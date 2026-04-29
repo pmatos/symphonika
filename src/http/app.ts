@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 
+import type { IssuePollStatus } from "../issue-polling.js";
+import { emptyIssuePollStatus } from "../issue-polling.js";
+
 export type HttpAppOptions = {
+  issuePollStatus?: IssuePollStatus;
   stateRoot: string;
   version: string;
   startedAtMs?: number;
@@ -11,6 +15,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
   const app = new Hono();
   const startedAtMs = options.startedAtMs ?? Date.now();
   const now = options.now ?? Date.now;
+  const issuePollStatus = options.issuePollStatus ?? emptyIssuePollStatus();
 
   app.get("/health", (context) =>
     context.json({
@@ -24,6 +29,12 @@ export function createHttpApp(options: HttpAppOptions): Hono {
 
   app.get("/api/status", (context) =>
     context.json({
+      candidateIssues: issuePollStatus.candidateIssues,
+      filteredIssues: issuePollStatus.filteredIssues,
+      issuePolling: {
+        errors: issuePollStatus.errors,
+        projects: issuePollStatus.projects
+      },
       service: "symphonika",
       state: "idle",
       dispatching: false,

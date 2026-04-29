@@ -37,9 +37,15 @@ describe("HTTP app", () => {
 
     expect(response.status).toBe(200);
     expect(body).toEqual({
+      candidateIssues: [],
+      dispatching: false,
+      filteredIssues: [],
+      issuePolling: {
+        errors: [],
+        projects: []
+      },
       service: "symphonika",
       state: "idle",
-      dispatching: false,
       stateRoot: "/tmp/symphonika-state",
       uptimeMs: 100
     });

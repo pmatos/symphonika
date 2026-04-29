@@ -1,0 +1,7 @@
+.symphonika/
+coverage/
+dist/
+node_modules/
+npm-debug.log*
+*.local
+.DS_Store

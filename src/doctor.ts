@@ -5,6 +5,7 @@ import { parse } from "yaml";
 import { z } from "zod";
 
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
+import { validateWorkflowContract } from "./workflow.js";
 
 export { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 
@@ -190,38 +191,6 @@ const serviceConfigSchema = z
     projects: z.array(projectSchema).min(1)
   })
   .passthrough();
-
-const allowedTemplateFields: Record<string, ReadonlySet<string>> = {
-  branch: new Set(["name"]),
-  issue: new Set([
-    "body",
-    "created_at",
-    "id",
-    "labels",
-    "number",
-    "priority",
-    "state",
-    "title",
-    "updated_at",
-    "url"
-  ]),
-  project: new Set(["name"]),
-  provider: new Set(["command", "name"]),
-  run: new Set(["attempt", "continuation", "id"]),
-  workspace: new Set(["path", "root"])
-};
-
-const serviceDiscoveryFrontMatterKeys = new Set([
-  "agent",
-  "issue_filters",
-  "priority",
-  "projects",
-  "provider",
-  "providers",
-  "tracker",
-  "workflow",
-  "workspace"
-]);
 
 export async function runDoctor(
   options: DoctorOptions = {}
@@ -541,126 +510,6 @@ async function validateProject(
   };
 }
 
-async function validateWorkflowContract(
-  workflowPath: string
-): Promise<string[]> {
-  const errors: string[] = [];
-  let contents: string;
-
-  try {
-    contents = await readFile(workflowPath, "utf8");
-  } catch (error) {
-    return [`workflow contract not found at ${workflowPath}: ${errorMessage(error)}`];
-  }
-
-  const workflow = parseWorkflowContract(contents, workflowPath);
-  errors.push(...workflow.errors);
-
-  if (workflow.body.trim().length === 0) {
-    errors.push(`workflow contract at ${workflowPath} must not be empty`);
-  }
-
-  errors.push(...validateTemplateVariables(workflow.body, workflowPath));
-  return errors;
-}
-
-function parseWorkflowContract(
-  contents: string,
-  workflowPath: string
-): { body: string; errors: string[] } {
-  const lines = contents.split(/\r?\n/);
-
-  if (lines[0]?.trim() !== "---") {
-    return { body: contents, errors: [] };
-  }
-
-  const closingLine = lines.findIndex(
-    (line, index) => index > 0 && line.trim() === "---"
-  );
-  if (closingLine === -1) {
-    return {
-      body: "",
-      errors: [`workflow front matter at ${workflowPath} is missing a closing ---`]
-    };
-  }
-
-  const frontMatterSource = lines.slice(1, closingLine).join("\n");
-  const errors: string[] = [];
-  const frontMatter = parseFrontMatter(frontMatterSource, workflowPath, errors);
-
-  if (frontMatter !== undefined) {
-    for (const key of Object.keys(frontMatter)) {
-      if (serviceDiscoveryFrontMatterKeys.has(key)) {
-        errors.push(
-          `workflow front matter at ${workflowPath} must not define service config key ${key}`
-        );
-      }
-    }
-  }
-
-  return {
-    body: lines.slice(closingLine + 1).join("\n"),
-    errors
-  };
-}
-
-function parseFrontMatter(
-  source: string,
-  workflowPath: string,
-  errors: string[]
-): Record<string, unknown> | undefined {
-  try {
-    const parsed: unknown = parse(source) ?? {};
-    if (isRecord(parsed)) {
-      return parsed;
-    }
-    errors.push(`workflow front matter at ${workflowPath} must be a mapping`);
-    return undefined;
-  } catch (error) {
-    errors.push(
-      `workflow front matter at ${workflowPath} could not be parsed: ${errorMessage(error)}`
-    );
-    return undefined;
-  }
-}
-
-function validateTemplateVariables(
-  template: string,
-  workflowPath: string
-): string[] {
-  const errors: string[] = [];
-  const tagPattern = /{{\s*([^{}]+?)\s*}}/g;
-
-  for (const match of template.matchAll(tagPattern)) {
-    const expression = match[1]?.trim() ?? "";
-    const parts = expression.split(".");
-    const topLevel = parts[0];
-
-    if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(expression)) {
-      errors.push(
-        `workflow template at ${workflowPath} has unsupported tag {{${expression}}}`
-      );
-      continue;
-    }
-
-    if (topLevel === undefined || !(topLevel in allowedTemplateFields)) {
-      errors.push(
-        `workflow template at ${workflowPath} references unknown variable {{${expression}}}`
-      );
-      continue;
-    }
-
-    const field = parts[1];
-    if (field !== undefined && !allowedTemplateFields[topLevel]!.has(field)) {
-      errors.push(
-        `workflow template at ${workflowPath} references unknown variable {{${expression}}}`
-      );
-    }
-  }
-
-  return errors;
-}
-
 function resolveEnvBackedValue(
   input: string,
   env: NodeJS.ProcessEnv
@@ -742,8 +591,4 @@ function githubErrorMessage(error: unknown): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

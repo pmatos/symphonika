@@ -85,6 +85,13 @@ export async function prepareIssueWorkspace(
     }
 
     if (currentBranch === prepared.branchName) {
+      if (!(await isWorktreeRoot(prepared.workspacePath))) {
+        throw new WorkspacePreparationError(
+          "workspace_conflict",
+          `workspace path ${prepared.workspacePath} is checked out on ${prepared.branchName} but is not the Git worktree root`
+        );
+      }
+
       if (!(await isWorktreeForCache(prepared.workspacePath, prepared.cachePath))) {
         throw new WorkspacePreparationError(
           "workspace_conflict",
@@ -126,6 +133,21 @@ export async function prepareIssueWorkspace(
   ]);
 
   return prepared;
+}
+
+async function isWorktreeRoot(workspacePath: string): Promise<boolean> {
+  const topLevel = await git([
+    "-C",
+    workspacePath,
+    "rev-parse",
+    "--show-toplevel"
+  ]);
+  const [actualTopLevel, expectedTopLevel] = await Promise.all([
+    realpath(topLevel),
+    realpath(workspacePath)
+  ]);
+
+  return actualTopLevel === expectedTopLevel;
 }
 
 async function isWorktreeForCache(

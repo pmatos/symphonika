@@ -261,6 +261,53 @@ describe("Git workspace preparation", () => {
     ).resolves.toBe(wrongRemotePath);
   });
 
+  it("rejects a nested directory inside the issue branch worktree", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "symphonika");
+    const cachePath = path.join(workspaceRoot, ".cache", "repo.git");
+    const branchName =
+      "sym/symphonika/6-prepare-deterministic-git-workspaces-and-issue-branches";
+    const parentWorktreePath = path.join(workspaceRoot, "issues");
+    const nestedWorkspacePath = path.join(
+      parentWorktreePath,
+      "6-prepare-deterministic-git-workspaces-and-issue-branches"
+    );
+    await mkdir(path.dirname(cachePath), { recursive: true });
+    await git(["clone", "--bare", remotePath, cachePath]);
+    await git(["-C", cachePath, "fetch", "origin", "main:refs/remotes/origin/main"]);
+    await git(["-C", cachePath, "branch", branchName, "origin/main"]);
+    await git(["-C", cachePath, "worktree", "add", parentWorktreePath, branchName]);
+    await mkdir(nestedWorkspacePath);
+
+    const preparation = prepareIssueWorkspace({
+      issue: {
+        number: 6,
+        title: "Prepare deterministic Git workspaces and issue branches"
+      },
+      project: {
+        name: "symphonika",
+        workspace: {
+          git: {
+            base_branch: "main",
+            remote: remotePath
+          },
+          root: workspaceRoot
+        }
+      }
+    });
+
+    const error = await rejectionOf(preparation);
+    expect(error).toBeInstanceOf(WorkspacePreparationError);
+    if (!(error instanceof WorkspacePreparationError)) {
+      throw new Error("expected workspace preparation error");
+    }
+    expect(error.code).toBe("workspace_conflict");
+    await expect(
+      git(["-C", nestedWorkspacePath, "rev-parse", "--show-toplevel"])
+    ).resolves.toBe(parentWorktreePath);
+  });
+
   it("surfaces an issue branch checked out elsewhere as a deterministic conflict", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

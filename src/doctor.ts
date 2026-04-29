@@ -447,7 +447,12 @@ async function validateProject(
     validForDispatch = false;
   }
   const providerAdapter = agentProviders[project.agent.provider];
-  if (providerAdapter !== undefined) {
+  if (providerAdapter === undefined) {
+    errors.push(
+      `projects.${project.name}.agent.provider references ${project.agent.provider}, but no adapter is registered`
+    );
+    validForDispatch = false;
+  } else {
     try {
       await providerAdapter.validate(provider.command);
     } catch (error) {

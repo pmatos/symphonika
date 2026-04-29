@@ -178,6 +178,52 @@ describe("Git workspace preparation", () => {
     ).rejects.toThrow();
   });
 
+  it("rejects an unrelated Git repository even when it has the deterministic issue branch", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "symphonika");
+    const branchName =
+      "sym/symphonika/6-prepare-deterministic-git-workspaces-and-issue-branches";
+    const workspacePath = path.join(
+      workspaceRoot,
+      "issues",
+      "6-prepare-deterministic-git-workspaces-and-issue-branches"
+    );
+    await git(["init", "--initial-branch", branchName, workspacePath]);
+    await git(["-C", workspacePath, "config", "user.email", "test@example.com"]);
+    await git(["-C", workspacePath, "config", "user.name", "Symphonika Test"]);
+    await writeFile(path.join(workspacePath, "README.md"), "# Wrong repo\n");
+    await git(["-C", workspacePath, "add", "README.md"]);
+    await git(["-C", workspacePath, "commit", "-m", "Wrong repo"]);
+
+    const preparation = prepareIssueWorkspace({
+      issue: {
+        number: 6,
+        title: "Prepare deterministic Git workspaces and issue branches"
+      },
+      project: {
+        name: "symphonika",
+        workspace: {
+          git: {
+            base_branch: "main",
+            remote: remotePath
+          },
+          root: workspaceRoot
+        }
+      }
+    });
+
+    const error = await rejectionOf(preparation);
+    expect(error).toBeInstanceOf(WorkspacePreparationError);
+    if (!(error instanceof WorkspacePreparationError)) {
+      throw new Error("expected workspace preparation error");
+    }
+    expect(error.code).toBe("workspace_conflict");
+    await expect(
+      git(["-C", workspacePath, "show", "--no-patch", "--format=%s"])
+    ).resolves.toBe("Wrong repo");
+  });
+
   it("surfaces an issue branch checked out elsewhere as a deterministic conflict", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

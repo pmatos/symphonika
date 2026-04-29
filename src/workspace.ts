@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -84,6 +84,13 @@ export async function prepareIssueWorkspace(
     }
 
     if (currentBranch === prepared.branchName) {
+      if (!(await isWorktreeForCache(prepared.workspacePath, prepared.cachePath))) {
+        throw new WorkspacePreparationError(
+          "workspace_conflict",
+          `workspace path ${prepared.workspacePath} is checked out on ${prepared.branchName} but is not linked to cache ${prepared.cachePath}`
+        );
+      }
+
       return {
         ...prepared,
         reused: true
@@ -118,6 +125,25 @@ export async function prepareIssueWorkspace(
   ]);
 
   return prepared;
+}
+
+async function isWorktreeForCache(
+  workspacePath: string,
+  cachePath: string
+): Promise<boolean> {
+  const commonDirectory = await git([
+    "-C",
+    workspacePath,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir"
+  ]);
+  const [actualCommonDirectory, expectedCommonDirectory] = await Promise.all([
+    realpath(commonDirectory),
+    realpath(cachePath)
+  ]);
+
+  return actualCommonDirectory === expectedCommonDirectory;
 }
 
 async function worktreePathForBranch(

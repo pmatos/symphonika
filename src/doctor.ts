@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { Octokit } from "@octokit/rest";
 import { parse } from "yaml";
 import { z } from "zod";
 
@@ -7,10 +8,13 @@ export type DoctorOptions = {
   configPath?: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  githubApi?: GitHubApi;
 };
 
 export type DoctorProjectReport = {
+  missingOperationalLabels: string[];
   name: string;
+  validForDispatch: boolean;
   workflowPath: string;
 };
 
@@ -21,8 +25,91 @@ export type DoctorReport = {
   projects: DoctorProjectReport[];
 };
 
+export type InitProjectOptions = DoctorOptions & {
+  onWarning?: (warning: string) => void;
+  yes?: boolean;
+};
+
+export type InitProjectProjectReport = {
+  createdOperationalLabels: string[];
+  missingOperationalLabels: string[];
+  name: string;
+  repository: string;
+};
+
+export type InitProjectReport = {
+  configPath: string;
+  errors: string[];
+  ok: boolean;
+  projects: InitProjectProjectReport[];
+  warnings: string[];
+};
+
+export type GitHubRepositoryInput = {
+  owner: string;
+  repo: string;
+  token: string;
+};
+
+export type GitHubRepositoryAccess = {
+  message?: string;
+  ok: boolean;
+};
+
+export type GitHubApi = {
+  createLabel: (input: GitHubRepositoryInput & { name: string }) => Promise<void>;
+  listLabels: (input: GitHubRepositoryInput) => Promise<string[]>;
+  validateRepositoryAccess: (
+    input: GitHubRepositoryInput
+  ) => Promise<GitHubRepositoryAccess>;
+};
+
 type ServiceConfig = z.infer<typeof serviceConfigSchema>;
 type ProjectConfig = z.infer<typeof projectSchema>;
+type ProjectValidation = Pick<
+  DoctorProjectReport,
+  "missingOperationalLabels" | "validForDispatch"
+>;
+type LabelDescription = {
+  color: string;
+  description: string;
+};
+
+export const REQUIRED_OPERATIONAL_LABELS = [
+  "sym:claimed",
+  "sym:running",
+  "sym:failed",
+  "sym:stale"
+] as const;
+
+const OPERATIONAL_LABEL_DESCRIPTIONS: Record<
+  (typeof REQUIRED_OPERATIONAL_LABELS)[number],
+  LabelDescription
+> = {
+  "sym:claimed": {
+    color: "5319e7",
+    description: "Symphonika has claimed this issue for an orchestrated run."
+  },
+  "sym:failed": {
+    color: "d73a4a",
+    description: "A Symphonika run reached a deterministic failed state."
+  },
+  "sym:running": {
+    color: "0e8a16",
+    description: "A Symphonika coding-agent run is currently active."
+  },
+  "sym:stale": {
+    color: "fbca04",
+    description: "A Symphonika claim exists without a live local run."
+  }
+};
+
+const SILENT_OCTOKIT_LOG = {
+  debug: () => undefined,
+  error: () => undefined,
+  info: () => undefined,
+  warn: () => undefined
+};
 
 const providerNameSchema = z.enum(["codex", "claude"]);
 const pathStringSchema = z
@@ -145,6 +232,7 @@ export async function runDoctor(
   const cwd = options.cwd ?? process.cwd();
   const configPath = path.resolve(cwd, options.configPath ?? "symphonika.yml");
   const env = options.env ?? process.env;
+  const githubApi = options.githubApi ?? DEFAULT_GITHUB_API;
   const errors: string[] = [];
   const projects: DoctorProjectReport[] = [];
   const rawConfig = await readConfig(configPath, errors);
@@ -159,11 +247,18 @@ export async function runDoctor(
   }
 
   for (const project of parsedConfig.projects) {
-    validateProject(project, parsedConfig, env, errors);
+    const validation = await validateProject(
+      project,
+      parsedConfig,
+      env,
+      errors,
+      githubApi
+    );
     const workflowPath = path.resolve(path.dirname(configPath), project.workflow);
     const workflowErrors = await validateWorkflowContract(workflowPath);
     errors.push(...workflowErrors);
     projects.push({
+      ...validation,
       name: project.name,
       workflowPath
     });
@@ -171,6 +266,162 @@ export async function runDoctor(
 
   return report(configPath, errors, projects);
 }
+
+export async function runInitProject(
+  options: InitProjectOptions = {}
+): Promise<InitProjectReport> {
+  const cwd = options.cwd ?? process.cwd();
+  const configPath = path.resolve(cwd, options.configPath ?? "symphonika.yml");
+  const env = options.env ?? process.env;
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const projects: InitProjectProjectReport[] = [];
+  const rawConfig = await readConfig(configPath, errors);
+
+  if (rawConfig === undefined) {
+    return initProjectReport(configPath, errors, warnings, projects);
+  }
+
+  const parsedConfig = parseServiceConfig(rawConfig, errors);
+  if (parsedConfig === undefined) {
+    return initProjectReport(configPath, errors, warnings, projects);
+  }
+
+  const githubApi = options.githubApi ?? DEFAULT_GITHUB_API;
+
+  for (const project of parsedConfig.projects) {
+    const token = resolveEnvBackedValue(project.tracker.token, env);
+    if (token === undefined) {
+      const variableName = envReferenceName(project.tracker.token);
+      errors.push(
+        variableName === undefined
+          ? `projects.${project.name}.tracker.token must reference an environment variable like $GITHUB_TOKEN`
+          : `projects.${project.name}.tracker.token references unset environment variable $${variableName}`
+      );
+      continue;
+    }
+
+    const repository = {
+      owner: project.tracker.owner,
+      repo: project.tracker.repo,
+      token
+    };
+    const repositoryName = `${project.tracker.owner}/${project.tracker.repo}`;
+    const access = await githubApi.validateRepositoryAccess(repository);
+    if (!access.ok) {
+      errors.push(
+        `projects.${project.name}.tracker.repository ${repositoryName} is not accessible: ${access.message ?? "unknown GitHub error"}`
+      );
+      continue;
+    }
+
+    let labels: Set<string>;
+    try {
+      labels = new Set(await githubApi.listLabels(repository));
+    } catch (error) {
+      errors.push(
+        `projects.${project.name}.tracker.repository ${repositoryName} labels could not be listed: ${errorMessage(error)}`
+      );
+      continue;
+    }
+
+    const missingOperationalLabels = REQUIRED_OPERATIONAL_LABELS.filter(
+      (label) => !labels.has(label)
+    );
+    const createdOperationalLabels: string[] = [];
+
+    if (missingOperationalLabels.length > 0) {
+      const warning = `init-project ${options.yes === true ? "will" : "would"} create operational labels in ${repositoryName}: ${missingOperationalLabels.join(", ")}`;
+      warnings.push(warning);
+      options.onWarning?.(warning);
+
+      if (options.yes !== true) {
+        errors.push(
+          "pass --yes to create missing operational labels non-interactively"
+        );
+      } else {
+        for (const label of missingOperationalLabels) {
+          try {
+            await githubApi.createLabel({
+              ...repository,
+              name: label
+            });
+            createdOperationalLabels.push(label);
+          } catch (error) {
+            errors.push(
+              `projects.${project.name}.tracker.repository ${repositoryName} could not create operational label ${label}: ${errorMessage(error)}`
+            );
+          }
+        }
+      }
+    }
+
+    projects.push({
+      createdOperationalLabels,
+      missingOperationalLabels,
+      name: project.name,
+      repository: repositoryName
+    });
+  }
+
+  return initProjectReport(configPath, errors, warnings, projects);
+}
+
+class OctokitGitHubApi implements GitHubApi {
+  async validateRepositoryAccess(
+    input: GitHubRepositoryInput
+  ): Promise<GitHubRepositoryAccess> {
+    const octokit = this.octokit(input.token);
+
+    try {
+      await octokit.rest.repos.get({
+        owner: input.owner,
+        repo: input.repo
+      });
+      return { ok: true };
+    } catch (error) {
+      return {
+        message: githubErrorMessage(error),
+        ok: false
+      };
+    }
+  }
+
+  async listLabels(input: GitHubRepositoryInput): Promise<string[]> {
+    const octokit = this.octokit(input.token);
+    const labels = await octokit.paginate(octokit.rest.issues.listLabelsForRepo, {
+      owner: input.owner,
+      per_page: 100,
+      repo: input.repo
+    });
+
+    return labels.map((label) => label.name);
+  }
+
+  async createLabel(
+    input: GitHubRepositoryInput & { name: string }
+  ): Promise<void> {
+    const octokit = this.octokit(input.token);
+    const labelDescription = operationalLabelDescription(input.name);
+
+    await octokit.rest.issues.createLabel({
+      color: labelDescription.color,
+      description: labelDescription.description,
+      name: input.name,
+      owner: input.owner,
+      repo: input.repo
+    });
+  }
+
+  private octokit(token: string): Octokit {
+    return new Octokit({
+      auth: token,
+      log: SILENT_OCTOKIT_LOG
+    });
+  }
+}
+
+const DEFAULT_GITHUB_API = new OctokitGitHubApi();
 
 async function readConfig(
   configPath: string,
@@ -207,20 +458,25 @@ function parseServiceConfig(
   return parsed.data;
 }
 
-function validateProject(
+async function validateProject(
   project: ProjectConfig,
   config: ServiceConfig,
   env: NodeJS.ProcessEnv,
-  errors: string[]
-): void {
+  errors: string[],
+  githubApi: GitHubApi | undefined
+): Promise<ProjectValidation> {
   const provider = config.providers[project.agent.provider];
+  let validForDispatch = true;
+
   if (provider.command.trim().length === 0) {
     errors.push(
       `projects.${project.name}.agent.provider references ${project.agent.provider}, but its command is empty`
     );
+    validForDispatch = false;
   }
 
-  if (resolveEnvBackedValue(project.tracker.token, env) === undefined) {
+  const token = resolveEnvBackedValue(project.tracker.token, env);
+  if (token === undefined) {
     const variableName = envReferenceName(project.tracker.token);
     if (variableName === undefined) {
       errors.push(
@@ -231,7 +487,61 @@ function validateProject(
         `projects.${project.name}.tracker.token references unset environment variable $${variableName}`
       );
     }
+    return {
+      missingOperationalLabels: [],
+      validForDispatch: false
+    };
   }
+
+  if (githubApi === undefined) {
+    return {
+      missingOperationalLabels: [],
+      validForDispatch
+    };
+  }
+
+  const repository = {
+    owner: project.tracker.owner,
+    repo: project.tracker.repo,
+    token
+  };
+  const access = await githubApi.validateRepositoryAccess(repository);
+  if (!access.ok) {
+    errors.push(
+      `projects.${project.name}.tracker.repository ${project.tracker.owner}/${project.tracker.repo} is not accessible: ${access.message ?? "unknown GitHub error"}`
+    );
+    return {
+      missingOperationalLabels: [],
+      validForDispatch: false
+    };
+  }
+
+  let labels: Set<string>;
+  try {
+    labels = new Set(await githubApi.listLabels(repository));
+  } catch (error) {
+    errors.push(
+      `projects.${project.name}.tracker.repository ${project.tracker.owner}/${project.tracker.repo} labels could not be listed: ${errorMessage(error)}`
+    );
+    return {
+      missingOperationalLabels: [],
+      validForDispatch: false
+    };
+  }
+
+  const missingOperationalLabels = REQUIRED_OPERATIONAL_LABELS.filter(
+    (label) => !labels.has(label)
+  );
+  if (missingOperationalLabels.length > 0) {
+    errors.push(
+      `projects.${project.name}.tracker.repository ${project.tracker.owner}/${project.tracker.repo} is missing operational labels: ${missingOperationalLabels.join(", ")}`
+    );
+  }
+
+  return {
+    missingOperationalLabels,
+    validForDispatch: validForDispatch && missingOperationalLabels.length === 0
+  };
 }
 
 async function validateWorkflowContract(
@@ -385,9 +695,52 @@ function report(
   };
 }
 
+function initProjectReport(
+  configPath: string,
+  errors: string[],
+  warnings: string[],
+  projects: InitProjectProjectReport[]
+): InitProjectReport {
+  return {
+    configPath,
+    errors,
+    ok: errors.length === 0,
+    projects,
+    warnings
+  };
+}
+
 function formatZodIssue(issue: z.ZodIssue): string {
   const location = issue.path.length === 0 ? "service config" : issue.path.join(".");
   return `${location}: ${issue.message}`;
+}
+
+function operationalLabelDescription(name: string): LabelDescription {
+  if (isOperationalLabel(name)) {
+    return OPERATIONAL_LABEL_DESCRIPTIONS[name];
+  }
+
+  return {
+    color: "6a737d",
+    description: "Symphonika operational label."
+  };
+}
+
+function isOperationalLabel(
+  name: string
+): name is (typeof REQUIRED_OPERATIONAL_LABELS)[number] {
+  return (REQUIRED_OPERATIONAL_LABELS as readonly string[]).includes(name);
+}
+
+function githubErrorMessage(error: unknown): string {
+  if (error instanceof Error && "status" in error) {
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === "number") {
+      return `${error.message} (HTTP ${status})`;
+    }
+  }
+
+  return errorMessage(error);
 }
 
 function errorMessage(error: unknown): string {

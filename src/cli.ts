@@ -4,18 +4,25 @@ import { pathToFileURL } from "node:url";
 
 import type { DaemonHandle, StartDaemonOptions } from "./daemon.js";
 import { startDaemon } from "./daemon.js";
-import type { DoctorOptions, DoctorReport } from "./doctor.js";
-import { runDoctor } from "./doctor.js";
+import type {
+  DoctorOptions,
+  DoctorReport,
+  InitProjectOptions,
+  InitProjectReport
+} from "./doctor.js";
+import { runDoctor, runInitProject } from "./doctor.js";
 import { VERSION } from "./version.js";
 
 export type CliDependencies = {
   registerSignalHandlers?: boolean;
   runDoctor?: (options: DoctorOptions) => Promise<DoctorReport>;
+  runInitProject?: (options: InitProjectOptions) => Promise<InitProjectReport>;
   startDaemon?: (options: StartDaemonOptions) => Promise<DaemonHandle>;
 };
 
 export function buildCli(dependencies: CliDependencies = {}): Command {
   const doctor = dependencies.runDoctor ?? runDoctor;
+  const initProject = dependencies.runInitProject ?? runInitProject;
   const start = dependencies.startDaemon ?? startDaemon;
   const registerSignalHandlers = dependencies.registerSignalHandlers ?? true;
   const program = new Command();
@@ -45,6 +52,54 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         writeErr(program, `- ${error}\n`);
       }
       process.exitCode = 1;
+    });
+
+  program
+    .command("init-project")
+    .description("create missing GitHub operational labels after explicit confirmation")
+    .option("--config <path>", "service config path", "symphonika.yml")
+    .option("--yes", "create missing operational labels without an interactive prompt")
+    .action(async (options: { config: string; yes?: boolean }) => {
+      const emittedWarnings = new Set<string>();
+      const report = await initProject({
+        configPath: options.config,
+        onWarning: (warning) => {
+          emittedWarnings.add(warning);
+          writeErr(program, `warning: ${warning}\n`);
+        },
+        yes: options.yes === true
+      });
+
+      for (const warning of report.warnings) {
+        if (emittedWarnings.has(warning)) {
+          continue;
+        }
+        writeErr(program, `warning: ${warning}\n`);
+      }
+
+      if (!report.ok) {
+        writeErr(program, "init-project failed:\n");
+        for (const error of report.errors) {
+          writeErr(program, `- ${error}\n`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      const createdLabels = report.projects.flatMap((project) =>
+        project.createdOperationalLabels.map((label) => ({
+          label,
+          repository: project.repository
+        }))
+      );
+
+      writeOut(
+        program,
+        `init-project ok: created ${createdLabels.length} ${pluralize("label", createdLabels.length)}\n`
+      );
+      for (const created of createdLabels) {
+        writeOut(program, `- ${created.label} in ${created.repository}\n`);
+      }
     });
 
   program

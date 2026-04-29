@@ -4,6 +4,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { buildCli } from "../src/cli.js";
+import {
+  REQUIRED_OPERATIONAL_LABELS,
+  runDoctor,
+  type GitHubApi
+} from "../src/doctor.js";
 
 const tempRoots: string[] = [];
 const originalGithubToken = process.env.GITHUB_TOKEN;
@@ -204,10 +209,18 @@ describe("doctor", () => {
 });
 
 async function runDoctorCommand(
-  configPath: string
+  configPath: string,
+  githubApi: GitHubApi = successfulGitHubApi()
 ): Promise<{ stderr: string; stdout: string }> {
   const output = { stderr: "", stdout: "" };
-  const program = buildCli({ registerSignalHandlers: false });
+  const program = buildCli({
+    registerSignalHandlers: false,
+    runDoctor: (options) =>
+      runDoctor({
+        ...options,
+        githubApi
+      })
+  });
   program.configureOutput({
     writeErr: (message) => {
       output.stderr += message;
@@ -226,6 +239,14 @@ async function runDoctorCommand(
   ]);
 
   return output;
+}
+
+function successfulGitHubApi(): GitHubApi {
+  return {
+    createLabel: () => Promise.resolve(),
+    listLabels: () => Promise.resolve([...REQUIRED_OPERATIONAL_LABELS]),
+    validateRepositoryAccess: () => Promise.resolve({ ok: true })
+  };
 }
 
 async function writeValidConfig(

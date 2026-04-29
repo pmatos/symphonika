@@ -224,6 +224,43 @@ describe("Git workspace preparation", () => {
     ).resolves.toBe("Wrong repo");
   });
 
+  it("rejects an existing repository cache with a mismatched origin remote", async () => {
+    const root = await makeTempRoot();
+    const expectedRemotePath = await createRemoteRepository(root, "expected");
+    const wrongRemotePath = await createRemoteRepository(root, "wrong");
+    const workspaceRoot = path.join(root, "workspaces", "symphonika");
+    const cachePath = path.join(workspaceRoot, ".cache", "repo.git");
+    await mkdir(path.dirname(cachePath), { recursive: true });
+    await git(["clone", "--bare", wrongRemotePath, cachePath]);
+
+    const preparation = prepareIssueWorkspace({
+      issue: {
+        number: 6,
+        title: "Prepare deterministic Git workspaces and issue branches"
+      },
+      project: {
+        name: "symphonika",
+        workspace: {
+          git: {
+            base_branch: "main",
+            remote: expectedRemotePath
+          },
+          root: workspaceRoot
+        }
+      }
+    });
+
+    const error = await rejectionOf(preparation);
+    expect(error).toBeInstanceOf(WorkspacePreparationError);
+    if (!(error instanceof WorkspacePreparationError)) {
+      throw new Error("expected workspace preparation error");
+    }
+    expect(error.code).toBe("cache_conflict");
+    await expect(
+      git(["-C", cachePath, "config", "--get", "remote.origin.url"])
+    ).resolves.toBe(wrongRemotePath);
+  });
+
   it("surfaces an issue branch checked out elsewhere as a deterministic conflict", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);
@@ -301,9 +338,12 @@ describe("Git workspace preparation", () => {
   });
 });
 
-async function createRemoteRepository(root: string): Promise<string> {
-  const remotePath = path.join(root, "remote.git");
-  const seedPath = path.join(root, "seed");
+async function createRemoteRepository(
+  root: string,
+  name = "remote"
+): Promise<string> {
+  const remotePath = path.join(root, `${name}.git`);
+  const seedPath = path.join(root, `${name}-seed`);
 
   await git(["init", "--bare", remotePath]);
   await git(["init", "--initial-branch=main", seedPath]);

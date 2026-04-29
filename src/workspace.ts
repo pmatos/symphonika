@@ -38,6 +38,7 @@ export type PreparedIssueWorkspace = {
 
 export type WorkspacePreparationErrorCode =
   | "branch_conflict"
+  | "cache_conflict"
   | "workspace_conflict";
 
 export class WorkspacePreparationError extends Error {
@@ -197,6 +198,8 @@ async function ensureRepositoryCache(
   if (!(await exists(cachePath))) {
     await mkdir(path.dirname(cachePath), { recursive: true });
     await git(["clone", "--bare", project.workspace.git.remote, cachePath]);
+  } else {
+    await ensureRepositoryCacheRemote(project, cachePath);
   }
 
   await git([
@@ -206,6 +209,29 @@ async function ensureRepositoryCache(
     "origin",
     `${project.workspace.git.base_branch}:refs/remotes/origin/${project.workspace.git.base_branch}`
   ]);
+}
+
+async function ensureRepositoryCacheRemote(
+  project: WorkspaceProject,
+  cachePath: string
+): Promise<void> {
+  let originUrl: string;
+  try {
+    originUrl = await git(["-C", cachePath, "config", "--get", "remote.origin.url"]);
+  } catch (error) {
+    throw new WorkspacePreparationError(
+      "cache_conflict",
+      `repository cache ${cachePath} is not a reusable Git repository with origin ${project.workspace.git.remote}`,
+      error
+    );
+  }
+
+  if (originUrl !== project.workspace.git.remote) {
+    throw new WorkspacePreparationError(
+      "cache_conflict",
+      `repository cache ${cachePath} has origin ${originUrl}, expected ${project.workspace.git.remote}`
+    );
+  }
 }
 
 async function ensureIssueBranch(

@@ -315,7 +315,16 @@ export async function runInitProject(
       continue;
     }
 
-    const labels = new Set(await githubApi.listLabels(repository));
+    let labels: Set<string>;
+    try {
+      labels = new Set(await githubApi.listLabels(repository));
+    } catch (error) {
+      errors.push(
+        `projects.${project.name}.tracker.repository ${repositoryName} labels could not be listed: ${errorMessage(error)}`
+      );
+      continue;
+    }
+
     const missingOperationalLabels = REQUIRED_OPERATIONAL_LABELS.filter(
       (label) => !labels.has(label)
     );
@@ -332,11 +341,17 @@ export async function runInitProject(
         );
       } else {
         for (const label of missingOperationalLabels) {
-          await githubApi.createLabel({
-            ...repository,
-            name: label
-          });
-          createdOperationalLabels.push(label);
+          try {
+            await githubApi.createLabel({
+              ...repository,
+              name: label
+            });
+            createdOperationalLabels.push(label);
+          } catch (error) {
+            errors.push(
+              `projects.${project.name}.tracker.repository ${repositoryName} could not create operational label ${label}: ${errorMessage(error)}`
+            );
+          }
         }
       }
     }
@@ -501,7 +516,19 @@ async function validateProject(
     };
   }
 
-  const labels = new Set(await githubApi.listLabels(repository));
+  let labels: Set<string>;
+  try {
+    labels = new Set(await githubApi.listLabels(repository));
+  } catch (error) {
+    errors.push(
+      `projects.${project.name}.tracker.repository ${project.tracker.owner}/${project.tracker.repo} labels could not be listed: ${errorMessage(error)}`
+    );
+    return {
+      missingOperationalLabels: [],
+      validForDispatch: false
+    };
+  }
+
   const missingOperationalLabels = REQUIRED_OPERATIONAL_LABELS.filter(
     (label) => !labels.has(label)
   );

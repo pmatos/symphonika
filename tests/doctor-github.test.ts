@@ -117,6 +117,32 @@ describe("GitHub Project validation", () => {
     });
     expect(githubApi.createLabel).not.toHaveBeenCalled();
   });
+
+  it("reports label-listing failures without throwing", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi.fn().mockRejectedValue(new Error("rate limited")),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runDoctor({
+      configPath: "symphonika.yml",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain(
+      "projects.symphonika.tracker.repository pmatos/symphonika labels could not be listed: rate limited"
+    );
+    expect(report.projects[0]).toMatchObject({
+      missingOperationalLabels: [],
+      validForDispatch: false
+    });
+  });
 });
 
 describe("GitHub Project initialization", () => {
@@ -216,6 +242,39 @@ describe("GitHub Project initialization", () => {
       "create:sym:failed",
       "create:sym:stale"
     ]);
+  });
+
+  it("reports createLabel failures without throwing during confirmed initialization", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const createLabel: GitHubApi["createLabel"] = (input) => {
+      if (input.name === "sym:stale") {
+        return Promise.reject(new Error("already exists"));
+      }
+      return Promise.resolve();
+    };
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(createLabel),
+      listLabels: vi.fn().mockResolvedValue(["sym:claimed", "sym:failed"]),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runInitProject({
+      configPath: "symphonika.yml",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      yes: true
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain(
+      "projects.symphonika.tracker.repository pmatos/symphonika could not create operational label sym:stale: already exists"
+    );
+    expect(report.projects[0]).toMatchObject({
+      createdOperationalLabels: ["sym:running"],
+      missingOperationalLabels: ["sym:running", "sym:stale"]
+    });
   });
 });
 

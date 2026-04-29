@@ -4,6 +4,10 @@ import { Octokit } from "@octokit/rest";
 import { parse } from "yaml";
 import { z } from "zod";
 
+import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
+
+export { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
+
 export type DoctorOptions = {
   configPath?: string;
   cwd?: string;
@@ -74,13 +78,6 @@ type LabelDescription = {
   color: string;
   description: string;
 };
-
-export const REQUIRED_OPERATIONAL_LABELS = [
-  "sym:claimed",
-  "sym:running",
-  "sym:failed",
-  "sym:stale"
-] as const;
 
 const OPERATIONAL_LABEL_DESCRIPTIONS: Record<
   (typeof REQUIRED_OPERATIONAL_LABELS)[number],

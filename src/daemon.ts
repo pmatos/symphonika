@@ -3,12 +3,22 @@ import type { Logger } from "pino";
 import pino from "pino";
 
 import { createHttpApp } from "./http/app.js";
+import type {
+  GitHubIssuesApi,
+  PollConfiguredGitHubIssuesOptions
+} from "./issue-polling.js";
+import {
+  emptyIssuePollStatus,
+  pollConfiguredGitHubIssues
+} from "./issue-polling.js";
 import { resolveStateRoot } from "./state.js";
 import { VERSION } from "./version.js";
 
 export type StartDaemonOptions = {
   configPath?: string;
   cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  githubIssuesApi?: GitHubIssuesApi;
   host?: string;
   logger?: Logger;
   port?: number;
@@ -36,7 +46,21 @@ export async function startDaemon(
     stateRootOptions.cwd = options.cwd;
   }
   const state = resolveStateRoot(stateRootOptions);
+  let issuePollStatus = emptyIssuePollStatus();
+  if (state.configExists) {
+    const pollOptions: PollConfiguredGitHubIssuesOptions = {
+      configPath: state.configPath
+    };
+    if (options.env !== undefined) {
+      pollOptions.env = options.env;
+    }
+    if (options.githubIssuesApi !== undefined) {
+      pollOptions.githubIssuesApi = options.githubIssuesApi;
+    }
+    issuePollStatus = await pollConfiguredGitHubIssues(pollOptions);
+  }
   const app = createHttpApp({
+    issuePollStatus,
     stateRoot: state.stateRoot,
     version: VERSION
   });

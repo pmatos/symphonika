@@ -4,14 +4,18 @@ import { pathToFileURL } from "node:url";
 
 import type { DaemonHandle, StartDaemonOptions } from "./daemon.js";
 import { startDaemon } from "./daemon.js";
+import type { DoctorOptions, DoctorReport } from "./doctor.js";
+import { runDoctor } from "./doctor.js";
 import { VERSION } from "./version.js";
 
 export type CliDependencies = {
   registerSignalHandlers?: boolean;
+  runDoctor?: (options: DoctorOptions) => Promise<DoctorReport>;
   startDaemon?: (options: StartDaemonOptions) => Promise<DaemonHandle>;
 };
 
 export function buildCli(dependencies: CliDependencies = {}): Command {
+  const doctor = dependencies.runDoctor ?? runDoctor;
   const start = dependencies.startDaemon ?? startDaemon;
   const registerSignalHandlers = dependencies.registerSignalHandlers ?? true;
   const program = new Command();
@@ -20,6 +24,28 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .name("symphonika")
     .description("Local daemon for orchestrating coding-agent runs from GitHub issues")
     .version(VERSION);
+
+  program
+    .command("doctor")
+    .description("validate service config and workflow contracts without dispatching work")
+    .option("--config <path>", "service config path", "symphonika.yml")
+    .action(async (options: { config: string }) => {
+      const report = await doctor({ configPath: options.config });
+
+      if (report.ok) {
+        writeOut(
+          program,
+          `doctor ok: ${report.projects.length} ${pluralize("project", report.projects.length)} valid\n`
+        );
+        return;
+      }
+
+      writeErr(program, "doctor failed:\n");
+      for (const error of report.errors) {
+        writeErr(program, `- ${error}\n`);
+      }
+      process.exitCode = 1;
+    });
 
   program
     .command("daemon")
@@ -52,6 +78,30 @@ function parsePort(value: string): number {
   }
 
   return port;
+}
+
+function pluralize(word: string, count: number): string {
+  return count === 1 ? word : `${word}s`;
+}
+
+function writeOut(program: Command, message: string): void {
+  const output = program.configureOutput();
+  if (output.writeOut !== undefined) {
+    output.writeOut(message);
+    return;
+  }
+
+  process.stdout.write(message);
+}
+
+function writeErr(program: Command, message: string): void {
+  const output = program.configureOutput();
+  if (output.writeErr !== undefined) {
+    output.writeErr(message);
+    return;
+  }
+
+  process.stderr.write(message);
 }
 
 function registerShutdownHandlers(daemon: DaemonHandle): void {

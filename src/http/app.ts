@@ -2,8 +2,13 @@ import { Hono } from "hono";
 
 import type { IssuePollStatus } from "../issue-polling.js";
 import { emptyIssuePollStatus } from "../issue-polling.js";
+import type { RunStatus } from "../run-store.js";
 
 export type HttpAppOptions = {
+  dispatchRuntime?: {
+    dispatching: boolean;
+  };
+  getRuns?: () => RunStatus[];
   issuePollStatus?: IssuePollStatus;
   stateRoot: string;
   version: string;
@@ -16,6 +21,10 @@ export function createHttpApp(options: HttpAppOptions): Hono {
   const startedAtMs = options.startedAtMs ?? Date.now();
   const now = options.now ?? Date.now;
   const issuePollStatus = options.issuePollStatus ?? emptyIssuePollStatus();
+  const dispatchRuntime = options.dispatchRuntime ?? {
+    dispatching: false
+  };
+  const getRuns = options.getRuns ?? (() => []);
 
   app.get("/health", (context) =>
     context.json({
@@ -35,9 +44,10 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         errors: issuePollStatus.errors,
         projects: issuePollStatus.projects
       },
+      runs: getRuns(),
       service: "symphonika",
-      state: "idle",
-      dispatching: false,
+      state: dispatchRuntime.dispatching ? "dispatching" : "idle",
+      dispatching: dispatchRuntime.dispatching,
       stateRoot: options.stateRoot,
       uptimeMs: uptimeMs(startedAtMs, now)
     })

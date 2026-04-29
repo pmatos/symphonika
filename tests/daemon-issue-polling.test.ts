@@ -221,6 +221,100 @@ describe("daemon GitHub issue polling", () => {
       await daemon.stop();
     }
   });
+
+  it("refreshes issue snapshots on the configured polling interval", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root, { pollingIntervalMs: 10 });
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([
+          issueFixture({
+            labels: ["agent-ready"],
+            number: 30,
+            title: "Startup snapshot"
+          })
+        ])
+        .mockResolvedValue([
+          issueFixture({
+            labels: ["agent-ready"],
+            number: 31,
+            title: "Refreshed snapshot"
+          })
+        ])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      await waitFor(async () => {
+        const response = await fetch(`${daemon.url}/api/status`);
+        const body = (await response.json()) as {
+          candidateIssues: Array<{ issue: { number: number } }>;
+        };
+
+        return (
+          githubIssuesApi.listOpenIssues.mock.calls.length >= 2 &&
+          body.candidateIssues.map((entry) => entry.issue.number).includes(31)
+        );
+      });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("continues polling valid projects when another project entry is invalid", async () => {
+    const root = await makeTempRoot();
+    await writeConfigWithInvalidAndValidProjects(root);
+    const githubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 40,
+          title: "Valid project issue"
+        })
+      ])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const response = await fetch(`${daemon.url}/api/status`);
+      const body = (await response.json()) as {
+        candidateIssues: Array<{ issue: { number: number }; project: string }>;
+        issuePolling: { errors: string[] };
+      };
+
+      expect(githubIssuesApi.listOpenIssues).toHaveBeenCalledWith({
+        owner: "pmatos",
+        repo: "symphonika",
+        token: "secret-token"
+      });
+      expect(
+        body.candidateIssues.map((entry) => ({
+          number: entry.issue.number,
+          project: entry.project
+        }))
+      ).toEqual([{ number: 40, project: "symphonika" }]);
+      expect(body.issuePolling.errors.join("\n")).toContain(
+        "projects.0.tracker.repo"
+      );
+    } finally {
+      await daemon.stop();
+    }
+  });
 });
 
 function issueFixture(overrides: {
@@ -251,7 +345,10 @@ function issueFixture(overrides: {
   };
 }
 
-async function writeValidProject(root: string): Promise<void> {
+async function writeValidProject(
+  root: string,
+  options: { pollingIntervalMs?: number } = {}
+): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(
     path.join(root, "symphonika.yml"),
@@ -259,7 +356,7 @@ async function writeValidProject(root: string): Promise<void> {
       "state:",
       "  root: ./.symphonika",
       "polling:",
-      "  interval_ms: 30000",
+      `  interval_ms: ${options.pollingIntervalMs ?? 30000}`,
       "providers:",
       "  codex:",
       '    command: "codex --dangerously-bypass-approvals-and-sandbox app-server"',
@@ -297,4 +394,72 @@ async function writeValidProject(root: string): Promise<void> {
     ].join("\n")
   );
   await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+}
+
+async function writeConfigWithInvalidAndValidProjects(root: string): Promise<void> {
+  await mkdir(root, { recursive: true });
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "polling:",
+      "  interval_ms: 30000",
+      "providers:",
+      "  codex:",
+      '    command: "codex --dangerously-bypass-approvals-and-sandbox app-server"',
+      "  claude:",
+      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      "projects:",
+      "  - name: malformed",
+      "    tracker:",
+      "      kind: github",
+      "      owner: pmatos",
+      '      token: "$GITHUB_TOKEN"',
+      "    issue_filters:",
+      '      states: ["open"]',
+      '      labels_all: ["agent-ready"]',
+      '      labels_none: ["blocked"]',
+      "    priority:",
+      "      labels: {}",
+      "      default: 99",
+      "    agent:",
+      "      provider: codex",
+      "  - name: symphonika",
+      "    tracker:",
+      "      kind: github",
+      "      owner: pmatos",
+      "      repo: symphonika",
+      '      token: "$GITHUB_TOKEN"',
+      "    issue_filters:",
+      '      states: ["open"]',
+      '      labels_all: ["agent-ready"]',
+      '      labels_none: ["blocked"]',
+      "    priority:",
+      "      labels: {}",
+      "      default: 99",
+      "    agent:",
+      "      provider: codex",
+      ""
+    ].join("\n")
+  );
+}
+
+async function waitFor(
+  predicate: () => Promise<boolean>,
+  options: { intervalMs?: number; timeoutMs?: number } = {}
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 1_000;
+  const intervalMs = options.intervalMs ?? 10;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (await predicate()) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error("condition was not met before timeout");
 }

@@ -9,7 +9,9 @@ import type {
 } from "./issue-polling.js";
 import {
   emptyIssuePollStatus,
-  pollConfiguredGitHubIssues
+  pollConfiguredGitHubIssues,
+  readConfiguredPollingIntervalMs,
+  replaceIssuePollStatus
 } from "./issue-polling.js";
 import { resolveStateRoot } from "./state.js";
 import { VERSION } from "./version.js";
@@ -46,18 +48,37 @@ export async function startDaemon(
     stateRootOptions.cwd = options.cwd;
   }
   const state = resolveStateRoot(stateRootOptions);
-  let issuePollStatus = emptyIssuePollStatus();
+  const issuePollStatus = emptyIssuePollStatus();
+  let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let polling = false;
+  const refreshIssuePollStatus = async (): Promise<void> => {
+    if (!state.configExists || polling) {
+      return;
+    }
+
+    polling = true;
+    try {
+      replaceIssuePollStatus(
+        issuePollStatus,
+        await pollConfiguredGitHubIssues(issuePollOptions(state.configPath, options))
+      );
+    } catch (error) {
+      issuePollStatus.errors = [errorMessage(error)];
+      issuePollStatus.projects = [];
+      issuePollStatus.candidateIssues = [];
+      issuePollStatus.filteredIssues = [];
+    } finally {
+      polling = false;
+    }
+  };
+
   if (state.configExists) {
-    const pollOptions: PollConfiguredGitHubIssuesOptions = {
-      configPath: state.configPath
-    };
-    if (options.env !== undefined) {
-      pollOptions.env = options.env;
-    }
-    if (options.githubIssuesApi !== undefined) {
-      pollOptions.githubIssuesApi = options.githubIssuesApi;
-    }
-    issuePollStatus = await pollConfiguredGitHubIssues(pollOptions);
+    await refreshIssuePollStatus();
+    const intervalMs = await readConfiguredPollingIntervalMs(state.configPath);
+    pollTimer = setInterval(() => {
+      void refreshIssuePollStatus();
+    }, intervalMs);
+    pollTimer.unref?.();
   }
   const app = createHttpApp({
     issuePollStatus,
@@ -89,8 +110,29 @@ export async function startDaemon(
     port,
     stateRoot: state.stateRoot,
     url,
-    stop: () => stopServer(server, logger)
+    stop: () => {
+      if (pollTimer !== undefined) {
+        clearInterval(pollTimer);
+      }
+      return stopServer(server, logger);
+    }
   };
+}
+
+function issuePollOptions(
+  configPath: string,
+  options: StartDaemonOptions
+): PollConfiguredGitHubIssuesOptions {
+  const pollOptions: PollConfiguredGitHubIssuesOptions = {
+    configPath
+  };
+  if (options.env !== undefined) {
+    pollOptions.env = options.env;
+  }
+  if (options.githubIssuesApi !== undefined) {
+    pollOptions.githubIssuesApi = options.githubIssuesApi;
+  }
+  return pollOptions;
 }
 
 function waitForListening(server: ServerType): Promise<void> {
@@ -126,4 +168,8 @@ function stopServer(server: ServerType, logger: Logger): Promise<void> {
       resolve();
     });
   });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

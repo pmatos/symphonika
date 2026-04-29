@@ -73,8 +73,13 @@ export type PollConfiguredGitHubIssuesOptions = {
   githubIssuesApi?: GitHubIssuesApi;
 };
 
-type PollingServiceConfig = z.infer<typeof pollingServiceConfigSchema>;
 type PollingProjectConfig = z.infer<typeof pollingProjectSchema>;
+type PollingServiceConfig = {
+  polling?: {
+    interval_ms?: number | undefined;
+  };
+  projects: PollingProjectConfig[];
+};
 
 const providerNameSchema = z.enum(["codex", "claude"]);
 
@@ -113,7 +118,13 @@ const pollingProjectSchema = z
 
 const pollingServiceConfigSchema = z
   .object({
-    projects: z.array(pollingProjectSchema).min(1)
+    polling: z
+      .object({
+        interval_ms: z.number().int().positive().optional()
+      })
+      .passthrough()
+      .optional(),
+    projects: z.array(z.unknown()).min(1)
   })
   .passthrough();
 
@@ -144,6 +155,7 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
 }
 
 const DEFAULT_GITHUB_ISSUES_API = new OctokitGitHubIssuesApi();
+export const DEFAULT_POLLING_INTERVAL_MS = 30_000;
 
 export function emptyIssuePollStatus(): IssuePollStatus {
   return {
@@ -152,6 +164,23 @@ export function emptyIssuePollStatus(): IssuePollStatus {
     filteredIssues: [],
     projects: []
   };
+}
+
+export function replaceIssuePollStatus(
+  target: IssuePollStatus,
+  source: IssuePollStatus
+): void {
+  target.candidateIssues = source.candidateIssues;
+  target.errors = source.errors;
+  target.filteredIssues = source.filteredIssues;
+  target.projects = source.projects;
+}
+
+export async function readConfiguredPollingIntervalMs(
+  configPath: string
+): Promise<number> {
+  const config = await readPollingConfig(configPath, []);
+  return config?.polling?.interval_ms ?? DEFAULT_POLLING_INTERVAL_MS;
 }
 
 export async function pollConfiguredGitHubIssues(
@@ -281,7 +310,29 @@ async function readPollingConfig(
     return undefined;
   }
 
-  return parsed.data;
+  const projects: PollingProjectConfig[] = [];
+  parsed.data.projects.forEach((rawProject, index) => {
+    const parsedProject = pollingProjectSchema.safeParse(rawProject);
+    if (parsedProject.success) {
+      projects.push(parsedProject.data);
+      return;
+    }
+
+    errors.push(
+      ...parsedProject.error.issues.map((issue) =>
+        formatZodIssueWithPrefix(issue, ["projects", String(index)])
+      )
+    );
+  });
+
+  const config: PollingServiceConfig = {
+    projects
+  };
+  if (parsed.data.polling !== undefined) {
+    config.polling = parsed.data.polling;
+  }
+
+  return config;
 }
 
 function normalizeIssueSnapshot(
@@ -397,6 +448,14 @@ function envReferenceName(input: string): string | undefined {
 
 function formatZodIssue(issue: z.ZodIssue): string {
   const location = issue.path.length === 0 ? "service config" : issue.path.join(".");
+  return `${location}: ${issue.message}`;
+}
+
+function formatZodIssueWithPrefix(
+  issue: z.ZodIssue,
+  prefix: string[]
+): string {
+  const location = [...prefix, ...issue.path].join(".");
   return `${location}: ${issue.message}`;
 }
 

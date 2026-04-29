@@ -317,6 +317,75 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("dispatches an issue that becomes eligible on a later poll interval", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "symphonika",
+      "issues",
+      "8-dispatch-an-end-to-end-run-through-a-test-provider"
+    );
+    await mkdir(workspacePath, { recursive: true });
+    await writeValidProject(root, { pollingIntervalMs: 10 });
+
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          issueFixture({
+            labels: ["agent-ready"],
+            number: 8,
+            title: "Dispatch an end-to-end run through a test provider"
+          })
+        ])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = successfulCodexProvider();
+    const prepareIssueWorkspace = vi.fn(
+      (input: PrepareIssueWorkspaceInput): Promise<PreparedIssueWorkspace> => {
+        void input;
+        return Promise.resolve(preparedWorkspaceFixture(root));
+      }
+    );
+
+    const daemon = await startDaemon({
+      agentProviders: {
+        codex: codexProvider
+      },
+      createRunId: () => "run-issue-8-polled",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      const status = await waitForRun(daemon.url, "succeeded");
+      const run = firstRun(status);
+
+      expect(githubIssuesApi.listOpenIssues.mock.calls.length).toBeGreaterThanOrEqual(
+        2
+      );
+      expect(run).toMatchObject({
+        id: "run-issue-8-polled",
+        issueNumber: 8,
+        state: "succeeded",
+        workspacePath
+      });
+      expect(prepareIssueWorkspace).toHaveBeenCalledOnce();
+      expect(codexProvider.runAttempt).toHaveBeenCalledOnce();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("marks a fake-provider process failure and preserves logs for inspection", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(
@@ -727,14 +796,17 @@ function preparedWorkspaceFixture(root: string): PreparedIssueWorkspace {
   };
 }
 
-async function writeValidProject(root: string): Promise<void> {
+async function writeValidProject(
+  root: string,
+  options: { pollingIntervalMs?: number } = {}
+): Promise<void> {
   await writeFile(
     path.join(root, "symphonika.yml"),
     [
       "state:",
       "  root: ./.symphonika",
       "polling:",
-      "  interval_ms: 30000",
+      `  interval_ms: ${options.pollingIntervalMs ?? 30000}`,
       "providers:",
       "  codex:",
       '    command: "codex --dangerously-bypass-approvals-and-sandbox app-server"',

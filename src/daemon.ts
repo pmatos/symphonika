@@ -70,6 +70,7 @@ export async function startDaemon(
   };
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let polling = false;
+  let scheduledWork = Promise.resolve();
   const refreshIssuePollStatus = async (): Promise<void> => {
     if (!state.configExists || polling) {
       return;
@@ -124,13 +125,19 @@ export async function startDaemon(
       dispatchRuntime.dispatching = false;
     }
   };
+  const refreshAndDispatch = async (): Promise<void> => {
+    await refreshIssuePollStatus();
+    await dispatchEligibleIssue();
+  };
+  const scheduleRefreshAndDispatch = (): void => {
+    scheduledWork = scheduledWork.then(refreshAndDispatch, refreshAndDispatch);
+    void scheduledWork;
+  };
 
   if (state.configExists) {
     await refreshIssuePollStatus();
     const intervalMs = await readConfiguredPollingIntervalMs(state.configPath);
-    pollTimer = setInterval(() => {
-      void refreshIssuePollStatus();
-    }, intervalMs);
+    pollTimer = setInterval(scheduleRefreshAndDispatch, intervalMs);
     pollTimer.unref?.();
   }
   const app = createHttpApp({
@@ -173,6 +180,7 @@ export async function startDaemon(
       if (dispatchPromise !== undefined) {
         await dispatchPromise;
       }
+      await scheduledWork;
       await stopServer(server, logger);
       runStore.close();
     }

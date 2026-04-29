@@ -8,6 +8,7 @@ import {
   runInitProject,
   type GitHubApi
 } from "../src/doctor.js";
+import type { AgentProviderRegistry } from "../src/provider.js";
 
 const tempRoots: string[] = [];
 
@@ -42,6 +43,7 @@ describe("GitHub Project validation", () => {
     };
 
     const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
       env: { GITHUB_TOKEN: "secret-token" },
@@ -73,6 +75,7 @@ describe("GitHub Project validation", () => {
     };
 
     const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
       env: { GITHUB_TOKEN: "secret-token" },
@@ -101,6 +104,7 @@ describe("GitHub Project validation", () => {
     };
 
     const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
       env: { GITHUB_TOKEN: "secret-token" },
@@ -128,6 +132,7 @@ describe("GitHub Project validation", () => {
     };
 
     const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
       env: { GITHUB_TOKEN: "secret-token" },
@@ -144,6 +149,20 @@ describe("GitHub Project validation", () => {
     });
   });
 });
+
+function fakeAgentProviders(): AgentProviderRegistry {
+  return {
+    codex: {
+      cancel: () => Promise.resolve(),
+      name: "codex",
+      runAttempt: async function* () {
+        await Promise.resolve();
+        yield* [];
+      },
+      validate: () => Promise.resolve()
+    }
+  };
+}
 
 describe("GitHub Project initialization", () => {
   it("warns about the target repository and labels without mutating unless confirmed", async () => {

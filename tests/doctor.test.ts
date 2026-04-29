@@ -9,6 +9,7 @@ import {
   runDoctor,
   type GitHubApi
 } from "../src/doctor.js";
+import type { AgentProviderRegistry } from "../src/provider.js";
 
 const tempRoots: string[] = [];
 const originalGithubToken = process.env.GITHUB_TOKEN;
@@ -148,6 +149,41 @@ describe("doctor", () => {
     expect(output.stderr).toContain("$SYMPHONIKA_MISSING_TOKEN");
   });
 
+  it("reports Codex provider command validation errors", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath);
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const report = await runDoctor({
+      agentProviders: {
+        codex: {
+          cancel: () => Promise.resolve(),
+          name: "codex",
+          runAttempt: async function* () {
+            await Promise.resolve();
+            yield* [];
+          },
+          validate: () => Promise.reject(new Error("codex app-server missing"))
+        }
+      },
+      configPath,
+      githubApi: successfulGitHubApi()
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain(
+      "projects.symphonika.providers.codex.command is invalid: codex app-server missing"
+    );
+    expect(report.projects[0]).toMatchObject({
+      validForDispatch: false
+    });
+  });
+
   it("accepts workflow front matter for prompt-adjacent policy", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");
@@ -218,6 +254,7 @@ async function runDoctorCommand(
     runDoctor: (options) =>
       runDoctor({
         ...options,
+        agentProviders: fakeAgentProviders(),
         githubApi
       })
   });
@@ -239,6 +276,20 @@ async function runDoctorCommand(
   ]);
 
   return output;
+}
+
+function fakeAgentProviders(): AgentProviderRegistry {
+  return {
+    codex: {
+      cancel: () => Promise.resolve(),
+      name: "codex",
+      runAttempt: async function* () {
+        await Promise.resolve();
+        yield* [];
+      },
+      validate: () => Promise.resolve()
+    }
+  };
 }
 
 function successfulGitHubApi(): GitHubApi {

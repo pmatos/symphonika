@@ -16,6 +16,7 @@ import {
   replaceIssuePollStatus
 } from "./issue-polling.js";
 import type { AgentProviderRegistry } from "./provider.js";
+import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { openRunStore } from "./run-store.js";
 import { resolveStateRoot } from "./state.js";
 import { VERSION } from "./version.js";
@@ -65,6 +66,7 @@ export async function startDaemon(
   const runStore = openRunStore({
     stateRoot: state.stateRoot
   });
+  const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const dispatchRuntime = {
     dispatching: false
   };
@@ -95,7 +97,7 @@ export async function startDaemon(
     if (
       !state.configExists ||
       dispatchRuntime.dispatching ||
-      !hasRegisteredProviders(options.agentProviders)
+      !hasRegisteredProviders(agentProviders)
     ) {
       return;
     }
@@ -103,7 +105,7 @@ export async function startDaemon(
     dispatchRuntime.dispatching = true;
     try {
       await dispatchOneEligibleIssue({
-        agentProviders: options.agentProviders,
+        agentProviders,
         configDir: state.configDir,
         configPath: state.configPath,
         githubIssuesApi: options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API,

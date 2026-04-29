@@ -392,7 +392,9 @@ async function runProviderAttempt(input: {
       runStore: input.runStore,
       sequence
     });
-    finalState = terminalStateAfterEvent(finalState, event.normalized);
+    if (event.normalized !== undefined) {
+      finalState = terminalStateAfterEvent(finalState, event.normalized);
+    }
   }
 
   return finalState;
@@ -409,8 +411,14 @@ async function persistProviderEvent(input: {
 }): Promise<void> {
   await Promise.all([
     appendJsonl(input.rawLogPath, input.event.raw),
-    appendJsonl(input.normalizedLogPath, input.event.normalized)
+    ...(input.event.normalized === undefined
+      ? []
+      : [appendJsonl(input.normalizedLogPath, input.event.normalized)])
   ]);
+  if (input.event.normalized === undefined) {
+    return;
+  }
+
   input.runStore.recordProviderEvent({
     attemptId: input.attemptId,
     normalized: input.event.normalized,
@@ -445,7 +453,11 @@ function terminalStateAfterEvent(
 
 function processExitFailed(event: NormalizedProviderEvent): boolean {
   const exitCode = event.exitCode;
-  return typeof exitCode === "number" && exitCode !== 0;
+  if (typeof exitCode === "number" && exitCode !== 0) {
+    return true;
+  }
+
+  return typeof event.signal === "string" && event.cancelled !== true;
 }
 
 async function appendJsonl(filePath: string, value: unknown): Promise<void> {

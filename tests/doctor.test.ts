@@ -9,6 +9,8 @@ import {
   runDoctor,
   type GitHubApi
 } from "../src/doctor.js";
+import type { AgentProviderRegistry } from "../src/provider.js";
+import { DEFAULT_AGENT_PROVIDERS } from "../src/providers/index.js";
 
 const tempRoots: string[] = [];
 const originalGithubToken = process.env.GITHUB_TOKEN;
@@ -148,6 +150,95 @@ describe("doctor", () => {
     expect(output.stderr).toContain("$SYMPHONIKA_MISSING_TOKEN");
   });
 
+  it("reports Codex provider command validation errors", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath);
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const report = await runDoctor({
+      agentProviders: {
+        codex: {
+          cancel: () => Promise.resolve(),
+          name: "codex",
+          runAttempt: async function* () {
+            await Promise.resolve();
+            yield* [];
+          },
+          validate: () => Promise.reject(new Error("codex app-server missing"))
+        }
+      },
+      configPath,
+      githubApi: successfulGitHubApi()
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain(
+      "projects.symphonika.providers.codex.command is invalid: codex app-server missing"
+    );
+    expect(report.projects[0]).toMatchObject({
+      validForDispatch: false
+    });
+  });
+
+  it("reports missing provider adapters as invalid for dispatch", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, {
+      agentProvider: "claude"
+    });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      githubApi: successfulGitHubApi()
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain(
+      "projects.symphonika.agent.provider references claude, but no adapter is registered"
+    );
+    expect(report.projects[0]).toMatchObject({
+      validForDispatch: false
+    });
+  });
+
+  it("keeps Claude visible in the default registry but rejects it until issue #10 lands", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, {
+      agentProvider: "claude"
+    });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const report = await runDoctor({
+      configPath,
+      githubApi: successfulGitHubApi()
+    });
+
+    expect(DEFAULT_AGENT_PROVIDERS.claude?.name).toBe("claude");
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain(
+      "projects.symphonika.providers.claude.command is invalid: Claude provider adapter is not implemented yet; track issue #10"
+    );
+    expect(report.projects[0]).toMatchObject({
+      validForDispatch: false
+    });
+  });
+
   it("accepts workflow front matter for prompt-adjacent policy", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");
@@ -218,6 +309,7 @@ async function runDoctorCommand(
     runDoctor: (options) =>
       runDoctor({
         ...options,
+        agentProviders: fakeAgentProviders(),
         githubApi
       })
   });
@@ -239,6 +331,20 @@ async function runDoctorCommand(
   ]);
 
   return output;
+}
+
+function fakeAgentProviders(): AgentProviderRegistry {
+  return {
+    codex: {
+      cancel: () => Promise.resolve(),
+      name: "codex",
+      runAttempt: async function* () {
+        await Promise.resolve();
+        yield* [];
+      },
+      validate: () => Promise.resolve()
+    }
+  };
 }
 
 function successfulGitHubApi(): GitHubApi {

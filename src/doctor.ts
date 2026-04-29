@@ -5,11 +5,14 @@ import { parse } from "yaml";
 import { z } from "zod";
 
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
+import type { AgentProviderRegistry } from "./provider.js";
+import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { validateWorkflowContract } from "./workflow.js";
 
 export { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 
 export type DoctorOptions = {
+  agentProviders?: AgentProviderRegistry;
   configPath?: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -199,6 +202,7 @@ export async function runDoctor(
   const configPath = path.resolve(cwd, options.configPath ?? "symphonika.yml");
   const env = options.env ?? process.env;
   const githubApi = options.githubApi ?? DEFAULT_GITHUB_API;
+  const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const errors: string[] = [];
   const projects: DoctorProjectReport[] = [];
   const rawConfig = await readConfig(configPath, errors);
@@ -216,6 +220,7 @@ export async function runDoctor(
     const validation = await validateProject(
       project,
       parsedConfig,
+      agentProviders,
       env,
       errors,
       githubApi
@@ -427,6 +432,7 @@ function parseServiceConfig(
 async function validateProject(
   project: ProjectConfig,
   config: ServiceConfig,
+  agentProviders: AgentProviderRegistry,
   env: NodeJS.ProcessEnv,
   errors: string[],
   githubApi: GitHubApi | undefined
@@ -439,6 +445,22 @@ async function validateProject(
       `projects.${project.name}.agent.provider references ${project.agent.provider}, but its command is empty`
     );
     validForDispatch = false;
+  }
+  const providerAdapter = agentProviders[project.agent.provider];
+  if (providerAdapter === undefined) {
+    errors.push(
+      `projects.${project.name}.agent.provider references ${project.agent.provider}, but no adapter is registered`
+    );
+    validForDispatch = false;
+  } else {
+    try {
+      await providerAdapter.validate(provider.command);
+    } catch (error) {
+      errors.push(
+        `projects.${project.name}.providers.${project.agent.provider}.command is invalid: ${errorMessage(error)}`
+      );
+      validForDispatch = false;
+    }
   }
 
   const token = resolveEnvBackedValue(project.tracker.token, env);

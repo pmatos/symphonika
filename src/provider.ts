@@ -20,7 +20,7 @@ export type NormalizedProviderEvent = {
 };
 
 export type ProviderEvent = {
-  normalized: NormalizedProviderEvent;
+  normalized?: NormalizedProviderEvent;
   raw: unknown;
 };
 

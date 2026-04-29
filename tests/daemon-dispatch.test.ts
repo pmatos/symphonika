@@ -475,6 +475,178 @@ describe("daemon dispatch", () => {
       await daemon.stop();
     }
   });
+
+  it("does not persist a queued run when the initial claim label write fails", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockRejectedValue(new Error("claim rejected")),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 8,
+          title: "Dispatch an end-to-end run through a test provider"
+        })
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = successfulCodexProvider();
+    const prepareIssueWorkspace = vi.fn(
+      (input: PrepareIssueWorkspaceInput): Promise<PreparedIssueWorkspace> => {
+        void input;
+        return Promise.resolve(preparedWorkspaceFixture(root));
+      }
+    );
+
+    const daemon = await startDaemon({
+      agentProviders: {
+        codex: codexProvider
+      },
+      createRunId: () => "run-issue-8-claim-rejected",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      await waitForStatusError(daemon.url, "claim rejected");
+      expect(prepareIssueWorkspace).not.toHaveBeenCalled();
+      expect(codexProvider.validate).not.toHaveBeenCalled();
+
+      const database = new Database(path.join(root, ".symphonika", "symphonika.db"), {
+        readonly: true
+      });
+      try {
+        expect(countRows(database, "runs")).toBe(0);
+        expect(countRows(database, "attempts")).toBe(0);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("marks the attempt failed when provider execution throws after launch", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "symphonika",
+      "issues",
+      "8-dispatch-an-end-to-end-run-through-a-test-provider"
+    );
+    await mkdir(workspacePath, { recursive: true });
+    await writeValidProject(root);
+
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 8,
+          title: "Dispatch an end-to-end run through a test provider"
+        })
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        yield await Promise.reject(new Error("provider crashed"));
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const prepareIssueWorkspace = vi.fn(
+      (input: PrepareIssueWorkspaceInput): Promise<PreparedIssueWorkspace> => {
+        void input;
+        return Promise.resolve(preparedWorkspaceFixture(root));
+      }
+    );
+
+    const daemon = await startDaemon({
+      agentProviders: {
+        codex: codexProvider
+      },
+      createRunId: () => "run-issue-8-provider-crashed",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      const status = await waitForRun(daemon.url, "failed");
+      const run = firstRun(status);
+
+      expect(githubIssuesApi.addLabelsToIssue.mock.calls).toEqual([
+        [
+          {
+            issueNumber: 8,
+            labels: ["sym:claimed"],
+            owner: "pmatos",
+            repo: "symphonika",
+            token: "secret-token"
+          }
+        ],
+        [
+          {
+            issueNumber: 8,
+            labels: ["sym:running"],
+            owner: "pmatos",
+            repo: "symphonika",
+            token: "secret-token"
+          }
+        ],
+        [
+          {
+            issueNumber: 8,
+            labels: ["sym:failed"],
+            owner: "pmatos",
+            repo: "symphonika",
+            token: "secret-token"
+          }
+        ]
+      ]);
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith({
+        issueNumber: 8,
+        labels: ["sym:running"],
+        owner: "pmatos",
+        repo: "symphonika",
+        token: "secret-token"
+      });
+      expect(run).toMatchObject({
+        id: "run-issue-8-provider-crashed",
+        issueNumber: 8,
+        state: "failed",
+        workspacePath
+      });
+
+      const database = new Database(path.join(root, ".symphonika", "symphonika.db"), {
+        readonly: true
+      });
+      try {
+        const attempts = database.prepare("select * from attempts").all();
+        expect(attempts).toHaveLength(1);
+        expect(attempts[0]).toMatchObject({
+          run_id: "run-issue-8-provider-crashed",
+          state: "failed"
+        });
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
 });
 
 function issueFixture(overrides: {
@@ -502,6 +674,56 @@ function issueFixture(overrides: {
     state: "open",
     title: overrides.title,
     updated_at: "2026-04-21T11:00:00Z"
+  };
+}
+
+function successfulCodexProvider(): AgentProvider {
+  return {
+    cancel: vi.fn().mockResolvedValue(undefined),
+    name: "codex",
+    runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+      await Promise.resolve();
+      yield {
+        normalized: {
+          exitCode: 0,
+          type: "process_exit"
+        },
+        raw: {
+          code: 0,
+          kind: "exit"
+        }
+      };
+    }),
+    validate: vi.fn().mockResolvedValue(undefined)
+  };
+}
+
+function preparedWorkspaceFixture(root: string): PreparedIssueWorkspace {
+  const workspacePath = path.join(
+    root,
+    ".symphonika",
+    "workspaces",
+    "symphonika",
+    "issues",
+    "8-dispatch-an-end-to-end-run-through-a-test-provider"
+  );
+
+  return {
+    branchName:
+      "sym/symphonika/8-dispatch-an-end-to-end-run-through-a-test-provider",
+    branchRef:
+      "refs/heads/sym/symphonika/8-dispatch-an-end-to-end-run-through-a-test-provider",
+    cachePath: path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "symphonika",
+      ".cache",
+      "repo.git"
+    ),
+    issueDirectoryName: "8-dispatch-an-end-to-end-run-through-a-test-provider",
+    reused: false,
+    workspacePath
   };
 }
 
@@ -604,6 +826,33 @@ async function waitForRun(
   throw new Error(`run did not reach ${state} before timeout`);
 }
 
+async function waitForStatusError(
+  url: string,
+  message: string,
+  options: { intervalMs?: number; timeoutMs?: number } = {}
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 1_000;
+  const intervalMs = options.intervalMs ?? 10;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const response = await fetch(`${url}/api/status`);
+    const body = (await response.json()) as {
+      issuePolling?: {
+        errors?: string[];
+      };
+    };
+
+    if (body.issuePolling?.errors?.some((error) => error.includes(message))) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(`status error did not include ${message} before timeout`);
+}
+
 function readJsonl(contents: string): unknown[] {
   return contents
     .split(/\r?\n/)
@@ -629,6 +878,25 @@ function firstPrepareIssueWorkspaceInput(
   }
 
   return call[0];
+}
+
+function countRows(
+  database: {
+    prepare: (source: string) => {
+      get: () => unknown;
+    };
+  },
+  table: "attempts" | "runs"
+): number {
+  const row = database.prepare(`select count(*) as count from ${table}`).get();
+  if (typeof row === "object" && row !== null && "count" in row) {
+    const value = row.count;
+    if (typeof value === "number") {
+      return value;
+    }
+  }
+
+  throw new Error(`expected row count for ${table}`);
 }
 
 function stringColumn(row: unknown, key: string): string {

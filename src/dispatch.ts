@@ -158,20 +158,26 @@ export async function dispatchOneEligibleIssue(
     token
   };
 
-  options.runStore.createRun({
-    id: runId,
-    issue,
-    projectName: target.project.name,
-    providerCommand,
-    providerName
-  });
-  await options.githubIssuesApi.addLabelsToIssue({
-    ...repository,
-    issueNumber: issue.number,
-    labels: ["sym:claimed"]
-  });
+  let runCreated = false;
+  let attemptCreated = false;
+  let claimed = false;
+  let running = false;
 
   try {
+    await options.githubIssuesApi.addLabelsToIssue({
+      ...repository,
+      issueNumber: issue.number,
+      labels: ["sym:claimed"]
+    });
+    claimed = true;
+    options.runStore.createRun({
+      id: runId,
+      issue,
+      projectName: target.project.name,
+      providerCommand,
+      providerName
+    });
+    runCreated = true;
     options.runStore.updateRunState(runId, "preparing_workspace");
     const prepared = await (options.prepareIssueWorkspace ?? prepareRealIssueWorkspace)({
       configDir: options.configDir,
@@ -227,6 +233,7 @@ export async function dispatchOneEligibleIssue(
       issueNumber: issue.number,
       labels: ["sym:running"]
     });
+    running = true;
     options.runStore.updateRunState(runId, "running");
     options.runStore.createAttempt({
       ...runEvidence,
@@ -237,6 +244,7 @@ export async function dispatchOneEligibleIssue(
       runId,
       state: "running"
     });
+    attemptCreated = true;
     const finalState = await runProviderAttempt({
       attemptId,
       branchName: prepared.branchName,
@@ -273,17 +281,26 @@ export async function dispatchOneEligibleIssue(
       runId
     };
   } catch (error) {
-    options.runStore.updateRunState(runId, "failed");
-    await bestEffortRemoveRunningLabel(
-      options.githubIssuesApi,
-      repository,
-      issue.number
-    );
-    await bestEffortAddFailedLabel(
-      options.githubIssuesApi,
-      repository,
-      issue.number
-    );
+    if (attemptCreated) {
+      options.runStore.updateAttemptState(attemptId, "failed");
+    }
+    if (runCreated) {
+      options.runStore.updateRunState(runId, "failed");
+    }
+    if (running) {
+      await bestEffortRemoveRunningLabel(
+        options.githubIssuesApi,
+        repository,
+        issue.number
+      );
+    }
+    if (claimed) {
+      await bestEffortAddFailedLabel(
+        options.githubIssuesApi,
+        repository,
+        issue.number
+      );
+    }
     throw error;
   }
 }

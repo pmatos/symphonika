@@ -2,28 +2,41 @@ import { serve, type ServerType } from "@hono/node-server";
 import type { Logger } from "pino";
 import pino from "pino";
 
+import { dispatchOneEligibleIssue } from "./dispatch.js";
 import { createHttpApp } from "./http/app.js";
 import type {
   GitHubIssuesApi,
   PollConfiguredGitHubIssuesOptions
 } from "./issue-polling.js";
 import {
+  DEFAULT_GITHUB_ISSUES_API,
   emptyIssuePollStatus,
   pollConfiguredGitHubIssues,
   readConfiguredPollingIntervalMs,
   replaceIssuePollStatus
 } from "./issue-polling.js";
+import type { AgentProviderRegistry } from "./provider.js";
+import { openRunStore } from "./run-store.js";
 import { resolveStateRoot } from "./state.js";
 import { VERSION } from "./version.js";
+import type {
+  PreparedIssueWorkspace,
+  PrepareIssueWorkspaceInput
+} from "./workspace.js";
 
 export type StartDaemonOptions = {
+  agentProviders?: AgentProviderRegistry;
   configPath?: string;
+  createRunId?: () => string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   githubIssuesApi?: GitHubIssuesApi;
   host?: string;
   logger?: Logger;
   port?: number;
+  prepareIssueWorkspace?: (
+    input: PrepareIssueWorkspaceInput
+  ) => Promise<PreparedIssueWorkspace>;
 };
 
 export type DaemonHandle = {
@@ -49,6 +62,12 @@ export async function startDaemon(
   }
   const state = resolveStateRoot(stateRootOptions);
   const issuePollStatus = emptyIssuePollStatus();
+  const runStore = openRunStore({
+    stateRoot: state.stateRoot
+  });
+  const dispatchRuntime = {
+    dispatching: false
+  };
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let polling = false;
   const refreshIssuePollStatus = async (): Promise<void> => {
@@ -71,6 +90,40 @@ export async function startDaemon(
       polling = false;
     }
   };
+  const dispatchEligibleIssue = async (): Promise<void> => {
+    if (
+      !state.configExists ||
+      dispatchRuntime.dispatching ||
+      !hasRegisteredProviders(options.agentProviders)
+    ) {
+      return;
+    }
+
+    dispatchRuntime.dispatching = true;
+    try {
+      await dispatchOneEligibleIssue({
+        agentProviders: options.agentProviders,
+        configDir: state.configDir,
+        configPath: state.configPath,
+        githubIssuesApi: options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API,
+        issuePollStatus,
+        runStore,
+        stateRoot: state.stateRoot,
+        ...(options.createRunId === undefined
+          ? {}
+          : { createRunId: options.createRunId }),
+        ...(options.env === undefined ? {} : { env: options.env }),
+        ...(options.prepareIssueWorkspace === undefined
+          ? {}
+          : { prepareIssueWorkspace: options.prepareIssueWorkspace })
+      });
+    } catch (error) {
+      issuePollStatus.errors.push(errorMessage(error));
+      logger.error({ err: error }, "symphonika dispatch failed");
+    } finally {
+      dispatchRuntime.dispatching = false;
+    }
+  };
 
   if (state.configExists) {
     await refreshIssuePollStatus();
@@ -81,6 +134,8 @@ export async function startDaemon(
     pollTimer.unref?.();
   }
   const app = createHttpApp({
+    dispatchRuntime,
+    getRuns: () => runStore.listRuns(),
     issuePollStatus,
     stateRoot: state.stateRoot,
     version: VERSION
@@ -94,6 +149,7 @@ export async function startDaemon(
   await waitForListening(server);
   const port = resolveListeningPort(server, requestedPort);
   const url = `http://${host}:${port}`;
+  const dispatchPromise = dispatchEligibleIssue();
 
   logger.info(
     {
@@ -110,11 +166,15 @@ export async function startDaemon(
     port,
     stateRoot: state.stateRoot,
     url,
-    stop: () => {
+    stop: async () => {
       if (pollTimer !== undefined) {
         clearInterval(pollTimer);
       }
-      return stopServer(server, logger);
+      if (dispatchPromise !== undefined) {
+        await dispatchPromise;
+      }
+      await stopServer(server, logger);
+      runStore.close();
     }
   };
 }
@@ -172,4 +232,10 @@ function stopServer(server: ServerType, logger: Logger): Promise<void> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function hasRegisteredProviders(
+  providers: AgentProviderRegistry | undefined
+): providers is AgentProviderRegistry {
+  return providers !== undefined && Object.values(providers).some(Boolean);
 }

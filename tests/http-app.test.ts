@@ -44,6 +44,7 @@ describe("HTTP app", () => {
         errors: [],
         projects: []
       },
+      runs: [],
       service: "symphonika",
       state: "idle",
       stateRoot: "/tmp/symphonika-state",

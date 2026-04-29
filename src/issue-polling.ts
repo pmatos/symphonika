@@ -11,6 +11,11 @@ export type GitHubIssueRepositoryInput = {
   token: string;
 };
 
+export type GitHubIssueLabelInput = GitHubIssueRepositoryInput & {
+  issueNumber: number;
+  labels: string[];
+};
+
 export type RawGitHubIssue = {
   body?: string | null;
   created_at?: string | null;
@@ -26,9 +31,11 @@ export type RawGitHubIssue = {
 };
 
 export type GitHubIssuesApi = {
+  addLabelsToIssue?: (input: GitHubIssueLabelInput) => Promise<void>;
   listOpenIssues: (
     input: GitHubIssueRepositoryInput
   ) => Promise<RawGitHubIssue[]>;
+  removeLabelsFromIssue?: (input: GitHubIssueLabelInput) => Promise<void>;
 };
 
 export type IssueSnapshot = {
@@ -136,13 +143,20 @@ const SILENT_OCTOKIT_LOG = {
 };
 
 class OctokitGitHubIssuesApi implements GitHubIssuesApi {
+  async addLabelsToIssue(input: GitHubIssueLabelInput): Promise<void> {
+    const octokit = this.octokit(input.token);
+    await octokit.rest.issues.addLabels({
+      issue_number: input.issueNumber,
+      labels: input.labels,
+      owner: input.owner,
+      repo: input.repo
+    });
+  }
+
   async listOpenIssues(
     input: GitHubIssueRepositoryInput
   ): Promise<RawGitHubIssue[]> {
-    const octokit = new Octokit({
-      auth: input.token,
-      log: SILENT_OCTOKIT_LOG
-    });
+    const octokit = this.octokit(input.token);
     const issues = await octokit.paginate(octokit.rest.issues.listForRepo, {
       owner: input.owner,
       per_page: 100,
@@ -152,9 +166,28 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
 
     return issues;
   }
+
+  async removeLabelsFromIssue(input: GitHubIssueLabelInput): Promise<void> {
+    const octokit = this.octokit(input.token);
+    for (const label of input.labels) {
+      await octokit.rest.issues.removeLabel({
+        issue_number: input.issueNumber,
+        name: label,
+        owner: input.owner,
+        repo: input.repo
+      });
+    }
+  }
+
+  private octokit(token: string): Octokit {
+    return new Octokit({
+      auth: token,
+      log: SILENT_OCTOKIT_LOG
+    });
+  }
 }
 
-const DEFAULT_GITHUB_ISSUES_API = new OctokitGitHubIssuesApi();
+export const DEFAULT_GITHUB_ISSUES_API = new OctokitGitHubIssuesApi();
 export const DEFAULT_POLLING_INTERVAL_MS = 30_000;
 
 export function emptyIssuePollStatus(): IssuePollStatus {

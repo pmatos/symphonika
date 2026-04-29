@@ -212,11 +212,14 @@ describe("doctor", () => {
     });
   });
 
-  it("keeps Claude visible in the default registry but rejects it until issue #10 lands", async () => {
+  it("accepts Claude from the default registry now that its adapter is implemented", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");
+    const fakeClaudePath = path.join(root, "fake-claude.mjs");
+    await writeFakeClaudeHelp(fakeClaudePath);
     await writeValidConfig(configPath, {
-      agentProvider: "claude"
+      agentProvider: "claude",
+      claudeCommand: `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json`
     });
     await writeFile(
       path.join(root, "WORKFLOW.md"),
@@ -230,12 +233,10 @@ describe("doctor", () => {
     });
 
     expect(DEFAULT_AGENT_PROVIDERS.claude?.name).toBe("claude");
-    expect(report.ok).toBe(false);
-    expect(report.errors).toContain(
-      "projects.symphonika.providers.claude.command is invalid: Claude provider adapter is not implemented yet; track issue #10"
-    );
+    expect(report.errors).toEqual([]);
+    expect(report.ok).toBe(true);
     expect(report.projects[0]).toMatchObject({
-      validForDispatch: false
+      validForDispatch: true
     });
   });
 
@@ -359,6 +360,8 @@ async function writeValidConfig(
   configPath: string,
   overrides: {
     agentProvider?: string;
+    claudeCommand?: string;
+    codexCommand?: string;
     token?: string;
     trackerKind?: string;
     workflowPath?: string;
@@ -375,9 +378,9 @@ async function writeValidConfig(
       "  interval_ms: 30000",
       "providers:",
       "  codex:",
-      '    command: "codex --dangerously-bypass-approvals-and-sandbox app-server"',
+      `    command: "${overrides.codexCommand ?? "codex --dangerously-bypass-approvals-and-sandbox app-server"}"`,
       "  claude:",
-      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      `    command: "${overrides.claudeCommand ?? "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"}"`,
       "projects:",
       "  - name: symphonika",
       "    disabled: false",
@@ -408,5 +411,20 @@ async function writeValidConfig(
       `    workflow: ${overrides.workflowPath ?? "./WORKFLOW.md"}`,
       ""
     ].join("\n")
+  );
+}
+
+async function writeFakeClaudeHelp(filePath: string): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "if (process.argv.includes('--help')) {",
+      "  process.stdout.write('Usage: fake-claude -p --input-format stream-json --output-format stream-json\\n');",
+      "  process.exit(0);",
+      "}",
+      "process.exit(0);",
+      ""
+    ].join("\n"),
+    "utf8"
   );
 }

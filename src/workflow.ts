@@ -361,7 +361,7 @@ function stringifyTemplateValue(value: unknown, workflowPath: string): string {
 }
 
 function isPromptObjectName(input: string): input is keyof PromptContext {
-  return input in allowedTemplateFields;
+  return Object.hasOwn(allowedTemplateFields, input);
 }
 
 function templateExpressionError(

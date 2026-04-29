@@ -108,6 +108,37 @@ describe("workflow prompt rendering", () => {
     ).toThrow("references unknown variable {{issue.assignee}}");
   });
 
+  it("rejects inherited object property names as template variables", () => {
+    expect(() =>
+      renderAutonomousPrompt({
+        branch: {
+          name: "sym/symphonika/7-render-prompts",
+          ref: "refs/heads/sym/symphonika/7-render-prompts"
+        },
+        issue: issueSnapshot(),
+        project: {
+          name: "symphonika"
+        },
+        provider: {
+          command: "codex --dangerously-bypass-approvals-and-sandbox app-server",
+          name: "codex"
+        },
+        run: {
+          attempt: 1,
+          continuation: false,
+          id: "run-7"
+        },
+        template: "Work on {{toString}} and {{constructor}}.",
+        workflowPath: "/repo/WORKFLOW.md",
+        workspace: {
+          path: "/state/workspaces/symphonika/issues/7-render-prompts",
+          previous_attempt: false,
+          root: "/state/workspaces/symphonika"
+        }
+      })
+    ).toThrow("references unknown variable {{toString}}");
+  });
+
   it("calls out previous-attempt workspaces in the rendered prompt", () => {
     const rendered = renderAutonomousPrompt({
       branch: {

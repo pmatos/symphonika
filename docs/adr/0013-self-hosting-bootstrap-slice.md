@@ -1,0 +1,3 @@
+# Self-hosting bootstrap slice
+
+Symphonika's first implementation milestone will be a self-hosting bootstrap slice: a local daemon that can run this repository as one real Project well enough to help implement later Symphonika issues. The slice should use the final multi-project service config shape even with a single configured Project, and include GitHub issue polling, durable run state, deterministic Git workspaces and branches, Codex and Claude provider adapters, raw and normalized logs, and basic operator visibility, while deferring full multi-project fairness, UI polish, and stale-claim TTLs.

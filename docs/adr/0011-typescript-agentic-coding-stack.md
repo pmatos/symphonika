@@ -1,0 +1,3 @@
+# TypeScript stack for agentic coding
+
+Symphonika will use a small TypeScript stack optimized for agent readability and debugging: Node.js LTS, strict TypeScript, `tsx` for development, `tsc` for production builds, `commander` for the CLI, Hono for the local HTTP/API surface, Zod for runtime validation, SQLite through `better-sqlite3` with Kysely for typed SQL, Octokit for GitHub, Vitest for tests, and Pino for structured logs. We prefer simple composable libraries over a heavy application framework so future agent sessions can inspect control flow, schemas, database access, and provider adapters directly.

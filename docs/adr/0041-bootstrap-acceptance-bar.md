@@ -1,0 +1,3 @@
+# Bootstrap acceptance bar
+
+The bootstrap slice is accepted when tests and lint pass, `doctor` validates service config, GitHub auth, operational labels, Codex and Claude provider commands, workflow file, database path, and workspace root, `init-project` can create missing operational labels after confirmation, and `daemon` can claim one `agent-ready` issue in this repository, prepare its worktree and branch, run the configured provider through either the Codex JSON-RPC adapter or the Claude stream-json adapter, capture logs, prompt, and events, update durable run state, and show Projects, runs, failures, input-required events, stale state, and log links in CLI and the local status page.

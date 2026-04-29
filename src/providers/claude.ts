@@ -712,17 +712,17 @@ function splitCommand(command: string): string[] {
       continue;
     }
 
-    if (character === "\\") {
-      escaping = true;
-      continue;
-    }
-
     if (quote !== undefined) {
       if (character === quote) {
         quote = undefined;
       } else {
         current += character;
       }
+      continue;
+    }
+
+    if (character === "\\") {
+      escaping = true;
       continue;
     }
 

@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -374,6 +381,21 @@ describe("Claude stream-json provider", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("preserves backslashes inside quoted command executables", async () => {
+    const root = await makeTempRoot();
+    const fakeClaudeDir = path.join(root, "fake\\claude dir");
+    await mkdir(fakeClaudeDir, { recursive: true });
+    const fakeClaudePath = path.join(fakeClaudeDir, "fake\\claude");
+    await writeFakeClaudeHelpExecutable(fakeClaudePath);
+    const provider = createClaudeProvider();
+
+    await expect(
+      provider.validate(
+        `"${fakeClaudePath}" -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json`
+      )
+    ).resolves.toBeUndefined();
+  });
+
   it("rejects Claude commands that do not speak stream-json", async () => {
     const provider = createClaudeProvider();
 
@@ -506,6 +528,20 @@ async function writeFakeClaudeStreamJson(
   );
 
   process.env.SYMPHONIKA_FAKE_CLAUDE_TRANSCRIPT = transcriptPath;
+}
+
+async function writeFakeClaudeHelpExecutable(filePath: string): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "#!/bin/sh",
+      "printf '%s\\n' 'Usage: fake-claude -p --input-format stream-json --output-format stream-json'",
+      "exit 0",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  await chmod(filePath, 0o755);
 }
 
 function readJsonl(contents: string): unknown[] {

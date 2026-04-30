@@ -294,6 +294,7 @@ export class RunController {
 
     await this.runAttemptLifecycle({
       attemptNumber: payload.attemptNumber,
+      isContinuation: this.runStore.isContinuationRun(payload.runId),
       issue: payload.issue,
       project,
       provider,
@@ -414,6 +415,7 @@ export class RunController {
       runCreated = true;
       await this.runAttemptLifecycle({
         attemptNumber: input.attemptNumber,
+        isContinuation: input.isContinuation,
         issue: input.issue,
         project: input.project,
         provider: input.provider,
@@ -439,6 +441,7 @@ export class RunController {
 
   private async runAttemptLifecycle(input: {
     attemptNumber: number;
+    isContinuation: boolean;
     issue: IssueSnapshot;
     project: RunControllerProjectConfig;
     provider: AgentProvider;
@@ -464,6 +467,7 @@ export class RunController {
       started = await this.startAttempt({
         attemptId,
         attemptNumber: input.attemptNumber,
+        isContinuation: input.isContinuation,
         issue: input.issue,
         project: input.project,
         providerCommand: input.providerCommand,
@@ -574,6 +578,7 @@ export class RunController {
 
   private async startAttempt(input: {
     attemptId: string;
+    isContinuation: boolean;
     attemptNumber: number;
     issue: IssueSnapshot;
     project: RunControllerProjectConfig;
@@ -609,7 +614,7 @@ export class RunController {
       },
       run: {
         attempt: input.attemptNumber,
-        continuation: false,
+        continuation: input.isContinuation,
         id: input.runId
       },
       template: workflow.body,

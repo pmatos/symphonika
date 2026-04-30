@@ -197,6 +197,13 @@ export class RunStore {
     return row?.retry_count ?? 0;
   }
 
+  isContinuationRun(runId: string): boolean {
+    const row = this.database
+      .prepare("select is_continuation from runs where id = ?")
+      .get(runId) as { is_continuation: number } | undefined;
+    return row?.is_continuation === 1;
+  }
+
   listActiveRunIds(): { runId: string; projectName: string; issueNumber: number }[] {
     const rows = this.database
       .prepare(

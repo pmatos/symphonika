@@ -86,8 +86,11 @@ export async function startDaemon(
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const env = options.env ?? process.env;
   const activeRuns = new ActiveRunRegistry();
+  const dispatchMutex = createAsyncMutex();
   const dispatchRuntime = {
-    dispatching: false
+    get dispatching(): boolean {
+      return dispatchMutex.held;
+    }
   };
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let polling = false;
@@ -134,23 +137,23 @@ export async function startDaemon(
     schedule: (item: ScheduledWorkInput) => {
       activeRuns.scheduleDelayed({
         delayMs: item.delayMs,
-        fire: () =>
-          new Promise<void>((resolve) => {
-            enqueueScheduledWork(async () => {
-              if (dispatchRuntime.dispatching) {
-                // re-defer if mutex is held; rare for retry/continuation chains.
-              }
-              dispatchRuntime.dispatching = true;
-              try {
-                await item.fire();
-              } catch (error) {
-                logger.error({ err: error }, "symphonika scheduled work failed");
-              } finally {
-                dispatchRuntime.dispatching = false;
-                resolve();
-              }
-            });
-          }),
+        fire: async () => {
+          await dispatchMutex.acquire();
+          const promise = (async () => {
+            try {
+              await item.fire();
+            } catch (error) {
+              logger.error({ err: error }, "symphonika scheduled work failed");
+            } finally {
+              dispatchMutex.release();
+            }
+          })();
+          inflightDispatches.add(promise);
+          void promise.finally(() => {
+            inflightDispatches.delete(promise);
+          });
+          await promise;
+        },
         kind: item.kind,
         runId: item.runId
       });
@@ -211,34 +214,24 @@ export async function startDaemon(
       logger.error({ err: error }, "symphonika reconcile failed");
     }
   };
-  const dispatchEligibleIssue = async (): Promise<void> => {
-    if (
-      !state.configExists ||
-      dispatchRuntime.dispatching ||
-      !hasRegisteredProviders(agentProviders)
-    ) {
-      return;
-    }
-
-    dispatchRuntime.dispatching = true;
-    try {
-      await runController.dispatchOneFresh(issuePollStatus);
-    } catch (error) {
-      issuePollStatus.errors.push(errorMessage(error));
-      logger.error({ err: error }, "symphonika dispatch failed");
-    } finally {
-      dispatchRuntime.dispatching = false;
-    }
-  };
   const launchDispatch = (): void => {
     if (
       !state.configExists ||
-      dispatchRuntime.dispatching ||
-      !hasRegisteredProviders(agentProviders)
+      !hasRegisteredProviders(agentProviders) ||
+      !dispatchMutex.tryAcquire()
     ) {
       return;
     }
-    const promise = dispatchEligibleIssue();
+    const promise = (async () => {
+      try {
+        await runController.dispatchOneFresh(issuePollStatus);
+      } catch (error) {
+        issuePollStatus.errors.push(errorMessage(error));
+        logger.error({ err: error }, "symphonika dispatch failed");
+      } finally {
+        dispatchMutex.release();
+      }
+    })();
     inflightDispatches.add(promise);
     void promise.finally(() => {
       inflightDispatches.delete(promise);
@@ -488,4 +481,45 @@ function defaultProvidersConfig(): RunControllerProvidersConfig {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type AsyncMutex = {
+  acquire: () => Promise<void>;
+  readonly held: boolean;
+  release: () => void;
+  tryAcquire: () => boolean;
+};
+
+function createAsyncMutex(): AsyncMutex {
+  const waiters: Array<() => void> = [];
+  let locked = false;
+  return {
+    acquire(): Promise<void> {
+      if (!locked) {
+        locked = true;
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => {
+        waiters.push(resolve);
+      });
+    },
+    get held(): boolean {
+      return locked;
+    },
+    release(): void {
+      const next = waiters.shift();
+      if (next !== undefined) {
+        next();
+        return;
+      }
+      locked = false;
+    },
+    tryAcquire(): boolean {
+      if (locked) {
+        return false;
+      }
+      locked = true;
+      return true;
+    }
+  };
 }

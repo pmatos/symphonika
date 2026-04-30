@@ -396,6 +396,21 @@ describe("Claude stream-json provider", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("preserves backslashes inside unquoted command executables", async () => {
+    const root = await makeTempRoot();
+    const fakeClaudeDir = path.join(root, "fake\\claude");
+    await mkdir(fakeClaudeDir, { recursive: true });
+    const fakeClaudePath = path.join(fakeClaudeDir, "claude\\bin");
+    await writeFakeClaudeHelpExecutable(fakeClaudePath);
+    const provider = createClaudeProvider();
+
+    await expect(
+      provider.validate(
+        `${fakeClaudePath} -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json`
+      )
+    ).resolves.toBeUndefined();
+  });
+
   it("rejects Claude commands that do not speak stream-json", async () => {
     const provider = createClaudeProvider();
 

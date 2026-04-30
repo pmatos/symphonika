@@ -704,8 +704,10 @@ function splitCommand(command: string): string[] {
   let current = "";
   let quote: "'" | '"' | undefined;
   let escaping = false;
+  const trimmedCommand = command.trim();
 
-  for (const character of command.trim()) {
+  for (let index = 0; index < trimmedCommand.length; index += 1) {
+    const character = trimmedCommand[index] ?? "";
     if (escaping) {
       current += character;
       escaping = false;
@@ -722,7 +724,16 @@ function splitCommand(command: string): string[] {
     }
 
     if (character === "\\") {
-      escaping = true;
+      const nextCharacter = trimmedCommand[index + 1];
+      if (
+        nextCharacter === "'" ||
+        nextCharacter === '"' ||
+        (nextCharacter !== undefined && /\s/.test(nextCharacter))
+      ) {
+        escaping = true;
+      } else {
+        current += character;
+      }
       continue;
     }
 

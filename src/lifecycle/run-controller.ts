@@ -557,7 +557,9 @@ export class RunController {
       }
       await this.applyTerminalLabels(labelInput);
 
-      if (caughtError === undefined) {
+      // scheduleNext also handles transient throws (kind=failed/transient with retry budget).
+      // It is a no-op for cancelled, deterministic, and input_required outcomes.
+      try {
         await this.scheduleNext({
           issue: input.issue,
           outcome: terminal,
@@ -566,6 +568,11 @@ export class RunController {
           runId: input.runId,
           runtimeAttemptNumber: input.attemptNumber
         });
+      } catch (scheduleError) {
+        this.logger?.error(
+          { err: scheduleError, runId: input.runId },
+          "symphonika scheduleNext failed"
+        );
       }
     }
 
@@ -632,13 +639,15 @@ export class RunController {
       renderedPrompt,
       stateRoot: this.stateRoot
     });
+    const attemptSuffix =
+      input.attemptNumber === 1 ? "" : `.attempt-${input.attemptNumber}`;
     const rawLogPath = path.join(
       evidence.runEvidenceDirectory,
-      "provider.raw.jsonl"
+      `provider.raw${attemptSuffix}.jsonl`
     );
     const normalizedLogPath = path.join(
       evidence.runEvidenceDirectory,
-      "provider.normalized.jsonl"
+      `provider.normalized${attemptSuffix}.jsonl`
     );
     await Promise.all([
       writeFile(rawLogPath, "", "utf8"),
@@ -839,6 +848,11 @@ export class RunController {
       ignoreOperationalLabels: true
     });
     if (!eligibility.eligible) {
+      return;
+    }
+
+    if (this.lifecyclePolicy.continuation.cap <= 0) {
+      // Continuations disabled; nothing to schedule and nothing to surface as cap-reached.
       return;
     }
 

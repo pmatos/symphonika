@@ -171,13 +171,24 @@ describe("dispatch retry policy", () => {
       validate: vi.fn().mockResolvedValue(undefined)
     };
 
+    let listCalls = 0;
+    const claimedIssue = {
+      ...baseIssue,
+      labels: ["agent-ready", "sym:claimed"]
+    };
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
-      getIssue: vi.fn().mockResolvedValue(null),
-      listOpenIssues: vi
-        .fn()
-        .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
-        .mockResolvedValue([]),
+      // After the first poll, simulate GitHub showing the issue with sym:claimed
+      // so dispatchTarget filters it out (reflecting real label persistence) and
+      // reconcile finds it in filteredIssues with ignoreOperationalLabels=true.
+      getIssue: vi.fn().mockResolvedValue(claimedIssue),
+      listOpenIssues: vi.fn(() => {
+        listCalls += 1;
+        if (listCalls === 1) {
+          return Promise.resolve([{ ...baseIssue, labels: ["agent-ready"] }]);
+        }
+        return Promise.resolve([claimedIssue]);
+      }),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
     const prepareIssueWorkspace = vi.fn(
@@ -253,13 +264,21 @@ describe("dispatch retry policy", () => {
       validate: vi.fn().mockResolvedValue(undefined)
     };
 
+    let listCalls = 0;
+    const claimedIssue = {
+      ...baseIssue,
+      labels: ["agent-ready", "sym:claimed", "sym:failed"]
+    };
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
-      getIssue: vi.fn().mockResolvedValue(null),
-      listOpenIssues: vi
-        .fn()
-        .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
-        .mockResolvedValue([]),
+      getIssue: vi.fn().mockResolvedValue(claimedIssue),
+      listOpenIssues: vi.fn(() => {
+        listCalls += 1;
+        if (listCalls === 1) {
+          return Promise.resolve([{ ...baseIssue, labels: ["agent-ready"] }]);
+        }
+        return Promise.resolve([claimedIssue]);
+      }),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
     const prepareIssueWorkspace = vi.fn(

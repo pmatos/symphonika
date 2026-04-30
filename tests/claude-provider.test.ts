@@ -411,6 +411,20 @@ describe("Claude stream-json provider", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("preserves escaped quotes inside quoted command arguments", async () => {
+    const root = await makeTempRoot();
+    const fakeClaudePath = path.join(root, "fake-claude-argv.mjs");
+    const settingsJson = '{"permissions":{"allow":["Read"]}}';
+    await writeFakeClaudeArgvValidator(fakeClaudePath, settingsJson);
+    const provider = createClaudeProvider();
+
+    await expect(
+      provider.validate(
+        `${process.execPath} ${fakeClaudePath} --settings "${settingsJson.replaceAll('"', '\\"')}" -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json`
+      )
+    ).resolves.toBeUndefined();
+  });
+
   it("rejects Claude commands that do not speak stream-json", async () => {
     const provider = createClaudeProvider();
 
@@ -557,6 +571,30 @@ async function writeFakeClaudeHelpExecutable(filePath: string): Promise<void> {
     "utf8"
   );
   await chmod(filePath, 0o755);
+}
+
+async function writeFakeClaudeArgvValidator(
+  filePath: string,
+  expectedSettings: string
+): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "const expectedSettings = " + JSON.stringify(expectedSettings) + ";",
+      "const settingsIndex = process.argv.indexOf('--settings');",
+      "if (settingsIndex < 0 || process.argv[settingsIndex + 1] !== expectedSettings) {",
+      "  process.stderr.write(`settings mismatch: ${JSON.stringify(process.argv)}\\n`);",
+      "  process.exit(1);",
+      "}",
+      "if (process.argv.includes('--help')) {",
+      "  process.stdout.write('Usage: fake-claude -p --input-format stream-json --output-format stream-json\\n');",
+      "  process.exit(0);",
+      "}",
+      "process.exit(0);",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
 }
 
 function readJsonl(contents: string): unknown[] {

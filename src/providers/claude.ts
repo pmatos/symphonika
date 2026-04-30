@@ -715,6 +715,17 @@ function splitCommand(command: string): string[] {
     }
 
     if (quote !== undefined) {
+      if (character === "\\") {
+        const nextCharacter = trimmedCommand[index + 1];
+        if (nextCharacter === quote || nextCharacter === "\\") {
+          current += nextCharacter;
+          index += 1;
+        } else {
+          current += character;
+        }
+        continue;
+      }
+
       if (character === quote) {
         quote = undefined;
       } else {

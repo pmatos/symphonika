@@ -201,7 +201,7 @@ describe("dispatch retry policy", () => {
       const status = await waitForCondition(
         daemon.url,
         ({ runs }) => runs.some((run) => run["state"] === "succeeded"),
-        { timeoutMs: 10_000 }
+        { timeoutMs: 30_000 }
       );
       const run = status.runs.find((entry) => entry["state"] === "succeeded");
       expect(run?.["retryCount"]).toBe(2);

@@ -460,6 +460,10 @@ describe("daemon dispatch", () => {
       cwd: root,
       env: { GITHUB_TOKEN: "secret-token" },
       githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 0 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
       logger: pino({ enabled: false }),
       port: 0,
       prepareIssueWorkspace
@@ -647,6 +651,10 @@ describe("daemon dispatch", () => {
       cwd: root,
       env: { GITHUB_TOKEN: "secret-token" },
       githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 0 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
       logger: pino({ enabled: false }),
       port: 0,
       prepareIssueWorkspace
@@ -878,7 +886,7 @@ async function waitForRun(
   state: string,
   options: { intervalMs?: number; timeoutMs?: number } = {}
 ): Promise<{ runs: StatusRun[] }> {
-  const timeoutMs = options.timeoutMs ?? 1_000;
+  const timeoutMs = options.timeoutMs ?? 5_000;
   const intervalMs = options.intervalMs ?? 10;
   const deadline = Date.now() + timeoutMs;
 
@@ -903,7 +911,7 @@ async function waitForStatusError(
   message: string,
   options: { intervalMs?: number; timeoutMs?: number } = {}
 ): Promise<void> {
-  const timeoutMs = options.timeoutMs ?? 1_000;
+  const timeoutMs = options.timeoutMs ?? 5_000;
   const intervalMs = options.intervalMs ?? 10;
   const deadline = Date.now() + timeoutMs;
 

@@ -1,20 +1,35 @@
+import { readFile } from "node:fs/promises";
+
 import { serve, type ServerType } from "@hono/node-server";
 import type { Logger } from "pino";
 import pino from "pino";
+import { parse } from "yaml";
 
-import { dispatchOneEligibleIssue } from "./dispatch.js";
 import { createHttpApp } from "./http/app.js";
 import type {
   GitHubIssuesApi,
-  PollConfiguredGitHubIssuesOptions
+  PollConfiguredGitHubIssuesOptions,
+  PollingProjectConfig
 } from "./issue-polling.js";
 import {
   DEFAULT_GITHUB_ISSUES_API,
   emptyIssuePollStatus,
+  loadPollingProjectsByName,
   pollConfiguredGitHubIssues,
   readConfiguredPollingIntervalMs,
   replaceIssuePollStatus
 } from "./issue-polling.js";
+import { ActiveRunRegistry } from "./lifecycle/active-runs.js";
+import type {
+  LifecyclePolicy,
+  ScheduledWorkInput
+} from "./lifecycle/active-runs.js";
+import { reconcileActiveRuns } from "./lifecycle/reconcile.js";
+import {
+  RunController,
+  type RunControllerProjectConfig,
+  type RunControllerProvidersConfig
+} from "./lifecycle/run-controller.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { openRunStore } from "./run-store.js";
@@ -33,6 +48,7 @@ export type StartDaemonOptions = {
   env?: NodeJS.ProcessEnv;
   githubIssuesApi?: GitHubIssuesApi;
   host?: string;
+  lifecyclePolicy?: LifecyclePolicy;
   logger?: Logger;
   port?: number;
   prepareIssueWorkspace?: (
@@ -67,12 +83,90 @@ export async function startDaemon(
     stateRoot: state.stateRoot
   });
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
+  const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
+  const env = options.env ?? process.env;
+  const activeRuns = new ActiveRunRegistry();
   const dispatchRuntime = {
     dispatching: false
   };
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let polling = false;
   let scheduledWork = Promise.resolve();
+  const inflightDispatches = new Set<Promise<void>>();
+  const projectsLoader = async (): Promise<
+    Map<string, RunControllerProjectConfig>
+  > => {
+    if (!state.configExists) {
+      return new Map();
+    }
+    const map = await loadPollingProjectsByName(state.configPath);
+    const enriched = new Map<string, RunControllerProjectConfig>();
+    const richDetails = await loadRichProjects(state.configPath);
+    for (const [name, project] of map) {
+      const detail = richDetails.get(name);
+      if (detail === undefined) {
+        continue;
+      }
+      enriched.set(name, {
+        ...project,
+        workflow: detail.workflow,
+        workspace: detail.workspace
+      });
+    }
+    return enriched;
+  };
+  const providersLoader = async (): Promise<RunControllerProvidersConfig> => {
+    return loadProvidersConfig(state.configPath);
+  };
+  const enqueueScheduledWork = (work: () => Promise<void>): void => {
+    scheduledWork = scheduledWork.then(work, work);
+    void scheduledWork;
+  };
+  const runController = new RunController({
+    activeRuns,
+    agentProviders,
+    configDir: state.configDir,
+    githubIssuesApi,
+    logger,
+    projectsLoader,
+    providersLoader,
+    runStore,
+    schedule: (item: ScheduledWorkInput) => {
+      activeRuns.scheduleDelayed({
+        delayMs: item.delayMs,
+        fire: () =>
+          new Promise<void>((resolve) => {
+            enqueueScheduledWork(async () => {
+              if (dispatchRuntime.dispatching) {
+                // re-defer if mutex is held; rare for retry/continuation chains.
+              }
+              dispatchRuntime.dispatching = true;
+              try {
+                await item.fire();
+              } catch (error) {
+                logger.error({ err: error }, "symphonika scheduled work failed");
+              } finally {
+                dispatchRuntime.dispatching = false;
+                resolve();
+              }
+            });
+          }),
+        kind: item.kind,
+        runId: item.runId
+      });
+    },
+    stateRoot: state.stateRoot,
+    ...(options.createRunId === undefined
+      ? {}
+      : { createRunId: options.createRunId }),
+    ...(options.env === undefined ? {} : { env: options.env }),
+    ...(options.lifecyclePolicy === undefined
+      ? {}
+      : { lifecyclePolicy: options.lifecyclePolicy }),
+    ...(options.prepareIssueWorkspace === undefined
+      ? {}
+      : { prepareIssueWorkspace: options.prepareIssueWorkspace })
+  });
   const refreshIssuePollStatus = async (): Promise<void> => {
     if (!state.configExists || polling) {
       return;
@@ -93,6 +187,30 @@ export async function startDaemon(
       polling = false;
     }
   };
+  const reconcile = async (): Promise<void> => {
+    if (!state.configExists) {
+      return;
+    }
+    let projects: Map<string, PollingProjectConfig>;
+    try {
+      projects = await loadPollingProjectsByName(state.configPath);
+    } catch {
+      return;
+    }
+    try {
+      await reconcileActiveRuns({
+        activeRuns,
+        env,
+        githubIssuesApi,
+        logger,
+        pollStatus: issuePollStatus,
+        projects,
+        runStore
+      });
+    } catch (error) {
+      logger.error({ err: error }, "symphonika reconcile failed");
+    }
+  };
   const dispatchEligibleIssue = async (): Promise<void> => {
     if (
       !state.configExists ||
@@ -104,22 +222,7 @@ export async function startDaemon(
 
     dispatchRuntime.dispatching = true;
     try {
-      await dispatchOneEligibleIssue({
-        agentProviders,
-        configDir: state.configDir,
-        configPath: state.configPath,
-        githubIssuesApi: options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API,
-        issuePollStatus,
-        runStore,
-        stateRoot: state.stateRoot,
-        ...(options.createRunId === undefined
-          ? {}
-          : { createRunId: options.createRunId }),
-        ...(options.env === undefined ? {} : { env: options.env }),
-        ...(options.prepareIssueWorkspace === undefined
-          ? {}
-          : { prepareIssueWorkspace: options.prepareIssueWorkspace })
-      });
+      await runController.dispatchOneFresh(issuePollStatus);
     } catch (error) {
       issuePollStatus.errors.push(errorMessage(error));
       logger.error({ err: error }, "symphonika dispatch failed");
@@ -127,24 +230,46 @@ export async function startDaemon(
       dispatchRuntime.dispatching = false;
     }
   };
-  const refreshAndDispatch = async (): Promise<void> => {
-    await refreshIssuePollStatus();
-    await dispatchEligibleIssue();
+  const launchDispatch = (): void => {
+    if (
+      !state.configExists ||
+      dispatchRuntime.dispatching ||
+      !hasRegisteredProviders(agentProviders)
+    ) {
+      return;
+    }
+    const promise = dispatchEligibleIssue();
+    inflightDispatches.add(promise);
+    void promise.finally(() => {
+      inflightDispatches.delete(promise);
+    });
   };
-  const scheduleRefreshAndDispatch = (): void => {
-    scheduledWork = scheduledWork.then(refreshAndDispatch, refreshAndDispatch);
-    void scheduledWork;
+  const tick = async (): Promise<void> => {
+    await refreshIssuePollStatus();
+    await reconcile();
+    launchDispatch();
+  };
+  const scheduleTick = (): void => {
+    enqueueScheduledWork(tick);
   };
 
+  let intervalMs: number | undefined;
   if (state.configExists) {
     await refreshIssuePollStatus();
-    const intervalMs = await readConfiguredPollingIntervalMs(state.configPath);
-    pollTimer = setInterval(scheduleRefreshAndDispatch, intervalMs);
-    pollTimer.unref?.();
+    intervalMs = await readConfiguredPollingIntervalMs(state.configPath);
   }
   const app = createHttpApp({
     dispatchRuntime,
+    getActiveRuns: () =>
+      activeRuns.list().map((entry) => ({
+        cancelReason: entry.cancelReason ?? null,
+        cancelRequested: entry.cancelRequested,
+        issueNumber: entry.issueNumber,
+        projectName: entry.projectName,
+        runId: entry.runId
+      })),
     getRuns: () => runStore.listRuns(),
+    getScheduled: () => activeRuns.peekDelayed(),
     issuePollStatus,
     stateRoot: state.stateRoot,
     version: VERSION
@@ -158,7 +283,15 @@ export async function startDaemon(
   await waitForListening(server);
   const port = resolveListeningPort(server, requestedPort);
   const url = `http://${host}:${port}`;
-  const dispatchPromise = dispatchEligibleIssue();
+  if (state.configExists) {
+    if (issuePollStatus.candidateIssues.length > 0) {
+      launchDispatch();
+    }
+    if (intervalMs !== undefined) {
+      pollTimer = setInterval(scheduleTick, intervalMs);
+      pollTimer.unref?.();
+    }
+  }
 
   logger.info(
     {
@@ -179,10 +312,9 @@ export async function startDaemon(
       if (pollTimer !== undefined) {
         clearInterval(pollTimer);
       }
-      if (dispatchPromise !== undefined) {
-        await dispatchPromise;
-      }
+      activeRuns.cancelAll();
       await scheduledWork;
+      await Promise.allSettled(Array.from(inflightDispatches));
       await stopServer(server, logger);
       runStore.close();
     }
@@ -248,4 +380,112 @@ function hasRegisteredProviders(
   providers: AgentProviderRegistry | undefined
 ): providers is AgentProviderRegistry {
   return providers !== undefined && Object.values(providers).some(Boolean);
+}
+
+type RichProjectDetail = {
+  workflow: string;
+  workspace: {
+    git: {
+      base_branch: string;
+      remote: string;
+    };
+    root: string;
+  };
+};
+
+async function loadRichProjects(
+  configPath: string
+): Promise<Map<string, RichProjectDetail>> {
+  const map = new Map<string, RichProjectDetail>();
+  let raw: unknown;
+  try {
+    raw = parse(await readFile(configPath, "utf8")) ?? {};
+  } catch {
+    return map;
+  }
+  if (!isRecord(raw)) {
+    return map;
+  }
+  const projects = raw["projects"];
+  if (!Array.isArray(projects)) {
+    return map;
+  }
+  for (const project of projects) {
+    if (!isRecord(project)) {
+      continue;
+    }
+    const name = project["name"];
+    if (typeof name !== "string") {
+      continue;
+    }
+    const workflow = project["workflow"];
+    const workspace = project["workspace"];
+    if (typeof workflow !== "string" || !isRecord(workspace)) {
+      continue;
+    }
+    const root = workspace["root"];
+    const git = workspace["git"];
+    if (typeof root !== "string" || !isRecord(git)) {
+      continue;
+    }
+    const remote = git["remote"];
+    const baseBranch = git["base_branch"];
+    if (typeof remote !== "string" || typeof baseBranch !== "string") {
+      continue;
+    }
+    map.set(name, {
+      workflow,
+      workspace: {
+        git: {
+          base_branch: baseBranch,
+          remote
+        },
+        root
+      }
+    });
+  }
+  return map;
+}
+
+async function loadProvidersConfig(
+  configPath: string
+): Promise<RunControllerProvidersConfig> {
+  let raw: unknown;
+  try {
+    raw = parse(await readFile(configPath, "utf8")) ?? {};
+  } catch {
+    return defaultProvidersConfig();
+  }
+  if (!isRecord(raw)) {
+    return defaultProvidersConfig();
+  }
+  const providers = raw["providers"];
+  if (!isRecord(providers)) {
+    return defaultProvidersConfig();
+  }
+  return {
+    claude: { command: providerCommand(providers["claude"], defaultProvidersConfig().claude.command) },
+    codex: { command: providerCommand(providers["codex"], defaultProvidersConfig().codex.command) }
+  };
+}
+
+function providerCommand(input: unknown, fallback: string): string {
+  if (isRecord(input) && typeof input["command"] === "string") {
+    return input["command"];
+  }
+  return fallback;
+}
+
+function defaultProvidersConfig(): RunControllerProvidersConfig {
+  return {
+    claude: {
+      command:
+        "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"
+    },
+    codex: { command: "codex --dangerously-bypass-approvals-and-sandbox app-server" }
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

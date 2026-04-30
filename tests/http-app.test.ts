@@ -37,6 +37,7 @@ describe("HTTP app", () => {
 
     expect(response.status).toBe(200);
     expect(body).toEqual({
+      active: [],
       candidateIssues: [],
       dispatching: false,
       filteredIssues: [],
@@ -45,6 +46,7 @@ describe("HTTP app", () => {
         projects: []
       },
       runs: [],
+      scheduled: [],
       service: "symphonika",
       state: "idle",
       stateRoot: "/tmp/symphonika-state",

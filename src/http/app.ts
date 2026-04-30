@@ -8,7 +8,19 @@ export type HttpAppOptions = {
   dispatchRuntime?: {
     dispatching: boolean;
   };
+  getActiveRuns?: () => Array<{
+    cancelReason: string | null;
+    cancelRequested: boolean;
+    issueNumber: number;
+    projectName: string;
+    runId: string;
+  }>;
   getRuns?: () => RunStatus[];
+  getScheduled?: () => Array<{
+    dueAt: number;
+    kind: "retry" | "continuation";
+    runId: string;
+  }>;
   issuePollStatus?: IssuePollStatus;
   stateRoot: string;
   version: string;
@@ -25,6 +37,8 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     dispatching: false
   };
   const getRuns = options.getRuns ?? (() => []);
+  const getActiveRuns = options.getActiveRuns ?? (() => []);
+  const getScheduled = options.getScheduled ?? (() => []);
 
   app.get("/health", (context) =>
     context.json({
@@ -38,6 +52,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
 
   app.get("/api/status", (context) =>
     context.json({
+      active: getActiveRuns(),
       candidateIssues: issuePollStatus.candidateIssues,
       filteredIssues: issuePollStatus.filteredIssues,
       issuePolling: {
@@ -45,6 +60,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         projects: issuePollStatus.projects
       },
       runs: getRuns(),
+      scheduled: getScheduled(),
       service: "symphonika",
       state: dispatchRuntime.dispatching ? "dispatching" : "idle",
       dispatching: dispatchRuntime.dispatching,

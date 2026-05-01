@@ -269,6 +269,45 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("marks GitHub issues stale when sym:claimed is present and no live run exists", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready", "sym:claimed"],
+          number: 77,
+          title: "Orphan claimed issue"
+        })
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      await waitFor(() =>
+        Promise.resolve(githubIssuesApi.addLabelsToIssue.mock.calls.length >= 1)
+      );
+      expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith({
+        issueNumber: 77,
+        labels: ["sym:stale"],
+        owner: "pmatos",
+        repo: "symphonika",
+        token: "secret-token"
+      });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("continues polling valid projects when another project entry is invalid", async () => {
     const root = await makeTempRoot();
     await writeConfigWithInvalidAndValidProjects(root);

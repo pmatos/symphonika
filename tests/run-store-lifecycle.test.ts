@@ -161,6 +161,60 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("markLeakedRunsAsStale transitions non-terminal runs to stale", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      seedRun(store, { id: "queued", issueNumber: 1 });
+      seedRun(store, { id: "running", issueNumber: 2 });
+      store.updateRunState("running", "running");
+      seedRun(store, { id: "preparing", issueNumber: 3 });
+      store.updateRunState("preparing", "preparing_workspace");
+      seedRun(store, { id: "succeeded", issueNumber: 4 });
+      store.updateRunState("succeeded", "succeeded");
+      seedRun(store, { id: "failed", issueNumber: 5 });
+      store.updateRunState("failed", "failed");
+
+      const swept = store.markLeakedRunsAsStale();
+
+      expect(swept.map((entry) => entry.runId).sort()).toEqual([
+        "preparing",
+        "queued",
+        "running"
+      ]);
+      expect(swept).toEqual(
+        expect.arrayContaining([
+          { runId: "queued", projectName: "symphonika", issueNumber: 1 },
+          { runId: "running", projectName: "symphonika", issueNumber: 2 },
+          { runId: "preparing", projectName: "symphonika", issueNumber: 3 }
+        ])
+      );
+
+      const runsById = new Map(store.listRuns().map((entry) => [entry.id, entry]));
+      expect(runsById.get("queued")).toMatchObject({
+        state: "stale",
+        terminalReason: "leaked_active_run"
+      });
+      expect(runsById.get("running")?.state).toBe("stale");
+      expect(runsById.get("preparing")?.state).toBe("stale");
+      expect(runsById.get("succeeded")?.state).toBe("succeeded");
+      expect(runsById.get("failed")?.state).toBe("failed");
+      expect(store.listActiveRunIds()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("markLeakedRunsAsStale is idempotent on a clean database", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      expect(store.markLeakedRunsAsStale()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("createCapReachedFailureRun inserts a synthetic failed continuation row", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

@@ -5,16 +5,19 @@ import { pathToFileURL } from "node:url";
 import type { DaemonHandle, StartDaemonOptions } from "./daemon.js";
 import { startDaemon } from "./daemon.js";
 import type {
+  ClearStaleOptions,
+  ClearStaleReport,
   DoctorOptions,
   DoctorReport,
   InitProjectOptions,
   InitProjectReport
 } from "./doctor.js";
-import { runDoctor, runInitProject } from "./doctor.js";
+import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
 import { VERSION } from "./version.js";
 
 export type CliDependencies = {
   registerSignalHandlers?: boolean;
+  runClearStale?: (options: ClearStaleOptions) => Promise<ClearStaleReport>;
   runDoctor?: (options: DoctorOptions) => Promise<DoctorReport>;
   runInitProject?: (options: InitProjectOptions) => Promise<InitProjectReport>;
   startDaemon?: (options: StartDaemonOptions) => Promise<DaemonHandle>;
@@ -23,6 +26,7 @@ export type CliDependencies = {
 export function buildCli(dependencies: CliDependencies = {}): Command {
   const doctor = dependencies.runDoctor ?? runDoctor;
   const initProject = dependencies.runInitProject ?? runInitProject;
+  const clearStale = dependencies.runClearStale ?? runClearStale;
   const start = dependencies.startDaemon ?? startDaemon;
   const registerSignalHandlers = dependencies.registerSignalHandlers ?? true;
   const program = new Command();
@@ -39,11 +43,27 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .action(async (options: { config: string }) => {
       const report = await doctor({ configPath: options.config });
 
+      const printStaleSection = (): void => {
+        for (const project of report.projects) {
+          if (project.staleIssues.length === 0) {
+            continue;
+          }
+          writeOut(
+            program,
+            `- project: ${project.name} — stale issues: ${project.staleIssues.length}\n`
+          );
+          for (const issue of project.staleIssues) {
+            writeOut(program, `    • #${issue.number}  ${issue.title} (${issue.url})\n`);
+          }
+        }
+      };
+
       if (report.ok) {
         writeOut(
           program,
           `doctor ok: ${report.projects.length} ${pluralize("project", report.projects.length)} valid\n`
         );
+        printStaleSection();
         return;
       }
 
@@ -51,6 +71,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       for (const error of report.errors) {
         writeErr(program, `- ${error}\n`);
       }
+      printStaleSection();
       process.exitCode = 1;
     });
 
@@ -103,6 +124,59 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     });
 
   program
+    .command("clear-stale")
+    .description(
+      "remove sym:stale and sym:claimed from a target issue after explicit confirmation"
+    )
+    .argument("<project>", "project name from symphonika.yml")
+    .argument("<issue-number>", "GitHub issue number", parseIssueNumber)
+    .option("--config <path>", "service config path", "symphonika.yml")
+    .option("--yes", "remove labels without an interactive prompt")
+    .action(
+      async (
+        project: string,
+        issueNumber: number,
+        options: { config: string; yes?: boolean }
+      ) => {
+        const emittedWarnings = new Set<string>();
+        const report = await clearStale({
+          configPath: options.config,
+          issueNumber,
+          onWarning: (warning) => {
+            emittedWarnings.add(warning);
+            writeErr(program, `warning: ${warning}\n`);
+          },
+          project,
+          yes: options.yes === true
+        });
+
+        for (const warning of report.warnings) {
+          if (emittedWarnings.has(warning)) {
+            continue;
+          }
+          writeErr(program, `warning: ${warning}\n`);
+        }
+
+        if (!report.ok) {
+          writeErr(program, "clear-stale failed:\n");
+          for (const error of report.errors) {
+            writeErr(program, `- ${error}\n`);
+          }
+          process.exitCode = 1;
+          return;
+        }
+
+        writeOut(
+          program,
+          `clear-stale ok: removed ${report.removedLabels.length} ${pluralize("label", report.removedLabels.length)} from ${report.repository}#${report.issueNumber}\n`
+        );
+        for (const label of report.removedLabels) {
+          writeOut(program, `- ${label}\n`);
+        }
+      }
+    );
+
+  program
     .command("daemon")
     .description("start the local Symphonika daemon without dispatching work")
     .option("--config <path>", "service config path", "symphonika.yml")
@@ -133,6 +207,16 @@ function parsePort(value: string): number {
   }
 
   return port;
+}
+
+function parseIssueNumber(value: string): number {
+  const issue = Number(value);
+
+  if (!Number.isInteger(issue) || issue < 1) {
+    throw new InvalidArgumentError("issue number must be a positive integer");
+  }
+
+  return issue;
 }
 
 function pluralize(word: string, count: number): string {

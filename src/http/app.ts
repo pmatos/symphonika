@@ -62,6 +62,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       runs: getRuns(),
       scheduled: getScheduled(),
       service: "symphonika",
+      staleIssues: issuePollStatus.filteredIssues.filter((entry) =>
+        entry.issue.labels.includes("sym:stale")
+      ),
       state: dispatchRuntime.dispatching ? "dispatching" : "idle",
       dispatching: dispatchRuntime.dispatching,
       stateRoot: options.stateRoot,

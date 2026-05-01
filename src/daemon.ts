@@ -33,8 +33,9 @@ import {
 import { detectStaleClaims } from "./lifecycle/stale-claims.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
-import { openRunStore } from "./run-store.js";
+import { openRunStore, type RunState } from "./run-store.js";
 import { resolveStateRoot } from "./state.js";
+import { buildStatusSnapshot } from "./status.js";
 import { VERSION } from "./version.js";
 import type {
   PreparedIssueWorkspace,
@@ -283,7 +284,32 @@ export async function startDaemon(
     await refreshIssuePollStatus();
     intervalMs = await readConfiguredPollingIntervalMs(state.configPath);
   }
+  const TERMINAL_STATES = new Set<RunState>([
+    "cancelled",
+    "failed",
+    "stale",
+    "succeeded"
+  ]);
+  const cancelViaUi = async (
+    runId: string
+  ): Promise<
+    | { kind: "cancelled" }
+    | { kind: "not-found" }
+    | { kind: "already-terminal"; state: RunState }
+  > => {
+    const detail = runStore.getRun(runId);
+    if (detail === undefined) {
+      return { kind: "not-found" };
+    }
+    if (TERMINAL_STATES.has(detail.state)) {
+      return { kind: "already-terminal", state: detail.state };
+    }
+    runStore.markCancelRequested(runId, "operator");
+    await activeRuns.requestCancel(runId, "operator");
+    return { kind: "cancelled" };
+  };
   const app = createHttpApp({
+    cancelRun: cancelViaUi,
     dispatchRuntime,
     getActiveRuns: () =>
       activeRuns.list().map((entry) => ({
@@ -296,9 +322,13 @@ export async function startDaemon(
     getRuns: () => runStore.listRuns(),
     getScheduled: () => activeRuns.peekDelayed(),
     issuePollStatus,
+    runStore,
     stateRoot: state.stateRoot,
     version: VERSION
   });
+  // Reference buildStatusSnapshot so eslint/tsc don't strip the import; it's
+  // exported for CLI use and may be wired into HTTP pages later.
+  void buildStatusSnapshot;
 
   const server = serve({
     fetch: app.fetch,

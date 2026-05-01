@@ -13,9 +13,18 @@ import type {
   InitProjectReport
 } from "./doctor.js";
 import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
+import type {
+  ListRunsFilter,
+  OpenRunStoreOptions,
+  RunState,
+  RunStore
+} from "./run-store.js";
+import { openRunStore as openRunStoreReal } from "./run-store.js";
+import { resolveStateRoot } from "./state.js";
 import { VERSION } from "./version.js";
 
 export type CliDependencies = {
+  openRunStore?: (options: OpenRunStoreOptions) => RunStore;
   registerSignalHandlers?: boolean;
   runClearStale?: (options: ClearStaleOptions) => Promise<ClearStaleReport>;
   runDoctor?: (options: DoctorOptions) => Promise<DoctorReport>;
@@ -28,6 +37,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   const initProject = dependencies.runInitProject ?? runInitProject;
   const clearStale = dependencies.runClearStale ?? runClearStale;
   const start = dependencies.startDaemon ?? startDaemon;
+  const openRunStore = dependencies.openRunStore ?? openRunStoreReal;
   const registerSignalHandlers = dependencies.registerSignalHandlers ?? true;
   const program = new Command();
 
@@ -192,11 +202,210 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       }
     });
 
+  program
+    .command("status")
+    .description("print run store summary grouped by lifecycle state")
+    .option("--config <path>", "service config path", "symphonika.yml")
+    .action((options: { config: string }) => {
+      const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
+      const store = openRunStore({ stateRoot });
+      try {
+        const all = store.listRuns();
+        const byState = new Map<string, number>();
+        for (const run of all) {
+          byState.set(run.state, (byState.get(run.state) ?? 0) + 1);
+        }
+        writeOut(program, `state root: ${stateRoot}\n`);
+        writeOut(program, `total runs: ${all.length}\n`);
+        for (const [state, count] of [...byState.entries()].sort()) {
+          writeOut(program, `${state}: ${count}\n`);
+        }
+        if (all.length > 0) {
+          writeOut(program, "\nrecent runs:\n");
+          for (const run of all.slice(0, 25)) {
+            writeOut(
+              program,
+              `  ${run.id}  ${run.project}  #${run.issueNumber}  ${run.state}  ${run.provider}\n`
+            );
+          }
+        }
+      } finally {
+        store.close();
+      }
+    });
+
+  program
+    .command("runs")
+    .description("list runs from the run store")
+    .option("--config <path>", "service config path", "symphonika.yml")
+    .option("--state <state>", "filter by run state")
+    .option("--project <project>", "filter by project name")
+    .option("--limit <n>", "max rows", parsePositiveInt)
+    .action(
+      (options: {
+        config: string;
+        limit?: number;
+        project?: string;
+        state?: string;
+      }) => {
+        const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
+        const store = openRunStore({ stateRoot });
+        try {
+          const filter: ListRunsFilter = {};
+          if (options.state !== undefined) {
+            filter.state = options.state as RunState;
+          }
+          if (options.project !== undefined) {
+            filter.project = options.project;
+          }
+          if (options.limit !== undefined) {
+            filter.limit = options.limit;
+          }
+          const runs = store.listRuns(filter);
+          if (runs.length === 0) {
+            writeOut(program, "(no runs)\n");
+            return;
+          }
+          for (const run of runs) {
+            writeOut(
+              program,
+              `${run.id}  ${run.project}  #${run.issueNumber}  ${run.state}  ${run.provider}\n`
+            );
+          }
+        } finally {
+          store.close();
+        }
+      }
+    );
+
+  program
+    .command("show-run")
+    .description("show run detail, attempts, transitions, and recent events")
+    .argument("<id>", "run id")
+    .option("--config <path>", "service config path", "symphonika.yml")
+    .option("--events <n>", "max recent events", parsePositiveInt, 25)
+    .action((id: string, options: { config: string; events: number }) => {
+      const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
+      const store = openRunStore({ stateRoot });
+      try {
+        const detail = store.getRun(id);
+        if (detail === undefined) {
+          writeErr(program, `run ${id} not found\n`);
+          program.error(`run ${id} not found`, { exitCode: 1 });
+          return;
+        }
+        writeOut(program, `id:           ${detail.id}\n`);
+        writeOut(program, `project:      ${detail.project}\n`);
+        writeOut(program, `issue:        #${detail.issueNumber} ${detail.issueTitle}\n`);
+        writeOut(program, `state:        ${detail.state}\n`);
+        writeOut(program, `provider:     ${detail.provider}\n`);
+        writeOut(program, `branch:       ${formatPath(detail.branchName)}\n`);
+        writeOut(program, `workspace:    ${formatPath(detail.workspacePath)}\n`);
+        writeOut(program, `prompt:       ${formatPath(detail.promptPath)}\n`);
+        writeOut(program, `raw log:      ${formatPath(detail.rawLogPath)}\n`);
+        writeOut(program, `normalized:   ${formatPath(detail.normalizedLogPath)}\n`);
+        writeOut(program, `metadata:     ${formatPath(detail.metadataPath)}\n`);
+        writeOut(program, `issue snap:   ${formatPath(detail.issueSnapshotPath)}\n`);
+        writeOut(program, `retries:      ${detail.retryCount}${detail.isContinuation ? " (continuation)" : ""}\n`);
+        if (detail.terminalReason !== null) {
+          writeOut(program, `terminal:     ${detail.terminalReason}\n`);
+        }
+        if (detail.cancelRequested) {
+          writeOut(
+            program,
+            `cancel:       requested (reason ${detail.cancelReason ?? "unknown"})\n`
+          );
+        }
+        if (detail.attempts.length > 0) {
+          writeOut(program, "\nattempts:\n");
+          for (const attempt of detail.attempts) {
+            writeOut(
+              program,
+              `  ${attempt.attemptNumber}. ${attempt.id}  ${attempt.state}  ${attempt.providerName}\n`
+            );
+          }
+        }
+        if (detail.transitions.length > 0) {
+          writeOut(program, "\ntransitions:\n");
+          for (const transition of detail.transitions) {
+            writeOut(
+              program,
+              `  ${transition.sequence}. ${transition.state}  ${transition.createdAt}\n`
+            );
+          }
+        }
+        const events = store.listProviderEvents(id, { limit: options.events });
+        if (events.length > 0) {
+          writeOut(program, `\nrecent events (last ${events.length}):\n`);
+          for (const event of events) {
+            const message =
+              typeof event.normalized.message === "string"
+                ? event.normalized.message
+                : JSON.stringify(event.normalized);
+            writeOut(
+              program,
+              `  ${event.sequence}. ${event.type}  ${message}\n`
+            );
+          }
+        }
+      } finally {
+        store.close();
+      }
+    });
+
+  program
+    .command("cancel")
+    .description("request cancellation of an active run via the run store")
+    .argument("<id>", "run id")
+    .option("--config <path>", "service config path", "symphonika.yml")
+    .action((id: string, options: { config: string }) => {
+      const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
+      const store = openRunStore({ stateRoot });
+      try {
+        const detail = store.getRun(id);
+        if (detail === undefined) {
+          writeErr(program, `run ${id} not found\n`);
+          program.error(`run ${id} not found`, { exitCode: 1 });
+          return;
+        }
+        if (
+          detail.state === "cancelled" ||
+          detail.state === "failed" ||
+          detail.state === "stale" ||
+          detail.state === "succeeded"
+        ) {
+          writeErr(program, `run ${id} already ${detail.state}\n`);
+          program.error(`run ${id} already ${detail.state}`, { exitCode: 1 });
+          return;
+        }
+        store.markCancelRequested(id, "operator");
+        writeOut(program, `cancel requested for ${id}\n`);
+        writeOut(
+          program,
+          "the running daemon will pick up the request on its next iteration; if no daemon is running, the request will be honored on next startup.\n"
+        );
+      } finally {
+        store.close();
+      }
+    });
+
   return program;
 }
 
 export async function runCli(argv = process.argv): Promise<void> {
   await buildCli().parseAsync(argv);
+}
+
+function parsePositiveInt(value: string): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new InvalidArgumentError("must be a positive integer");
+  }
+  return n;
+}
+
+function formatPath(value: string): string {
+  return value.length === 0 ? "<not yet recorded>" : value;
 }
 
 function parsePort(value: string): number {

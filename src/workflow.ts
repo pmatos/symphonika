@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 import type { IssueSnapshot } from "./issue-polling.js";
+import { isPathInside } from "./path-safety.js";
 
 export const AUTONOMY_PREAMBLE_VERSION = "autonomy-preamble-v1";
 
@@ -414,11 +415,6 @@ function contentHash(contents: string): string {
 function safePathSegment(input: string): string {
   const segment = input.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
   return segment.length === 0 ? "run" : segment;
-}
-
-function isPathInside(candidatePath: string, parentPath: string): boolean {
-  const relative = path.relative(path.resolve(parentPath), path.resolve(candidatePath));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function errorMessage(error: unknown): string {

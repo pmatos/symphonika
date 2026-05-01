@@ -30,6 +30,7 @@ export type RunStatus = {
   isContinuation: boolean;
   issueNumber: number;
   issueSnapshotPath: string;
+  issueTitle: string;
   metadataPath: string;
   normalizedLogPath: string;
   project: string;
@@ -40,6 +41,54 @@ export type RunStatus = {
   state: RunState;
   terminalReason: string | null;
   workspacePath: string;
+};
+
+export type AttemptStatus = {
+  attemptNumber: number;
+  branchName: string;
+  id: string;
+  issueSnapshotPath: string;
+  normalizedLogPath: string;
+  promptPath: string;
+  providerCommand: string;
+  providerName: string;
+  rawLogPath: string;
+  runId: string;
+  state: RunState;
+  workspacePath: string;
+};
+
+export type RunStateTransition = {
+  createdAt: string;
+  sequence: number;
+  state: RunState;
+};
+
+export type RunDetail = RunStatus & {
+  attempts: AttemptStatus[];
+  transitions: RunStateTransition[];
+};
+
+export type ProviderEventRecord = {
+  attemptId: string;
+  createdAt: string;
+  normalized: NormalizedProviderEvent;
+  raw: unknown;
+  runId: string;
+  sequence: number;
+  type: string;
+};
+
+export type ListProviderEventsOptions = {
+  afterSequence?: number;
+  limit?: number;
+};
+
+export type ListRunsFilter = {
+  issueNumber?: number;
+  limit?: number;
+  project?: string;
+  state?: RunState;
 };
 
 export type OpenRunStoreOptions = {
@@ -92,6 +141,7 @@ type RunRow = {
   is_continuation: number;
   issue_number: number;
   issue_snapshot_path: string | null;
+  issue_title: string;
   metadata_path: string | null;
   normalized_log_path: string | null;
   project_name: string;
@@ -102,6 +152,31 @@ type RunRow = {
   state: RunState;
   terminal_reason: string | null;
   workspace_path: string | null;
+};
+
+type AttemptRow = {
+  attempt_number: number;
+  branch_name: string;
+  id: string;
+  issue_snapshot_path: string;
+  normalized_log_path: string;
+  prompt_path: string;
+  provider_command: string;
+  provider_name: string;
+  raw_log_path: string;
+  run_id: string;
+  state: RunState;
+  workspace_path: string;
+};
+
+type ProviderEventRow = {
+  attempt_id: string;
+  created_at: string;
+  normalized_json: string;
+  raw_json: string;
+  run_id: string;
+  sequence: number;
+  type: string;
 };
 
 export class RunStore {
@@ -369,21 +444,152 @@ export class RunStore {
       });
   }
 
-  listRuns(): RunStatus[] {
+  listRuns(filter?: ListRunsFilter): RunStatus[] {
+    const conditions: string[] = [];
+    const params: Record<string, unknown> = {};
+    if (filter?.state !== undefined) {
+      conditions.push("state = @state");
+      params.state = filter.state;
+    }
+    if (filter?.project !== undefined) {
+      conditions.push("project_name = @project");
+      params.project = filter.project;
+    }
+    if (filter?.issueNumber !== undefined) {
+      conditions.push("issue_number = @issueNumber");
+      params.issueNumber = filter.issueNumber;
+    }
+    const where = conditions.length === 0 ? "" : `where ${conditions.join(" and ")}`;
+    const limit =
+      filter?.limit !== undefined
+        ? `limit ${Math.max(0, Math.floor(filter.limit))}`
+        : "";
+
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, issue_number, state, provider_name,",
+          "select id, project_name, issue_number, issue_title, state, provider_name,",
           "workspace_path, branch_name, prompt_path, metadata_path,",
           "issue_snapshot_path, raw_log_path, normalized_log_path,",
           "is_continuation, continuation_parent_run_id, retry_count,",
           "failure_classification, terminal_reason, cancel_requested, cancel_reason",
-          "from runs order by created_at desc, id desc"
-        ].join(" ")
+          "from runs",
+          where,
+          "order by created_at desc, id desc",
+          limit
+        ]
+          .filter((part) => part.length > 0)
+          .join(" ")
       )
-      .all() as RunRow[];
+      .all(params) as RunRow[];
 
     return rows.map((row) => mapRunRow(row));
+  }
+
+  getRun(id: string): RunDetail | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select id, project_name, issue_number, issue_title, state, provider_name,",
+          "workspace_path, branch_name, prompt_path, metadata_path,",
+          "issue_snapshot_path, raw_log_path, normalized_log_path,",
+          "is_continuation, continuation_parent_run_id, retry_count,",
+          "failure_classification, terminal_reason, cancel_requested, cancel_reason",
+          "from runs where id = ?"
+        ].join(" ")
+      )
+      .get(id) as RunRow | undefined;
+
+    if (row === undefined) {
+      return undefined;
+    }
+
+    return {
+      ...mapRunRow(row),
+      attempts: this.listAttempts(id),
+      transitions: this.listRunStateTransitions(id)
+    };
+  }
+
+  listAttempts(runId: string): AttemptStatus[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select id, run_id, attempt_number, state, provider_name, provider_command,",
+          "workspace_path, branch_name, prompt_path, issue_snapshot_path,",
+          "raw_log_path, normalized_log_path",
+          "from attempts where run_id = ? order by attempt_number asc, id asc"
+        ].join(" ")
+      )
+      .all(runId) as AttemptRow[];
+
+    return rows.map((row) => ({
+      attemptNumber: row.attempt_number,
+      branchName: row.branch_name,
+      id: row.id,
+      issueSnapshotPath: row.issue_snapshot_path,
+      normalizedLogPath: row.normalized_log_path,
+      promptPath: row.prompt_path,
+      providerCommand: row.provider_command,
+      providerName: row.provider_name,
+      rawLogPath: row.raw_log_path,
+      runId: row.run_id,
+      state: row.state,
+      workspacePath: row.workspace_path
+    }));
+  }
+
+  listRunStateTransitions(runId: string): RunStateTransition[] {
+    const rows = this.database
+      .prepare(
+        "select sequence, state, created_at from run_state_transitions where run_id = ? order by sequence asc"
+      )
+      .all(runId) as { created_at: string; sequence: number; state: RunState }[];
+
+    return rows.map((row) => ({
+      createdAt: row.created_at,
+      sequence: row.sequence,
+      state: row.state
+    }));
+  }
+
+  listProviderEvents(
+    runId: string,
+    options: ListProviderEventsOptions = {}
+  ): ProviderEventRecord[] {
+    const conditions: string[] = ["run_id = @runId"];
+    const params: Record<string, unknown> = { runId };
+    if (options.afterSequence !== undefined) {
+      conditions.push("sequence > @afterSequence");
+      params.afterSequence = options.afterSequence;
+    }
+    const limit =
+      options.limit !== undefined
+        ? `limit ${Math.max(0, Math.floor(options.limit))}`
+        : "";
+    const rows = this.database
+      .prepare(
+        [
+          "select run_id, attempt_id, sequence, type, raw_json, normalized_json, created_at",
+          "from provider_events",
+          `where ${conditions.join(" and ")}`,
+          "order by sequence asc",
+          limit
+        ]
+          .filter((part) => part.length > 0)
+          .join(" ")
+      )
+      .all(params) as ProviderEventRow[];
+
+    return rows.map((row) => ({
+      attemptId: row.attempt_id,
+      createdAt: row.created_at,
+      normalized: JSON.parse(row.normalized_json) as NormalizedProviderEvent,
+      raw: JSON.parse(row.raw_json) as unknown,
+      runId: row.run_id,
+      sequence: row.sequence,
+      type: row.type
+    }));
   }
 
   markCancelRequested(runId: string, reason: CancelReason): void {
@@ -557,6 +763,7 @@ function mapRunRow(row: RunRow): RunStatus {
     isContinuation: row.is_continuation === 1,
     issueNumber: row.issue_number,
     issueSnapshotPath: row.issue_snapshot_path ?? "",
+    issueTitle: row.issue_title,
     metadataPath: row.metadata_path ?? "",
     normalizedLogPath: row.normalized_log_path ?? "",
     project: row.project_name,

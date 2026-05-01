@@ -147,7 +147,7 @@ const projectSchema = z
       .passthrough(),
     priority: z
       .object({
-        labels: z.record(z.number().int().nonnegative()),
+        labels: z.record(z.string(), z.number().int().nonnegative()),
         default: z.number().int().nonnegative()
       })
       .passthrough(),

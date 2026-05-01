@@ -65,13 +65,17 @@ export type ScheduledWorkKind = "retry" | "continuation";
 export type ScheduledWorkInput = {
   delayMs: number;
   fire: () => Promise<void>;
+  issueNumber: number;
   kind: ScheduledWorkKind;
+  projectName: string;
   runId: string;
 };
 
 type ScheduledItem = {
   dueAt: number;
+  issueNumber: number;
   kind: ScheduledWorkKind;
+  projectName: string;
   runId: string;
   timeout: ReturnType<typeof setTimeout>;
 };
@@ -132,7 +136,9 @@ export class ActiveRunRegistry {
     const dueAt = Date.now() + input.delayMs;
     const item: ScheduledItem = {
       dueAt,
+      issueNumber: input.issueNumber,
       kind: input.kind,
+      projectName: input.projectName,
       runId: input.runId,
       timeout: setTimeout(() => {
         this.scheduled.delete(item);
@@ -150,6 +156,13 @@ export class ActiveRunRegistry {
       dueAt: item.dueAt,
       kind: item.kind,
       runId: item.runId
+    }));
+  }
+
+  scheduledIssueKeys(): { issueNumber: number; projectName: string }[] {
+    return Array.from(this.scheduled, (item) => ({
+      issueNumber: item.issueNumber,
+      projectName: item.projectName
     }));
   }
 

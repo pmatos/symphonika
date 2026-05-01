@@ -285,6 +285,51 @@ describe("detectStaleClaims", () => {
     });
   });
 
+  it("does not mark when a retry is scheduled for the issue (registry empty, run-store row terminal)", async () => {
+    await withRunStore(async (store) => {
+      const issue = snapshot({ labels: ["agent-ready", "sym:claimed"] });
+      // Simulate transient-retry state: original run is unregistered and
+      // the run-store row has transitioned to 'failed' awaiting the next
+      // attempt. sym:claimed has been re-asserted by run-controller.
+      store.createRun({
+        id: "run-retry",
+        issue,
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      store.updateRunState("run-retry", "failed");
+
+      const registry = new ActiveRunRegistry();
+      registry.scheduleDelayed({
+        delayMs: 30_000,
+        fire: () => Promise.resolve(),
+        issueNumber: issue.number,
+        kind: "retry",
+        projectName: project.name,
+        runId: "run-retry"
+      });
+
+      const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+      const marks = await detectStaleClaims({
+        activeRuns: registry,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: {
+          addLabelsToIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        logger,
+        pollStatus: pollStatusWithFiltered([issue]),
+        projects: new Map([[project.name, project]]),
+        runStore: store
+      });
+
+      expect(addLabelsToIssue).not.toHaveBeenCalled();
+      expect(marks).toEqual([]);
+      registry.cancelAll();
+    });
+  });
+
   it("does not mark when run-store reports an active run for the issue", async () => {
     await withRunStore(async (store) => {
       const issue = snapshot({ labels: ["agent-ready", "sym:claimed"] });

@@ -99,6 +99,9 @@ function collectLiveKeys(input: DetectStaleClaimsInput): Set<string> {
   for (const entry of input.activeRuns.list()) {
     keys.add(issueKey(entry.projectName, entry.issueNumber));
   }
+  for (const entry of input.activeRuns.scheduledIssueKeys()) {
+    keys.add(issueKey(entry.projectName, entry.issueNumber));
+  }
   for (const entry of input.runStore.listActiveRunIds()) {
     keys.add(issueKey(entry.projectName, entry.issueNumber));
   }

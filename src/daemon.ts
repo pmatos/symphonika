@@ -166,7 +166,9 @@ export async function startDaemon(
           });
           await promise;
         },
+        issueNumber: item.issueNumber,
         kind: item.kind,
+        projectName: item.projectName,
         runId: item.runId
       });
     },

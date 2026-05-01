@@ -239,6 +239,163 @@ describe("dispatch retry policy", () => {
     }
   });
 
+  it("cancels a scheduled retry when the issue closes during backoff", async () => {
+    const root = await makeTempRoot();
+    const prepared = preparedWorkspaceFixture(root);
+    await mkdir(prepared.workspacePath, { recursive: true });
+    await writeProject(root);
+
+    let attempts = 0;
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        attempts += 1;
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { code: 1, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+
+    let listCalls = 0;
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      // executeRetry calls getIssue: simulate the issue closing during backoff.
+      getIssue: vi.fn().mockResolvedValue(null),
+      listOpenIssues: vi.fn(() => {
+        listCalls += 1;
+        if (listCalls === 1) {
+          return Promise.resolve([{ ...baseIssue, labels: ["agent-ready"] }]);
+        }
+        return Promise.resolve([]);
+      }),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const prepareIssueWorkspace = vi.fn(
+      (): Promise<PreparedIssueWorkspace> =>
+        Promise.resolve(prepared)
+    );
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => "run-retry-closed",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: fastRetryPolicy,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      await waitForCondition(daemon.url, ({ runs }) =>
+        runs.some((run) => run["state"] === "cancelled")
+      );
+
+      // Give the system a window for any spurious second attempt.
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(attempts).toBe(1);
+
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) => r.json())) as {
+        runs: Array<Record<string, unknown>>;
+      };
+      const run = status.runs.find((entry) => entry["state"] === "cancelled");
+      expect(run?.["cancelReason"]).toBe("closed_issue");
+      expect(run?.["cancelRequested"]).toBe(true);
+
+      const removeCalls = githubIssuesApi.removeLabelsFromIssue.mock.calls.map(
+        ([call]) => call as { labels: string[] }
+      );
+      expect(removeCalls.some((call) => call.labels[0] === "sym:claimed")).toBe(true);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("cancels a scheduled retry when the issue loses eligibility during backoff", async () => {
+    const root = await makeTempRoot();
+    const prepared = preparedWorkspaceFixture(root);
+    await mkdir(prepared.workspacePath, { recursive: true });
+    await writeProject(root);
+
+    let attempts = 0;
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        attempts += 1;
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { code: 1, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+
+    let listCalls = 0;
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      // executeRetry calls getIssue: simulate an excluded label appearing on the issue.
+      getIssue: vi.fn().mockResolvedValue({
+        ...baseIssue,
+        labels: ["agent-ready", "needs-human", "sym:claimed"]
+      }),
+      listOpenIssues: vi.fn(() => {
+        listCalls += 1;
+        if (listCalls === 1) {
+          return Promise.resolve([{ ...baseIssue, labels: ["agent-ready"] }]);
+        }
+        return Promise.resolve([]);
+      }),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const prepareIssueWorkspace = vi.fn(
+      (): Promise<PreparedIssueWorkspace> =>
+        Promise.resolve(prepared)
+    );
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => "run-retry-eligibility",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: fastRetryPolicy,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      await waitForCondition(daemon.url, ({ runs }) =>
+        runs.some((run) => run["state"] === "cancelled")
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(attempts).toBe(1);
+
+      const database = new Database(path.join(root, ".symphonika", "symphonika.db"), {
+        readonly: true
+      });
+      try {
+        const stored = database
+          .prepare("select state, cancel_reason from runs where id = ?")
+          .get("run-retry-eligibility") as { state: string; cancel_reason: string };
+        expect(stored.state).toBe("cancelled");
+        expect(stored.cancel_reason).toBe("eligibility_loss");
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("does not retry deterministic malformed_event failures", async () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);

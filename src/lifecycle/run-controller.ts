@@ -283,11 +283,49 @@ export class RunController {
       token
     };
 
+    // Re-validate eligibility before re-asserting sym:claimed and starting the
+    // attempt. During the [10s, 30s, 2m] retry backoff the issue may have been
+    // closed or lost required labels; reconcile cannot help here because a
+    // scheduled retry is not present in activeRuns.list() during the window.
+    const refreshed = await this.refreshIssue({
+      project,
+      issueNumber: payload.issue.number,
+      repository
+    });
+    if (refreshed === undefined) {
+      this.logger?.warn(
+        { runId: payload.runId, projectName: payload.projectName },
+        "symphonika retry dropped: issue refresh unavailable"
+      );
+      return;
+    }
+    if (refreshed === null || refreshed.state !== "open") {
+      await this.cancelScheduledLifecycleWork({
+        issueNumber: payload.issue.number,
+        reason: CANCEL_REASONS.CLOSED_ISSUE,
+        repository,
+        runId: payload.runId
+      });
+      return;
+    }
+    const eligibility = evaluateProjectEligibility(refreshed, project, {
+      ignoreOperationalLabels: true
+    });
+    if (!eligibility.eligible) {
+      await this.cancelScheduledLifecycleWork({
+        issueNumber: payload.issue.number,
+        reason: CANCEL_REASONS.ELIGIBILITY_LOSS,
+        repository,
+        runId: payload.runId
+      });
+      return;
+    }
+
     // Re-assert sym:claimed best-effort in case operator clear-stale ran between attempts.
     await this.bestEffort(() =>
       this.githubIssuesApi.addLabelsToIssue!({
         ...repository,
-        issueNumber: payload.issue.number,
+        issueNumber: refreshed.number,
         labels: ["sym:claimed"]
       })
     );
@@ -295,13 +333,31 @@ export class RunController {
     await this.runAttemptLifecycle({
       attemptNumber: payload.attemptNumber,
       isContinuation: this.runStore.isContinuationRun(payload.runId),
-      issue: payload.issue,
+      issue: refreshed,
       project,
       provider,
       providerCommand,
       providerName: project.agent.provider,
       repository,
       runId: payload.runId
+    });
+  }
+
+  private async cancelScheduledLifecycleWork(input: {
+    issueNumber: number;
+    reason: CancelReason;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    this.runStore.markCancelRequested(input.runId, input.reason);
+    this.runStore.recordTerminalReason(input.runId, input.reason);
+    this.runStore.updateRunState(input.runId, "cancelled");
+    await this.applyTerminalLabels({
+      cancelReason: input.reason,
+      issueNumber: input.issueNumber,
+      outcome: { kind: "cancelled", reason: input.reason },
+      repository: input.repository,
+      willRetry: false
     });
   }
 

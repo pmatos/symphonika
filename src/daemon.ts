@@ -138,8 +138,12 @@ export async function startDaemon(
       activeRuns.scheduleDelayed({
         delayMs: item.delayMs,
         fire: async () => {
-          await dispatchMutex.acquire();
+          // Register the entire fire callback in inflightDispatches BEFORE
+          // awaiting the mutex, so a shutdown that races with a freshly-fired
+          // timer (while another dispatch still holds the mutex) cannot snapshot
+          // the set early and miss this work.
           const promise = (async () => {
+            await dispatchMutex.acquire();
             try {
               await item.fire();
             } catch (error) {

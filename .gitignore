@@ -5,3 +5,6 @@ node_modules/
 npm-debug.log*
 *.local
 .DS_Store
+
+.claude/settings.local.json
+.claude/worktrees/

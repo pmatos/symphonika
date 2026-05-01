@@ -11,6 +11,7 @@ import {
 import type { RunStore } from "../run-store.js";
 
 import { ActiveRunRegistry, CANCEL_REASONS } from "./active-runs.js";
+import { resolveToken } from "./token.js";
 
 export type ReconcileInput = {
   activeRuns: ActiveRunRegistry;
@@ -126,11 +127,3 @@ function findIssueSnapshot(
   return undefined;
 }
 
-function resolveToken(reference: string, env: NodeJS.ProcessEnv): string | undefined {
-  const match = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(reference);
-  if (match === null) {
-    return undefined;
-  }
-  const value = env[match[1] ?? ""];
-  return value === undefined || value.length === 0 ? undefined : value;
-}

@@ -80,6 +80,16 @@ describe("evaluateProjectEligibility", () => {
     expect(result.reasons.some((reason) => reason.includes("agent-ready"))).toBe(true);
   });
 
+  it("flags sym:stale as ineligible by default (operational-label rule)", () => {
+    const result = evaluateProjectEligibility(
+      snapshot({ labels: ["agent-ready", "sym:stale"] }),
+      baseProject
+    );
+
+    expect(result.eligible).toBe(false);
+    expect(result.reasons).toContain("has operational label sym:stale");
+  });
+
   it("flags issues with excluded labels", () => {
     const result = evaluateProjectEligibility(
       snapshot({ labels: ["agent-ready", "needs-human", "sym:running"] }),

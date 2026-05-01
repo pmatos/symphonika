@@ -30,6 +30,7 @@ import {
   type RunControllerProjectConfig,
   type RunControllerProvidersConfig
 } from "./lifecycle/run-controller.js";
+import { detectStaleClaims } from "./lifecycle/stale-claims.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { openRunStore } from "./run-store.js";
@@ -82,6 +83,13 @@ export async function startDaemon(
   const runStore = openRunStore({
     stateRoot: state.stateRoot
   });
+  const sweptOnStartup = runStore.markLeakedRunsAsStale();
+  if (sweptOnStartup.length > 0) {
+    logger.info(
+      { swept: sweptOnStartup },
+      "symphonika startup: marked leaked runs as stale"
+    );
+  }
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const env = options.env ?? process.env;
@@ -158,7 +166,9 @@ export async function startDaemon(
           });
           await promise;
         },
+        issueNumber: item.issueNumber,
         kind: item.kind,
+        projectName: item.projectName,
         runId: item.runId
       });
     },
@@ -216,6 +226,24 @@ export async function startDaemon(
       });
     } catch (error) {
       logger.error({ err: error }, "symphonika reconcile failed");
+    }
+
+    if (dispatchMutex.held) {
+      return;
+    }
+
+    try {
+      await detectStaleClaims({
+        activeRuns,
+        env,
+        githubIssuesApi,
+        logger,
+        pollStatus: issuePollStatus,
+        projects,
+        runStore
+      });
+    } catch (error) {
+      logger.error({ err: error }, "symphonika stale-claim detection failed");
     }
   };
   const launchDispatch = (): void => {
@@ -281,6 +309,7 @@ export async function startDaemon(
   const port = resolveListeningPort(server, requestedPort);
   const url = `http://${host}:${port}`;
   if (state.configExists) {
+    await reconcile();
     if (issuePollStatus.candidateIssues.length > 0) {
       launchDispatch();
     }

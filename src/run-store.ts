@@ -394,6 +394,26 @@ export class RunStore {
       .run(reason, timestamp(), runId);
   }
 
+  markLeakedRunsAsStale(
+    reason = "leaked_active_run"
+  ): { runId: string; projectName: string; issueNumber: number }[] {
+    const rows = this.database
+      .prepare(
+        "select id, project_name, issue_number from runs where state in ('queued','preparing_workspace','running')"
+      )
+      .all() as { id: string; project_name: string; issue_number: number }[];
+    const swept = rows.map((row) => ({
+      issueNumber: row.issue_number,
+      projectName: row.project_name,
+      runId: row.id
+    }));
+    for (const entry of swept) {
+      this.recordTerminalReason(entry.runId, reason);
+      this.updateRunState(entry.runId, "stale");
+    }
+    return swept;
+  }
+
   private migrate(): void {
     this.database.exec(`
       create table if not exists runs (

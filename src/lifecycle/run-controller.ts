@@ -60,7 +60,9 @@ export type RunControllerProvidersConfig = {
 export type ScheduleHandler = (input: {
   delayMs: number;
   fire: () => Promise<void>;
+  issueNumber: number;
   kind: "retry" | "continuation";
+  projectName: string;
   runId: string;
 }) => void;
 
@@ -882,7 +884,9 @@ export class RunController {
             projectName: input.project.name,
             runId: input.runId
           }),
+        issueNumber: input.issue.number,
         kind: "retry",
+        projectName: input.project.name,
         runId: input.runId
       });
       return;
@@ -943,7 +947,9 @@ export class RunController {
           parentRunId: input.runId,
           projectName: input.project.name
         }),
+      issueNumber: refreshed.number,
       kind: "continuation",
+      projectName: input.project.name,
       runId: input.runId
     });
   }

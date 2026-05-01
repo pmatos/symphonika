@@ -57,7 +57,9 @@ describe("ActiveRunRegistry", () => {
       registry.scheduleDelayed({
         delayMs: 50,
         fire,
+        issueNumber: 1,
         kind: "retry",
+        projectName: "p",
         runId: "run-a"
       });
 
@@ -81,7 +83,9 @@ describe("ActiveRunRegistry", () => {
       registry.scheduleDelayed({
         delayMs: 50,
         fire,
+        issueNumber: 1,
         kind: "continuation",
+        projectName: "p",
         runId: "run-a"
       });
       registry.cancelAll();

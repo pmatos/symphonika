@@ -4,6 +4,10 @@ import { Octokit } from "@octokit/rest";
 import { parse } from "yaml";
 import { z } from "zod";
 
+import {
+  DEFAULT_GITHUB_ISSUES_API,
+  type GitHubIssuesApi
+} from "./issue-polling.js";
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
@@ -17,11 +21,19 @@ export type DoctorOptions = {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   githubApi?: GitHubApi;
+  githubIssuesApi?: GitHubIssuesApi;
+};
+
+export type StaleIssueSummary = {
+  number: number;
+  title: string;
+  url: string;
 };
 
 export type DoctorProjectReport = {
   missingOperationalLabels: string[];
   name: string;
+  staleIssues: StaleIssueSummary[];
   validForDispatch: boolean;
   workflowPath: string;
 };
@@ -67,9 +79,30 @@ export type GitHubRepositoryAccess = {
 export type GitHubApi = {
   createLabel: (input: GitHubRepositoryInput & { name: string }) => Promise<void>;
   listLabels: (input: GitHubRepositoryInput) => Promise<string[]>;
+  removeIssueLabel?: (
+    input: GitHubRepositoryInput & { issueNumber: number; name: string }
+  ) => Promise<void>;
   validateRepositoryAccess: (
     input: GitHubRepositoryInput
   ) => Promise<GitHubRepositoryAccess>;
+};
+
+export type ClearStaleOptions = DoctorOptions & {
+  issueNumber: number;
+  onWarning?: (warning: string) => void;
+  project: string;
+  yes?: boolean;
+};
+
+export type ClearStaleReport = {
+  configPath: string;
+  errors: string[];
+  issueNumber: number;
+  ok: boolean;
+  project: string;
+  removedLabels: string[];
+  repository: string;
+  warnings: string[];
 };
 
 type ServiceConfig = z.infer<typeof serviceConfigSchema>;
@@ -202,6 +235,7 @@ export async function runDoctor(
   const configPath = path.resolve(cwd, options.configPath ?? "symphonika.yml");
   const env = options.env ?? process.env;
   const githubApi = options.githubApi ?? DEFAULT_GITHUB_API;
+  const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const errors: string[] = [];
   const projects: DoctorProjectReport[] = [];
@@ -228,14 +262,83 @@ export async function runDoctor(
     const workflowPath = path.resolve(path.dirname(configPath), project.workflow);
     const workflowErrors = await validateWorkflowContract(workflowPath);
     errors.push(...workflowErrors);
+    const staleIssues = await fetchStaleIssues(
+      project,
+      env,
+      githubIssuesApi
+    );
     projects.push({
       ...validation,
       name: project.name,
+      staleIssues,
       workflowPath
     });
   }
 
   return report(configPath, errors, projects);
+}
+
+async function fetchStaleIssues(
+  project: ProjectConfig,
+  env: NodeJS.ProcessEnv,
+  githubIssuesApi: GitHubIssuesApi
+): Promise<StaleIssueSummary[]> {
+  const token = resolveEnvBackedValue(project.tracker.token, env);
+  if (token === undefined) {
+    return [];
+  }
+  let issues;
+  try {
+    issues = await githubIssuesApi.listOpenIssues({
+      owner: project.tracker.owner,
+      repo: project.tracker.repo,
+      token
+    });
+  } catch {
+    return [];
+  }
+  const stale: StaleIssueSummary[] = [];
+  for (const raw of issues) {
+    const labelNames = labelNamesOf(raw.labels);
+    if (!labelNames.includes("sym:stale")) {
+      continue;
+    }
+    const number = typeof raw.number === "number" ? raw.number : undefined;
+    if (number === undefined) {
+      continue;
+    }
+    stale.push({
+      number,
+      title: typeof raw.title === "string" ? raw.title : "",
+      url:
+        typeof raw.html_url === "string"
+          ? raw.html_url
+          : typeof raw.url === "string"
+            ? raw.url
+            : ""
+    });
+  }
+  return stale;
+}
+
+function labelNamesOf(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  const names: string[] = [];
+  for (const entry of input) {
+    if (typeof entry === "string") {
+      names.push(entry);
+    } else if (
+      typeof entry === "object" &&
+      entry !== null &&
+      "name" in entry &&
+      typeof (entry as { name: unknown }).name === "string"
+    ) {
+      names.push((entry as { name: string }).name);
+    }
+  }
+  return names;
 }
 
 export async function runInitProject(
@@ -338,6 +441,122 @@ export async function runInitProject(
   return initProjectReport(configPath, errors, warnings, projects);
 }
 
+const STALE_CLEAR_LABELS = ["sym:stale", "sym:claimed", "sym:running"] as const;
+
+export async function runClearStale(
+  options: ClearStaleOptions
+): Promise<ClearStaleReport> {
+  const cwd = options.cwd ?? process.cwd();
+  const configPath = path.resolve(cwd, options.configPath ?? "symphonika.yml");
+  const env = options.env ?? process.env;
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const removedLabels: string[] = [];
+  const result = (
+    repository: string,
+    ok = false
+  ): ClearStaleReport => ({
+    configPath,
+    errors,
+    issueNumber: options.issueNumber,
+    ok,
+    project: options.project,
+    removedLabels,
+    repository,
+    warnings
+  });
+
+  const rawConfig = await readConfig(configPath, errors);
+  if (rawConfig === undefined) {
+    return result("");
+  }
+  const parsedConfig = parseServiceConfig(rawConfig, errors);
+  if (parsedConfig === undefined) {
+    return result("");
+  }
+
+  const project = parsedConfig.projects.find(
+    (entry) => entry.name === options.project
+  );
+  if (project === undefined) {
+    errors.push(`projects.${options.project} not found in config`);
+    return result("");
+  }
+
+  const repositoryName = `${project.tracker.owner}/${project.tracker.repo}`;
+  const token = resolveEnvBackedValue(project.tracker.token, env);
+  if (token === undefined) {
+    const variableName = envReferenceName(project.tracker.token);
+    errors.push(
+      variableName === undefined
+        ? `projects.${project.name}.tracker.token must reference an environment variable like $GITHUB_TOKEN`
+        : `projects.${project.name}.tracker.token references unset environment variable $${variableName}`
+    );
+    return result(repositoryName);
+  }
+
+  const githubApi = options.githubApi ?? DEFAULT_GITHUB_API;
+  const repository = {
+    owner: project.tracker.owner,
+    repo: project.tracker.repo,
+    token
+  };
+  const access = await githubApi.validateRepositoryAccess(repository);
+  if (!access.ok) {
+    errors.push(
+      `projects.${project.name}.tracker.repository ${repositoryName} is not accessible: ${access.message ?? "unknown GitHub error"}`
+    );
+    return result(repositoryName);
+  }
+
+  const warning = `clear-stale ${options.yes === true ? "will" : "would"} remove ${STALE_CLEAR_LABELS.join(", ")} from ${repositoryName}#${options.issueNumber}`;
+  warnings.push(warning);
+  options.onWarning?.(warning);
+
+  if (options.yes !== true) {
+    errors.push("pass --yes to remove stale-claim labels non-interactively");
+    return result(repositoryName);
+  }
+
+  if (githubApi.removeIssueLabel === undefined) {
+    errors.push(
+      `projects.${project.name}.tracker.repository ${repositoryName} GitHub adapter does not support removeIssueLabel`
+    );
+    return result(repositoryName);
+  }
+
+  let allOk = true;
+  for (const label of STALE_CLEAR_LABELS) {
+    try {
+      await githubApi.removeIssueLabel({
+        ...repository,
+        issueNumber: options.issueNumber,
+        name: label
+      });
+      removedLabels.push(label);
+    } catch (error) {
+      if (isOctokitNotFoundError(error)) {
+        removedLabels.push(label);
+        continue;
+      }
+      allOk = false;
+      errors.push(
+        `projects.${project.name}.tracker.repository ${repositoryName} could not remove label ${label} from issue ${options.issueNumber}: ${errorMessage(error)}`
+      );
+    }
+  }
+
+  return result(repositoryName, allOk);
+}
+
+function isOctokitNotFoundError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" && status === 404;
+}
+
 class OctokitGitHubApi implements GitHubApi {
   async validateRepositoryAccess(
     input: GitHubRepositoryInput
@@ -378,6 +597,18 @@ class OctokitGitHubApi implements GitHubApi {
     await octokit.rest.issues.createLabel({
       color: labelDescription.color,
       description: labelDescription.description,
+      name: input.name,
+      owner: input.owner,
+      repo: input.repo
+    });
+  }
+
+  async removeIssueLabel(
+    input: GitHubRepositoryInput & { issueNumber: number; name: string }
+  ): Promise<void> {
+    const octokit = this.octokit(input.token);
+    await octokit.rest.issues.removeLabel({
+      issue_number: input.issueNumber,
       name: input.name,
       owner: input.owner,
       repo: input.repo

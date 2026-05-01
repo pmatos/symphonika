@@ -16,9 +16,18 @@ export type RunState =
   | "cancelled"
   | "stale";
 
+export type FailureClassification = "transient" | "deterministic" | "input_required";
+
+export type CancelReason = "closed_issue" | "eligibility_loss" | "operator";
+
 export type RunStatus = {
   branchName: string;
+  cancelReason: CancelReason | null;
+  cancelRequested: boolean;
+  continuationParentRunId: string | null;
+  failureClassification: FailureClassification | null;
   id: string;
+  isContinuation: boolean;
   issueNumber: number;
   issueSnapshotPath: string;
   metadataPath: string;
@@ -27,7 +36,9 @@ export type RunStatus = {
   promptPath: string;
   provider: string;
   rawLogPath: string;
+  retryCount: number;
   state: RunState;
+  terminalReason: string | null;
   workspacePath: string;
 };
 
@@ -73,7 +84,12 @@ export type ProviderEventMetadataInput = {
 
 type RunRow = {
   branch_name: string | null;
+  cancel_reason: string | null;
+  cancel_requested: number;
+  continuation_parent_run_id: string | null;
+  failure_classification: string | null;
   id: string;
+  is_continuation: number;
   issue_number: number;
   issue_snapshot_path: string | null;
   metadata_path: string | null;
@@ -82,7 +98,9 @@ type RunRow = {
   prompt_path: string | null;
   provider_name: string | null;
   raw_log_path: string | null;
+  retry_count: number;
   state: RunState;
+  terminal_reason: string | null;
   workspace_path: string | null;
 };
 
@@ -99,32 +117,155 @@ export class RunStore {
   }
 
   createRun(input: CreateRunInput): void {
+    this.insertRunRow({
+      ...input,
+      isContinuation: false,
+      parentRunId: null,
+      providerCommand: input.providerCommand,
+      providerName: input.providerName,
+      state: "queued"
+    });
+  }
+
+  createContinuationRun(input: CreateRunInput & { parentRunId: string }): void {
+    this.insertRunRow({
+      ...input,
+      isContinuation: true,
+      parentRunId: input.parentRunId,
+      providerCommand: input.providerCommand,
+      providerName: input.providerName,
+      state: "queued"
+    });
+  }
+
+  createCapReachedFailureRun(input: {
+    id: string;
+    issue: IssueSnapshot;
+    parentRunId: string;
+    projectName: string;
+    reason: string;
+  }): void {
+    this.insertRunRow({
+      id: input.id,
+      isContinuation: true,
+      issue: input.issue,
+      parentRunId: input.parentRunId,
+      projectName: input.projectName,
+      providerCommand: null,
+      providerName: null,
+      state: "failed"
+    });
+    this.database
+      .prepare(
+        "update runs set terminal_reason = ?, failure_classification = 'deterministic', updated_at = ? where id = ?"
+      )
+      .run(input.reason, timestamp(), input.id);
+    this.updateRunState(input.id, "failed");
+  }
+
+  recordTerminalReason(
+    runId: string,
+    reason: string,
+    classification?: FailureClassification
+  ): void {
+    if (classification === undefined) {
+      this.database
+        .prepare("update runs set terminal_reason = ?, updated_at = ? where id = ?")
+        .run(reason, timestamp(), runId);
+      return;
+    }
+    this.database
+      .prepare(
+        "update runs set terminal_reason = ?, failure_classification = ?, updated_at = ? where id = ?"
+      )
+      .run(reason, classification, timestamp(), runId);
+  }
+
+  incrementRetryCount(runId: string): number {
+    const updated = this.database
+      .prepare(
+        "update runs set retry_count = retry_count + 1, updated_at = ? where id = ? returning retry_count"
+      )
+      .get(timestamp(), runId) as { retry_count: number } | undefined;
+    return updated?.retry_count ?? 0;
+  }
+
+  runRetryCount(runId: string): number {
+    const row = this.database
+      .prepare("select retry_count from runs where id = ?")
+      .get(runId) as { retry_count: number } | undefined;
+    return row?.retry_count ?? 0;
+  }
+
+  isContinuationRun(runId: string): boolean {
+    const row = this.database
+      .prepare("select is_continuation from runs where id = ?")
+      .get(runId) as { is_continuation: number } | undefined;
+    return row?.is_continuation === 1;
+  }
+
+  listActiveRunIds(): { runId: string; projectName: string; issueNumber: number }[] {
+    const rows = this.database
+      .prepare(
+        "select id, project_name, issue_number from runs where state in ('queued','preparing_workspace','running')"
+      )
+      .all() as { id: string; project_name: string; issue_number: number }[];
+    return rows.map((row) => ({
+      issueNumber: row.issue_number,
+      projectName: row.project_name,
+      runId: row.id
+    }));
+  }
+
+  private insertRunRow(input: {
+    id: string;
+    isContinuation: boolean;
+    issue: IssueSnapshot;
+    parentRunId: string | null;
+    projectName: string;
+    providerCommand: string | null;
+    providerName: AgentProviderName | null;
+    state: RunState;
+  }): void {
     const now = timestamp();
     this.database
       .prepare(
         [
           "insert into runs (",
           "id, project_name, issue_number, issue_title, state, issue_snapshot_json,",
-          "provider_name, provider_command, created_at, updated_at",
+          "provider_name, provider_command, is_continuation, continuation_parent_run_id,",
+          "created_at, updated_at",
           ") values (",
           "@id, @project_name, @issue_number, @issue_title, @state, @issue_snapshot_json,",
-          "@provider_name, @provider_command, @created_at, @updated_at",
+          "@provider_name, @provider_command, @is_continuation, @continuation_parent_run_id,",
+          "@created_at, @updated_at",
           ")"
         ].join(" ")
       )
       .run({
+        continuation_parent_run_id: input.parentRunId,
         created_at: now,
         id: input.id,
+        is_continuation: input.isContinuation ? 1 : 0,
         issue_number: input.issue.number,
         issue_snapshot_json: JSON.stringify(input.issue),
         issue_title: input.issue.title,
         project_name: input.projectName,
         provider_command: input.providerCommand,
         provider_name: input.providerName,
-        state: "queued",
+        state: input.state,
         updated_at: now
       });
-    this.recordRunTransition(input.id, "queued", now);
+    this.recordRunTransition(input.id, input.state, now);
+  }
+
+  countSucceededContinuations(projectName: string, issueNumber: number): number {
+    const row = this.database
+      .prepare(
+        "select count(*) as count from runs where project_name = ? and issue_number = ? and state = 'succeeded' and is_continuation = 1"
+      )
+      .get(projectName, issueNumber) as { count: number } | undefined;
+    return row?.count ?? 0;
   }
 
   updateRunState(runId: string, state: RunState): void {
@@ -234,26 +375,23 @@ export class RunStore {
         [
           "select id, project_name, issue_number, state, provider_name,",
           "workspace_path, branch_name, prompt_path, metadata_path,",
-          "issue_snapshot_path, raw_log_path, normalized_log_path",
+          "issue_snapshot_path, raw_log_path, normalized_log_path,",
+          "is_continuation, continuation_parent_run_id, retry_count,",
+          "failure_classification, terminal_reason, cancel_requested, cancel_reason",
           "from runs order by created_at desc, id desc"
         ].join(" ")
       )
       .all() as RunRow[];
 
-    return rows.map((row) => ({
-      branchName: row.branch_name ?? "",
-      id: row.id,
-      issueNumber: row.issue_number,
-      issueSnapshotPath: row.issue_snapshot_path ?? "",
-      metadataPath: row.metadata_path ?? "",
-      normalizedLogPath: row.normalized_log_path ?? "",
-      project: row.project_name,
-      promptPath: row.prompt_path ?? "",
-      provider: row.provider_name ?? "",
-      rawLogPath: row.raw_log_path ?? "",
-      state: row.state,
-      workspacePath: row.workspace_path ?? ""
-    }));
+    return rows.map((row) => mapRunRow(row));
+  }
+
+  markCancelRequested(runId: string, reason: CancelReason): void {
+    this.database
+      .prepare(
+        "update runs set cancel_requested = 1, cancel_reason = ?, updated_at = ? where id = ?"
+      )
+      .run(reason, timestamp(), runId);
   }
 
   private migrate(): void {
@@ -319,6 +457,35 @@ export class RunStore {
         foreign key (attempt_id) references attempts(id)
       );
     `);
+
+    const additions: Array<[string, string, string]> = [
+      ["runs", "is_continuation", "integer not null default 0"],
+      ["runs", "continuation_parent_run_id", "text"],
+      ["runs", "retry_count", "integer not null default 0"],
+      ["runs", "failure_classification", "text"],
+      ["runs", "terminal_reason", "text"],
+      ["runs", "cancel_requested", "integer not null default 0"],
+      ["runs", "cancel_reason", "text"],
+      ["attempts", "failure_classification", "text"]
+    ];
+
+    const apply = this.database.transaction(() => {
+      for (const [table, column, decl] of additions) {
+        this.ensureColumn(table, column, decl);
+      }
+    });
+    apply();
+  }
+
+  private ensureColumn(table: string, column: string, decl: string): void {
+    const existing = this.database
+      .prepare("select name from pragma_table_info(?)")
+      .all(table) as { name: string }[];
+    if (existing.some((row) => row.name === column)) {
+      return;
+    }
+
+    this.database.exec(`alter table ${table} add column ${column} ${decl};`);
   }
 
   private recordRunTransition(
@@ -356,4 +523,29 @@ function nextTransitionSequence(database: SqliteDatabase, runId: string): number
 
 function timestamp(): string {
   return new Date().toISOString();
+}
+
+function mapRunRow(row: RunRow): RunStatus {
+  return {
+    branchName: row.branch_name ?? "",
+    cancelReason: (row.cancel_reason as CancelReason | null) ?? null,
+    cancelRequested: row.cancel_requested === 1,
+    continuationParentRunId: row.continuation_parent_run_id ?? null,
+    failureClassification:
+      (row.failure_classification as FailureClassification | null) ?? null,
+    id: row.id,
+    isContinuation: row.is_continuation === 1,
+    issueNumber: row.issue_number,
+    issueSnapshotPath: row.issue_snapshot_path ?? "",
+    metadataPath: row.metadata_path ?? "",
+    normalizedLogPath: row.normalized_log_path ?? "",
+    project: row.project_name,
+    promptPath: row.prompt_path ?? "",
+    provider: row.provider_name ?? "",
+    rawLogPath: row.raw_log_path ?? "",
+    retryCount: row.retry_count ?? 0,
+    state: row.state,
+    terminalReason: row.terminal_reason ?? null,
+    workspacePath: row.workspace_path ?? ""
+  };
 }

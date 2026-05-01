@@ -32,6 +32,9 @@ export type RawGitHubIssue = {
 
 export type GitHubIssuesApi = {
   addLabelsToIssue?: (input: GitHubIssueLabelInput) => Promise<void>;
+  getIssue?: (
+    input: GitHubIssueRepositoryInput & { issueNumber: number }
+  ) => Promise<RawGitHubIssue | null>;
   listOpenIssues: (
     input: GitHubIssueRepositoryInput
   ) => Promise<RawGitHubIssue[]>;
@@ -80,7 +83,7 @@ export type PollConfiguredGitHubIssuesOptions = {
   githubIssuesApi?: GitHubIssuesApi;
 };
 
-type PollingProjectConfig = z.infer<typeof pollingProjectSchema>;
+export type PollingProjectConfig = z.infer<typeof pollingProjectSchema>;
 type PollingServiceConfig = {
   polling?: {
     interval_ms?: number | undefined;
@@ -151,6 +154,25 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
       owner: input.owner,
       repo: input.repo
     });
+  }
+
+  async getIssue(
+    input: GitHubIssueRepositoryInput & { issueNumber: number }
+  ): Promise<RawGitHubIssue | null> {
+    const octokit = this.octokit(input.token);
+    try {
+      const response = await octokit.rest.issues.get({
+        issue_number: input.issueNumber,
+        owner: input.owner,
+        repo: input.repo
+      });
+      return response.data;
+    } catch (error) {
+      if (isOctokitNotFound(error)) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   async listOpenIssues(
@@ -421,6 +443,14 @@ function issueFilterReasons(
   issue: IssueSnapshot,
   project: PollingProjectConfig
 ): string[] {
+  return evaluateProjectEligibility(issue, project).reasons;
+}
+
+export function evaluateProjectEligibility(
+  issue: IssueSnapshot,
+  project: PollingProjectConfig,
+  options: { ignoreOperationalLabels?: boolean } = {}
+): { eligible: boolean; reasons: string[] } {
   const reasons: string[] = [];
   const labels = new Set(issue.labels);
 
@@ -440,13 +470,38 @@ function issueFilterReasons(
     }
   }
 
-  for (const operationalLabel of REQUIRED_OPERATIONAL_LABELS) {
-    if (labels.has(operationalLabel)) {
-      reasons.push(`has operational label ${operationalLabel}`);
+  if (options.ignoreOperationalLabels !== true) {
+    for (const operationalLabel of REQUIRED_OPERATIONAL_LABELS) {
+      if (labels.has(operationalLabel)) {
+        reasons.push(`has operational label ${operationalLabel}`);
+      }
     }
   }
 
-  return reasons;
+  return {
+    eligible: reasons.length === 0,
+    reasons
+  };
+}
+
+export async function loadPollingProjectsByName(
+  configPath: string
+): Promise<Map<string, PollingProjectConfig>> {
+  const errors: string[] = [];
+  const config = await readPollingConfig(configPath, errors);
+  if (config === undefined) {
+    throw new Error(
+      errors.length === 0
+        ? `failed to load polling config at ${configPath}`
+        : errors.join("\n")
+    );
+  }
+
+  const map = new Map<string, PollingProjectConfig>();
+  for (const project of config.projects) {
+    map.set(project.name, project);
+  }
+  return map;
 }
 
 function compareProjectIssues(
@@ -498,4 +553,13 @@ function errorMessage(error: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isOctokitNotFound(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    (error as { status?: unknown }).status === 404
+  );
 }

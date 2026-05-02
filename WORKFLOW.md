@@ -51,7 +51,7 @@ Stay on this branch for all commits. Do not switch branches or open new ones.
    - `npm run build`
 5. Commit your changes with a focused message. Push the branch {{branch.name}} to `origin`.
 6. Open a **non-draft** pull request against `main` with `Closes #{{issue.number}}` in the body. Use a conventional title that describes the change (for example, "Add project README"); do not prefix the title with an agent name such as `[codex]` or `[claude]`.
-7. Do not apply `needs-human` or `needs-review` unless you encountered a blocker that the operator must resolve before code review can proceed. If you did, write an `EVIDENCE.md` at `{{workspace.path}}/EVIDENCE.md` describing what is blocked and why, then apply `needs-human`. Do not remove `agent-ready`; the operator owns label transitions on PR open and merge.
+7. On successful completion, remove `agent-ready` from the issue so the orchestrator does not schedule redundant continuations (per SPEC §9.3 and §12.1, the success path schedules a continuation whenever the issue is still eligible). The PR opened in step 6 carries the work into review; the operator owns any further label transitions on PR open and merge. Apply `needs-human` only if you encountered a blocker that the operator must resolve before code review can proceed; in that case, also write an `EVIDENCE.md` at `{{workspace.path}}/EVIDENCE.md` describing what is blocked and why.
 8. Update `SPEC.md`, `CONTEXT.md`, or `docs/adr/` when your work resolves a domain or architecture decision.
 
 ## Constraints

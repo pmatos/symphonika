@@ -30,6 +30,23 @@ npm run build
 
 The bootstrap dogfooding path is documented in [docs/smoke.md](docs/smoke.md). The repository includes a bootstrap [symphonika.yml](symphonika.yml) service config and [WORKFLOW.md](WORKFLOW.md) workflow contract for running Symphonika against its own issues.
 
+### Codex profile setup
+
+The default Codex provider command is `codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server`. Before `npm run doctor`, `npm run smoke`, or starting the daemon, define the `symphonika` profile in `~/.codex/config.toml`:
+
+```toml
+[profiles.symphonika]
+analytics = { enabled = false }
+
+[profiles.symphonika.features]
+memories         = false
+multi_agent      = true
+codex_hooks      = false
+image_generation = false
+```
+
+Without the profile `doctor` will fail and print this snippet. See [docs/adr/0042-codex-profile-for-headless-runs.md](docs/adr/0042-codex-profile-for-headless-runs.md) for what each feature does and why `multi_agent` stays on.
+
 ## Status and License
 
 This repository is private and experimental, built for a single-operator workflow. No public license is currently declared.

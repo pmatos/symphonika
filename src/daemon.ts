@@ -538,7 +538,10 @@ function defaultProvidersConfig(): RunControllerProvidersConfig {
       command:
         "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"
     },
-    codex: { command: "codex --dangerously-bypass-approvals-and-sandbox app-server" }
+    codex: {
+      command:
+        "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"
+    }
   };
 }
 

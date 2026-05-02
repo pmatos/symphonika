@@ -293,7 +293,7 @@ async function writeBootstrapProject(root: string): Promise<void> {
       "  interval_ms: 30000",
       "providers:",
       "  codex:",
-      '    command: "codex --dangerously-bypass-approvals-and-sandbox app-server"',
+      '    command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"',
       "  claude:",
       '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
       "projects:",

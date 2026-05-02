@@ -175,7 +175,7 @@ describe("daemon dispatch", () => {
       });
       expect(workspaceInput.project.name).toBe("symphonika");
       expect(codexProvider.validate).toHaveBeenCalledWith(
-        "codex --dangerously-bypass-approvals-and-sandbox app-server"
+        "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"
       );
       expect(providerInputs).toHaveLength(1);
       expect(providerInputs[0]).toMatchObject({
@@ -273,7 +273,7 @@ describe("daemon dispatch", () => {
           project_name: "symphonika",
           prompt_path: run.promptPath,
           provider_command:
-            "codex --dangerously-bypass-approvals-and-sandbox app-server",
+            "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server",
           provider_name: "codex",
           raw_log_path: run.rawLogPath,
           state: "succeeded",
@@ -817,7 +817,7 @@ async function writeValidProject(
       `  interval_ms: ${options.pollingIntervalMs ?? 30000}`,
       "providers:",
       "  codex:",
-      '    command: "codex --dangerously-bypass-approvals-and-sandbox app-server"',
+      '    command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"',
       "  claude:",
       '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
       "projects:",

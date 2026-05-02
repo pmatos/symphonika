@@ -404,6 +404,45 @@ describe("Codex JSON-RPC provider", () => {
   });
 });
 
+describe("Codex provider validate", () => {
+  it("succeeds when no profile is configured", async () => {
+    const root = await makeTempRoot();
+    const fakePath = path.join(root, "fake-codex-validate.mjs");
+    await writeFakeCodexValidator(fakePath, []);
+    const provider = createCodexProvider();
+
+    await expect(
+      provider.validate(`${process.execPath} ${fakePath} app-server`)
+    ).resolves.toBeUndefined();
+  });
+
+  it("succeeds when the configured profile exists", async () => {
+    const root = await makeTempRoot();
+    const fakePath = path.join(root, "fake-codex-validate.mjs");
+    await writeFakeCodexValidator(fakePath, ["symphonika"]);
+    const provider = createCodexProvider();
+
+    await expect(
+      provider.validate(
+        `${process.execPath} ${fakePath} -p symphonika app-server`
+      )
+    ).resolves.toBeUndefined();
+  });
+
+  it("returns an actionable error including the [profiles.<name>] snippet when the profile is missing", async () => {
+    const root = await makeTempRoot();
+    const fakePath = path.join(root, "fake-codex-validate.mjs");
+    await writeFakeCodexValidator(fakePath, []);
+    const provider = createCodexProvider();
+
+    await expect(
+      provider.validate(
+        `${process.execPath} ${fakePath} -p symphonika app-server`
+      )
+    ).rejects.toThrow(/\[profiles\.symphonika\][\s\S]*memories\s*=\s*false/);
+  });
+});
+
 async function collectProviderEvents(
   iterable: AsyncIterable<ProviderEvent>
 ): Promise<ProviderEvent[]> {
@@ -457,7 +496,7 @@ function providerInputFixture(): ProviderRunInput {
     prompt: "Implement issue #9.",
     promptPath: "/tmp/prompt.md",
     provider: {
-      command: "codex --dangerously-bypass-approvals-and-sandbox app-server",
+      command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server",
       name: "codex"
     },
     run: {
@@ -564,6 +603,43 @@ async function writeFakeCodexAppServer(
   );
 
   process.env.SYMPHONIKA_FAKE_CODEX_TRANSCRIPT = transcriptPath;
+}
+
+async function writeFakeCodexValidator(
+  filePath: string,
+  knownProfiles: string[]
+): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      `const known = new Set(${JSON.stringify(knownProfiles)});`,
+      "const args = process.argv.slice(2);",
+      "function profileFrom(args) {",
+      "  for (let i = 0; i < args.length; i++) {",
+      "    const a = args[i];",
+      "    if (a === '-p' || a === '--profile') return args[i + 1];",
+      "    if (a.startsWith('--profile=')) return a.slice('--profile='.length);",
+      "  }",
+      "  return undefined;",
+      "}",
+      "if (args.includes('--help')) {",
+      "  process.stdout.write('Usage: fake-codex app-server --listen <URL>\\n');",
+      "  process.exit(0);",
+      "}",
+      "if (args.includes('features') && args.includes('list')) {",
+      "  const profile = profileFrom(args);",
+      "  if (profile !== undefined && !known.has(profile)) {",
+      "    process.stderr.write('Error: config profile `' + profile + '` not found\\n');",
+      "    process.exit(1);",
+      "  }",
+      "  process.stdout.write('memories experimental true\\n');",
+      "  process.exit(0);",
+      "}",
+      "process.exit(0);",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
 }
 
 function readJsonl(contents: string): unknown[] {

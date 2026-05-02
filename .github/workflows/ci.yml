@@ -88,3 +88,35 @@ jobs:
           path: dist
           if-no-files-found: error
           retention-days: 7
+
+  smoke:
+    name: Smoke (opt-in)
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.SYMPHONIKA_SMOKE_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # Install the agent provider declared in symphonika.yml (`agent.provider: codex`).
+      # If a Codex CLI binary is not available in the runner image, switch this step
+      # and `agent.provider` together to keep `doctor` validation aligned.
+      - name: Install codex CLI
+        run: |
+          if ! command -v codex >/dev/null 2>&1; then
+            echo "::error::codex binary not found on PATH; install it before enabling SYMPHONIKA_SMOKE_ENABLED" >&2
+            exit 1
+          fi
+          codex --version
+      - name: Run symphonika smoke
+        env:
+          GITHUB_TOKEN: ${{ secrets.SYMPHONIKA_SMOKE_GITHUB_TOKEN }}
+        run: npm run smoke -- --config symphonika.yml

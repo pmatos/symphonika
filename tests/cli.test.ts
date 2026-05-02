@@ -7,6 +7,7 @@ import type {
   ClearStaleReport,
   InitProjectOptions
 } from "../src/doctor.js";
+import type { SmokeOptions, SmokeReport } from "../src/smoke.js";
 
 describe("CLI", () => {
   it("starts the daemon with the selected config path and port", async () => {
@@ -135,6 +136,144 @@ describe("CLI", () => {
       expect(process.exitCode).toBe(1);
       expect(output.stderr).toContain("clear-stale failed");
       expect(output.stderr).toContain("pass --yes");
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it("smoke forwards --config to the runner and prints a dispatched-run summary", async () => {
+    const previousExitCode = process.exitCode;
+    process.exitCode = 0;
+    const calls: SmokeOptions[] = [];
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({
+      registerSignalHandlers: false,
+      runSmoke: (options) => {
+        calls.push(options);
+        return Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          dispatched: true,
+          errors: [],
+          ok: true,
+          runDetail: {
+            branchName: "sym/symphonika/42-x",
+            id: "run-x",
+            issueNumber: 42,
+            issueSnapshotPath: "/tmp/state/logs/runs/run-x/issue-snapshot.json",
+            issueTitle: "Title",
+            metadataPath: "/tmp/state/logs/runs/run-x/prompt-metadata.json",
+            normalizedLogPath:
+              "/tmp/state/logs/runs/run-x/provider.normalized.jsonl",
+            project: "symphonika",
+            promptPath: "/tmp/state/logs/runs/run-x/prompt.md",
+            provider: "codex",
+            rawLogPath: "/tmp/state/logs/runs/run-x/provider.raw.jsonl",
+            state: "succeeded",
+            terminalReason: null,
+            workspacePath: "/tmp/state/workspaces/symphonika/issues/42-x"
+          },
+          runId: "run-x",
+          warnings: []
+        } satisfies SmokeReport);
+      }
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    try {
+      await program.parseAsync([
+        "node",
+        "symphonika",
+        "smoke",
+        "--config",
+        "custom.yml"
+      ]);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ configPath: "custom.yml" });
+      expect(output.stdout).toContain("smoke ok");
+      expect(output.stdout).toContain("run-x");
+      expect(output.stdout).toContain("succeeded");
+      expect(process.exitCode).not.toBe(1);
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it("smoke exits non-zero when the runner reports a doctor failure", async () => {
+    const previousExitCode = process.exitCode;
+    process.exitCode = 0;
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({
+      registerSignalHandlers: false,
+      runSmoke: () =>
+        Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          dispatched: false,
+          errors: [
+            "projects.symphonika.tracker.repository pmatos/symphonika is missing operational labels: sym:claimed"
+          ],
+          ok: false,
+          warnings: []
+        } satisfies SmokeReport)
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    try {
+      await program.parseAsync(["node", "symphonika", "smoke"]);
+
+      expect(process.exitCode).toBe(1);
+      expect(output.stderr).toContain("smoke failed");
+      expect(output.stderr).toContain("missing operational labels");
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it("smoke prints a skipReason when no eligible issue exists and exits zero", async () => {
+    const previousExitCode = process.exitCode;
+    process.exitCode = 0;
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({
+      registerSignalHandlers: false,
+      runSmoke: () =>
+        Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          dispatched: false,
+          errors: [],
+          ok: true,
+          skipReason: "no eligible issues to dispatch",
+          warnings: []
+        } satisfies SmokeReport)
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    try {
+      await program.parseAsync(["node", "symphonika", "smoke"]);
+
+      expect(process.exitCode).not.toBe(1);
+      expect(output.stdout).toContain("smoke skipped");
+      expect(output.stdout).toContain("no eligible issues");
     } finally {
       process.exitCode = previousExitCode;
     }

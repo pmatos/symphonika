@@ -96,3 +96,9 @@ present.
   `sym:claimed` or `sym:running` and there is no live local run, doctor will
   surface a `sym:stale` warning. Clear it with
   `symphonika clear-stale <project> <issue> --yes`.
+- **Workspace remote is HTTPS by default.** The bootstrap `symphonika.yml`
+  uses an HTTPS remote so clones work in stock GitHub-hosted runners and on
+  any machine without configured SSH keys. Operators who prefer SSH (e.g.
+  for push convenience) can override `workspace.git.remote` locally — most
+  conveniently by copying the file to `symphonika.local.yml` (already
+  gitignored via `*.local`) and pointing `--config` at it.

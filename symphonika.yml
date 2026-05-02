@@ -33,7 +33,7 @@ projects:
     workspace:
       root: ./.symphonika/workspaces/symphonika
       git:
-        remote: git@github.com:pmatos/symphonika.git
+        remote: https://github.com/pmatos/symphonika.git
         base_branch: main
     agent:
       provider: codex

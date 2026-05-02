@@ -179,7 +179,7 @@ polling:
 
 providers:
   codex:
-    command: "codex --dangerously-bypass-approvals-and-sandbox app-server"
+    command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"
   claude:
     command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"
 
@@ -535,8 +535,13 @@ Symphonika assumes providers run with full local permissions.
 Default Codex command:
 
 ```text
-codex --dangerously-bypass-approvals-and-sandbox app-server
+codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server
 ```
+
+The `-p symphonika` flag selects a named profile that operators define in `~/.codex/config.toml` so
+headless runs do not pick up interactive Codex defaults (memory consolidation, hooks, etc.). See
+ADR-0042 for the contract and the snippet operators paste; `doctor` surfaces the snippet when the
+profile is missing.
 
 Default Claude command:
 

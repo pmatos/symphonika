@@ -65,7 +65,7 @@ describe("doctor", () => {
       [
         "providers:",
         "  codex:",
-        '    command: "codex --dangerously-bypass-approvals-and-sandbox app-server"',
+        '    command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"',
         "  claude:",
         '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
         ""
@@ -378,7 +378,7 @@ async function writeValidConfig(
       "  interval_ms: 30000",
       "providers:",
       "  codex:",
-      `    command: "${overrides.codexCommand ?? "codex --dangerously-bypass-approvals-and-sandbox app-server"}"`,
+      `    command: "${overrides.codexCommand ?? "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"}"`,
       "  claude:",
       `    command: "${overrides.claudeCommand ?? "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"}"`,
       "projects:",

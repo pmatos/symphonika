@@ -617,8 +617,80 @@ async function validateCodexAppServerCommand(command: {
   args: string[];
   executable: string;
 }): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command.executable, [...command.args, "--help"], {
+  const help = await runCodexProbe(command.executable, [
+    ...command.args,
+    "--help"
+  ]);
+  if (help.kind === "spawn_error") {
+    throw new Error(
+      `Codex provider command executable not available: ${command.executable}: ${help.message}`
+    );
+  }
+  if (help.kind === "timeout") {
+    throw new Error("Codex provider command validation timed out");
+  }
+  if (help.exitCode !== 0) {
+    throw new Error(
+      `Codex provider command validation failed with exit code ${help.exitCode ?? "unknown"}: ${help.output.trim() || "no output"}`
+    );
+  }
+  if (!/app-server/.test(help.output)) {
+    throw new Error(
+      "Codex provider command help output does not look like app-server"
+    );
+  }
+
+  const profile = extractProfileName(command.args);
+  if (profile === undefined) {
+    return;
+  }
+
+  const appServerIndex = command.args.indexOf("app-server");
+  const baseArgs =
+    appServerIndex >= 0
+      ? command.args.slice(0, appServerIndex)
+      : command.args.slice();
+  const probe = await runCodexProbe(command.executable, [
+    ...baseArgs,
+    "features",
+    "list"
+  ]);
+  if (probe.kind === "spawn_error") {
+    throw new Error(
+      `Codex profile probe for '${profile}' could not spawn ${command.executable}: ${probe.message}`
+    );
+  }
+  if (probe.kind === "timeout") {
+    throw new Error(
+      `Codex profile probe for '${profile}' timed out; cannot verify profile exists`
+    );
+  }
+  if (probe.exitCode === 0) {
+    return;
+  }
+
+  const stderr = probe.output.trim();
+  if (/config profile/i.test(stderr) && /not found/i.test(stderr)) {
+    throw new Error(missingProfileMessage(profile, stderr));
+  }
+  throw new Error(
+    `Codex profile probe for '${profile}' failed with exit code ${probe.exitCode ?? "unknown"}: ${stderr || "no output"}`
+  );
+}
+
+type CodexProbeResult =
+  | { exitCode: number | null; kind: "exit"; output: string }
+  | { kind: "spawn_error"; message: string }
+  | { kind: "timeout" };
+
+async function runCodexProbe(
+  executable: string,
+  args: string[]
+): Promise<CodexProbeResult> {
+  const envTimeout = Number(process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 5_000;
+  return await new Promise<CodexProbeResult>((resolve) => {
+    const child = spawn(executable, args, {
       stdio: ["ignore", "pipe", "pipe"]
     });
     let output = "";
@@ -629,16 +701,16 @@ async function validateCodexAppServerCommand(command: {
       }
       settled = true;
       terminateProcess(child);
-      reject(new Error("Codex provider command validation timed out"));
-    }, 5_000);
+      resolve({ kind: "timeout" });
+    }, timeoutMs);
 
-    const settle = (callback: () => void): void => {
+    const settle = (result: CodexProbeResult): void => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timer);
-      callback();
+      resolve(result);
     };
 
     child.stdout.setEncoding("utf8");
@@ -650,38 +722,46 @@ async function validateCodexAppServerCommand(command: {
       output += chunk;
     });
     child.once("error", (error) => {
-      settle(() => {
-        reject(
-          new Error(
-            `Codex provider command executable not available: ${command.executable}: ${error.message}`
-          )
-        );
-      });
+      settle({ kind: "spawn_error", message: error.message });
     });
     child.once("close", (exitCode) => {
-      settle(() => {
-        if (exitCode !== 0) {
-          reject(
-            new Error(
-              `Codex provider command validation failed with exit code ${exitCode ?? "unknown"}`
-            )
-          );
-          return;
-        }
-
-        if (!/app-server/.test(output)) {
-          reject(
-            new Error(
-              "Codex provider command help output does not look like app-server"
-            )
-          );
-          return;
-        }
-
-        resolve();
-      });
+      settle({ exitCode, kind: "exit", output });
     });
   });
+}
+
+function extractProfileName(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === undefined) {
+      continue;
+    }
+    if (arg === "-p" || arg === "--profile") {
+      return args[i + 1];
+    }
+    if (arg.startsWith("--profile=")) {
+      return arg.slice("--profile=".length);
+    }
+  }
+  return undefined;
+}
+
+function missingProfileMessage(profile: string, stderr: string): string {
+  return [
+    `Codex profile '${profile}' is not defined in ~/.codex/config.toml.`,
+    `Codex reported: ${stderr}`,
+    "",
+    `Add this block to ~/.codex/config.toml (see README.md and docs/adr/0042-codex-profile-for-headless-runs.md):`,
+    "",
+    `  [profiles.${profile}]`,
+    `  analytics = { enabled = false }`,
+    "",
+    `  [profiles.${profile}.features]`,
+    `  memories         = false`,
+    `  multi_agent      = true`,
+    `  codex_hooks      = false`,
+    `  image_generation = false`
+  ].join("\n");
 }
 
 function parseCommand(command: string): { args: string[]; executable: string } {

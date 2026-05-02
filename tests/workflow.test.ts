@@ -37,7 +37,7 @@ describe("workflow prompt rendering", () => {
         name: "symphonika"
       },
       provider: {
-        command: "codex --dangerously-bypass-approvals-and-sandbox app-server",
+        command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server",
         name: "codex"
       },
       run: {
@@ -72,7 +72,7 @@ describe("workflow prompt rendering", () => {
       "Branch sym/symphonika/7-render-prompts at refs/heads/sym/symphonika/7-render-prompts."
     );
     expect(rendered.prompt).toContain(
-      'Provider command codex --dangerously-bypass-approvals-and-sandbox app-server with labels ["agent-ready"].'
+      'Provider command codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server with labels ["agent-ready"].'
     );
     expect(rendered.preambleVersion).toBe("autonomy-preamble-v1");
   });
@@ -89,7 +89,7 @@ describe("workflow prompt rendering", () => {
           name: "symphonika"
         },
         provider: {
-          command: "codex --dangerously-bypass-approvals-and-sandbox app-server",
+          command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server",
           name: "codex"
         },
         run: {
@@ -120,7 +120,7 @@ describe("workflow prompt rendering", () => {
           name: "symphonika"
         },
         provider: {
-          command: "codex --dangerously-bypass-approvals-and-sandbox app-server",
+          command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server",
           name: "codex"
         },
         run: {
@@ -192,7 +192,7 @@ describe("workflow prompt rendering", () => {
         name: "symphonika"
       },
       provider: {
-        command: "codex --dangerously-bypass-approvals-and-sandbox app-server",
+        command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server",
         name: "codex" as const
       },
       run: {
@@ -271,7 +271,7 @@ describe("workflow prompt rendering", () => {
         name: "symphonika"
       },
       provider: {
-        command: "codex --dangerously-bypass-approvals-and-sandbox app-server",
+        command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server",
         name: "codex"
       },
       run: {

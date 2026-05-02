@@ -70,7 +70,7 @@ async function writeProject(root: string, workflowTemplate: string): Promise<voi
       "  interval_ms: 25",
       "providers:",
       "  codex:",
-      '    command: "codex --dangerously-bypass-approvals-and-sandbox app-server"',
+      '    command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"',
       "  claude:",
       '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
       "projects:",

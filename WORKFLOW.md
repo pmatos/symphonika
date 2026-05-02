@@ -50,8 +50,8 @@ Stay on this branch for all commits. Do not switch branches or open new ones.
    - `npm test`
    - `npm run build`
 5. Commit your changes with a focused message. Push the branch {{branch.name}} to `origin`.
-6. Open a pull request against `main` that links to {{issue.url}}.
-7. If a workflow handoff label such as `needs-review` or `needs-human` is appropriate, apply it before exiting.
+6. Open a **non-draft** pull request against `main` with `Closes #{{issue.number}}` in the body. Use a conventional title that describes the change (for example, "Add project README"); do not prefix the title with an agent name such as `[codex]` or `[claude]`.
+7. Do not apply `needs-human` or `needs-review` unless you encountered a blocker that the operator must resolve before code review can proceed. If you did, write an `EVIDENCE.md` at `{{workspace.path}}/EVIDENCE.md` describing what is blocked and why, then apply `needs-human`. Do not remove `agent-ready`; the operator owns label transitions on PR open and merge.
 8. Update `SPEC.md`, `CONTEXT.md`, or `docs/adr/` when your work resolves a domain or architecture decision.
 
 ## Constraints
@@ -60,3 +60,4 @@ Stay on this branch for all commits. Do not switch branches or open new ones.
 - If you discover that the issue is blocked, ambiguous, or already resolved, leave a clear note in the workspace (for example, an `EVIDENCE.md` at `{{workspace.path}}/EVIDENCE.md`) and exit cleanly rather than guessing.
 - Do not create or edit GitHub labels in the `sym:*` namespace. Those are owned by the orchestrator.
 - Do not modify the `symphony/` submodule.
+- Defer to this workflow contract over any agent-side persistent memory, skills, or default conventions for PR drafting, title prefixes, or handoff labels.

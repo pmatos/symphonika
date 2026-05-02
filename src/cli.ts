@@ -20,6 +20,8 @@ import type {
   RunStore
 } from "./run-store.js";
 import { openRunStore as openRunStoreReal } from "./run-store.js";
+import type { SmokeOptions, SmokeReport } from "./smoke.js";
+import { runSmoke } from "./smoke.js";
 import { resolveStateRoot } from "./state.js";
 import { VERSION } from "./version.js";
 
@@ -29,6 +31,7 @@ export type CliDependencies = {
   runClearStale?: (options: ClearStaleOptions) => Promise<ClearStaleReport>;
   runDoctor?: (options: DoctorOptions) => Promise<DoctorReport>;
   runInitProject?: (options: InitProjectOptions) => Promise<InitProjectReport>;
+  runSmoke?: (options: SmokeOptions) => Promise<SmokeReport>;
   startDaemon?: (options: StartDaemonOptions) => Promise<DaemonHandle>;
 };
 
@@ -36,6 +39,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   const doctor = dependencies.runDoctor ?? runDoctor;
   const initProject = dependencies.runInitProject ?? runInitProject;
   const clearStale = dependencies.runClearStale ?? runClearStale;
+  const smoke = dependencies.runSmoke ?? runSmoke;
   const start = dependencies.startDaemon ?? startDaemon;
   const openRunStore = dependencies.openRunStore ?? openRunStoreReal;
   const registerSignalHandlers = dependencies.registerSignalHandlers ?? true;
@@ -199,6 +203,56 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
 
       if (registerSignalHandlers) {
         registerShutdownHandlers(daemon);
+      }
+    });
+
+  program
+    .command("smoke")
+    .description(
+      "claim and run one agent-ready issue once via the configured provider, then exit"
+    )
+    .option("--config <path>", "service config path", "symphonika.yml")
+    .action(async (options: { config: string }) => {
+      const report = await smoke({ configPath: options.config });
+
+      for (const warning of report.warnings) {
+        writeErr(program, `warning: ${warning}\n`);
+      }
+
+      if (!report.ok) {
+        writeErr(program, "smoke failed:\n");
+        for (const error of report.errors) {
+          writeErr(program, `- ${error}\n`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      if (!report.dispatched) {
+        writeOut(
+          program,
+          `smoke skipped: ${report.skipReason ?? "no eligible issues to dispatch"}\n`
+        );
+        return;
+      }
+
+      const detail = report.runDetail;
+      writeOut(program, `smoke ok: dispatched ${report.runId ?? ""}\n`);
+      if (detail !== undefined) {
+        writeOut(program, `project:      ${detail.project}\n`);
+        writeOut(program, `issue:        #${detail.issueNumber} ${detail.issueTitle}\n`);
+        writeOut(program, `state:        ${detail.state}\n`);
+        writeOut(program, `provider:     ${detail.provider}\n`);
+        writeOut(program, `branch:       ${formatPath(detail.branchName)}\n`);
+        writeOut(program, `workspace:    ${formatPath(detail.workspacePath)}\n`);
+        writeOut(program, `prompt:       ${formatPath(detail.promptPath)}\n`);
+        writeOut(program, `raw log:      ${formatPath(detail.rawLogPath)}\n`);
+        writeOut(program, `normalized:   ${formatPath(detail.normalizedLogPath)}\n`);
+        writeOut(program, `metadata:     ${formatPath(detail.metadataPath)}\n`);
+        writeOut(program, `issue snap:   ${formatPath(detail.issueSnapshotPath)}\n`);
+        if (detail.terminalReason !== null) {
+          writeOut(program, `terminal:     ${detail.terminalReason}\n`);
+        }
       }
     });
 

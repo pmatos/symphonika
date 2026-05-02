@@ -8,6 +8,7 @@ import type { ProviderEvent, ProviderRunInput } from "../src/provider.js";
 
 const tempRoots: string[] = [];
 const originalFakeCodexTranscript = process.env.SYMPHONIKA_FAKE_CODEX_TRANSCRIPT;
+const originalProbeTimeout = process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS;
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-codex-test-"));
@@ -20,6 +21,11 @@ afterEach(async () => {
     delete process.env.SYMPHONIKA_FAKE_CODEX_TRANSCRIPT;
   } else {
     process.env.SYMPHONIKA_FAKE_CODEX_TRANSCRIPT = originalFakeCodexTranscript;
+  }
+  if (originalProbeTimeout === undefined) {
+    delete process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS;
+  } else {
+    process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS = originalProbeTimeout;
   }
 
   await Promise.all(
@@ -441,6 +447,22 @@ describe("Codex provider validate", () => {
       )
     ).rejects.toThrow(/\[profiles\.symphonika\][\s\S]*memories\s*=\s*false/);
   });
+
+  it("fails validation when the profile probe times out instead of silently treating it as success", async () => {
+    const root = await makeTempRoot();
+    const fakePath = path.join(root, "fake-codex-validate.mjs");
+    await writeFakeCodexValidator(fakePath, ["symphonika"], {
+      hangFeaturesList: true
+    });
+    process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS = "200";
+    const provider = createCodexProvider();
+
+    await expect(
+      provider.validate(
+        `${process.execPath} ${fakePath} -p symphonika app-server`
+      )
+    ).rejects.toThrow(/profile probe for 'symphonika' timed out/i);
+  });
 });
 
 async function collectProviderEvents(
@@ -607,12 +629,14 @@ async function writeFakeCodexAppServer(
 
 async function writeFakeCodexValidator(
   filePath: string,
-  knownProfiles: string[]
+  knownProfiles: string[],
+  options: { hangFeaturesList?: boolean } = {}
 ): Promise<void> {
   await writeFile(
     filePath,
     [
       `const known = new Set(${JSON.stringify(knownProfiles)});`,
+      `const hangFeaturesList = ${options.hangFeaturesList === true ? "true" : "false"};`,
       "const args = process.argv.slice(2);",
       "function profileFrom(args) {",
       "  for (let i = 0; i < args.length; i++) {",
@@ -625,17 +649,21 @@ async function writeFakeCodexValidator(
       "if (args.includes('--help')) {",
       "  process.stdout.write('Usage: fake-codex app-server --listen <URL>\\n');",
       "  process.exit(0);",
-      "}",
-      "if (args.includes('features') && args.includes('list')) {",
-      "  const profile = profileFrom(args);",
-      "  if (profile !== undefined && !known.has(profile)) {",
-      "    process.stderr.write('Error: config profile `' + profile + '` not found\\n');",
-      "    process.exit(1);",
+      "} else if (args.includes('features') && args.includes('list')) {",
+      "  if (hangFeaturesList) {",
+      "    setTimeout(() => process.exit(0), 60_000);",
+      "  } else {",
+      "    const profile = profileFrom(args);",
+      "    if (profile !== undefined && !known.has(profile)) {",
+      "      process.stderr.write('Error: config profile `' + profile + '` not found\\n');",
+      "      process.exit(1);",
+      "    }",
+      "    process.stdout.write('memories experimental true\\n');",
+      "    process.exit(0);",
       "  }",
-      "  process.stdout.write('memories experimental true\\n');",
+      "} else {",
       "  process.exit(0);",
       "}",
-      "process.exit(0);",
       ""
     ].join("\n"),
     "utf8"

@@ -655,8 +655,15 @@ async function validateCodexAppServerCommand(command: {
     "features",
     "list"
   ]);
-  if (probe.kind === "spawn_error" || probe.kind === "timeout") {
-    return;
+  if (probe.kind === "spawn_error") {
+    throw new Error(
+      `Codex profile probe for '${profile}' could not spawn ${command.executable}: ${probe.message}`
+    );
+  }
+  if (probe.kind === "timeout") {
+    throw new Error(
+      `Codex profile probe for '${profile}' timed out; cannot verify profile exists`
+    );
   }
   if (probe.exitCode === 0) {
     return;
@@ -680,6 +687,8 @@ async function runCodexProbe(
   executable: string,
   args: string[]
 ): Promise<CodexProbeResult> {
+  const envTimeout = Number(process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 5_000;
   return await new Promise<CodexProbeResult>((resolve) => {
     const child = spawn(executable, args, {
       stdio: ["ignore", "pipe", "pipe"]
@@ -693,7 +702,7 @@ async function runCodexProbe(
       settled = true;
       terminateProcess(child);
       resolve({ kind: "timeout" });
-    }, 5_000);
+    }, timeoutMs);
 
     const settle = (result: CodexProbeResult): void => {
       if (settled) {

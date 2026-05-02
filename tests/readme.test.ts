@@ -40,7 +40,9 @@ describe("README", () => {
     expect(readme).toContain("private and experimental");
     expect(readme).toContain("single-operator workflow");
 
-    expect(readme).not.toMatch(/\/home\/|\/Users\/|GITHUB_TOKEN|gh[pousr]_[A-Za-z0-9_]+/);
+    expect(readme).not.toMatch(
+      /\/home\/|\/Users\/|GITHUB_TOKEN|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+/,
+    );
   });
 });
 

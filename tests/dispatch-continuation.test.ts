@@ -322,4 +322,78 @@ describe("dispatch continuation cap", () => {
       await daemon.stop();
     }
   });
+
+  it("does not start scheduled continuation when issue loses eligibility during delay", async () => {
+    const root = await makeTempRoot();
+    await mkdir(preparedWorkspaceFixture(root).workspacePath, { recursive: true });
+    await writeProject(root);
+
+    let runAttemptCount = 0;
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        runAttemptCount += 1;
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi
+        .fn()
+        // First refresh schedules the continuation.
+        .mockResolvedValueOnce({ ...baseIssue, labels: ["agent-ready"] })
+        // Second refresh happens when the scheduled continuation fires.
+        .mockResolvedValue({
+          ...baseIssue,
+          labels: ["agent-ready", "needs-human"]
+        }),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const prepareIssueWorkspace = vi.fn(
+      (): Promise<PreparedIssueWorkspace> =>
+        Promise.resolve(preparedWorkspaceFixture(root))
+    );
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => `run-cont-loss-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: fastContinuationPolicy,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      await waitForCondition(daemon.url, ({ runs }) =>
+        runs.some((run) => run["state"] === "succeeded")
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) => r.json())) as {
+        runs: Array<Record<string, unknown>>;
+      };
+      expect(status.runs).toHaveLength(1);
+      expect(status.runs[0]?.["isContinuation"]).toBe(false);
+      expect(runAttemptCount).toBe(1);
+      expect(prepareIssueWorkspace).toHaveBeenCalledTimes(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
 });

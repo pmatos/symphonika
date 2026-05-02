@@ -396,11 +396,36 @@ export class RunController {
       token
     };
 
+    // Re-check issue state at the moment the continuation fires. The success
+    // path already checks before scheduling, but operators may remove
+    // agent-ready or add needs-human during the short continuation delay.
+    const refreshed = await this.refreshIssue({
+      project,
+      issueNumber: payload.issue.number,
+      repository
+    });
+    if (refreshed === undefined) {
+      this.logger?.warn(
+        { projectName: payload.projectName, parentRunId: payload.parentRunId },
+        "symphonika continuation dropped: issue refresh unavailable"
+      );
+      return;
+    }
+    if (refreshed === null || refreshed.state !== "open") {
+      return;
+    }
+    const eligibility = evaluateProjectEligibility(refreshed, project, {
+      ignoreOperationalLabels: true
+    });
+    if (!eligibility.eligible) {
+      return;
+    }
+
     const runId = this.createRunId();
     await this.runFreshLifecycle({
       attemptNumber: 1,
       isContinuation: true,
-      issue: payload.issue,
+      issue: refreshed,
       parentRunId: payload.parentRunId,
       project,
       provider,

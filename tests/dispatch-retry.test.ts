@@ -474,6 +474,95 @@ describe("dispatch retry policy", () => {
         .map(([call]) => call as { labels: string[] })
         .filter((call) => call.labels[0] === "sym:failed");
       expect(failedAddCalls.length).toBeGreaterThan(0);
+
+      // Issue #59: terminal-failed runs must remove sym:claimed so the next
+      // reconcile sweep cannot layer sym:stale on top of sym:failed.
+      const claimedRemoveCalls = githubIssuesApi.removeLabelsFromIssue.mock.calls
+        .map(([call]) => call as { labels: string[] })
+        .filter((call) => call.labels[0] === "sym:claimed");
+      expect(claimedRemoveCalls.length).toBeGreaterThan(0);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("does not remove sym:claimed when adding sym:failed fails", async () => {
+    const root = await makeTempRoot();
+    const prepared = preparedWorkspaceFixture(root);
+    await mkdir(prepared.workspacePath, { recursive: true });
+    await writeProject(root);
+
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { line: "{", message: "bad json", type: "malformed_event" },
+          raw: { kind: "malformed_json" }
+        };
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { code: 1, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+
+    let listCalls = 0;
+    const claimedIssue = {
+      ...baseIssue,
+      labels: ["agent-ready", "sym:claimed"]
+    };
+    const githubIssuesApi = {
+      // Reject the sym:failed add to simulate transient GitHub 5xx; succeed for
+      // the initial sym:claimed and sym:running adds.
+      addLabelsToIssue: vi.fn().mockImplementation((input: { labels: string[] }) => {
+        if (input.labels[0] === "sym:failed") {
+          return Promise.reject(new Error("transient github 5xx"));
+        }
+        return Promise.resolve();
+      }),
+      getIssue: vi.fn().mockResolvedValue(claimedIssue),
+      listOpenIssues: vi.fn(() => {
+        listCalls += 1;
+        if (listCalls === 1) {
+          return Promise.resolve([{ ...baseIssue, labels: ["agent-ready"] }]);
+        }
+        return Promise.resolve([claimedIssue]);
+      }),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const prepareIssueWorkspace = vi.fn(
+      (): Promise<PreparedIssueWorkspace> =>
+        Promise.resolve(prepared)
+    );
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => "run-failed-add",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: fastRetryPolicy,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      await waitForCondition(daemon.url, ({ runs }) =>
+        runs.some((run) => run["state"] === "failed")
+      );
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      // PR #62 review feedback: when the sym:failed add fails, sym:claimed
+      // must NOT be removed — otherwise the issue ends up with neither
+      // operational label and is re-eligible for dispatch.
+      const claimedRemoveCalls = githubIssuesApi.removeLabelsFromIssue.mock.calls
+        .map(([call]) => call as { labels: string[] })
+        .filter((call) => call.labels[0] === "sym:claimed");
+      expect(claimedRemoveCalls).toHaveLength(0);
     } finally {
       await daemon.stop();
     }

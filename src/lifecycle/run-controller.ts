@@ -510,13 +510,10 @@ export class RunController {
     } catch (error) {
       if (!runCreated && claimed) {
         // Failure between claim and createRun (rare): still mark sym:failed best-effort.
-        await this.bestEffort(() =>
-          (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
-            ...input.repository,
-            issueNumber: input.issue.number,
-            labels: ["sym:failed"]
-          })
-        );
+        await this.markIssueFailed({
+          issueNumber: input.issue.number,
+          repository: input.repository
+        });
       }
       throw error;
     }
@@ -826,6 +823,34 @@ export class RunController {
     });
   }
 
+  private async markIssueFailed(input: {
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+  }): Promise<void> {
+    const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
+    // Add sym:failed; only on success remove sym:claimed. If either write
+    // fails, the issue retains sym:claimed and stays out of dispatch —
+    // matching pre-#59 safe-on-partial-failure behavior. Full success leaves
+    // the issue with sym:failed alone, so the next reconcile sweep cannot
+    // layer sym:stale on top.
+    try {
+      await api.addLabelsToIssue({
+        ...input.repository,
+        issueNumber: input.issueNumber,
+        labels: ["sym:failed"]
+      });
+    } catch {
+      return;
+    }
+    await this.bestEffort(() =>
+      api.removeLabelsFromIssue({
+        ...input.repository,
+        issueNumber: input.issueNumber,
+        labels: ["sym:claimed"]
+      })
+    );
+  }
+
   private async applyTerminalLabels(input: ApplyLabelsInput): Promise<void> {
     const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
     if (input.outcome.kind === "cancelled") {
@@ -868,13 +893,10 @@ export class RunController {
       input.outcome.kind === "input_required" ||
       (input.outcome.kind === "failed" && !input.willRetry)
     ) {
-      await this.bestEffort(() =>
-        api.addLabelsToIssue({
-          ...input.repository,
-          issueNumber: input.issueNumber,
-          labels: ["sym:failed"]
-        })
-      );
+      await this.markIssueFailed({
+        issueNumber: input.issueNumber,
+        repository: input.repository
+      });
     }
   }
 
@@ -954,13 +976,10 @@ export class RunController {
         projectName: input.project.name,
         reason: "continuation cap reached"
       });
-      await this.bestEffort(() =>
-        (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
-          ...input.repository,
-          issueNumber: input.issue.number,
-          labels: ["sym:failed"]
-        })
-      );
+      await this.markIssueFailed({
+        issueNumber: input.issue.number,
+        repository: input.repository
+      });
       return;
     }
 

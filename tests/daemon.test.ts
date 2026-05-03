@@ -4,7 +4,7 @@ import path from "node:path";
 import pino from "pino";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { startDaemon } from "../src/daemon.js";
+import { resolveLogLevel, startDaemon } from "../src/daemon.js";
 
 const tempRoots: string[] = [];
 
@@ -48,6 +48,26 @@ describe("startDaemon", () => {
     } finally {
       await daemon.stop();
     }
+  });
+});
+
+describe("resolveLogLevel", () => {
+  it("defaults to info when no env var is set", () => {
+    expect(resolveLogLevel({})).toBe("info");
+  });
+
+  it("honours PINO_LOG_LEVEL", () => {
+    expect(resolveLogLevel({ PINO_LOG_LEVEL: "debug" })).toBe("debug");
+  });
+
+  it("honours LOG_LEVEL as an alias", () => {
+    expect(resolveLogLevel({ LOG_LEVEL: "warn" })).toBe("warn");
+  });
+
+  it("prefers PINO_LOG_LEVEL over LOG_LEVEL when both are set", () => {
+    expect(
+      resolveLogLevel({ PINO_LOG_LEVEL: "trace", LOG_LEVEL: "warn" }),
+    ).toBe("trace");
   });
 });
 

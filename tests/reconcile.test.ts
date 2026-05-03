@@ -227,4 +227,55 @@ describe("reconcileActiveRuns", () => {
       expect(cancel).not.toHaveBeenCalled();
     });
   });
+
+  it("preserves `this` when calling getIssue on a class-based API", async () => {
+    await withRunStore(async (store) => {
+      store.createRun({
+        id: "run-a",
+        issue: snapshot(),
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const registry = new ActiveRunRegistry();
+      registry.register({
+        cancel,
+        issueNumber: 7,
+        projectName: project.name,
+        runId: "run-a"
+      });
+
+      class StubApi {
+        readonly calls: Array<{ issueNumber: number }> = [];
+        getIssue(input: {
+          issueNumber: number;
+          owner: string;
+          repo: string;
+          token: string;
+        }): Promise<null> {
+          this.calls.push({ issueNumber: input.issueNumber });
+          return Promise.resolve(null);
+        }
+        listOpenIssues(): Promise<never[]> {
+          return Promise.resolve([]);
+        }
+      }
+      const api = new StubApi();
+
+      await reconcileActiveRuns({
+        activeRuns: registry,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: api,
+        logger,
+        pollStatus: pollStatus([]),
+        projects: new Map([[project.name, project]]),
+        runStore: store
+      });
+
+      expect(api.calls).toEqual([{ issueNumber: 7 }]);
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(registry.get("run-a")?.cancelReason).toBe(CANCEL_REASONS.CLOSED_ISSUE);
+    });
+  });
 });

@@ -2,11 +2,11 @@ import type { Logger } from "pino";
 
 import {
   evaluateProjectEligibility,
+  tryGetIssue,
   type GitHubIssuesApi,
   type IssuePollStatus,
   type IssueSnapshot,
-  type PollingProjectConfig,
-  type RawGitHubIssue
+  type PollingProjectConfig
 } from "../issue-polling.js";
 import type { RunStore } from "../run-store.js";
 
@@ -70,18 +70,9 @@ async function handleMissingFromPoll(input: ReconcileInput & {
     return;
   }
 
-  const fetcher = input.githubIssuesApi.getIssue;
-  if (fetcher === undefined) {
-    input.logger.warn(
-      { runId: input.entry.runId },
-      "symphonika reconcile skipped: githubIssuesApi.getIssue not available"
-    );
-    return;
-  }
-
-  let raw: RawGitHubIssue | null;
+  let raw;
   try {
-    raw = await fetcher({
+    raw = await tryGetIssue(input.githubIssuesApi, {
       issueNumber: input.entry.issueNumber,
       owner: input.project.tracker.owner,
       repo: input.project.tracker.repo,
@@ -91,6 +82,14 @@ async function handleMissingFromPoll(input: ReconcileInput & {
     input.logger.warn(
       { err: error, runId: input.entry.runId },
       "symphonika reconcile getIssue failed"
+    );
+    return;
+  }
+
+  if (raw === undefined) {
+    input.logger.warn(
+      { runId: input.entry.runId },
+      "symphonika reconcile skipped: githubIssuesApi.getIssue not available"
     );
     return;
   }

@@ -12,7 +12,7 @@ import type {
   IssueSnapshot,
   PollingProjectConfig
 } from "../issue-polling.js";
-import { evaluateProjectEligibility } from "../issue-polling.js";
+import { evaluateProjectEligibility, tryGetIssue } from "../issue-polling.js";
 import type {
   AgentProvider,
   AgentProviderName,
@@ -984,13 +984,9 @@ export class RunController {
     issueNumber: number;
     repository: GitHubIssueRepositoryInput;
   }): Promise<IssueSnapshot | null | undefined> {
-    const fetcher = this.githubIssuesApi.getIssue;
-    if (fetcher === undefined) {
-      return undefined;
-    }
     let raw;
     try {
-      raw = await fetcher({
+      raw = await tryGetIssue(this.githubIssuesApi, {
         issueNumber: input.issueNumber,
         owner: input.repository.owner,
         repo: input.repository.repo,
@@ -1001,6 +997,9 @@ export class RunController {
         { err: error },
         "symphonika continuation refresh failed"
       );
+      return undefined;
+    }
+    if (raw === undefined) {
       return undefined;
     }
     if (raw === null) {

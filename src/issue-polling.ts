@@ -212,6 +212,32 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
 export const DEFAULT_GITHUB_ISSUES_API = new OctokitGitHubIssuesApi();
 export const DEFAULT_POLLING_INTERVAL_MS = 30_000;
 
+// Invoke optional GitHubIssuesApi methods through the property accessor so the
+// implementation's `this` binding is preserved. Extracting `api.method` into a
+// local variable strips `this` and breaks class-based implementations like
+// OctokitGitHubIssuesApi (see issue-polling.ts:148).
+
+export async function tryAddLabelsToIssue(
+  api: GitHubIssuesApi,
+  input: GitHubIssueLabelInput
+): Promise<boolean> {
+  if (api.addLabelsToIssue === undefined) {
+    return false;
+  }
+  await api.addLabelsToIssue(input);
+  return true;
+}
+
+export async function tryGetIssue(
+  api: GitHubIssuesApi,
+  input: GitHubIssueRepositoryInput & { issueNumber: number }
+): Promise<RawGitHubIssue | null | undefined> {
+  if (api.getIssue === undefined) {
+    return undefined;
+  }
+  return api.getIssue(input);
+}
+
 export function emptyIssuePollStatus(): IssuePollStatus {
   return {
     candidateIssues: [],

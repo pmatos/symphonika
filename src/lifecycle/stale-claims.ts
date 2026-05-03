@@ -1,9 +1,10 @@
 import type { Logger } from "pino";
 
-import type {
-  GitHubIssuesApi,
-  IssuePollStatus,
-  PollingProjectConfig
+import {
+  tryAddLabelsToIssue,
+  type GitHubIssuesApi,
+  type IssuePollStatus,
+  type PollingProjectConfig
 } from "../issue-polling.js";
 import type { RunStore } from "../run-store.js";
 
@@ -62,23 +63,21 @@ export async function detectStaleClaims(
       continue;
     }
 
-    const addLabelsToIssue = input.githubIssuesApi.addLabelsToIssue;
-    if (addLabelsToIssue === undefined) {
-      input.logger.warn(
-        { project: filtered.project, issueNumber: issue.number },
-        "symphonika stale-claim detection skipped: addLabelsToIssue not available"
-      );
-      continue;
-    }
-
     try {
-      await addLabelsToIssue({
+      const called = await tryAddLabelsToIssue(input.githubIssuesApi, {
         issueNumber: issue.number,
         labels: [STALE_LABEL],
         owner: project.tracker.owner,
         repo: project.tracker.repo,
         token
       });
+      if (!called) {
+        input.logger.warn(
+          { project: filtered.project, issueNumber: issue.number },
+          "symphonika stale-claim detection skipped: addLabelsToIssue not available"
+        );
+        continue;
+      }
       issue.labels.push(STALE_LABEL);
       marks.push({
         issueNumber: issue.number,

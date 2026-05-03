@@ -453,4 +453,41 @@ describe("detectStaleClaims", () => {
       expect(marks).toEqual([{ project: project.name, issueNumber: 7 }]);
     });
   });
+
+  it("preserves `this` when calling addLabelsToIssue on a class-based API", async () => {
+    await withRunStore(async (store) => {
+      const issue = snapshot({ labels: ["agent-ready", "sym:claimed"] });
+
+      class StubApi {
+        readonly calls: Array<{ issueNumber: number; labels: string[] }> = [];
+        addLabelsToIssue(input: {
+          issueNumber: number;
+          labels: string[];
+          owner: string;
+          repo: string;
+          token: string;
+        }): Promise<void> {
+          this.calls.push({ issueNumber: input.issueNumber, labels: input.labels });
+          return Promise.resolve();
+        }
+        listOpenIssues(): Promise<never[]> {
+          return Promise.resolve([]);
+        }
+      }
+      const api = new StubApi();
+
+      const marks = await detectStaleClaims({
+        activeRuns: new ActiveRunRegistry(),
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: api,
+        logger,
+        pollStatus: pollStatusWithFiltered([issue]),
+        projects: new Map([[project.name, project]]),
+        runStore: store
+      });
+
+      expect(api.calls).toEqual([{ issueNumber: 7, labels: ["sym:stale"] }]);
+      expect(marks).toEqual([{ project: project.name, issueNumber: 7 }]);
+    });
+  });
 });

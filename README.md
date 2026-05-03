@@ -26,6 +26,20 @@ npm test
 npm run build
 ```
 
+## Running the daemon
+
+There is no `npm run daemon` script. The `daemon` is a subcommand of the `symphonika` CLI, so run it one of these ways from a clone of this repo:
+
+```sh
+npm run dev -- daemon            # runs src/cli.ts via tsx (recommended for development)
+npm run build && node dist/cli.js daemon
+npm link && symphonika daemon    # link the bin once, then run from anywhere
+```
+
+`npx symphonika daemon` does **not** work from inside this repo: a package's `bin` is only linked into a *consuming* project's `node_modules/.bin`, not its own, so npx silently finds nothing and exits.
+
+The `symphony/` directory in the tree is a git submodule of an unrelated upstream project (`openai/symphony`) used as a reference — it is not a launcher for Symphonika.
+
 ## Self-Hosting
 
 The bootstrap dogfooding path is documented in [docs/smoke.md](docs/smoke.md). The repository includes a bootstrap [symphonika.yml](symphonika.yml) service config and [WORKFLOW.md](WORKFLOW.md) workflow contract for running Symphonika against its own issues.

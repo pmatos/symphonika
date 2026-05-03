@@ -126,7 +126,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   program
     .command("clear-stale")
     .description(
-      "remove sym:stale and sym:claimed from a target issue after explicit confirmation"
+      "remove sym:stale, sym:claimed, and sym:running from a target issue after explicit confirmation"
     )
     .argument("<project>", "project name from symphonika.yml")
     .argument("<issue-number>", "GitHub issue number", parseIssueNumber)

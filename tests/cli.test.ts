@@ -56,10 +56,10 @@ describe("CLI", () => {
           issueNumber: options.issueNumber,
           ok: true,
           project: options.project,
-          removedLabels: ["sym:stale", "sym:claimed"],
+          removedLabels: ["sym:stale", "sym:claimed", "sym:running"],
           repository: "pmatos/symphonika",
           warnings: [
-            "clear-stale will remove sym:stale, sym:claimed from pmatos/symphonika#42"
+            "clear-stale will remove sym:stale, sym:claimed, sym:running from pmatos/symphonika#42"
           ]
         } satisfies ClearStaleReport);
       }
@@ -92,7 +92,7 @@ describe("CLI", () => {
     expect(output.stdout).toContain("clear-stale ok");
     expect(output.stdout).toContain("sym:stale");
     expect(output.stdout).toContain("sym:claimed");
-    expect(output.stdout).not.toContain("sym:running");
+    expect(output.stdout).toContain("sym:running");
   });
 
   it("clear-stale exits non-zero when the runner reports failure (no --yes)", async () => {
@@ -111,7 +111,7 @@ describe("CLI", () => {
           removedLabels: [],
           repository: "pmatos/symphonika",
           warnings: [
-            "clear-stale would remove sym:stale, sym:claimed from pmatos/symphonika#7"
+            "clear-stale would remove sym:stale, sym:claimed, sym:running from pmatos/symphonika#7"
           ]
         } satisfies ClearStaleReport)
     });

@@ -5,7 +5,7 @@ import { parse } from "yaml";
 import type { IssueSnapshot } from "./issue-polling.js";
 import { isPathInside } from "./path-safety.js";
 
-export const AUTONOMY_PREAMBLE_VERSION = "autonomy-preamble-v1";
+export const AUTONOMY_PREAMBLE_VERSION = "autonomy-preamble-v2";
 
 export type PromptProject = {
   name: string;
@@ -116,11 +116,15 @@ const tagPattern = /{{\s*([^{}]+?)\s*}}/g;
 const AUTONOMY_PREAMBLE = [
   "# Autonomous run instructions",
   "",
-  "You are running as an autonomous full-permission coding worker.",
-  "Do not ask the operator for interactive input; make reasonable decisions when ambiguity is low.",
-  "Use the prepared workspace as your current working directory and stay on the assigned issue branch.",
-  "Work only on the assigned issue unless the workflow contract explicitly says otherwise.",
-  "Preserve useful evidence in the workspace when blocked or when you cannot complete the task.",
+  "You are running as an autonomous full-permission coding worker. No operator will respond to prompts, approve tool calls, or read intermediate output during this run; behaviour that depends on a human answering mid-run is a failure mode.",
+  "Use the prepared workspace as your current working directory and stay on the assigned issue branch. Work only on the assigned issue unless the workflow contract explicitly says otherwise. Preserve useful evidence in the workspace when blocked or when you cannot complete the task.",
+  "",
+  "## Operating contract",
+  "",
+  "1. **Make best-effort decisions and document them.** When information is missing or a judgement call is needed, choose the most defensible option, proceed, and leave a `gh issue comment` (or PR comment if a PR exists) explaining the choice and the alternatives considered. A future operator or reviewer can override.",
+  "2. **Never request approval at runtime.** Use the local gh CLI (`gh issue ...`, `gh pr ...`, `gh issue comment ...`, `gh issue edit ...`) for every GitHub mutation — issues, pull requests, comments, labels. Do not call the GitHub MCP connector tools (for example `add_issue_labels`, `create_pull_request`) — those tools elicit per-call operator approval through the provider transport, which Symphonika classifies as `input_required` and ends the run with `terminal_reason=\"provider requested input\"`.",
+  "3. **Do not self-apply `needs-human` as an exit strategy.** If you cannot proceed at all, post an explanatory comment with `gh issue comment` describing what blocked you and what would unblock it, then exit cleanly without applying handoff labels. The operator may still apply `needs-human` from outside the run; that is unchanged.",
+  "4. **Branch and PR hygiene.** Commit, push, and open the PR via `gh pr create` with explicit non-interactive flags (`--base`, `--head`, `--title`, `--body`). Do not use `--web` or any other flag that opens a browser or waits for input.",
   ""
 ].join("\n");
 

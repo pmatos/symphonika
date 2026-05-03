@@ -303,6 +303,20 @@ describe("daemon GitHub issue polling", () => {
         repo: "symphonika",
         token: "secret-token"
       });
+      const response = await fetch(`${daemon.url}/api/status`);
+      const body = (await response.json()) as {
+        staleIssues: Array<{
+          issue: { number: number };
+          project: string;
+          reasons: string[];
+        }>;
+      };
+      expect(body.staleIssues).toHaveLength(1);
+      expect(body.staleIssues[0]?.issue.number).toBe(77);
+      expect(body.staleIssues[0]?.project).toBe("symphonika");
+      expect(body.staleIssues[0]?.reasons).toEqual([
+        "has operational label sym:claimed"
+      ]);
     } finally {
       await daemon.stop();
     }

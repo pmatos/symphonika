@@ -441,7 +441,7 @@ export async function runInitProject(
   return initProjectReport(configPath, errors, warnings, projects);
 }
 
-const STALE_CLEAR_LABELS = ["sym:stale", "sym:claimed", "sym:running"] as const;
+const STALE_CLEAR_LABELS = ["sym:stale", "sym:claimed"] as const;
 
 export async function runClearStale(
   options: ClearStaleOptions

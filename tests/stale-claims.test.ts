@@ -449,6 +449,7 @@ describe("detectStaleClaims", () => {
         repo: "symphonika",
         token: "secret"
       });
+      expect(issue.labels).toContain("sym:stale");
       expect(marks).toEqual([{ project: project.name, issueNumber: 7 }]);
     });
   });

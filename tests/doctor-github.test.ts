@@ -380,7 +380,7 @@ describe("runClearStale", () => {
 
     expect(report.ok).toBe(false);
     expect(report.warnings).toContain(
-      "clear-stale would remove sym:stale, sym:claimed, sym:running from pmatos/symphonika#42"
+      "clear-stale would remove sym:stale, sym:claimed from pmatos/symphonika#42"
     );
     expect(report.errors).toContain(
       "pass --yes to remove stale-claim labels non-interactively"
@@ -389,7 +389,7 @@ describe("runClearStale", () => {
     expect(githubApi.removeIssueLabel).not.toHaveBeenCalled();
   });
 
-  it("removes sym:stale, sym:claimed, and sym:running when --yes is supplied", async () => {
+  it("removes only sym:stale and sym:claimed when --yes is supplied", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);
     const githubApi: GitHubApi = {
@@ -410,22 +410,16 @@ describe("runClearStale", () => {
     });
 
     expect(report.ok).toBe(true);
-    expect(report.removedLabels).toEqual([
-      "sym:stale",
-      "sym:claimed",
-      "sym:running"
-    ]);
-    expect(githubApi.removeIssueLabel).toHaveBeenCalledTimes(3);
-    expect(githubApi.removeIssueLabel).toHaveBeenNthCalledWith(3, {
+    expect(report.removedLabels).toEqual(["sym:stale", "sym:claimed"]);
+    expect(githubApi.removeIssueLabel).toHaveBeenCalledTimes(2);
+    expect(githubApi.removeIssueLabel).not.toHaveBeenCalledWith({
       issueNumber: 84,
       name: "sym:running",
       owner: "pmatos",
       repo: "symphonika",
       token: "secret-token"
     });
-    expect(report.warnings[0]).toContain(
-      "sym:stale, sym:claimed, sym:running"
-    );
+    expect(report.warnings[0]).toContain("sym:stale, sym:claimed");
   });
 
   it("removes sym:stale and sym:claimed when --yes is supplied", async () => {
@@ -449,16 +443,12 @@ describe("runClearStale", () => {
     });
 
     expect(report.ok).toBe(true);
-    expect(report.removedLabels).toEqual([
-      "sym:stale",
-      "sym:claimed",
-      "sym:running"
-    ]);
+    expect(report.removedLabels).toEqual(["sym:stale", "sym:claimed"]);
     expect(report.repository).toBe("pmatos/symphonika");
     expect(report.warnings).toContain(
-      "clear-stale will remove sym:stale, sym:claimed, sym:running from pmatos/symphonika#42"
+      "clear-stale will remove sym:stale, sym:claimed from pmatos/symphonika#42"
     );
-    expect(githubApi.removeIssueLabel).toHaveBeenCalledTimes(3);
+    expect(githubApi.removeIssueLabel).toHaveBeenCalledTimes(2);
     expect(githubApi.removeIssueLabel).toHaveBeenNthCalledWith(1, {
       issueNumber: 42,
       name: "sym:stale",
@@ -500,11 +490,7 @@ describe("runClearStale", () => {
     });
 
     expect(report.ok).toBe(true);
-    expect(report.removedLabels).toEqual([
-      "sym:stale",
-      "sym:claimed",
-      "sym:running"
-    ]);
+    expect(report.removedLabels).toEqual(["sym:stale", "sym:claimed"]);
   });
 
   it("reports unknown projects as an error", async () => {

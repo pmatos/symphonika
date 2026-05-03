@@ -111,7 +111,7 @@ describe("CLI", () => {
           removedLabels: [],
           repository: "pmatos/symphonika",
           warnings: [
-            "clear-stale would remove sym:stale, sym:claimed from pmatos/symphonika#7"
+            "clear-stale would remove sym:stale, sym:claimed, sym:running from pmatos/symphonika#7"
           ]
         } satisfies ClearStaleReport)
     });

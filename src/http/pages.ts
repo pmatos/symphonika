@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 
 import type {
+  FilteredProjectIssueSnapshot,
+  IssuePollStatus
+} from "../issue-polling.js";
+import type {
   ListRunsFilter,
   RunState,
   RunStatus,
@@ -11,6 +15,7 @@ import type { StatusSnapshot } from "../status.js";
 export type RegisterPagesOptions = {
   app: Hono;
   getStatusSnapshot?: () => StatusSnapshot;
+  issuePollStatus?: IssuePollStatus;
   runStore: RunStore;
   version: string;
 };
@@ -42,6 +47,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       [
         renderHeader(options.version, snapshot),
         renderProjectsCard(snapshot),
+        renderStaleIssuesCard(options.issuePollStatus?.filteredIssues ?? []),
         renderRunsTable("Recent runs", recentRuns)
       ].join("")
     );
@@ -150,6 +156,27 @@ function renderProjectsCard(snapshot: StatusSnapshot | undefined): string {
     .join("");
   return `<section><h2>Projects</h2>
 <table><thead><tr><th>Name</th><th>Validation</th><th>Workflow</th><th>Missing operational labels</th></tr></thead>
+<tbody>${rows}</tbody></table></section>`;
+}
+
+function renderStaleIssuesCard(
+  filteredIssues: FilteredProjectIssueSnapshot[]
+): string {
+  const staleIssues = filteredIssues.filter((entry) =>
+    entry.issue.labels.includes("sym:stale")
+  );
+  if (staleIssues.length === 0) {
+    return "";
+  }
+
+  const rows = staleIssues
+    .map(
+      (entry) =>
+        `<tr><td>${escapeHtml(entry.project)}</td><td><a href="${escapeHtml(entry.issue.url)}">#${entry.issue.number}</a> ${escapeHtml(entry.issue.title)}</td><td>${escapeHtml(entry.reasons.join(", "))}</td></tr>`
+    )
+    .join("");
+  return `<section><h2>Stale issues</h2>
+<table><thead><tr><th>Project</th><th>Issue</th><th>Reason</th></tr></thead>
 <tbody>${rows}</tbody></table></section>`;
 }
 

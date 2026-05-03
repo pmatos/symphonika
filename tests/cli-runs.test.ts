@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { buildCli } from "../src/cli.js";
+import type { DoctorReport } from "../src/doctor.js";
 import type { IssueSnapshot } from "../src/issue-polling.js";
 import { openRunStore } from "../src/run-store.js";
 
@@ -39,14 +40,18 @@ function sampleIssue(overrides: Partial<IssueSnapshot> = {}): IssueSnapshot {
   };
 }
 
-function captureProgram(stateRoot: string): {
+function captureProgram(
+  stateRoot: string,
+  overrides: Partial<Parameters<typeof buildCli>[0]> = {}
+): {
   output: { stderr: string; stdout: string };
   program: ReturnType<typeof buildCli>;
 } {
   const output = { stderr: "", stdout: "" };
   const program = buildCli({
     openRunStore: () => openRunStore({ stateRoot }),
-    registerSignalHandlers: false
+    registerSignalHandlers: false,
+    ...overrides
   });
   program.configureOutput({
     writeErr: (m) => {
@@ -96,6 +101,45 @@ describe("CLI run commands", () => {
     expect(output.stdout).toContain("failed: 1");
     expect(output.stdout).toContain("r-running");
     expect(output.stdout).toContain("r-failed");
+  });
+
+  it("status prints stale GitHub issues by project and issue number", async () => {
+    const stateRoot = await makeTempRoot();
+    const { output, program } = captureProgram(stateRoot, {
+      runDoctor: () =>
+        Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          errors: [],
+          ok: true,
+          projects: [
+            {
+              missingOperationalLabels: [],
+              name: "alpha",
+              staleIssues: [
+                {
+                  number: 44,
+                  title: "Stale claim",
+                  url: "https://github.com/pmatos/symphonika/issues/44"
+                }
+              ],
+              validForDispatch: true,
+              workflowPath: "/tmp/WORKFLOW.md"
+            }
+          ]
+        } satisfies DoctorReport)
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "status",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+
+    expect(output.stdout).toContain("project: alpha");
+    expect(output.stdout).toContain("stale issues: 1");
+    expect(output.stdout).toContain("#44  Stale claim");
   });
 
   it("runs filters by state and prints (no runs) for empty results", async () => {

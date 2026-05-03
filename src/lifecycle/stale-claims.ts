@@ -79,6 +79,7 @@ export async function detectStaleClaims(
         repo: project.tracker.repo,
         token
       });
+      issue.labels.push(STALE_LABEL);
       marks.push({
         issueNumber: issue.number,
         project: filtered.project
@@ -120,4 +121,3 @@ function hasAnyLabel(labels: string[], targets: ReadonlyArray<string>): boolean 
   }
   return false;
 }
-

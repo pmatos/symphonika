@@ -404,45 +404,6 @@ describe("runClearStale", () => {
       cwd: root,
       env: { GITHUB_TOKEN: "secret-token" },
       githubApi,
-      issueNumber: 84,
-      project: "symphonika",
-      yes: true
-    });
-
-    expect(report.ok).toBe(true);
-    expect(report.removedLabels).toEqual([
-      "sym:stale",
-      "sym:claimed",
-      "sym:running"
-    ]);
-    expect(githubApi.removeIssueLabel).toHaveBeenCalledTimes(3);
-    expect(githubApi.removeIssueLabel).toHaveBeenNthCalledWith(3, {
-      issueNumber: 84,
-      name: "sym:running",
-      owner: "pmatos",
-      repo: "symphonika",
-      token: "secret-token"
-    });
-    expect(report.warnings[0]).toContain(
-      "sym:stale, sym:claimed, sym:running"
-    );
-  });
-
-  it("removes sym:stale and sym:claimed when --yes is supplied", async () => {
-    const root = await makeTempRoot();
-    await writeValidProject(root);
-    const githubApi: GitHubApi = {
-      createLabel: vi.fn(),
-      listLabels: vi.fn(),
-      removeIssueLabel: vi.fn().mockResolvedValue(undefined),
-      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
-    };
-
-    const report = await runClearStale({
-      configPath: "symphonika.yml",
-      cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubApi,
       issueNumber: 42,
       project: "symphonika",
       yes: true
@@ -473,6 +434,13 @@ describe("runClearStale", () => {
       repo: "symphonika",
       token: "secret-token"
     });
+    expect(githubApi.removeIssueLabel).toHaveBeenNthCalledWith(3, {
+      issueNumber: 42,
+      name: "sym:running",
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "secret-token"
+    });
   });
 
   it("treats label-not-found as a successful removal", async () => {
@@ -485,6 +453,7 @@ describe("runClearStale", () => {
       removeIssueLabel: vi
         .fn()
         .mockImplementationOnce(() => Promise.reject(notFound))
+        .mockResolvedValueOnce(undefined)
         .mockResolvedValueOnce(undefined),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };

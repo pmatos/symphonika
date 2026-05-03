@@ -667,7 +667,7 @@ Bootstrap CLI commands:
 
 `init-project` creates missing operational labels only after explicit confirmation.
 
-`clear-stale` removes `sym:stale` and `sym:claimed` only after explicit confirmation.
+`clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
 
 ## 14. Local Web UI and API
 

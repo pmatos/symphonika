@@ -289,4 +289,42 @@ describe("HTTP app — runs API and pages", () => {
       test.cleanup();
     }
   });
+
+  it("renders stale issues on the dashboard with project and issue number", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        issuePollStatus: {
+          candidateIssues: [],
+          errors: [],
+          filteredIssues: [
+            {
+              issue: sampleIssue({
+                labels: ["agent-ready", "sym:claimed", "sym:stale"],
+                number: 44,
+                title: "Stale claim",
+                url: "https://github.com/pmatos/symphonika/issues/44"
+              }),
+              project: "alpha",
+              reasons: ["has operational label sym:stale"]
+            }
+          ],
+          projects: []
+        },
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).toContain("Stale issues");
+      expect(body).toContain("alpha");
+      expect(body).toContain("#44");
+      expect(body).toContain("Stale claim");
+    } finally {
+      test.cleanup();
+    }
+  });
 });

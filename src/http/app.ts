@@ -265,6 +265,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
 
     registerPages({
       app,
+      issuePollStatus,
       ...(options.runStore !== undefined ? { runStore: options.runStore } : {}),
       version: options.version
     } as Parameters<typeof registerPages>[0]);

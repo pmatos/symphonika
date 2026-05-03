@@ -7,6 +7,7 @@ import { startDaemon } from "./daemon.js";
 import type {
   ClearStaleOptions,
   ClearStaleReport,
+  DoctorProjectReport,
   DoctorOptions,
   DoctorReport,
   InitProjectOptions,
@@ -57,27 +58,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .action(async (options: { config: string }) => {
       const report = await doctor({ configPath: options.config });
 
-      const printStaleSection = (): void => {
-        for (const project of report.projects) {
-          if (project.staleIssues.length === 0) {
-            continue;
-          }
-          writeOut(
-            program,
-            `- project: ${project.name} — stale issues: ${project.staleIssues.length}\n`
-          );
-          for (const issue of project.staleIssues) {
-            writeOut(program, `    • #${issue.number}  ${issue.title} (${issue.url})\n`);
-          }
-        }
-      };
-
       if (report.ok) {
         writeOut(
           program,
           `doctor ok: ${report.projects.length} ${pluralize("project", report.projects.length)} valid\n`
         );
-        printStaleSection();
+        printStaleSection(program, report.projects);
         return;
       }
 
@@ -85,7 +71,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       for (const error of report.errors) {
         writeErr(program, `- ${error}\n`);
       }
-      printStaleSection();
+      printStaleSection(program, report.projects);
       process.exitCode = 1;
     });
 
@@ -140,7 +126,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   program
     .command("clear-stale")
     .description(
-      "remove sym:stale and sym:claimed from a target issue after explicit confirmation"
+      "remove sym:stale, sym:claimed, and sym:running from a target issue after explicit confirmation"
     )
     .argument("<project>", "project name from symphonika.yml")
     .argument("<issue-number>", "GitHub issue number", parseIssueNumber)
@@ -260,7 +246,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .command("status")
     .description("print run store summary grouped by lifecycle state")
     .option("--config <path>", "service config path", "symphonika.yml")
-    .action((options: { config: string }) => {
+    .action(async (options: { config: string }) => {
       const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
       const store = openRunStore({ stateRoot });
       try {
@@ -283,6 +269,8 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             );
           }
         }
+        const report = await doctor({ configPath: options.config });
+        printStaleSection(program, report.projects);
       } finally {
         store.close();
       }
@@ -484,6 +472,24 @@ function parseIssueNumber(value: string): number {
 
 function pluralize(word: string, count: number): string {
   return count === 1 ? word : `${word}s`;
+}
+
+function printStaleSection(
+  program: Command,
+  projects: DoctorProjectReport[]
+): void {
+  for (const project of projects) {
+    if (project.staleIssues.length === 0) {
+      continue;
+    }
+    writeOut(
+      program,
+      `- project: ${project.name} — stale issues: ${project.staleIssues.length}\n`
+    );
+    for (const issue of project.staleIssues) {
+      writeOut(program, `    • #${issue.number}  ${issue.title} (${issue.url})\n`);
+    }
+  }
 }
 
 function writeOut(program: Command, message: string): void {

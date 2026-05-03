@@ -828,17 +828,20 @@ export class RunController {
     repository: GitHubIssueRepositoryInput;
   }): Promise<void> {
     const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
-    // Order: add sym:failed first, then remove sym:claimed. If the second call
-    // fails, the issue retains sym:claimed and stays out of dispatch — matching
-    // pre-#59 safe-on-partial-failure behavior. Full success leaves sym:failed
-    // alone, so the next reconcile sweep cannot layer sym:stale on top.
-    await this.bestEffort(() =>
-      api.addLabelsToIssue({
+    // Add sym:failed; only on success remove sym:claimed. If either write
+    // fails, the issue retains sym:claimed and stays out of dispatch —
+    // matching pre-#59 safe-on-partial-failure behavior. Full success leaves
+    // the issue with sym:failed alone, so the next reconcile sweep cannot
+    // layer sym:stale on top.
+    try {
+      await api.addLabelsToIssue({
         ...input.repository,
         issueNumber: input.issueNumber,
         labels: ["sym:failed"]
-      })
-    );
+      });
+    } catch {
+      return;
+    }
     await this.bestEffort(() =>
       api.removeLabelsFromIssue({
         ...input.repository,

@@ -246,8 +246,10 @@ Symphonika prepends a standard autonomy preamble to every rendered workflow prom
 The preamble tells the agent:
 
 - it is running as an autonomous full-permission worker
-- it should not request operator input
-- it should make reasonable decisions when ambiguity is low
+- no operator will respond to prompts, approve tool calls, or read intermediate output during the run; behaviour that depends on a human answering mid-run is a failure mode
+- it should make reasonable decisions when ambiguity is low and document them via `gh issue comment`
+- it should use the local `gh` CLI for every GitHub mutation and avoid the GitHub MCP connector tools (for example `add_issue_labels`, `create_pull_request`), which elicit per-call operator approval through the provider transport
+- it should not self-apply `needs-human` (or any other handoff label) as an exit strategy — leave a `gh issue comment` describing the blocker and exit cleanly instead
 - it should preserve evidence when blocked
 - it should use the prepared workspace and issue branch
 - it should operate on the assigned issue unless the workflow says otherwise
@@ -564,7 +566,7 @@ Runs are autonomous. If a provider requests interactive input:
 - add `sym:failed`
 - preserve logs and workspace
 
-The prompt preamble should minimize these cases by telling agents not to ask for operator input.
+The prompt preamble minimizes these cases by telling agents not to ask for operator input and to avoid tools (such as the GitHub MCP connector) that elicit operator approval through provider transports.
 
 ### 11.5 GitHub Tools
 

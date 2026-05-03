@@ -50,14 +50,27 @@ Stay on this branch for all commits. Do not switch branches or open new ones.
    - `npm test`
    - `npm run build`
 5. Commit your changes with a focused message. Push the branch {{branch.name}} to `origin`.
-6. Open a **non-draft** pull request against `main` with `Closes #{{issue.number}}` in the body. Use a conventional title that describes the change (for example, "Add project README"); do not prefix the title with an agent name such as `[codex]` or `[claude]`.
-7. On successful completion, remove `agent-ready` from the issue so the orchestrator does not schedule redundant continuations (per SPEC §9.3 and §12.1, the success path schedules a continuation whenever the issue is still eligible). The PR opened in step 6 carries the work into review; the operator owns any further label transitions on PR open and merge. Apply `needs-human` only if you encountered a blocker that the operator must resolve before code review can proceed; in that case, also write an `EVIDENCE.md` at `{{workspace.path}}/EVIDENCE.md` describing what is blocked and why.
-8. Update `SPEC.md`, `CONTEXT.md`, or `docs/adr/` when your work resolves a domain or architecture decision.
+6. Open a **non-draft** pull request against `main` with the local `gh` CLI:
+
+   ```sh
+   gh pr create --base main --head {{branch.name}} \
+     --title "<conventional title>" \
+     --body "<summary>\n\nCloses #{{issue.number}}"
+   ```
+
+   Use a conventional title that describes the change (for example, "Add project README"); do not prefix the title with an agent name such as `[codex]` or `[claude]`. Do not use `--web`, `--draft`, or any other flag that opens a browser, waits for input, or downgrades the PR.
+7. On successful completion, remove `agent-ready` from the issue with `gh issue edit {{issue.number}} --remove-label agent-ready` so the orchestrator does not schedule a redundant continuation (per SPEC §9.3 and §12.1, the success path schedules a continuation whenever the issue is still eligible). The PR opened in step 6 carries the work into review; the operator owns any further label transitions on PR open and merge.
+8. If the work cannot proceed at all, post an explanatory comment with `gh issue comment {{issue.number}} --body "<what blocked you and what would unblock it>"`, then exit cleanly. Do not apply `needs-human` or any other handoff label as an exit strategy — the operator decides how to triage. Also write an `EVIDENCE.md` at `{{workspace.path}}/EVIDENCE.md` recording the same explanation for the workspace record.
+9. Update `SPEC.md`, `CONTEXT.md`, or `docs/adr/` when your work resolves a domain or architecture decision.
 
 ## Constraints
 
+- **You are running unattended.** No operator will respond to prompts, approve tool calls, or read intermediate output during this run. Behaviour that depends on a human answering mid-run is a failure mode.
+- **Make best-effort decisions and document them.** When information is missing or a judgement call is needed, choose the most defensible option, proceed, and leave a `gh issue comment` (or PR comment if a PR exists) explaining the choice and the alternatives considered. A future operator or reviewer can override.
+- **Use the local `gh` CLI for every GitHub mutation.** Do **not** call the GitHub MCP connector tools (for example `add_issue_labels`, `create_pull_request`). Those tools elicit per-call operator approval through the MCP transport, which Symphonika classifies as `input_required` and ends the run with `terminal_reason="provider requested input"`. The `gh` CLI has no elicitation surface.
+- **Do not self-apply `needs-human` (or any other handoff label) as an exit strategy.** Use the comment-and-exit path in step 8 instead. The operator may still apply `needs-human` from outside the run; that is unchanged and remains a valid `labels_none` exclusion in service config.
 - This run executes with full local permissions; do not request operator input.
-- If you discover that the issue is blocked, ambiguous, or already resolved, leave a clear note in the workspace (for example, an `EVIDENCE.md` at `{{workspace.path}}/EVIDENCE.md`) and exit cleanly rather than guessing.
+- If you discover that the issue is blocked, ambiguous, or already resolved, follow step 8 (comment + `EVIDENCE.md` + exit).
 - Do not create or edit GitHub labels in the `sym:*` namespace. Those are owned by the orchestrator.
 - Do not modify the `symphony/` submodule.
 - Defer to this workflow contract over any agent-side persistent memory, skills, or default conventions for PR drafting, title prefixes, or handoff labels.

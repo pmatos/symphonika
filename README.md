@@ -46,6 +46,13 @@ The `symphony/` directory in the tree is a git submodule of an unrelated upstrea
 
 The bootstrap dogfooding path is documented in [docs/smoke.md](docs/smoke.md). The repository includes a bootstrap [symphonika.yml](symphonika.yml) service config and [WORKFLOW.md](WORKFLOW.md) workflow contract for running Symphonika against its own issues.
 
+### Autonomy contract for agent runs
+
+Symphonika dispatches the agent unattended; nothing on the operator side will respond to prompts, approve tool calls, or read intermediate output during a run. Workflow contracts must be authored with that constraint in mind.
+
+- Workflow contracts (see [WORKFLOW.md](WORKFLOW.md)) instruct the agent to use the local `gh` CLI for all GitHub mutations and to avoid the GitHub MCP connector tools (for example `add_issue_labels`, `create_pull_request`). MCP connector tools elicit per-call operator approval through the provider transport, which Symphonika classifies as `input_required` and ends the run.
+- If the agent cannot proceed, the contract requires it to leave a `gh issue comment` describing the blocker and exit cleanly — never to self-apply `needs-human` or any other handoff label. The operator may still apply `needs-human` from outside the run.
+
 ### Codex profile setup
 
 The default Codex provider command is `codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server`. Before `npm run doctor`, `npm run smoke`, or starting the daemon, define the `symphonika` profile in `~/.codex/config.toml`:

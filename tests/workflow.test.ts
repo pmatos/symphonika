@@ -74,7 +74,8 @@ describe("workflow prompt rendering", () => {
     expect(rendered.prompt).toContain(
       'Provider command codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server with labels ["agent-ready"].'
     );
-    expect(rendered.preambleVersion).toBe("autonomy-preamble-v1");
+    expect(rendered.prompt).toContain("gh CLI");
+    expect(rendered.preambleVersion).toBe("autonomy-preamble-v2");
   });
 
   it("fails rendering when the workflow references an unknown variable", () => {
@@ -225,7 +226,7 @@ describe("workflow prompt rendering", () => {
     );
     const metadata = parseJsonRecord(await readFile(evidence.metadataPath, "utf8"));
     expect(metadata).toMatchObject({
-      autonomy_preamble_version: "autonomy-preamble-v1",
+      autonomy_preamble_version: "autonomy-preamble-v2",
       branch: input.branch,
       provider: input.provider,
       project: input.project,

@@ -69,7 +69,8 @@ export type DaemonHandle = {
 export async function startDaemon(
   options: StartDaemonOptions = {}
 ): Promise<DaemonHandle> {
-  const logger = options.logger ?? pino();
+  const env = options.env ?? process.env;
+  const logger = options.logger ?? pino({ level: resolveLogLevel(env) });
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 3000;
   const stateRootOptions: Parameters<typeof resolveStateRoot>[0] = {};
@@ -93,7 +94,6 @@ export async function startDaemon(
   }
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
-  const env = options.env ?? process.env;
   const activeRuns = new ActiveRunRegistry();
   const dispatchMutex = createAsyncMutex();
   const dispatchRuntime = {
@@ -543,6 +543,10 @@ function defaultProvidersConfig(): RunControllerProvidersConfig {
         "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"
     }
   };
+}
+
+export function resolveLogLevel(env: NodeJS.ProcessEnv): string {
+  return env["PINO_LOG_LEVEL"] ?? env["LOG_LEVEL"] ?? "info";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

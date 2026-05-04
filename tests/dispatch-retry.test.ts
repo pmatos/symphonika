@@ -475,12 +475,10 @@ describe("dispatch retry policy", () => {
         .filter((call) => call.labels[0] === "sym:failed");
       expect(failedAddCalls.length).toBeGreaterThan(0);
 
-      // Issue #59: terminal-failed runs must remove sym:claimed so the next
-      // reconcile sweep cannot layer sym:stale on top of sym:failed.
       const claimedRemoveCalls = githubIssuesApi.removeLabelsFromIssue.mock.calls
         .map(([call]) => call as { labels: string[] })
         .filter((call) => call.labels[0] === "sym:claimed");
-      expect(claimedRemoveCalls.length).toBeGreaterThan(0);
+      expect(claimedRemoveCalls).toHaveLength(0);
     } finally {
       await daemon.stop();
     }

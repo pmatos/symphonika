@@ -77,9 +77,12 @@ describe("Codex JSON-RPC provider", () => {
       params: {
         approvalPolicy: "never",
         cwd: workspacePath,
+        experimentalRawEvents: false,
+        persistExtendedHistory: true,
         sandbox: "danger-full-access"
       }
     });
+    expect(objectField(objectField(requests[2], "params"), "ephemeral")).toBeUndefined();
     expect(objectField(objectField(requests[2], "params"), "permissionProfile")).toBeUndefined();
     expect(requests[3]).toMatchObject({
       method: "turn/start",
@@ -451,6 +454,8 @@ describe("Codex provider validate", () => {
       method: "thread/start",
       params: {
         approvalPolicy: "never",
+        ephemeral: true,
+        persistExtendedHistory: false,
         sandbox: "danger-full-access"
       }
     });

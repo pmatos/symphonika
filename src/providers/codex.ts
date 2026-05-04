@@ -718,7 +718,7 @@ async function validateCodexAppServerRuntime(command: {
     writeJson(child, {
       id: 2,
       method: "thread/start",
-      params: codexThreadStartParams(cwd)
+      params: codexThreadStartParams(cwd, { ephemeral: true })
     });
     const threadResponse = await readProbeResponse(
       queue,
@@ -945,13 +945,17 @@ async function runCodexProbe(
   });
 }
 
-function codexThreadStartParams(cwd: string): JsonObject {
+function codexThreadStartParams(
+  cwd: string,
+  options: { ephemeral?: boolean } = {}
+): JsonObject {
   return {
     approvalPolicy: "never",
     cwd,
+    ...(options.ephemeral === true ? { ephemeral: true } : {}),
     experimentalRawEvents: false,
     sandbox: "danger-full-access",
-    persistExtendedHistory: true
+    persistExtendedHistory: options.ephemeral === true ? false : true
   };
 }
 

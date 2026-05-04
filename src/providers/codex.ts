@@ -729,6 +729,7 @@ async function validateCodexAppServerRuntime(command: {
     );
     validateThreadStartProbeResponse(threadResponse);
 
+    const runtimeProbeTimeoutMs = codexRuntimeProbeTimeoutMs();
     writeJson(child, {
       id: 3,
       method: "command/exec",
@@ -739,7 +740,7 @@ async function validateCodexAppServerRuntime(command: {
           [
             "touch .symphonika-codex-write-probe || { echo SYMPHONIKA_PROBE_WRITE_FAILED >&2; exit 11; }",
             "git ls-remote https://github.com/openai/codex.git HEAD >/dev/null || { echo SYMPHONIKA_PROBE_GIT_NETWORK_FAILED >&2; exit 12; }",
-            "curl -fsSI https://api.github.com >/dev/null || { echo SYMPHONIKA_PROBE_GITHUB_API_FAILED >&2; exit 13; }",
+            nodeGithubApiProbeCommand(),
             "echo SYMPHONIKA_PROBE_OK"
           ].join("; ")
         ],
@@ -748,7 +749,7 @@ async function validateCodexAppServerRuntime(command: {
         sandboxPolicy: {
           type: "dangerFullAccess"
         },
-        timeoutMs: codexProbeTimeoutMs()
+        timeoutMs: runtimeProbeTimeoutMs
       }
     });
     const commandResponse = await readProbeResponse(
@@ -756,7 +757,8 @@ async function validateCodexAppServerRuntime(command: {
       child,
       3,
       "command/exec",
-      () => stderr
+      () => stderr,
+      runtimeProbeTimeoutMs + 5_000
     );
     validateCommandExecProbeResponse(commandResponse);
   } finally {
@@ -770,10 +772,11 @@ async function readProbeResponse(
   child: ChildProcessWithoutNullStreams,
   requestId: number,
   context: string,
-  stderr: () => string
+  stderr: () => string,
+  timeoutMs = codexProbeTimeoutMs()
 ): Promise<unknown> {
   while (true) {
-    const item = await nextProbeItem(queue, child, context);
+    const item = await nextProbeItem(queue, child, context, timeoutMs);
     switch (item.kind) {
       case "error":
         throw new Error(
@@ -804,7 +807,8 @@ async function readProbeResponse(
 async function nextProbeItem(
   queue: ProcessQueue,
   child: ChildProcess,
-  context: string
+  context: string,
+  timeoutMs: number
 ): Promise<ProcessQueueItem> {
   return await new Promise<ProcessQueueItem>((resolve, reject) => {
     let settled = false;
@@ -819,7 +823,7 @@ async function nextProbeItem(
           `Codex app-server runtime probe timed out waiting for ${context} response`
         )
       );
-    }, codexProbeTimeoutMs());
+    }, timeoutMs);
     timer.unref();
 
     queue.next().then(
@@ -954,6 +958,29 @@ function codexThreadStartParams(cwd: string): JsonObject {
 function codexProbeTimeoutMs(): number {
   const envTimeout = Number(process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS);
   return Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 5_000;
+}
+
+function codexRuntimeProbeTimeoutMs(): number {
+  const envTimeout = Number(process.env.SYMPHONIKA_CODEX_RUNTIME_PROBE_TIMEOUT_MS);
+  return Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 30_000;
+}
+
+function nodeGithubApiProbeCommand(): string {
+  const script = [
+    `const https = require("node:https");`,
+    `const req = https.request("https://api.github.com", { method: "HEAD", headers: { "user-agent": "symphonika-codex-probe" } }, (res) => {`,
+    `  res.resume();`,
+    `  process.exit(res.statusCode !== undefined && res.statusCode < 500 ? 0 : 13);`,
+    `});`,
+    `req.setTimeout(15_000, () => req.destroy(new Error("timeout")));`,
+    `req.on("error", () => process.exit(13));`,
+    `req.end();`
+  ].join(" ");
+  return `${shellQuote(process.execPath)} -e ${shellQuote(script)} || { echo SYMPHONIKA_PROBE_GITHUB_API_FAILED >&2; exit 13; }`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 function extractProfileName(args: string[]): string | undefined {

@@ -10,6 +10,8 @@ const tempRoots: string[] = [];
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
 const originalFakeCodexTranscript = process.env.SYMPHONIKA_FAKE_CODEX_TRANSCRIPT;
 const originalProbeTimeout = process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS;
+const originalRuntimeProbeTimeout =
+  process.env.SYMPHONIKA_CODEX_RUNTIME_PROBE_TIMEOUT_MS;
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-codex-test-"));
@@ -27,6 +29,12 @@ afterEach(async () => {
     delete process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS;
   } else {
     process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS = originalProbeTimeout;
+  }
+  if (originalRuntimeProbeTimeout === undefined) {
+    delete process.env.SYMPHONIKA_CODEX_RUNTIME_PROBE_TIMEOUT_MS;
+  } else {
+    process.env.SYMPHONIKA_CODEX_RUNTIME_PROBE_TIMEOUT_MS =
+      originalRuntimeProbeTimeout;
   }
 
   await Promise.all(
@@ -451,9 +459,35 @@ describe("Codex provider validate", () => {
       params: {
         sandboxPolicy: {
           type: "dangerFullAccess"
-        }
+        },
+        timeoutMs: 30_000
       }
     });
+    const command = objectField(objectField(requests[3], "params"), "command");
+    expect(command).toEqual(["bash", "-lc", expect.any(String)]);
+    const shellScript =
+      Array.isArray(command) && typeof command[2] === "string" ? command[2] : "";
+    expect(shellScript).toContain("https://api.github.com");
+    expect(shellScript).toContain("node:https");
+    expect(shellScript).not.toContain("curl");
+  });
+
+  it("lets operators override the runtime sandbox probe timeout independently", async () => {
+    const root = await makeTempRoot();
+    const fakePath = path.join(root, "fake-codex-validate.mjs");
+    const transcriptPath = path.join(root, "validate-requests.jsonl");
+    await writeFakeCodexValidator(fakePath, [], { transcriptPath });
+    process.env.SYMPHONIKA_CODEX_RUNTIME_PROBE_TIMEOUT_MS = "42000";
+    const provider = createCodexProvider();
+
+    await expect(
+      provider.validate(`${process.execPath} ${fakePath} app-server`)
+    ).resolves.toBeUndefined();
+
+    const requests = readJsonl(await readFile(transcriptPath, "utf8"));
+    expect(objectField(objectField(requests[3], "params"), "timeoutMs")).toBe(
+      42_000
+    );
   });
 
   it("rejects app-server commands that start read-only Codex threads", async () => {

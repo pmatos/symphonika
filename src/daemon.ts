@@ -6,6 +6,10 @@ import pino from "pino";
 import { parse } from "yaml";
 
 import { createHttpApp } from "./http/app.js";
+import {
+  removeDaemonEndpoint,
+  writeDaemonEndpoint
+} from "./daemon-endpoint.js";
 import type {
   GitHubIssuesApi,
   PollConfiguredGitHubIssuesOptions,
@@ -316,6 +320,7 @@ export async function startDaemon(
   const TERMINAL_STATES = new Set<RunState>([
     "cancelled",
     "failed",
+    "input_required",
     "stale",
     "succeeded"
   ]);
@@ -350,14 +355,18 @@ export async function startDaemon(
       })),
     getRuns: () => runStore.listRuns(),
     getScheduled: () => activeRuns.peekDelayed(),
+    getStatusSnapshot: () =>
+      buildStatusSnapshot({
+        configPath: state.configPath,
+        issuePollStatus,
+        runStore,
+        stateRoot: state.stateRoot
+      }),
     issuePollStatus,
     runStore,
     stateRoot: state.stateRoot,
     version: VERSION
   });
-  // Reference buildStatusSnapshot so eslint/tsc don't strip the import; it's
-  // exported for CLI use and may be wired into HTTP pages later.
-  void buildStatusSnapshot;
 
   const server = serve({
     fetch: app.fetch,
@@ -367,6 +376,12 @@ export async function startDaemon(
   await waitForListening(server);
   const port = resolveListeningPort(server, requestedPort);
   const url = `http://${host}:${port}`;
+  await writeDaemonEndpoint(state.stateRoot, {
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    stateRoot: state.stateRoot,
+    url
+  });
   if (state.configExists) {
     await reconcile();
     if (issuePollStatus.candidateIssues.length > 0) {
@@ -401,6 +416,7 @@ export async function startDaemon(
       await scheduledWork;
       await Promise.allSettled(Array.from(inflightDispatches));
       await stopServer(server, logger);
+      await removeDaemonEndpoint(state.stateRoot);
       runStore.close();
     }
   };

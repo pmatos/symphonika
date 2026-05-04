@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -30,10 +30,12 @@ describe("startDaemon", () => {
       logger: pino({ enabled: false }),
       port: 0
     });
+    const endpointPath = path.join(cwd, ".symphonika", "daemon.json");
 
     try {
       const response = await fetch(`${daemon.url}/health`);
       const body: unknown = await response.json();
+      const endpoint = JSON.parse(await readFile(endpointPath, "utf8")) as unknown;
 
       expect(response.status).toBe(200);
       expect(body).toMatchObject({
@@ -45,9 +47,14 @@ describe("startDaemon", () => {
       if (isRecord(body)) {
         expect(typeof body.uptimeMs).toBe("number");
       }
+      expect(endpoint).toMatchObject({
+        stateRoot: path.join(cwd, ".symphonika"),
+        url: daemon.url
+      });
     } finally {
       await daemon.stop();
     }
+    await expect(readFile(endpointPath, "utf8")).rejects.toThrow();
   });
 });
 

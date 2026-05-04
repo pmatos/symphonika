@@ -25,6 +25,7 @@ export type RunStatus = {
   cancelReason: CancelReason | null;
   cancelRequested: boolean;
   continuationParentRunId: string | null;
+  createdAt: string;
   failureClassification: FailureClassification | null;
   id: string;
   isContinuation: boolean;
@@ -40,12 +41,14 @@ export type RunStatus = {
   retryCount: number;
   state: RunState;
   terminalReason: string | null;
+  updatedAt: string;
   workspacePath: string;
 };
 
 export type AttemptStatus = {
   attemptNumber: number;
   branchName: string;
+  createdAt: string;
   id: string;
   issueSnapshotPath: string;
   normalizedLogPath: string;
@@ -55,6 +58,7 @@ export type AttemptStatus = {
   rawLogPath: string;
   runId: string;
   state: RunState;
+  updatedAt: string;
   workspacePath: string;
 };
 
@@ -136,6 +140,7 @@ type RunRow = {
   cancel_reason: string | null;
   cancel_requested: number;
   continuation_parent_run_id: string | null;
+  created_at: string;
   failure_classification: string | null;
   id: string;
   is_continuation: number;
@@ -151,12 +156,14 @@ type RunRow = {
   retry_count: number;
   state: RunState;
   terminal_reason: string | null;
+  updated_at: string;
   workspace_path: string | null;
 };
 
 type AttemptRow = {
   attempt_number: number;
   branch_name: string;
+  created_at: string;
   id: string;
   issue_snapshot_path: string;
   normalized_log_path: string;
@@ -166,6 +173,7 @@ type AttemptRow = {
   raw_log_path: string;
   run_id: string;
   state: RunState;
+  updated_at: string;
   workspace_path: string;
 };
 
@@ -472,7 +480,8 @@ export class RunStore {
           "workspace_path, branch_name, prompt_path, metadata_path,",
           "issue_snapshot_path, raw_log_path, normalized_log_path,",
           "is_continuation, continuation_parent_run_id, retry_count,",
-          "failure_classification, terminal_reason, cancel_requested, cancel_reason",
+          "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
+          "created_at, updated_at",
           "from runs",
           where,
           "order by created_at desc, id desc",
@@ -494,7 +503,8 @@ export class RunStore {
           "workspace_path, branch_name, prompt_path, metadata_path,",
           "issue_snapshot_path, raw_log_path, normalized_log_path,",
           "is_continuation, continuation_parent_run_id, retry_count,",
-          "failure_classification, terminal_reason, cancel_requested, cancel_reason",
+          "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
+          "created_at, updated_at",
           "from runs where id = ?"
         ].join(" ")
       )
@@ -517,7 +527,7 @@ export class RunStore {
         [
           "select id, run_id, attempt_number, state, provider_name, provider_command,",
           "workspace_path, branch_name, prompt_path, issue_snapshot_path,",
-          "raw_log_path, normalized_log_path",
+          "raw_log_path, normalized_log_path, created_at, updated_at",
           "from attempts where run_id = ? order by attempt_number asc, id asc"
         ].join(" ")
       )
@@ -526,6 +536,7 @@ export class RunStore {
     return rows.map((row) => ({
       attemptNumber: row.attempt_number,
       branchName: row.branch_name,
+      createdAt: row.created_at,
       id: row.id,
       issueSnapshotPath: row.issue_snapshot_path,
       normalizedLogPath: row.normalized_log_path,
@@ -535,6 +546,7 @@ export class RunStore {
       rawLogPath: row.raw_log_path,
       runId: row.run_id,
       state: row.state,
+      updatedAt: row.updated_at,
       workspacePath: row.workspace_path
     }));
   }
@@ -757,6 +769,7 @@ function mapRunRow(row: RunRow): RunStatus {
     cancelReason: (row.cancel_reason as CancelReason | null) ?? null,
     cancelRequested: row.cancel_requested === 1,
     continuationParentRunId: row.continuation_parent_run_id ?? null,
+    createdAt: row.created_at,
     failureClassification:
       (row.failure_classification as FailureClassification | null) ?? null,
     id: row.id,
@@ -773,6 +786,7 @@ function mapRunRow(row: RunRow): RunStatus {
     retryCount: row.retry_count ?? 0,
     state: row.state,
     terminalReason: row.terminal_reason ?? null,
+    updatedAt: row.updated_at,
     workspacePath: row.workspace_path ?? ""
   };
 }

@@ -157,6 +157,7 @@ describe("CLI", () => {
           ok: true,
           runDetail: {
             branchName: "sym/symphonika/42-x",
+            createdAt: "2026-05-04T17:00:00.000Z",
             id: "run-x",
             issueNumber: 42,
             issueSnapshotPath: "/tmp/state/logs/runs/run-x/issue-snapshot.json",
@@ -170,6 +171,7 @@ describe("CLI", () => {
             rawLogPath: "/tmp/state/logs/runs/run-x/provider.raw.jsonl",
             state: "succeeded",
             terminalReason: null,
+            updatedAt: "2026-05-04T17:00:01.000Z",
             workspacePath: "/tmp/state/workspaces/symphonika/issues/42-x"
           },
           runId: "run-x",

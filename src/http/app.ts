@@ -3,11 +3,12 @@ import { access } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
 
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 
 import type { IssuePollStatus } from "../issue-polling.js";
 import { emptyIssuePollStatus } from "../issue-polling.js";
 import { isPathInside } from "../path-safety.js";
+import type { StatusSnapshot } from "../status.js";
 import type {
   ListRunsFilter,
   RunState,
@@ -47,6 +48,7 @@ export type HttpAppOptions = {
     kind: "retry" | "continuation";
     runId: string;
   }>;
+  getStatusSnapshot?: () => StatusSnapshot;
   issuePollStatus?: IssuePollStatus;
   now?: () => number;
   runStore?: RunStore;
@@ -66,6 +68,14 @@ const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
   "stale"
 ]);
 
+const TERMINAL_RUN_STATES: ReadonlySet<RunState> = new Set([
+  "cancelled",
+  "failed",
+  "input_required",
+  "stale",
+  "succeeded"
+]);
+
 type FileColumn =
   | "issueSnapshotPath"
   | "metadataPath"
@@ -73,9 +83,11 @@ type FileColumn =
   | "promptPath"
   | "rawLogPath";
 
+type RunFileDescriptor = { column: FileColumn; contentType: string };
+
 const FILE_DESCRIPTORS: Record<
   string,
-  { column: FileColumn; contentType: string }
+  RunFileDescriptor
 > = {
   "issue-snapshot": {
     column: "issueSnapshotPath",
@@ -99,6 +111,29 @@ const FILE_DESCRIPTORS: Record<
   }
 };
 
+const LOG_FILE_DESCRIPTORS: Record<string, RunFileDescriptor> = {
+  "issue-snapshot.json": {
+    column: "issueSnapshotPath",
+    contentType: "application/json; charset=utf-8"
+  },
+  "prompt-metadata.json": {
+    column: "metadataPath",
+    contentType: "application/json; charset=utf-8"
+  },
+  "prompt.md": {
+    column: "promptPath",
+    contentType: "text/markdown; charset=utf-8"
+  },
+  "provider.normalized.jsonl": {
+    column: "normalizedLogPath",
+    contentType: "application/x-ndjson"
+  },
+  "provider.raw.jsonl": {
+    column: "rawLogPath",
+    contentType: "application/x-ndjson"
+  }
+};
+
 export function createHttpApp(options: HttpAppOptions): Hono {
   const app = new Hono();
   const startedAtMs = options.startedAtMs ?? Date.now();
@@ -111,7 +146,11 @@ export function createHttpApp(options: HttpAppOptions): Hono {
   const getActiveRuns = options.getActiveRuns ?? (() => []);
   const getScheduled = options.getScheduled ?? (() => []);
   const runStore = options.runStore;
-  const cancelRun = options.cancelRun;
+  const cancelRun =
+    options.cancelRun ??
+    (runStore === undefined
+      ? undefined
+      : (runId: string) => cancelRunInStore(runStore, runId));
 
   app.get("/health", (context) =>
     context.json({
@@ -197,38 +236,22 @@ export function createHttpApp(options: HttpAppOptions): Hono {
 
     app.get("/api/runs/:id/files/:fileKind", async (context) => {
       const id = context.req.param("id");
-      const detail = runStore.getRun(id);
-      if (detail === undefined) {
-        return context.json({ error: "run not found" }, 404);
-      }
       const fileKind = context.req.param("fileKind");
       const descriptor = FILE_DESCRIPTORS[fileKind];
       if (descriptor === undefined) {
         return context.json({ error: "unknown file kind" }, 404);
       }
-      const filePath = detail[descriptor.column];
-      if (typeof filePath !== "string" || filePath.length === 0) {
-        return context.json({ error: "file not yet recorded" }, 404);
+      return streamRunFile(context, runStore, options.stateRoot, id, descriptor);
+    });
+
+    app.get("/logs/runs/:id/:fileName", async (context) => {
+      const id = context.req.param("id");
+      const fileName = context.req.param("fileName");
+      const descriptor = LOG_FILE_DESCRIPTORS[fileName];
+      if (descriptor === undefined) {
+        return context.json({ error: "unknown file" }, 404);
       }
-      const evidenceRoot = path.join(
-        path.resolve(options.stateRoot),
-        "logs",
-        "runs",
-        id
-      );
-      if (!isPathInside(filePath, evidenceRoot)) {
-        return context.json({ error: "file not available" }, 404);
-      }
-      try {
-        await access(filePath);
-      } catch {
-        return context.json({ error: "file not found" }, 404);
-      }
-      const stream: ReadStream = createReadStream(filePath);
-      return new Response(Readable.toWeb(stream) as ReadableStream, {
-        headers: { "content-type": descriptor.contentType },
-        status: 200
-      });
+      return streamRunFile(context, runStore, options.stateRoot, id, descriptor);
     });
 
     app.post("/api/runs/:id/cancel", async (context) => {
@@ -265,13 +288,64 @@ export function createHttpApp(options: HttpAppOptions): Hono {
 
     registerPages({
       app,
+      ...(options.getStatusSnapshot === undefined
+        ? {}
+        : { getStatusSnapshot: options.getStatusSnapshot }),
       issuePollStatus,
-      ...(options.runStore !== undefined ? { runStore: options.runStore } : {}),
+      runStore,
       version: options.version
-    } as Parameters<typeof registerPages>[0]);
+    });
   }
 
   return app;
+}
+
+async function streamRunFile(
+  context: Context,
+  runStore: RunStore,
+  stateRoot: string,
+  id: string,
+  descriptor: RunFileDescriptor
+): Promise<Response> {
+  const detail = runStore.getRun(id);
+  if (detail === undefined) {
+    return context.json({ error: "run not found" }, 404);
+  }
+  const filePath = detail[descriptor.column];
+  if (typeof filePath !== "string" || filePath.length === 0) {
+    return context.json({ error: "file not yet recorded" }, 404);
+  }
+  const evidenceRoot = path.join(path.resolve(stateRoot), "logs", "runs", id);
+  if (!isPathInside(filePath, evidenceRoot)) {
+    return context.json({ error: "file not available" }, 404);
+  }
+  try {
+    await access(filePath);
+  } catch {
+    return context.json({ error: "file not found" }, 404);
+  }
+  const stream: ReadStream = createReadStream(filePath);
+  return new Response(Readable.toWeb(stream) as ReadableStream, {
+    headers: { "content-type": descriptor.contentType },
+    status: 200
+  });
+}
+
+function cancelRunInStore(
+  runStore: RunStore,
+  runId: string
+): ReturnType<CancelRunFn> {
+  const detail = runStore.getRun(runId);
+  if (detail === undefined) {
+    return { kind: "not-found" };
+  }
+  if (TERMINAL_RUN_STATES.has(detail.state)) {
+    return { kind: "already-terminal", state: detail.state };
+  }
+  runStore.markCancelRequested(runId, "operator");
+  runStore.recordTerminalReason(runId, "operator");
+  runStore.updateRunState(runId, "cancelled");
+  return { kind: "cancelled" };
 }
 
 function parsePositiveInt(value: string | undefined): number | undefined {

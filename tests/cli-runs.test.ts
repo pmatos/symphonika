@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -103,6 +103,170 @@ describe("CLI run commands", () => {
     expect(output.stdout).toContain("r-failed");
   });
 
+  it("status prints project validation, issue counts, and last poll outcome", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "r-running",
+      issue: sampleIssue({ number: 1, title: "Sample" }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("r-running", "running");
+    store.close();
+
+    const { output, program } = captureProgram(stateRoot, {
+      fetch: () =>
+        Promise.resolve(
+          Response.json({
+            candidateIssues: [{ issue: { number: 1 }, project: "alpha" }],
+            filteredIssues: [
+              { issue: { labels: ["sym:running"], number: 2 }, project: "alpha" },
+              { issue: { labels: ["sym:failed"], number: 3 }, project: "alpha" },
+              { issue: { labels: ["sym:stale"], number: 4 }, project: "alpha" }
+            ],
+            issuePolling: {
+              errors: [],
+              projects: [{ fetchedIssues: 4, name: "alpha", ok: true }]
+            },
+            staleIssues: [
+              { issue: { labels: ["sym:stale"], number: 4 }, project: "alpha" }
+            ],
+            state: "idle",
+            stateRoot: path.join(stateRoot, ".symphonika")
+          })
+        ),
+      runDoctor: () =>
+        Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          errors: [],
+          ok: true,
+          projects: [
+            {
+              missingOperationalLabels: [],
+              name: "alpha",
+              staleIssues: [],
+              validForDispatch: true,
+              workflowPath: "/tmp/WORKFLOW.md"
+            }
+          ]
+        } satisfies DoctorReport)
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "status",
+      "--config",
+      path.join(stateRoot, "symphonika.yml"),
+      "--daemon-url",
+      "http://127.0.0.1:3030"
+    ]);
+
+    expect(output.stdout).toContain("daemon: idle at http://127.0.0.1:3030");
+    expect(output.stdout).toContain("Projects:");
+    expect(output.stdout).toContain("alpha: valid");
+    expect(output.stdout).toContain("candidate: 1");
+    expect(output.stdout).toContain("filtered:  3");
+    expect(output.stdout).toContain("running:   1");
+    expect(output.stdout).toContain("failed:    1");
+    expect(output.stdout).toContain("stale:     1");
+    expect(output.stdout).toContain("last poll outcome: alpha ok (4 fetched)");
+  });
+
+  it("status discovers the local daemon endpoint descriptor", async () => {
+    const stateRoot = await makeTempRoot();
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    await mkdir(resolvedStateRoot, { recursive: true });
+    await writeFile(
+      path.join(resolvedStateRoot, "daemon.json"),
+      JSON.stringify({ url: "http://127.0.0.1:3030" }),
+      "utf8"
+    );
+    const requests: string[] = [];
+    const { output, program } = captureProgram(stateRoot, {
+      fetch: (input: string | URL | Request) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        requests.push(url);
+        return Promise.resolve(
+          Response.json({
+            issuePolling: {
+              errors: [],
+              projects: [{ fetchedIssues: 2, name: "alpha", ok: true }]
+            },
+            state: "idle",
+            stateRoot: resolvedStateRoot
+          })
+        );
+      },
+      runDoctor: () =>
+        Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          errors: [],
+          ok: true,
+          projects: []
+        } satisfies DoctorReport)
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "status",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+
+    expect(output.stdout).toContain("daemon: idle at http://127.0.0.1:3030");
+    expect(output.stdout).toContain("last poll outcome: alpha ok (2 fetched)");
+    expect(requests).toEqual(["http://127.0.0.1:3030/api/status"]);
+  });
+
+  it("status and cancel treat a malformed daemon endpoint descriptor as unavailable", async () => {
+    const stateRoot = await makeTempRoot();
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    await mkdir(resolvedStateRoot, { recursive: true });
+    await writeFile(path.join(resolvedStateRoot, "daemon.json"), "{", "utf8");
+
+    const status = captureProgram(stateRoot, {
+      runDoctor: () =>
+        Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          errors: [],
+          ok: true,
+          projects: []
+        } satisfies DoctorReport)
+    });
+    await status.program.parseAsync([
+      "node",
+      "symphonika",
+      "status",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+    expect(status.output.stdout).toContain(
+      "last poll outcome: unknown (not configured)"
+    );
+
+    const cancel = captureProgram(stateRoot);
+    await expect(
+      cancel.program.parseAsync([
+        "node",
+        "symphonika",
+        "cancel",
+        "run-1",
+        "--config",
+        path.join(stateRoot, "symphonika.yml")
+      ])
+    ).rejects.toThrow();
+    expect(cancel.output.stderr).toContain("daemon endpoint not found");
+  });
+
   it("status prints stale GitHub issues by project and issue number", async () => {
     const stateRoot = await makeTempRoot();
     const { output, program } = captureProgram(stateRoot, {
@@ -180,6 +344,8 @@ describe("CLI run commands", () => {
       "failed"
     ]);
     expect(failed.output.stdout).toContain("r-only-failed");
+    expect(failed.output.stdout).toContain("started");
+    expect(failed.output.stdout).toContain("updated");
   });
 
   it("show-run errors when the run is missing and prints detail when present", async () => {
@@ -191,6 +357,29 @@ describe("CLI run commands", () => {
       projectName: "alpha",
       providerCommand: "x",
       providerName: "codex"
+    });
+    store.createAttempt({
+      attemptNumber: 1,
+      branchName: "sym/alpha/7-detail",
+      branchRef: "refs/heads/sym/alpha/7-detail",
+      id: "show-1-attempt-1",
+      issueSnapshotPath: "",
+      metadataPath: "",
+      normalizedLogPath: "",
+      promptPath: "",
+      providerCommand: "x",
+      providerName: "codex",
+      rawLogPath: "",
+      runId: "show-1",
+      state: "running",
+      workspacePath: stateRoot
+    });
+    store.recordProviderEvent({
+      attemptId: "show-1-attempt-1",
+      normalized: { message: "hello from provider", type: "message" },
+      raw: { message: "hello from provider" },
+      runId: "show-1",
+      sequence: 1
     });
     store.close();
 
@@ -219,10 +408,16 @@ describe("CLI run commands", () => {
     ]);
     expect(present.output.stdout).toContain("show-1");
     expect(present.output.stdout).toContain("Detail");
+    expect(present.output.stdout).toContain("started:");
+    expect(present.output.stdout).toContain("updated:");
+    expect(present.output.stdout).toContain("prompt.md");
+    expect(present.output.stdout).toContain("show-1-attempt-1");
+    expect(present.output.stdout).toContain("normalized events");
+    expect(present.output.stdout).toContain("hello from provider");
     expect(present.output.stdout).toContain("<not yet recorded>");
   });
 
-  it("cancel writes markCancelRequested for non-terminal runs and errors otherwise", async () => {
+  it("cancel discovers the local daemon and posts to its cancel endpoint", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     store.createRun({
@@ -233,18 +428,34 @@ describe("CLI run commands", () => {
       providerName: "codex"
     });
     store.updateRunState("cancel-live", "running");
-    store.createRun({
-      id: "cancel-done",
-      issue: sampleIssue({ number: 12 }),
-      projectName: "alpha",
-      providerCommand: "x",
-      providerName: "codex"
-    });
-    store.updateRunState("cancel-done", "succeeded");
     store.close();
 
     const cfg = path.join(stateRoot, "symphonika.yml");
-    const live = captureProgram(stateRoot);
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    await mkdir(resolvedStateRoot, { recursive: true });
+    await writeFile(
+      path.join(resolvedStateRoot, "daemon.json"),
+      JSON.stringify({ url: "http://127.0.0.1:3030" }),
+      "utf8"
+    );
+    const requests: Array<{ method: string; url: string }> = [];
+    const live = captureProgram(stateRoot, {
+      fetch: (input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        requests.push({ method: init?.method ?? "GET", url });
+        if (url.endsWith("/api/status")) {
+          return Promise.resolve(
+            Response.json({ stateRoot: resolvedStateRoot })
+          );
+        }
+        return Promise.resolve(Response.json({ kind: "cancelled" }));
+      }
+    });
     await live.program.parseAsync([
       "node",
       "symphonika",
@@ -253,38 +464,56 @@ describe("CLI run commands", () => {
       "--config",
       cfg
     ]);
-    expect(live.output.stdout).toContain("cancel requested for cancel-live");
+    expect(live.output.stdout).toContain("cancelled cancel-live");
+    expect(requests).toEqual([
+      { method: "GET", url: "http://127.0.0.1:3030/api/status" },
+      {
+        method: "POST",
+        url: "http://127.0.0.1:3030/api/runs/cancel-live/cancel"
+      }
+    ]);
 
     const verifyStore = openRunStore({ stateRoot });
-    expect(verifyStore.getRun("cancel-live")?.cancelRequested).toBe(true);
-    expect(verifyStore.getRun("cancel-live")?.cancelReason).toBe("operator");
+    expect(verifyStore.getRun("cancel-live")?.cancelRequested).toBe(false);
     verifyStore.close();
+  });
 
-    const done = captureProgram(stateRoot);
+  it("cancel refuses a daemon endpoint for another state root", async () => {
+    const stateRoot = await makeTempRoot();
+    const requests: string[] = [];
+    const { output, program } = captureProgram(stateRoot, {
+      fetch: (input: string | URL | Request) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        requests.push(url);
+        if (url.endsWith("/api/status")) {
+          return Promise.resolve(
+            Response.json({ stateRoot: path.join(stateRoot, "..", "other") })
+          );
+        }
+        return Promise.resolve(Response.json({ kind: "cancelled" }));
+      }
+    });
+
     await expect(
-      done.program.parseAsync([
+      program.parseAsync([
         "node",
         "symphonika",
         "cancel",
-        "cancel-done",
+        "cancel-live",
         "--config",
-        cfg
+        path.join(stateRoot, "symphonika.yml"),
+        "--daemon-url",
+        "http://127.0.0.1:3030"
       ])
     ).rejects.toThrow();
-    expect(done.output.stderr).toContain("already succeeded");
 
-    const missing = captureProgram(stateRoot);
-    await expect(
-      missing.program.parseAsync([
-        "node",
-        "symphonika",
-        "cancel",
-        "missing",
-        "--config",
-        cfg
-      ])
-    ).rejects.toThrow();
-    expect(missing.output.stderr).toContain("not found");
+    expect(output.stderr).toContain("state root mismatch");
+    expect(requests).toEqual(["http://127.0.0.1:3030/api/status"]);
   });
 
   it("show-run renders cap context for a cap_reached:no_commits run", async () => {

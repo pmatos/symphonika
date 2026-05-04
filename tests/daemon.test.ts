@@ -1,10 +1,12 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resolveLogLevel, startDaemon } from "../src/daemon.js";
+import { RunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -30,10 +32,12 @@ describe("startDaemon", () => {
       logger: pino({ enabled: false }),
       port: 0
     });
+    const endpointPath = path.join(cwd, ".symphonika", "daemon.json");
 
     try {
       const response = await fetch(`${daemon.url}/health`);
       const body: unknown = await response.json();
+      const endpoint = JSON.parse(await readFile(endpointPath, "utf8")) as unknown;
 
       expect(response.status).toBe(200);
       expect(body).toMatchObject({
@@ -45,8 +49,51 @@ describe("startDaemon", () => {
       if (isRecord(body)) {
         expect(typeof body.uptimeMs).toBe("number");
       }
+      expect(endpoint).toMatchObject({
+        stateRoot: path.join(cwd, ".symphonika"),
+        url: daemon.url
+      });
     } finally {
       await daemon.stop();
+    }
+    await expect(readFile(endpointPath, "utf8")).rejects.toThrow();
+  });
+
+  it("cleans up the HTTP listener when endpoint descriptor writing fails", async () => {
+    const cwd = await makeTempRoot();
+    const port = await getFreePort();
+    await mkdir(path.join(cwd, ".symphonika", "daemon.json"), {
+      recursive: true
+    });
+
+    await expect(
+      startDaemon({
+        cwd,
+        logger: pino({ enabled: false }),
+        port
+      })
+    ).rejects.toThrow();
+    await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
+  });
+
+  it("closes the run store when endpoint descriptor removal fails during stop", async () => {
+    const cwd = await makeTempRoot();
+    const daemon = await startDaemon({
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+    const closeRunStore = vi.spyOn(RunStore.prototype, "close");
+    const endpointPath = path.join(cwd, ".symphonika", "daemon.json");
+
+    try {
+      await rm(endpointPath, { force: true });
+      await mkdir(endpointPath);
+
+      await expect(daemon.stop()).rejects.toThrow();
+      expect(closeRunStore).toHaveBeenCalledTimes(1);
+    } finally {
+      closeRunStore.mockRestore();
     }
   });
 });
@@ -73,4 +120,25 @@ describe("resolveLogLevel", () => {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (typeof address !== "object" || address === null) {
+        server.close(() => reject(new Error("free port lookup failed")));
+        return;
+      }
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(address.port);
+      });
+    });
+  });
 }

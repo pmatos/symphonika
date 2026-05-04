@@ -38,6 +38,7 @@ export type SmokeOptions = {
 export type SmokeRunDetail = Pick<
   RunDetail,
   | "branchName"
+  | "createdAt"
   | "id"
   | "issueNumber"
   | "issueSnapshotPath"
@@ -50,6 +51,7 @@ export type SmokeRunDetail = Pick<
   | "rawLogPath"
   | "state"
   | "terminalReason"
+  | "updatedAt"
   | "workspacePath"
 >;
 
@@ -173,6 +175,7 @@ export async function runSmoke(options: SmokeOptions = {}): Promise<SmokeReport>
 function pickRunDetail(detail: RunDetail): SmokeRunDetail {
   return {
     branchName: detail.branchName,
+    createdAt: detail.createdAt,
     id: detail.id,
     issueNumber: detail.issueNumber,
     issueSnapshotPath: detail.issueSnapshotPath,
@@ -185,6 +188,7 @@ function pickRunDetail(detail: RunDetail): SmokeRunDetail {
     rawLogPath: detail.rawLogPath,
     state: detail.state,
     terminalReason: detail.terminalReason,
+    updatedAt: detail.updatedAt,
     workspacePath: detail.workspacePath
   };
 }

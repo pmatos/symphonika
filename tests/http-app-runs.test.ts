@@ -246,6 +246,11 @@ describe("HTTP app — runs API and pages", () => {
       expect(ok.headers.get("content-type")).toContain("application/x-ndjson");
       expect(await ok.text()).toContain('{"x":1}');
 
+      const log = await app.request("/logs/runs/run-files/provider.raw.jsonl");
+      expect(log.status).toBe(200);
+      expect(log.headers.get("content-type")).toContain("application/x-ndjson");
+      expect(await log.text()).toContain('{"x":1}');
+
       expect(
         (await app.request("/api/runs/run-empty/files/raw-log")).status
       ).toBe(404);
@@ -257,7 +262,7 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
-  it("POST /api/runs/:id/cancel returns 200/404/409 and 303 for form submissions", async () => {
+  it("POST /api/runs/:id/cancel cancels run-store backed active runs", async () => {
     const test = await setup();
     try {
       test.runStore.createRun({
@@ -268,12 +273,24 @@ describe("HTTP app — runs API and pages", () => {
         providerName: "codex"
       });
       test.runStore.updateRunState("live", "running");
+      test.runStore.createRun({
+        id: "done",
+        issue: sampleIssue({ number: 12 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("done", "succeeded");
+      test.runStore.createRun({
+        id: "needs-input",
+        issue: sampleIssue({ number: 13 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("needs-input", "input_required");
 
       const app = createHttpApp({
-        cancelRun: (runId) => {
-          test.runStore.markCancelRequested(runId, "operator");
-          return { kind: "cancelled" };
-        },
         runStore: test.runStore,
         stateRoot: test.stateRoot,
         version: "0.1.0"
@@ -283,6 +300,32 @@ describe("HTTP app — runs API and pages", () => {
       expect(ok.status).toBe(200);
       const okBody = (await ok.json()) as { kind: string };
       expect(okBody.kind).toBe("cancelled");
+      const detail = test.runStore.getRun("live");
+      expect(detail?.state).toBe("cancelled");
+      expect(detail?.cancelRequested).toBe(true);
+      expect(detail?.cancelReason).toBe("operator");
+      expect(detail?.terminalReason).toBe("operator");
+
+      const missing = await app.request("/api/runs/missing/cancel", {
+        method: "POST"
+      });
+      expect(missing.status).toBe(404);
+
+      const done = await app.request("/api/runs/done/cancel", { method: "POST" });
+      expect(done.status).toBe(409);
+      expect(await done.json()).toMatchObject({
+        kind: "already-terminal",
+        state: "succeeded"
+      });
+
+      const inputRequired = await app.request("/api/runs/needs-input/cancel", {
+        method: "POST"
+      });
+      expect(inputRequired.status).toBe(409);
+      expect(await inputRequired.json()).toMatchObject({
+        kind: "already-terminal",
+        state: "input_required"
+      });
 
       const form = await app.request("/api/runs/live/cancel", {
         body: "",
@@ -331,6 +374,85 @@ describe("HTTP app — runs API and pages", () => {
 
       const missing = await app.request("/runs/missing");
       expect(missing.status).toBe(404);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("renders polling projects, timestamps, and stable log links on pages", async () => {
+    const test = await setup();
+    try {
+      const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-page");
+      await mkdir(evidenceDir, { recursive: true });
+      const rawLogPath = path.join(evidenceDir, "provider.raw.jsonl");
+      await writeFile(rawLogPath, '{"type":"message"}\n', "utf8");
+
+      test.runStore.createRun({
+        id: "run-page",
+        issue: sampleIssue({ number: 77, title: "Visible run" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-page", "running");
+      test.runStore.updateRunEvidence("run-page", {
+        branchName: "sym/run-page",
+        branchRef: "refs/heads/sym/run-page",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        rawLogPath,
+        workspacePath: test.stateRoot
+      });
+      test.runStore.createAttempt({
+        attemptNumber: 1,
+        branchName: "sym/run-page",
+        branchRef: "refs/heads/sym/run-page",
+        id: "run-page-attempt-1",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        providerCommand: "x",
+        providerName: "codex",
+        rawLogPath,
+        runId: "run-page",
+        state: "running",
+        workspacePath: test.stateRoot
+      });
+      const detail = test.runStore.getRun("run-page");
+
+      const app = createHttpApp({
+        issuePollStatus: {
+          candidateIssues: [],
+          errors: [],
+          filteredIssues: [],
+          projects: [{ fetchedIssues: 4, name: "alpha", ok: true }]
+        },
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const dashboard = await app.request("/");
+      expect(dashboard.status).toBe(200);
+      const dashboardBody = await dashboard.text();
+      expect(dashboardBody).toContain("Projects");
+      expect(dashboardBody).toContain("poll ok");
+      expect(dashboardBody).toContain("4 fetched");
+      expect(dashboardBody).toContain(detail?.createdAt);
+      expect(dashboardBody).toContain(detail?.updatedAt);
+
+      const runPage = await app.request("/runs/run-page");
+      expect(runPage.status).toBe(200);
+      const runPageBody = await runPage.text();
+      expect(runPageBody).toContain("Started");
+      expect(runPageBody).toContain("Updated");
+      expect(runPageBody).toContain("Attempt started");
+      expect(runPageBody).toContain("run-page-attempt-1");
+      expect(runPageBody).toContain(detail?.attempts[0]?.createdAt);
+      expect(runPageBody).toContain("/logs/runs/run-page/provider.raw.jsonl");
     } finally {
       test.cleanup();
     }

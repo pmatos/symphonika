@@ -75,6 +75,12 @@ describe("RunStore detail queries", () => {
       expect(detail?.issueTitle).toBe("Sample issue");
       expect(detail?.attempts).toHaveLength(1);
       expect(detail?.attempts[0]?.id).toBe("run-A-attempt-1");
+      expect(detail?.attempts[0]?.createdAt).toMatch(
+        /^\d{4}-\d{2}-\d{2}T/
+      );
+      expect(detail?.attempts[0]?.updatedAt).toMatch(
+        /^\d{4}-\d{2}-\d{2}T/
+      );
       expect(detail?.transitions.map((t) => t.state)).toEqual([
         "queued",
         "preparing_workspace",

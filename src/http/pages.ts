@@ -27,6 +27,7 @@ export type RegisterPagesOptions = {
 const TERMINAL_STATES: ReadonlySet<RunState> = new Set([
   "cancelled",
   "failed",
+  "input_required",
   "stale",
   "succeeded"
 ]);
@@ -50,7 +51,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       "Symphonika",
       [
         renderHeader(options.version, snapshot),
-        renderProjectsCard(snapshot),
+        renderProjectsCard(snapshot, options.issuePollStatus),
         renderStaleIssuesCard(options.issuePollStatus?.filteredIssues ?? []),
         renderRunsTable("Recent runs", recentRuns)
       ].join("")
@@ -154,23 +155,42 @@ function renderHeader(version: string, snapshot: StatusSnapshot | undefined): st
 </section>`;
 }
 
-function renderProjectsCard(snapshot: StatusSnapshot | undefined): string {
-  if (snapshot === undefined || snapshot.projects.length === 0) {
+function renderProjectsCard(
+  snapshot: StatusSnapshot | undefined,
+  issuePollStatus: IssuePollStatus | undefined
+): string {
+  if (snapshot !== undefined && snapshot.projects.length > 0) {
+    const rows = snapshot.projects
+      .map((project) => {
+        const missing =
+          project.missingOperationalLabels.length === 0
+            ? "&mdash;"
+            : escapeHtml(project.missingOperationalLabels.join(", "));
+        const valid = project.validForDispatch ? "valid" : "invalid";
+        return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(valid)}</td><td><code>${escapeHtml(project.workflowPath)}</code></td><td>${missing}</td></tr>`;
+      })
+      .join("");
+    return `<section><h2>Projects</h2>
+<table><thead><tr><th>Name</th><th>Validation</th><th>Workflow</th><th>Missing operational labels</th></tr></thead>
+<tbody>${rows}</tbody></table></section>`;
+  }
+
+  const pollProjects = issuePollStatus?.projects ?? [];
+  if (pollProjects.length === 0) {
     return "";
   }
 
-  const rows = snapshot.projects
+  const rows = pollProjects
     .map((project) => {
-      const missing =
-        project.missingOperationalLabels.length === 0
-          ? "&mdash;"
-          : escapeHtml(project.missingOperationalLabels.join(", "));
-      const valid = project.validForDispatch ? "valid" : "invalid";
-      return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(valid)}</td><td><code>${escapeHtml(project.workflowPath)}</code></td><td>${missing}</td></tr>`;
+      const status = project.ok ? "poll ok" : "poll failed";
+      const detail = project.ok
+        ? `${project.fetchedIssues} fetched`
+        : project.error ?? "unknown error";
+      return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(status)}</td><td>${escapeHtml(detail)}</td></tr>`;
     })
     .join("");
   return `<section><h2>Projects</h2>
-<table><thead><tr><th>Name</th><th>Validation</th><th>Workflow</th><th>Missing operational labels</th></tr></thead>
+<table><thead><tr><th>Name</th><th>Issue polling</th><th>Last poll</th></tr></thead>
 <tbody>${rows}</tbody></table></section>`;
 }
 
@@ -203,11 +223,11 @@ function renderRunsTable(title: string, runs: RunStatus[]): string {
   const rows = runs
     .map(
       (run) =>
-        `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td>#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td><span class="state-${escapeHtml(run.state)}">${escapeHtml(run.state)}</span></td><td>${escapeHtml(run.provider)}</td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`
+        `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td>#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td><span class="state-${escapeHtml(run.state)}">${escapeHtml(run.state)}</span></td><td>${escapeHtml(run.provider)}</td><td>${escapeHtml(run.createdAt)}</td><td>${escapeHtml(run.updatedAt)}</td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`
     )
     .join("");
   return `<section><h2>${escapeHtml(title)}</h2>
-<table><thead><tr><th>Run id</th><th>Project</th><th>Issue</th><th>State</th><th>Provider</th><th>Branch</th></tr></thead>
+<table><thead><tr><th>Run id</th><th>Project</th><th>Issue</th><th>State</th><th>Provider</th><th>Started</th><th>Updated</th><th>Branch</th></tr></thead>
 <tbody>${rows}</tbody></table></section>`;
 }
 
@@ -226,6 +246,8 @@ function renderRunSummary(detail: RunStatus, capContext: CapContext | null): str
   <p><strong>Issue:</strong> #${detail.issueNumber} ${escapeHtml(detail.issueTitle)}</p>
   <p><strong>State:</strong> <span class="state-${escapeHtml(detail.state)}">${escapeHtml(detail.state)}</span></p>
   <p><strong>Provider:</strong> ${escapeHtml(detail.provider)}</p>
+  <p><strong>Started:</strong> ${escapeHtml(detail.createdAt)}</p>
+  <p><strong>Updated:</strong> ${escapeHtml(detail.updatedAt)}</p>
   <p><strong>Branch:</strong> <code>${escapeHtml(detail.branchName)}</code></p>
   <p><strong>Workspace:</strong> <code>${escapeHtml(detail.workspacePath)}</code></p>
   <p><strong>Retries:</strong> ${detail.retryCount}${detail.isContinuation ? " (continuation)" : ""}</p>
@@ -248,6 +270,8 @@ function renderAttemptsTable(
     attemptNumber: number;
     state: RunState;
     providerName: string;
+    createdAt: string;
+    updatedAt: string;
     branchName: string;
     promptPath: string;
   }[]
@@ -258,10 +282,10 @@ function renderAttemptsTable(
   const rows = attempts
     .map(
       (attempt) =>
-        `<tr><td>${attempt.attemptNumber}</td><td><code>${escapeHtml(attempt.id)}</code></td><td><span class="state-${escapeHtml(attempt.state)}">${escapeHtml(attempt.state)}</span></td><td>${escapeHtml(attempt.providerName)}</td><td><code>${escapeHtml(attempt.branchName)}</code></td><td><code>${escapeHtml(attempt.promptPath)}</code></td></tr>`
+        `<tr><td>${attempt.attemptNumber}</td><td><code>${escapeHtml(attempt.id)}</code></td><td><span class="state-${escapeHtml(attempt.state)}">${escapeHtml(attempt.state)}</span></td><td>${escapeHtml(attempt.providerName)}</td><td>${escapeHtml(attempt.createdAt)}</td><td>${escapeHtml(attempt.updatedAt)}</td><td><code>${escapeHtml(attempt.branchName)}</code></td><td><code>${escapeHtml(attempt.promptPath)}</code></td></tr>`
     )
     .join("");
-  return `<section><h2>Attempts</h2><table><thead><tr><th>#</th><th>Attempt id</th><th>State</th><th>Provider</th><th>Branch</th><th>Prompt</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+  return `<section><h2>Attempts</h2><table><thead><tr><th>#</th><th>Attempt id</th><th>State</th><th>Provider</th><th>Attempt started</th><th>Attempt updated</th><th>Branch</th><th>Prompt</th></tr></thead><tbody>${rows}</tbody></table></section>`;
 }
 
 function renderTransitionsTable(
@@ -304,19 +328,23 @@ function renderEventsTable(
 
 function renderRunFileLinks(detail: RunStatus): string {
   const items: string[] = [];
-  const linkIfPresent = (label: string, kind: string, value: string): void => {
+  const linkIfPresent = (label: string, fileName: string, value: string): void => {
     if (value.length === 0) {
       return;
     }
     items.push(
-      `<li><a href="/api/runs/${encodeURIComponent(detail.id)}/files/${kind}">${escapeHtml(label)}</a></li>`
+      `<li><a href="/logs/runs/${encodeURIComponent(detail.id)}/${encodeURIComponent(fileName)}">${escapeHtml(label)}</a></li>`
     );
   };
-  linkIfPresent("Rendered prompt", "prompt", detail.promptPath);
-  linkIfPresent("Provider raw log", "raw-log", detail.rawLogPath);
-  linkIfPresent("Normalized log", "normalized-log", detail.normalizedLogPath);
-  linkIfPresent("Issue snapshot", "issue-snapshot", detail.issueSnapshotPath);
-  linkIfPresent("Prompt metadata", "metadata", detail.metadataPath);
+  linkIfPresent("prompt.md", "prompt.md", detail.promptPath);
+  linkIfPresent("provider.raw.jsonl", "provider.raw.jsonl", detail.rawLogPath);
+  linkIfPresent(
+    "provider.normalized.jsonl",
+    "provider.normalized.jsonl",
+    detail.normalizedLogPath
+  );
+  linkIfPresent("issue-snapshot.json", "issue-snapshot.json", detail.issueSnapshotPath);
+  linkIfPresent("prompt-metadata.json", "prompt-metadata.json", detail.metadataPath);
   if (items.length === 0) {
     return "";
   }

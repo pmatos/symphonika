@@ -420,9 +420,12 @@ export async function startDaemon(
       activeRuns.cancelAll();
       await scheduledWork;
       await Promise.allSettled(Array.from(inflightDispatches));
-      await stopServer(server, logger);
-      await removeDaemonEndpoint(state.stateRoot);
-      runStore.close();
+      try {
+        await stopServer(server, logger);
+        await removeDaemonEndpoint(state.stateRoot);
+      } finally {
+        runStore.close();
+      }
     }
   };
 }

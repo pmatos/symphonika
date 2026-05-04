@@ -3,9 +3,10 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resolveLogLevel, startDaemon } from "../src/daemon.js";
+import { RunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -73,6 +74,27 @@ describe("startDaemon", () => {
       })
     ).rejects.toThrow();
     await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
+  });
+
+  it("closes the run store when endpoint descriptor removal fails during stop", async () => {
+    const cwd = await makeTempRoot();
+    const daemon = await startDaemon({
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+    const closeRunStore = vi.spyOn(RunStore.prototype, "close");
+    const endpointPath = path.join(cwd, ".symphonika", "daemon.json");
+
+    try {
+      await rm(endpointPath, { force: true });
+      await mkdir(endpointPath);
+
+      await expect(daemon.stop()).rejects.toThrow();
+      expect(closeRunStore).toHaveBeenCalledTimes(1);
+    } finally {
+      closeRunStore.mockRestore();
+    }
   });
 });
 

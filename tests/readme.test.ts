@@ -41,6 +41,11 @@ describe("README", () => {
     expect(readme).toContain("single-operator workflow");
     expect(readme).toContain("Autonomy contract");
     expect(readme).toContain("gh issue comment");
+    expect(readme).toContain(
+      `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`
+    );
+    expect(readme).toContain(`sandbox_mode = "danger-full-access"`);
+    expect(readme).toContain(`approval_policy = "never"`);
 
     expect(readme).not.toMatch(
       /\/home\/|\/Users\/|GITHUB_TOKEN|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+/,

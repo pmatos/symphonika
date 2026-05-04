@@ -10,6 +10,7 @@ import {
 } from "../src/workflow.js";
 
 const tempRoots: string[] = [];
+const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-workflow-test-"));
@@ -37,7 +38,7 @@ describe("workflow prompt rendering", () => {
         name: "symphonika"
       },
       provider: {
-        command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server",
+        command: DEFAULT_CODEX_COMMAND,
         name: "codex"
       },
       run: {
@@ -72,7 +73,7 @@ describe("workflow prompt rendering", () => {
       "Branch sym/symphonika/7-render-prompts at refs/heads/sym/symphonika/7-render-prompts."
     );
     expect(rendered.prompt).toContain(
-      'Provider command codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server with labels ["agent-ready"].'
+      `Provider command ${DEFAULT_CODEX_COMMAND} with labels ["agent-ready"].`
     );
     expect(rendered.prompt).toContain("gh CLI");
     expect(rendered.preambleVersion).toBe("autonomy-preamble-v2");
@@ -90,7 +91,7 @@ describe("workflow prompt rendering", () => {
           name: "symphonika"
         },
         provider: {
-          command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server",
+          command: DEFAULT_CODEX_COMMAND,
           name: "codex"
         },
         run: {
@@ -121,7 +122,7 @@ describe("workflow prompt rendering", () => {
           name: "symphonika"
         },
         provider: {
-          command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server",
+          command: DEFAULT_CODEX_COMMAND,
           name: "codex"
         },
         run: {
@@ -193,7 +194,7 @@ describe("workflow prompt rendering", () => {
         name: "symphonika"
       },
       provider: {
-        command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server",
+        command: DEFAULT_CODEX_COMMAND,
         name: "codex" as const
       },
       run: {
@@ -272,7 +273,7 @@ describe("workflow prompt rendering", () => {
         name: "symphonika"
       },
       provider: {
-        command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server",
+        command: DEFAULT_CODEX_COMMAND,
         name: "codex"
       },
       run: {

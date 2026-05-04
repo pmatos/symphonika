@@ -17,6 +17,7 @@ import type {
 } from "../src/workspace.js";
 
 const tempRoots: string[] = [];
+const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-dispatch-test-"));
@@ -174,9 +175,7 @@ describe("daemon dispatch", () => {
         title: "Dispatch an end-to-end run through a test provider"
       });
       expect(workspaceInput.project.name).toBe("symphonika");
-      expect(codexProvider.validate).toHaveBeenCalledWith(
-        "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"
-      );
+      expect(codexProvider.validate).toHaveBeenCalledWith(DEFAULT_CODEX_COMMAND);
       expect(providerInputs).toHaveLength(1);
       expect(providerInputs[0]).toMatchObject({
         issue: {
@@ -272,8 +271,7 @@ describe("daemon dispatch", () => {
           normalized_log_path: run.normalizedLogPath,
           project_name: "symphonika",
           prompt_path: run.promptPath,
-          provider_command:
-            "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server",
+          provider_command: DEFAULT_CODEX_COMMAND,
           provider_name: "codex",
           raw_log_path: run.rawLogPath,
           state: "succeeded",
@@ -817,7 +815,7 @@ async function writeValidProject(
       `  interval_ms: ${options.pollingIntervalMs ?? 30000}`,
       "providers:",
       "  codex:",
-      '    command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"',
+      `    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"`,
       "  claude:",
       '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
       "projects:",

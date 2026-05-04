@@ -227,6 +227,46 @@ describe("CLI run commands", () => {
     expect(requests).toEqual(["http://127.0.0.1:3030/api/status"]);
   });
 
+  it("status and cancel treat a malformed daemon endpoint descriptor as unavailable", async () => {
+    const stateRoot = await makeTempRoot();
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    await mkdir(resolvedStateRoot, { recursive: true });
+    await writeFile(path.join(resolvedStateRoot, "daemon.json"), "{", "utf8");
+
+    const status = captureProgram(stateRoot, {
+      runDoctor: () =>
+        Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          errors: [],
+          ok: true,
+          projects: []
+        } satisfies DoctorReport)
+    });
+    await status.program.parseAsync([
+      "node",
+      "symphonika",
+      "status",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+    expect(status.output.stdout).toContain(
+      "last poll outcome: unknown (not configured)"
+    );
+
+    const cancel = captureProgram(stateRoot);
+    await expect(
+      cancel.program.parseAsync([
+        "node",
+        "symphonika",
+        "cancel",
+        "run-1",
+        "--config",
+        path.join(stateRoot, "symphonika.yml")
+      ])
+    ).rejects.toThrow();
+    expect(cancel.output.stderr).toContain("daemon endpoint not found");
+  });
+
   it("status prints stale GitHub issues by project and issue number", async () => {
     const stateRoot = await makeTempRoot();
     const { output, program } = captureProgram(stateRoot, {

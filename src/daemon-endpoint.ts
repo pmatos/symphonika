@@ -19,9 +19,14 @@ export function readDaemonEndpoint(stateRoot: string): DaemonEndpoint | undefine
     return undefined;
   }
 
-  const parsed = JSON.parse(readFileSync(descriptorPath, "utf8")) as unknown;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(descriptorPath, "utf8")) as unknown;
+  } catch {
+    return undefined;
+  }
   if (!isRecord(parsed) || typeof parsed.url !== "string" || parsed.url.length === 0) {
-    throw new Error(`Invalid daemon endpoint descriptor: ${descriptorPath}`);
+    return undefined;
   }
 
   const endpoint: DaemonEndpoint = { url: parsed.url };

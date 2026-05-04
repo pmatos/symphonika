@@ -7,6 +7,7 @@ import { createCodexProvider } from "../src/providers/codex.js";
 import type { ProviderEvent, ProviderRunInput } from "../src/provider.js";
 
 const tempRoots: string[] = [];
+const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
 const originalFakeCodexTranscript = process.env.SYMPHONIKA_FAKE_CODEX_TRANSCRIPT;
 const originalProbeTimeout = process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS;
 
@@ -68,12 +69,10 @@ describe("Codex JSON-RPC provider", () => {
       params: {
         approvalPolicy: "never",
         cwd: workspacePath,
-        experimentalRawEvents: false,
-        permissionProfile: {
-          type: "disabled"
-        }
+        sandbox: "danger-full-access"
       }
     });
+    expect(objectField(objectField(requests[2], "params"), "permissionProfile")).toBeUndefined();
     expect(requests[3]).toMatchObject({
       method: "turn/start",
       params: {
@@ -422,6 +421,85 @@ describe("Codex provider validate", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("probes the configured app-server sandbox before accepting the command", async () => {
+    const root = await makeTempRoot();
+    const fakePath = path.join(root, "fake-codex-validate.mjs");
+    const transcriptPath = path.join(root, "validate-requests.jsonl");
+    await writeFakeCodexValidator(fakePath, [], { transcriptPath });
+    const provider = createCodexProvider();
+
+    await expect(
+      provider.validate(`${process.execPath} ${fakePath} app-server`)
+    ).resolves.toBeUndefined();
+
+    const requests = readJsonl(await readFile(transcriptPath, "utf8"));
+    expect(requests.map((request) => objectField(request, "method"))).toEqual([
+      "initialize",
+      "initialized",
+      "thread/start",
+      "command/exec"
+    ]);
+    expect(requests[2]).toMatchObject({
+      method: "thread/start",
+      params: {
+        approvalPolicy: "never",
+        sandbox: "danger-full-access"
+      }
+    });
+    expect(requests[3]).toMatchObject({
+      method: "command/exec",
+      params: {
+        sandboxPolicy: {
+          type: "dangerFullAccess"
+        }
+      }
+    });
+  });
+
+  it("rejects app-server commands that start read-only Codex threads", async () => {
+    const root = await makeTempRoot();
+    const fakePath = path.join(root, "fake-codex-validate.mjs");
+    await writeFakeCodexValidator(fakePath, [], { sandboxType: "readOnly" });
+    const provider = createCodexProvider();
+
+    await expect(
+      provider.validate(`${process.execPath} ${fakePath} app-server`)
+    ).rejects.toThrow(/thread\/start sandbox is readOnly; expected dangerFullAccess/);
+  });
+
+  it.each([
+    {
+      exitCode: 11,
+      message: /blocks in-cwd writes/,
+      stderr: "SYMPHONIKA_PROBE_WRITE_FAILED\n"
+    },
+    {
+      exitCode: 12,
+      message: /blocks public git network access/,
+      stderr: "SYMPHONIKA_PROBE_GIT_NETWORK_FAILED\n"
+    },
+    {
+      exitCode: 13,
+      message: /blocks api\.github\.com reachability/,
+      stderr: "SYMPHONIKA_PROBE_GITHUB_API_FAILED\n"
+    }
+  ])(
+    "surfaces command/exec sandbox probe failures for exit code $exitCode",
+    async ({ exitCode, message, stderr }) => {
+      const root = await makeTempRoot();
+      const fakePath = path.join(root, "fake-codex-validate.mjs");
+      await writeFakeCodexValidator(fakePath, [], {
+        commandExitCode: exitCode,
+        commandStderr: stderr
+      });
+      const provider = createCodexProvider();
+
+      await expect(
+        provider.validate(`${process.execPath} ${fakePath} app-server`)
+      ).rejects.toThrow(message);
+    }
+  );
+
   it("succeeds when the configured profile exists", async () => {
     const root = await makeTempRoot();
     const fakePath = path.join(root, "fake-codex-validate.mjs");
@@ -518,7 +596,7 @@ function providerInputFixture(): ProviderRunInput {
     prompt: "Implement issue #9.",
     promptPath: "/tmp/prompt.md",
     provider: {
-      command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server",
+      command: DEFAULT_CODEX_COMMAND,
       name: "codex"
     },
     run: {
@@ -630,13 +708,26 @@ async function writeFakeCodexAppServer(
 async function writeFakeCodexValidator(
   filePath: string,
   knownProfiles: string[],
-  options: { hangFeaturesList?: boolean } = {}
+  options: {
+    commandExitCode?: number;
+    commandStderr?: string;
+    hangFeaturesList?: boolean;
+    sandboxType?: "dangerFullAccess" | "readOnly";
+    transcriptPath?: string;
+  } = {}
 ): Promise<void> {
   await writeFile(
     filePath,
     [
+      "import { appendFile } from 'node:fs/promises';",
+      "import readline from 'node:readline';",
+      "",
       `const known = new Set(${JSON.stringify(knownProfiles)});`,
+      `const commandExitCode = ${JSON.stringify(options.commandExitCode ?? 0)};`,
+      `const commandStderr = ${JSON.stringify(options.commandStderr ?? "")};`,
       `const hangFeaturesList = ${options.hangFeaturesList === true ? "true" : "false"};`,
+      `const sandboxType = ${JSON.stringify(options.sandboxType ?? "dangerFullAccess")};`,
+      `const transcriptPath = ${JSON.stringify(options.transcriptPath)};`,
       "const args = process.argv.slice(2);",
       "function profileFrom(args) {",
       "  for (let i = 0; i < args.length; i++) {",
@@ -645,6 +736,14 @@ async function writeFakeCodexValidator(
       "    if (a.startsWith('--profile=')) return a.slice('--profile='.length);",
       "  }",
       "  return undefined;",
+      "}",
+      "function send(message) {",
+      "  process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "}",
+      "async function record(message) {",
+      "  if (transcriptPath) {",
+      "    await appendFile(transcriptPath, `${JSON.stringify(message)}\\n`, 'utf8');",
+      "  }",
       "}",
       "if (args.includes('--help')) {",
       "  process.stdout.write('Usage: fake-codex app-server --listen <URL>\\n');",
@@ -662,7 +761,21 @@ async function writeFakeCodexValidator(
       "    process.exit(0);",
       "  }",
       "} else {",
-      "  process.exit(0);",
+      "  const rl = readline.createInterface({ input: process.stdin });",
+      "  for await (const line of rl) {",
+      "    const message = JSON.parse(line);",
+      "    await record(message);",
+      "    if (message.method === 'initialize') {",
+      "      send({ id: message.id, result: { codexHome: '/tmp/fake-codex-home', platformFamily: 'unix', platformOs: 'linux', userAgent: 'fake-codex-app-server' } });",
+      "    }",
+      "    if (message.method === 'thread/start') {",
+      "      send({ id: message.id, result: { approvalPolicy: 'never', cwd: message.params.cwd, sandbox: { type: sandboxType }, thread: { id: 'validate-thread' } } });",
+      "    }",
+      "    if (message.method === 'command/exec') {",
+      "      send({ id: message.id, result: { exitCode: commandExitCode, stdout: commandExitCode === 0 ? 'probe ok\\n' : '', stderr: commandStderr } });",
+      "      process.exit(0);",
+      "    }",
+      "  }",
       "}",
       ""
     ].join("\n"),

@@ -540,7 +540,7 @@ function defaultProvidersConfig(): RunControllerProvidersConfig {
     },
     codex: {
       command:
-        "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"
+        `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`
     }
   };
 }

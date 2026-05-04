@@ -55,11 +55,13 @@ Symphonika dispatches the agent unattended; nothing on the operator side will re
 
 ### Codex profile setup
 
-The default Codex provider command is `codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server`. Before `npm run doctor`, `npm run smoke`, or starting the daemon, define the `symphonika` profile in `~/.codex/config.toml`:
+The default Codex provider command is `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`. Before `npm run doctor`, `npm run smoke`, or starting the daemon, define the `symphonika` profile in `~/.codex/config.toml`:
 
 ```toml
 [profiles.symphonika]
 analytics = { enabled = false }
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
 
 [profiles.symphonika.features]
 memories         = false
@@ -68,7 +70,7 @@ codex_hooks      = false
 image_generation = false
 ```
 
-Without the profile `doctor` will fail and print this snippet. See [docs/adr/0042-codex-profile-for-headless-runs.md](docs/adr/0042-codex-profile-for-headless-runs.md) for what each feature does and why `multi_agent` stays on.
+Without the profile `doctor` will fail and print this snippet. The command-line `-c` overrides intentionally repeat the sandbox settings so app-server threads are full-permission even when older profile defaults are still present. See [docs/adr/0042-codex-profile-for-headless-runs.md](docs/adr/0042-codex-profile-for-headless-runs.md) for what each feature does and why `multi_agent` stays on.
 
 ## Status and License
 

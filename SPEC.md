@@ -179,7 +179,7 @@ polling:
 
 providers:
   codex:
-    command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"
+    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
   claude:
     command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"
 
@@ -537,7 +537,7 @@ Symphonika assumes providers run with full local permissions.
 Default Codex command:
 
 ```text
-codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server
+codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server
 ```
 
 The `-p symphonika` flag selects a named profile that operators define in `~/.codex/config.toml` so

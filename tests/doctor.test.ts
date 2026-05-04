@@ -13,6 +13,7 @@ import type { AgentProviderRegistry } from "../src/provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "../src/providers/index.js";
 
 const tempRoots: string[] = [];
+const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
 const originalGithubToken = process.env.GITHUB_TOKEN;
 const originalExitCode = process.exitCode;
 
@@ -65,7 +66,7 @@ describe("doctor", () => {
       [
         "providers:",
         "  codex:",
-        '    command: "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"',
+        `    command: "${DEFAULT_CODEX_COMMAND}"`,
         "  claude:",
         '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
         ""
@@ -378,7 +379,7 @@ async function writeValidConfig(
       "  interval_ms: 30000",
       "providers:",
       "  codex:",
-      `    command: "${overrides.codexCommand ?? "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"}"`,
+      `    command: "${overrides.codexCommand ?? DEFAULT_CODEX_COMMAND}"`,
       "  claude:",
       `    command: "${overrides.claudeCommand ?? "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"}"`,
       "projects:",

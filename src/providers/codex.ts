@@ -3,6 +3,9 @@ import {
   type ChildProcess,
   type ChildProcessWithoutNullStreams
 } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import type {
   AgentProvider,
@@ -123,15 +126,7 @@ export function createCodexProvider(): AgentProvider {
         writeJson(child, {
           id: 2,
           method: "thread/start",
-          params: {
-            approvalPolicy: "never",
-            cwd: input.workspacePath,
-            experimentalRawEvents: false,
-            permissionProfile: {
-              type: "disabled"
-            },
-            persistExtendedHistory: true
-          }
+          params: codexThreadStartParams(input.workspacePath)
         });
         const threadStarted = await readUntilResponse(
           queue,
@@ -641,10 +636,17 @@ async function validateCodexAppServerCommand(command: {
   }
 
   const profile = extractProfileName(command.args);
-  if (profile === undefined) {
-    return;
+  if (profile !== undefined) {
+    await validateCodexProfile(command, profile);
   }
 
+  await validateCodexAppServerRuntime(command);
+}
+
+async function validateCodexProfile(
+  command: { args: string[]; executable: string },
+  profile: string
+): Promise<void> {
   const appServerIndex = command.args.indexOf("app-server");
   const baseArgs =
     appServerIndex >= 0
@@ -665,17 +667,227 @@ async function validateCodexAppServerCommand(command: {
       `Codex profile probe for '${profile}' timed out; cannot verify profile exists`
     );
   }
-  if (probe.exitCode === 0) {
+  if (probe.exitCode !== 0) {
+    const stderr = probe.output.trim();
+    if (/config profile/i.test(stderr) && /not found/i.test(stderr)) {
+      throw new Error(missingProfileMessage(profile, stderr));
+    }
+    throw new Error(
+      `Codex profile probe for '${profile}' failed with exit code ${probe.exitCode ?? "unknown"}: ${stderr || "no output"}`
+    );
+  }
+}
+
+async function validateCodexAppServerRuntime(command: {
+  args: string[];
+  executable: string;
+}): Promise<void> {
+  const cwd = await mkdtemp(path.join(tmpdir(), "symphonika-codex-probe-"));
+  const child = spawn(command.executable, command.args, {
+    cwd,
+    env: process.env,
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+  const queue = createProcessQueue(child);
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+
+  try {
+    writeJson(child, {
+      id: 1,
+      method: "initialize",
+      params: {
+        capabilities: {
+          experimentalApi: true
+        },
+        clientInfo: {
+          name: "symphonika-doctor",
+          title: "Symphonika Doctor",
+          version: VERSION
+        }
+      }
+    });
+    await readProbeResponse(queue, child, 1, "initialize", () => stderr);
+
+    writeJson(child, {
+      method: "initialized"
+    });
+    writeJson(child, {
+      id: 2,
+      method: "thread/start",
+      params: codexThreadStartParams(cwd)
+    });
+    const threadResponse = await readProbeResponse(
+      queue,
+      child,
+      2,
+      "thread/start",
+      () => stderr
+    );
+    validateThreadStartProbeResponse(threadResponse);
+
+    writeJson(child, {
+      id: 3,
+      method: "command/exec",
+      params: {
+        command: [
+          "bash",
+          "-lc",
+          [
+            "touch .symphonika-codex-write-probe || { echo SYMPHONIKA_PROBE_WRITE_FAILED >&2; exit 11; }",
+            "git ls-remote https://github.com/openai/codex.git HEAD >/dev/null || { echo SYMPHONIKA_PROBE_GIT_NETWORK_FAILED >&2; exit 12; }",
+            "curl -fsSI https://api.github.com >/dev/null || { echo SYMPHONIKA_PROBE_GITHUB_API_FAILED >&2; exit 13; }",
+            "echo SYMPHONIKA_PROBE_OK"
+          ].join("; ")
+        ],
+        cwd,
+        disableOutputCap: true,
+        sandboxPolicy: {
+          type: "dangerFullAccess"
+        },
+        timeoutMs: codexProbeTimeoutMs()
+      }
+    });
+    const commandResponse = await readProbeResponse(
+      queue,
+      child,
+      3,
+      "command/exec",
+      () => stderr
+    );
+    validateCommandExecProbeResponse(commandResponse);
+  } finally {
+    shutdownProcess(child);
+    await rm(cwd, { force: true, recursive: true });
+  }
+}
+
+async function readProbeResponse(
+  queue: ProcessQueue,
+  child: ChildProcessWithoutNullStreams,
+  requestId: number,
+  context: string,
+  stderr: () => string
+): Promise<unknown> {
+  while (true) {
+    const item = await nextProbeItem(queue, child, context);
+    switch (item.kind) {
+      case "error":
+        throw new Error(
+          `Codex app-server runtime probe failed during ${context}: ${item.error.message}`
+        );
+      case "exit":
+        throw new Error(
+          `Codex app-server runtime probe exited before ${context} response with exit code ${item.exitCode ?? "unknown"}${formatProbeStderr(stderr())}`
+        );
+      case "malformed":
+        throw new Error(
+          `Codex app-server runtime probe received malformed JSON during ${context}: ${item.message}`
+        );
+      case "message":
+        if (responseId(item.raw) !== requestId) {
+          continue;
+        }
+        if (objectField(item.raw, "error") !== undefined) {
+          throw new Error(
+            `Codex app-server runtime probe ${context} failed: ${JSON.stringify(objectField(item.raw, "error"))}`
+          );
+        }
+        return item.raw;
+    }
+  }
+}
+
+async function nextProbeItem(
+  queue: ProcessQueue,
+  child: ChildProcess,
+  context: string
+): Promise<ProcessQueueItem> {
+  return await new Promise<ProcessQueueItem>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      terminateProcess(child);
+      reject(
+        new Error(
+          `Codex app-server runtime probe timed out waiting for ${context} response`
+        )
+      );
+    }, codexProbeTimeoutMs());
+    timer.unref();
+
+    queue.next().then(
+      (item) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(item);
+      },
+      (error: unknown) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    );
+  });
+}
+
+function validateThreadStartProbeResponse(raw: unknown): void {
+  const result = objectField(raw, "result");
+  const approvalPolicy = stringField(result, "approvalPolicy");
+  const sandbox = objectField(result, "sandbox");
+  const sandboxType = stringField(sandbox, "type");
+
+  if (approvalPolicy !== "never") {
+    throw new Error(
+      `Codex app-server thread/start approvalPolicy is ${approvalPolicy ?? "missing"}; expected never`
+    );
+  }
+  if (sandboxType !== "dangerFullAccess") {
+    throw new Error(
+      `Codex app-server thread/start sandbox is ${sandboxType ?? "missing"}; expected dangerFullAccess`
+    );
+  }
+}
+
+function validateCommandExecProbeResponse(raw: unknown): void {
+  const result = objectField(raw, "result");
+  const exitCode = numberField(result, "exitCode");
+  if (exitCode === 0) {
     return;
   }
 
-  const stderr = probe.output.trim();
-  if (/config profile/i.test(stderr) && /not found/i.test(stderr)) {
-    throw new Error(missingProfileMessage(profile, stderr));
+  const stdout = stringField(result, "stdout") ?? "";
+  const stderr = stringField(result, "stderr") ?? "";
+  const output = `${stdout}\n${stderr}`;
+  if (exitCode === 11 || output.includes("SYMPHONIKA_PROBE_WRITE_FAILED")) {
+    throw new Error("Codex app-server sandbox blocks in-cwd writes");
+  }
+  if (exitCode === 12 || output.includes("SYMPHONIKA_PROBE_GIT_NETWORK_FAILED")) {
+    throw new Error("Codex app-server sandbox blocks public git network access");
+  }
+  if (exitCode === 13 || output.includes("SYMPHONIKA_PROBE_GITHUB_API_FAILED")) {
+    throw new Error("Codex app-server sandbox blocks api.github.com reachability");
   }
   throw new Error(
-    `Codex profile probe for '${profile}' failed with exit code ${probe.exitCode ?? "unknown"}: ${stderr || "no output"}`
+    `Codex app-server command/exec sandbox probe failed with exit code ${exitCode ?? "unknown"}${formatProbeStderr(output)}`
   );
+}
+
+function formatProbeStderr(stderr: string): string {
+  const trimmed = stderr.trim();
+  return trimmed.length > 0 ? `: ${trimmed}` : "";
 }
 
 type CodexProbeResult =
@@ -687,8 +899,7 @@ async function runCodexProbe(
   executable: string,
   args: string[]
 ): Promise<CodexProbeResult> {
-  const envTimeout = Number(process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS);
-  const timeoutMs = Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 5_000;
+  const timeoutMs = codexProbeTimeoutMs();
   return await new Promise<CodexProbeResult>((resolve) => {
     const child = spawn(executable, args, {
       stdio: ["ignore", "pipe", "pipe"]
@@ -730,6 +941,21 @@ async function runCodexProbe(
   });
 }
 
+function codexThreadStartParams(cwd: string): JsonObject {
+  return {
+    approvalPolicy: "never",
+    cwd,
+    experimentalRawEvents: false,
+    sandbox: "danger-full-access",
+    persistExtendedHistory: true
+  };
+}
+
+function codexProbeTimeoutMs(): number {
+  const envTimeout = Number(process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS);
+  return Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 5_000;
+}
+
 function extractProfileName(args: string[]): string | undefined {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -755,6 +981,8 @@ function missingProfileMessage(profile: string, stderr: string): string {
     "",
     `  [profiles.${profile}]`,
     `  analytics = { enabled = false }`,
+    `  sandbox_mode = "danger-full-access"`,
+    `  approval_policy = "never"`,
     "",
     `  [profiles.${profile}.features]`,
     `  memories         = false`,
@@ -860,6 +1088,15 @@ function field(value: unknown, key: string): unknown {
 function stringField(value: unknown, key: string): string | undefined {
   const valueAtKey = field(value, key);
   if (typeof valueAtKey === "string") {
+    return valueAtKey;
+  }
+
+  return undefined;
+}
+
+function numberField(value: unknown, key: string): number | undefined {
+  const valueAtKey = field(value, key);
+  if (typeof valueAtKey === "number") {
     return valueAtKey;
   }
 

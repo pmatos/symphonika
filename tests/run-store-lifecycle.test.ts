@@ -238,7 +238,7 @@ describe("run-store lifecycle CRUD", () => {
         },
         parentRunId: "parent",
         projectName: "symphonika",
-        reason: "continuation cap reached"
+        reason: "cap_reached:no_commits"
       });
 
       const cap = store
@@ -248,7 +248,7 @@ describe("run-store lifecycle CRUD", () => {
         state: "failed",
         isContinuation: true,
         continuationParentRunId: "parent",
-        terminalReason: "continuation cap reached",
+        terminalReason: "cap_reached:no_commits",
         failureClassification: "deterministic",
         issueNumber: 8
       });

@@ -4,6 +4,10 @@ import type {
   FilteredProjectIssueSnapshot,
   IssuePollStatus
 } from "../issue-polling.js";
+import {
+  formatCapReachedReason,
+  parseCapReachedReason
+} from "../lifecycle/terminal-reason.js";
 import type {
   ListRunsFilter,
   RunState,
@@ -81,9 +85,20 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
 
     const events = options.runStore.listProviderEvents(id, { limit: 100 });
+    const capKind = parseCapReachedReason(detail.terminalReason);
+    const capContext =
+      capKind === null
+        ? null
+        : {
+            count: options.runStore.countSucceededContinuations(
+              detail.project,
+              detail.issueNumber
+            ),
+            kind: capKind
+          };
     const sections = [
       `<h1>Run ${escapeHtml(detail.id)}</h1>`,
-      renderRunSummary(detail),
+      renderRunSummary(detail, capContext),
       renderCancelForm(detail),
       renderAttemptsTable(detail.attempts),
       renderTransitionsTable(detail.transitions),
@@ -196,7 +211,16 @@ function renderRunsTable(title: string, runs: RunStatus[]): string {
 <tbody>${rows}</tbody></table></section>`;
 }
 
-function renderRunSummary(detail: RunStatus): string {
+type CapContext = {
+  count: number;
+  kind: ReturnType<typeof parseCapReachedReason>;
+};
+
+function renderRunSummary(detail: RunStatus, capContext: CapContext | null): string {
+  const capContextLine =
+    capContext !== null && capContext.kind !== null
+      ? `<p><strong>Cap context:</strong> ${escapeHtml(formatCapReachedReason(capContext.kind, capContext.count))}</p>`
+      : "";
   return `<section>
   <p><strong>Project:</strong> ${escapeHtml(detail.project)}</p>
   <p><strong>Issue:</strong> #${detail.issueNumber} ${escapeHtml(detail.issueTitle)}</p>
@@ -206,6 +230,7 @@ function renderRunSummary(detail: RunStatus): string {
   <p><strong>Workspace:</strong> <code>${escapeHtml(detail.workspacePath)}</code></p>
   <p><strong>Retries:</strong> ${detail.retryCount}${detail.isContinuation ? " (continuation)" : ""}</p>
   ${detail.terminalReason !== null ? `<p><strong>Terminal reason:</strong> ${escapeHtml(detail.terminalReason)}</p>` : ""}
+  ${capContextLine}
   ${detail.cancelRequested ? `<p><strong>Cancel requested</strong> (reason: ${escapeHtml(detail.cancelReason ?? "unknown")})</p>` : ""}
 </section>`;
 }

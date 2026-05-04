@@ -100,6 +100,52 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("renders Cap context on the /runs/:id HTML page for cap_reached:* runs", async () => {
+    const test = await setup();
+    try {
+      const issue = sampleIssue({ number: 65, title: "Capped" });
+      test.runStore.createRun({
+        id: "fresh",
+        issue,
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("fresh", "succeeded");
+      test.runStore.createContinuationRun({
+        id: "cont-1",
+        issue,
+        parentRunId: "fresh",
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("cont-1", "succeeded");
+      test.runStore.createCapReachedFailureRun({
+        id: "cap",
+        issue,
+        parentRunId: "cont-1",
+        projectName: "alpha",
+        reason: "cap_reached:no_commits"
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/cap");
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain("<strong>Terminal reason:</strong> cap_reached:no_commits");
+      expect(html).toContain(
+        "<strong>Cap context:</strong> continuation cap reached after 1 continuation: no commits on issue branch"
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("returns 404 for /api/runs/:id when missing and detail otherwise", async () => {
     const test = await setup();
     try {

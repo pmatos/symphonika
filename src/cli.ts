@@ -23,6 +23,10 @@ import type {
 import { openRunStore as openRunStoreReal } from "./run-store.js";
 import type { SmokeOptions, SmokeReport } from "./smoke.js";
 import { runSmoke } from "./smoke.js";
+import {
+  formatCapReachedReason,
+  parseCapReachedReason
+} from "./lifecycle/terminal-reason.js";
 import { resolveStateRoot } from "./state.js";
 import { VERSION } from "./version.js";
 
@@ -263,9 +267,10 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         if (all.length > 0) {
           writeOut(program, "\nrecent runs:\n");
           for (const run of all.slice(0, 25)) {
+            const suffix = formatRecentRunSuffix(run, store);
             writeOut(
               program,
-              `  ${run.id}  ${run.project}  #${run.issueNumber}  ${run.state}  ${run.provider}\n`
+              `  ${run.id}  ${run.project}  #${run.issueNumber}  ${run.state}  ${run.provider}${suffix}\n`
             );
           }
         }
@@ -351,6 +356,17 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         writeOut(program, `retries:      ${detail.retryCount}${detail.isContinuation ? " (continuation)" : ""}\n`);
         if (detail.terminalReason !== null) {
           writeOut(program, `terminal:     ${detail.terminalReason}\n`);
+          const capKind = parseCapReachedReason(detail.terminalReason);
+          if (capKind !== null) {
+            const count = store.countSucceededContinuations(
+              detail.project,
+              detail.issueNumber
+            );
+            writeOut(
+              program,
+              `cap context:  ${formatCapReachedReason(capKind, count)}\n`
+            );
+          }
         }
         if (detail.cancelRequested) {
           writeOut(
@@ -448,6 +464,21 @@ function parsePositiveInt(value: string): number {
 
 function formatPath(value: string): string {
   return value.length === 0 ? "<not yet recorded>" : value;
+}
+
+function formatRecentRunSuffix(
+  run: { issueNumber: number; project: string; state: RunState; terminalReason: string | null },
+  store: RunStore
+): string {
+  if (run.terminalReason === null || run.state !== "failed") {
+    return "";
+  }
+  const capKind = parseCapReachedReason(run.terminalReason);
+  if (capKind === null) {
+    return `  — ${run.terminalReason}`;
+  }
+  const count = store.countSucceededContinuations(run.project, run.issueNumber);
+  return `  — ${formatCapReachedReason(capKind, count)}`;
 }
 
 function parsePort(value: string): number {

@@ -164,10 +164,12 @@ describe("dispatch mutex", () => {
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
       getIssue: vi.fn().mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
+      listBranchCommits: vi.fn().mockResolvedValue([]),
       listOpenIssues: vi
         .fn()
         .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
         .mockResolvedValue([]),
+      listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
     const prepareIssueWorkspace = vi.fn(
@@ -194,7 +196,7 @@ describe("dispatch mutex", () => {
         runs.some(
           (run) =>
             run["state"] === "failed" &&
-            run["terminalReason"] === "continuation cap reached"
+            run["terminalReason"] === "cap_reached:no_commits"
         )
       );
 
@@ -228,10 +230,12 @@ describe("dispatch mutex", () => {
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
       getIssue: vi.fn().mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
+      listBranchCommits: vi.fn().mockResolvedValue([]),
       listOpenIssues: vi
         .fn()
         .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
         .mockResolvedValue([]),
+      listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
     const prepareIssueWorkspace = vi.fn(
@@ -258,7 +262,7 @@ describe("dispatch mutex", () => {
         runs.some(
           (run) =>
             run["state"] === "failed" &&
-            run["terminalReason"] === "continuation cap reached"
+            run["terminalReason"] === "cap_reached:no_commits"
         )
       );
 

@@ -3,10 +3,14 @@ import { describe, expect, it } from "vitest";
 import {
   tryAddLabelsToIssue,
   tryGetIssue,
+  tryListBranchCommits,
+  tryListPullRequestsForBranch,
   type GitHubIssueLabelInput,
   type GitHubIssueRepositoryInput,
   type GitHubIssuesApi,
-  type RawGitHubIssue
+  type RawGitHubCommit,
+  type RawGitHubIssue,
+  type RawGitHubPullRequest
 } from "../src/issue-polling.js";
 
 const labelInput: GitHubIssueLabelInput = {
@@ -89,5 +93,76 @@ describe("tryGetIssue", () => {
       listOpenIssues: () => Promise.resolve([])
     };
     expect(await tryGetIssue(api, fetchInput)).toBeNull();
+  });
+});
+
+const branchInput: GitHubIssueRepositoryInput & { branch: string } = {
+  branch: "symphonika/issue65",
+  owner: "pmatos",
+  repo: "symphonika",
+  token: "secret"
+};
+
+describe("tryListBranchCommits", () => {
+  it("preserves `this` when invoking a class-based implementation", async () => {
+    class Api {
+      readonly received: string[] = [];
+      listOpenIssues(): Promise<never[]> {
+        return Promise.resolve([]);
+      }
+      listBranchCommits(
+        input: GitHubIssueRepositoryInput & { branch: string }
+      ): Promise<RawGitHubCommit[] | null> {
+        this.received.push(input.branch);
+        return Promise.resolve([{ sha: "abc" }]);
+      }
+    }
+    const api = new Api();
+    const result = await tryListBranchCommits(api, branchInput);
+    expect(api.received).toEqual(["symphonika/issue65"]);
+    expect(result).toEqual([{ sha: "abc" }]);
+  });
+
+  it("returns undefined when the implementation does not provide listBranchCommits", async () => {
+    const api: GitHubIssuesApi = {
+      listOpenIssues: () => Promise.resolve([])
+    };
+    expect(await tryListBranchCommits(api, branchInput)).toBeUndefined();
+  });
+
+  it("propagates null when the branch is missing", async () => {
+    const api: GitHubIssuesApi = {
+      listBranchCommits: () => Promise.resolve(null),
+      listOpenIssues: () => Promise.resolve([])
+    };
+    expect(await tryListBranchCommits(api, branchInput)).toBeNull();
+  });
+});
+
+describe("tryListPullRequestsForBranch", () => {
+  it("preserves `this` when invoking a class-based implementation", async () => {
+    class Api {
+      readonly received: string[] = [];
+      listOpenIssues(): Promise<never[]> {
+        return Promise.resolve([]);
+      }
+      listPullRequestsForBranch(
+        input: GitHubIssueRepositoryInput & { branch: string }
+      ): Promise<RawGitHubPullRequest[]> {
+        this.received.push(input.branch);
+        return Promise.resolve([{ number: 7, merged_at: null }]);
+      }
+    }
+    const api = new Api();
+    const result = await tryListPullRequestsForBranch(api, branchInput);
+    expect(api.received).toEqual(["symphonika/issue65"]);
+    expect(result).toEqual([{ number: 7, merged_at: null }]);
+  });
+
+  it("returns undefined when the implementation does not provide listPullRequestsForBranch", async () => {
+    const api: GitHubIssuesApi = {
+      listOpenIssues: () => Promise.resolve([])
+    };
+    expect(await tryListPullRequestsForBranch(api, branchInput)).toBeUndefined();
   });
 });

@@ -104,6 +104,7 @@ export async function startDaemon(
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let polling = false;
   let scheduledWork = Promise.resolve();
+  let lastPollErrorsKey = "";
   const inflightDispatches = new Set<Promise<void>>();
   const projectsLoader = async (): Promise<
     Map<string, RunControllerProjectConfig>
@@ -204,6 +205,18 @@ export async function startDaemon(
     } finally {
       polling = false;
     }
+    const errorsKey = issuePollStatus.errors.join("\n");
+    if (errorsKey !== lastPollErrorsKey) {
+      if (issuePollStatus.errors.length > 0) {
+        logger.warn(
+          { errors: issuePollStatus.errors },
+          "symphonika polling has errors; no issues will be dispatched"
+        );
+      } else {
+        logger.info("symphonika polling errors cleared");
+      }
+      lastPollErrorsKey = errorsKey;
+    }
   };
   const reconcile = async (): Promise<void> => {
     if (!state.configExists) {
@@ -257,7 +270,13 @@ export async function startDaemon(
     }
     const promise = (async () => {
       try {
-        await runController.dispatchOneFresh(issuePollStatus);
+        const result = await runController.dispatchOneFresh(issuePollStatus);
+        if (result.dispatched === false) {
+          logger.debug(
+            { reason: result.reason },
+            "symphonika dispatch skipped"
+          );
+        }
       } catch (error) {
         issuePollStatus.errors.push(errorMessage(error));
         logger.error({ err: error }, "symphonika dispatch failed");
@@ -274,6 +293,16 @@ export async function startDaemon(
     await refreshIssuePollStatus();
     await reconcile();
     launchDispatch();
+    logger.debug(
+      {
+        candidates: issuePollStatus.candidateIssues.length,
+        dispatching: dispatchMutex.held,
+        errors: issuePollStatus.errors.length,
+        filtered: issuePollStatus.filteredIssues.length,
+        projects: issuePollStatus.projects.length
+      },
+      "symphonika tick"
+    );
   };
   const scheduleTick = (): void => {
     enqueueScheduledWork(tick);

@@ -326,12 +326,20 @@ export class RunController {
     }
 
     // Re-assert sym:claimed best-effort in case operator clear-stale ran between attempts.
-    await this.bestEffort(() =>
-      this.githubIssuesApi.addLabelsToIssue!({
-        ...repository,
+    await this.bestEffort(
+      () =>
+        this.githubIssuesApi.addLabelsToIssue!({
+          ...repository,
+          issueNumber: refreshed.number,
+          labels: ["sym:claimed"]
+        }),
+      {
         issueNumber: refreshed.number,
-        labels: ["sym:claimed"]
-      })
+        label: "sym:claimed",
+        operation: "addLabel",
+        project: project.name,
+        runId: payload.runId
+      }
     );
 
     await this.runAttemptLifecycle({
@@ -482,6 +490,17 @@ export class RunController {
         labels: ["sym:claimed"]
       });
       claimed = true;
+      this.logger?.info(
+        {
+          issueNumber: input.issue.number,
+          isContinuation: input.isContinuation,
+          parentRunId: input.parentRunId,
+          project: input.project.name,
+          provider: input.providerName,
+          runId: input.runId
+        },
+        "symphonika claimed issue and starting run"
+      );
       const createInput = {
         id: input.runId,
         issue: input.issue,
@@ -627,6 +646,24 @@ export class RunController {
         terminal.kind === "failed" &&
         terminal.classification === "transient" &&
         this.runStore.runRetryCount(input.runId) < this.lifecyclePolicy.retry.cap;
+
+      this.logger?.info(
+        {
+          attemptNumber: input.attemptNumber,
+          cancelReason,
+          cancelRequested,
+          classification: terminal.classification,
+          isContinuation: input.isContinuation,
+          issueNumber: input.issue.number,
+          kind: terminal.kind,
+          project: input.project.name,
+          runId: input.runId,
+          state: outcomeState,
+          terminalReason: terminal.reason,
+          willRetry
+        },
+        "symphonika run terminated"
+      );
 
       const labelInput: ApplyLabelsInput = {
         issueNumber: input.issue.number,
@@ -841,15 +878,29 @@ export class RunController {
         issueNumber: input.issueNumber,
         labels: ["sym:failed"]
       });
-    } catch {
+    } catch (err) {
+      this.logger?.warn(
+        { err, issueNumber: input.issueNumber },
+        "symphonika failed to add sym:failed label; sym:claimed left in place"
+      );
       return;
     }
-    await this.bestEffort(() =>
-      api.removeLabelsFromIssue({
-        ...input.repository,
+    this.logger?.info(
+      { issueNumber: input.issueNumber },
+      "symphonika marked issue sym:failed"
+    );
+    await this.bestEffort(
+      () =>
+        api.removeLabelsFromIssue({
+          ...input.repository,
+          issueNumber: input.issueNumber,
+          labels: ["sym:claimed"]
+        }),
+      {
         issueNumber: input.issueNumber,
-        labels: ["sym:claimed"]
-      })
+        label: "sym:claimed",
+        operation: "removeLabel"
+      }
     );
   }
 
@@ -857,38 +908,66 @@ export class RunController {
     const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
     if (input.outcome.kind === "cancelled") {
       const reason = input.cancelReason;
-      await this.bestEffort(() =>
-        api.removeLabelsFromIssue({
-          ...input.repository,
+      await this.bestEffort(
+        () =>
+          api.removeLabelsFromIssue({
+            ...input.repository,
+            issueNumber: input.issueNumber,
+            labels: ["sym:running"]
+          }),
+        {
           issueNumber: input.issueNumber,
-          labels: ["sym:running"]
-        })
+          label: "sym:running",
+          operation: "removeLabel",
+          phase: "cancelled"
+        }
       );
       if (reason === CANCEL_REASONS.CLOSED_ISSUE) {
-        await this.bestEffort(() =>
-          api.removeLabelsFromIssue({
-            ...input.repository,
+        await this.bestEffort(
+          () =>
+            api.removeLabelsFromIssue({
+              ...input.repository,
+              issueNumber: input.issueNumber,
+              labels: ["sym:claimed"]
+            }),
+          {
             issueNumber: input.issueNumber,
-            labels: ["sym:claimed"]
-          })
+            label: "sym:claimed",
+            operation: "removeLabel",
+            phase: "closed-issue-cleanup"
+          }
         );
-        await this.bestEffort(() =>
-          api.removeLabelsFromIssue({
-            ...input.repository,
+        await this.bestEffort(
+          () =>
+            api.removeLabelsFromIssue({
+              ...input.repository,
+              issueNumber: input.issueNumber,
+              labels: ["sym:failed"]
+            }),
+          {
             issueNumber: input.issueNumber,
-            labels: ["sym:failed"]
-          })
+            label: "sym:failed",
+            operation: "removeLabel",
+            phase: "closed-issue-cleanup"
+          }
         );
       }
       return;
     }
 
-    await this.bestEffort(() =>
-      api.removeLabelsFromIssue({
-        ...input.repository,
+    await this.bestEffort(
+      () =>
+        api.removeLabelsFromIssue({
+          ...input.repository,
+          issueNumber: input.issueNumber,
+          labels: ["sym:running"]
+        }),
+      {
         issueNumber: input.issueNumber,
-        labels: ["sym:running"]
-      })
+        label: "sym:running",
+        operation: "removeLabel",
+        phase: "terminal"
+      }
     );
 
     if (
@@ -978,6 +1057,18 @@ export class RunController {
         repository: input.repository
       });
       const capId = this.createRunId();
+      this.logger?.info(
+        {
+          cap: this.lifecyclePolicy.continuation.cap,
+          capRunId: capId,
+          issueNumber: input.issue.number,
+          kind,
+          parentRunId: input.runId,
+          project: input.project.name,
+          succeededContinuations
+        },
+        "symphonika continuation cap reached; marking issue failed"
+      );
       this.runStore.createCapReachedFailureRun({
         id: capId,
         issue: refreshed,
@@ -991,6 +1082,17 @@ export class RunController {
       });
       return;
     }
+
+    this.logger?.info(
+      {
+        delayMs: this.lifecyclePolicy.continuation.delayMs,
+        issueNumber: refreshed.number,
+        parentRunId: input.runId,
+        project: input.project.name,
+        succeededContinuations
+      },
+      "symphonika scheduling continuation"
+    );
 
     this.schedule({
       delayMs: this.lifecyclePolicy.continuation.delayMs,
@@ -1036,11 +1138,17 @@ export class RunController {
     return normalizeRawIssue(raw, input.project);
   }
 
-  private async bestEffort(fn: () => Promise<void>): Promise<void> {
+  private async bestEffort(
+    fn: () => Promise<void>,
+    context?: Record<string, unknown>
+  ): Promise<void> {
     try {
       await fn();
-    } catch {
-      // best-effort: swallow.
+    } catch (err) {
+      this.logger?.warn(
+        { err, ...context },
+        "symphonika best-effort op failed; continuing"
+      );
     }
   }
 }

@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -11,6 +11,7 @@ import type { AgentProvider, ProviderEvent } from "../src/provider.js";
 import type {
   PreparedIssueWorkspace
 } from "../src/workspace.js";
+import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
 
@@ -144,7 +145,8 @@ async function waitForCondition(
 describe("dispatch continuation cap", () => {
   it("schedules continuations up to the cap, then writes a cap-reached failure row", async () => {
     const root = await makeTempRoot();
-    await mkdir(preparedWorkspaceFixture(root).workspacePath, { recursive: true });
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
     await writeProject(root);
 
     const provider: AgentProvider = {
@@ -176,7 +178,7 @@ describe("dispatch continuation cap", () => {
     const prepareIssueWorkspace = vi.fn(
       (): Promise<PreparedIssueWorkspace> => {
         createCount += 1;
-        return Promise.resolve(preparedWorkspaceFixture(root, createCount > 1));
+        return Promise.resolve({ ...prepared, reused: createCount > 1 });
       }
     );
     let runCounter = 0;
@@ -259,7 +261,8 @@ describe("dispatch continuation cap", () => {
 
   it("does not schedule continuation when refreshed issue is closed", async () => {
     const root = await makeTempRoot();
-    await mkdir(preparedWorkspaceFixture(root).workspacePath, { recursive: true });
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
     await writeProject(root);
 
     const provider: AgentProvider = {
@@ -286,7 +289,7 @@ describe("dispatch continuation cap", () => {
     };
     const prepareIssueWorkspace = vi.fn(
       (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(preparedWorkspaceFixture(root))
+        Promise.resolve(prepared)
     );
 
     const daemon = await startDaemon({
@@ -327,7 +330,8 @@ describe("dispatch continuation cap", () => {
 
   it("does not start scheduled continuation when issue loses eligibility during delay", async () => {
     const root = await makeTempRoot();
-    await mkdir(preparedWorkspaceFixture(root).workspacePath, { recursive: true });
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
     await writeProject(root);
 
     let runAttemptCount = 0;
@@ -364,7 +368,7 @@ describe("dispatch continuation cap", () => {
     };
     const prepareIssueWorkspace = vi.fn(
       (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(preparedWorkspaceFixture(root))
+        Promise.resolve(prepared)
     );
 
     let runCounter = 0;

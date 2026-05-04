@@ -626,10 +626,18 @@ export class RunController {
           cancelReason = removed.cancelReason;
         }
       }
-      const terminal = classifyFailure({
+      const terminal = await classifyFailure({
         cancelRequested,
         ...(caughtError === undefined ? {} : { error: caughtError }),
-        events: runtime.events
+        events: runtime.events,
+        ...(started === undefined
+          ? {}
+          : {
+              successWorkspace: {
+                baseBranch: input.project.workspace.git.base_branch,
+                workspacePath: started.evidence.workspacePath
+              }
+            })
       });
       const outcomeState = mapOutcomeToRunState(terminal);
       if (attemptCreated) {

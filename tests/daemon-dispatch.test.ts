@@ -15,6 +15,7 @@ import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
 } from "../src/workspace.js";
+import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
@@ -44,7 +45,6 @@ describe("daemon dispatch", () => {
       "issues",
       "8-dispatch-an-end-to-end-run-through-a-test-provider"
     );
-    await mkdir(workspacePath, { recursive: true });
     await writeValidProject(root);
 
     const githubIssuesApi = {
@@ -117,6 +117,7 @@ describe("daemon dispatch", () => {
       reused: false,
       workspacePath
     };
+    await createGitWorkspaceAhead(preparedWorkspace);
     const prepareIssueWorkspace = vi.fn(
       (input: PrepareIssueWorkspaceInput): Promise<PreparedIssueWorkspace> => {
         void input;
@@ -325,8 +326,9 @@ describe("daemon dispatch", () => {
       "issues",
       "8-dispatch-an-end-to-end-run-through-a-test-provider"
     );
-    await mkdir(workspacePath, { recursive: true });
     await writeValidProject(root, { pollingIntervalMs: 10 });
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
 
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
@@ -347,7 +349,7 @@ describe("daemon dispatch", () => {
     const prepareIssueWorkspace = vi.fn(
       (input: PrepareIssueWorkspaceInput): Promise<PreparedIssueWorkspace> => {
         void input;
-        return Promise.resolve(preparedWorkspaceFixture(root));
+        return Promise.resolve(preparedWorkspace);
       }
     );
 

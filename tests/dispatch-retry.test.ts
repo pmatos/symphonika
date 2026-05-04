@@ -11,6 +11,7 @@ import type { AgentProvider, ProviderEvent } from "../src/provider.js";
 import type {
   PreparedIssueWorkspace
 } from "../src/workspace.js";
+import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
 
@@ -146,7 +147,7 @@ describe("dispatch retry policy", () => {
   it("retries transient failures up to the cap and records retry_count", async () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);
-    await mkdir(prepared.workspacePath, { recursive: true });
+    await createGitWorkspaceAhead(prepared);
     await writeProject(root);
 
     let attempts = 0;

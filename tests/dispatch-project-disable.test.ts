@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -10,6 +10,7 @@ import type { AgentProvider, ProviderEvent } from "../src/provider.js";
 import type {
   PreparedIssueWorkspace
 } from "../src/workspace.js";
+import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
 
@@ -145,7 +146,8 @@ async function waitForCondition(
 describe("dispatch project disable", () => {
   it("disabling a project mid-flight does not interrupt the active run; no continuation is scheduled afterwards", async () => {
     const root = await makeTempRoot();
-    await mkdir(preparedWorkspaceFixture(root).workspacePath, { recursive: true });
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
     await writeProject(root);
 
     let runAttemptCount = 0;
@@ -176,7 +178,7 @@ describe("dispatch project disable", () => {
     };
     const prepareIssueWorkspace = vi.fn(
       (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(preparedWorkspaceFixture(root))
+        Promise.resolve(prepared)
     );
 
     const daemon = await startDaemon({
@@ -230,7 +232,6 @@ describe("dispatch project disable", () => {
 
   it("does not dispatch new work when the only project is disabled at startup", async () => {
     const root = await makeTempRoot();
-    await mkdir(preparedWorkspaceFixture(root).workspacePath, { recursive: true });
     await writeProject(root, { disabled: true });
 
     const provider: AgentProvider = {
@@ -284,7 +285,8 @@ describe("dispatch project disable", () => {
 
   it("removing a project mid-flight does not interrupt the active run; no continuation is scheduled afterwards", async () => {
     const root = await makeTempRoot();
-    await mkdir(preparedWorkspaceFixture(root).workspacePath, { recursive: true });
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
     await writeProject(root);
 
     let runAttemptCount = 0;
@@ -313,7 +315,7 @@ describe("dispatch project disable", () => {
     };
     const prepareIssueWorkspace = vi.fn(
       (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(preparedWorkspaceFixture(root))
+        Promise.resolve(prepared)
     );
 
     const daemon = await startDaemon({

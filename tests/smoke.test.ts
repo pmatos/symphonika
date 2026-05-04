@@ -18,6 +18,10 @@ import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
 } from "../src/workspace.js";
+import {
+  createGitWorkspaceAhead,
+  createGitWorkspaceAtBase
+} from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
 
@@ -155,7 +159,6 @@ describe("runSmoke", () => {
       "issues",
       issueDirectory
     );
-    await mkdir(workspacePath, { recursive: true });
 
     const githubApi = successfulGitHubApi();
     const githubIssuesApi: GitHubIssuesApi = {
@@ -194,7 +197,7 @@ describe("runSmoke", () => {
     const prepareIssueWorkspace = vi.fn(
       (input: PrepareIssueWorkspaceInput): Promise<PreparedIssueWorkspace> => {
         void input;
-        return Promise.resolve({
+        const prepared = {
           branchName: `sym/symphonika/${issueDirectory}`,
           branchRef: `refs/heads/sym/symphonika/${issueDirectory}`,
           cachePath: path.join(
@@ -208,9 +211,14 @@ describe("runSmoke", () => {
           issueDirectoryName: issueDirectory,
           reused: false,
           workspacePath
-        });
+        };
+        return Promise.resolve(prepared);
       }
     );
+    await createGitWorkspaceAhead({
+      branchName: `sym/symphonika/${issueDirectory}`,
+      workspacePath
+    });
 
     const report = await runSmoke({
       agentProviders: { codex },
@@ -244,6 +252,102 @@ describe("runSmoke", () => {
     await expect(readFile(detail.promptPath, "utf8")).resolves.toContain(
       issueTitle
     );
+  });
+
+  it("surfaces no_workspace_changes when an exit-0 provider leaves the issue branch at base", async () => {
+    const root = await makeTempRoot();
+    await writeBootstrapProject(root);
+
+    const issueNumber = 52;
+    const issueTitle = "Verify provider work before success";
+    const issueDirectory = `${issueNumber}-verify-provider-work-before-success`;
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "symphonika",
+      "issues",
+      issueDirectory
+    );
+    const branchName = `sym/symphonika/${issueDirectory}`;
+    await createGitWorkspaceAtBase({ branchName, workspacePath });
+
+    const githubApi = successfulGitHubApi();
+    const githubIssuesApi: GitHubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        {
+          body: "Exit 0, but no workspace commits.",
+          created_at: "2026-04-20T10:00:00Z",
+          html_url: `https://github.com/pmatos/symphonika/issues/${issueNumber}`,
+          id: 6000 + issueNumber,
+          labels: [{ name: "agent-ready" }],
+          number: issueNumber,
+          state: "open",
+          title: issueTitle,
+          updated_at: "2026-04-21T11:00:00Z"
+        }
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codex: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const prepareIssueWorkspace = vi.fn(
+      (): Promise<PreparedIssueWorkspace> =>
+        Promise.resolve({
+          branchName,
+          branchRef: `refs/heads/${branchName}`,
+          cachePath: path.join(
+            root,
+            ".symphonika",
+            "workspaces",
+            "symphonika",
+            ".cache",
+            "repo.git"
+          ),
+          issueDirectoryName: issueDirectory,
+          reused: false,
+          workspacePath
+        })
+    );
+
+    const report = await runSmoke({
+      agentProviders: { codex },
+      configPath: path.join(root, "symphonika.yml"),
+      cwd: root,
+      env: { GITHUB_TOKEN: "test-token" },
+      githubApi,
+      githubIssuesApi,
+      prepareIssueWorkspace
+    });
+
+    expect(report.dispatched).toBe(true);
+    expect(report.ok).toBe(false);
+    expect(report.runDetail).toMatchObject({
+      issueNumber,
+      state: "failed",
+      terminalReason: "no_workspace_changes",
+      workspacePath
+    });
+    expect(report.errors).toHaveLength(1);
+    expect(report.errors[0]).toContain("terminalReason=no_workspace_changes");
+    expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith({
+      issueNumber,
+      labels: ["sym:failed"],
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "test-token"
+    });
   });
 
   it("surfaces a failed terminal run state when the provider reports turn_failed", async () => {

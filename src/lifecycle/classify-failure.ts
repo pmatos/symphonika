@@ -1,11 +1,20 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
 import type { NormalizedProviderEvent } from "../provider.js";
 import type { FailureClassification } from "../run-store.js";
 import { WorkspacePreparationError } from "../workspace.js";
+
+const execFileAsync = promisify(execFile);
 
 export type ClassifyFailureInput = {
   cancelRequested: boolean;
   error?: unknown;
   events: NormalizedProviderEvent[];
+  successWorkspace?: {
+    baseBranch: string;
+    workspacePath: string;
+  };
 };
 
 export type ClassifiedTerminal = {
@@ -14,7 +23,9 @@ export type ClassifiedTerminal = {
   reason: string;
 };
 
-export function classifyFailure(input: ClassifyFailureInput): ClassifiedTerminal {
+export async function classifyFailure(
+  input: ClassifyFailureInput
+): Promise<ClassifiedTerminal> {
   if (input.cancelRequested) {
     return {
       kind: "cancelled",
@@ -71,10 +82,7 @@ export function classifyFailure(input: ClassifyFailureInput): ClassifiedTerminal
 
   const exitCode = numberField(exit, "exitCode");
   if (exitCode === 0) {
-    return {
-      kind: "success",
-      reason: ""
-    };
+    return verifyWorkspaceSuccess(input.successWorkspace);
   }
 
   return {
@@ -84,6 +92,51 @@ export function classifyFailure(input: ClassifyFailureInput): ClassifiedTerminal
       exitCode === undefined
         ? `process_exit_signal_${stringField(exit, "signal") ?? "unknown"}`
         : `process_exit_${exitCode}`
+  };
+}
+
+async function verifyWorkspaceSuccess(
+  workspace: ClassifyFailureInput["successWorkspace"]
+): Promise<ClassifiedTerminal> {
+  if (workspace === undefined) {
+    return workspaceInspectionFailed();
+  }
+
+  try {
+    const baseRef = `refs/remotes/origin/${workspace.baseBranch}`;
+    const { stdout } = await execFileAsync("git", [
+      "-C",
+      workspace.workspacePath,
+      "rev-list",
+      "--count",
+      `${baseRef}..HEAD`
+    ]);
+    const trimmed = stdout.trim();
+    if (!/^\d+$/.test(trimmed)) {
+      return workspaceInspectionFailed();
+    }
+    const aheadCount = Number(trimmed);
+    if (aheadCount === 0) {
+      return {
+        classification: "deterministic",
+        kind: "failed",
+        reason: "no_workspace_changes"
+      };
+    }
+    return {
+      kind: "success",
+      reason: ""
+    };
+  } catch {
+    return workspaceInspectionFailed();
+  }
+}
+
+function workspaceInspectionFailed(): ClassifiedTerminal {
+  return {
+    classification: "deterministic",
+    kind: "failed",
+    reason: "workspace_inspection_failed"
   };
 }
 

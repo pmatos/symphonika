@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -8,6 +8,7 @@ import { startDaemon } from "../src/daemon.js";
 import type { LifecyclePolicy } from "../src/lifecycle/active-runs.js";
 import type { AgentProvider, ProviderEvent } from "../src/provider.js";
 import type { PreparedIssueWorkspace } from "../src/workspace.js";
+import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
 
@@ -133,7 +134,8 @@ async function waitForCondition(
 describe("dispatch mutex", () => {
   it("scheduled continuation never runs concurrently with another active dispatch", async () => {
     const root = await makeTempRoot();
-    await mkdir(preparedWorkspaceFixture(root).workspacePath, { recursive: true });
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
     await writeProject(root, "Work {{issue.number}}\n");
 
     let active = 0;
@@ -174,7 +176,7 @@ describe("dispatch mutex", () => {
     };
     const prepareIssueWorkspace = vi.fn(
       (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(preparedWorkspaceFixture(root))
+        Promise.resolve(prepared)
     );
 
     let runCounter = 0;
@@ -208,7 +210,8 @@ describe("dispatch mutex", () => {
 
   it("renders run.continuation as true on continuation runs and false on the fresh run", async () => {
     const root = await makeTempRoot();
-    await mkdir(preparedWorkspaceFixture(root).workspacePath, { recursive: true });
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
     await writeProject(
       root,
       "Continuation? {{run.continuation}} attempt={{run.attempt}}\n"
@@ -240,7 +243,7 @@ describe("dispatch mutex", () => {
     };
     const prepareIssueWorkspace = vi.fn(
       (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(preparedWorkspaceFixture(root))
+        Promise.resolve(prepared)
     );
 
     let runCounter = 0;

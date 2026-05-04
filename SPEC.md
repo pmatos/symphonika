@@ -133,8 +133,9 @@ The exact slugging algorithm must be deterministic and path-safe.
 
 A Run is one orchestrator-managed execution lifecycle for one issue in one workspace.
 
-Run success means the provider process completed successfully. It does not mean the GitHub issue is
-closed, merged, or complete.
+Run success means the provider process completed successfully and the issue branch has at least one
+commit ahead of the configured base branch in the Workspace. It does not mean the GitHub issue is
+closed, merged, pushed, or represented by a pull request.
 
 ### 4.8 Continuation
 
@@ -599,13 +600,19 @@ Terminal run state does not necessarily match GitHub issue state.
 
 ### 12.1 Success
 
-On provider success:
+On provider exit code 0:
 
-1. Mark run `succeeded`.
-2. Remove `sym:running`.
-3. Re-check GitHub issue.
-4. If the issue remains eligible, schedule a short continuation.
-5. If the continuation cap is reached, mark `sym:failed` and surface the reason.
+1. Inspect the Workspace issue branch against
+   `refs/remotes/origin/<configured-base-branch>..HEAD`.
+2. If the branch has zero commits ahead of base, mark the run `failed` with deterministic terminal
+   reason `no_workspace_changes`.
+3. If Workspace inspection fails, mark the run `failed` with deterministic terminal reason
+   `workspace_inspection_failed`.
+4. If the branch is ahead of base, mark run `succeeded`.
+5. Remove `sym:running`.
+6. Re-check GitHub issue.
+7. If the issue remains eligible, schedule a short continuation.
+8. If the continuation cap is reached, mark `sym:failed` and surface the reason.
 
 Default continuation delay: about 1 second.
 
@@ -628,6 +635,8 @@ Do not automatically retry deterministic failures:
 - missing workflow
 - input required
 - continuation cap reached
+- no workspace commits ahead of base after provider exit code 0
+- workspace success inspection failure
 - workspace branch conflict
 - Project validation failure
 

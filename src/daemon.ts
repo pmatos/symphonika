@@ -376,12 +376,17 @@ export async function startDaemon(
   await waitForListening(server);
   const port = resolveListeningPort(server, requestedPort);
   const url = `http://${host}:${port}`;
-  await writeDaemonEndpoint(state.stateRoot, {
-    pid: process.pid,
-    startedAt: new Date().toISOString(),
-    stateRoot: state.stateRoot,
-    url
-  });
+  try {
+    await writeDaemonEndpoint(state.stateRoot, {
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      stateRoot: state.stateRoot,
+      url
+    });
+  } catch (error) {
+    await rollbackDaemonStartup(server, runStore, logger);
+    throw error;
+  }
   if (state.configExists) {
     await reconcile();
     if (issuePollStatus.candidateIssues.length > 0) {
@@ -471,6 +476,30 @@ function stopServer(server: ServerType, logger: Logger): Promise<void> {
       resolve();
     });
   });
+}
+
+async function rollbackDaemonStartup(
+  server: ServerType,
+  runStore: ReturnType<typeof openRunStore>,
+  logger: Logger
+): Promise<void> {
+  try {
+    await stopServer(server, logger);
+  } catch (error) {
+    logger.warn(
+      { error: errorMessage(error) },
+      "symphonika daemon startup rollback failed to stop server"
+    );
+  }
+
+  try {
+    runStore.close();
+  } catch (error) {
+    logger.warn(
+      { error: errorMessage(error) },
+      "symphonika daemon startup rollback failed to close run store"
+    );
+  }
 }
 
 function errorMessage(error: unknown): string {

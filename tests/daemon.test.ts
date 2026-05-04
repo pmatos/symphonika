@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -56,6 +57,23 @@ describe("startDaemon", () => {
     }
     await expect(readFile(endpointPath, "utf8")).rejects.toThrow();
   });
+
+  it("cleans up the HTTP listener when endpoint descriptor writing fails", async () => {
+    const cwd = await makeTempRoot();
+    const port = await getFreePort();
+    await mkdir(path.join(cwd, ".symphonika", "daemon.json"), {
+      recursive: true
+    });
+
+    await expect(
+      startDaemon({
+        cwd,
+        logger: pino({ enabled: false }),
+        port
+      })
+    ).rejects.toThrow();
+    await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
+  });
 });
 
 describe("resolveLogLevel", () => {
@@ -80,4 +98,25 @@ describe("resolveLogLevel", () => {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (typeof address !== "object" || address === null) {
+        server.close(() => reject(new Error("free port lookup failed")));
+        return;
+      }
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(address.port);
+      });
+    });
+  });
 }

@@ -23,6 +23,7 @@ export type RegisterPagesOptions = {
 const TERMINAL_STATES: ReadonlySet<RunState> = new Set([
   "cancelled",
   "failed",
+  "input_required",
   "stale",
   "succeeded"
 ]);
@@ -46,7 +47,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       "Symphonika",
       [
         renderHeader(options.version, snapshot),
-        renderProjectsCard(snapshot),
+        renderProjectsCard(snapshot, options.issuePollStatus),
         renderStaleIssuesCard(options.issuePollStatus?.filteredIssues ?? []),
         renderRunsTable("Recent runs", recentRuns)
       ].join("")
@@ -139,23 +140,38 @@ function renderHeader(version: string, snapshot: StatusSnapshot | undefined): st
 </section>`;
 }
 
-function renderProjectsCard(snapshot: StatusSnapshot | undefined): string {
-  if (snapshot === undefined || snapshot.projects.length === 0) {
+function renderProjectsCard(
+  snapshot: StatusSnapshot | undefined,
+  issuePollStatus: IssuePollStatus | undefined
+): string {
+  if (snapshot !== undefined && snapshot.projects.length > 0) {
+    const rows = snapshot.projects
+      .map((project) => {
+        const missing =
+          project.missingOperationalLabels.length === 0
+            ? "&mdash;"
+            : escapeHtml(project.missingOperationalLabels.join(", "));
+        const valid = project.validForDispatch ? "valid" : "invalid";
+        return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(valid)}</td><td><code>${escapeHtml(project.workflowPath)}</code></td><td>${missing}</td></tr>`;
+      })
+      .join("");
+    return `<section><h2>Projects</h2>
+<table><thead><tr><th>Name</th><th>Validation</th><th>Workflow</th><th>Missing operational labels</th></tr></thead>
+<tbody>${rows}</tbody></table></section>`;
+  }
+
+  if (issuePollStatus === undefined || issuePollStatus.projects.length === 0) {
     return "";
   }
 
-  const rows = snapshot.projects
-    .map((project) => {
-      const missing =
-        project.missingOperationalLabels.length === 0
-          ? "&mdash;"
-          : escapeHtml(project.missingOperationalLabels.join(", "));
-      const valid = project.validForDispatch ? "valid" : "invalid";
-      return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(valid)}</td><td><code>${escapeHtml(project.workflowPath)}</code></td><td>${missing}</td></tr>`;
-    })
+  const rows = issuePollStatus.projects
+    .map(
+      (project) =>
+        `<tr><td>${escapeHtml(project.name)}</td><td>${project.ok ? "poll ok" : "poll failed"}</td><td>${project.fetchedIssues}</td><td>${escapeHtml(project.error ?? "")}</td></tr>`
+    )
     .join("");
   return `<section><h2>Projects</h2>
-<table><thead><tr><th>Name</th><th>Validation</th><th>Workflow</th><th>Missing operational labels</th></tr></thead>
+<table><thead><tr><th>Name</th><th>Last poll</th><th>Fetched issues</th><th>Error</th></tr></thead>
 <tbody>${rows}</tbody></table></section>`;
 }
 
@@ -188,11 +204,11 @@ function renderRunsTable(title: string, runs: RunStatus[]): string {
   const rows = runs
     .map(
       (run) =>
-        `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td>#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td><span class="state-${escapeHtml(run.state)}">${escapeHtml(run.state)}</span></td><td>${escapeHtml(run.provider)}</td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`
+        `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td>#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td><span class="state-${escapeHtml(run.state)}">${escapeHtml(run.state)}</span></td><td>${escapeHtml(run.provider)}</td><td>${escapeHtml(run.createdAt)}</td><td>${escapeHtml(run.updatedAt)}</td></tr>`
     )
     .join("");
   return `<section><h2>${escapeHtml(title)}</h2>
-<table><thead><tr><th>Run id</th><th>Project</th><th>Issue</th><th>State</th><th>Provider</th><th>Branch</th></tr></thead>
+<table><thead><tr><th>Run id</th><th>Project</th><th>Issue</th><th>State</th><th>Provider</th><th>Started</th><th>Updated</th></tr></thead>
 <tbody>${rows}</tbody></table></section>`;
 }
 
@@ -202,6 +218,8 @@ function renderRunSummary(detail: RunStatus): string {
   <p><strong>Issue:</strong> #${detail.issueNumber} ${escapeHtml(detail.issueTitle)}</p>
   <p><strong>State:</strong> <span class="state-${escapeHtml(detail.state)}">${escapeHtml(detail.state)}</span></p>
   <p><strong>Provider:</strong> ${escapeHtml(detail.provider)}</p>
+  <p><strong>Started:</strong> ${escapeHtml(detail.createdAt)}</p>
+  <p><strong>Updated:</strong> ${escapeHtml(detail.updatedAt)}</p>
   <p><strong>Branch:</strong> <code>${escapeHtml(detail.branchName)}</code></p>
   <p><strong>Workspace:</strong> <code>${escapeHtml(detail.workspacePath)}</code></p>
   <p><strong>Retries:</strong> ${detail.retryCount}${detail.isContinuation ? " (continuation)" : ""}</p>
@@ -284,14 +302,18 @@ function renderRunFileLinks(detail: RunStatus): string {
       return;
     }
     items.push(
-      `<li><a href="/api/runs/${encodeURIComponent(detail.id)}/files/${kind}">${escapeHtml(label)}</a></li>`
+      `<li><a href="/logs/runs/${encodeURIComponent(detail.id)}/${encodeURIComponent(kind)}">${escapeHtml(label)}</a></li>`
     );
   };
-  linkIfPresent("Rendered prompt", "prompt", detail.promptPath);
-  linkIfPresent("Provider raw log", "raw-log", detail.rawLogPath);
-  linkIfPresent("Normalized log", "normalized-log", detail.normalizedLogPath);
-  linkIfPresent("Issue snapshot", "issue-snapshot", detail.issueSnapshotPath);
-  linkIfPresent("Prompt metadata", "metadata", detail.metadataPath);
+  linkIfPresent("Rendered prompt", "prompt.md", detail.promptPath);
+  linkIfPresent("Provider raw log", "provider.raw.jsonl", detail.rawLogPath);
+  linkIfPresent(
+    "Normalized log",
+    "provider.normalized.jsonl",
+    detail.normalizedLogPath
+  );
+  linkIfPresent("Issue snapshot", "issue-snapshot.json", detail.issueSnapshotPath);
+  linkIfPresent("Prompt metadata", "prompt-metadata.json", detail.metadataPath);
   if (items.length === 0) {
     return "";
   }

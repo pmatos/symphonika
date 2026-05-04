@@ -312,6 +312,7 @@ Recommended layout:
 
 ```text
 .symphonika/
+  daemon.json
   symphonika.db
   logs/
     runs/
@@ -320,9 +321,13 @@ Recommended layout:
         provider.normalized.jsonl
         stderr.log
         prompt.md
+        prompt-metadata.json
+        issue-snapshot.json
 ```
 
 Agents may modify workspaces, so orchestrator evidence must stay outside the Git worktree.
+When the daemon is running, `daemon.json` records the local API endpoint for the same state root so
+operator CLI commands can discover it without targeting an unrelated daemon.
 
 ### 7.4 Prompt Evidence
 

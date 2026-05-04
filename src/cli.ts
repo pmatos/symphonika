@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { InvalidArgumentError, Command } from "commander";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { DaemonHandle, StartDaemonOptions } from "./daemon.js";
 import { startDaemon } from "./daemon.js";
+import { readDaemonEndpoint } from "./daemon-endpoint.js";
 import type {
   ClearStaleOptions,
   ClearStaleReport,
@@ -14,6 +16,7 @@ import type {
   InitProjectReport
 } from "./doctor.js";
 import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
+import type { ProjectIssuePollReport } from "./issue-polling.js";
 import type {
   ListRunsFilter,
   OpenRunStoreOptions,
@@ -27,6 +30,7 @@ import { resolveStateRoot } from "./state.js";
 import { VERSION } from "./version.js";
 
 export type CliDependencies = {
+  fetch?: FetchFn;
   openRunStore?: (options: OpenRunStoreOptions) => RunStore;
   registerSignalHandlers?: boolean;
   runClearStale?: (options: ClearStaleOptions) => Promise<ClearStaleReport>;
@@ -36,6 +40,20 @@ export type CliDependencies = {
   startDaemon?: (options: StartDaemonOptions) => Promise<DaemonHandle>;
 };
 
+type FetchFn = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+type DaemonStatusResponse = {
+  candidateIssues?: unknown[];
+  filteredIssues?: unknown[];
+  issuePolling?: {
+    errors?: string[];
+    projects?: ProjectIssuePollReport[];
+  };
+  staleIssues?: unknown[];
+  state?: string;
+  stateRoot?: string;
+};
+
 export function buildCli(dependencies: CliDependencies = {}): Command {
   const doctor = dependencies.runDoctor ?? runDoctor;
   const initProject = dependencies.runInitProject ?? runInitProject;
@@ -43,6 +61,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   const smoke = dependencies.runSmoke ?? runSmoke;
   const start = dependencies.startDaemon ?? startDaemon;
   const openRunStore = dependencies.openRunStore ?? openRunStoreReal;
+  const fetcher = dependencies.fetch ?? fetch;
   const registerSignalHandlers = dependencies.registerSignalHandlers ?? true;
   const program = new Command();
 
@@ -231,11 +250,11 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         writeOut(program, `provider:     ${detail.provider}\n`);
         writeOut(program, `branch:       ${formatPath(detail.branchName)}\n`);
         writeOut(program, `workspace:    ${formatPath(detail.workspacePath)}\n`);
-        writeOut(program, `prompt:       ${formatPath(detail.promptPath)}\n`);
-        writeOut(program, `raw log:      ${formatPath(detail.rawLogPath)}\n`);
-        writeOut(program, `normalized:   ${formatPath(detail.normalizedLogPath)}\n`);
-        writeOut(program, `metadata:     ${formatPath(detail.metadataPath)}\n`);
-        writeOut(program, `issue snap:   ${formatPath(detail.issueSnapshotPath)}\n`);
+        writeOut(program, `prompt.md:                 ${formatEvidencePath(detail.promptPath)}\n`);
+        writeOut(program, `provider.raw.jsonl:        ${formatEvidencePath(detail.rawLogPath)}\n`);
+        writeOut(program, `provider.normalized.jsonl: ${formatEvidencePath(detail.normalizedLogPath)}\n`);
+        writeOut(program, `issue-snapshot.json:       ${formatEvidencePath(detail.issueSnapshotPath)}\n`);
+        writeOut(program, `prompt-metadata.json:      ${formatEvidencePath(detail.metadataPath)}\n`);
         if (detail.terminalReason !== null) {
           writeOut(program, `terminal:     ${detail.terminalReason}\n`);
         }
@@ -244,18 +263,61 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
 
   program
     .command("status")
-    .description("print run store summary grouped by lifecycle state")
+    .description("print project validation, issue polling, and run summaries")
     .option("--config <path>", "service config path", "symphonika.yml")
-    .action(async (options: { config: string }) => {
-      const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
+    .option("--daemon-url <url>", "local daemon base URL")
+    .action(async (options: { config: string; daemonUrl?: string }) => {
+      const state = resolveStateRoot({ configPath: options.config });
+      const stateRoot = state.stateRoot;
       const store = openRunStore({ stateRoot });
       try {
+        const report = await doctor({ configPath: options.config });
+        const daemonUrl = await resolveDaemonUrl(stateRoot, options.daemonUrl);
+        const daemonStatus = await fetchDaemonStatus(fetcher, daemonUrl, stateRoot);
         const all = store.listRuns();
         const byState = new Map<string, number>();
         for (const run of all) {
           byState.set(run.state, (byState.get(run.state) ?? 0) + 1);
         }
         writeOut(program, `state root: ${stateRoot}\n`);
+        writeOut(program, `daemon: ${formatDaemonAvailability(daemonStatus, daemonUrl)}\n`);
+        writeOut(program, "\nProjects:\n");
+        if (report.projects.length === 0) {
+          writeOut(program, "  (no projects validated)\n");
+        }
+        for (const project of report.projects) {
+          writeOut(
+            program,
+            `  ${project.name}: ${project.validForDispatch ? "valid" : "invalid"}\n`
+          );
+          writeOut(program, `    workflow: ${project.workflowPath}\n`);
+          writeOut(
+            program,
+            `    missing operational labels: ${formatList(project.missingOperationalLabels)}\n`
+          );
+        }
+        if (report.errors.length > 0) {
+          writeOut(program, "validation errors:\n");
+          for (const error of report.errors) {
+            writeOut(program, `  - ${error}\n`);
+          }
+        }
+        const issueCounts = issueCountsFromStatus(
+          daemonStatus,
+          report.projects,
+          byState
+        );
+        writeOut(program, "\nIssue counts:\n");
+        writeOut(program, `  candidate: ${issueCounts.candidate}\n`);
+        writeOut(program, `  filtered:  ${issueCounts.filtered}\n`);
+        writeOut(program, `  running:   ${issueCounts.running}\n`);
+        writeOut(program, `  failed:    ${issueCounts.failed}\n`);
+        writeOut(program, `  stale:     ${issueCounts.stale}\n`);
+        writeOut(
+          program,
+          `last poll outcome: ${formatLastPollOutcome(daemonStatus)}\n`
+        );
+        writeOut(program, "\nRun state counts:\n");
         writeOut(program, `total runs: ${all.length}\n`);
         for (const [state, count] of [...byState.entries()].sort()) {
           writeOut(program, `${state}: ${count}\n`);
@@ -265,11 +327,10 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           for (const run of all.slice(0, 25)) {
             writeOut(
               program,
-              `  ${run.id}  ${run.project}  #${run.issueNumber}  ${run.state}  ${run.provider}\n`
+              `  ${run.id}  ${run.project}  #${run.issueNumber}  ${run.state}  ${run.provider}  ${run.createdAt}  ${run.updatedAt}\n`
             );
           }
         }
-        const report = await doctor({ configPath: options.config });
         printStaleSection(program, report.projects);
       } finally {
         store.close();
@@ -308,10 +369,11 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             writeOut(program, "(no runs)\n");
             return;
           }
+          writeOut(program, "id  project  issue  state  started  updated\n");
           for (const run of runs) {
             writeOut(
               program,
-              `${run.id}  ${run.project}  #${run.issueNumber}  ${run.state}  ${run.provider}\n`
+              `${run.id}  ${run.project}  #${run.issueNumber}  ${run.state}  ${run.createdAt}  ${run.updatedAt}\n`
             );
           }
         } finally {
@@ -341,13 +403,15 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         writeOut(program, `issue:        #${detail.issueNumber} ${detail.issueTitle}\n`);
         writeOut(program, `state:        ${detail.state}\n`);
         writeOut(program, `provider:     ${detail.provider}\n`);
+        writeOut(program, `started:      ${detail.createdAt}\n`);
+        writeOut(program, `updated:      ${detail.updatedAt}\n`);
         writeOut(program, `branch:       ${formatPath(detail.branchName)}\n`);
         writeOut(program, `workspace:    ${formatPath(detail.workspacePath)}\n`);
-        writeOut(program, `prompt:       ${formatPath(detail.promptPath)}\n`);
-        writeOut(program, `raw log:      ${formatPath(detail.rawLogPath)}\n`);
-        writeOut(program, `normalized:   ${formatPath(detail.normalizedLogPath)}\n`);
-        writeOut(program, `metadata:     ${formatPath(detail.metadataPath)}\n`);
-        writeOut(program, `issue snap:   ${formatPath(detail.issueSnapshotPath)}\n`);
+        writeOut(program, `prompt.md:                 ${formatEvidencePath(detail.promptPath)}\n`);
+        writeOut(program, `provider.raw.jsonl:        ${formatEvidencePath(detail.rawLogPath)}\n`);
+        writeOut(program, `provider.normalized.jsonl: ${formatEvidencePath(detail.normalizedLogPath)}\n`);
+        writeOut(program, `issue-snapshot.json:       ${formatEvidencePath(detail.issueSnapshotPath)}\n`);
+        writeOut(program, `prompt-metadata.json:      ${formatEvidencePath(detail.metadataPath)}\n`);
         writeOut(program, `retries:      ${detail.retryCount}${detail.isContinuation ? " (continuation)" : ""}\n`);
         if (detail.terminalReason !== null) {
           writeOut(program, `terminal:     ${detail.terminalReason}\n`);
@@ -377,18 +441,16 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           }
         }
         const events = store.listProviderEvents(id, { limit: options.events });
-        if (events.length > 0) {
-          writeOut(program, `\nrecent events (last ${events.length}):\n`);
-          for (const event of events) {
-            const message =
-              typeof event.normalized.message === "string"
-                ? event.normalized.message
-                : JSON.stringify(event.normalized);
-            writeOut(
-              program,
-              `  ${event.sequence}. ${event.type}  ${message}\n`
-            );
-          }
+        writeOut(program, `\nnormalized events (last ${events.length}):\n`);
+        if (events.length === 0) {
+          writeOut(program, "  (no events recorded)\n");
+        }
+        for (const event of events) {
+          const message =
+            typeof event.normalized.message === "string"
+              ? event.normalized.message
+              : JSON.stringify(event.normalized);
+          writeOut(program, `  ${event.sequence}. ${event.type}  ${message}\n`);
         }
       } finally {
         store.close();
@@ -397,38 +459,30 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
 
   program
     .command("cancel")
-    .description("request cancellation of an active run via the run store")
+    .description("request cancellation of an active run via the daemon")
     .argument("<id>", "run id")
     .option("--config <path>", "service config path", "symphonika.yml")
-    .action((id: string, options: { config: string }) => {
+    .option("--daemon-url <url>", "local daemon base URL")
+    .action(async (id: string, options: { config: string; daemonUrl?: string }) => {
       const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
-      const store = openRunStore({ stateRoot });
-      try {
-        const detail = store.getRun(id);
-        if (detail === undefined) {
-          writeErr(program, `run ${id} not found\n`);
-          program.error(`run ${id} not found`, { exitCode: 1 });
-          return;
-        }
-        if (
-          detail.state === "cancelled" ||
-          detail.state === "failed" ||
-          detail.state === "stale" ||
-          detail.state === "succeeded"
-        ) {
-          writeErr(program, `run ${id} already ${detail.state}\n`);
-          program.error(`run ${id} already ${detail.state}`, { exitCode: 1 });
-          return;
-        }
-        store.markCancelRequested(id, "operator");
-        writeOut(program, `cancel requested for ${id}\n`);
-        writeOut(
-          program,
-          "the running daemon will pick up the request on its next iteration; if no daemon is running, the request will be honored on next startup.\n"
-        );
-      } finally {
-        store.close();
+      const daemonUrl = await resolveDaemonUrl(stateRoot, options.daemonUrl);
+      const outcome = await postCancel(fetcher, daemonUrl, id);
+      if (outcome.kind === "cancelled") {
+        writeOut(program, `cancelled ${id}\n`);
+        return;
       }
+      if (outcome.kind === "not-found") {
+        writeErr(program, `run ${id} not found\n`);
+        program.error(`run ${id} not found`, { exitCode: 1 });
+        return;
+      }
+      if (outcome.kind === "already-terminal") {
+        writeErr(program, `run ${id} already ${outcome.state}\n`);
+        program.error(`run ${id} already ${outcome.state}`, { exitCode: 1 });
+        return;
+      }
+      writeErr(program, `cancel failed: ${outcome.error}\n`);
+      program.error(`cancel failed: ${outcome.error}`, { exitCode: 1 });
     });
 
   return program;
@@ -436,6 +490,285 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
 
 export async function runCli(argv = process.argv): Promise<void> {
   await buildCli().parseAsync(argv);
+}
+
+async function resolveDaemonUrl(
+  stateRoot: string,
+  explicitUrl: string | undefined
+): Promise<string> {
+  if (explicitUrl !== undefined) {
+    return trimTrailingSlash(explicitUrl);
+  }
+  const endpoint = await readDaemonEndpoint(stateRoot);
+  return trimTrailingSlash(endpoint?.url ?? "http://127.0.0.1:3000");
+}
+
+async function fetchDaemonStatus(
+  fetcher: FetchFn,
+  daemonUrl: string,
+  expectedStateRoot: string
+): Promise<
+  | { kind: "available"; status: DaemonStatusResponse }
+  | { kind: "unavailable"; error: string }
+> {
+  try {
+    const response = await fetcher(`${daemonUrl}/api/status`);
+    if (!response.ok) {
+      return {
+        error: `HTTP ${response.status}`,
+        kind: "unavailable"
+      };
+    }
+    const status = (await response.json()) as DaemonStatusResponse;
+    if (
+      typeof status.stateRoot === "string" &&
+      path.resolve(status.stateRoot) !== path.resolve(expectedStateRoot)
+    ) {
+      return {
+        error: `state root mismatch (${status.stateRoot})`,
+        kind: "unavailable"
+      };
+    }
+    return {
+      kind: "available",
+      status
+    };
+  } catch (error) {
+    return {
+      error: errorMessage(error),
+      kind: "unavailable"
+    };
+  }
+}
+
+async function postCancel(
+  fetcher: FetchFn,
+  daemonUrl: string,
+  runId: string
+): Promise<
+  | { kind: "cancelled" }
+  | { kind: "not-found" }
+  | { kind: "already-terminal"; state: RunState }
+  | { kind: "error"; error: string }
+> {
+  let response: Response;
+  try {
+    response = await fetcher(
+      `${daemonUrl}/api/runs/${encodeURIComponent(runId)}/cancel`,
+      { method: "POST" }
+    );
+  } catch (error) {
+    return {
+      error: errorMessage(error),
+      kind: "error"
+    };
+  }
+
+  if (response.status === 404) {
+    return { kind: "not-found" };
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    body = undefined;
+  }
+
+  if (response.status === 409) {
+    const state = readRunState(body);
+    return state === undefined
+      ? { error: "daemon returned terminal conflict without a run state", kind: "error" }
+      : { kind: "already-terminal", state };
+  }
+  if (!response.ok) {
+    return {
+      error: `daemon returned HTTP ${response.status}`,
+      kind: "error"
+    };
+  }
+  if (isObject(body) && body.kind === "cancelled") {
+    return { kind: "cancelled" };
+  }
+  return {
+    error: "daemon returned an unexpected cancellation response",
+    kind: "error"
+  };
+}
+
+function issueCountsFromStatus(
+  daemonStatus:
+    | { kind: "available"; status: DaemonStatusResponse }
+    | { kind: "unavailable"; error: string },
+  projects: DoctorProjectReport[],
+  byState: Map<string, number>
+): {
+  candidate: number;
+  failed: number;
+  filtered: number;
+  running: number;
+  stale: number;
+} {
+  if (daemonStatus.kind === "available") {
+    const filteredIssues = daemonStatus.status.filteredIssues;
+    return {
+      candidate: arrayLength(daemonStatus.status.candidateIssues),
+      failed: Math.max(
+        countIssuesWithLabel(filteredIssues, "sym:failed"),
+        (byState.get("failed") ?? 0) + (byState.get("input_required") ?? 0)
+      ),
+      filtered: arrayLength(filteredIssues),
+      running: Math.max(
+        countIssuesWithLabel(filteredIssues, "sym:running"),
+        byState.get("running") ?? 0
+      ),
+      stale: Math.max(
+        projects.reduce((count, project) => count + project.staleIssues.length, 0),
+        countIssuesWithLabel(filteredIssues, "sym:stale"),
+        arrayLength(daemonStatus.status.staleIssues),
+        byState.get("stale") ?? 0
+      )
+    };
+  }
+  return {
+    candidate: 0,
+    failed: (byState.get("failed") ?? 0) + (byState.get("input_required") ?? 0),
+    filtered: 0,
+    running: byState.get("running") ?? 0,
+    stale: Math.max(
+      projects.reduce((count, project) => count + project.staleIssues.length, 0),
+      byState.get("stale") ?? 0
+    )
+  };
+}
+
+function countIssuesWithLabel(
+  entries: unknown[] | undefined,
+  label: string
+): number {
+  if (!Array.isArray(entries)) {
+    return 0;
+  }
+
+  const seen = new Set<string>();
+  let anonymous = 0;
+  for (const entry of entries) {
+    const labels = labelsFromPollEntry(entry);
+    if (!labels.has(label)) {
+      continue;
+    }
+    const key = pollEntryKey(entry);
+    if (key === undefined) {
+      anonymous += 1;
+      continue;
+    }
+    seen.add(key);
+  }
+  return seen.size + anonymous;
+}
+
+function labelsFromPollEntry(entry: unknown): Set<string> {
+  if (!isObject(entry) || !isObject(entry.issue)) {
+    return new Set();
+  }
+  const labels = entry.issue.labels;
+  if (!Array.isArray(labels)) {
+    return new Set();
+  }
+  return new Set(labels.filter((label): label is string => typeof label === "string"));
+}
+
+function pollEntryKey(entry: unknown): string | undefined {
+  if (!isObject(entry) || !isObject(entry.issue)) {
+    return undefined;
+  }
+  const project = typeof entry.project === "string" ? entry.project : "";
+  const id = entry.issue.id;
+  if (typeof id === "number" || typeof id === "string") {
+    return `${project}:id:${id}`;
+  }
+  const number = entry.issue.number;
+  if (typeof number === "number" || typeof number === "string") {
+    return `${project}:number:${number}`;
+  }
+  return undefined;
+}
+
+function formatDaemonAvailability(
+  daemonStatus:
+    | { kind: "available"; status: DaemonStatusResponse }
+    | { kind: "unavailable"; error: string },
+  daemonUrl: string
+): string {
+  if (daemonStatus.kind === "available") {
+    return `${daemonStatus.status.state ?? "unknown"} at ${daemonUrl}`;
+  }
+  return `unavailable at ${daemonUrl} (${daemonStatus.error})`;
+}
+
+function formatLastPollOutcome(
+  daemonStatus:
+    | { kind: "available"; status: DaemonStatusResponse }
+    | { kind: "unavailable"; error: string }
+): string {
+  if (daemonStatus.kind === "unavailable") {
+    return `unknown (${daemonStatus.error})`;
+  }
+  const issuePolling = daemonStatus.status.issuePolling;
+  if (issuePolling === undefined) {
+    return "unknown";
+  }
+  const errors = issuePolling.errors ?? [];
+  if (errors.length > 0) {
+    return `failed: ${errors.join("; ")}`;
+  }
+  const projects = issuePolling.projects ?? [];
+  if (projects.length === 0) {
+    return "not yet polled";
+  }
+  return projects
+    .map((project) =>
+      project.ok
+        ? `${project.name} ok (${project.fetchedIssues} fetched)`
+        : `${project.name} failed (${project.error ?? "unknown error"})`
+    )
+    .join("; ");
+}
+
+function readRunState(value: unknown): RunState | undefined {
+  if (!isObject(value) || typeof value.state !== "string") {
+    return undefined;
+  }
+  return isRunState(value.state) ? value.state : undefined;
+}
+
+function isRunState(value: string): value is RunState {
+  return (
+    value === "queued" ||
+    value === "preparing_workspace" ||
+    value === "running" ||
+    value === "input_required" ||
+    value === "failed" ||
+    value === "succeeded" ||
+    value === "cancelled" ||
+    value === "stale"
+  );
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function arrayLength(value: unknown[] | undefined): number {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function formatList(values: string[]): string {
+  return values.length === 0 ? "(none)" : values.join(", ");
+}
+
+function trimTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value.slice(0, -1) : value;
 }
 
 function parsePositiveInt(value: string): number {
@@ -448,6 +781,14 @@ function parsePositiveInt(value: string): number {
 
 function formatPath(value: string): string {
   return value.length === 0 ? "<not yet recorded>" : value;
+}
+
+function formatEvidencePath(value: string): string {
+  return value.length === 0 ? "<not yet recorded>" : path.resolve(value);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function parsePort(value: string): number {

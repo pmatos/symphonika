@@ -200,11 +200,30 @@ describe("HTTP app — runs API and pages", () => {
       expect(ok.headers.get("content-type")).toContain("application/x-ndjson");
       expect(await ok.text()).toContain('{"x":1}');
 
+      const logLink = await app.request("/logs/runs/run-files/provider.raw.jsonl");
+      expect(logLink.status).toBe(200);
+      expect(logLink.headers.get("content-type")).toContain("application/x-ndjson");
+      expect(await logLink.text()).toContain('{"x":1}');
+
+      const detail = await app.request("/runs/run-files");
+      expect(detail.status).toBe(200);
+      const detailBody = await detail.text();
+      expect(detailBody).toContain("Run run-files");
+      expect(detailBody).toContain("Project:");
+      expect(detailBody).toContain("State:");
+      expect(detailBody).toContain("/logs/runs/run-files/provider.raw.jsonl");
+
       expect(
         (await app.request("/api/runs/run-empty/files/raw-log")).status
       ).toBe(404);
       expect(
+        (await app.request("/logs/runs/run-empty/provider.raw.jsonl")).status
+      ).toBe(404);
+      expect(
         (await app.request("/api/runs/run-escape/files/raw-log")).status
+      ).toBe(404);
+      expect(
+        (await app.request("/logs/runs/run-escape/provider.raw.jsonl")).status
       ).toBe(404);
     } finally {
       test.cleanup();
@@ -246,6 +265,66 @@ describe("HTTP app — runs API and pages", () => {
       });
       expect(form.status).toBe(303);
       expect(form.headers.get("location")).toBe("/runs/live");
+
+      test.runStore.createRun({
+        id: "default-live",
+        issue: sampleIssue({ number: 12 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("default-live", "running");
+      test.runStore.createRun({
+        id: "done",
+        issue: sampleIssue({ number: 13 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("done", "succeeded");
+      test.runStore.createRun({
+        id: "input-needed",
+        issue: sampleIssue({ number: 14 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("input-needed", "input_required");
+
+      const defaultApp = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const defaultOk = await defaultApp.request("/api/runs/default-live/cancel", {
+        method: "POST"
+      });
+      expect(defaultOk.status).toBe(200);
+      expect(test.runStore.getRun("default-live")).toMatchObject({
+        cancelReason: "operator",
+        cancelRequested: true,
+        state: "cancelled"
+      });
+      expect(
+        test.runStore
+          .getRun("default-live")
+          ?.transitions.map((transition) => transition.state)
+      ).toContain("cancelled");
+      expect(
+        (await defaultApp.request("/api/runs/done/cancel", { method: "POST" }))
+          .status
+      ).toBe(409);
+      expect(
+        (
+          await defaultApp.request("/api/runs/input-needed/cancel", {
+            method: "POST"
+          })
+        ).status
+      ).toBe(409);
+      expect(
+        (await defaultApp.request("/api/runs/missing/cancel", { method: "POST" }))
+          .status
+      ).toBe(404);
     } finally {
       test.cleanup();
     }
@@ -264,6 +343,12 @@ describe("HTTP app — runs API and pages", () => {
       test.runStore.updateRunState("<script>x</script>", "running");
 
       const app = createHttpApp({
+        issuePollStatus: {
+          candidateIssues: [],
+          errors: [],
+          filteredIssues: [],
+          projects: [{ fetchedIssues: 0, name: "alpha", ok: true }]
+        },
         runStore: test.runStore,
         stateRoot: test.stateRoot,
         version: "0.1.0"
@@ -274,6 +359,8 @@ describe("HTTP app — runs API and pages", () => {
       expect(dashboard.headers.get("content-type")).toContain("text/html");
       const body = await dashboard.text();
       expect(body).not.toContain("<script>x</script>");
+      expect(body).toContain("Projects");
+      expect(body).toContain("poll ok");
       expect(body).toContain("&lt;script&gt;x&lt;/script&gt;");
       expect(body).not.toContain("<img src=x>");
       expect(body).toContain("&lt;img src=x&gt;");

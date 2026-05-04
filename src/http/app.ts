@@ -14,6 +14,7 @@ import type {
   RunStatus,
   RunStore
 } from "../run-store.js";
+import type { StatusSnapshot } from "../status.js";
 import { registerPages } from "./pages.js";
 
 export type CancelRunFn = (
@@ -47,6 +48,7 @@ export type HttpAppOptions = {
     kind: "retry" | "continuation";
     runId: string;
   }>;
+  getStatusSnapshot?: () => StatusSnapshot;
   issuePollStatus?: IssuePollStatus;
   now?: () => number;
   runStore?: RunStore;
@@ -98,6 +100,40 @@ const FILE_DESCRIPTORS: Record<
     contentType: "application/x-ndjson"
   }
 };
+
+const LOG_FILE_DESCRIPTORS: Record<
+  string,
+  { column: FileColumn; contentType: string }
+> = {
+  "issue-snapshot.json": {
+    column: "issueSnapshotPath",
+    contentType: "application/json; charset=utf-8"
+  },
+  "prompt-metadata.json": {
+    column: "metadataPath",
+    contentType: "application/json; charset=utf-8"
+  },
+  "prompt.md": {
+    column: "promptPath",
+    contentType: "text/markdown; charset=utf-8"
+  },
+  "provider.normalized.jsonl": {
+    column: "normalizedLogPath",
+    contentType: "application/x-ndjson"
+  },
+  "provider.raw.jsonl": {
+    column: "rawLogPath",
+    contentType: "application/x-ndjson"
+  }
+};
+
+const TERMINAL_STATES: ReadonlySet<RunState> = new Set([
+  "cancelled",
+  "failed",
+  "input_required",
+  "stale",
+  "succeeded"
+]);
 
 export function createHttpApp(options: HttpAppOptions): Hono {
   const app = new Hono();
@@ -231,20 +267,35 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       });
     });
 
+    app.get("/logs/runs/:id/:fileName", async (context) => {
+      const id = context.req.param("id");
+      const detail = runStore.getRun(id);
+      if (detail === undefined) {
+        return context.json({ error: "run not found" }, 404);
+      }
+      const fileName = context.req.param("fileName");
+      const descriptor = LOG_FILE_DESCRIPTORS[fileName];
+      if (descriptor === undefined) {
+        return context.json({ error: "unknown log file" }, 404);
+      }
+      return serveRunEvidenceFile({
+        contentType: descriptor.contentType,
+        filePath: detail[descriptor.column],
+        id,
+        stateRoot: options.stateRoot
+      });
+    });
+
     app.post("/api/runs/:id/cancel", async (context) => {
       const id = context.req.param("id");
       const wantsRedirect = (
         context.req.header("content-type") ?? ""
       ).startsWith("application/x-www-form-urlencoded");
 
-      if (cancelRun === undefined) {
-        if (wantsRedirect) {
-          return context.redirect(`/runs/${encodeURIComponent(id)}`, 303);
-        }
-        return context.json({ kind: "unavailable" }, 503);
-      }
-
-      const outcome = await Promise.resolve(cancelRun(id, "ui"));
+      const outcome =
+        cancelRun === undefined
+          ? cancelRunInStore(runStore, id)
+          : await Promise.resolve(cancelRun(id, "ui"));
       if (outcome.kind === "not-found") {
         if (wantsRedirect) {
           return context.redirect("/", 303);
@@ -266,12 +317,66 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     registerPages({
       app,
       issuePollStatus,
-      ...(options.runStore !== undefined ? { runStore: options.runStore } : {}),
+      runStore,
+      ...(options.getStatusSnapshot === undefined
+        ? {}
+        : { getStatusSnapshot: options.getStatusSnapshot }),
       version: options.version
-    } as Parameters<typeof registerPages>[0]);
+    });
   }
 
   return app;
+}
+
+async function serveRunEvidenceFile(input: {
+  contentType: string;
+  filePath: string;
+  id: string;
+  stateRoot: string;
+}): Promise<Response> {
+  if (typeof input.filePath !== "string" || input.filePath.length === 0) {
+    return Response.json({ error: "file not yet recorded" }, { status: 404 });
+  }
+  const evidenceRoot = path.join(
+    path.resolve(input.stateRoot),
+    "logs",
+    "runs",
+    input.id
+  );
+  if (!isPathInside(input.filePath, evidenceRoot)) {
+    return Response.json({ error: "file not available" }, { status: 404 });
+  }
+  try {
+    await access(input.filePath);
+  } catch {
+    return Response.json({ error: "file not found" }, { status: 404 });
+  }
+  const stream: ReadStream = createReadStream(input.filePath);
+  return new Response(Readable.toWeb(stream) as ReadableStream, {
+    headers: { "content-type": input.contentType },
+    status: 200
+  });
+}
+
+function cancelRunInStore(
+  runStore: RunStore,
+  runId: string
+):
+  | { kind: "cancelled" }
+  | { kind: "not-found" }
+  | { kind: "already-terminal"; state: RunState } {
+  const detail = runStore.getRun(runId);
+  if (detail === undefined) {
+    return { kind: "not-found" };
+  }
+  if (TERMINAL_STATES.has(detail.state)) {
+    return { kind: "already-terminal", state: detail.state };
+  }
+
+  runStore.markCancelRequested(runId, "operator");
+  runStore.recordTerminalReason(runId, "operator_cancelled");
+  runStore.updateRunState(runId, "cancelled");
+  return { kind: "cancelled" };
 }
 
 function parsePositiveInt(value: string | undefined): number | undefined {

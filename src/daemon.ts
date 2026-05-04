@@ -5,6 +5,10 @@ import type { Logger } from "pino";
 import pino from "pino";
 import { parse } from "yaml";
 
+import {
+  removeDaemonEndpoint,
+  writeDaemonEndpoint
+} from "./daemon-endpoint.js";
 import { createHttpApp } from "./http/app.js";
 import type {
   GitHubIssuesApi,
@@ -69,9 +73,11 @@ export type DaemonHandle = {
 export async function startDaemon(
   options: StartDaemonOptions = {}
 ): Promise<DaemonHandle> {
-  const logger = options.logger ?? pino();
+  const env = options.env ?? process.env;
+  const logger = options.logger ?? pino({ level: resolveLogLevel(env) });
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 3000;
+  const startedAtMs = Date.now();
   const stateRootOptions: Parameters<typeof resolveStateRoot>[0] = {};
   if (options.configPath !== undefined) {
     stateRootOptions.configPath = options.configPath;
@@ -93,7 +99,6 @@ export async function startDaemon(
   }
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
-  const env = options.env ?? process.env;
   const activeRuns = new ActiveRunRegistry();
   const dispatchMutex = createAsyncMutex();
   const dispatchRuntime = {
@@ -287,6 +292,7 @@ export async function startDaemon(
   const TERMINAL_STATES = new Set<RunState>([
     "cancelled",
     "failed",
+    "input_required",
     "stale",
     "succeeded"
   ]);
@@ -306,6 +312,8 @@ export async function startDaemon(
     }
     runStore.markCancelRequested(runId, "operator");
     await activeRuns.requestCancel(runId, "operator");
+    runStore.recordTerminalReason(runId, "operator_cancelled");
+    runStore.updateRunState(runId, "cancelled");
     return { kind: "cancelled" };
   };
   const app = createHttpApp({
@@ -321,14 +329,19 @@ export async function startDaemon(
       })),
     getRuns: () => runStore.listRuns(),
     getScheduled: () => activeRuns.peekDelayed(),
+    getStatusSnapshot: () =>
+      buildStatusSnapshot({
+        configPath: state.configPath,
+        issuePollStatus,
+        runStore,
+        stateRoot: state.stateRoot
+      }),
     issuePollStatus,
     runStore,
+    startedAtMs,
     stateRoot: state.stateRoot,
     version: VERSION
   });
-  // Reference buildStatusSnapshot so eslint/tsc don't strip the import; it's
-  // exported for CLI use and may be wired into HTTP pages later.
-  void buildStatusSnapshot;
 
   const server = serve({
     fetch: app.fetch,
@@ -338,6 +351,13 @@ export async function startDaemon(
   await waitForListening(server);
   const port = resolveListeningPort(server, requestedPort);
   const url = `http://${host}:${port}`;
+  await writeDaemonEndpoint(state.stateRoot, {
+    host,
+    pid: process.pid,
+    port,
+    startedAt: new Date(startedAtMs).toISOString(),
+    url
+  });
   if (state.configExists) {
     await reconcile();
     if (issuePollStatus.candidateIssues.length > 0) {
@@ -372,6 +392,7 @@ export async function startDaemon(
       await scheduledWork;
       await Promise.allSettled(Array.from(inflightDispatches));
       await stopServer(server, logger);
+      await removeDaemonEndpoint(state.stateRoot);
       runStore.close();
     }
   };
@@ -543,6 +564,10 @@ function defaultProvidersConfig(): RunControllerProvidersConfig {
         "codex -p symphonika --dangerously-bypass-approvals-and-sandbox app-server"
     }
   };
+}
+
+export function resolveLogLevel(env: NodeJS.ProcessEnv): string {
+  return env["PINO_LOG_LEVEL"] ?? env["LOG_LEVEL"] ?? "info";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

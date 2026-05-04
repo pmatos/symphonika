@@ -43,7 +43,7 @@ Stay on this branch for all commits. Do not switch branches or open new ones.
 
 1. Read `SPEC.md`, `CONTEXT.md`, `AGENTS.md`, and any ADRs in `docs/adr/` that touch the area you are about to change.
 2. Investigate the issue body and any code paths it references before writing code. Prefer small, vertical slices.
-3. Implement the change. Add or update tests under `tests/` so the new behavior is covered. Do not silently relax existing tests.
+3. Implement the change using test-driven development (TDD): write one behavior-focused test through the public interface, watch it fail, implement only enough code to make it pass, then repeat in small red-green-refactor slices. Add or update tests under `tests/` so the new behavior is covered. Do not silently relax existing tests.
 4. Run the full local quality gate before pushing:
    - `npm run lint`
    - `npm run typecheck`

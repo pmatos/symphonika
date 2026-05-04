@@ -37,6 +37,20 @@ describe("classifyCapReachedOutcome", () => {
     expect(kind).toBe("no_commits");
   });
 
+  it("returns unknown when the branch is missing and listPullRequestsForBranch is unavailable", async () => {
+    const api: GitHubIssuesApi = {
+      ...baseApi,
+      listBranchCommits: vi.fn().mockResolvedValue(null)
+      // listPullRequestsForBranch intentionally absent
+    };
+    const kind = await classifyCapReachedOutcome({
+      api,
+      branch: "feature/x",
+      repository
+    });
+    expect(kind).toBe("unknown");
+  });
+
   it("returns work_landed when the branch is missing (auto-deleted) but a merged PR still exists", async () => {
     const api: GitHubIssuesApi = {
       ...baseApi,

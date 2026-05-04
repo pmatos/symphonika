@@ -49,7 +49,7 @@ export async function classifyCapReachedOutcome(
         { branch: input.branch },
         "cap-reached classifier: listPullRequestsForBranch unavailable; classifying as unknown"
       );
-      return branchMissing ? "no_commits" : "unknown";
+      return "unknown";
     }
     if (prs.some((pr) => pr.merged_at != null)) {
       return "work_landed";

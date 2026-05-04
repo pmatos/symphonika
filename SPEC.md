@@ -20,7 +20,7 @@ repository as one real Project well enough to help implement later Symphonika is
 - Distributed workers or remote execution.
 - A multi-tenant control plane.
 - Provider-level sandboxing or approval workflows.
-- Automatic pull request detection.
+- Cross-repository pull request handling.
 - A rich frontend application.
 - Automatic workspace deletion.
 - GitHub Projects board integration.
@@ -144,7 +144,14 @@ the issue remains eligible.
 
 Continuations are capped. Default: `3` per issue.
 
-### 4.9 Agent Provider
+### 4.9 PR Follow-up
+
+A PR Follow-up is a poll-driven orchestration loop for a pull request discovered from a
+Symphonika-created Issue Branch. It records the PR number and head SHA, watches review feedback,
+checks, and mergeability, re-dispatches the Coding Agent into the same Workspace when unresolved
+review feedback appears, and merges the PR when the configured policy says it is clear.
+
+### 4.10 Agent Provider
 
 An Agent Provider is a normalized adapter that lets Symphonika run one coding-agent implementation.
 
@@ -153,7 +160,7 @@ v1 supports both:
 - Codex through JSON-RPC app-server mode
 - Claude through `stream-json` CLI mode
 
-### 4.10 Event Logs
+### 4.11 Event Logs
 
 Symphonika stores both:
 
@@ -177,6 +184,16 @@ state:
 
 polling:
   interval_ms: 30000
+
+pull_requests:
+  enabled: true
+  review_followup:
+    max_dispatches_per_pr: 3
+  merge:
+    enabled: true
+    method: squash
+    require_status_success: true
+    require_review_decision: false
 
 providers:
   codex:
@@ -296,6 +313,7 @@ SQLite stores durable orchestration state:
 - runs
 - attempts
 - retry state
+- tracked PR associations
 - claim state snapshots
 - issue snapshots
 - rendered prompt metadata
@@ -363,6 +381,7 @@ The daemon owns:
 - provider launches
 - reconciliation
 - retries and continuations
+- PR follow-up polling for Symphonika-owned PRs
 - local UI/API
 
 ### 8.2 Startup Sequence
@@ -463,11 +482,15 @@ On stale startup state:
 - if GitHub has `sym:claimed` or `sym:running` but there is no live local run, mark `sym:stale`
 - do not auto-clear stale claims in v1
 
-### 9.4 No PR Detection
+### 9.4 PR Follow-up Scope
 
-The orchestrator does not inspect pull requests to decide eligibility. Workflow prompts and agents
-are responsible for removing `agent-ready`, adding handoff labels, commenting, opening PRs, and
-closing issues according to repository policy.
+The orchestrator does not inspect arbitrary pull requests to decide issue eligibility. It only
+tracks PRs that can be associated with a completed Symphonika Run by the deterministic Issue Branch.
+Repository workflows and coding agents remain responsible for opening PRs, writing comments, and
+removing `agent-ready`; Symphonika records the discovered PR number and head SHA so the daemon can
+continue the same branch after review feedback.
+
+The v1 trigger model is poll-based and runs on the daemon tick. Webhooks are deferred.
 
 ## 10. Workspace and Git Behavior
 
@@ -657,6 +680,24 @@ Cancel active provider process when:
 
 Cancellation preserves workspace and logs.
 
+### 12.4 PR Follow-up
+
+On each daemon tick, Symphonika discovers open PRs for succeeded runs whose Issue Branch is not yet
+tracked. For each tracked open PR:
+
+1. Fetch PR review state, unresolved review threads, status-check rollup, head SHA, and mergeability.
+2. If unresolved review threads or requested changes exist, start a follow-up Run in the same
+   Workspace and Issue Branch. The prompt includes the review thread context and tells the agent not
+   to open a second PR.
+3. Do not repeat the same review follow-up for the same head SHA and review-feedback fingerprint.
+4. Stop automatic review follow-up after `pull_requests.review_followup.max_dispatches_per_pr`.
+5. If the PR is open, non-draft, mergeable, has no unresolved review feedback, satisfies the review
+   policy, and has passing status checks when required, merge it using the configured merge method.
+
+Default PR follow-up policy: poll enabled, at most `3` review dispatches per PR, squash merge,
+require successful status checks, and do not require an explicit approval unless repository rules
+surface `REVIEW_REQUIRED`.
+
 ## 13. CLI
 
 Bootstrap CLI commands:
@@ -732,7 +773,7 @@ The bootstrap slice is accepted when:
 - workspace cleanup commands
 - stale-claim TTLs
 - GitHub Projects board support
-- PR detection
+- webhook-based PR subscriptions
 - first-class provider-neutral GitHub tools for agents
 - distributed scheduling
 - production packaging

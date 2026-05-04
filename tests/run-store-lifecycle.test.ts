@@ -53,6 +53,19 @@ function seedRun(
   return id;
 }
 
+function evidence(branchName: string) {
+  return {
+    branchName,
+    branchRef: `refs/heads/${branchName}`,
+    issueSnapshotPath: "/tmp/issue-snapshot.json",
+    metadataPath: "/tmp/prompt-metadata.json",
+    normalizedLogPath: "/tmp/provider.normalized.jsonl",
+    promptPath: "/tmp/prompt.md",
+    rawLogPath: "/tmp/provider.raw.jsonl",
+    workspacePath: "/tmp/workspace"
+  };
+}
+
 describe("run-store lifecycle CRUD", () => {
   it("markCancelRequested surfaces in listRuns", async () => {
     const root = await makeTempRoot();
@@ -252,6 +265,68 @@ describe("run-store lifecycle CRUD", () => {
         failureClassification: "deterministic",
         issueNumber: 8
       });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("tracks pull requests discovered from succeeded run branches", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const branchName = "sym/symphonika/54-pr-followup";
+      const id = seedRun(store, { id: "parent", issueNumber: 54 });
+      store.updateRunEvidence(id, evidence(branchName));
+      store.updateRunState(id, "succeeded");
+
+      expect(store.hasPullRequestFollowupWork()).toBe(true);
+      expect(store.listRunsAwaitingPullRequestDiscovery()).toEqual([
+        {
+          branchName,
+          issueNumber: 54,
+          projectName: "symphonika",
+          runId: "parent"
+        }
+      ]);
+
+      store.trackPullRequest({
+        branchName,
+        headSha: "abc123",
+        issueNumber: 54,
+        projectName: "symphonika",
+        prNumber: 81,
+        prUrl: "https://github.com/pmatos/symphonika/pull/81",
+        runId: "parent"
+      });
+
+      expect(store.listRunsAwaitingPullRequestDiscovery()).toEqual([]);
+      expect(store.hasPullRequestFollowupWork()).toBe(true);
+      const [tracked] = store.listOpenTrackedPullRequests();
+      expect(tracked).toMatchObject({
+        branchName,
+        headShaAtDispatch: "abc123",
+        lastSeenHeadSha: "abc123",
+        prNumber: 81,
+        reviewDispatchCount: 0,
+        state: "open"
+      });
+
+      expect(tracked).toBeDefined();
+      store.recordPullRequestReviewDispatch({
+        fingerprint: "sha256:feedback",
+        headSha: "def456",
+        id: tracked!.id,
+        runId: "review-run"
+      });
+      store.recordPullRequestObservation({
+        headSha: "def456",
+        id: tracked!.id,
+        prUrl: tracked!.prUrl,
+        state: "merged"
+      });
+
+      expect(store.listOpenTrackedPullRequests()).toEqual([]);
+      expect(store.hasPullRequestFollowupWork()).toBe(false);
     } finally {
       store.close();
     }

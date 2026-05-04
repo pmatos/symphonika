@@ -10,7 +10,8 @@ import type {
   GitHubIssuesApi,
   IssuePollStatus,
   IssueSnapshot,
-  PollingProjectConfig
+  PollingProjectConfig,
+  RawGitHubPullRequestReviewThread
 } from "../issue-polling.js";
 import { evaluateProjectEligibility, tryGetIssue } from "../issue-polling.js";
 import type {
@@ -91,6 +92,15 @@ export type DispatchOneFreshResult =
   | { dispatched: false; reason: string }
   | { dispatched: true; runId: string };
 
+export type ReviewFollowupContext = {
+  headSha: string;
+  pullRequestNumber: number;
+  pullRequestUrl: string;
+  reviewDecision: string | null;
+  statusCheckRollupState: string | null;
+  unresolvedThreads: RawGitHubPullRequestReviewThread[];
+};
+
 type DispatchTarget = {
   candidate: { issue: IssueSnapshot; project: string };
   project: RunControllerProjectConfig;
@@ -136,6 +146,7 @@ type ApplyLabelsInput = {
 
 type RetryPayload = {
   attemptNumber: number;
+  extraInstructions?: string;
   issue: IssueSnapshot;
   projectName: string;
   runId: string;
@@ -344,6 +355,9 @@ export class RunController {
 
     await this.runAttemptLifecycle({
       attemptNumber: payload.attemptNumber,
+      ...(payload.extraInstructions === undefined
+        ? {}
+        : { extraInstructions: payload.extraInstructions }),
       isContinuation: this.runStore.isContinuationRun(payload.runId),
       issue: refreshed,
       project,
@@ -446,6 +460,95 @@ export class RunController {
     });
   }
 
+  async dispatchReviewFollowup(input: {
+    issueNumber: number;
+    parentRunId: string;
+    projectName: string;
+    review: ReviewFollowupContext;
+  }): Promise<DispatchOneFreshResult> {
+    const projects = await this.projectsLoader();
+    const project = projects.get(input.projectName);
+    if (project === undefined || project.disabled === true) {
+      return {
+        dispatched: false,
+        reason: "project disabled or removed"
+      };
+    }
+
+    if (this.activeRuns.isIssueInFlight(input.projectName, input.issueNumber)) {
+      return {
+        dispatched: false,
+        reason: "issue already has an active run"
+      };
+    }
+
+    const provider = this.agentProviders[project.agent.provider];
+    if (provider === undefined) {
+      return {
+        dispatched: false,
+        reason: "project provider is not registered"
+      };
+    }
+
+    const providersConfig = await this.providersLoader();
+    const providerCommand = providersConfig[project.agent.provider].command;
+
+    if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
+      return {
+        dispatched: false,
+        reason: "GitHub tracker does not support operational label writes"
+      };
+    }
+
+    const token = resolveTokenFromEnv(project.tracker.token, this.env);
+    if (token === undefined) {
+      return {
+        dispatched: false,
+        reason: `projects.${project.name}.tracker.token is not available`
+      };
+    }
+    const repository = {
+      owner: project.tracker.owner,
+      repo: project.tracker.repo,
+      token
+    };
+
+    const refreshed = await this.refreshIssue({
+      project,
+      issueNumber: input.issueNumber,
+      repository
+    });
+    if (refreshed === undefined) {
+      return {
+        dispatched: false,
+        reason: "issue refresh unavailable"
+      };
+    }
+    if (refreshed === null || refreshed.state !== "open") {
+      return {
+        dispatched: false,
+        reason: "issue is closed"
+      };
+    }
+
+    const runId = this.createRunId();
+    await this.runFreshLifecycle({
+      attemptNumber: 1,
+      extraInstructions: renderReviewFollowupInstructions(input.review),
+      isContinuation: true,
+      issue: refreshed,
+      parentRunId: input.parentRunId,
+      project,
+      provider,
+      providerCommand,
+      providerName: project.agent.provider,
+      repository,
+      runId
+    });
+
+    return { dispatched: true, runId };
+  }
+
   private pickTargetFromCandidates(
     candidates: ReadonlyArray<{ issue: IssueSnapshot; project: string }>,
     projects: Map<string, RunControllerProjectConfig>
@@ -471,6 +574,7 @@ export class RunController {
 
   private async runFreshLifecycle(input: {
     attemptNumber: number;
+    extraInstructions?: string;
     isContinuation: boolean;
     issue: IssueSnapshot;
     parentRunId: string | null;
@@ -519,6 +623,9 @@ export class RunController {
       runCreated = true;
       await this.runAttemptLifecycle({
         attemptNumber: input.attemptNumber,
+        ...(input.extraInstructions === undefined
+          ? {}
+          : { extraInstructions: input.extraInstructions }),
         isContinuation: input.isContinuation,
         issue: input.issue,
         project: input.project,
@@ -542,6 +649,7 @@ export class RunController {
 
   private async runAttemptLifecycle(input: {
     attemptNumber: number;
+    extraInstructions?: string;
     isContinuation: boolean;
     issue: IssueSnapshot;
     project: RunControllerProjectConfig;
@@ -568,6 +676,9 @@ export class RunController {
       started = await this.startAttempt({
         attemptId,
         attemptNumber: input.attemptNumber,
+        ...(input.extraInstructions === undefined
+          ? {}
+          : { extraInstructions: input.extraInstructions }),
         isContinuation: input.isContinuation,
         issue: input.issue,
         project: input.project,
@@ -688,6 +799,9 @@ export class RunController {
       // It is a no-op for cancelled, deterministic, and input_required outcomes.
       try {
         await this.scheduleNext({
+          ...(input.extraInstructions === undefined
+            ? {}
+            : { extraInstructions: input.extraInstructions }),
           issue: input.issue,
           outcome: terminal,
           project: input.project,
@@ -712,8 +826,9 @@ export class RunController {
 
   private async startAttempt(input: {
     attemptId: string;
-    isContinuation: boolean;
     attemptNumber: number;
+    extraInstructions?: string;
+    isContinuation: boolean;
     issue: IssueSnapshot;
     project: RunControllerProjectConfig;
     providerCommand: string;
@@ -740,6 +855,9 @@ export class RunController {
         name: prepared.branchName,
         ref: prepared.branchRef
       },
+      ...(input.extraInstructions === undefined
+        ? {}
+        : { extraInstructions: input.extraInstructions }),
       issue: input.issue,
       project: { name: input.project.name },
       provider: {
@@ -972,6 +1090,7 @@ export class RunController {
   }
 
   private async scheduleNext(input: {
+    extraInstructions?: string;
     issue: IssueSnapshot;
     outcome: ClassifiedTerminal;
     project: RunControllerProjectConfig;
@@ -998,6 +1117,9 @@ export class RunController {
         fire: () =>
           this.executeRetry({
             attemptNumber: input.runtimeAttemptNumber + 1,
+            ...(input.extraInstructions === undefined
+              ? {}
+              : { extraInstructions: input.extraInstructions }),
             issue: input.issue,
             projectName: input.project.name,
             runId: input.runId
@@ -1141,6 +1263,62 @@ export class RunController {
       );
     }
   }
+}
+
+function renderReviewFollowupInstructions(
+  review: ReviewFollowupContext
+): string {
+  const lines = [
+    "## Pull request review follow-up",
+    "",
+    "Symphonika detected unaddressed reviewer feedback on an existing pull request for this issue.",
+    `PR: #${review.pullRequestNumber} ${review.pullRequestUrl}`,
+    `Head SHA: ${review.headSha}`,
+    `Review decision: ${review.reviewDecision ?? "none"}`,
+    `Status checks: ${review.statusCheckRollupState ?? "unknown"}`,
+    "",
+    "This is a follow-up run, not a fresh PR creation run. Stay on the existing issue branch, address the review feedback below, push the same branch, and use the local `gh` CLI to reply to the PR review thread when appropriate. Do not open a second pull request.",
+    "",
+    "### Unaddressed review feedback",
+    ""
+  ];
+
+  if (review.unresolvedThreads.length === 0) {
+    lines.push("- GitHub reported requested changes but did not expose unresolved review threads.");
+    return `${lines.join("\n")}\n`;
+  }
+
+  for (const thread of review.unresolvedThreads) {
+    const location = [thread.path, thread.line].filter(Boolean).join(":");
+    lines.push(
+      `#### Thread ${thread.id}${location.length === 0 ? "" : ` (${location})`}`
+    );
+    if (thread.isOutdated === true) {
+      lines.push("Outdated: true");
+    }
+    for (const comment of thread.comments) {
+      const author = comment.author ?? "unknown";
+      const createdAt = comment.createdAt ?? "unknown time";
+      const url = comment.url ?? "";
+      lines.push(`- ${author} at ${createdAt}${url.length === 0 ? "" : ` (${url})`}:`);
+      lines.push(indentReviewBody(comment.body ?? ""));
+    }
+    lines.push("");
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+function indentReviewBody(body: string): string {
+  const trimmed = body.trim();
+  if (trimmed.length === 0) {
+    return "  (empty comment)";
+  }
+  return trimmed
+    .split(/\r?\n/)
+    .slice(0, 80)
+    .map((line) => `  ${line}`)
+    .join("\n");
 }
 
 function mapOutcomeToRunState(outcome: ClassifiedTerminal): RunState {

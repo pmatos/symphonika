@@ -35,10 +35,43 @@ export type RawGitHubCommit = {
 };
 
 export type RawGitHubPullRequest = {
-  head?: { ref?: string };
+  draft?: boolean;
+  head?: { ref?: string; sha?: string };
+  html_url?: string | null;
   merged_at?: string | null;
   number?: number;
   state?: string;
+};
+
+export type RawGitHubPullRequestReviewComment = {
+  author?: string | null;
+  body?: string | null;
+  createdAt?: string | null;
+  line?: number | null;
+  path?: string | null;
+  url?: string | null;
+};
+
+export type RawGitHubPullRequestReviewThread = {
+  comments: RawGitHubPullRequestReviewComment[];
+  id: string;
+  isOutdated?: boolean | null;
+  isResolved: boolean;
+  line?: number | null;
+  path?: string | null;
+};
+
+export type RawGitHubPullRequestFollowupState = {
+  draft: boolean;
+  headSha: string;
+  mergeable: "CONFLICTING" | "MERGEABLE" | "UNKNOWN" | null;
+  merged: boolean;
+  number: number;
+  reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
+  state: "CLOSED" | "MERGED" | "OPEN" | "UNKNOWN";
+  statusCheckRollupState: "ERROR" | "EXPECTED" | "FAILURE" | "PENDING" | "SUCCESS" | null;
+  unresolvedReviewThreads: RawGitHubPullRequestReviewThread[];
+  url: string;
 };
 
 export type GitHubBranchCommitsInput = GitHubIssueRepositoryInput & {
@@ -48,6 +81,15 @@ export type GitHubBranchCommitsInput = GitHubIssueRepositoryInput & {
 
 export type GitHubBranchPullRequestsInput = GitHubIssueRepositoryInput & {
   branch: string;
+};
+
+export type GitHubPullRequestInput = GitHubIssueRepositoryInput & {
+  pullNumber: number;
+};
+
+export type GitHubPullRequestMergeInput = GitHubPullRequestInput & {
+  expectedHeadSha?: string;
+  method: "merge" | "rebase" | "squash";
 };
 
 export type GitHubIssuesApi = {
@@ -64,6 +106,10 @@ export type GitHubIssuesApi = {
   listPullRequestsForBranch?: (
     input: GitHubBranchPullRequestsInput
   ) => Promise<RawGitHubPullRequest[]>;
+  getPullRequestFollowupState?: (
+    input: GitHubPullRequestInput
+  ) => Promise<RawGitHubPullRequestFollowupState | null>;
+  mergePullRequest?: (input: GitHubPullRequestMergeInput) => Promise<void>;
   removeLabelsFromIssue?: (input: GitHubIssueLabelInput) => Promise<void>;
 };
 
@@ -249,6 +295,69 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
     return response.data;
   }
 
+  async getPullRequestFollowupState(
+    input: GitHubPullRequestInput
+  ): Promise<RawGitHubPullRequestFollowupState | null> {
+    const octokit = this.octokit(input.token);
+    const response = await octokit.graphql<GraphqlPullRequestFollowupResponse>(
+      PULL_REQUEST_FOLLOWUP_QUERY,
+      {
+        number: input.pullNumber,
+        owner: input.owner,
+        repo: input.repo
+      }
+    );
+    const pullRequest = response.repository?.pullRequest;
+    if (pullRequest === null || pullRequest === undefined) {
+      return null;
+    }
+
+    return {
+      draft: pullRequest.isDraft ?? false,
+      headSha: pullRequest.headRefOid ?? "",
+      mergeable: normalizeMergeable(pullRequest.mergeable),
+      merged: pullRequest.merged ?? false,
+      number: pullRequest.number ?? input.pullNumber,
+      reviewDecision: normalizeReviewDecision(pullRequest.reviewDecision),
+      state: normalizePullRequestState(pullRequest.state),
+      statusCheckRollupState: normalizeStatusCheckRollupState(
+        pullRequest.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state
+      ),
+      unresolvedReviewThreads: (pullRequest.reviewThreads?.nodes ?? [])
+        .filter((thread): thread is GraphqlReviewThread => thread !== null)
+        .filter((thread) => thread.isResolved !== true)
+        .map((thread) => ({
+          comments: (thread.comments?.nodes ?? [])
+            .filter((comment): comment is GraphqlReviewComment => comment !== null)
+            .map((comment) => ({
+              author: comment.author?.login ?? null,
+              body: comment.body ?? null,
+              createdAt: comment.createdAt ?? null,
+              line: comment.line ?? null,
+              path: comment.path ?? null,
+              url: comment.url ?? null
+            })),
+          id: thread.id,
+          isOutdated: thread.isOutdated ?? null,
+          isResolved: thread.isResolved ?? false,
+          line: thread.line ?? null,
+          path: thread.path ?? null
+        })),
+      url: pullRequest.url ?? ""
+    };
+  }
+
+  async mergePullRequest(input: GitHubPullRequestMergeInput): Promise<void> {
+    const octokit = this.octokit(input.token);
+    await octokit.rest.pulls.merge({
+      merge_method: input.method,
+      owner: input.owner,
+      pull_number: input.pullNumber,
+      repo: input.repo,
+      ...(input.expectedHeadSha === undefined ? {} : { sha: input.expectedHeadSha })
+    });
+  }
+
   async removeLabelsFromIssue(input: GitHubIssueLabelInput): Promise<void> {
     const octokit = this.octokit(input.token);
     for (const label of input.labels) {
@@ -271,6 +380,104 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
 
 export const DEFAULT_GITHUB_ISSUES_API = new OctokitGitHubIssuesApi();
 export const DEFAULT_POLLING_INTERVAL_MS = 30_000;
+
+type GraphqlPullRequestFollowupResponse = {
+  repository?: {
+    pullRequest?: GraphqlPullRequest | null;
+  } | null;
+};
+
+type GraphqlPullRequest = {
+  commits?: {
+    nodes?: Array<{
+      commit?: {
+        statusCheckRollup?: {
+          state?: string | null;
+        } | null;
+      } | null;
+    } | null> | null;
+  } | null;
+  headRefOid?: string | null;
+  isDraft?: boolean | null;
+  mergeable?: string | null;
+  merged?: boolean | null;
+  number?: number | null;
+  reviewDecision?: string | null;
+  reviewThreads?: {
+    nodes?: Array<GraphqlReviewThread | null> | null;
+  } | null;
+  state?: string | null;
+  url?: string | null;
+};
+
+type GraphqlReviewThread = {
+  comments?: {
+    nodes?: Array<GraphqlReviewComment | null> | null;
+  } | null;
+  id: string;
+  isOutdated?: boolean | null;
+  isResolved?: boolean | null;
+  line?: number | null;
+  path?: string | null;
+};
+
+type GraphqlReviewComment = {
+  author?: {
+    login?: string | null;
+  } | null;
+  body?: string | null;
+  createdAt?: string | null;
+  line?: number | null;
+  path?: string | null;
+  url?: string | null;
+};
+
+const PULL_REQUEST_FOLLOWUP_QUERY = `
+  query PullRequestFollowup($owner: String!, $repo: String!, $number: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        number
+        url
+        state
+        merged
+        isDraft
+        headRefOid
+        mergeable
+        reviewDecision
+        reviewThreads(first: 50) {
+          nodes {
+            id
+            isResolved
+            isOutdated
+            path
+            line
+            comments(first: 20) {
+              nodes {
+                author {
+                  login
+                }
+                body
+                url
+                createdAt
+                path
+                line
+              }
+            }
+          }
+        }
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                state
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
 
 // Invoke optional GitHubIssuesApi methods through the property accessor so the
 // implementation's `this` binding is preserved. Extracting `api.method` into a
@@ -316,6 +523,27 @@ export async function tryListPullRequestsForBranch(
     return undefined;
   }
   return api.listPullRequestsForBranch(input);
+}
+
+export async function tryGetPullRequestFollowupState(
+  api: GitHubIssuesApi,
+  input: GitHubPullRequestInput
+): Promise<RawGitHubPullRequestFollowupState | null | undefined> {
+  if (api.getPullRequestFollowupState === undefined) {
+    return undefined;
+  }
+  return api.getPullRequestFollowupState(input);
+}
+
+export async function tryMergePullRequest(
+  api: GitHubIssuesApi,
+  input: GitHubPullRequestMergeInput
+): Promise<boolean> {
+  if (api.mergePullRequest === undefined) {
+    return false;
+  }
+  await api.mergePullRequest(input);
+  return true;
 }
 
 export function emptyIssuePollStatus(): IssuePollStatus {
@@ -622,7 +850,12 @@ function compareProjectIssues(
   );
 }
 
-function resolveEnvBackedValue(
+function envReferenceName(input: string): string | undefined {
+  const match = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(input);
+  return match?.[1];
+}
+
+export function resolveEnvBackedValue(
   input: string,
   env: NodeJS.ProcessEnv
 ): string | undefined {
@@ -635,9 +868,58 @@ function resolveEnvBackedValue(
   return value === undefined || value.length === 0 ? undefined : value;
 }
 
-function envReferenceName(input: string): string | undefined {
-  const match = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(input);
-  return match?.[1];
+function normalizeMergeable(
+  value: string | null | undefined
+): RawGitHubPullRequestFollowupState["mergeable"] {
+  switch (value) {
+    case "CONFLICTING":
+    case "MERGEABLE":
+    case "UNKNOWN":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function normalizeReviewDecision(
+  value: string | null | undefined
+): RawGitHubPullRequestFollowupState["reviewDecision"] {
+  switch (value) {
+    case "APPROVED":
+    case "CHANGES_REQUESTED":
+    case "REVIEW_REQUIRED":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function normalizeStatusCheckRollupState(
+  value: string | null | undefined
+): RawGitHubPullRequestFollowupState["statusCheckRollupState"] {
+  switch (value) {
+    case "ERROR":
+    case "EXPECTED":
+    case "FAILURE":
+    case "PENDING":
+    case "SUCCESS":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function normalizePullRequestState(
+  value: string | null | undefined
+): RawGitHubPullRequestFollowupState["state"] {
+  switch (value) {
+    case "CLOSED":
+    case "MERGED":
+    case "OPEN":
+      return value;
+    default:
+      return "UNKNOWN";
+  }
 }
 
 function formatZodIssue(issue: z.ZodIssue): string {

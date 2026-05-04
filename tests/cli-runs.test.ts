@@ -286,4 +286,106 @@ describe("CLI run commands", () => {
     ).rejects.toThrow();
     expect(missing.output.stderr).toContain("not found");
   });
+
+  it("show-run renders cap context for a cap_reached:no_commits run", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const issue = sampleIssue({ number: 65, title: "Capped issue" });
+    store.createRun({
+      id: "fresh",
+      issue,
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("fresh", "succeeded");
+    store.createContinuationRun({
+      id: "cont-1",
+      issue,
+      parentRunId: "fresh",
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("cont-1", "succeeded");
+    store.createContinuationRun({
+      id: "cont-2",
+      issue,
+      parentRunId: "cont-1",
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("cont-2", "succeeded");
+    store.createCapReachedFailureRun({
+      id: "cap",
+      issue,
+      parentRunId: "cont-2",
+      projectName: "alpha",
+      reason: "cap_reached:no_commits"
+    });
+    store.close();
+
+    const { output, program } = captureProgram(stateRoot);
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "show-run",
+      "cap",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+
+    expect(output.stdout).toContain("terminal:     cap_reached:no_commits");
+    expect(output.stdout).toContain(
+      "cap context:  continuation cap reached after 2 continuations: no commits on issue branch"
+    );
+  });
+
+  it("status appends decoded cap context to recent-run lines for failed cap-reached runs", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const issue = sampleIssue({ number: 65, title: "Capped" });
+    store.createRun({
+      id: "fresh",
+      issue,
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("fresh", "succeeded");
+    store.createContinuationRun({
+      id: "cont-1",
+      issue,
+      parentRunId: "fresh",
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("cont-1", "succeeded");
+    store.createCapReachedFailureRun({
+      id: "cap",
+      issue,
+      parentRunId: "cont-1",
+      projectName: "alpha",
+      reason: "cap_reached:no_pr"
+    });
+    store.close();
+
+    const { output, program } = captureProgram(stateRoot);
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "status",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+
+    expect(output.stdout).toContain(
+      "cap  alpha  #65  failed"
+    );
+    expect(output.stdout).toContain(
+      "— continuation cap reached after 1 continuation: commits exist but no pull request"
+    );
+  });
 });

@@ -39,7 +39,9 @@ import {
   LIFECYCLE_POLICY,
   type LifecyclePolicy
 } from "./active-runs.js";
+import { classifyCapReachedOutcome } from "./cap-reached-context.js";
 import { classifyFailure, type ClassifiedTerminal } from "./classify-failure.js";
+import { buildCapReachedReason } from "./terminal-reason.js";
 
 export type RunControllerProjectConfig = PollingProjectConfig & {
   workflow: string;
@@ -968,13 +970,20 @@ export class RunController {
       input.issue.number
     );
     if (succeededContinuations >= this.lifecyclePolicy.continuation.cap) {
+      const parent = this.runStore.getRun(input.runId);
+      const kind = await classifyCapReachedOutcome({
+        api: this.githubIssuesApi,
+        branch: parent?.branchName ?? "",
+        logger: this.logger,
+        repository: input.repository
+      });
       const capId = this.createRunId();
       this.runStore.createCapReachedFailureRun({
         id: capId,
         issue: refreshed,
         parentRunId: input.runId,
         projectName: input.project.name,
-        reason: "continuation cap reached"
+        reason: buildCapReachedReason(kind)
       });
       await this.markIssueFailed({
         issueNumber: input.issue.number,

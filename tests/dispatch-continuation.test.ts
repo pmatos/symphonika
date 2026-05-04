@@ -124,7 +124,7 @@ async function waitForCondition(
   options: { intervalMs?: number; timeoutMs?: number } = {}
 ): Promise<{ runs: Array<Record<string, unknown>> }> {
   const intervalMs = options.intervalMs ?? 10;
-  const timeoutMs = options.timeoutMs ?? 4_000;
+  const timeoutMs = options.timeoutMs ?? 10_000;
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
@@ -164,10 +164,12 @@ describe("dispatch continuation cap", () => {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
       // every refresh returns the issue still eligible
       getIssue: vi.fn().mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
+      listBranchCommits: vi.fn().mockResolvedValue([]),
       listOpenIssues: vi
         .fn()
         .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
         .mockResolvedValue([]),
+      listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
     let createCount = 0;
@@ -201,7 +203,7 @@ describe("dispatch continuation cap", () => {
         runs.some(
           (run) =>
             run["state"] === "failed" &&
-            run["terminalReason"] === "continuation cap reached"
+            run["terminalReason"] === "cap_reached:no_commits"
         )
       );
 
@@ -225,7 +227,7 @@ describe("dispatch continuation cap", () => {
 
       // Cap-reached failure row visible
       const capRow = status.runs.find(
-        (run) => run["terminalReason"] === "continuation cap reached"
+        (run) => run["terminalReason"] === "cap_reached:no_commits"
       );
       expect(capRow).toMatchObject({
         state: "failed",

@@ -30,14 +30,40 @@ export type RawGitHubIssue = {
   url?: string | null;
 };
 
+export type RawGitHubCommit = {
+  sha?: string;
+};
+
+export type RawGitHubPullRequest = {
+  head?: { ref?: string };
+  merged_at?: string | null;
+  number?: number;
+  state?: string;
+};
+
+export type GitHubBranchCommitsInput = GitHubIssueRepositoryInput & {
+  branch: string;
+  perPage?: number;
+};
+
+export type GitHubBranchPullRequestsInput = GitHubIssueRepositoryInput & {
+  branch: string;
+};
+
 export type GitHubIssuesApi = {
   addLabelsToIssue?: (input: GitHubIssueLabelInput) => Promise<void>;
   getIssue?: (
     input: GitHubIssueRepositoryInput & { issueNumber: number }
   ) => Promise<RawGitHubIssue | null>;
+  listBranchCommits?: (
+    input: GitHubBranchCommitsInput
+  ) => Promise<RawGitHubCommit[] | null>;
   listOpenIssues: (
     input: GitHubIssueRepositoryInput
   ) => Promise<RawGitHubIssue[]>;
+  listPullRequestsForBranch?: (
+    input: GitHubBranchPullRequestsInput
+  ) => Promise<RawGitHubPullRequest[]>;
   removeLabelsFromIssue?: (input: GitHubIssueLabelInput) => Promise<void>;
 };
 
@@ -175,6 +201,26 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
     }
   }
 
+  async listBranchCommits(
+    input: GitHubBranchCommitsInput
+  ): Promise<RawGitHubCommit[] | null> {
+    const octokit = this.octokit(input.token);
+    try {
+      const response = await octokit.rest.repos.listCommits({
+        owner: input.owner,
+        per_page: input.perPage ?? 1,
+        repo: input.repo,
+        sha: input.branch
+      });
+      return response.data;
+    } catch (error) {
+      if (isOctokitNotFound(error)) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
   async listOpenIssues(
     input: GitHubIssueRepositoryInput
   ): Promise<RawGitHubIssue[]> {
@@ -187,6 +233,20 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
     });
 
     return issues;
+  }
+
+  async listPullRequestsForBranch(
+    input: GitHubBranchPullRequestsInput
+  ): Promise<RawGitHubPullRequest[]> {
+    const octokit = this.octokit(input.token);
+    const response = await octokit.rest.pulls.list({
+      head: `${input.owner}:${input.branch}`,
+      owner: input.owner,
+      per_page: 100,
+      repo: input.repo,
+      state: "all"
+    });
+    return response.data;
   }
 
   async removeLabelsFromIssue(input: GitHubIssueLabelInput): Promise<void> {
@@ -236,6 +296,26 @@ export async function tryGetIssue(
     return undefined;
   }
   return api.getIssue(input);
+}
+
+export async function tryListBranchCommits(
+  api: GitHubIssuesApi,
+  input: GitHubBranchCommitsInput
+): Promise<RawGitHubCommit[] | null | undefined> {
+  if (api.listBranchCommits === undefined) {
+    return undefined;
+  }
+  return api.listBranchCommits(input);
+}
+
+export async function tryListPullRequestsForBranch(
+  api: GitHubIssuesApi,
+  input: GitHubBranchPullRequestsInput
+): Promise<RawGitHubPullRequest[] | undefined> {
+  if (api.listPullRequestsForBranch === undefined) {
+    return undefined;
+  }
+  return api.listPullRequestsForBranch(input);
 }
 
 export function emptyIssuePollStatus(): IssuePollStatus {

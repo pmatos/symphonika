@@ -79,6 +79,10 @@ export async function detectStaleClaims(
         continue;
       }
       issue.labels.push(STALE_LABEL);
+      input.logger.info(
+        { issueNumber: issue.number, project: filtered.project },
+        "symphonika marked issue sym:stale"
+      );
       marks.push({
         issueNumber: issue.number,
         project: filtered.project

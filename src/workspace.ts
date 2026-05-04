@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, realpath, stat } from "node:fs/promises";
+import { lstat, mkdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -137,7 +137,7 @@ async function isGitRepoRoot(workspacePath: string): Promise<boolean> {
   const dotGitPath = path.join(workspacePath, ".git");
   let dotGitStat;
   try {
-    dotGitStat = await stat(dotGitPath);
+    dotGitStat = await lstat(dotGitPath);
   } catch {
     return false;
   }
@@ -243,6 +243,25 @@ async function ensureIssueBranch(
   cachePath: string,
   branchName: string
 ): Promise<void> {
+  const upstreamHasBranch = await gitSucceeds([
+    "-C",
+    cachePath,
+    "ls-remote",
+    "--exit-code",
+    "origin",
+    `refs/heads/${branchName}`
+  ]);
+  if (upstreamHasBranch) {
+    await git([
+      "-C",
+      cachePath,
+      "fetch",
+      "origin",
+      `+refs/heads/${branchName}:refs/heads/${branchName}`
+    ]);
+    return;
+  }
+
   if (await gitSucceeds(["-C", cachePath, "show-ref", "--verify", `refs/heads/${branchName}`])) {
     return;
   }

@@ -1,5 +1,13 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -445,6 +453,56 @@ describe("Git workspace preparation", () => {
     expect(worktreeLines[0]).toContain(first.cachePath);
   });
 
+  it("re-prepares a deleted workspace from the latest pushed branch tip on upstream, not the stale cache ref", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "symphonika");
+    const input = {
+      issue: {
+        number: 64,
+        title: "Use per-issue clones not worktrees"
+      },
+      project: {
+        name: "symphonika",
+        workspace: {
+          git: {
+            base_branch: "main",
+            remote: remotePath
+          },
+          root: workspaceRoot
+        }
+      }
+    };
+
+    const first = await prepareIssueWorkspace(input);
+    await git(["-C", first.workspacePath, "config", "user.email", "agent@example.com"]);
+    await git(["-C", first.workspacePath, "config", "user.name", "Agent"]);
+    await writeFile(path.join(first.workspacePath, "agent-output.txt"), "work\n");
+    await git(["-C", first.workspacePath, "add", "agent-output.txt"]);
+    await git(["-C", first.workspacePath, "commit", "-m", "agent commit"]);
+    const pushedSha = await git(["-C", first.workspacePath, "rev-parse", "HEAD"]);
+    await git([
+      "-C",
+      first.workspacePath,
+      "push",
+      "-u",
+      "origin",
+      first.branchName
+    ]);
+
+    await rm(first.workspacePath, { recursive: true, force: true });
+
+    const second = await prepareIssueWorkspace(input);
+    expect(second.reused).toBe(false);
+    expect(second.workspacePath).toBe(first.workspacePath);
+    await expect(
+      git(["-C", second.workspacePath, "rev-parse", "HEAD"])
+    ).resolves.toBe(pushedSha);
+    await expect(
+      git(["-C", second.workspacePath, "log", "--oneline", "-1", "--format=%s"])
+    ).resolves.toBe("agent commit");
+  });
+
   it("rejects a legacy worktree-shape workspace (.git is a gitdir file, not a directory)", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);
@@ -467,6 +525,56 @@ describe("Git workspace preparation", () => {
 
     const dotGitStat = await stat(path.join(workspacePath, ".git"));
     expect(dotGitStat.isDirectory()).toBe(false);
+
+    const preparation = prepareIssueWorkspace({
+      issue: {
+        number: 64,
+        title: "Use per-issue clones not worktrees"
+      },
+      project: {
+        name: "symphonika",
+        workspace: {
+          git: {
+            base_branch: "main",
+            remote: remotePath
+          },
+          root: workspaceRoot
+        }
+      }
+    });
+
+    const error = await rejectionOf(preparation);
+    expect(error).toBeInstanceOf(WorkspacePreparationError);
+    if (!(error instanceof WorkspacePreparationError)) {
+      throw new Error("expected workspace preparation error");
+    }
+    expect(error.code).toBe("workspace_conflict");
+    expect(error.message).toContain(workspacePath);
+  });
+
+  it("rejects a workspace whose .git is a symlink to a Git directory outside the workspace", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "symphonika");
+    const branchName =
+      "sym/symphonika/64-use-per-issue-clones-not-worktrees";
+    const workspacePath = path.join(
+      workspaceRoot,
+      "issues",
+      "64-use-per-issue-clones-not-worktrees"
+    );
+    const outsideRepoPath = path.join(root, "outside-repo");
+
+    await git(["init", "--initial-branch", branchName, outsideRepoPath]);
+    await git(["-C", outsideRepoPath, "config", "user.email", "outside@example.com"]);
+    await git(["-C", outsideRepoPath, "config", "user.name", "Outside"]);
+    await git(["-C", outsideRepoPath, "remote", "add", "origin", remotePath]);
+    await writeFile(path.join(outsideRepoPath, "README.md"), "# Outside\n");
+    await git(["-C", outsideRepoPath, "add", "README.md"]);
+    await git(["-C", outsideRepoPath, "commit", "-m", "outside commit"]);
+
+    await mkdir(workspacePath, { recursive: true });
+    await symlink(path.join(outsideRepoPath, ".git"), path.join(workspacePath, ".git"));
 
     const preparation = prepareIssueWorkspace({
       issue: {

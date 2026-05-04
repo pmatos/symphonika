@@ -80,11 +80,11 @@ describe("run-store lifecycle CRUD", () => {
     const store = openRunStore({ stateRoot: root });
     try {
       const id = seedRun(store);
-      store.recordTerminalReason(id, "workspace_branch_conflict", "deterministic");
+      store.recordTerminalReason(id, "workspace_workspace_conflict", "deterministic");
 
       const [run] = store.listRuns();
       expect(run).toMatchObject({
-        terminalReason: "workspace_branch_conflict",
+        terminalReason: "workspace_workspace_conflict",
         failureClassification: "deterministic"
       });
     } finally {

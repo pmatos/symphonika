@@ -14,7 +14,7 @@ not retry, and does not schedule continuations after a successful run.
 2. Polls GitHub once for issues that match the Project's `labels_all` /
    `labels_none` filters.
 3. If at least one eligible issue is found, claims it (adds `sym:claimed`,
-   then `sym:running`), prepares a deterministic Git worktree under
+   then `sym:running`), prepares a deterministic Git clone under
    `<state.root>/workspaces/<project>/issues/<n>-<slug>/`, renders the workflow
    prompt, and launches the configured agent provider (Codex or Claude).
 4. Persists evidence under `<state.root>/logs/runs/<run-id>/`:
@@ -90,7 +90,7 @@ present.
 - **`agent-ready` is workflow-side, not operational.** Smoke does not create
   this label. Apply it to the target issue manually before invoking smoke.
 - **Submodules are not initialized.** The `symphony/` upstream reference
-  submodule is left empty in the worktree. The bootstrap workflow contract
+  submodule is left empty in the workspace clone. The bootstrap workflow contract
   treats `symphony/` as a reference, so this is expected.
 - **Stale claims block dispatch.** If a previous attempt left the issue with
   `sym:claimed` or `sym:running` and there is no live local run, doctor will

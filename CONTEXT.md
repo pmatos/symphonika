@@ -45,8 +45,8 @@ A durable orchestrator claim on an issue for which no live local run exists.
 _Avoid_: failed run
 
 **Workspace**:
-The operational Git worktree assigned to one issue run, used as the coding-agent cwd and prepared from the Project's repository before hooks run.
-_Avoid_: checkout, repo clone
+The operational Git clone assigned to one issue run, used as the coding-agent cwd and prepared from the Project's repository before hooks run.
+_Avoid_: checkout, repo workspace
 
 **Issue Branch**:
 The deterministic Git branch created by the orchestrator for one issue workspace.

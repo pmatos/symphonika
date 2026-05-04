@@ -74,13 +74,13 @@ describe("classifyFailure", () => {
   it("classifies WorkspacePreparationError as deterministic", () => {
     const result = classifyFailure({
       cancelRequested: false,
-      error: new WorkspacePreparationError("branch_conflict", "boom"),
+      error: new WorkspacePreparationError("workspace_conflict", "boom"),
       events: []
     });
 
     expect(result.kind).toBe("failed");
     expect(result.classification).toBe("deterministic");
-    expect(result.reason).toContain("workspace_branch_conflict");
+    expect(result.reason).toContain("workspace_workspace_conflict");
   });
 
   it("classifies workflow render errors as deterministic", () => {

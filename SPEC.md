@@ -111,7 +111,7 @@ not silently create labels.
 
 ### 4.5 Workspace
 
-A Workspace is the operational Git worktree assigned to one issue run. Symphonika always starts the
+A Workspace is the operational Git clone assigned to one issue run. Symphonika always starts the
 agent with the workspace as the current working directory.
 
 This cwd rule is an operational invariant, not a security boundary. Agents run with full local
@@ -324,7 +324,7 @@ Recommended layout:
         prompt.md
 ```
 
-Agents may modify workspaces, so orchestrator evidence must stay outside the Git worktree.
+Agents may modify workspaces, so orchestrator evidence must stay outside the issue clone.
 
 ### 7.4 Prompt Evidence
 
@@ -481,14 +481,14 @@ First attempt:
 - ensure repository cache exists
 - fetch base branch
 - create deterministic issue branch
-- create deterministic issue worktree
+- create deterministic issue clone (`git clone --shared` from the cache, with `origin` repointed at the upstream remote)
 - run configured hooks
 - launch provider from workspace cwd
 
 Retry or continuation:
 
-- reuse the same worktree and issue branch
-- dirty worktrees are expected
+- reuse the same clone and issue branch
+- dirty clones are expected
 - do not auto-reset
 - do not auto-delete
 - notify the agent in the rendered prompt that it is entering a previous-attempt workspace
@@ -702,7 +702,7 @@ The bootstrap slice is accepted when:
   commands, workflow file, database path, and workspace root
 - `init-project` can create missing operational labels after confirmation
 - `daemon` can claim one `agent-ready` issue in this repository
-- daemon prepares the deterministic issue worktree and branch
+- daemon prepares the deterministic issue clone and branch
 - daemon runs the configured provider through either Codex JSON-RPC or Claude stream-json
 - daemon captures raw logs, normalized events, rendered prompt, issue snapshot, and provider metadata
 - durable run state is updated in SQLite

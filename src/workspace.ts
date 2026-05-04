@@ -37,7 +37,6 @@ export type PreparedIssueWorkspace = {
 };
 
 export type WorkspacePreparationErrorCode =
-  | "branch_conflict"
   | "cache_conflict"
   | "workspace_conflict";
 
@@ -79,23 +78,24 @@ export async function prepareIssueWorkspace(
     } catch (error) {
       throw new WorkspacePreparationError(
         "workspace_conflict",
-        `workspace path ${prepared.workspacePath} exists but is not a reusable Git worktree for ${prepared.branchName}`,
+        `workspace path ${prepared.workspacePath} exists but is not a reusable Git clone for ${prepared.branchName}`,
         error
       );
     }
 
     if (currentBranch === prepared.branchName) {
-      if (!(await isWorktreeRoot(prepared.workspacePath))) {
+      if (!(await isGitRepoRoot(prepared.workspacePath))) {
         throw new WorkspacePreparationError(
           "workspace_conflict",
-          `workspace path ${prepared.workspacePath} is checked out on ${prepared.branchName} but is not the Git worktree root`
+          `workspace path ${prepared.workspacePath} is checked out on ${prepared.branchName} but is not a standalone Git clone (its .git is not a directory at the workspace root)`
         );
       }
 
-      if (!(await isWorktreeForCache(prepared.workspacePath, prepared.cachePath))) {
+      const originUrl = await originUrlOf(prepared.workspacePath);
+      if (originUrl !== input.project.workspace.git.remote) {
         throw new WorkspacePreparationError(
           "workspace_conflict",
-          `workspace path ${prepared.workspacePath} is checked out on ${prepared.branchName} but is not linked to cache ${prepared.cachePath}`
+          `workspace path ${prepared.workspacePath} is checked out on ${prepared.branchName} but origin is ${originUrl ?? "unset"}, expected ${input.project.workspace.git.remote}`
         );
       }
 
@@ -111,31 +111,40 @@ export async function prepareIssueWorkspace(
     );
   }
 
-  const conflictingWorktreePath = await worktreePathForBranch(
-    prepared.cachePath,
-    prepared.branchName
-  );
-  if (conflictingWorktreePath !== undefined) {
-    throw new WorkspacePreparationError(
-      "branch_conflict",
-      `issue branch ${prepared.branchName} is already checked out at ${conflictingWorktreePath}`
-    );
-  }
-
   await mkdir(path.dirname(prepared.workspacePath), { recursive: true });
   await git([
-    "-C",
+    "clone",
+    "--shared",
+    "--no-tags",
+    "--branch",
+    prepared.branchName,
     prepared.cachePath,
-    "worktree",
-    "add",
+    prepared.workspacePath
+  ]);
+  await git([
+    "-C",
     prepared.workspacePath,
-    prepared.branchName
+    "remote",
+    "set-url",
+    "origin",
+    input.project.workspace.git.remote
   ]);
 
   return prepared;
 }
 
-async function isWorktreeRoot(workspacePath: string): Promise<boolean> {
+async function isGitRepoRoot(workspacePath: string): Promise<boolean> {
+  const dotGitPath = path.join(workspacePath, ".git");
+  let dotGitStat;
+  try {
+    dotGitStat = await stat(dotGitPath);
+  } catch {
+    return false;
+  }
+  if (!dotGitStat.isDirectory()) {
+    return false;
+  }
+
   const topLevel = await git([
     "-C",
     workspacePath,
@@ -150,45 +159,18 @@ async function isWorktreeRoot(workspacePath: string): Promise<boolean> {
   return actualTopLevel === expectedTopLevel;
 }
 
-async function isWorktreeForCache(
-  workspacePath: string,
-  cachePath: string
-): Promise<boolean> {
-  const commonDirectory = await git([
-    "-C",
-    workspacePath,
-    "rev-parse",
-    "--path-format=absolute",
-    "--git-common-dir"
-  ]);
-  const [actualCommonDirectory, expectedCommonDirectory] = await Promise.all([
-    realpath(commonDirectory),
-    realpath(cachePath)
-  ]);
-
-  return actualCommonDirectory === expectedCommonDirectory;
-}
-
-async function worktreePathForBranch(
-  cachePath: string,
-  branchName: string
-): Promise<string | undefined> {
-  const output = await git(["-C", cachePath, "worktree", "list", "--porcelain"]);
-  let currentWorktreePath: string | undefined;
-  const expectedBranchLine = `branch refs/heads/${branchName}`;
-
-  for (const line of output.split(/\r?\n/)) {
-    if (line.startsWith("worktree ")) {
-      currentWorktreePath = line.slice("worktree ".length);
-      continue;
-    }
-
-    if (line === expectedBranchLine) {
-      return currentWorktreePath;
-    }
+async function originUrlOf(workspacePath: string): Promise<string | undefined> {
+  try {
+    return await git([
+      "-C",
+      workspacePath,
+      "config",
+      "--get",
+      "remote.origin.url"
+    ]);
+  } catch {
+    return undefined;
   }
-
-  return undefined;
 }
 
 function issueWorkspacePaths(

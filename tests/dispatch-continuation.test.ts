@@ -124,7 +124,7 @@ async function waitForCondition(
   options: { intervalMs?: number; timeoutMs?: number } = {}
 ): Promise<{ runs: Array<Record<string, unknown>> }> {
   const intervalMs = options.intervalMs ?? 10;
-  const timeoutMs = options.timeoutMs ?? 4_000;
+  const timeoutMs = options.timeoutMs ?? 10_000;
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {

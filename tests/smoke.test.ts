@@ -61,6 +61,50 @@ describe("runSmoke", () => {
     expect(report.errors).toEqual([]);
   });
 
+  it("warns when a claimed issue blocks smoke without a live local run", async () => {
+    const root = await makeTempRoot();
+    await writeBootstrapProject(root);
+
+    const issueNumber = 77;
+    const githubApi = successfulGitHubApi();
+    const githubIssuesApi: GitHubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([
+        {
+          body: "Body of issue 77",
+          created_at: "2026-04-20T10:00:00Z",
+          html_url: `https://github.com/pmatos/symphonika/issues/${issueNumber}`,
+          id: 5077,
+          labels: [{ name: "agent-ready" }, { name: "sym:claimed" }],
+          number: issueNumber,
+          state: "open",
+          title: "Orphan claimed issue",
+          updated_at: "2026-04-21T11:00:00Z"
+        }
+      ])
+    };
+    const codex = fakeCodexProvider();
+
+    const report = await runSmoke({
+      agentProviders: { codex },
+      configPath: path.join(root, "symphonika.yml"),
+      cwd: root,
+      env: { GITHUB_TOKEN: "test-token" },
+      githubApi,
+      githubIssuesApi
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.dispatched).toBe(false);
+    expect(report.skipReason).toBe("no eligible issues to dispatch");
+    expect(report.warnings).toEqual([
+      expect.stringContaining(
+        "issue #77 carries sym:claimed without a live local run"
+      )
+    ]);
+    expect(report.warnings[0]).toContain("symphonika clear-stale symphonika 77");
+    expect(codex.runAttempt).not.toHaveBeenCalled();
+  });
+
   it("short-circuits with doctor errors when operational labels are missing and never dispatches", async () => {
     const root = await makeTempRoot();
     await writeBootstrapProject(root);
@@ -202,7 +246,7 @@ describe("runSmoke", () => {
     );
   });
 
-  it("surfaces a failed terminal run state when the provider exits non-zero", async () => {
+  it("surfaces a failed terminal run state when the provider reports turn_failed", async () => {
     const root = await makeTempRoot();
     await writeBootstrapProject(root);
 
@@ -242,8 +286,11 @@ describe("runSmoke", () => {
       runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
         await Promise.resolve();
         yield {
-          normalized: { exitCode: 1, type: "process_exit" },
-          raw: { code: 1, kind: "exit" }
+          normalized: {
+            message: "turn_failed: legacy codex refused the run",
+            type: "turn_failed"
+          },
+          raw: { kind: "turn_failed", message: "legacy codex refused the run" }
         };
       }),
       validate: vi.fn().mockResolvedValue(undefined)
@@ -280,6 +327,27 @@ describe("runSmoke", () => {
     expect(report.dispatched).toBe(true);
     expect(report.runDetail?.state).toBe("failed");
     expect(report.ok).toBe(false);
+    expect(report.errors).toHaveLength(1);
+    expect(report.errors[0]).toContain(report.runId);
+    expect(report.errors[0]).toContain("terminalReason=turn_failed");
+    expect(report.errors[0]).toContain("provider.normalized.jsonl");
+    expect(report.errors[0]).toContain(report.runDetail?.normalizedLogPath);
+
+    expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith({
+      issueNumber,
+      labels: ["sym:failed"],
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "test-token"
+    });
+    expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledTimes(1);
+    expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith({
+      issueNumber,
+      labels: ["sym:running"],
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "test-token"
+    });
   });
 });
 

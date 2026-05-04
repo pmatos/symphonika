@@ -867,11 +867,6 @@ export class RunController {
     repository: GitHubIssueRepositoryInput;
   }): Promise<void> {
     const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
-    // Add sym:failed; only on success remove sym:claimed. If either write
-    // fails, the issue retains sym:claimed and stays out of dispatch —
-    // matching pre-#59 safe-on-partial-failure behavior. Full success leaves
-    // the issue with sym:failed alone, so the next reconcile sweep cannot
-    // layer sym:stale on top.
     try {
       await api.addLabelsToIssue({
         ...input.repository,
@@ -888,19 +883,6 @@ export class RunController {
     this.logger?.info(
       { issueNumber: input.issueNumber },
       "symphonika marked issue sym:failed"
-    );
-    await this.bestEffort(
-      () =>
-        api.removeLabelsFromIssue({
-          ...input.repository,
-          issueNumber: input.issueNumber,
-          labels: ["sym:claimed"]
-        }),
-      {
-        issueNumber: input.issueNumber,
-        label: "sym:claimed",
-        operation: "removeLabel"
-      }
     );
   }
 

@@ -7,7 +7,10 @@ import type {
   GitHubIssuesApi,
   IssuePollStatus
 } from "./issue-polling.js";
-import { ActiveRunRegistry } from "./lifecycle/active-runs.js";
+import {
+  ActiveRunRegistry,
+  type LifecyclePolicy
+} from "./lifecycle/active-runs.js";
 import {
   RunController,
   type RunControllerProjectConfig,
@@ -115,6 +118,11 @@ const dispatchServiceConfigSchema = z
   })
   .passthrough();
 
+const ONE_SHOT_LIFECYCLE_POLICY: LifecyclePolicy = {
+  continuation: { cap: 0, delayMs: 0 },
+  retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+};
+
 export async function dispatchOneEligibleIssue(
   options: DispatchIssueOptions
 ): Promise<DispatchIssueResult> {
@@ -139,6 +147,7 @@ export async function dispatchOneEligibleIssue(
     agentProviders: options.agentProviders,
     configDir: options.configDir,
     githubIssuesApi: options.githubIssuesApi,
+    lifecyclePolicy: ONE_SHOT_LIFECYCLE_POLICY,
     projectsLoader,
     providersLoader,
     runStore: options.runStore,

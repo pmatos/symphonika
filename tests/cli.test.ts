@@ -245,6 +245,66 @@ describe("CLI", () => {
     }
   });
 
+  it("smoke prints a descriptive error when a dispatched run fails", async () => {
+    const previousExitCode = process.exitCode;
+    process.exitCode = 0;
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({
+      registerSignalHandlers: false,
+      runSmoke: () =>
+        Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          dispatched: true,
+          errors: [
+            "run run-failed terminated in state failed; terminalReason=turn_failed: boom; provider.normalized.jsonl: /tmp/state/logs/runs/run-failed/provider.normalized.jsonl"
+          ],
+          ok: false,
+          runDetail: {
+            branchName: "sym/symphonika/99-x",
+            createdAt: "2026-05-04T17:00:00.000Z",
+            id: "run-failed",
+            issueNumber: 99,
+            issueSnapshotPath:
+              "/tmp/state/logs/runs/run-failed/issue-snapshot.json",
+            issueTitle: "Failure",
+            metadataPath: "/tmp/state/logs/runs/run-failed/prompt-metadata.json",
+            normalizedLogPath:
+              "/tmp/state/logs/runs/run-failed/provider.normalized.jsonl",
+            project: "symphonika",
+            promptPath: "/tmp/state/logs/runs/run-failed/prompt.md",
+            provider: "codex",
+            rawLogPath: "/tmp/state/logs/runs/run-failed/provider.raw.jsonl",
+            state: "failed",
+            terminalReason: "turn_failed: boom",
+            updatedAt: "2026-05-04T17:00:01.000Z",
+            workspacePath: "/tmp/state/workspaces/symphonika/issues/99-x"
+          },
+          runId: "run-failed",
+          warnings: []
+        } satisfies SmokeReport)
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    try {
+      await program.parseAsync(["node", "symphonika", "smoke"]);
+
+      expect(process.exitCode).toBe(1);
+      expect(output.stderr).toContain("smoke failed");
+      expect(output.stderr).toContain("run run-failed terminated in state failed");
+      expect(output.stderr).toContain("terminalReason=turn_failed");
+      expect(output.stderr).toContain("provider.normalized.jsonl");
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
   it("smoke prints a skipReason when no eligible issue exists and exits zero", async () => {
     const previousExitCode = process.exitCode;
     process.exitCode = 0;

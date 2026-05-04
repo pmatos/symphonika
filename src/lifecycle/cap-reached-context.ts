@@ -35,7 +35,8 @@ export async function classifyCapReachedOutcome(
       );
       return "unknown";
     }
-    if (commits === null || commits.length === 0) {
+    const branchMissing = commits === null;
+    if (!branchMissing && commits.length === 0) {
       return "no_commits";
     }
 
@@ -48,15 +49,12 @@ export async function classifyCapReachedOutcome(
         { branch: input.branch },
         "cap-reached classifier: listPullRequestsForBranch unavailable; classifying as unknown"
       );
-      return "unknown";
-    }
-    if (prs.length === 0) {
-      return "no_pr";
+      return branchMissing ? "no_commits" : "unknown";
     }
     if (prs.some((pr) => pr.merged_at != null)) {
       return "work_landed";
     }
-    return "no_pr";
+    return branchMissing ? "no_commits" : "no_pr";
   } catch (error) {
     input.logger?.warn(
       { branch: input.branch, err: error },

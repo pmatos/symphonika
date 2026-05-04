@@ -23,7 +23,7 @@ describe("classifyCapReachedOutcome", () => {
     expect(kind).toBe("no_commits");
   });
 
-  it("returns no_commits when listBranchCommits reports the branch missing (404)", async () => {
+  it("returns no_commits when listBranchCommits reports the branch missing (404) and no PR exists", async () => {
     const api: GitHubIssuesApi = {
       ...baseApi,
       listBranchCommits: vi.fn().mockResolvedValue(null),
@@ -35,6 +35,24 @@ describe("classifyCapReachedOutcome", () => {
       repository
     });
     expect(kind).toBe("no_commits");
+  });
+
+  it("returns work_landed when the branch is missing (auto-deleted) but a merged PR still exists", async () => {
+    const api: GitHubIssuesApi = {
+      ...baseApi,
+      listBranchCommits: vi.fn().mockResolvedValue(null),
+      listPullRequestsForBranch: vi
+        .fn()
+        .mockResolvedValue([
+          { merged_at: "2026-05-04T00:00:00Z", number: 9, state: "closed" }
+        ])
+    };
+    const kind = await classifyCapReachedOutcome({
+      api,
+      branch: "feature/x",
+      repository
+    });
+    expect(kind).toBe("work_landed");
   });
 
   it("returns no_commits when the branch reports zero commits", async () => {

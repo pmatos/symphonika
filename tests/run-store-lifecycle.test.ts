@@ -94,8 +94,8 @@ describe("run-store lifecycle CRUD", () => {
         issueNumber: 12,
         projectName: "alpha",
         schedulerWeights: [
-          { currentWeight: -1, projectName: "alpha" },
-          { currentWeight: 1, projectName: "beta" }
+          { currentWeight: -1, projectName: "alpha", weight: 2 },
+          { currentWeight: 1, projectName: "beta", weight: 1 }
         ]
       });
     } finally {
@@ -139,6 +139,42 @@ describe("run-store lifecycle CRUD", () => {
       expect(states[1]?.validationMessage).toContain("BETA_TOKEN");
     } finally {
       reopened.close();
+    }
+  });
+
+  it("reactivates project metadata when dispatch records scheduler state", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      store.syncProjectStates([{ name: "alpha", weight: 5 }]);
+      store.syncProjectStates([]);
+
+      expect(store.listProjectStates()[0]).toMatchObject({
+        active: false,
+        projectName: "alpha",
+        validationState: "inactive",
+        weight: 5
+      });
+
+      store.recordProjectDispatchSelection({
+        issueNumber: 42,
+        projectName: "alpha",
+        schedulerWeights: [
+          { currentWeight: 0, projectName: "alpha", weight: 5 }
+        ]
+      });
+
+      expect(store.listProjectStates()[0]).toMatchObject({
+        active: true,
+        lastDispatchedIssueNumber: 42,
+        projectName: "alpha",
+        schedulerCurrentWeight: 0,
+        validationMessage: null,
+        validationState: "valid",
+        weight: 5
+      });
+    } finally {
+      store.close();
     }
   });
 

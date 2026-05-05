@@ -108,6 +108,7 @@ type DispatchTarget = {
   schedulerWeights: Array<{
     currentWeight: number;
     projectName: string;
+    weight: number;
   }>;
 };
 
@@ -632,7 +633,8 @@ export class RunController {
     const schedulerWeights = dispatchable.map((entry) => ({
       currentWeight:
         entry === selected ? entry.nextWeight - totalWeight : entry.nextWeight,
-      projectName: entry.project.name
+      projectName: entry.project.name,
+      weight: entry.weight
     }));
 
     return {
@@ -658,6 +660,7 @@ export class RunController {
     schedulerWeights?: Array<{
       currentWeight: number;
       projectName: string;
+      weight: number;
     }>;
   }): Promise<void> {
     let claimed = false;

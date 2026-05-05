@@ -119,6 +119,7 @@ export type ProjectDispatchSelectionInput = {
   schedulerWeights: Array<{
     currentWeight: number;
     projectName: string;
+    weight: number;
   }>;
 };
 
@@ -586,11 +587,15 @@ export class RunStore {
           .prepare(
             [
               "insert into project_states (",
-              "project_name, active, weight, scheduler_current_weight, created_at, updated_at",
+              "project_name, active, weight, validation_state, validation_message, scheduler_current_weight, created_at, updated_at",
               ") values (",
-              "@project_name, 1, 1, @scheduler_current_weight, @created_at, @updated_at",
+              "@project_name, 1, @weight, 'valid', null, @scheduler_current_weight, @created_at, @updated_at",
               ")",
               "on conflict(project_name) do update set",
+              "active = 1,",
+              "weight = excluded.weight,",
+              "validation_state = case when project_states.validation_state = 'inactive' then 'valid' else project_states.validation_state end,",
+              "validation_message = case when project_states.validation_state = 'inactive' then null else project_states.validation_message end,",
               "scheduler_current_weight = excluded.scheduler_current_weight,",
               "updated_at = excluded.updated_at"
             ].join(" ")
@@ -599,7 +604,8 @@ export class RunStore {
             created_at: now,
             project_name: weight.projectName,
             scheduler_current_weight: weight.currentWeight,
-            updated_at: now
+            updated_at: now,
+            weight: normalizeProjectWeight(weight.weight)
           });
       }
 

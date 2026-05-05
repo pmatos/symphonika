@@ -223,6 +223,93 @@ describe("dispatch fairness", () => {
       runStore.close();
     }
   });
+
+  it("records configured project weights during one-shot dispatch before project sync", async () => {
+    const root = await makeTempRoot();
+    await writeWeightedConfig(root);
+    const runStore = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const pollStatus = pollStatusFor([
+      { issue: issue({ number: 1, title: "Alpha issue" }), project: "alpha" },
+      { issue: issue({ number: 2, title: "Beta issue" }), project: "beta" }
+    ]);
+    const prepareIssueWorkspace = vi.fn(
+      async (input: PrepareIssueWorkspaceInput): Promise<PreparedIssueWorkspace> => {
+        const prepared = {
+          branchName: `sym/${input.project.name}/${input.issue.number}`,
+          branchRef: `refs/heads/sym/${input.project.name}/${input.issue.number}`,
+          cachePath: path.join(root, "cache", `${input.project.name}.git`),
+          issueDirectoryName: `${input.issue.number}`,
+          reused: false,
+          workspacePath: path.join(
+            root,
+            "workspaces",
+            `${input.project.name}-${input.issue.number}`
+          )
+        };
+        await createGitWorkspaceAhead(prepared);
+        return prepared;
+      }
+    );
+
+    try {
+      const result = await dispatchOneEligibleIssue({
+        agentProviders: { codex: provider },
+        configDir: root,
+        configPath: path.join(root, "symphonika.yml"),
+        createRunId: () => "run-weight-metadata",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        issuePollStatus: pollStatus,
+        prepareIssueWorkspace,
+        runStore,
+        stateRoot: path.join(root, ".symphonika")
+      });
+
+      expect(result.dispatched).toBe(true);
+      expect(
+        runStore
+          .listProjectStates()
+          .map((state) => ({
+            active: state.active,
+            projectName: state.projectName,
+            validationState: state.validationState,
+            weight: state.weight
+          }))
+      ).toEqual([
+        {
+          active: true,
+          projectName: "alpha",
+          validationState: "valid",
+          weight: 2
+        },
+        {
+          active: true,
+          projectName: "beta",
+          validationState: "valid",
+          weight: 1
+        }
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
 });
 
 function pollStatusFor(

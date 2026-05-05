@@ -110,6 +110,39 @@ describe("daemon hot reload", () => {
     }
   });
 
+  it("keeps periodic reload attempts after an invalid startup config", async () => {
+    const root = await makeTempRoot();
+    await writeProjectWithoutProviders(root, { pollingIntervalMs: 10 });
+    const githubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 82,
+          title: "Recovered startup config"
+        })
+      ])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      expect(githubIssuesApi.listOpenIssues).not.toHaveBeenCalled();
+
+      await writeProject(root, { pollingIntervalMs: 10 });
+      await waitFor(() =>
+        Promise.resolve(githubIssuesApi.listOpenIssues.mock.calls.length >= 1)
+      );
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("applies changed project filters, provider commands, and workflow prompts to future work", async () => {
     const root = await makeTempRoot();
     await writeProject(root, {
@@ -446,6 +479,26 @@ async function writeProject(
     path.join(root, "WORKFLOW.md"),
     options.workflowBody ?? "Work on {{issue.title}}.\n"
   );
+}
+
+async function writeProjectWithoutProviders(
+  root: string,
+  options: { pollingIntervalMs: number }
+): Promise<void> {
+  await mkdir(root, { recursive: true });
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "polling:",
+      `  interval_ms: ${options.pollingIntervalMs}`,
+      "projects:",
+      "  - name: symphonika",
+      ""
+    ].join("\n")
+  );
+  await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
 }
 
 function preparedWorkspaceFixture(

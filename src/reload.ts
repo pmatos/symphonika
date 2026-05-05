@@ -9,6 +9,7 @@ import type {
   PollingProjectConfig,
   PollingServiceConfig
 } from "./issue-polling.js";
+import { DEFAULT_POLLING_INTERVAL_MS } from "./issue-polling.js";
 import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig,
@@ -405,5 +406,3 @@ function formatZodIssueWithPrefix(
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
-
-const DEFAULT_POLLING_INTERVAL_MS = 30_000;

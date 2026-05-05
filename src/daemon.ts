@@ -13,8 +13,10 @@ import {
 import type { GitHubIssuesApi } from "./issue-polling.js";
 import {
   DEFAULT_GITHUB_ISSUES_API,
+  DEFAULT_POLLING_INTERVAL_MS,
   emptyIssuePollStatus,
   pollConfiguredGitHubIssuesFromConfig,
+  readConfiguredPollingIntervalMs,
   replaceIssuePollStatus
 } from "./issue-polling.js";
 import { ActiveRunRegistry } from "./lifecycle/active-runs.js";
@@ -347,10 +349,10 @@ export async function startDaemon(
     if (!state.configExists) {
       return;
     }
-    const nextIntervalMs = runtimeConfig.getSnapshot()?.pollingIntervalMs;
-    if (nextIntervalMs === undefined) {
-      return;
-    }
+    const nextIntervalMs =
+      runtimeConfig.getSnapshot()?.pollingIntervalMs ??
+      intervalMs ??
+      DEFAULT_POLLING_INTERVAL_MS;
     if (nextIntervalMs === intervalMs) {
       return;
     }
@@ -410,7 +412,9 @@ export async function startDaemon(
   let intervalMs: number | undefined;
   if (state.configExists) {
     await refreshIssuePollStatus();
-    intervalMs = runtimeConfig.getSnapshot()?.pollingIntervalMs;
+    intervalMs =
+      runtimeConfig.getSnapshot()?.pollingIntervalMs ??
+      (await readConfiguredPollingIntervalMs(state.configPath));
   }
   const TERMINAL_STATES = new Set<RunState>([
     "cancelled",

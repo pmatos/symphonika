@@ -299,52 +299,10 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
     input: GitHubPullRequestInput
   ): Promise<RawGitHubPullRequestFollowupState | null> {
     const octokit = this.octokit(input.token);
-    const response = await octokit.graphql<GraphqlPullRequestFollowupResponse>(
-      PULL_REQUEST_FOLLOWUP_QUERY,
-      {
-        number: input.pullNumber,
-        owner: input.owner,
-        repo: input.repo
-      }
+    return fetchPullRequestFollowupState(
+      (query, variables) => octokit.graphql(query, variables),
+      input
     );
-    const pullRequest = response.repository?.pullRequest;
-    if (pullRequest === null || pullRequest === undefined) {
-      return null;
-    }
-
-    return {
-      draft: pullRequest.isDraft ?? false,
-      headSha: pullRequest.headRefOid ?? "",
-      mergeable: normalizeMergeable(pullRequest.mergeable),
-      merged: pullRequest.merged ?? false,
-      number: pullRequest.number ?? input.pullNumber,
-      reviewDecision: normalizeReviewDecision(pullRequest.reviewDecision),
-      state: normalizePullRequestState(pullRequest.state),
-      statusCheckRollupState: normalizeStatusCheckRollupState(
-        pullRequest.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state
-      ),
-      unresolvedReviewThreads: (pullRequest.reviewThreads?.nodes ?? [])
-        .filter((thread): thread is GraphqlReviewThread => thread !== null)
-        .filter((thread) => thread.isResolved !== true)
-        .map((thread) => ({
-          comments: (thread.comments?.nodes ?? [])
-            .filter((comment): comment is GraphqlReviewComment => comment !== null)
-            .map((comment) => ({
-              author: comment.author?.login ?? null,
-              body: comment.body ?? null,
-              createdAt: comment.createdAt ?? null,
-              line: comment.line ?? null,
-              path: comment.path ?? null,
-              url: comment.url ?? null
-            })),
-          id: thread.id,
-          isOutdated: thread.isOutdated ?? null,
-          isResolved: thread.isResolved ?? false,
-          line: thread.line ?? null,
-          path: thread.path ?? null
-        })),
-      url: pullRequest.url ?? ""
-    };
   }
 
   async mergePullRequest(input: GitHubPullRequestMergeInput): Promise<void> {
@@ -387,6 +345,14 @@ type GraphqlPullRequestFollowupResponse = {
   } | null;
 };
 
+type GraphqlReviewThreadConnection = {
+  nodes?: Array<GraphqlReviewThread | null> | null;
+  pageInfo?: {
+    endCursor?: string | null;
+    hasNextPage?: boolean | null;
+  } | null;
+};
+
 type GraphqlPullRequest = {
   commits?: {
     nodes?: Array<{
@@ -403,11 +369,17 @@ type GraphqlPullRequest = {
   merged?: boolean | null;
   number?: number | null;
   reviewDecision?: string | null;
-  reviewThreads?: {
-    nodes?: Array<GraphqlReviewThread | null> | null;
-  } | null;
+  reviewThreads?: GraphqlReviewThreadConnection | null;
   state?: string | null;
   url?: string | null;
+};
+
+type GraphqlReviewThreadsPageResponse = {
+  repository?: {
+    pullRequest?: {
+      reviewThreads?: GraphqlReviewThreadConnection | null;
+    } | null;
+  } | null;
 };
 
 type GraphqlReviewThread = {
@@ -432,6 +404,32 @@ type GraphqlReviewComment = {
   url?: string | null;
 };
 
+const REVIEW_THREAD_FIELDS = `
+  pageInfo {
+    hasNextPage
+    endCursor
+  }
+  nodes {
+    id
+    isResolved
+    isOutdated
+    path
+    line
+    comments(first: 20) {
+      nodes {
+        author {
+          login
+        }
+        body
+        url
+        createdAt
+        path
+        line
+      }
+    }
+  }
+`;
+
 const PULL_REQUEST_FOLLOWUP_QUERY = `
   query PullRequestFollowup($owner: String!, $repo: String!, $number: Int!) {
     repository(owner: $owner, name: $repo) {
@@ -445,25 +443,7 @@ const PULL_REQUEST_FOLLOWUP_QUERY = `
         mergeable
         reviewDecision
         reviewThreads(first: 50) {
-          nodes {
-            id
-            isResolved
-            isOutdated
-            path
-            line
-            comments(first: 20) {
-              nodes {
-                author {
-                  login
-                }
-                body
-                url
-                createdAt
-                path
-                line
-              }
-            }
-          }
+          ${REVIEW_THREAD_FIELDS}
         }
         commits(last: 1) {
           nodes {
@@ -478,6 +458,107 @@ const PULL_REQUEST_FOLLOWUP_QUERY = `
     }
   }
 `;
+
+const PULL_REQUEST_REVIEW_THREADS_PAGE_QUERY = `
+  query PullRequestReviewThreadsPage(
+    $owner: String!
+    $repo: String!
+    $number: Int!
+    $after: String!
+  ) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewThreads(first: 50, after: $after) {
+          ${REVIEW_THREAD_FIELDS}
+        }
+      }
+    }
+  }
+`;
+
+export type GraphqlExecutor = (
+  query: string,
+  variables: Record<string, unknown>
+) => Promise<unknown>;
+
+export async function fetchPullRequestFollowupState(
+  executeGraphql: GraphqlExecutor,
+  input: GitHubPullRequestInput
+): Promise<RawGitHubPullRequestFollowupState | null> {
+  const initial = (await executeGraphql(PULL_REQUEST_FOLLOWUP_QUERY, {
+    number: input.pullNumber,
+    owner: input.owner,
+    repo: input.repo
+  })) as GraphqlPullRequestFollowupResponse;
+
+  const pullRequest = initial.repository?.pullRequest;
+  if (pullRequest === null || pullRequest === undefined) {
+    return null;
+  }
+
+  const allThreads = collectReviewThreads(pullRequest.reviewThreads);
+  let pageInfo = pullRequest.reviewThreads?.pageInfo;
+
+  while (
+    pageInfo?.hasNextPage === true &&
+    typeof pageInfo.endCursor === "string"
+  ) {
+    const page = (await executeGraphql(PULL_REQUEST_REVIEW_THREADS_PAGE_QUERY, {
+      after: pageInfo.endCursor,
+      number: input.pullNumber,
+      owner: input.owner,
+      repo: input.repo
+    })) as GraphqlReviewThreadsPageResponse;
+
+    const continuation = page.repository?.pullRequest?.reviewThreads;
+    if (continuation === null || continuation === undefined) {
+      break;
+    }
+    allThreads.push(...collectReviewThreads(continuation));
+    pageInfo = continuation.pageInfo;
+  }
+
+  return {
+    draft: pullRequest.isDraft ?? false,
+    headSha: pullRequest.headRefOid ?? "",
+    mergeable: normalizeMergeable(pullRequest.mergeable),
+    merged: pullRequest.merged ?? false,
+    number: pullRequest.number ?? input.pullNumber,
+    reviewDecision: normalizeReviewDecision(pullRequest.reviewDecision),
+    state: normalizePullRequestState(pullRequest.state),
+    statusCheckRollupState: normalizeStatusCheckRollupState(
+      pullRequest.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state
+    ),
+    unresolvedReviewThreads: allThreads
+      .filter((thread) => thread.isResolved !== true)
+      .map((thread) => ({
+        comments: (thread.comments?.nodes ?? [])
+          .filter((comment): comment is GraphqlReviewComment => comment !== null)
+          .map((comment) => ({
+            author: comment.author?.login ?? null,
+            body: comment.body ?? null,
+            createdAt: comment.createdAt ?? null,
+            line: comment.line ?? null,
+            path: comment.path ?? null,
+            url: comment.url ?? null
+          })),
+        id: thread.id,
+        isOutdated: thread.isOutdated ?? null,
+        isResolved: thread.isResolved ?? false,
+        line: thread.line ?? null,
+        path: thread.path ?? null
+      })),
+    url: pullRequest.url ?? ""
+  };
+}
+
+function collectReviewThreads(
+  connection: GraphqlReviewThreadConnection | null | undefined
+): GraphqlReviewThread[] {
+  return (connection?.nodes ?? []).filter(
+    (thread): thread is GraphqlReviewThread => thread !== null
+  );
+}
 
 // Invoke optional GitHubIssuesApi methods through the property accessor so the
 // implementation's `this` binding is preserved. Extracting `api.method` into a

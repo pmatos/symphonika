@@ -158,4 +158,61 @@ describe("HTTP app", () => {
       runStore.close();
     }
   });
+
+  it("POST /api/poll-now invokes the daemon trigger and returns a poll summary", async () => {
+    let calls = 0;
+    const app = createHttpApp({
+      pollNow: () => {
+        calls += 1;
+        return Promise.resolve({
+          candidateIssues: 2,
+          dispatching: false,
+          errors: 0,
+          filteredIssues: 1,
+          issuePolling: {
+            errors: [],
+            projects: [
+              {
+                candidateIssues: 2,
+                fetchedIssues: 3,
+                filteredIssues: 1,
+                name: "alpha",
+                ok: true
+              }
+            ]
+          },
+          kind: "queued",
+          state: "idle"
+        });
+      },
+      stateRoot: "/tmp/symphonika-state",
+      version: "0.1.0"
+    });
+
+    const response = await app.request("/api/poll-now", { method: "POST" });
+    const body: unknown = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(calls).toBe(1);
+    expect(body).toEqual({
+      candidateIssues: 2,
+      dispatching: false,
+      errors: 0,
+      filteredIssues: 1,
+      issuePolling: {
+        errors: [],
+        projects: [
+          {
+            candidateIssues: 2,
+            fetchedIssues: 3,
+            filteredIssues: 1,
+            name: "alpha",
+            ok: true
+          }
+        ]
+      },
+      kind: "queued",
+      state: "idle"
+    });
+  });
 });

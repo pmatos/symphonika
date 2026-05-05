@@ -317,6 +317,82 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("coalesces concurrent poll-now requests into one manual polling cycle", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const manualPoll = deferred<ReturnType<typeof issueFixture>[]>();
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([
+          issueFixture({
+            labels: [],
+            number: 79,
+            title: "Startup snapshot"
+          })
+        ])
+        .mockImplementationOnce(() => manualPoll.promise)
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const first = fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      await waitFor(() =>
+        Promise.resolve(githubIssuesApi.listOpenIssues.mock.calls.length >= 2)
+      );
+      const second = fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      manualPoll.resolve([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 80,
+          title: "Manual poll snapshot"
+        })
+      ]);
+
+      const [firstResponse, secondResponse] = await Promise.all([
+        first,
+        second
+      ]);
+      const firstBody = (await firstResponse.json()) as {
+        candidateIssues: number;
+        kind: string;
+      };
+      const secondBody = (await secondResponse.json()) as {
+        candidateIssues: number;
+        kind: string;
+      };
+
+      expect(firstResponse.status).toBe(200);
+      expect(secondResponse.status).toBe(200);
+      expect(firstBody).toMatchObject({
+        candidateIssues: 1,
+        kind: "queued"
+      });
+      expect(secondBody).toMatchObject({
+        candidateIssues: 1,
+        kind: "coalesced"
+      });
+      expect(githubIssuesApi.listOpenIssues).toHaveBeenCalledTimes(2);
+
+      const statusResponse = await fetch(`${daemon.url}/api/status`);
+      const status = (await statusResponse.json()) as {
+        candidateIssues: Array<{ issue: { number: number } }>;
+      };
+      expect(status.candidateIssues.map((entry) => entry.issue.number)).toEqual([
+        80
+      ]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("marks GitHub issues stale when sym:claimed is present and no live run exists", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);
@@ -578,4 +654,18 @@ async function waitFor(
   }
 
   throw new Error("condition was not met before timeout");
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  reject: (reason?: unknown) => void;
+  resolve: (value: T) => void;
+} {
+  let resolve: (value: T) => void = () => undefined;
+  let reject: (reason?: unknown) => void = () => undefined;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, reject, resolve };
 }

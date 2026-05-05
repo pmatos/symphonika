@@ -397,8 +397,9 @@ On daemon startup:
 
 Default poll interval: `30000` ms.
 
-Manual poll-now triggers may exist in CLI or UI/API. Validation and status commands must not
-dispatch work.
+Manual poll-now triggers may exist in CLI or UI/API. They run the same daemon reconcile, polling,
+and dispatch gates as interval ticks, and may queue or coalesce when another manual poll is already
+pending. Validation and status commands must not dispatch work.
 
 ### 8.3 Multi-Project Dispatch
 
@@ -705,6 +706,7 @@ Bootstrap CLI commands:
 - `symphonika init-project <name> --config <path>`
 - `symphonika daemon --config <path> [--port <port>]`
 - `symphonika status --config <path>`
+- `symphonika poll-now --config <path>`
 - `symphonika runs --config <path>`
 - `symphonika show-run <run-id> --config <path>`
 - `symphonika cancel <run-id> --config <path>`
@@ -743,7 +745,8 @@ The UI is primarily read-only. It shows:
 - rendered prompt links
 - retry and continuation state
 
-The only v1 mutating web action is explicit active-run cancellation.
+The v1 mutating web actions are explicit active-run cancellation and a manual poll-now trigger that
+uses the normal daemon scheduler path.
 
 Label creation, stale-claim reset, and workspace cleanup remain CLI-only.
 

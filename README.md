@@ -40,6 +40,14 @@ npm link && symphonika daemon    # link the bin once, then run from anywhere
 
 Set `PINO_LOG_LEVEL=debug` (or the alias `LOG_LEVEL=debug`) to raise daemon log verbosity for per-tick visibility, e.g. `PINO_LOG_LEVEL=debug npm run dev -- daemon`. Accepted values match pino's level set: `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent`.
 
+While the daemon is running, force a debugging poll without waiting for the configured interval:
+
+```sh
+npm run dev -- poll-now --config symphonika.yml
+```
+
+The command discovers `.symphonika/daemon.json`, preflights that the daemon reports the same state root, then posts to the local `/api/poll-now` endpoint. The daemon uses the same reconcile, polling, and dispatch gates as interval ticks, so invalid Projects, operational labels, excluded labels, active runs, and the dispatch mutex still apply.
+
 The `symphony/` directory in the tree is a git submodule of an unrelated upstream project (`openai/symphony`) used as a reference — it is not a launcher for Symphonika.
 
 ## Self-Hosting

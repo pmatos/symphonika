@@ -5,7 +5,10 @@ import { Readable } from "node:stream";
 
 import { Hono, type Context } from "hono";
 
-import type { IssuePollStatus } from "../issue-polling.js";
+import type {
+  IssuePollStatus,
+  ProjectIssuePollReport
+} from "../issue-polling.js";
 import { emptyIssuePollStatus } from "../issue-polling.js";
 import { isPathInside } from "../path-safety.js";
 import type { StatusSnapshot } from "../status.js";
@@ -30,6 +33,21 @@ export type CancelRunFn = (
       | { kind: "already-terminal"; state: RunState }
     >;
 
+export type PollNowResult = {
+  candidateIssues: number;
+  dispatching: boolean;
+  errors: number;
+  filteredIssues: number;
+  issuePolling: {
+    errors: string[];
+    projects: ProjectIssuePollReport[];
+  };
+  kind: "coalesced" | "queued";
+  state: "dispatching" | "idle";
+};
+
+export type PollNowFn = () => PollNowResult | Promise<PollNowResult>;
+
 export type HttpAppOptions = {
   cancelRun?: CancelRunFn;
   dispatchRuntime?: {
@@ -51,6 +69,7 @@ export type HttpAppOptions = {
   getStatusSnapshot?: () => StatusSnapshot;
   issuePollStatus?: IssuePollStatus;
   now?: () => number;
+  pollNow?: PollNowFn;
   runStore?: RunStore;
   startedAtMs?: number;
   stateRoot: string;
@@ -184,6 +203,17 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       uptimeMs: uptimeMs(startedAtMs, now)
     })
   );
+
+  app.post("/api/poll-now", async (context) => {
+    if (options.pollNow === undefined) {
+      return context.json(
+        { error: "poll-now trigger unavailable", kind: "unavailable" },
+        503
+      );
+    }
+
+    return context.json(await Promise.resolve(options.pollNow()));
+  });
 
   if (runStore !== undefined) {
     app.get("/api/runs", (context) => {

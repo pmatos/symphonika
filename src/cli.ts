@@ -60,6 +60,19 @@ type DaemonStatusResponse = {
   stateRoot?: string;
 };
 
+type PollNowResponse = {
+  candidateIssues: number;
+  dispatching: boolean;
+  errors: number;
+  filteredIssues: number;
+  issuePolling: {
+    errors: string[];
+    projects: ProjectIssuePollReport[];
+  };
+  kind: "coalesced" | "queued";
+  state: "dispatching" | "idle";
+};
+
 export function buildCli(dependencies: CliDependencies = {}): Command {
   const doctor = dependencies.runDoctor ?? runDoctor;
   const initProject = dependencies.runInitProject ?? runInitProject;
@@ -360,6 +373,45 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     });
 
   program
+    .command("poll-now")
+    .description("ask the running daemon to reconcile and poll immediately")
+    .option("--config <path>", "service config path", "symphonika.yml")
+    .option("--daemon-url <url>", "local daemon base URL")
+    .action(async (options: { config: string; daemonUrl?: string }) => {
+      const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
+      const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
+      if (daemonUrl === undefined) {
+        const descriptorPath = daemonEndpointPath(stateRoot);
+        writeErr(
+          program,
+          `poll-now failed: daemon endpoint not found at ${descriptorPath}\n`
+        );
+        program.error("poll-now failed: daemon endpoint not found", {
+          exitCode: 1
+        });
+        return;
+      }
+
+      const daemonStatus = await fetchDaemonStatus(fetcher, daemonUrl, stateRoot);
+      if (daemonStatus.kind === "unavailable") {
+        writeErr(program, `poll-now failed: ${daemonStatus.error}\n`);
+        program.error(`poll-now failed: ${daemonStatus.error}`, {
+          exitCode: 1
+        });
+        return;
+      }
+
+      const outcome = await postPollNow(fetcher, daemonUrl);
+      if (!outcome.ok) {
+        writeErr(program, `poll-now failed: ${outcome.error}\n`);
+        program.error(`poll-now failed: ${outcome.error}`, { exitCode: 1 });
+        return;
+      }
+
+      printPollNowResult(program, outcome.response);
+    });
+
+  program
     .command("runs")
     .description("list runs from the run store")
     .option("--config <path>", "service config path", "symphonika.yml")
@@ -631,6 +683,142 @@ async function postCancel(
   };
 }
 
+async function postPollNow(
+  fetcher: FetchFn,
+  daemonUrl: string
+): Promise<
+  | { ok: false; error: string }
+  | { ok: true; response: PollNowResponse }
+> {
+  let response: Response;
+  try {
+    response = await fetcher(`${daemonUrl}/api/poll-now`, { method: "POST" });
+  } catch (error) {
+    return { error: errorMessage(error), ok: false };
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    body = undefined;
+  }
+
+  if (!response.ok) {
+    const error =
+      isObject(body) && typeof body.error === "string"
+        ? body.error
+        : `daemon returned HTTP ${response.status}`;
+    return { error, ok: false };
+  }
+
+  const parsed = readPollNowResponse(body);
+  if (parsed === undefined) {
+    return {
+      error: "daemon returned an unexpected poll-now response",
+      ok: false
+    };
+  }
+  return { ok: true, response: parsed };
+}
+
+function readPollNowResponse(value: unknown): PollNowResponse | undefined {
+  if (!isObject(value)) {
+    return undefined;
+  }
+  const kind = value.kind;
+  if (kind !== "queued" && kind !== "coalesced") {
+    return undefined;
+  }
+  const candidateIssues = readNonnegativeNumber(value.candidateIssues);
+  const filteredIssues = readNonnegativeNumber(value.filteredIssues);
+  const errors = readNonnegativeNumber(value.errors);
+  if (
+    candidateIssues === undefined ||
+    filteredIssues === undefined ||
+    errors === undefined
+  ) {
+    return undefined;
+  }
+  const dispatching =
+    typeof value.dispatching === "boolean" ? value.dispatching : false;
+  const state =
+    value.state === "dispatching" || dispatching ? "dispatching" : "idle";
+
+  return {
+    candidateIssues,
+    dispatching,
+    errors,
+    filteredIssues,
+    issuePolling: readPollNowIssuePolling(value.issuePolling),
+    kind,
+    state
+  };
+}
+
+function readPollNowIssuePolling(value: unknown): PollNowResponse["issuePolling"] {
+  if (!isObject(value)) {
+    return { errors: [], projects: [] };
+  }
+  return {
+    errors: Array.isArray(value.errors)
+      ? value.errors.filter((error): error is string => typeof error === "string")
+      : [],
+    projects: readPollNowProjects(value.projects)
+  };
+}
+
+function readPollNowProjects(value: unknown): ProjectIssuePollReport[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const projects: ProjectIssuePollReport[] = [];
+  for (const entry of value) {
+    if (
+      !isObject(entry) ||
+      typeof entry.name !== "string" ||
+      typeof entry.ok !== "boolean"
+    ) {
+      continue;
+    }
+    const fetchedIssues = readNonnegativeNumber(entry.fetchedIssues);
+    if (fetchedIssues === undefined) {
+      continue;
+    }
+    const project: ProjectIssuePollReport = {
+      fetchedIssues,
+      name: entry.name,
+      ok: entry.ok
+    };
+    const candidateIssues = readNonnegativeNumber(entry.candidateIssues);
+    if (candidateIssues !== undefined) {
+      project.candidateIssues = candidateIssues;
+    }
+    const filteredIssues = readNonnegativeNumber(entry.filteredIssues);
+    if (filteredIssues !== undefined) {
+      project.filteredIssues = filteredIssues;
+    }
+    const weight = readNonnegativeNumber(entry.weight);
+    if (weight !== undefined) {
+      project.weight = weight;
+    }
+    if (typeof entry.lastPolledAt === "string") {
+      project.lastPolledAt = entry.lastPolledAt;
+    }
+    if (typeof entry.error === "string") {
+      project.error = entry.error;
+    }
+    projects.push(project);
+  }
+  return projects;
+}
+
+function readNonnegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
 function readRunState(value: unknown): RunState | undefined {
   if (!isObject(value) || typeof value.state !== "string") {
     return undefined;
@@ -792,6 +980,38 @@ function formatLastPollOutcome(
         : `${project.name} failed (${project.error ?? "unknown error"})`
     )
     .join("; ");
+}
+
+function printPollNowResult(program: Command, result: PollNowResponse): void {
+  writeOut(program, `poll-now ${result.kind}\n`);
+  writeOut(program, `state:     ${result.state}\n`);
+  writeOut(program, `candidate: ${result.candidateIssues}\n`);
+  writeOut(program, `filtered:  ${result.filteredIssues}\n`);
+  writeOut(program, `errors:    ${result.errors}\n`);
+  if (result.issuePolling.projects.length > 0) {
+    writeOut(program, "projects:\n");
+    for (const project of result.issuePolling.projects) {
+      writeOut(program, `  ${formatPollNowProject(project)}\n`);
+    }
+  }
+  if (result.issuePolling.errors.length > 0) {
+    writeOut(program, "poll errors:\n");
+    for (const error of result.issuePolling.errors) {
+      writeOut(program, `  - ${error}\n`);
+    }
+  }
+}
+
+function formatPollNowProject(project: ProjectIssuePollReport): string {
+  if (!project.ok) {
+    return `${project.name} failed (${project.error ?? "unknown error"})`;
+  }
+  return [
+    `${project.name} ok`,
+    `(${project.fetchedIssues} fetched,`,
+    `${project.candidateIssues ?? 0} candidate,`,
+    `${project.filteredIssues ?? 0} filtered)`
+  ].join(" ");
 }
 
 function projectCursorFromStatus(

@@ -5,7 +5,7 @@ import type { Logger } from "pino";
 import pino from "pino";
 import { parse } from "yaml";
 
-import { createHttpApp } from "./http/app.js";
+import { createHttpApp, type PollNowResult } from "./http/app.js";
 import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
@@ -115,6 +115,7 @@ export async function startDaemon(
   let scheduledWork = Promise.resolve();
   let lastPollErrorsKey = "";
   let lastPullRequestFollowupAt = Date.now();
+  let pendingPollNow: Promise<PollNowResult> | undefined;
   const inflightDispatches = new Set<Promise<void>>();
   const projectsLoader = async (): Promise<
     Map<string, RunControllerProjectConfig>
@@ -344,6 +345,44 @@ export async function startDaemon(
   const scheduleTick = (): void => {
     enqueueScheduledWork(tick);
   };
+  const pollNowSummary = (kind: PollNowResult["kind"]): PollNowResult => ({
+    candidateIssues: issuePollStatus.candidateIssues.length,
+    dispatching: dispatchMutex.held,
+    errors: issuePollStatus.errors.length,
+    filteredIssues: issuePollStatus.filteredIssues.length,
+    issuePolling: {
+      errors: issuePollStatus.errors.slice(),
+      projects: issuePollStatus.projects.map((project) => ({ ...project }))
+    },
+    kind,
+    state: dispatchMutex.held ? "dispatching" : "idle"
+  });
+  const triggerPollNow = (): Promise<PollNowResult> => {
+    if (pendingPollNow !== undefined) {
+      return pendingPollNow.then((result) => ({
+        ...result,
+        kind: "coalesced"
+      }));
+    }
+
+    const queued = new Promise<PollNowResult>((resolve, reject) => {
+      enqueueScheduledWork(async () => {
+        try {
+          await tick();
+          resolve(pollNowSummary("queued"));
+        } catch (error) {
+          const reason =
+            error instanceof Error ? error : new Error(errorMessage(error));
+          reject(reason);
+          throw reason;
+        }
+      });
+    });
+    pendingPollNow = queued.finally(() => {
+      pendingPollNow = undefined;
+    });
+    return pendingPollNow;
+  };
 
   let intervalMs: number | undefined;
   if (state.configExists) {
@@ -396,6 +435,7 @@ export async function startDaemon(
         stateRoot: state.stateRoot
       }),
     issuePollStatus,
+    pollNow: triggerPollNow,
     runStore,
     stateRoot: state.stateRoot,
     version: VERSION

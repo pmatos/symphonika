@@ -241,6 +241,9 @@ type TrackedPullRequestRow = {
   updated_at: string;
 };
 
+export const PULL_REQUEST_DISCOVERY_LIMIT = 25;
+export const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
+
 export class RunStore {
   private readonly database: SqliteDatabase;
 
@@ -658,7 +661,14 @@ export class RunStore {
     }));
   }
 
-  listRunsAwaitingPullRequestDiscovery(limit = 25): PullRequestDiscoveryRun[] {
+  listRunsAwaitingPullRequestDiscovery(
+    options: { limit?: number; maxAttempts?: number } = {}
+  ): PullRequestDiscoveryRun[] {
+    const limit = Math.max(0, Math.floor(options.limit ?? PULL_REQUEST_DISCOVERY_LIMIT));
+    const maxAttempts = Math.max(
+      1,
+      Math.floor(options.maxAttempts ?? MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS)
+    );
     const rows = this.database
       .prepare(
         [
@@ -667,16 +677,17 @@ export class RunStore {
           "where state = 'succeeded'",
           "and branch_name is not null",
           "and branch_name <> ''",
+          "and pr_discovery_attempts < @maxAttempts",
           "and not exists (",
           "  select 1 from tracked_pull_requests pr",
           "  where pr.project_name = runs.project_name",
           "  and pr.branch_name = runs.branch_name",
           ")",
-          "order by updated_at asc, id asc",
-          `limit ${Math.max(0, Math.floor(limit))}`
+          "order by pr_discovery_attempts asc, updated_at asc, id asc",
+          "limit @limit"
         ].join(" ")
       )
-      .all() as PullRequestDiscoveryRunRow[];
+      .all({ limit, maxAttempts }) as PullRequestDiscoveryRunRow[];
 
     return rows.map((row) => ({
       branchName: row.branch_name,
@@ -686,7 +697,21 @@ export class RunStore {
     }));
   }
 
-  hasPullRequestFollowupWork(): boolean {
+  recordPullRequestDiscoveryAttempt(runId: string): void {
+    this.database
+      .prepare(
+        "update runs set pr_discovery_attempts = pr_discovery_attempts + 1, updated_at = ? where id = ?"
+      )
+      .run(timestamp(), runId);
+  }
+
+  hasPullRequestFollowupWork(
+    options: { maxAttempts?: number } = {}
+  ): boolean {
+    const maxAttempts = Math.max(
+      1,
+      Math.floor(options.maxAttempts ?? MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS)
+    );
     const row = this.database
       .prepare(
         [
@@ -696,6 +721,7 @@ export class RunStore {
           "where state = 'succeeded'",
           "and branch_name is not null",
           "and branch_name <> ''",
+          "and pr_discovery_attempts < @maxAttempts",
           "and not exists (",
           "  select 1 from tracked_pull_requests pr",
           "  where pr.project_name = runs.project_name",
@@ -704,7 +730,7 @@ export class RunStore {
           "limit 1"
         ].join(" ")
       )
-      .get() as { found: number } | undefined;
+      .get({ maxAttempts }) as { found: number } | undefined;
     return row !== undefined;
   }
 
@@ -950,6 +976,7 @@ export class RunStore {
       ["runs", "terminal_reason", "text"],
       ["runs", "cancel_requested", "integer not null default 0"],
       ["runs", "cancel_reason", "text"],
+      ["runs", "pr_discovery_attempts", "integer not null default 0"],
       ["attempts", "failure_classification", "text"]
     ];
 

@@ -331,6 +331,50 @@ describe("run-store lifecycle CRUD", () => {
       store.close();
     }
   });
+
+  it("PR discovery prefers least-attempted runs and excludes ones that hit the attempt cap", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const stuckBranch = "sym/symphonika/stuck";
+      const freshBranch = "sym/symphonika/fresh";
+      seedRun(store, { id: "run-a-stuck", issueNumber: 1 });
+      store.updateRunEvidence("run-a-stuck", evidence(stuckBranch));
+      store.updateRunState("run-a-stuck", "succeeded");
+      seedRun(store, { id: "run-b-fresh", issueNumber: 2 });
+      store.updateRunEvidence("run-b-fresh", evidence(freshBranch));
+      store.updateRunState("run-b-fresh", "succeeded");
+
+      // Simulate 3 polls where the stuck run is checked but no PR is found.
+      store.recordPullRequestDiscoveryAttempt("run-a-stuck");
+      store.recordPullRequestDiscoveryAttempt("run-a-stuck");
+      store.recordPullRequestDiscoveryAttempt("run-a-stuck");
+
+      // The fresh run (attempts=0) now sorts ahead of the stuck run (attempts=3) —
+      // newer work cannot be starved by older never-matched runs.
+      expect(
+        store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
+      ).toEqual(["run-b-fresh", "run-a-stuck"]);
+
+      // Push the stuck run past the cap; it must be excluded entirely from candidates.
+      for (let i = 0; i < 5; i += 1) {
+        store.recordPullRequestDiscoveryAttempt("run-a-stuck");
+      }
+      expect(
+        store
+          .listRunsAwaitingPullRequestDiscovery({ maxAttempts: 5 })
+          .map((run) => run.runId)
+      ).toEqual(["run-b-fresh"]);
+
+      // Once both are exhausted, hasPullRequestFollowupWork reports no candidate work.
+      for (let i = 0; i < 5; i += 1) {
+        store.recordPullRequestDiscoveryAttempt("run-b-fresh");
+      }
+      expect(store.hasPullRequestFollowupWork({ maxAttempts: 5 })).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
 });
 
 describe("run-store schema migration", () => {

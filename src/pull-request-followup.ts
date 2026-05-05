@@ -257,6 +257,7 @@ async function discoverPullRequests(input: {
     }
     const pullRequest = selectOpenPullRequest(pullRequests, run.branchName);
     if (pullRequest === undefined) {
+      input.runStore.recordPullRequestDiscoveryAttempt(run.runId);
       continue;
     }
     input.runStore.trackPullRequest({

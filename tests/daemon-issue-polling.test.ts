@@ -85,6 +85,54 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("records project poll state for status readback", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 6,
+          title: "Record project poll state"
+        }),
+        issueFixture({
+          labels: ["blocked"],
+          number: 7,
+          title: "Filtered issue"
+        })
+      ])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const response = await fetch(`${daemon.url}/api/status`);
+      const body = (await response.json()) as {
+        projectStates?: Array<Record<string, unknown>>;
+      };
+
+      expect(body.projectStates).toEqual([
+        expect.objectContaining({
+          lastCandidateIssues: 1,
+          lastFetchedIssues: 2,
+          lastFilteredIssues: 1,
+          lastPollOk: true,
+          projectName: "symphonika",
+          validationState: "valid",
+          weight: 1
+        })
+      ]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("shows filtered snapshots when required, excluded, or operational labels block eligibility", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);
@@ -348,6 +396,7 @@ describe("daemon GitHub issue polling", () => {
       const body = (await response.json()) as {
         candidateIssues: Array<{ issue: { number: number }; project: string }>;
         issuePolling: { errors: string[] };
+        projectStates?: Array<Record<string, unknown>>;
       };
 
       expect(githubIssuesApi.listOpenIssues).toHaveBeenCalledWith({
@@ -363,6 +412,20 @@ describe("daemon GitHub issue polling", () => {
       ).toEqual([{ number: 40, project: "symphonika" }]);
       expect(body.issuePolling.errors.join("\n")).toContain(
         "projects.0.tracker.repo"
+      );
+      expect(body.projectStates).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            projectName: "malformed",
+            validationState: "invalid"
+          }),
+          expect.objectContaining({
+            lastCandidateIssues: 1,
+            lastPollOk: true,
+            projectName: "symphonika",
+            validationState: "valid"
+          })
+        ])
       );
     } finally {
       await daemon.stop();

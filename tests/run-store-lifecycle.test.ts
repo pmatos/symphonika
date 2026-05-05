@@ -67,6 +67,117 @@ function evidence(branchName: string) {
 }
 
 describe("run-store lifecycle CRUD", () => {
+  it("persists project cursor and validation state across store reopen", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      store.syncProjectStates([
+        { name: "alpha", weight: 2 },
+        { name: "beta", weight: 1 }
+      ]);
+      store.recordProjectPollOutcome({
+        candidateIssues: 2,
+        fetchedIssues: 4,
+        filteredIssues: 1,
+        ok: true,
+        projectName: "alpha"
+      });
+      store.recordProjectPollOutcome({
+        candidateIssues: 0,
+        error: "projects.beta.tracker.token references unset environment variable $BETA_TOKEN",
+        fetchedIssues: 0,
+        filteredIssues: 0,
+        ok: false,
+        projectName: "beta"
+      });
+      store.recordProjectDispatchSelection({
+        issueNumber: 12,
+        projectName: "alpha",
+        schedulerWeights: [
+          { currentWeight: -1, projectName: "alpha", weight: 2 },
+          { currentWeight: 1, projectName: "beta", weight: 1 }
+        ]
+      });
+    } finally {
+      store.close();
+    }
+
+    const reopened = openRunStore({ stateRoot: root });
+    try {
+      const states = reopened.listProjectStates();
+      expect(states.map((state) => state.projectName)).toEqual(["alpha", "beta"]);
+      expect(states[0]).toMatchObject({
+        active: true,
+        lastCandidateIssues: 2,
+        lastDispatchedIssueNumber: 12,
+        lastFetchedIssues: 4,
+        lastFilteredIssues: 1,
+        lastPollError: null,
+        lastPollOk: true,
+        projectName: "alpha",
+        schedulerCurrentWeight: -1,
+        validationMessage: null,
+        validationState: "valid",
+        weight: 2
+      });
+      expect(states[0]?.lastDispatchedAt).toEqual(expect.any(String));
+      expect(states[0]?.lastPollFinishedAt).toEqual(expect.any(String));
+      expect(states[1]).toMatchObject({
+        active: true,
+        lastCandidateIssues: 0,
+        lastDispatchedAt: null,
+        lastDispatchedIssueNumber: null,
+        lastFetchedIssues: 0,
+        lastFilteredIssues: 0,
+        lastPollOk: false,
+        projectName: "beta",
+        schedulerCurrentWeight: 1,
+        validationState: "invalid",
+        weight: 1
+      });
+      expect(states[1]?.lastPollError).toContain("BETA_TOKEN");
+      expect(states[1]?.validationMessage).toContain("BETA_TOKEN");
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it("reactivates project metadata when dispatch records scheduler state", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      store.syncProjectStates([{ name: "alpha", weight: 5 }]);
+      store.syncProjectStates([]);
+
+      expect(store.listProjectStates()[0]).toMatchObject({
+        active: false,
+        projectName: "alpha",
+        validationState: "inactive",
+        weight: 5
+      });
+
+      store.recordProjectDispatchSelection({
+        issueNumber: 42,
+        projectName: "alpha",
+        schedulerWeights: [
+          { currentWeight: 0, projectName: "alpha", weight: 5 }
+        ]
+      });
+
+      expect(store.listProjectStates()[0]).toMatchObject({
+        active: true,
+        lastDispatchedIssueNumber: 42,
+        projectName: "alpha",
+        schedulerCurrentWeight: 0,
+        validationMessage: null,
+        validationState: "valid",
+        weight: 5
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("markCancelRequested surfaces in listRuns", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

@@ -10,6 +10,7 @@ import {
 } from "../lifecycle/terminal-reason.js";
 import type {
   ListRunsFilter,
+  ProjectState,
   RunState,
   RunStatus,
   RunStore
@@ -159,6 +160,26 @@ function renderProjectsCard(
   snapshot: StatusSnapshot | undefined,
   issuePollStatus: IssuePollStatus | undefined
 ): string {
+  const projectStates = snapshot?.projectStates ?? [];
+  if (projectStates.length > 0) {
+    const rows = projectStates
+      .map((project) => {
+        return [
+          "<tr>",
+          `<td>${escapeHtml(project.projectName)}</td>`,
+          `<td>${project.weight}</td>`,
+          `<td>${escapeHtml(formatProjectValidation(project))}</td>`,
+          `<td>${escapeHtml(formatProjectPoll(project))}</td>`,
+          `<td>${escapeHtml(formatProjectDispatch(project))}</td>`,
+          "</tr>"
+        ].join("");
+      })
+      .join("");
+    return `<section><h2>Projects</h2>
+<table><thead><tr><th>Name</th><th>Weight</th><th>Validation</th><th>Last poll</th><th>Last dispatch</th></tr></thead>
+<tbody>${rows}</tbody></table></section>`;
+  }
+
   if (snapshot !== undefined && snapshot.projects.length > 0) {
     const rows = snapshot.projects
       .map((project) => {
@@ -192,6 +213,33 @@ function renderProjectsCard(
   return `<section><h2>Projects</h2>
 <table><thead><tr><th>Name</th><th>Issue polling</th><th>Last poll</th></tr></thead>
 <tbody>${rows}</tbody></table></section>`;
+}
+
+function formatProjectValidation(project: ProjectState): string {
+  return project.validationMessage === null
+    ? project.validationState
+    : `${project.validationState}: ${project.validationMessage}`;
+}
+
+function formatProjectPoll(project: ProjectState): string {
+  if (project.lastPollFinishedAt === null || project.lastPollOk === null) {
+    return "never";
+  }
+  const outcome = project.lastPollOk ? "ok" : "failed";
+  return [
+    `${outcome} at ${project.lastPollFinishedAt}`,
+    `(${project.lastFetchedIssues} fetched, ${project.lastCandidateIssues} candidate, ${project.lastFilteredIssues} filtered)`
+  ].join(" ");
+}
+
+function formatProjectDispatch(project: ProjectState): string {
+  if (
+    project.lastDispatchedAt === null ||
+    project.lastDispatchedIssueNumber === null
+  ) {
+    return "never";
+  }
+  return `#${project.lastDispatchedIssueNumber} at ${project.lastDispatchedAt}`;
 }
 
 function renderStaleIssuesCard(

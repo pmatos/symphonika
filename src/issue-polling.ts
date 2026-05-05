@@ -136,9 +136,13 @@ export type FilteredProjectIssueSnapshot = ProjectIssueSnapshot & {
 };
 
 export type ProjectIssuePollReport = {
+  candidateIssues?: number;
   fetchedIssues: number;
+  filteredIssues?: number;
+  lastPolledAt?: string;
   name: string;
   ok: boolean;
+  weight?: number;
   error?: string;
 };
 
@@ -169,6 +173,7 @@ const pollingProjectSchema = z
   .object({
     name: z.string().trim().min(1),
     disabled: z.boolean().optional(),
+    weight: z.number().int().positive().optional(),
     tracker: z
       .object({
         kind: z.literal("github"),
@@ -685,6 +690,8 @@ async function pollProject(
   githubIssuesApi: GitHubIssuesApi,
   status: IssuePollStatus
 ): Promise<void> {
+  const lastPolledAt = new Date().toISOString();
+  const weight = project.weight ?? 1;
   const token = resolveEnvBackedValue(project.tracker.token, env);
   if (token === undefined) {
     const variableName = envReferenceName(project.tracker.token);
@@ -694,10 +701,14 @@ async function pollProject(
         : `projects.${project.name}.tracker.token references unset environment variable $${variableName}`;
     status.errors.push(error);
     status.projects.push({
+      candidateIssues: 0,
       error,
       fetchedIssues: 0,
+      filteredIssues: 0,
+      lastPolledAt,
       name: project.name,
-      ok: false
+      ok: false,
+      weight
     });
     return;
   }
@@ -713,15 +724,21 @@ async function pollProject(
     const message = `projects.${project.name}.tracker.repository ${project.tracker.owner}/${project.tracker.repo} issues could not be listed: ${errorMessage(error)}`;
     status.errors.push(message);
     status.projects.push({
+      candidateIssues: 0,
       error: message,
       fetchedIssues: 0,
+      filteredIssues: 0,
+      lastPolledAt,
       name: project.name,
-      ok: false
+      ok: false,
+      weight
     });
     return;
   }
 
   let fetchedIssues = 0;
+  let candidateIssues = 0;
+  let filteredIssues = 0;
   for (const rawIssue of rawIssues) {
     if (rawIssue.pull_request !== undefined) {
       continue;
@@ -732,6 +749,7 @@ async function pollProject(
     const reasons = issueFilterReasons(issue, project);
 
     if (reasons.length === 0) {
+      candidateIssues += 1;
       status.candidateIssues.push({
         issue,
         project: project.name
@@ -739,6 +757,7 @@ async function pollProject(
       continue;
     }
 
+    filteredIssues += 1;
     status.filteredIssues.push({
       issue,
       project: project.name,
@@ -747,9 +766,13 @@ async function pollProject(
   }
 
   status.projects.push({
+    candidateIssues,
     fetchedIssues,
+    filteredIssues,
+    lastPolledAt,
     name: project.name,
-    ok: true
+    ok: true,
+    weight
   });
 }
 
@@ -924,7 +947,6 @@ function compareProjectIssues(
   right: ProjectIssueSnapshot
 ): number {
   return (
-    left.project.localeCompare(right.project) ||
     left.issue.priority - right.issue.priority ||
     left.issue.created_at.localeCompare(right.issue.created_at) ||
     left.issue.number - right.issue.number

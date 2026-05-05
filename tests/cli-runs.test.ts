@@ -130,6 +130,22 @@ describe("CLI run commands", () => {
               errors: [],
               projects: [{ fetchedIssues: 4, name: "alpha", ok: true }]
             },
+            projectStates: [
+              {
+                active: true,
+                lastCandidateIssues: 1,
+                lastDispatchedAt: "2026-05-05T08:00:00.000Z",
+                lastDispatchedIssueNumber: 12,
+                lastFetchedIssues: 4,
+                lastFilteredIssues: 3,
+                lastPollFinishedAt: "2026-05-05T07:59:00.000Z",
+                lastPollOk: true,
+                projectName: "alpha",
+                schedulerCurrentWeight: -1,
+                validationState: "valid",
+                weight: 2
+              }
+            ],
             staleIssues: [
               { issue: { labels: ["sym:stale"], number: 4 }, project: "alpha" }
             ],
@@ -173,6 +189,15 @@ describe("CLI run commands", () => {
     expect(output.stdout).toContain("failed:    1");
     expect(output.stdout).toContain("stale:     1");
     expect(output.stdout).toContain("last poll outcome: alpha ok (4 fetched)");
+    expect(output.stdout).toContain(
+      "cursor: weight 2, validation valid, current weight -1"
+    );
+    expect(output.stdout).toContain(
+      "last poll: ok at 2026-05-05T07:59:00.000Z (4 fetched, 1 candidate, 3 filtered)"
+    );
+    expect(output.stdout).toContain(
+      "last dispatch: #12 at 2026-05-05T08:00:00.000Z"
+    );
   });
 
   it("status discovers the local daemon endpoint descriptor", async () => {

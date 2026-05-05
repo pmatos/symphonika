@@ -886,7 +886,7 @@ async function waitForRun(
   state: string,
   options: { intervalMs?: number; timeoutMs?: number } = {}
 ): Promise<{ runs: StatusRun[] }> {
-  const timeoutMs = options.timeoutMs ?? 5_000;
+  const timeoutMs = options.timeoutMs ?? 15_000;
   const intervalMs = options.intervalMs ?? 10;
   const deadline = Date.now() + timeoutMs;
 

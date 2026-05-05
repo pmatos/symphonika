@@ -171,6 +171,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         errors: issuePollStatus.errors,
         projects: issuePollStatus.projects
       },
+      projectStates: runStore?.listProjectStates() ?? [],
       runs: getRuns(),
       scheduled: getScheduled(),
       service: "symphonika",

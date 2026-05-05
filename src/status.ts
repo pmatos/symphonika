@@ -1,11 +1,12 @@
 import type { DoctorProjectReport, DoctorReport } from "./doctor.js";
 import type { IssuePollStatus } from "./issue-polling.js";
-import type { RunStatus, RunStore } from "./run-store.js";
+import type { ProjectState, RunStatus, RunStore } from "./run-store.js";
 
 export type StatusSnapshot = {
   configPath: string;
   doctorErrors: string[];
   issuePolling: IssuePollStatus;
+  projectStates: ProjectState[];
   projects: DoctorProjectReport[];
   runs: {
     active: RunStatus[];
@@ -48,6 +49,7 @@ export function buildStatusSnapshot(
     configPath: input.configPath,
     doctorErrors: input.doctorReport?.errors ?? [],
     issuePolling: input.issuePollStatus,
+    projectStates: input.runStore.listProjectStates(),
     projects: input.doctorReport?.projects ?? [],
     runs: {
       active,

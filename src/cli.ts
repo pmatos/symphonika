@@ -20,6 +20,7 @@ import type { ProjectIssuePollReport } from "./issue-polling.js";
 import type {
   ListRunsFilter,
   OpenRunStoreOptions,
+  ProjectState,
   RunState,
   RunStore
 } from "./run-store.js";
@@ -53,6 +54,7 @@ type DaemonStatusResponse = {
     errors?: string[];
     projects?: ProjectIssuePollReport[];
   };
+  projectStates?: ProjectState[];
   staleIssues?: unknown[];
   state?: string;
   stateRoot?: string;
@@ -308,6 +310,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             program,
             `    missing operational labels: ${formatList(project.missingOperationalLabels)}\n`
           );
+          const cursor = projectCursorFromStatus(daemonStatus, project.name);
+          if (cursor !== undefined) {
+            writeOut(program, `    ${formatProjectCursor(cursor)}\n`);
+            writeOut(program, `    ${formatProjectLastPoll(cursor)}\n`);
+            writeOut(program, `    ${formatProjectLastDispatch(cursor)}\n`);
+          }
         }
         if (report.errors.length > 0) {
           writeOut(program, "validation errors:\n");
@@ -784,6 +792,47 @@ function formatLastPollOutcome(
         : `${project.name} failed (${project.error ?? "unknown error"})`
     )
     .join("; ");
+}
+
+function projectCursorFromStatus(
+  daemonStatus:
+    | { kind: "available"; status: DaemonStatusResponse }
+    | { kind: "unavailable"; error: string },
+  projectName: string
+): ProjectState | undefined {
+  if (daemonStatus.kind === "unavailable") {
+    return undefined;
+  }
+  return daemonStatus.status.projectStates?.find(
+    (state) => state.projectName === projectName
+  );
+}
+
+function formatProjectCursor(state: ProjectState): string {
+  return [
+    `cursor: weight ${state.weight}`,
+    `validation ${state.validationState}`,
+    `current weight ${state.schedulerCurrentWeight}`
+  ].join(", ");
+}
+
+function formatProjectLastPoll(state: ProjectState): string {
+  const outcome =
+    state.lastPollOk === null ? "unknown" : state.lastPollOk ? "ok" : "failed";
+  return [
+    `last poll: ${outcome} at ${state.lastPollFinishedAt ?? "never"}`,
+    `(${state.lastFetchedIssues} fetched, ${state.lastCandidateIssues} candidate, ${state.lastFilteredIssues} filtered)`
+  ].join(" ");
+}
+
+function formatProjectLastDispatch(state: ProjectState): string {
+  if (
+    state.lastDispatchedAt === null ||
+    state.lastDispatchedIssueNumber === null
+  ) {
+    return "last dispatch: never";
+  }
+  return `last dispatch: #${state.lastDispatchedIssueNumber} at ${state.lastDispatchedAt}`;
 }
 
 function formatList(values: string[]): string {

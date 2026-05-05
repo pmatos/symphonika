@@ -65,6 +65,7 @@ const dispatchProjectSchema = z
   .object({
     name: z.string().trim().min(1),
     disabled: z.boolean().optional(),
+    weight: z.number().int().positive().optional(),
     tracker: z
       .object({
         kind: z.literal("github"),

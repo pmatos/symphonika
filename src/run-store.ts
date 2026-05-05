@@ -75,6 +75,53 @@ export type RunDetail = RunStatus & {
 
 export type PullRequestTrackingState = "closed" | "merged" | "open";
 
+export type ProjectValidationState = "inactive" | "invalid" | "valid";
+
+export type ProjectState = {
+  active: boolean;
+  createdAt: string;
+  lastCandidateIssues: number;
+  lastDispatchedAt: string | null;
+  lastDispatchedIssueNumber: number | null;
+  lastFetchedIssues: number;
+  lastFilteredIssues: number;
+  lastPollError: string | null;
+  lastPollFinishedAt: string | null;
+  lastPollOk: boolean | null;
+  lastPollStartedAt: string | null;
+  projectName: string;
+  schedulerCurrentWeight: number;
+  updatedAt: string;
+  validationMessage: string | null;
+  validationState: ProjectValidationState;
+  weight: number;
+};
+
+export type SyncProjectStateInput = {
+  name: string;
+  validationMessage?: string | null;
+  validationState?: ProjectValidationState;
+  weight?: number | undefined;
+};
+
+export type ProjectPollOutcomeInput = {
+  candidateIssues: number;
+  error?: string | null;
+  fetchedIssues: number;
+  filteredIssues: number;
+  ok: boolean;
+  projectName: string;
+};
+
+export type ProjectDispatchSelectionInput = {
+  issueNumber: number;
+  projectName: string;
+  schedulerWeights: Array<{
+    currentWeight: number;
+    projectName: string;
+  }>;
+};
+
 export type PullRequestDiscoveryRun = {
   branchName: string;
   issueNumber: number;
@@ -239,6 +286,26 @@ type TrackedPullRequestRow = {
   run_id: string;
   state: PullRequestTrackingState;
   updated_at: string;
+};
+
+type ProjectStateRow = {
+  active: number;
+  created_at: string;
+  last_candidate_issues: number;
+  last_dispatched_at: string | null;
+  last_dispatched_issue_number: number | null;
+  last_fetched_issues: number;
+  last_filtered_issues: number;
+  last_poll_error: string | null;
+  last_poll_finished_at: string | null;
+  last_poll_ok: number | null;
+  last_poll_started_at: string | null;
+  project_name: string;
+  scheduler_current_weight: number;
+  updated_at: string;
+  validation_message: string | null;
+  validation_state: ProjectValidationState;
+  weight: number;
 };
 
 export const PULL_REQUEST_DISCOVERY_LIMIT = 25;
@@ -406,6 +473,165 @@ export class RunStore {
       )
       .get(projectName, issueNumber) as { count: number } | undefined;
     return row?.count ?? 0;
+  }
+
+  syncProjectStates(projects: SyncProjectStateInput[]): void {
+    const now = timestamp();
+    const normalized = projects.map((project) => ({
+      name: project.name,
+      validationMessage: project.validationMessage ?? null,
+      validationState: project.validationState ?? "valid",
+      weight: normalizeProjectWeight(project.weight)
+    }));
+    const activeNames = new Set(normalized.map((project) => project.name));
+    const apply = this.database.transaction(() => {
+      for (const project of normalized) {
+        this.database
+          .prepare(
+            [
+              "insert into project_states (",
+              "project_name, active, weight, validation_state, validation_message,",
+              "created_at, updated_at",
+              ") values (",
+              "@project_name, 1, @weight, @validation_state, @validation_message,",
+              "@created_at, @updated_at",
+              ")",
+              "on conflict(project_name) do update set",
+              "active = 1,",
+              "weight = excluded.weight,",
+              "validation_state = excluded.validation_state,",
+              "validation_message = excluded.validation_message,",
+              "updated_at = excluded.updated_at"
+            ].join(" ")
+          )
+          .run({
+            created_at: now,
+            project_name: project.name,
+            updated_at: now,
+            validation_message: project.validationMessage,
+            validation_state: project.validationState,
+            weight: project.weight
+          });
+      }
+
+      const rows = this.database
+        .prepare("select project_name from project_states where active = 1")
+        .all() as { project_name: string }[];
+      for (const row of rows) {
+        if (activeNames.has(row.project_name)) {
+          continue;
+        }
+        this.database
+          .prepare(
+            "update project_states set active = 0, validation_state = 'inactive', validation_message = null, updated_at = ? where project_name = ?"
+          )
+          .run(now, row.project_name);
+      }
+    });
+    apply();
+  }
+
+  recordProjectPollOutcome(input: ProjectPollOutcomeInput): void {
+    const now = timestamp();
+    const validationState: ProjectValidationState = input.ok ? "valid" : "invalid";
+    const message = input.ok ? null : (input.error ?? "project poll failed");
+    this.database
+      .prepare(
+        [
+          "insert into project_states (",
+          "project_name, active, weight, validation_state, validation_message,",
+          "last_poll_started_at, last_poll_finished_at, last_poll_ok, last_poll_error,",
+          "last_fetched_issues, last_candidate_issues, last_filtered_issues,",
+          "created_at, updated_at",
+          ") values (",
+          "@project_name, 1, 1, @validation_state, @validation_message,",
+          "@last_poll_started_at, @last_poll_finished_at, @last_poll_ok, @last_poll_error,",
+          "@last_fetched_issues, @last_candidate_issues, @last_filtered_issues,",
+          "@created_at, @updated_at",
+          ")",
+          "on conflict(project_name) do update set",
+          "validation_state = excluded.validation_state,",
+          "validation_message = excluded.validation_message,",
+          "last_poll_started_at = excluded.last_poll_started_at,",
+          "last_poll_finished_at = excluded.last_poll_finished_at,",
+          "last_poll_ok = excluded.last_poll_ok,",
+          "last_poll_error = excluded.last_poll_error,",
+          "last_fetched_issues = excluded.last_fetched_issues,",
+          "last_candidate_issues = excluded.last_candidate_issues,",
+          "last_filtered_issues = excluded.last_filtered_issues,",
+          "updated_at = excluded.updated_at"
+        ].join(" ")
+      )
+      .run({
+        created_at: now,
+        last_candidate_issues: input.candidateIssues,
+        last_fetched_issues: input.fetchedIssues,
+        last_filtered_issues: input.filteredIssues,
+        last_poll_error: input.error ?? null,
+        last_poll_finished_at: now,
+        last_poll_ok: input.ok ? 1 : 0,
+        last_poll_started_at: now,
+        project_name: input.projectName,
+        updated_at: now,
+        validation_message: message,
+        validation_state: validationState
+      });
+  }
+
+  recordProjectDispatchSelection(input: ProjectDispatchSelectionInput): void {
+    const now = timestamp();
+    const apply = this.database.transaction(() => {
+      for (const weight of input.schedulerWeights) {
+        this.database
+          .prepare(
+            [
+              "insert into project_states (",
+              "project_name, active, weight, scheduler_current_weight, created_at, updated_at",
+              ") values (",
+              "@project_name, 1, 1, @scheduler_current_weight, @created_at, @updated_at",
+              ")",
+              "on conflict(project_name) do update set",
+              "scheduler_current_weight = excluded.scheduler_current_weight,",
+              "updated_at = excluded.updated_at"
+            ].join(" ")
+          )
+          .run({
+            created_at: now,
+            project_name: weight.projectName,
+            scheduler_current_weight: weight.currentWeight,
+            updated_at: now
+          });
+      }
+
+      this.database
+        .prepare(
+          "update project_states set last_dispatched_at = ?, last_dispatched_issue_number = ?, updated_at = ? where project_name = ?"
+        )
+        .run(now, input.issueNumber, now, input.projectName);
+    });
+    apply();
+  }
+
+  listProjectStates(): ProjectState[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select project_name, active, weight, validation_state, validation_message,",
+          "last_poll_started_at, last_poll_finished_at, last_poll_ok, last_poll_error,",
+          "last_fetched_issues, last_candidate_issues, last_filtered_issues,",
+          "scheduler_current_weight, last_dispatched_at, last_dispatched_issue_number,",
+          "created_at, updated_at",
+          "from project_states order by project_name asc"
+        ].join(" ")
+      )
+      .all() as ProjectStateRow[];
+    return rows.map((row) => mapProjectStateRow(row));
+  }
+
+  getProjectStatesByName(): Map<string, ProjectState> {
+    return new Map(
+      this.listProjectStates().map((state) => [state.projectName, state])
+    );
   }
 
   updateRunState(runId: string, state: RunState): void {
@@ -966,6 +1192,26 @@ export class RunStore {
         unique(project_name, pr_number),
         foreign key (run_id) references runs(id)
       );
+
+      create table if not exists project_states (
+        project_name text primary key,
+        active integer not null default 1,
+        weight integer not null default 1,
+        validation_state text not null default 'valid',
+        validation_message text,
+        last_poll_started_at text,
+        last_poll_finished_at text,
+        last_poll_ok integer,
+        last_poll_error text,
+        last_fetched_issues integer not null default 0,
+        last_candidate_issues integer not null default 0,
+        last_filtered_issues integer not null default 0,
+        scheduler_current_weight integer not null default 0,
+        last_dispatched_at text,
+        last_dispatched_issue_number integer,
+        created_at text not null,
+        updated_at text not null
+      );
     `);
 
     const additions: Array<[string, string, string]> = [
@@ -1062,6 +1308,38 @@ function mapRunRow(row: RunRow): RunStatus {
     updatedAt: row.updated_at,
     workspacePath: row.workspace_path ?? ""
   };
+}
+
+function mapProjectStateRow(row: ProjectStateRow): ProjectState {
+  return {
+    active: row.active === 1,
+    createdAt: row.created_at,
+    lastCandidateIssues: row.last_candidate_issues,
+    lastDispatchedAt: row.last_dispatched_at ?? null,
+    lastDispatchedIssueNumber: row.last_dispatched_issue_number ?? null,
+    lastFetchedIssues: row.last_fetched_issues,
+    lastFilteredIssues: row.last_filtered_issues,
+    lastPollError: row.last_poll_error ?? null,
+    lastPollFinishedAt: row.last_poll_finished_at ?? null,
+    lastPollOk:
+      row.last_poll_ok === null || row.last_poll_ok === undefined
+        ? null
+        : row.last_poll_ok === 1,
+    lastPollStartedAt: row.last_poll_started_at ?? null,
+    projectName: row.project_name,
+    schedulerCurrentWeight: row.scheduler_current_weight,
+    updatedAt: row.updated_at,
+    validationMessage: row.validation_message ?? null,
+    validationState: row.validation_state,
+    weight: row.weight
+  };
+}
+
+function normalizeProjectWeight(weight: number | undefined): number {
+  if (weight === undefined || !Number.isInteger(weight) || weight <= 0) {
+    return 1;
+  }
+  return weight;
 }
 
 function mapTrackedPullRequestRow(

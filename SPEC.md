@@ -37,8 +37,7 @@ Symphonika uses a small TypeScript stack optimized for agentic coding and debugg
 - `commander` for CLI commands
 - Hono for the local HTTP API and server-rendered pages
 - Zod for runtime validation
-- SQLite via `better-sqlite3`
-- Kysely for typed SQL
+- SQLite via direct `better-sqlite3` prepared statements
 - Octokit for GitHub API access
 - Vitest for tests
 - Pino for structured logging

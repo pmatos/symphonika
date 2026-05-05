@@ -103,4 +103,39 @@ describe("buildStatusSnapshot", () => {
       runStore.close();
     }
   });
+
+  it("includes durable project cursor state", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    try {
+      runStore.syncProjectStates([{ name: "alpha", weight: 3 }]);
+      runStore.recordProjectPollOutcome({
+        candidateIssues: 1,
+        fetchedIssues: 2,
+        filteredIssues: 1,
+        ok: true,
+        projectName: "alpha"
+      });
+
+      const snapshot = buildStatusSnapshot({
+        configPath: "/tmp/symphonika.yml",
+        issuePollStatus: emptyPollStatus(),
+        runStore,
+        stateRoot
+      });
+
+      expect(snapshot.projectStates).toHaveLength(1);
+      expect(snapshot.projectStates[0]).toMatchObject({
+        lastCandidateIssues: 1,
+        lastFetchedIssues: 2,
+        lastFilteredIssues: 1,
+        lastPollOk: true,
+        projectName: "alpha",
+        validationState: "valid",
+        weight: 3
+      });
+    } finally {
+      runStore.close();
+    }
+  });
 });

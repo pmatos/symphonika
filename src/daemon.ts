@@ -38,7 +38,11 @@ import { detectStaleClaims } from "./lifecycle/stale-claims.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { runPullRequestFollowup } from "./pull-request-followup.js";
-import { openRunStore, type RunState } from "./run-store.js";
+import {
+  openRunStore,
+  type RunState,
+  type SyncProjectStateInput
+} from "./run-store.js";
 import { resolveStateRoot } from "./state.js";
 import { buildStatusSnapshot } from "./status.js";
 import { VERSION } from "./version.js";
@@ -199,10 +203,11 @@ export async function startDaemon(
 
     polling = true;
     try {
-      replaceIssuePollStatus(
-        issuePollStatus,
-        await pollConfiguredGitHubIssues(issuePollOptions(state.configPath, options))
+      const nextStatus = await pollConfiguredGitHubIssues(
+        issuePollOptions(state.configPath, options)
       );
+      replaceIssuePollStatus(issuePollStatus, nextStatus);
+      await persistProjectPollState(runStore, state.configPath, nextStatus);
     } catch (error) {
       issuePollStatus.errors = [errorMessage(error)];
       issuePollStatus.projects = [];
@@ -454,6 +459,84 @@ export async function startDaemon(
       }
     }
   };
+}
+
+function persistProjectPollState(
+  runStore: ReturnType<typeof openRunStore>,
+  configPath: string,
+  status: import("./issue-polling.js").IssuePollStatus
+): Promise<void> {
+  return readProjectStateInputs(configPath, status).then((projects) => {
+    runStore.syncProjectStates(projects);
+    for (const project of status.projects) {
+      runStore.recordProjectPollOutcome({
+        candidateIssues: project.candidateIssues ?? 0,
+        error: project.error ?? null,
+        fetchedIssues: project.fetchedIssues,
+        filteredIssues: project.filteredIssues ?? 0,
+        ok: project.ok,
+        projectName: project.name
+      });
+    }
+  });
+}
+
+async function readProjectStateInputs(
+  configPath: string,
+  status: import("./issue-polling.js").IssuePollStatus
+): Promise<SyncProjectStateInput[]> {
+  const reports = new Map(
+    status.projects.map((project) => [project.name, project])
+  );
+  let raw: unknown;
+  try {
+    raw = parse(await readFile(configPath, "utf8")) ?? {};
+  } catch {
+    return status.projects.map(projectStateInputFromReport);
+  }
+  if (!isRecord(raw) || !Array.isArray(raw["projects"])) {
+    return status.projects.map(projectStateInputFromReport);
+  }
+  const inputs: SyncProjectStateInput[] = [];
+  raw["projects"].forEach((project, index) => {
+    if (!isRecord(project) || typeof project["name"] !== "string") {
+      return;
+    }
+    const report = reports.get(project["name"]);
+    if (report !== undefined) {
+      inputs.push(projectStateInputFromReport(report));
+      return;
+    }
+    const errors = status.errors.filter((error) =>
+      error.startsWith(`projects.${index}.`)
+    );
+    inputs.push({
+      name: project["name"],
+      validationMessage: errors.length === 0 ? null : errors.join("; "),
+      validationState: errors.length === 0 ? "valid" : "invalid",
+      weight: rawProjectWeight(project["weight"])
+    });
+  });
+  return inputs;
+}
+
+function projectStateInputFromReport(
+  project: import("./issue-polling.js").ProjectIssuePollReport
+): SyncProjectStateInput {
+  return {
+    name: project.name,
+    validationMessage: project.ok
+      ? null
+      : (project.error ?? "project poll failed"),
+    validationState: project.ok ? "valid" : "invalid",
+    weight: project.weight
+  };
+}
+
+function rawProjectWeight(weight: unknown): number | undefined {
+  return typeof weight === "number" && Number.isInteger(weight) && weight > 0
+    ? weight
+    : undefined;
 }
 
 function issuePollOptions(

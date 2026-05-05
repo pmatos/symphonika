@@ -1,6 +1,25 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
 
 import { createHttpApp } from "../src/http/app.js";
+import { openRunStore } from "../src/run-store.js";
+
+const tempRoots: string[] = [];
+
+async function makeTempRoot(): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "symphonika-http-test-"));
+  tempRoots.push(root);
+  return root;
+}
+
+afterEach(async () => {
+  await Promise.all(
+    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+  );
+});
 
 describe("HTTP app", () => {
   it("returns daemon health details", async () => {
@@ -86,6 +105,7 @@ describe("HTTP app", () => {
         errors: [],
         projects: []
       },
+      projectStates: [],
       runs: [],
       scheduled: [],
       service: "symphonika",
@@ -94,5 +114,48 @@ describe("HTTP app", () => {
       stateRoot: "/tmp/symphonika-state",
       uptimeMs: 100
     });
+  });
+
+  it("exposes durable project cursor state in status", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    try {
+      runStore.syncProjectStates([{ name: "alpha", weight: 2 }]);
+      runStore.recordProjectPollOutcome({
+        candidateIssues: 1,
+        fetchedIssues: 3,
+        filteredIssues: 2,
+        ok: true,
+        projectName: "alpha"
+      });
+
+      const app = createHttpApp({
+        runStore,
+        stateRoot,
+        startedAtMs: 2_000,
+        version: "0.1.0",
+        now: () => 2_100
+      });
+
+      const response = await app.request("/api/status");
+      const body = (await response.json()) as {
+        projectStates?: Array<Record<string, unknown>>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(body.projectStates).toEqual([
+        expect.objectContaining({
+          lastCandidateIssues: 1,
+          lastFetchedIssues: 3,
+          lastFilteredIssues: 2,
+          lastPollOk: true,
+          projectName: "alpha",
+          validationState: "valid",
+          weight: 2
+        })
+      ]);
+    } finally {
+      runStore.close();
+    }
   });
 });

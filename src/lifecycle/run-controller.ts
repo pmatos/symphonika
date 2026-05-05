@@ -105,6 +105,10 @@ type DispatchTarget = {
   candidate: { issue: IssueSnapshot; project: string };
   project: RunControllerProjectConfig;
   provider: AgentProvider;
+  schedulerWeights: Array<{
+    currentWeight: number;
+    projectName: string;
+  }>;
 };
 
 type LabelWritingGitHubIssuesApi = GitHubIssuesApi & {
@@ -247,7 +251,8 @@ export class RunController {
       providerCommand,
       providerName: target.project.agent.provider,
       repository,
-      runId
+      runId,
+      schedulerWeights: target.schedulerWeights
     });
 
     return { dispatched: true, runId };
@@ -553,23 +558,89 @@ export class RunController {
     candidates: ReadonlyArray<{ issue: IssueSnapshot; project: string }>,
     projects: Map<string, RunControllerProjectConfig>
   ): DispatchTarget | undefined {
+    const states = this.runStore.getProjectStatesByName();
+    const buckets = new Map<
+      string,
+      Array<{ issue: IssueSnapshot; project: string }>
+    >();
     for (const candidate of candidates) {
-      const project = projects.get(candidate.project);
-      if (project === undefined || project.disabled === true) {
+      const bucket = buckets.get(candidate.project);
+      if (bucket === undefined) {
+        buckets.set(candidate.project, [candidate]);
         continue;
       }
-      if (
-        this.activeRuns.isIssueInFlight(candidate.project, candidate.issue.number)
-      ) {
+      bucket.push(candidate);
+    }
+
+    const dispatchable: Array<{
+      candidate: { issue: IssueSnapshot; project: string };
+      currentWeight: number;
+      nextWeight: number;
+      project: RunControllerProjectConfig;
+      provider: AgentProvider;
+      weight: number;
+    }> = [];
+
+    for (const [projectName, project] of projects) {
+      const bucket = buckets.get(projectName);
+      if (bucket === undefined || project.disabled === true) {
         continue;
       }
       const provider = this.agentProviders[project.agent.provider];
       if (provider === undefined) {
         continue;
       }
-      return { candidate, project, provider };
+      const candidate = bucket
+        .slice()
+        .sort(compareCandidateIssues)
+        .find(
+          (entry) =>
+            !this.activeRuns.isIssueInFlight(entry.project, entry.issue.number)
+        );
+      if (candidate === undefined) {
+        continue;
+      }
+      const weight = normalizeProjectWeight(
+        project.weight ?? states.get(projectName)?.weight
+      );
+      const currentWeight =
+        states.get(projectName)?.schedulerCurrentWeight ?? 0;
+      dispatchable.push({
+        candidate,
+        currentWeight,
+        nextWeight: currentWeight + weight,
+        project,
+        provider,
+        weight
+      });
     }
-    return undefined;
+
+    if (dispatchable.length === 0) {
+      return undefined;
+    }
+
+    const totalWeight = dispatchable.reduce(
+      (sum, entry) => sum + entry.weight,
+      0
+    );
+    let selected = dispatchable[0]!;
+    for (const entry of dispatchable.slice(1)) {
+      if (entry.nextWeight > selected.nextWeight) {
+        selected = entry;
+      }
+    }
+    const schedulerWeights = dispatchable.map((entry) => ({
+      currentWeight:
+        entry === selected ? entry.nextWeight - totalWeight : entry.nextWeight,
+      projectName: entry.project.name
+    }));
+
+    return {
+      candidate: selected.candidate,
+      project: selected.project,
+      provider: selected.provider,
+      schedulerWeights
+    };
   }
 
   private async runFreshLifecycle(input: {
@@ -584,6 +655,10 @@ export class RunController {
     providerName: AgentProviderName;
     repository: GitHubIssueRepositoryInput;
     runId: string;
+    schedulerWeights?: Array<{
+      currentWeight: number;
+      projectName: string;
+    }>;
   }): Promise<void> {
     let claimed = false;
     let runCreated = false;
@@ -605,6 +680,13 @@ export class RunController {
         },
         "symphonika claimed issue and starting run"
       );
+      if (input.schedulerWeights !== undefined) {
+        this.runStore.recordProjectDispatchSelection({
+          issueNumber: input.issue.number,
+          projectName: input.project.name,
+          schedulerWeights: input.schedulerWeights
+        });
+      }
       const createInput = {
         id: input.runId,
         issue: input.issue,
@@ -1408,4 +1490,22 @@ function priorityForLabels(
     return priority === undefined ? [] : [priority];
   });
   return priorities.length === 0 ? project.priority.default : Math.min(...priorities);
+}
+
+function compareCandidateIssues(
+  left: { issue: IssueSnapshot },
+  right: { issue: IssueSnapshot }
+): number {
+  return (
+    left.issue.priority - right.issue.priority ||
+    left.issue.created_at.localeCompare(right.issue.created_at) ||
+    left.issue.number - right.issue.number
+  );
+}
+
+function normalizeProjectWeight(weight: number | undefined): number {
+  if (weight === undefined || !Number.isInteger(weight) || weight <= 0) {
+    return 1;
+  }
+  return weight;
 }

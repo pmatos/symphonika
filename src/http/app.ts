@@ -11,6 +11,7 @@ import type {
 } from "../issue-polling.js";
 import { emptyIssuePollStatus } from "../issue-polling.js";
 import { isPathInside } from "../path-safety.js";
+import type { RuntimeReloadStatus } from "../reload.js";
 import type { StatusSnapshot } from "../status.js";
 import type {
   ListRunsFilter,
@@ -61,6 +62,7 @@ export type HttpAppOptions = {
     runId: string;
   }>;
   getRuns?: () => RunStatus[];
+  getReloadStatus?: () => RuntimeReloadStatus;
   getScheduled?: () => Array<{
     dueAt: number;
     kind: "retry" | "continuation";
@@ -191,6 +193,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         projects: issuePollStatus.projects
       },
       projectStates: runStore?.listProjectStates() ?? [],
+      reload: options.getReloadStatus?.() ?? emptyReloadStatus(),
       runs: getRuns(),
       scheduled: getScheduled(),
       service: "symphonika",
@@ -329,6 +332,16 @@ export function createHttpApp(options: HttpAppOptions): Hono {
   }
 
   return app;
+}
+
+function emptyReloadStatus(): RuntimeReloadStatus {
+  return {
+    errors: [],
+    lastAttemptedAt: null,
+    lastLoadedAt: null,
+    ok: true,
+    usingLastKnownGood: false
+  };
 }
 
 async function streamRunFile(

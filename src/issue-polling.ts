@@ -160,7 +160,7 @@ export type PollConfiguredGitHubIssuesOptions = {
 };
 
 export type PollingProjectConfig = z.infer<typeof pollingProjectSchema>;
-type PollingServiceConfig = {
+export type PollingServiceConfig = {
   polling?: {
     interval_ms?: number | undefined;
   };
@@ -661,8 +661,6 @@ export async function readConfiguredPollingIntervalMs(
 export async function pollConfiguredGitHubIssues(
   options: PollConfiguredGitHubIssuesOptions
 ): Promise<IssuePollStatus> {
-  const env = options.env ?? process.env;
-  const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const status = emptyIssuePollStatus();
   const config = await readPollingConfig(options.configPath, status.errors);
 
@@ -670,7 +668,28 @@ export async function pollConfiguredGitHubIssues(
     return status;
   }
 
-  for (const project of config.projects) {
+  return pollConfiguredGitHubIssuesFromConfig({
+    config,
+    ...(options.env === undefined ? {} : { env: options.env }),
+    ...(options.githubIssuesApi === undefined
+      ? {}
+      : { githubIssuesApi: options.githubIssuesApi }),
+    initialErrors: status.errors
+  });
+}
+
+export async function pollConfiguredGitHubIssuesFromConfig(options: {
+  config: PollingServiceConfig;
+  env?: NodeJS.ProcessEnv;
+  githubIssuesApi?: GitHubIssuesApi;
+  initialErrors?: string[];
+}): Promise<IssuePollStatus> {
+  const env = options.env ?? process.env;
+  const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
+  const status = emptyIssuePollStatus();
+  status.errors.push(...(options.initialErrors ?? []));
+
+  for (const project of options.config.projects) {
     if (project.disabled === true) {
       continue;
     }

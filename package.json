@@ -11,6 +11,7 @@
     "dev": "tsx src/cli.ts",
     "lint": "eslint .",
     "smoke": "tsx src/cli.ts smoke",
+    "smoke:local": "scripts/smoke.sh",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

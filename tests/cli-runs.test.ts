@@ -503,6 +503,129 @@ describe("CLI run commands", () => {
     verifyStore.close();
   });
 
+  it("poll-now discovers the local daemon, preflights state root, and prints the poll summary", async () => {
+    const stateRoot = await makeTempRoot();
+    const cfg = path.join(stateRoot, "symphonika.yml");
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    await mkdir(resolvedStateRoot, { recursive: true });
+    await writeFile(
+      path.join(resolvedStateRoot, "daemon.json"),
+      JSON.stringify({ url: "http://127.0.0.1:3030" }),
+      "utf8"
+    );
+    const requests: Array<{ method: string; url: string }> = [];
+    const { output, program } = captureProgram(stateRoot, {
+      fetch: (input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        requests.push({ method: init?.method ?? "GET", url });
+        if (url.endsWith("/api/status")) {
+          return Promise.resolve(
+            Response.json({ state: "idle", stateRoot: resolvedStateRoot })
+          );
+        }
+        return Promise.resolve(
+          Response.json({
+            candidateIssues: 2,
+            dispatching: false,
+            errors: 0,
+            filteredIssues: 1,
+            issuePolling: {
+              errors: [],
+              projects: [
+                {
+                  candidateIssues: 2,
+                  fetchedIssues: 3,
+                  filteredIssues: 1,
+                  name: "alpha",
+                  ok: true
+                }
+              ]
+            },
+            kind: "queued",
+            state: "idle"
+          })
+        );
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "poll-now",
+      "--config",
+      cfg
+    ]);
+
+    expect(output.stdout).toContain("poll-now queued");
+    expect(output.stdout).toContain("candidate: 2");
+    expect(output.stdout).toContain("filtered:  1");
+    expect(output.stdout).toContain("errors:    0");
+    expect(output.stdout).toContain("alpha ok (3 fetched, 2 candidate, 1 filtered)");
+    expect(requests).toEqual([
+      { method: "GET", url: "http://127.0.0.1:3030/api/status" },
+      { method: "POST", url: "http://127.0.0.1:3030/api/poll-now" }
+    ]);
+  });
+
+  it("poll-now refuses a daemon endpoint for another state root", async () => {
+    const stateRoot = await makeTempRoot();
+    const requests: string[] = [];
+    const { output, program } = captureProgram(stateRoot, {
+      fetch: (input: string | URL | Request) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        requests.push(url);
+        if (url.endsWith("/api/status")) {
+          return Promise.resolve(
+            Response.json({ stateRoot: path.join(stateRoot, "..", "other") })
+          );
+        }
+        return Promise.resolve(Response.json({ kind: "queued" }));
+      }
+    });
+
+    await expect(
+      program.parseAsync([
+        "node",
+        "symphonika",
+        "poll-now",
+        "--config",
+        path.join(stateRoot, "symphonika.yml"),
+        "--daemon-url",
+        "http://127.0.0.1:3030"
+      ])
+    ).rejects.toThrow();
+
+    expect(output.stderr).toContain("state root mismatch");
+    expect(requests).toEqual(["http://127.0.0.1:3030/api/status"]);
+  });
+
+  it("poll-now errors when no daemon endpoint descriptor is present", async () => {
+    const stateRoot = await makeTempRoot();
+    const { output, program } = captureProgram(stateRoot);
+
+    await expect(
+      program.parseAsync([
+        "node",
+        "symphonika",
+        "poll-now",
+        "--config",
+        path.join(stateRoot, "symphonika.yml")
+      ])
+    ).rejects.toThrow();
+
+    expect(output.stderr).toContain("poll-now failed: daemon endpoint not found");
+  });
+
   it("cancel refuses a daemon endpoint for another state root", async () => {
     const stateRoot = await makeTempRoot();
     const requests: string[] = [];

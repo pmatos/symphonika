@@ -10,16 +10,12 @@ import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
 } from "./daemon-endpoint.js";
-import type {
-  GitHubIssuesApi,
-  PollConfiguredGitHubIssuesOptions,
-  PollingProjectConfig
-} from "./issue-polling.js";
+import type { GitHubIssuesApi } from "./issue-polling.js";
 import {
   DEFAULT_GITHUB_ISSUES_API,
+  DEFAULT_POLLING_INTERVAL_MS,
   emptyIssuePollStatus,
-  loadPollingProjectsByName,
-  pollConfiguredGitHubIssues,
+  pollConfiguredGitHubIssuesFromConfig,
   readConfiguredPollingIntervalMs,
   replaceIssuePollStatus
 } from "./issue-polling.js";
@@ -38,6 +34,7 @@ import { detectStaleClaims } from "./lifecycle/stale-claims.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { runPullRequestFollowup } from "./pull-request-followup.js";
+import { RuntimeConfigReloader } from "./reload.js";
 import {
   openRunStore,
   type RunState,
@@ -103,6 +100,10 @@ export async function startDaemon(
   }
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
+  const runtimeConfig = new RuntimeConfigReloader({
+    configPath: state.configPath,
+    logger
+  });
   const activeRuns = new ActiveRunRegistry();
   const dispatchMutex = createAsyncMutex();
   const dispatchRuntime = {
@@ -117,30 +118,13 @@ export async function startDaemon(
   let lastPullRequestFollowupAt = Date.now();
   let pendingPollNow: Promise<PollNowResult> | undefined;
   const inflightDispatches = new Set<Promise<void>>();
-  const projectsLoader = async (): Promise<
+  const projectsLoader = (): Promise<
     Map<string, RunControllerProjectConfig>
   > => {
-    if (!state.configExists) {
-      return new Map();
-    }
-    const map = await loadPollingProjectsByName(state.configPath);
-    const enriched = new Map<string, RunControllerProjectConfig>();
-    const richDetails = await loadRichProjects(state.configPath);
-    for (const [name, project] of map) {
-      const detail = richDetails.get(name);
-      if (detail === undefined) {
-        continue;
-      }
-      enriched.set(name, {
-        ...project,
-        workflow: detail.workflow,
-        workspace: detail.workspace
-      });
-    }
-    return enriched;
+    return Promise.resolve(runtimeConfig.projectsByName());
   };
-  const providersLoader = async (): Promise<RunControllerProvidersConfig> => {
-    return loadProvidersConfig(state.configPath);
+  const providersLoader = (): Promise<RunControllerProvidersConfig> => {
+    return Promise.resolve(runtimeConfig.providersConfig());
   };
   const enqueueScheduledWork = (work: () => Promise<void>): void => {
     scheduledWork = scheduledWork.then(work, work);
@@ -204,9 +188,25 @@ export async function startDaemon(
 
     polling = true;
     try {
-      const nextStatus = await pollConfiguredGitHubIssues(
-        issuePollOptions(state.configPath, options)
-      );
+      const snapshot = await runtimeConfig.reload();
+      const reloadStatus = runtimeConfig.getStatus();
+      if (snapshot === undefined) {
+        replaceIssuePollStatus(issuePollStatus, {
+          candidateIssues: [],
+          errors: reloadStatus.errors,
+          filteredIssues: [],
+          projects: []
+        });
+        return;
+      }
+      const nextStatus = await pollConfiguredGitHubIssuesFromConfig({
+        config: snapshot.polling,
+        ...(options.env === undefined ? {} : { env: options.env }),
+        ...(options.githubIssuesApi === undefined
+          ? {}
+          : { githubIssuesApi: options.githubIssuesApi }),
+        initialErrors: reloadStatus.errors
+      });
       replaceIssuePollStatus(issuePollStatus, nextStatus);
       await persistProjectPollState(runStore, state.configPath, nextStatus);
     } catch (error) {
@@ -234,10 +234,8 @@ export async function startDaemon(
     if (!state.configExists) {
       return;
     }
-    let projects: Map<string, PollingProjectConfig>;
-    try {
-      projects = await loadPollingProjectsByName(state.configPath);
-    } catch {
+    const projects = runtimeConfig.projectsByName();
+    if (projects.size === 0) {
       return;
     }
     try {
@@ -289,11 +287,15 @@ export async function startDaemon(
           now - lastPullRequestFollowupAt >= PR_FOLLOWUP_MIN_INTERVAL_MS
         ) {
           lastPullRequestFollowupAt = now;
+          const snapshot = runtimeConfig.getSnapshot();
           prResult = await runPullRequestFollowup({
             configPath: state.configPath,
             env,
             githubIssuesApi,
             logger,
+            ...(snapshot === undefined
+              ? {}
+              : { policy: snapshot.pullRequestPolicy }),
             projectsLoader,
             runController,
             runStore
@@ -329,6 +331,7 @@ export async function startDaemon(
   };
   const tick = async (): Promise<void> => {
     await refreshIssuePollStatus();
+    refreshPollingInterval();
     await reconcile();
     launchWork();
     logger.debug(
@@ -340,6 +343,28 @@ export async function startDaemon(
         projects: issuePollStatus.projects.length
       },
       "symphonika tick"
+    );
+  };
+  const refreshPollingInterval = (): void => {
+    if (!state.configExists) {
+      return;
+    }
+    const nextIntervalMs =
+      runtimeConfig.getSnapshot()?.pollingIntervalMs ??
+      intervalMs ??
+      DEFAULT_POLLING_INTERVAL_MS;
+    if (nextIntervalMs === intervalMs) {
+      return;
+    }
+    intervalMs = nextIntervalMs;
+    if (pollTimer !== undefined) {
+      clearInterval(pollTimer);
+    }
+    pollTimer = setInterval(scheduleTick, intervalMs);
+    pollTimer.unref?.();
+    logger.info(
+      { pollingIntervalMs: intervalMs },
+      "symphonika polling interval reloaded"
     );
   };
   const scheduleTick = (): void => {
@@ -387,7 +412,9 @@ export async function startDaemon(
   let intervalMs: number | undefined;
   if (state.configExists) {
     await refreshIssuePollStatus();
-    intervalMs = await readConfiguredPollingIntervalMs(state.configPath);
+    intervalMs =
+      runtimeConfig.getSnapshot()?.pollingIntervalMs ??
+      (await readConfiguredPollingIntervalMs(state.configPath));
   }
   const TERMINAL_STATES = new Set<RunState>([
     "cancelled",
@@ -431,10 +458,12 @@ export async function startDaemon(
       buildStatusSnapshot({
         configPath: state.configPath,
         issuePollStatus,
+        reloadStatus: runtimeConfig.getStatus(),
         runStore,
         stateRoot: state.stateRoot
       }),
     issuePollStatus,
+    getReloadStatus: () => runtimeConfig.getStatus(),
     pollNow: triggerPollNow,
     runStore,
     stateRoot: state.stateRoot,
@@ -579,22 +608,6 @@ function rawProjectWeight(weight: unknown): number | undefined {
     : undefined;
 }
 
-function issuePollOptions(
-  configPath: string,
-  options: StartDaemonOptions
-): PollConfiguredGitHubIssuesOptions {
-  const pollOptions: PollConfiguredGitHubIssuesOptions = {
-    configPath
-  };
-  if (options.env !== undefined) {
-    pollOptions.env = options.env;
-  }
-  if (options.githubIssuesApi !== undefined) {
-    pollOptions.githubIssuesApi = options.githubIssuesApi;
-  }
-  return pollOptions;
-}
-
 function waitForListening(server: ServerType): Promise<void> {
   if (server.listening) {
     return Promise.resolve();
@@ -662,113 +675,6 @@ function hasRegisteredProviders(
   providers: AgentProviderRegistry | undefined
 ): providers is AgentProviderRegistry {
   return providers !== undefined && Object.values(providers).some(Boolean);
-}
-
-type RichProjectDetail = {
-  workflow: string;
-  workspace: {
-    git: {
-      base_branch: string;
-      remote: string;
-    };
-    root: string;
-  };
-};
-
-async function loadRichProjects(
-  configPath: string
-): Promise<Map<string, RichProjectDetail>> {
-  const map = new Map<string, RichProjectDetail>();
-  let raw: unknown;
-  try {
-    raw = parse(await readFile(configPath, "utf8")) ?? {};
-  } catch {
-    return map;
-  }
-  if (!isRecord(raw)) {
-    return map;
-  }
-  const projects = raw["projects"];
-  if (!Array.isArray(projects)) {
-    return map;
-  }
-  for (const project of projects) {
-    if (!isRecord(project)) {
-      continue;
-    }
-    const name = project["name"];
-    if (typeof name !== "string") {
-      continue;
-    }
-    const workflow = project["workflow"];
-    const workspace = project["workspace"];
-    if (typeof workflow !== "string" || !isRecord(workspace)) {
-      continue;
-    }
-    const root = workspace["root"];
-    const git = workspace["git"];
-    if (typeof root !== "string" || !isRecord(git)) {
-      continue;
-    }
-    const remote = git["remote"];
-    const baseBranch = git["base_branch"];
-    if (typeof remote !== "string" || typeof baseBranch !== "string") {
-      continue;
-    }
-    map.set(name, {
-      workflow,
-      workspace: {
-        git: {
-          base_branch: baseBranch,
-          remote
-        },
-        root
-      }
-    });
-  }
-  return map;
-}
-
-async function loadProvidersConfig(
-  configPath: string
-): Promise<RunControllerProvidersConfig> {
-  let raw: unknown;
-  try {
-    raw = parse(await readFile(configPath, "utf8")) ?? {};
-  } catch {
-    return defaultProvidersConfig();
-  }
-  if (!isRecord(raw)) {
-    return defaultProvidersConfig();
-  }
-  const providers = raw["providers"];
-  if (!isRecord(providers)) {
-    return defaultProvidersConfig();
-  }
-  return {
-    claude: { command: providerCommand(providers["claude"], defaultProvidersConfig().claude.command) },
-    codex: { command: providerCommand(providers["codex"], defaultProvidersConfig().codex.command) }
-  };
-}
-
-function providerCommand(input: unknown, fallback: string): string {
-  if (isRecord(input) && typeof input["command"] === "string") {
-    return input["command"];
-  }
-  return fallback;
-}
-
-function defaultProvidersConfig(): RunControllerProvidersConfig {
-  return {
-    claude: {
-      command:
-        "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"
-    },
-    codex: {
-      command:
-        `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`
-    }
-  };
 }
 
 export function resolveLogLevel(env: NodeJS.ProcessEnv): string {

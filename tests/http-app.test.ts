@@ -106,6 +106,13 @@ describe("HTTP app", () => {
         projects: []
       },
       projectStates: [],
+      reload: {
+        errors: [],
+        lastAttemptedAt: null,
+        lastLoadedAt: null,
+        ok: true,
+        usingLastKnownGood: false
+      },
       runs: [],
       scheduled: [],
       service: "symphonika",

@@ -175,6 +175,12 @@ The default service config file is `symphonika.yml`.
 It is reloadable and owned by the orchestrator. It lists Projects and service-level runtime
 settings.
 
+v1 implements reload by defensively re-reading `symphonika.yml` on each daemon tick and manual
+poll-now trigger. A valid reload replaces the effective snapshot used for future polling,
+dispatch, retry, continuation, provider-command selection, and PR follow-up policy. An invalid
+reload is surfaced in structured logs and operator status while the daemon keeps using the last
+known good effective snapshot.
+
 Example:
 
 ```yaml
@@ -238,6 +244,12 @@ Each Project must reference a valid `WORKFLOW.md`.
 
 `WORKFLOW.md` is reloadable and repository-owned. It contains the prompt body and may contain
 optional YAML front matter for prompt-adjacent execution policy.
+
+Workflow contracts are re-read as part of the daemon's defensive service-config reload. A valid
+workflow edit applies to future attempts. In-flight attempts keep the rendered prompt and workflow
+content hash captured when the attempt was created. If a reload sees an invalid workflow for an
+existing Project, the daemon reports the reload error and keeps the last known good effective
+workflow snapshot for future work until a valid reload is available.
 
 Service discovery, tracker settings, workspace roots, provider selection, and GitHub labels belong
 in `symphonika.yml`, not in `WORKFLOW.md`.

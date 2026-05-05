@@ -17,6 +17,7 @@ import type {
 } from "./doctor.js";
 import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
+import type { RuntimeReloadStatus } from "./reload.js";
 import type {
   ListRunsFilter,
   OpenRunStoreOptions,
@@ -55,6 +56,7 @@ type DaemonStatusResponse = {
     projects?: ProjectIssuePollReport[];
   };
   projectStates?: ProjectState[];
+  reload?: RuntimeReloadStatus;
   staleIssues?: unknown[];
   state?: string;
   stateRoot?: string;
@@ -308,6 +310,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             program,
             `daemon: ${formatDaemonAvailability(daemonStatus, daemonUrl)}\n`
           );
+          writeOut(program, `config reload: ${formatReloadOutcome(daemonStatus)}\n`);
         }
         writeOut(program, "\nProjects:\n");
         if (report.projects.length === 0) {
@@ -980,6 +983,25 @@ function formatLastPollOutcome(
         : `${project.name} failed (${project.error ?? "unknown error"})`
     )
     .join("; ");
+}
+
+function formatReloadOutcome(
+  daemonStatus:
+    | { kind: "available"; status: DaemonStatusResponse }
+    | { kind: "unavailable"; error: string }
+): string {
+  if (daemonStatus.kind === "unavailable") {
+    return `unknown (${daemonStatus.error})`;
+  }
+  const reload = daemonStatus.status.reload;
+  if (reload === undefined) {
+    return "unknown";
+  }
+  if (reload.ok) {
+    return reload.lastLoadedAt === null ? "not yet loaded" : `ok at ${reload.lastLoadedAt}`;
+  }
+  const suffix = reload.usingLastKnownGood ? " (using last known good)" : "";
+  return `failed${suffix}: ${reload.errors.join("; ")}`;
 }
 
 function printPollNowResult(program: Command, result: PollNowResponse): void {

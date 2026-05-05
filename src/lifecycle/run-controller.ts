@@ -32,6 +32,7 @@ import {
   persistRunEvidence,
   renderAutonomousPrompt
 } from "../workflow.js";
+import type { WorkflowContract } from "../workflow.js";
 
 import {
   ActiveRunRegistry,
@@ -44,8 +45,14 @@ import { classifyCapReachedOutcome } from "./cap-reached-context.js";
 import { classifyFailure, type ClassifiedTerminal } from "./classify-failure.js";
 import { buildCapReachedReason } from "./terminal-reason.js";
 
+export type WorkflowSnapshot = {
+  body: string;
+  contentHash: string;
+  path: string;
+};
+
 export type RunControllerProjectConfig = PollingProjectConfig & {
-  workflow: string;
+  workflow: string | WorkflowSnapshot;
   workspace: {
     git: {
       base_branch: string;
@@ -929,8 +936,8 @@ export class RunController {
       project: input.project
     });
 
-    const workflowPath = path.resolve(this.configDir, input.project.workflow);
-    const workflow = await loadWorkflowContract(workflowPath);
+    const workflow = await this.loadWorkflow(input.project.workflow);
+    const workflowPath = workflow.path;
     if (workflow.errors.length > 0) {
       throw new Error(workflow.errors.join("\n"));
     }
@@ -1000,6 +1007,21 @@ export class RunController {
       prepared,
       prompt: renderedPrompt.prompt,
       promptPath: evidence.promptPath
+    };
+  }
+
+  private async loadWorkflow(
+    workflow: string | WorkflowSnapshot
+  ): Promise<WorkflowContract> {
+    if (typeof workflow === "string") {
+      return loadWorkflowContract(path.resolve(this.configDir, workflow));
+    }
+
+    return {
+      body: workflow.body,
+      contentHash: workflow.contentHash,
+      errors: [],
+      path: workflow.path
     };
   }
 

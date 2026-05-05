@@ -53,7 +53,7 @@ export type RunPullRequestFollowupOptions = {
   runStore: RunStore;
 };
 
-const DEFAULT_POLICY: PullRequestFollowupPolicy = {
+export const DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY: PullRequestFollowupPolicy = {
   enabled: true,
   maxReviewDispatchesPerPr: 3,
   merge: {
@@ -134,27 +134,40 @@ export async function readPullRequestFollowupPolicy(
   try {
     raw = parse(await readFile(configPath, "utf8")) ?? {};
   } catch {
-    return DEFAULT_POLICY;
+    return DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY;
   }
   const parsed = pullRequestPolicySchema.safeParse(raw);
   if (!parsed.success) {
-    return DEFAULT_POLICY;
+    return DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY;
+  }
+  return pullRequestFollowupPolicyFromRaw(parsed.data) ?? DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY;
+}
+
+export function pullRequestFollowupPolicyFromRaw(
+  raw: unknown
+): PullRequestFollowupPolicy | undefined {
+  const parsed = pullRequestPolicySchema.safeParse(raw);
+  if (!parsed.success) {
+    return undefined;
   }
   const input = parsed.data.pull_requests;
   return {
-    enabled: input?.enabled ?? DEFAULT_POLICY.enabled,
+    enabled: input?.enabled ?? DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY.enabled,
     maxReviewDispatchesPerPr:
       input?.review_followup?.max_dispatches_per_pr ??
-      DEFAULT_POLICY.maxReviewDispatchesPerPr,
+      DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY.maxReviewDispatchesPerPr,
     merge: {
-      enabled: input?.merge?.enabled ?? DEFAULT_POLICY.merge.enabled,
-      method: input?.merge?.method ?? DEFAULT_POLICY.merge.method,
+      enabled:
+        input?.merge?.enabled ??
+        DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY.merge.enabled,
+      method:
+        input?.merge?.method ?? DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY.merge.method,
       requireReviewDecision:
         input?.merge?.require_review_decision ??
-        DEFAULT_POLICY.merge.requireReviewDecision,
+        DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY.merge.requireReviewDecision,
       requireStatusSuccess:
         input?.merge?.require_status_success ??
-        DEFAULT_POLICY.merge.requireStatusSuccess
+        DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY.merge.requireStatusSuccess
     }
   };
 }
@@ -170,7 +183,7 @@ export function pullRequestNeedsReviewFollowup(
 
 export function pullRequestReadyToMerge(
   state: RawGitHubPullRequestFollowupState,
-  policy: PullRequestFollowupPolicy = DEFAULT_POLICY
+  policy: PullRequestFollowupPolicy = DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY
 ): boolean {
   if (!policy.merge.enabled || state.draft || state.merged || state.state !== "OPEN") {
     return false;

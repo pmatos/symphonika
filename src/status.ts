@@ -1,5 +1,6 @@
 import type { DoctorProjectReport, DoctorReport } from "./doctor.js";
 import type { IssuePollStatus } from "./issue-polling.js";
+import type { RuntimeReloadStatus } from "./reload.js";
 import type { ProjectState, RunStatus, RunStore } from "./run-store.js";
 
 export type StatusSnapshot = {
@@ -8,6 +9,7 @@ export type StatusSnapshot = {
   issuePolling: IssuePollStatus;
   projectStates: ProjectState[];
   projects: DoctorProjectReport[];
+  reload: RuntimeReloadStatus;
   runs: {
     active: RunStatus[];
     failed: RunStatus[];
@@ -21,6 +23,7 @@ export type BuildStatusSnapshotInput = {
   configPath: string;
   doctorReport?: DoctorReport;
   issuePollStatus: IssuePollStatus;
+  reloadStatus?: RuntimeReloadStatus;
   runStore: RunStore;
   stateRoot: string;
 };
@@ -51,6 +54,7 @@ export function buildStatusSnapshot(
     issuePolling: input.issuePollStatus,
     projectStates: input.runStore.listProjectStates(),
     projects: input.doctorReport?.projects ?? [],
+    reload: input.reloadStatus ?? emptyReloadStatus(),
     runs: {
       active,
       failed,
@@ -58,5 +62,15 @@ export function buildStatusSnapshot(
       stale
     },
     stateRoot: input.stateRoot
+  };
+}
+
+function emptyReloadStatus(): RuntimeReloadStatus {
+  return {
+    errors: [],
+    lastAttemptedAt: null,
+    lastLoadedAt: null,
+    ok: true,
+    usingLastKnownGood: false
   };
 }

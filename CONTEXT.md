@@ -56,6 +56,10 @@ _Avoid_: agent-created branch
 The repository-owned process for pushing branches, opening pull requests, updating comments, and reaching human review.
 _Avoid_: orchestrator workflow
 
+**PR Follow-up**:
+The orchestrator-owned polling loop for pull requests discovered from Symphonika-created Issue Branches; it re-dispatches review feedback and merges PRs only when policy says they are clear.
+_Avoid_: arbitrary PR detection
+
 **Coding Agent**:
 An external automation runtime that works on an issue inside a workspace.
 _Avoid_: orchestrator, worker
@@ -112,6 +116,7 @@ _Avoid_: chat session
 - A **Stale Claim** blocks automatic dispatch until explicitly cleared in v1
 - A **Coding Agent** may write **Workflow Labels**
 - A **Coding Agent** owns the **PR Workflow**
+- A **PR Follow-up** watches only PRs associated with completed Symphonika **Runs**
 - Each dispatched **Issue** has exactly one active **Workspace** per run
 - Each **Workspace** uses one **Issue Branch**
 - A **Coding Agent** executes within a **Workspace** for one **Issue**

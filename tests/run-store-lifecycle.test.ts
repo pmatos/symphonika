@@ -53,6 +53,19 @@ function seedRun(
   return id;
 }
 
+function evidence(branchName: string) {
+  return {
+    branchName,
+    branchRef: `refs/heads/${branchName}`,
+    issueSnapshotPath: "/tmp/issue-snapshot.json",
+    metadataPath: "/tmp/prompt-metadata.json",
+    normalizedLogPath: "/tmp/provider.normalized.jsonl",
+    promptPath: "/tmp/prompt.md",
+    rawLogPath: "/tmp/provider.raw.jsonl",
+    workspacePath: "/tmp/workspace"
+  };
+}
+
 describe("run-store lifecycle CRUD", () => {
   it("markCancelRequested surfaces in listRuns", async () => {
     const root = await makeTempRoot();
@@ -252,6 +265,112 @@ describe("run-store lifecycle CRUD", () => {
         failureClassification: "deterministic",
         issueNumber: 8
       });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("tracks pull requests discovered from succeeded run branches", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const branchName = "sym/symphonika/54-pr-followup";
+      const id = seedRun(store, { id: "parent", issueNumber: 54 });
+      store.updateRunEvidence(id, evidence(branchName));
+      store.updateRunState(id, "succeeded");
+
+      expect(store.hasPullRequestFollowupWork()).toBe(true);
+      expect(store.listRunsAwaitingPullRequestDiscovery()).toEqual([
+        {
+          branchName,
+          issueNumber: 54,
+          projectName: "symphonika",
+          runId: "parent"
+        }
+      ]);
+
+      store.trackPullRequest({
+        branchName,
+        headSha: "abc123",
+        issueNumber: 54,
+        projectName: "symphonika",
+        prNumber: 81,
+        prUrl: "https://github.com/pmatos/symphonika/pull/81",
+        runId: "parent"
+      });
+
+      expect(store.listRunsAwaitingPullRequestDiscovery()).toEqual([]);
+      expect(store.hasPullRequestFollowupWork()).toBe(true);
+      const [tracked] = store.listOpenTrackedPullRequests();
+      expect(tracked).toMatchObject({
+        branchName,
+        headShaAtDispatch: "abc123",
+        lastSeenHeadSha: "abc123",
+        prNumber: 81,
+        reviewDispatchCount: 0,
+        state: "open"
+      });
+
+      expect(tracked).toBeDefined();
+      store.recordPullRequestReviewDispatch({
+        fingerprint: "sha256:feedback",
+        headSha: "def456",
+        id: tracked!.id,
+        runId: "review-run"
+      });
+      store.recordPullRequestObservation({
+        headSha: "def456",
+        id: tracked!.id,
+        prUrl: tracked!.prUrl,
+        state: "merged"
+      });
+
+      expect(store.listOpenTrackedPullRequests()).toEqual([]);
+      expect(store.hasPullRequestFollowupWork()).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("PR discovery prefers least-attempted runs and excludes ones that hit the attempt cap", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const stuckBranch = "sym/symphonika/stuck";
+      const freshBranch = "sym/symphonika/fresh";
+      seedRun(store, { id: "run-a-stuck", issueNumber: 1 });
+      store.updateRunEvidence("run-a-stuck", evidence(stuckBranch));
+      store.updateRunState("run-a-stuck", "succeeded");
+      seedRun(store, { id: "run-b-fresh", issueNumber: 2 });
+      store.updateRunEvidence("run-b-fresh", evidence(freshBranch));
+      store.updateRunState("run-b-fresh", "succeeded");
+
+      // Simulate 3 polls where the stuck run is checked but no PR is found.
+      store.recordPullRequestDiscoveryAttempt("run-a-stuck");
+      store.recordPullRequestDiscoveryAttempt("run-a-stuck");
+      store.recordPullRequestDiscoveryAttempt("run-a-stuck");
+
+      // The fresh run (attempts=0) now sorts ahead of the stuck run (attempts=3) —
+      // newer work cannot be starved by older never-matched runs.
+      expect(
+        store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
+      ).toEqual(["run-b-fresh", "run-a-stuck"]);
+
+      // Push the stuck run past the cap; it must be excluded entirely from candidates.
+      for (let i = 0; i < 5; i += 1) {
+        store.recordPullRequestDiscoveryAttempt("run-a-stuck");
+      }
+      expect(
+        store
+          .listRunsAwaitingPullRequestDiscovery({ maxAttempts: 5 })
+          .map((run) => run.runId)
+      ).toEqual(["run-b-fresh"]);
+
+      // Once both are exhausted, hasPullRequestFollowupWork reports no candidate work.
+      for (let i = 0; i < 5; i += 1) {
+        store.recordPullRequestDiscoveryAttempt("run-b-fresh");
+      }
+      expect(store.hasPullRequestFollowupWork({ maxAttempts: 5 })).toBe(false);
     } finally {
       store.close();
     }

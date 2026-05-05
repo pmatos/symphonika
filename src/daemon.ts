@@ -37,6 +37,7 @@ import {
 import { detectStaleClaims } from "./lifecycle/stale-claims.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
+import { runPullRequestFollowup } from "./pull-request-followup.js";
 import { openRunStore, type RunState } from "./run-store.js";
 import { resolveStateRoot } from "./state.js";
 import { buildStatusSnapshot } from "./status.js";
@@ -109,6 +110,7 @@ export async function startDaemon(
   let polling = false;
   let scheduledWork = Promise.resolve();
   let lastPollErrorsKey = "";
+  let lastPullRequestFollowupAt = Date.now();
   const inflightDispatches = new Set<Promise<void>>();
   const projectsLoader = async (): Promise<
     Map<string, RunControllerProjectConfig>
@@ -264,7 +266,7 @@ export async function startDaemon(
       logger.error({ err: error }, "symphonika stale-claim detection failed");
     }
   };
-  const launchDispatch = (): void => {
+  const launchWork = (): void => {
     if (
       !state.configExists ||
       !hasRegisteredProviders(agentProviders) ||
@@ -274,6 +276,32 @@ export async function startDaemon(
     }
     const promise = (async () => {
       try {
+        const now = Date.now();
+        let prResult: Awaited<ReturnType<typeof runPullRequestFollowup>>;
+        if (
+          runStore.hasPullRequestFollowupWork() &&
+          now - lastPullRequestFollowupAt >= PR_FOLLOWUP_MIN_INTERVAL_MS
+        ) {
+          lastPullRequestFollowupAt = now;
+          prResult = await runPullRequestFollowup({
+            configPath: state.configPath,
+            env,
+            githubIssuesApi,
+            logger,
+            projectsLoader,
+            runController,
+            runStore
+          });
+        } else {
+          prResult = {
+            action: "none",
+            reason: "pull request follow-up throttled"
+          };
+        }
+        if (prResult.action === "review_dispatch" || prResult.action === "merged") {
+          logger.info(prResult, "symphonika PR follow-up action completed");
+          return;
+        }
         const result = await runController.dispatchOneFresh(issuePollStatus);
         if (result.dispatched === false) {
           logger.debug(
@@ -296,7 +324,7 @@ export async function startDaemon(
   const tick = async (): Promise<void> => {
     await refreshIssuePollStatus();
     await reconcile();
-    launchDispatch();
+    launchWork();
     logger.debug(
       {
         candidates: issuePollStatus.candidateIssues.length,
@@ -389,9 +417,7 @@ export async function startDaemon(
   }
   if (state.configExists) {
     await reconcile();
-    if (issuePollStatus.candidateIssues.length > 0) {
-      launchDispatch();
-    }
+    launchWork();
     if (intervalMs !== undefined) {
       pollTimer = setInterval(scheduleTick, intervalMs);
       pollTimer.unref?.();
@@ -625,6 +651,8 @@ function defaultProvidersConfig(): RunControllerProvidersConfig {
 export function resolveLogLevel(env: NodeJS.ProcessEnv): string {
   return env["PINO_LOG_LEVEL"] ?? env["LOG_LEVEL"] ?? "info";
 }
+
+const PR_FOLLOWUP_MIN_INTERVAL_MS = 1_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

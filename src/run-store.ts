@@ -73,6 +73,34 @@ export type RunDetail = RunStatus & {
   transitions: RunStateTransition[];
 };
 
+export type PullRequestTrackingState = "closed" | "merged" | "open";
+
+export type PullRequestDiscoveryRun = {
+  branchName: string;
+  issueNumber: number;
+  projectName: string;
+  runId: string;
+};
+
+export type TrackedPullRequest = {
+  branchName: string;
+  createdAt: string;
+  headShaAtDispatch: string;
+  id: number;
+  issueNumber: number;
+  lastFollowupRunId: string | null;
+  lastObservedAt: string;
+  lastReviewDispatchFingerprint: string | null;
+  lastSeenHeadSha: string;
+  projectName: string;
+  prNumber: number;
+  prUrl: string;
+  reviewDispatchCount: number;
+  runId: string;
+  state: PullRequestTrackingState;
+  updatedAt: string;
+};
+
 export type ProviderEventRecord = {
   attemptId: string;
   createdAt: string;
@@ -186,6 +214,35 @@ type ProviderEventRow = {
   sequence: number;
   type: string;
 };
+
+type PullRequestDiscoveryRunRow = {
+  branch_name: string;
+  id: string;
+  issue_number: number;
+  project_name: string;
+};
+
+type TrackedPullRequestRow = {
+  branch_name: string;
+  created_at: string;
+  head_sha_at_dispatch: string;
+  id: number;
+  issue_number: number;
+  last_followup_run_id: string | null;
+  last_observed_at: string;
+  last_review_dispatch_fingerprint: string | null;
+  last_seen_head_sha: string;
+  project_name: string;
+  pr_number: number;
+  pr_url: string;
+  review_dispatch_count: number;
+  run_id: string;
+  state: PullRequestTrackingState;
+  updated_at: string;
+};
+
+export const PULL_REQUEST_DISCOVERY_LIMIT = 25;
+export const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
 
 export class RunStore {
   private readonly database: SqliteDatabase;
@@ -604,6 +661,200 @@ export class RunStore {
     }));
   }
 
+  listRunsAwaitingPullRequestDiscovery(
+    options: { limit?: number; maxAttempts?: number } = {}
+  ): PullRequestDiscoveryRun[] {
+    const limit = Math.max(0, Math.floor(options.limit ?? PULL_REQUEST_DISCOVERY_LIMIT));
+    const maxAttempts = Math.max(
+      1,
+      Math.floor(options.maxAttempts ?? MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS)
+    );
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, issue_number, branch_name",
+          "from runs",
+          "where state = 'succeeded'",
+          "and branch_name is not null",
+          "and branch_name <> ''",
+          "and pr_discovery_attempts < @maxAttempts",
+          "and not exists (",
+          "  select 1 from tracked_pull_requests pr",
+          "  where pr.project_name = runs.project_name",
+          "  and pr.branch_name = runs.branch_name",
+          ")",
+          "order by pr_discovery_attempts asc, updated_at asc, id asc",
+          "limit @limit"
+        ].join(" ")
+      )
+      .all({ limit, maxAttempts }) as PullRequestDiscoveryRunRow[];
+
+    return rows.map((row) => ({
+      branchName: row.branch_name,
+      issueNumber: row.issue_number,
+      projectName: row.project_name,
+      runId: row.id
+    }));
+  }
+
+  recordPullRequestDiscoveryAttempt(runId: string): void {
+    this.database
+      .prepare(
+        "update runs set pr_discovery_attempts = pr_discovery_attempts + 1, updated_at = ? where id = ?"
+      )
+      .run(timestamp(), runId);
+  }
+
+  hasPullRequestFollowupWork(
+    options: { maxAttempts?: number } = {}
+  ): boolean {
+    const maxAttempts = Math.max(
+      1,
+      Math.floor(options.maxAttempts ?? MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS)
+    );
+    const row = this.database
+      .prepare(
+        [
+          "select 1 as found from tracked_pull_requests where state = 'open'",
+          "union all",
+          "select 1 as found from runs",
+          "where state = 'succeeded'",
+          "and branch_name is not null",
+          "and branch_name <> ''",
+          "and pr_discovery_attempts < @maxAttempts",
+          "and not exists (",
+          "  select 1 from tracked_pull_requests pr",
+          "  where pr.project_name = runs.project_name",
+          "  and pr.branch_name = runs.branch_name",
+          ")",
+          "limit 1"
+        ].join(" ")
+      )
+      .get({ maxAttempts }) as { found: number } | undefined;
+    return row !== undefined;
+  }
+
+  trackPullRequest(input: {
+    branchName: string;
+    headSha: string;
+    issueNumber: number;
+    projectName: string;
+    prNumber: number;
+    prUrl: string;
+    runId: string;
+  }): void {
+    const now = timestamp();
+    this.database
+      .prepare(
+        [
+          "insert into tracked_pull_requests (",
+          "project_name, issue_number, run_id, pr_number, pr_url, branch_name,",
+          "head_sha_at_dispatch, last_seen_head_sha, state, last_observed_at,",
+          "created_at, updated_at",
+          ") values (",
+          "@project_name, @issue_number, @run_id, @pr_number, @pr_url, @branch_name,",
+          "@head_sha_at_dispatch, @last_seen_head_sha, 'open', @last_observed_at,",
+          "@created_at, @updated_at",
+          ")",
+          "on conflict(project_name, pr_number) do update set",
+          "issue_number = excluded.issue_number,",
+          "pr_url = excluded.pr_url,",
+          "branch_name = excluded.branch_name,",
+          "last_seen_head_sha = excluded.last_seen_head_sha,",
+          "state = 'open',",
+          "last_observed_at = excluded.last_observed_at,",
+          "updated_at = excluded.updated_at"
+        ].join(" ")
+      )
+      .run({
+        branch_name: input.branchName,
+        created_at: now,
+        head_sha_at_dispatch: input.headSha,
+        issue_number: input.issueNumber,
+        last_observed_at: now,
+        last_seen_head_sha: input.headSha,
+        pr_number: input.prNumber,
+        pr_url: input.prUrl,
+        project_name: input.projectName,
+        run_id: input.runId,
+        updated_at: now
+      });
+  }
+
+  listOpenTrackedPullRequests(): TrackedPullRequest[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, issue_number, run_id, pr_number, pr_url,",
+          "branch_name, head_sha_at_dispatch, last_seen_head_sha,",
+          "last_review_dispatch_fingerprint, review_dispatch_count,",
+          "last_followup_run_id, state, last_observed_at, created_at, updated_at",
+          "from tracked_pull_requests",
+          "where state = 'open'",
+          "order by last_observed_at asc, id asc"
+        ].join(" ")
+      )
+      .all() as TrackedPullRequestRow[];
+
+    return rows.map((row) => mapTrackedPullRequestRow(row));
+  }
+
+  recordPullRequestObservation(input: {
+    headSha: string;
+    id: number;
+    prUrl: string;
+    state: PullRequestTrackingState;
+  }): void {
+    const now = timestamp();
+    this.database
+      .prepare(
+        [
+          "update tracked_pull_requests set",
+          "pr_url = @pr_url,",
+          "last_seen_head_sha = @last_seen_head_sha,",
+          "state = @state,",
+          "last_observed_at = @last_observed_at,",
+          "updated_at = @updated_at",
+          "where id = @id"
+        ].join(" ")
+      )
+      .run({
+        id: input.id,
+        last_observed_at: now,
+        last_seen_head_sha: input.headSha,
+        pr_url: input.prUrl,
+        state: input.state,
+        updated_at: now
+      });
+  }
+
+  recordPullRequestReviewDispatch(input: {
+    fingerprint: string;
+    headSha: string;
+    id: number;
+    runId: string;
+  }): void {
+    this.database
+      .prepare(
+        [
+          "update tracked_pull_requests set",
+          "last_review_dispatch_fingerprint = @fingerprint,",
+          "review_dispatch_count = review_dispatch_count + 1,",
+          "last_followup_run_id = @run_id,",
+          "last_seen_head_sha = @head_sha,",
+          "updated_at = @updated_at",
+          "where id = @id"
+        ].join(" ")
+      )
+      .run({
+        fingerprint: input.fingerprint,
+        head_sha: input.headSha,
+        id: input.id,
+        run_id: input.runId,
+        updated_at: timestamp()
+      });
+  }
+
   markCancelRequested(runId: string, reason: CancelReason): void {
     this.database
       .prepare(
@@ -694,6 +945,27 @@ export class RunStore {
         foreign key (run_id) references runs(id),
         foreign key (attempt_id) references attempts(id)
       );
+
+      create table if not exists tracked_pull_requests (
+        id integer primary key autoincrement,
+        project_name text not null,
+        issue_number integer not null,
+        run_id text not null,
+        pr_number integer not null,
+        pr_url text not null,
+        branch_name text not null,
+        head_sha_at_dispatch text not null,
+        last_seen_head_sha text not null,
+        last_review_dispatch_fingerprint text,
+        review_dispatch_count integer not null default 0,
+        last_followup_run_id text,
+        state text not null,
+        last_observed_at text not null,
+        created_at text not null,
+        updated_at text not null,
+        unique(project_name, pr_number),
+        foreign key (run_id) references runs(id)
+      );
     `);
 
     const additions: Array<[string, string, string]> = [
@@ -704,6 +976,7 @@ export class RunStore {
       ["runs", "terminal_reason", "text"],
       ["runs", "cancel_requested", "integer not null default 0"],
       ["runs", "cancel_reason", "text"],
+      ["runs", "pr_discovery_attempts", "integer not null default 0"],
       ["attempts", "failure_classification", "text"]
     ];
 
@@ -788,5 +1061,29 @@ function mapRunRow(row: RunRow): RunStatus {
     terminalReason: row.terminal_reason ?? null,
     updatedAt: row.updated_at,
     workspacePath: row.workspace_path ?? ""
+  };
+}
+
+function mapTrackedPullRequestRow(
+  row: TrackedPullRequestRow
+): TrackedPullRequest {
+  return {
+    branchName: row.branch_name,
+    createdAt: row.created_at,
+    headShaAtDispatch: row.head_sha_at_dispatch,
+    id: row.id,
+    issueNumber: row.issue_number,
+    lastFollowupRunId: row.last_followup_run_id ?? null,
+    lastObservedAt: row.last_observed_at,
+    lastReviewDispatchFingerprint:
+      row.last_review_dispatch_fingerprint ?? null,
+    lastSeenHeadSha: row.last_seen_head_sha,
+    projectName: row.project_name,
+    prNumber: row.pr_number,
+    prUrl: row.pr_url,
+    reviewDispatchCount: row.review_dispatch_count,
+    runId: row.run_id,
+    state: row.state,
+    updatedAt: row.updated_at
   };
 }

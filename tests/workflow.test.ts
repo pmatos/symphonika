@@ -4,6 +4,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  explainWorkflow,
+  loadExpandedWorkflow,
   loadWorkflowContract,
   persistRunEvidence,
   renderAutonomousPrompt
@@ -299,6 +301,140 @@ describe("workflow prompt rendering", () => {
     );
     expect(rendered.prompt).not.toContain("max_turns");
     expect(rendered.workflowContentHash).toBe(workflow.contentHash);
+  });
+});
+
+describe("state machine workflow definitions", () => {
+  it("compiles Markdown workflow contracts to the single-agent compatibility graph", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "WORKFLOW.md");
+    await writeFile(workflowPath, "Work on {{issue.title}}.\n");
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.workflow).toMatchObject({
+      initial: "run_agent",
+      name: "single_agent_workflow",
+      source: {
+        kind: "markdown",
+        path: workflowPath
+      },
+      states: [
+        {
+          action: {
+            kind: "agent"
+          },
+          completeWhen: {
+            branch_ahead_of_base: true,
+            provider_success: true
+          },
+          id: "run_agent",
+          transitions: [
+            {
+              to: "done"
+            }
+          ]
+        },
+        {
+          id: "done",
+          terminal: "success"
+        }
+      ]
+    });
+  });
+
+  it("loads and explains an explicit raw FSM workflow", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/plan.md",
+        "      complete_when:",
+        "        artifact_exists: PLAN.md",
+        "      transitions:",
+        "        - to: implementing",
+        "    implementing:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/implement-tdd.md",
+        "      complete_when:",
+        "        branch_ahead_of_base: true",
+        "        pr_open: true",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+    const explanation = explainWorkflow(result.workflow);
+
+    expect(result.errors).toEqual([]);
+    expect(result.workflow).toMatchObject({
+      initial: "planning",
+      name: "issue_to_merge",
+      source: {
+        kind: "raw_fsm",
+        path: workflowPath
+      }
+    });
+    expect(explanation).toContain("workflow: issue_to_merge");
+    expect(explanation).toContain(`source: ${workflowPath}`);
+    expect(explanation).toContain("initial: planning");
+    expect(explanation).toContain("state: planning");
+    expect(explanation).toContain(
+      "action: agent provider=codex prompt=prompts/plan.md"
+    );
+    expect(explanation).toContain("complete_when: artifact_exists=PLAN.md");
+    expect(explanation).toContain("-> implementing");
+    expect(explanation).toContain("state: done");
+    expect(explanation).toContain("terminal: success");
+  });
+
+  it("reports invalid raw FSM transitions and predicates", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/plan.md",
+        "      complete_when:",
+        "        local_guess: true",
+        "      transitions:",
+        "        - to: missing_state",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state planning at ${workflowPath} complete_when uses unknown predicate local_guess`
+    );
+    expect(result.errors).toContain(
+      `workflow state planning at ${workflowPath} transitions to unknown state missing_state`
+    );
   });
 });
 

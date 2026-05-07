@@ -34,6 +34,7 @@ import {
 } from "./lifecycle/terminal-reason.js";
 import { resolveStateRoot } from "./state.js";
 import { VERSION } from "./version.js";
+import { explainWorkflow, loadProjectWorkflow } from "./workflow.js";
 
 export type CliDependencies = {
   fetch?: FetchFn;
@@ -282,6 +283,61 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           writeOut(program, `terminal:     ${detail.terminalReason}\n`);
         }
       }
+    });
+
+  const workflowCommand = program
+    .command("workflow")
+    .description("validate and explain repository workflow definitions");
+
+  workflowCommand
+    .command("validate")
+    .description("validate the expanded workflow graph without dispatching work")
+    .option("--config <path>", "service config path", "symphonika.yml")
+    .option("--project <name>", "project name from symphonika.yml")
+    .action(async (options: { config: string; project?: string }) => {
+      const report = await loadProjectWorkflow({
+        configPath: options.config,
+        ...(options.project === undefined ? {} : { projectName: options.project })
+      });
+
+      if (report.workflow === null || report.errors.length > 0) {
+        writeErr(program, "workflow validate failed:\n");
+        for (const error of report.errors) {
+          writeErr(program, `- ${error}\n`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      writeOut(
+        program,
+        `workflow validate ok: ${report.projectName ?? "(unknown project)"} -> ${report.workflow.name}\n`
+      );
+      writeOut(program, `source: ${report.workflowPath ?? report.workflow.source.path}\n`);
+      writeOut(program, `states: ${report.workflow.states.length}\n`);
+    });
+
+  workflowCommand
+    .command("explain")
+    .description("print the expanded workflow graph without dispatching work")
+    .option("--config <path>", "service config path", "symphonika.yml")
+    .option("--project <name>", "project name from symphonika.yml")
+    .action(async (options: { config: string; project?: string }) => {
+      const report = await loadProjectWorkflow({
+        configPath: options.config,
+        ...(options.project === undefined ? {} : { projectName: options.project })
+      });
+
+      if (report.workflow === null || report.errors.length > 0) {
+        writeErr(program, "workflow explain failed:\n");
+        for (const error of report.errors) {
+          writeErr(program, `- ${error}\n`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      writeOut(program, explainWorkflow(report.workflow));
     });
 
   program

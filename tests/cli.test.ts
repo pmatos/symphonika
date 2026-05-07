@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { buildCli } from "../src/cli.js";
 import type { StartDaemonOptions } from "../src/daemon.js";
@@ -8,6 +11,22 @@ import type {
   InitProjectOptions
 } from "../src/doctor.js";
 import type { SmokeOptions, SmokeReport } from "../src/smoke.js";
+
+const tempRoots: string[] = [];
+
+async function makeTempRoot(): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "symphonika-cli-test-"));
+  tempRoots.push(root);
+  return root;
+}
+
+afterEach(async () => {
+  await Promise.all(
+    tempRoots.splice(0).map((root) =>
+      rm(root, { force: true, recursive: true })
+    )
+  );
+});
 
 describe("CLI", () => {
   it("starts the daemon with the selected config path and port", async () => {
@@ -465,5 +484,134 @@ describe("CLI", () => {
     expect(output.stderr).toContain("will create operational labels");
     expect(output.stdout).toContain("init-project ok");
     expect(output.stdout).toContain("sym:running");
+  });
+
+  it("explains the expanded workflow graph for a selected project", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeFile(
+      configPath,
+      [
+        "projects:",
+        "  - name: symphonika",
+        "    workflow: ./workflow.yml",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/plan.md",
+        "      complete_when:",
+        "        artifact_exists: PLAN.md",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({ registerSignalHandlers: false });
+    program.exitOverride();
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "workflow",
+      "explain",
+      "--config",
+      configPath,
+      "--project",
+      "symphonika"
+    ]);
+
+    expect(output.stderr).toBe("");
+    expect(output.stdout).toContain("workflow: issue_to_merge");
+    expect(output.stdout).toContain(`source: ${path.join(root, "workflow.yml")}`);
+    expect(output.stdout).toContain("state: planning");
+    expect(output.stdout).toContain(
+      "action: agent provider=codex prompt=prompts/plan.md"
+    );
+    expect(output.stdout).toContain("terminal: success");
+  });
+
+  it("validates the selected workflow graph and reports state-machine errors", async () => {
+    const previousExitCode = process.exitCode;
+    process.exitCode = 0;
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeFile(
+      configPath,
+      [
+        "projects:",
+        "  - name: symphonika",
+        "    workflow: ./workflow.yml",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/plan.md",
+        "      transitions:",
+        "        - to: missing_state",
+        ""
+      ].join("\n")
+    );
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({ registerSignalHandlers: false });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    try {
+      await program.parseAsync([
+        "node",
+        "symphonika",
+        "workflow",
+        "validate",
+        "--config",
+        configPath,
+        "--project",
+        "symphonika"
+      ]);
+
+      expect(process.exitCode).toBe(1);
+      expect(output.stdout).toBe("");
+      expect(output.stderr).toContain("workflow validate failed");
+      expect(output.stderr).toContain("missing_state");
+    } finally {
+      process.exitCode = previousExitCode;
+    }
   });
 });

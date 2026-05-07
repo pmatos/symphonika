@@ -614,4 +614,63 @@ describe("CLI", () => {
       process.exitCode = previousExitCode;
     }
   });
+
+  it("rejects YAML workflow files that omit the top-level workflow mapping", async () => {
+    const previousExitCode = process.exitCode;
+    process.exitCode = 0;
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeFile(
+      configPath,
+      [
+        "projects:",
+        "  - name: symphonika",
+        "    workflow: ./workflow.yml",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflows:",
+        "  name: typo",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: wait",
+        ""
+      ].join("\n")
+    );
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({ registerSignalHandlers: false });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    try {
+      await program.parseAsync([
+        "node",
+        "symphonika",
+        "workflow",
+        "validate",
+        "--config",
+        configPath,
+        "--project",
+        "symphonika"
+      ]);
+
+      expect(process.exitCode).toBe(1);
+      expect(output.stdout).toBe("");
+      expect(output.stderr).toContain("workflow validate failed");
+      expect(output.stderr).toContain("top-level workflow mapping");
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
 });

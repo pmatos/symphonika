@@ -559,6 +559,11 @@ function parseExplicitWorkflowDefinition(
   }
 
   if (!isRecord(parsed) || !isRecord(parsed.workflow)) {
+    if (looksLikeYamlPath(workflowPath)) {
+      errors.push(
+        `workflow definition at ${workflowPath} must define a top-level workflow mapping`
+      );
+    }
     return undefined;
   }
 

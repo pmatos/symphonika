@@ -436,6 +436,30 @@ describe("state machine workflow definitions", () => {
       `workflow state planning at ${workflowPath} transitions to unknown state missing_state`
     );
   });
+
+  it("rejects YAML workflow files that are missing the top-level workflow mapping", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflows:",
+        "  name: typo",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: wait",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow definition at ${workflowPath} must define a top-level workflow mapping`
+    );
+  });
 });
 
 function issueSnapshot() {

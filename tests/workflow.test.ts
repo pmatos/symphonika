@@ -437,6 +437,37 @@ describe("state machine workflow definitions", () => {
     );
   });
 
+  it("rejects terminal states that also declare work or outgoing transitions", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: done",
+        "  states:",
+        "    done:",
+        "      terminal: success",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        provider_success: true",
+        "      transitions:",
+        "        - to: next",
+        "    next:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state done at ${workflowPath} terminal states must not define action, complete_when, or transitions`
+    );
+  });
+
   it("rejects YAML workflow files that are missing the top-level workflow mapping", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");

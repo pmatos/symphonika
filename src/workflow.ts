@@ -671,6 +671,18 @@ function parseWorkflowState(
       `workflow state ${stateId} at ${workflowPath} terminal must be success, blocked, or failure`
     );
   }
+  if (terminal !== undefined) {
+    const disallowedFields = [
+      ...(rawState.action === undefined ? [] : ["action"]),
+      ...(rawState.complete_when === undefined ? [] : ["complete_when"]),
+      ...(rawState.transitions === undefined ? [] : ["transitions"])
+    ];
+    if (disallowedFields.length > 0) {
+      errors.push(
+        `workflow state ${stateId} at ${workflowPath} terminal states must not define ${formatTerminalStateDisallowedFields(disallowedFields)}`
+      );
+    }
+  }
   if (action === undefined && terminal === undefined) {
     errors.push(
       `workflow state ${stateId} at ${workflowPath} must define action or terminal`
@@ -684,6 +696,15 @@ function parseWorkflowState(
     ...(terminal === undefined ? {} : { terminal }),
     transitions
   };
+}
+
+function formatTerminalStateDisallowedFields(fields: string[]): string {
+  if (fields.length < 2) {
+    return fields[0] ?? "";
+  }
+  const prefix = fields.slice(0, -1).join(", ");
+  const last = fields[fields.length - 1] ?? "";
+  return fields.length === 2 ? `${prefix} or ${last}` : `${prefix}, or ${last}`;
 }
 
 function parseWorkflowAction(

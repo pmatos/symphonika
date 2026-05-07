@@ -673,4 +673,72 @@ describe("CLI", () => {
       process.exitCode = previousExitCode;
     }
   });
+
+  it("rejects terminal workflow states that declare work", async () => {
+    const previousExitCode = process.exitCode;
+    process.exitCode = 0;
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeFile(
+      configPath,
+      [
+        "projects:",
+        "  - name: symphonika",
+        "    workflow: ./workflow.yml",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: done",
+        "  states:",
+        "    done:",
+        "      terminal: success",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        provider_success: true",
+        "      transitions:",
+        "        - to: next",
+        "    next:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({ registerSignalHandlers: false });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    try {
+      await program.parseAsync([
+        "node",
+        "symphonika",
+        "workflow",
+        "validate",
+        "--config",
+        configPath,
+        "--project",
+        "symphonika"
+      ]);
+
+      expect(process.exitCode).toBe(1);
+      expect(output.stdout).toBe("");
+      expect(output.stderr).toContain("workflow validate failed");
+      expect(output.stderr).toContain(
+        "terminal states must not define action, complete_when, or transitions"
+      );
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
 });

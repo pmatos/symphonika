@@ -42,6 +42,7 @@ export type RunStatus = {
   state: RunState;
   terminalReason: string | null;
   updatedAt: string;
+  workflowGraphPath: string;
   workspacePath: string;
 };
 
@@ -59,6 +60,7 @@ export type AttemptStatus = {
   runId: string;
   state: RunState;
   updatedAt: string;
+  workflowGraphPath: string;
   workspacePath: string;
 };
 
@@ -191,6 +193,7 @@ export type RunEvidenceInput = {
   normalizedLogPath: string;
   promptPath: string;
   rawLogPath: string;
+  workflowGraphPath: string;
   workspacePath: string;
 };
 
@@ -233,6 +236,7 @@ type RunRow = {
   state: RunState;
   terminal_reason: string | null;
   updated_at: string;
+  workflow_graph_path: string | null;
   workspace_path: string | null;
 };
 
@@ -250,6 +254,7 @@ type AttemptRow = {
   run_id: string;
   state: RunState;
   updated_at: string;
+  workflow_graph_path: string | null;
   workspace_path: string;
 };
 
@@ -660,6 +665,7 @@ export class RunStore {
           "normalized_log_path = @normalized_log_path,",
           "prompt_path = @prompt_path,",
           "raw_log_path = @raw_log_path,",
+          "workflow_graph_path = @workflow_graph_path,",
           "workspace_path = @workspace_path,",
           "updated_at = @updated_at",
           "where id = @id"
@@ -675,6 +681,7 @@ export class RunStore {
         prompt_path: evidence.promptPath,
         raw_log_path: evidence.rawLogPath,
         updated_at: timestamp(),
+        workflow_graph_path: evidence.workflowGraphPath,
         workspace_path: evidence.workspacePath
       });
   }
@@ -687,11 +694,13 @@ export class RunStore {
           "insert into attempts (",
           "id, run_id, attempt_number, state, provider_name, provider_command,",
           "workspace_path, branch_name, prompt_path, issue_snapshot_path,",
-          "raw_log_path, normalized_log_path, created_at, updated_at",
+          "raw_log_path, normalized_log_path, workflow_graph_path,",
+          "created_at, updated_at",
           ") values (",
           "@id, @run_id, @attempt_number, @state, @provider_name, @provider_command,",
           "@workspace_path, @branch_name, @prompt_path, @issue_snapshot_path,",
-          "@raw_log_path, @normalized_log_path, @created_at, @updated_at",
+          "@raw_log_path, @normalized_log_path, @workflow_graph_path,",
+          "@created_at, @updated_at",
           ")"
         ].join(" ")
       )
@@ -709,6 +718,7 @@ export class RunStore {
         run_id: input.runId,
         state: input.state,
         updated_at: now,
+        workflow_graph_path: input.workflowGraphPath,
         workspace_path: input.workspacePath
       });
   }
@@ -768,6 +778,7 @@ export class RunStore {
           "select id, project_name, issue_number, issue_title, state, provider_name,",
           "workspace_path, branch_name, prompt_path, metadata_path,",
           "issue_snapshot_path, raw_log_path, normalized_log_path,",
+          "workflow_graph_path,",
           "is_continuation, continuation_parent_run_id, retry_count,",
           "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
           "created_at, updated_at",
@@ -791,6 +802,7 @@ export class RunStore {
           "select id, project_name, issue_number, issue_title, state, provider_name,",
           "workspace_path, branch_name, prompt_path, metadata_path,",
           "issue_snapshot_path, raw_log_path, normalized_log_path,",
+          "workflow_graph_path,",
           "is_continuation, continuation_parent_run_id, retry_count,",
           "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
           "created_at, updated_at",
@@ -816,7 +828,8 @@ export class RunStore {
         [
           "select id, run_id, attempt_number, state, provider_name, provider_command,",
           "workspace_path, branch_name, prompt_path, issue_snapshot_path,",
-          "raw_log_path, normalized_log_path, created_at, updated_at",
+          "raw_log_path, normalized_log_path, workflow_graph_path,",
+          "created_at, updated_at",
           "from attempts where run_id = ? order by attempt_number asc, id asc"
         ].join(" ")
       )
@@ -836,6 +849,7 @@ export class RunStore {
       runId: row.run_id,
       state: row.state,
       updatedAt: row.updated_at,
+      workflowGraphPath: row.workflow_graph_path ?? "",
       workspacePath: row.workspace_path
     }));
   }
@@ -1229,7 +1243,9 @@ export class RunStore {
       ["runs", "cancel_requested", "integer not null default 0"],
       ["runs", "cancel_reason", "text"],
       ["runs", "pr_discovery_attempts", "integer not null default 0"],
-      ["attempts", "failure_classification", "text"]
+      ["runs", "workflow_graph_path", "text"],
+      ["attempts", "failure_classification", "text"],
+      ["attempts", "workflow_graph_path", "text"]
     ];
 
     const apply = this.database.transaction(() => {
@@ -1312,6 +1328,7 @@ function mapRunRow(row: RunRow): RunStatus {
     state: row.state,
     terminalReason: row.terminal_reason ?? null,
     updatedAt: row.updated_at,
+    workflowGraphPath: row.workflow_graph_path ?? "",
     workspacePath: row.workspace_path ?? ""
   };
 }

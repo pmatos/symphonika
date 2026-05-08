@@ -221,8 +221,28 @@ describe("daemon dispatch", () => {
           "provider.raw.jsonl"
         ),
         state: "succeeded",
+        workflowGraphPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-issue-8",
+          "workflow-graph.json"
+        ),
         workspacePath
       });
+
+      const graphContents = JSON.parse(
+        await readFile(run.workflowGraphPath, "utf8")
+      ) as Record<string, unknown>;
+      expect(graphContents).toMatchObject({
+        initial: "run_agent",
+        name: "single_agent_workflow",
+        source: { kind: "markdown" }
+      });
+      expect(path.relative(workspacePath, run.workflowGraphPath)).toMatch(
+        /^\.\./
+      );
 
       expect(path.relative(workspacePath, run.promptPath)).toMatch(/^\.\./);
       await expect(readFile(run.promptPath, "utf8")).resolves.toContain(
@@ -872,6 +892,7 @@ type StatusRun = {
   provider: string;
   rawLogPath: string;
   state: string;
+  workflowGraphPath: string;
   workspacePath: string;
 };
 

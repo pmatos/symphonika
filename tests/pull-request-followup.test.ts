@@ -334,6 +334,7 @@ function seedSucceededRun(
     normalizedLogPath: "/tmp/provider.normalized.jsonl",
     promptPath: "/tmp/prompt.md",
     rawLogPath: "/tmp/provider.raw.jsonl",
+    workflowGraphPath: "/tmp/workflow-graph.json",
     workspacePath: input.workspacePath
   });
   store.updateRunState(input.runId, "succeeded");

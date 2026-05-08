@@ -62,6 +62,7 @@ function evidence(branchName: string) {
     normalizedLogPath: "/tmp/provider.normalized.jsonl",
     promptPath: "/tmp/prompt.md",
     rawLogPath: "/tmp/provider.raw.jsonl",
+    workflowGraphPath: "/tmp/workflow-graph.json",
     workspacePath: "/tmp/workspace"
   };
 }

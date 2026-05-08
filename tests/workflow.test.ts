@@ -186,6 +186,8 @@ describe("workflow prompt rendering", () => {
       "issues",
       "7-render-prompts"
     );
+    const workflowPath = path.join(root, "WORKFLOW.md");
+    await writeFile(workflowPath, "Work on {{issue.title}}.\n");
     const input = {
       branch: {
         name: "sym/symphonika/7-render-prompts",
@@ -205,7 +207,7 @@ describe("workflow prompt rendering", () => {
         id: "run-7"
       },
       template: "Work on {{issue.title}}.",
-      workflowPath: path.join(root, "WORKFLOW.md"),
+      workflowPath,
       workspace: {
         path: workspacePath,
         previous_attempt: false,
@@ -213,9 +215,12 @@ describe("workflow prompt rendering", () => {
       }
     };
     const rendered = renderAutonomousPrompt(input);
+    const expanded = await loadExpandedWorkflow(input.workflowPath);
 
     const evidence = await persistRunEvidence({
       ...input,
+      attemptNumber: input.run.attempt,
+      expandedWorkflow: expanded.workflow,
       renderedPrompt: rendered,
       stateRoot
     });
@@ -247,6 +252,87 @@ describe("workflow prompt rendering", () => {
     await expect(readFile(evidence.issueSnapshotPath, "utf8")).resolves.toContain(
       "Render autonomous prompts and persist run evidence"
     );
+  });
+
+  it("persists the expanded workflow graph for a Markdown workflow with no attempt suffix on attempt 1", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "symphonika",
+      "issues",
+      "7-render-prompts"
+    );
+    const workflowPath = path.join(root, "WORKFLOW.md");
+    await writeFile(workflowPath, "Work on {{issue.title}}.\n");
+    const expanded = await loadExpandedWorkflow(workflowPath);
+    expect(expanded.errors).toEqual([]);
+
+    const input = {
+      branch: {
+        name: "sym/symphonika/7-render-prompts",
+        ref: "refs/heads/sym/symphonika/7-render-prompts"
+      },
+      issue: issueSnapshot(),
+      project: { name: "symphonika" },
+      provider: {
+        command: DEFAULT_CODEX_COMMAND,
+        name: "codex" as const
+      },
+      run: {
+        attempt: 1,
+        continuation: false,
+        id: "run-7"
+      },
+      template: "Work on {{issue.title}}.",
+      workflowContentHash: expanded.workflow.contentHash,
+      workflowPath,
+      workspace: {
+        path: workspacePath,
+        previous_attempt: false,
+        root: path.dirname(path.dirname(workspacePath))
+      }
+    };
+    const rendered = renderAutonomousPrompt(input);
+
+    const evidence = await persistRunEvidence({
+      ...input,
+      attemptNumber: 1,
+      expandedWorkflow: expanded.workflow,
+      renderedPrompt: rendered,
+      stateRoot
+    });
+
+    expect(evidence.workflowGraphPath).toBe(
+      path.join(evidence.runEvidenceDirectory, "workflow-graph.json")
+    );
+    const graph = parseJsonRecord(
+      await readFile(evidence.workflowGraphPath, "utf8")
+    );
+    expect(graph).toMatchObject({
+      initial: "run_agent",
+      name: "single_agent_workflow",
+      source: {
+        kind: "markdown",
+        path: workflowPath
+      },
+      templateFiles: []
+    });
+    expect(graph.contentHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(Array.isArray(graph.states)).toBe(true);
+    expect((graph.states as unknown[]).length).toBe(2);
+
+    await expect(readFile(evidence.promptPath, "utf8")).resolves.toBe(
+      rendered.prompt
+    );
+    const metadata = parseJsonRecord(await readFile(evidence.metadataPath, "utf8"));
+    expect(metadata).toMatchObject({
+      workflow: {
+        path: workflowPath
+      }
+    });
   });
 
   it("loads WORKFLOW.md body without front matter and carries its content hash into the rendered prompt", async () => {
@@ -402,6 +488,114 @@ describe("state machine workflow definitions", () => {
     expect(explanation).toContain("-> implementing");
     expect(explanation).toContain("state: done");
     expect(explanation).toContain("terminal: success");
+  });
+
+  it("persists the expanded raw FSM workflow graph with an attempt suffix on retries", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "symphonika",
+      "issues",
+      "9-fsm-graph"
+    );
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/plan.md",
+        "      complete_when:",
+        "        artifact_exists: PLAN.md",
+        "      transitions:",
+        "        - to: implementing",
+        "    implementing:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/implement-tdd.md",
+        "      complete_when:",
+        "        branch_ahead_of_base: true",
+        "        pr_open: true",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    const expanded = await loadExpandedWorkflow(workflowPath);
+    expect(expanded.errors).toEqual([]);
+
+    const input = {
+      branch: {
+        name: "sym/symphonika/9-fsm-graph",
+        ref: "refs/heads/sym/symphonika/9-fsm-graph"
+      },
+      issue: issueSnapshot(),
+      project: { name: "symphonika" },
+      provider: {
+        command: DEFAULT_CODEX_COMMAND,
+        name: "codex" as const
+      },
+      run: {
+        attempt: 2,
+        continuation: false,
+        id: "run-9"
+      },
+      template: "Work on {{issue.title}}.",
+      workflowContentHash: expanded.workflow.contentHash,
+      workflowPath,
+      workspace: {
+        path: workspacePath,
+        previous_attempt: true,
+        root: path.dirname(path.dirname(workspacePath))
+      }
+    };
+    const rendered = renderAutonomousPrompt(input);
+
+    const evidence = await persistRunEvidence({
+      ...input,
+      attemptNumber: 2,
+      expandedWorkflow: expanded.workflow,
+      renderedPrompt: rendered,
+      stateRoot
+    });
+
+    expect(evidence.workflowGraphPath).toBe(
+      path.join(evidence.runEvidenceDirectory, "workflow-graph.attempt-2.json")
+    );
+    const graph = parseJsonRecord(
+      await readFile(evidence.workflowGraphPath, "utf8")
+    );
+    expect(graph).toMatchObject({
+      initial: "planning",
+      name: "issue_to_merge",
+      source: {
+        kind: "raw_fsm",
+        path: workflowPath
+      }
+    });
+    const states = graph.states as Array<Record<string, unknown>>;
+    expect(states.map((state) => state.id)).toEqual([
+      "planning",
+      "implementing",
+      "done"
+    ]);
+    expect(states[2]?.terminal).toBe("success");
+    expect(states[0]?.transitions).toEqual([
+      { to: "implementing", when: {} }
+    ]);
+    expect(states[1]?.transitions).toEqual([{ to: "done", when: {} }]);
   });
 
   it("reports invalid raw FSM transitions and predicates", async () => {

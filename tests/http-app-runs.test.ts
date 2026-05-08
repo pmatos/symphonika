@@ -202,6 +202,7 @@ describe("HTTP app — runs API and pages", () => {
         normalizedLogPath: "",
         promptPath: "",
         rawLogPath,
+        workflowGraphPath: "",
         workspacePath: test.stateRoot
       });
 
@@ -232,6 +233,7 @@ describe("HTTP app — runs API and pages", () => {
         normalizedLogPath: "",
         promptPath: "",
         rawLogPath: escaping,
+        workflowGraphPath: "",
         workspacePath: test.stateRoot
       });
 
@@ -403,6 +405,7 @@ describe("HTTP app — runs API and pages", () => {
         normalizedLogPath: "",
         promptPath: "",
         rawLogPath,
+        workflowGraphPath: "",
         workspacePath: test.stateRoot
       });
       test.runStore.createAttempt({
@@ -419,6 +422,7 @@ describe("HTTP app — runs API and pages", () => {
         rawLogPath,
         runId: "run-page",
         state: "running",
+        workflowGraphPath: "",
         workspacePath: test.stateRoot
       });
       const detail = test.runStore.getRun("run-page");
@@ -453,6 +457,97 @@ describe("HTTP app — runs API and pages", () => {
       expect(runPageBody).toContain("run-page-attempt-1");
       expect(runPageBody).toContain(detail?.attempts[0]?.createdAt);
       expect(runPageBody).toContain("/logs/runs/run-page/provider.raw.jsonl");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("renders the workflow graph summary and link on the run-detail page", async () => {
+    const test = await setup();
+    try {
+      const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-graph");
+      await mkdir(evidenceDir, { recursive: true });
+      const graphPath = path.join(evidenceDir, "workflow-graph.json");
+      await writeFile(
+        graphPath,
+        JSON.stringify(
+          {
+            contentHash: "sha256:" + "b".repeat(64),
+            initial: "run_agent",
+            name: "single_agent_workflow",
+            source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
+            states: [
+              { id: "run_agent", completeWhen: {}, transitions: [] },
+              { id: "done", completeWhen: {}, terminal: "success", transitions: [] }
+            ],
+            templateFiles: []
+          },
+          null,
+          2
+        )
+      );
+
+      test.runStore.createRun({
+        id: "run-graph",
+        issue: sampleIssue({ number: 88, title: "Graph visible" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-graph", "running");
+      test.runStore.updateRunEvidence("run-graph", {
+        branchName: "sym/run-graph",
+        branchRef: "refs/heads/sym/run-graph",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        rawLogPath: "",
+        workflowGraphPath: graphPath,
+        workspacePath: test.stateRoot
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const runPage = await app.request("/runs/run-graph");
+      expect(runPage.status).toBe(200);
+      const body = await runPage.text();
+      expect(body).toContain("single_agent_workflow");
+      expect(body).toContain("markdown");
+      expect(body).toContain("run_agent");
+      expect(body).toContain(`href="/logs/runs/run-graph/workflow-graph.json"`);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("renders the run-detail page without the workflow graph block when no graph evidence exists", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "run-nograph",
+        issue: sampleIssue({ number: 89, title: "Legacy run" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-nograph", "running");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const runPage = await app.request("/runs/run-nograph");
+      expect(runPage.status).toBe(200);
+      const body = await runPage.text();
+      expect(body).not.toContain("workflow-graph.json");
+      expect(body).toContain("Legacy run");
     } finally {
       test.cleanup();
     }

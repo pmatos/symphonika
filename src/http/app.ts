@@ -398,11 +398,15 @@ async function streamWorkflowGraphFile(
   if (detail === undefined) {
     return context.json({ error: "run not found" }, 404);
   }
-  const filePath = request.attemptNumber === null
-    ? detail.workflowGraphPath
-    : detail.attempts.find(
-        (attempt) => attempt.attemptNumber === request.attemptNumber
-      )?.workflowGraphPath ?? "";
+  const attemptNumber = request.attemptNumber ?? 1;
+  const attemptPath = detail.attempts.find(
+    (attempt) => attempt.attemptNumber === attemptNumber
+  )?.workflowGraphPath;
+  const filePath = (attemptPath !== undefined && attemptPath.length > 0)
+    ? attemptPath
+    : request.attemptNumber === null
+      ? detail.workflowGraphPath
+      : "";
   if (filePath.length === 0) {
     return context.json({ error: "file not yet recorded" }, 404);
   }

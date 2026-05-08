@@ -576,6 +576,101 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("serves the original attempt-1 workflow-graph.json after a retry overwrites the run-level path", async () => {
+    const test = await setup();
+    try {
+      const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-graph-retry");
+      await mkdir(evidenceDir, { recursive: true });
+      const attempt1Path = path.join(evidenceDir, "workflow-graph.json");
+      const attempt2Path = path.join(evidenceDir, "workflow-graph.attempt-2.json");
+      await writeFile(
+        attempt1Path,
+        JSON.stringify({
+          contentHash: "sha256:" + "1".repeat(64),
+          initial: "run_agent",
+          name: "single_agent_workflow",
+          source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
+          states: [],
+          templateFiles: []
+        })
+      );
+      await writeFile(
+        attempt2Path,
+        JSON.stringify({
+          contentHash: "sha256:" + "2".repeat(64),
+          initial: "run_agent",
+          name: "single_agent_workflow_v2",
+          source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
+          states: [],
+          templateFiles: []
+        })
+      );
+
+      test.runStore.createRun({
+        id: "run-graph-retry",
+        issue: sampleIssue({ number: 93 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      const baseAttempt = {
+        branchName: "sym/run-graph-retry",
+        branchRef: "refs/heads/sym/run-graph-retry",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        providerCommand: "x",
+        providerName: "codex" as const,
+        rawLogPath: "",
+        runId: "run-graph-retry",
+        state: "running" as const,
+        workspacePath: test.stateRoot
+      };
+      test.runStore.createAttempt({
+        ...baseAttempt,
+        attemptNumber: 1,
+        id: "run-graph-retry-attempt-1",
+        workflowGraphPath: attempt1Path
+      });
+      test.runStore.createAttempt({
+        ...baseAttempt,
+        attemptNumber: 2,
+        id: "run-graph-retry-attempt-2",
+        workflowGraphPath: attempt2Path
+      });
+      test.runStore.updateRunEvidence("run-graph-retry", {
+        branchName: baseAttempt.branchName,
+        branchRef: baseAttempt.branchRef,
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        rawLogPath: "",
+        workflowGraphPath: attempt2Path,
+        workspacePath: test.stateRoot
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const original = await app.request("/logs/runs/run-graph-retry/workflow-graph.json");
+      expect(original.status).toBe(200);
+      const originalBody = await original.text();
+      expect(JSON.parse(originalBody)).toMatchObject({ name: "single_agent_workflow" });
+
+      const latest = await app.request("/logs/runs/run-graph-retry/workflow-graph.attempt-2.json");
+      expect(latest.status).toBe(200);
+      const latestBody = await latest.text();
+      expect(JSON.parse(latestBody)).toMatchObject({ name: "single_agent_workflow_v2" });
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("serves per-attempt workflow-graph.attempt-N.json files", async () => {
     const test = await setup();
     try {

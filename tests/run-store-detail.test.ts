@@ -65,6 +65,7 @@ describe("RunStore detail queries", () => {
         rawLogPath: "/tmp/raw.jsonl",
         runId: "run-A",
         state: "running",
+        workflowGraphPath: "",
         workspacePath: "/tmp/work"
       });
       store.updateRunState("run-A", "running");
@@ -86,6 +87,102 @@ describe("RunStore detail queries", () => {
         "preparing_workspace",
         "running"
       ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("updateRunEvidence persists workflowGraphPath and getRun returns it on the run", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.createRun({
+        id: "run-graph",
+        issue: sampleIssue(),
+        projectName: "symphonika",
+        providerCommand: "codex",
+        providerName: "codex"
+      });
+      store.updateRunEvidence("run-graph", {
+        branchName: "sym/symphonika/42-graph",
+        branchRef: "refs/heads/sym/symphonika/42-graph",
+        issueSnapshotPath: "/tmp/snap.json",
+        metadataPath: "/tmp/meta.json",
+        normalizedLogPath: "/tmp/normalized.jsonl",
+        promptPath: "/tmp/prompt.md",
+        rawLogPath: "/tmp/raw.jsonl",
+        workflowGraphPath: "/tmp/workflow-graph.json",
+        workspacePath: "/tmp/work"
+      });
+
+      const detail = store.getRun("run-graph");
+      expect(detail?.workflowGraphPath).toBe("/tmp/workflow-graph.json");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("listAttempts surfaces per-attempt workflowGraphPath including the suffixed retry file", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.createRun({
+        id: "run-attempts",
+        issue: sampleIssue(),
+        projectName: "symphonika",
+        providerCommand: "codex",
+        providerName: "codex"
+      });
+      const baseAttempt = {
+        branchName: "sym/symphonika/42-attempts",
+        branchRef: "refs/heads/sym/symphonika/42-attempts",
+        issueSnapshotPath: "/tmp/snap.json",
+        metadataPath: "/tmp/meta.json",
+        normalizedLogPath: "/tmp/normalized.jsonl",
+        promptPath: "/tmp/prompt.md",
+        providerCommand: "codex",
+        providerName: "codex" as const,
+        rawLogPath: "/tmp/raw.jsonl",
+        runId: "run-attempts",
+        state: "running" as const,
+        workspacePath: "/tmp/work"
+      };
+      store.createAttempt({
+        ...baseAttempt,
+        attemptNumber: 1,
+        id: "run-attempts-attempt-1",
+        workflowGraphPath: "/tmp/workflow-graph.json"
+      });
+      store.createAttempt({
+        ...baseAttempt,
+        attemptNumber: 2,
+        id: "run-attempts-attempt-2",
+        workflowGraphPath: "/tmp/workflow-graph.attempt-2.json"
+      });
+
+      const detail = store.getRun("run-attempts");
+      expect(detail?.attempts.map((a) => a.workflowGraphPath)).toEqual([
+        "/tmp/workflow-graph.json",
+        "/tmp/workflow-graph.attempt-2.json"
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("getRun returns an empty workflowGraphPath for runs persisted before the column existed", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.createRun({
+        id: "run-legacy",
+        issue: sampleIssue(),
+        projectName: "symphonika",
+        providerCommand: "codex",
+        providerName: "codex"
+      });
+      const detail = store.getRun("run-legacy");
+      expect(detail?.workflowGraphPath).toBe("");
     } finally {
       store.close();
     }
@@ -172,6 +269,7 @@ describe("RunStore detail queries", () => {
         rawLogPath: "/tmp/raw.jsonl",
         runId: "r-events",
         state: "running",
+        workflowGraphPath: "",
         workspacePath: "/tmp/work"
       });
       for (let i = 1; i <= 5; i += 1) {

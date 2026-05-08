@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { InvalidArgumentError, Command } from "commander";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -545,6 +546,11 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         writeOut(program, `provider.normalized.jsonl: ${formatEvidencePath(detail.normalizedLogPath)}\n`);
         writeOut(program, `issue-snapshot.json:       ${formatEvidencePath(detail.issueSnapshotPath)}\n`);
         writeOut(program, `prompt-metadata.json:      ${formatEvidencePath(detail.metadataPath)}\n`);
+        writeOut(
+          program,
+          `workflow-graph.json:       ${formatEvidencePath(detail.workflowGraphPath)}\n`
+        );
+        writeOut(program, formatWorkflowGraphSummary(detail.workflowGraphPath));
         writeOut(program, `retries:      ${detail.retryCount}${detail.isContinuation ? " (continuation)" : ""}\n`);
         if (detail.terminalReason !== null) {
           writeOut(program, `terminal:     ${detail.terminalReason}\n`);
@@ -1159,6 +1165,47 @@ function formatPath(value: string): string {
 
 function formatEvidencePath(value: string): string {
   return formatPath(value);
+}
+
+function formatWorkflowGraphSummary(graphPath: string): string {
+  if (graphPath.length === 0) {
+    return "workflow:     (no workflow graph evidence)\n";
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(graphPath, "utf8"));
+  } catch {
+    return "workflow:     (no workflow graph evidence)\n";
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return "workflow:     (no workflow graph evidence)\n";
+  }
+  const graph = parsed as {
+    contentHash?: unknown;
+    initial?: unknown;
+    name?: unknown;
+    source?: { kind?: unknown; path?: unknown };
+    states?: unknown;
+  };
+  const name = typeof graph.name === "string" ? graph.name : "(unknown)";
+  const sourceKind =
+    typeof graph.source?.kind === "string" ? graph.source.kind : "(unknown)";
+  const sourcePath =
+    typeof graph.source?.path === "string" ? graph.source.path : "(unknown)";
+  const initial =
+    typeof graph.initial === "string" ? graph.initial : "(unknown)";
+  const stateCount = Array.isArray(graph.states) ? graph.states.length : 0;
+  const contentHash =
+    typeof graph.contentHash === "string" ? graph.contentHash : "(unknown)";
+  return [
+    `workflow:     ${name}`,
+    `source kind:  ${sourceKind}`,
+    `source path:  ${sourcePath}`,
+    `initial:      ${initial}`,
+    `states:       ${stateCount}`,
+    `content hash: ${contentHash}`,
+    ""
+  ].join("\n");
 }
 
 function formatRecentRunSuffix(

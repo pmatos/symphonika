@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { Hono } from "hono";
 
 import type {
@@ -101,6 +103,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     const sections = [
       `<h1>Run ${escapeHtml(detail.id)}</h1>`,
       renderRunSummary(detail, capContext),
+      renderWorkflowGraphSummary(detail.workflowGraphPath),
       renderCancelForm(detail),
       renderAttemptsTable(detail.attempts),
       renderTransitionsTable(detail.transitions),
@@ -393,10 +396,61 @@ function renderRunFileLinks(detail: RunStatus): string {
   );
   linkIfPresent("issue-snapshot.json", "issue-snapshot.json", detail.issueSnapshotPath);
   linkIfPresent("prompt-metadata.json", "prompt-metadata.json", detail.metadataPath);
+  if (detail.workflowGraphPath.length > 0) {
+    const fileName = path_basename(detail.workflowGraphPath);
+    items.push(
+      `<li><a href="/logs/runs/${encodeURIComponent(detail.id)}/${encodeURIComponent(fileName)}">${escapeHtml(fileName)}</a></li>`
+    );
+  }
   if (items.length === 0) {
     return "";
   }
   return `<section><h2>Files</h2><ul>${items.join("")}</ul></section>`;
+}
+
+function renderWorkflowGraphSummary(graphPath: string): string {
+  if (graphPath.length === 0) {
+    return "";
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(graphPath, "utf8"));
+  } catch {
+    return "";
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return "";
+  }
+  const graph = parsed as {
+    contentHash?: unknown;
+    initial?: unknown;
+    name?: unknown;
+    source?: { kind?: unknown; path?: unknown };
+    states?: unknown;
+  };
+  const name = typeof graph.name === "string" ? graph.name : "(unknown)";
+  const sourceKind =
+    typeof graph.source?.kind === "string" ? graph.source.kind : "(unknown)";
+  const sourcePath =
+    typeof graph.source?.path === "string" ? graph.source.path : "(unknown)";
+  const initial =
+    typeof graph.initial === "string" ? graph.initial : "(unknown)";
+  const stateCount = Array.isArray(graph.states) ? graph.states.length : 0;
+  const contentHash =
+    typeof graph.contentHash === "string" ? graph.contentHash : "(unknown)";
+  return `<section><h2>Workflow graph</h2>
+<p><strong>Name:</strong> <code>${escapeHtml(name)}</code></p>
+<p><strong>Source kind:</strong> ${escapeHtml(sourceKind)}</p>
+<p><strong>Source path:</strong> <code>${escapeHtml(sourcePath)}</code></p>
+<p><strong>Initial state:</strong> <code>${escapeHtml(initial)}</code></p>
+<p><strong>States:</strong> ${stateCount}</p>
+<p><strong>Content hash:</strong> <code>${escapeHtml(contentHash)}</code></p>
+</section>`;
+}
+
+function path_basename(p: string): string {
+  const ix = p.lastIndexOf("/");
+  return ix === -1 ? p : p.slice(ix + 1);
 }
 
 function escapeHtml(value: string): string {

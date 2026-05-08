@@ -53,6 +53,8 @@ export type RenderedAutonomousPrompt = {
 };
 
 export type PersistRunEvidenceInput = RenderAutonomousPromptInput & {
+  attemptNumber: number;
+  expandedWorkflow: ExpandedWorkflow;
   renderedPrompt: RenderedAutonomousPrompt;
   stateRoot: string;
 };
@@ -62,6 +64,7 @@ export type RunEvidencePaths = {
   metadataPath: string;
   promptPath: string;
   runEvidenceDirectory: string;
+  workflowGraphPath: string;
 };
 
 export type WorkflowContract = {
@@ -458,7 +461,7 @@ export function validateWorkflowTemplate(
   return errors;
 }
 
-function expandWorkflowDefinition(
+export function expandWorkflowDefinition(
   contents: string,
   workflowPath: string
 ): ExpandedWorkflowLoadResult {
@@ -941,6 +944,10 @@ export async function persistRunEvidence(
   const promptPath = path.join(runEvidenceDirectory, "prompt.md");
   const metadataPath = path.join(runEvidenceDirectory, "prompt-metadata.json");
   const issueSnapshotPath = path.join(runEvidenceDirectory, "issue-snapshot.json");
+  const workflowGraphPath = path.join(
+    runEvidenceDirectory,
+    workflowGraphFileName(input.attemptNumber)
+  );
   const metadata = {
     autonomy_preamble_version: input.renderedPrompt.preambleVersion,
     branch: input.branch,
@@ -953,6 +960,7 @@ export async function persistRunEvidence(
     workspace: input.workspace,
     workflow: {
       content_hash: input.renderedPrompt.workflowContentHash,
+      graph_path: workflowGraphPath,
       path: input.workflowPath
     }
   };
@@ -964,6 +972,11 @@ export async function persistRunEvidence(
       issueSnapshotPath,
       `${JSON.stringify(input.issue, null, 2)}\n`,
       "utf8"
+    ),
+    writeFile(
+      workflowGraphPath,
+      `${JSON.stringify(input.expandedWorkflow, null, 2)}\n`,
+      "utf8"
     )
   ]);
 
@@ -971,8 +984,15 @@ export async function persistRunEvidence(
     issueSnapshotPath,
     metadataPath,
     promptPath,
-    runEvidenceDirectory
+    runEvidenceDirectory,
+    workflowGraphPath
   };
+}
+
+function workflowGraphFileName(attemptNumber: number): string {
+  return attemptNumber === 1
+    ? "workflow-graph.json"
+    : `workflow-graph.attempt-${attemptNumber}.json`;
 }
 
 function previousAttemptNotice(workspace: PromptWorkspace): string {

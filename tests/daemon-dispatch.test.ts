@@ -221,8 +221,41 @@ describe("daemon dispatch", () => {
           "provider.raw.jsonl"
         ),
         state: "succeeded",
+        workflowGraphPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-issue-8",
+          "workflow-graph.json"
+        ),
         workspacePath
       });
+
+      const graphContents = JSON.parse(
+        await readFile(run.workflowGraphPath, "utf8")
+      ) as Record<string, unknown>;
+      expect(graphContents).toMatchObject({
+        initial: "run_agent",
+        name: "single_agent_workflow",
+        source: { kind: "markdown" }
+      });
+      expect(path.relative(workspacePath, run.workflowGraphPath)).toMatch(
+        /^\.\./
+      );
+
+      const promptMetadataPath = path.join(
+        root,
+        ".symphonika",
+        "logs",
+        "runs",
+        "run-issue-8",
+        "prompt-metadata.json"
+      );
+      const promptMetadata = JSON.parse(
+        await readFile(promptMetadataPath, "utf8")
+      ) as { workflow: { content_hash: string } };
+      expect(graphContents.contentHash).toBe(promptMetadata.workflow.content_hash);
 
       expect(path.relative(workspacePath, run.promptPath)).toMatch(/^\.\./);
       await expect(readFile(run.promptPath, "utf8")).resolves.toContain(
@@ -854,6 +887,10 @@ async function writeValidProject(
   await writeFile(
     path.join(root, "WORKFLOW.md"),
     [
+      "---",
+      "autonomy:",
+      "  max_turns: 8",
+      "---",
       "Work on #{{issue.number}}: {{issue.title}}.",
       "Use {{workspace.path}} on {{branch.name}}.",
       "Provider {{provider.name}} is running {{provider.command}}.",
@@ -872,6 +909,7 @@ type StatusRun = {
   provider: string;
   rawLogPath: string;
   state: string;
+  workflowGraphPath: string;
   workspacePath: string;
 };
 

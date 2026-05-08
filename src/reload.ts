@@ -21,8 +21,8 @@ import {
   pullRequestFollowupPolicyFromRaw
 } from "./pull-request-followup.js";
 import {
-  loadWorkflowContract,
-  validateWorkflowTemplate
+  expandWorkflowDefinition,
+  parseWorkflowContract
 } from "./workflow.js";
 
 export type RuntimeConfigSnapshot = {
@@ -337,19 +337,17 @@ async function readWorkflowSnapshot(
   workflowPath: string,
   errors: string[]
 ): Promise<WorkflowSnapshot | undefined> {
-  let workflow;
+  let contents: string;
   try {
-    workflow = await loadWorkflowContract(workflowPath);
+    contents = await readFile(workflowPath, "utf8");
   } catch (error) {
     errors.push(`workflow contract not found at ${workflowPath}: ${errorMessage(error)}`);
     return undefined;
   }
 
-  const workflowErrors = [...workflow.errors];
-  if (workflow.body.trim().length === 0) {
-    workflowErrors.push(`workflow contract at ${workflowPath} must not be empty`);
-  }
-  workflowErrors.push(...validateWorkflowTemplate(workflow.body, workflowPath));
+  const workflow = parseWorkflowContract(contents, workflowPath);
+  const expanded = expandWorkflowDefinition(contents, workflowPath);
+  const workflowErrors = [...workflow.errors, ...expanded.errors];
   if (workflowErrors.length > 0) {
     errors.push(...workflowErrors);
     return undefined;

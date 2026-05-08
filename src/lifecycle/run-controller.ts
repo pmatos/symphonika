@@ -27,12 +27,15 @@ import type {
   PrepareIssueWorkspaceInput
 } from "../workspace.js";
 import { prepareIssueWorkspace as defaultPrepareIssueWorkspace } from "../workspace.js";
+import { readFile } from "node:fs/promises";
+
 import {
-  loadWorkflowContract,
+  expandWorkflowDefinition,
+  parseWorkflowContract,
   persistRunEvidence,
   renderAutonomousPrompt
 } from "../workflow.js";
-import type { WorkflowContract } from "../workflow.js";
+import type { ExpandedWorkflow } from "../workflow.js";
 
 import {
   ActiveRunRegistry,
@@ -48,6 +51,14 @@ import { buildCapReachedReason } from "./terminal-reason.js";
 export type WorkflowSnapshot = {
   body: string;
   contentHash: string;
+  path: string;
+};
+
+type LoadedWorkflow = {
+  body: string;
+  contentHash: string;
+  errors: string[];
+  expandedWorkflow: ExpandedWorkflow;
   path: string;
 };
 
@@ -145,6 +156,7 @@ type AttemptEvidence = {
   normalizedLogPath: string;
   promptPath: string;
   rawLogPath: string;
+  workflowGraphPath: string;
   workspacePath: string;
 };
 
@@ -973,6 +985,8 @@ export class RunController {
     const renderedPrompt = renderAutonomousPrompt(promptInput);
     const evidence = await persistRunEvidence({
       ...promptInput,
+      attemptNumber: input.attemptNumber,
+      expandedWorkflow: workflow.expandedWorkflow,
       renderedPrompt,
       stateRoot: this.stateRoot
     });
@@ -998,6 +1012,7 @@ export class RunController {
       normalizedLogPath,
       promptPath: evidence.promptPath,
       rawLogPath,
+      workflowGraphPath: evidence.workflowGraphPath,
       workspacePath: prepared.workspacePath
     };
     this.runStore.updateRunEvidence(input.runId, attemptEvidence);
@@ -1012,15 +1027,27 @@ export class RunController {
 
   private async loadWorkflow(
     workflow: string | WorkflowSnapshot
-  ): Promise<WorkflowContract> {
+  ): Promise<LoadedWorkflow> {
     if (typeof workflow === "string") {
-      return loadWorkflowContract(path.resolve(this.configDir, workflow));
+      const workflowPath = path.resolve(this.configDir, workflow);
+      const contents = await readFile(workflowPath, "utf8");
+      const contract = parseWorkflowContract(contents, workflowPath);
+      const expanded = expandWorkflowDefinition(contents, workflowPath);
+      return {
+        body: contract.body,
+        contentHash: contract.contentHash,
+        errors: [...contract.errors, ...expanded.errors],
+        expandedWorkflow: expanded.workflow,
+        path: workflowPath
+      };
     }
 
+    const expanded = expandWorkflowDefinition(workflow.body, workflow.path);
     return {
       body: workflow.body,
       contentHash: workflow.contentHash,
-      errors: [],
+      errors: expanded.errors,
+      expandedWorkflow: { ...expanded.workflow, contentHash: workflow.contentHash },
       path: workflow.path
     };
   }

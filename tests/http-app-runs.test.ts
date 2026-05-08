@@ -202,6 +202,7 @@ describe("HTTP app — runs API and pages", () => {
         normalizedLogPath: "",
         promptPath: "",
         rawLogPath,
+        workflowGraphPath: "",
         workspacePath: test.stateRoot
       });
 
@@ -232,6 +233,7 @@ describe("HTTP app — runs API and pages", () => {
         normalizedLogPath: "",
         promptPath: "",
         rawLogPath: escaping,
+        workflowGraphPath: "",
         workspacePath: test.stateRoot
       });
 
@@ -403,6 +405,7 @@ describe("HTTP app — runs API and pages", () => {
         normalizedLogPath: "",
         promptPath: "",
         rawLogPath,
+        workflowGraphPath: "",
         workspacePath: test.stateRoot
       });
       test.runStore.createAttempt({
@@ -419,6 +422,7 @@ describe("HTTP app — runs API and pages", () => {
         rawLogPath,
         runId: "run-page",
         state: "running",
+        workflowGraphPath: "",
         workspacePath: test.stateRoot
       });
       const detail = test.runStore.getRun("run-page");
@@ -453,6 +457,328 @@ describe("HTTP app — runs API and pages", () => {
       expect(runPageBody).toContain("run-page-attempt-1");
       expect(runPageBody).toContain(detail?.attempts[0]?.createdAt);
       expect(runPageBody).toContain("/logs/runs/run-page/provider.raw.jsonl");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("renders the workflow graph summary and link on the run-detail page", async () => {
+    const test = await setup();
+    try {
+      const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-graph");
+      await mkdir(evidenceDir, { recursive: true });
+      const graphPath = path.join(evidenceDir, "workflow-graph.json");
+      await writeFile(
+        graphPath,
+        JSON.stringify(
+          {
+            contentHash: "sha256:" + "b".repeat(64),
+            initial: "run_agent",
+            name: "single_agent_workflow",
+            source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
+            states: [
+              { id: "run_agent", completeWhen: {}, transitions: [] },
+              { id: "done", completeWhen: {}, terminal: "success", transitions: [] }
+            ],
+            templateFiles: []
+          },
+          null,
+          2
+        )
+      );
+
+      test.runStore.createRun({
+        id: "run-graph",
+        issue: sampleIssue({ number: 88, title: "Graph visible" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-graph", "running");
+      test.runStore.updateRunEvidence("run-graph", {
+        branchName: "sym/run-graph",
+        branchRef: "refs/heads/sym/run-graph",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        rawLogPath: "",
+        workflowGraphPath: graphPath,
+        workspacePath: test.stateRoot
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const runPage = await app.request("/runs/run-graph");
+      expect(runPage.status).toBe(200);
+      const body = await runPage.text();
+      expect(body).toContain("single_agent_workflow");
+      expect(body).toContain("markdown");
+      expect(body).toContain("run_agent");
+      expect(body).toContain(`href="/logs/runs/run-graph/workflow-graph.json"`);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("serves the workflow-graph.json file for runs with graph evidence", async () => {
+    const test = await setup();
+    try {
+      const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-graph-serve");
+      await mkdir(evidenceDir, { recursive: true });
+      const graphPath = path.join(evidenceDir, "workflow-graph.json");
+      const graphJson = JSON.stringify({
+        contentHash: "sha256:" + "c".repeat(64),
+        initial: "run_agent",
+        name: "single_agent_workflow",
+        source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
+        states: [],
+        templateFiles: []
+      });
+      await writeFile(graphPath, graphJson);
+
+      test.runStore.createRun({
+        id: "run-graph-serve",
+        issue: sampleIssue({ number: 90 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunEvidence("run-graph-serve", {
+        branchName: "sym/run-graph-serve",
+        branchRef: "refs/heads/sym/run-graph-serve",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        rawLogPath: "",
+        workflowGraphPath: graphPath,
+        workspacePath: test.stateRoot
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/logs/runs/run-graph-serve/workflow-graph.json");
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      const body = await response.text();
+      expect(JSON.parse(body)).toMatchObject({ name: "single_agent_workflow" });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("serves the original attempt-1 workflow-graph.json after a retry overwrites the run-level path", async () => {
+    const test = await setup();
+    try {
+      const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-graph-retry");
+      await mkdir(evidenceDir, { recursive: true });
+      const attempt1Path = path.join(evidenceDir, "workflow-graph.json");
+      const attempt2Path = path.join(evidenceDir, "workflow-graph.attempt-2.json");
+      await writeFile(
+        attempt1Path,
+        JSON.stringify({
+          contentHash: "sha256:" + "1".repeat(64),
+          initial: "run_agent",
+          name: "single_agent_workflow",
+          source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
+          states: [],
+          templateFiles: []
+        })
+      );
+      await writeFile(
+        attempt2Path,
+        JSON.stringify({
+          contentHash: "sha256:" + "2".repeat(64),
+          initial: "run_agent",
+          name: "single_agent_workflow_v2",
+          source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
+          states: [],
+          templateFiles: []
+        })
+      );
+
+      test.runStore.createRun({
+        id: "run-graph-retry",
+        issue: sampleIssue({ number: 93 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      const baseAttempt = {
+        branchName: "sym/run-graph-retry",
+        branchRef: "refs/heads/sym/run-graph-retry",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        providerCommand: "x",
+        providerName: "codex" as const,
+        rawLogPath: "",
+        runId: "run-graph-retry",
+        state: "running" as const,
+        workspacePath: test.stateRoot
+      };
+      test.runStore.createAttempt({
+        ...baseAttempt,
+        attemptNumber: 1,
+        id: "run-graph-retry-attempt-1",
+        workflowGraphPath: attempt1Path
+      });
+      test.runStore.createAttempt({
+        ...baseAttempt,
+        attemptNumber: 2,
+        id: "run-graph-retry-attempt-2",
+        workflowGraphPath: attempt2Path
+      });
+      test.runStore.updateRunEvidence("run-graph-retry", {
+        branchName: baseAttempt.branchName,
+        branchRef: baseAttempt.branchRef,
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        rawLogPath: "",
+        workflowGraphPath: attempt2Path,
+        workspacePath: test.stateRoot
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const original = await app.request("/logs/runs/run-graph-retry/workflow-graph.json");
+      expect(original.status).toBe(200);
+      const originalBody = await original.text();
+      expect(JSON.parse(originalBody)).toMatchObject({ name: "single_agent_workflow" });
+
+      const latest = await app.request("/logs/runs/run-graph-retry/workflow-graph.attempt-2.json");
+      expect(latest.status).toBe(200);
+      const latestBody = await latest.text();
+      expect(JSON.parse(latestBody)).toMatchObject({ name: "single_agent_workflow_v2" });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("serves per-attempt workflow-graph.attempt-N.json files", async () => {
+    const test = await setup();
+    try {
+      const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-graph-attempt");
+      await mkdir(evidenceDir, { recursive: true });
+      const attemptGraphPath = path.join(evidenceDir, "workflow-graph.attempt-2.json");
+      await writeFile(
+        attemptGraphPath,
+        JSON.stringify({
+          contentHash: "sha256:" + "d".repeat(64),
+          initial: "run_agent",
+          name: "single_agent_workflow",
+          source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
+          states: [],
+          templateFiles: []
+        })
+      );
+
+      test.runStore.createRun({
+        id: "run-graph-attempt",
+        issue: sampleIssue({ number: 91 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.createAttempt({
+        attemptNumber: 2,
+        branchName: "sym/run-graph-attempt",
+        branchRef: "refs/heads/sym/run-graph-attempt",
+        id: "run-graph-attempt-attempt-2",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        providerCommand: "x",
+        providerName: "codex",
+        rawLogPath: "",
+        runId: "run-graph-attempt",
+        state: "running",
+        workflowGraphPath: attemptGraphPath,
+        workspacePath: test.stateRoot
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request(
+        "/logs/runs/run-graph-attempt/workflow-graph.attempt-2.json"
+      );
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(JSON.parse(body)).toMatchObject({ name: "single_agent_workflow" });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("returns 404 for an unknown workflow-graph attempt number", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "run-no-attempt",
+        issue: sampleIssue({ number: 92 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request(
+        "/logs/runs/run-no-attempt/workflow-graph.attempt-5.json"
+      );
+      expect(response.status).toBe(404);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("renders the run-detail page without the workflow graph block when no graph evidence exists", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "run-nograph",
+        issue: sampleIssue({ number: 89, title: "Legacy run" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-nograph", "running");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const runPage = await app.request("/runs/run-nograph");
+      expect(runPage.status).toBe(200);
+      const body = await runPage.text();
+      expect(body).not.toContain("workflow-graph.json");
+      expect(body).toContain("Legacy run");
     } finally {
       test.cleanup();
     }

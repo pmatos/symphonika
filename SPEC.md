@@ -355,6 +355,7 @@ Recommended layout:
         prompt.md
         prompt-metadata.json
         issue-snapshot.json
+        workflow-graph.json
 ```
 
 Agents may modify workspaces, so orchestrator evidence must stay outside the Git worktree.
@@ -375,6 +376,12 @@ Each provider attempt stores:
 - workspace path
 - issue branch
 - issue snapshot
+- expanded workflow graph (workflow name, source kind, source path, content hash, initial
+  state, states, transitions, terminal markers, template files), persisted as
+  `workflow-graph.json` next to `prompt-metadata.json`. Retries write
+  `workflow-graph.attempt-<N>.json` so prior attempts' graphs remain inspectable. Markdown
+  `WORKFLOW.md` workflows record their one-state compatibility graph; explicit raw FSM YAML
+  workflows record their parsed expanded graph without enabling multi-state dispatch.
 
 ## 8. Scheduling
 

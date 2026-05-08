@@ -397,6 +397,7 @@ describe("CLI run commands", () => {
       rawLogPath: "",
       runId: "show-1",
       state: "running",
+      workflowGraphPath: "",
       workspacePath: stateRoot
     });
     store.recordProviderEvent({
@@ -440,6 +441,94 @@ describe("CLI run commands", () => {
     expect(present.output.stdout).toContain("normalized events");
     expect(present.output.stdout).toContain("hello from provider");
     expect(present.output.stdout).toContain("<not yet recorded>");
+  });
+
+  it("show-run prints the workflow graph summary when graph evidence is present", async () => {
+    const stateRoot = await makeTempRoot();
+    const graphPath = path.join(stateRoot, "workflow-graph.json");
+    await writeFile(
+      graphPath,
+      JSON.stringify(
+        {
+          contentHash: "sha256:" + "a".repeat(64),
+          initial: "run_agent",
+          name: "single_agent_workflow",
+          source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
+          states: [
+            { id: "run_agent", completeWhen: {}, transitions: [] },
+            { id: "done", completeWhen: {}, terminal: "success", transitions: [] }
+          ],
+          templateFiles: []
+        },
+        null,
+        2
+      )
+    );
+
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "show-graph",
+      issue: sampleIssue({ number: 11, title: "Graph detail" }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunEvidence("show-graph", {
+      branchName: "sym/alpha/11-graph",
+      branchRef: "refs/heads/sym/alpha/11-graph",
+      issueSnapshotPath: "",
+      metadataPath: "",
+      normalizedLogPath: "",
+      promptPath: "",
+      rawLogPath: "",
+      workflowGraphPath: graphPath,
+      workspacePath: stateRoot
+    });
+    store.close();
+
+    const cfg = path.join(stateRoot, "symphonika.yml");
+    const present = captureProgram(stateRoot);
+    await present.program.parseAsync([
+      "node",
+      "symphonika",
+      "show-run",
+      "show-graph",
+      "--config",
+      cfg
+    ]);
+
+    expect(present.output.stdout).toContain("workflow:     single_agent_workflow");
+    expect(present.output.stdout).toContain("source kind:  markdown");
+    expect(present.output.stdout).toContain("source path:  /repo/WORKFLOW.md");
+    expect(present.output.stdout).toContain("initial:      run_agent");
+    expect(present.output.stdout).toContain("states:       2");
+    expect(present.output.stdout).toContain(`workflow-graph.json:       ${graphPath}`);
+  });
+
+  it("show-run reports no workflow graph evidence for runs without a graph file", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "show-nograph",
+      issue: sampleIssue({ number: 12, title: "Legacy" }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.close();
+
+    const cfg = path.join(stateRoot, "symphonika.yml");
+    const present = captureProgram(stateRoot);
+    await present.program.parseAsync([
+      "node",
+      "symphonika",
+      "show-run",
+      "show-nograph",
+      "--config",
+      cfg
+    ]);
+
+    expect(present.output.stdout).toContain("(no workflow graph evidence)");
   });
 
   it("cancel discovers the local daemon and posts to its cancel endpoint", async () => {

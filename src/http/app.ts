@@ -282,10 +282,20 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       const id = context.req.param("id");
       const fileName = context.req.param("fileName");
       const descriptor = LOG_FILE_DESCRIPTORS[fileName];
-      if (descriptor === undefined) {
-        return context.json({ error: "unknown file" }, 404);
+      if (descriptor !== undefined) {
+        return streamRunFile(context, runStore, options.stateRoot, id, descriptor);
       }
-      return streamRunFile(context, runStore, options.stateRoot, id, descriptor);
+      const workflowGraphRequest = parseWorkflowGraphFileName(fileName);
+      if (workflowGraphRequest !== undefined) {
+        return streamWorkflowGraphFile(
+          context,
+          runStore,
+          options.stateRoot,
+          id,
+          workflowGraphRequest
+        );
+      }
+      return context.json({ error: "unknown file" }, 404);
     });
 
     app.post("/api/runs/:id/cancel", async (context) => {
@@ -359,6 +369,59 @@ async function streamRunFile(
   if (typeof filePath !== "string" || filePath.length === 0) {
     return context.json({ error: "file not yet recorded" }, 404);
   }
+  return streamEvidenceFile(context, stateRoot, id, filePath, descriptor.contentType);
+}
+
+type WorkflowGraphRequest = { attemptNumber: number | null };
+
+function parseWorkflowGraphFileName(
+  fileName: string
+): WorkflowGraphRequest | undefined {
+  if (fileName === "workflow-graph.json") {
+    return { attemptNumber: null };
+  }
+  const match = /^workflow-graph\.attempt-(\d+)\.json$/.exec(fileName);
+  if (match === null) {
+    return undefined;
+  }
+  return { attemptNumber: Number(match[1]) };
+}
+
+async function streamWorkflowGraphFile(
+  context: Context,
+  runStore: RunStore,
+  stateRoot: string,
+  id: string,
+  request: WorkflowGraphRequest
+): Promise<Response> {
+  const detail = runStore.getRun(id);
+  if (detail === undefined) {
+    return context.json({ error: "run not found" }, 404);
+  }
+  const filePath = request.attemptNumber === null
+    ? detail.workflowGraphPath
+    : detail.attempts.find(
+        (attempt) => attempt.attemptNumber === request.attemptNumber
+      )?.workflowGraphPath ?? "";
+  if (filePath.length === 0) {
+    return context.json({ error: "file not yet recorded" }, 404);
+  }
+  return streamEvidenceFile(
+    context,
+    stateRoot,
+    id,
+    filePath,
+    "application/json; charset=utf-8"
+  );
+}
+
+async function streamEvidenceFile(
+  context: Context,
+  stateRoot: string,
+  id: string,
+  filePath: string,
+  contentType: string
+): Promise<Response> {
   const evidenceRoot = path.join(path.resolve(stateRoot), "logs", "runs", id);
   if (!isPathInside(filePath, evidenceRoot)) {
     return context.json({ error: "file not available" }, 404);
@@ -370,7 +433,7 @@ async function streamRunFile(
   }
   const stream: ReadStream = createReadStream(filePath);
   return new Response(Readable.toWeb(stream) as ReadableStream, {
-    headers: { "content-type": descriptor.contentType },
+    headers: { "content-type": contentType },
     status: 200
   });
 }

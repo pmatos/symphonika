@@ -1047,7 +1047,7 @@ export class RunController {
       body: workflow.body,
       contentHash: workflow.contentHash,
       errors: expanded.errors,
-      expandedWorkflow: expanded.workflow,
+      expandedWorkflow: { ...expanded.workflow, contentHash: workflow.contentHash },
       path: workflow.path
     };
   }

@@ -832,7 +832,8 @@ export class RunController {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           throw new Error(
-            `workflow state ${currentState.id} prompt not found at ${promptPath}: ${message}`
+            `workflow state ${currentState.id} prompt not found at ${promptPath}: ${message}`,
+            { cause: error }
           );
         }
       }

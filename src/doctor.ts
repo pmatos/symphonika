@@ -4,6 +4,7 @@ import { Octokit } from "@octokit/rest";
 import { parse } from "yaml";
 import { z } from "zod";
 
+import type { WorkflowFormat } from "./config-schemas.js";
 import { workflowReferenceSchema } from "./config-schemas.js";
 import {
   DEFAULT_GITHUB_ISSUES_API,
@@ -12,7 +13,7 @@ import {
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
-import { validateWorkflowContract } from "./workflow.js";
+import { loadExpandedWorkflow } from "./workflow.js";
 
 export { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 
@@ -261,7 +262,10 @@ export async function runDoctor(
       githubApi
     );
     const workflowPath = path.resolve(path.dirname(configPath), project.workflow.path);
-    const workflowErrors = await validateWorkflowContract(workflowPath);
+    const workflowErrors = await collectWorkflowErrors(
+      workflowPath,
+      project.workflow.format
+    );
     errors.push(...workflowErrors);
     const staleIssues = await fetchStaleIssues(
       project,
@@ -277,6 +281,19 @@ export async function runDoctor(
   }
 
   return report(configPath, errors, projects);
+}
+
+async function collectWorkflowErrors(
+  workflowPath: string,
+  format: WorkflowFormat
+): Promise<string[]> {
+  try {
+    const expanded = await loadExpandedWorkflow(workflowPath, format);
+    return expanded.errors;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return [`workflow contract not found at ${workflowPath}: ${message}`];
+  }
 }
 
 async function fetchStaleIssues(

@@ -355,6 +355,12 @@ export class RunStore {
       providerName: input.providerName,
       state: "queued"
     });
+    const parent = this.database
+      .prepare("select current_state_id from runs where id = ?")
+      .get(input.parentRunId) as { current_state_id: string | null } | undefined;
+    if (parent?.current_state_id != null) {
+      this.setRunCurrentState(input.id, parent.current_state_id);
+    }
   }
 
   createCapReachedFailureRun(input: {

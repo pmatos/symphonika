@@ -29,13 +29,18 @@ import type {
 import { prepareIssueWorkspace as defaultPrepareIssueWorkspace } from "../workspace.js";
 import { readFile } from "node:fs/promises";
 
+import type { WorkflowReference } from "../config-schemas.js";
 import {
   expandWorkflowDefinition,
   parseWorkflowContract,
   persistRunEvidence,
   renderAutonomousPrompt
 } from "../workflow.js";
-import type { ExpandedWorkflow } from "../workflow.js";
+import type {
+  ExpandedWorkflow,
+  ExpandedWorkflowState,
+  WorkflowPredicateMap
+} from "../workflow.js";
 
 import {
   ActiveRunRegistry,
@@ -46,6 +51,10 @@ import {
 } from "./active-runs.js";
 import { classifyCapReachedOutcome } from "./cap-reached-context.js";
 import { classifyFailure, type ClassifiedTerminal } from "./classify-failure.js";
+import {
+  decideNextStep,
+  findWorkflowState
+} from "./state-machine-dispatch.js";
 import { buildCapReachedReason } from "./terminal-reason.js";
 
 export type WorkflowSnapshot = {
@@ -64,7 +73,7 @@ type LoadedWorkflow = {
 };
 
 export type RunControllerProjectConfig = PollingProjectConfig & {
-  workflow: string | WorkflowSnapshot;
+  workflow: WorkflowReference | WorkflowSnapshot;
   workspace: {
     git: {
       base_branch: string;
@@ -777,6 +786,33 @@ export class RunController {
 
     this.runStore.updateRunState(input.runId, "preparing_workspace");
 
+    const loadedWorkflow = await this.loadWorkflow(input.project.workflow);
+    let projectForAttempt = input.project;
+    let currentState = undefined as
+      | ReturnType<typeof findWorkflowState>
+      | undefined;
+    if (loadedWorkflow.errors.length === 0) {
+      const persistedStateId = this.runStore.getRun(input.runId)?.currentStateId;
+      const startStateId =
+        persistedStateId ?? loadedWorkflow.expandedWorkflow.initial;
+      currentState = findWorkflowState(
+        loadedWorkflow.expandedWorkflow,
+        startStateId
+      );
+      if (currentState !== undefined) {
+        this.runStore.setRunCurrentState(input.runId, currentState.id);
+      }
+      projectForAttempt = {
+        ...input.project,
+        workflow: {
+          body: loadedWorkflow.body,
+          contentHash: loadedWorkflow.contentHash,
+          expandedWorkflow: loadedWorkflow.expandedWorkflow,
+          path: loadedWorkflow.path
+        }
+      };
+    }
+
     try {
       started = await this.startAttempt({
         attemptId,
@@ -786,7 +822,7 @@ export class RunController {
           : { extraInstructions: input.extraInstructions }),
         isContinuation: input.isContinuation,
         issue: input.issue,
-        project: input.project,
+        project: projectForAttempt,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
         runId: input.runId
@@ -864,6 +900,14 @@ export class RunController {
         terminal.reason,
         terminal.classification
       );
+      if (currentState !== undefined) {
+        this.applyWorkflowOutcome({
+          currentState,
+          runId: input.runId,
+          terminal,
+          workflow: loadedWorkflow.expandedWorkflow
+        });
+      }
       this.runStore.updateRunState(input.runId, outcomeState);
 
       const willRetry =
@@ -1026,14 +1070,60 @@ export class RunController {
     };
   }
 
+  private applyWorkflowOutcome(input: {
+    currentState: ExpandedWorkflowState;
+    runId: string;
+    terminal: ClassifiedTerminal;
+    workflow: ExpandedWorkflow;
+  }): void {
+    const signals = signalsFromTerminal(input.terminal);
+    const decision = decideNextStep({
+      actionExecuted: true,
+      signals,
+      state: input.currentState
+    });
+
+    if (decision.kind === "advance") {
+      const next = findWorkflowState(input.workflow, decision.to);
+      if (next?.terminal !== undefined) {
+        this.runStore.recordWorkflowTerminal(input.runId, {
+          terminalStateId: next.id,
+          transitionReason: decision.reason
+        });
+        return;
+      }
+      this.runStore.setRunCurrentState(input.runId, decision.to);
+      return;
+    }
+
+    if (decision.kind === "blocked") {
+      this.runStore.recordWorkflowTerminal(input.runId, {
+        terminalStateId: input.currentState.id,
+        transitionReason: decision.reason
+      });
+      return;
+    }
+
+    if (decision.kind === "terminate") {
+      this.runStore.recordWorkflowTerminal(input.runId, {
+        terminalStateId: decision.stateId,
+        transitionReason: `entered terminal state ${decision.terminal}`
+      });
+    }
+  }
+
   private async loadWorkflow(
-    workflow: string | WorkflowSnapshot
+    workflow: WorkflowReference | WorkflowSnapshot
   ): Promise<LoadedWorkflow> {
-    if (typeof workflow === "string") {
-      const workflowPath = path.resolve(this.configDir, workflow);
+    if (!("expandedWorkflow" in workflow)) {
+      const workflowPath = path.resolve(this.configDir, workflow.path);
       const contents = await readFile(workflowPath, "utf8");
       const contract = parseWorkflowContract(contents, workflowPath);
-      const expanded = expandWorkflowDefinition(contents, workflowPath);
+      const expanded = expandWorkflowDefinition(
+        contents,
+        workflowPath,
+        workflow.format
+      );
       return {
         body: contract.body,
         contentHash: contract.contentHash,
@@ -1560,4 +1650,16 @@ function normalizeProjectWeight(weight: number | undefined): number {
     return 1;
   }
   return weight;
+}
+
+function signalsFromTerminal(
+  terminal: ClassifiedTerminal
+): WorkflowPredicateMap {
+  if (terminal.kind === "success") {
+    return { branch_ahead_of_base: true, provider_success: true };
+  }
+  if (terminal.kind === "failed" && terminal.reason === "no_workspace_changes") {
+    return { branch_ahead_of_base: false, provider_success: true };
+  }
+  return { branch_ahead_of_base: false, provider_success: false };
 }

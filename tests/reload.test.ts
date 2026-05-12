@@ -157,7 +157,7 @@ describe("RuntimeConfigReloader workflow validation", () => {
     expect(project).toBeDefined();
     const workflow = project?.workflow;
     expect(typeof workflow).toBe("object");
-    if (typeof workflow === "string" || workflow === undefined) {
+    if (workflow === undefined || !("expandedWorkflow" in workflow)) {
       throw new Error("expected workflow snapshot to be an object");
     }
 

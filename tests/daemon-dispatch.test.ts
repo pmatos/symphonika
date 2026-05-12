@@ -788,7 +788,7 @@ describe("daemon dispatch", () => {
       throw new Error("expected reloader to expose symphonika project");
     }
     const snapshot = project.workflow;
-    if (typeof snapshot === "string") {
+    if (!("expandedWorkflow" in snapshot)) {
       throw new Error("expected reloader to expose a workflow snapshot");
     }
     const sentinelTemplate = "sentinel-only-in-snapshot.txt";
@@ -872,6 +872,174 @@ describe("daemon dispatch", () => {
       runStore.close();
     }
   });
+
+  it("walks a raw FSM workflow from the initial agent state to a terminal success state", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "symphonika",
+      "issues",
+      "8-dispatch-an-end-to-end-run-through-a-test-provider"
+    );
+    await writeRawFsmProject(root);
+
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 8,
+          title: "Dispatch an end-to-end run through a test provider"
+        })
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = successfulCodexProvider();
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => "run-raw-fsm-success",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      const status = await waitForRun(daemon.url, "succeeded");
+      const run = firstRun(status);
+      expect(run).toMatchObject({
+        id: "run-raw-fsm-success",
+        issueNumber: 8,
+        state: "succeeded",
+        workspacePath
+      });
+
+      const graphContents = JSON.parse(
+        await readFile(run.workflowGraphPath, "utf8")
+      ) as Record<string, unknown>;
+      expect(graphContents).toMatchObject({
+        initial: "run_agent",
+        name: "tracer_bullet",
+        source: { kind: "raw_fsm" }
+      });
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const storedRun = database
+          .prepare(
+            "select current_state_id, terminal_state_id, state_transition_reason from runs where id = ?"
+          )
+          .get("run-raw-fsm-success");
+        expect(storedRun).toMatchObject({
+          current_state_id: null,
+          terminal_state_id: "done"
+        });
+        const reason = stringColumn(storedRun, "state_transition_reason");
+        expect(reason).toContain("run_agent advanced to done");
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("records terminal_state_id at the stuck agent state when a raw FSM run fails", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "symphonika",
+      "issues",
+      "8-dispatch-an-end-to-end-run-through-a-test-provider"
+    );
+    await mkdir(workspacePath, { recursive: true });
+    await writeRawFsmProject(root);
+
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 8,
+          title: "Dispatch an end-to-end run through a test provider"
+        })
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex" as const,
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { code: 1, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => "run-raw-fsm-failed",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 0 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      const status = await waitForRun(daemon.url, "failed");
+      const run = firstRun(status);
+      expect(run).toMatchObject({
+        id: "run-raw-fsm-failed",
+        state: "failed"
+      });
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const storedRun = database
+          .prepare(
+            "select current_state_id, terminal_state_id, state_transition_reason from runs where id = ?"
+          )
+          .get("run-raw-fsm-failed");
+        expect(storedRun).toMatchObject({
+          current_state_id: null,
+          terminal_state_id: "run_agent"
+        });
+        const reason = stringColumn(storedRun, "state_transition_reason");
+        expect(reason).toContain("run_agent");
+        expect(reason).toContain("provider_success");
+        expect(reason).toContain("not satisfied");
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
 });
 
 function issueFixture(overrides: {
@@ -950,6 +1118,71 @@ function preparedWorkspaceFixture(root: string): PreparedIssueWorkspace {
     reused: false,
     workspacePath
   };
+}
+
+async function writeRawFsmProject(root: string): Promise<void> {
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "polling:",
+      "  interval_ms: 30000",
+      "providers:",
+      "  codex:",
+      `    command: "${DEFAULT_CODEX_COMMAND}"`,
+      "  claude:",
+      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      "projects:",
+      "  - name: symphonika",
+      "    disabled: false",
+      "    weight: 1",
+      "    tracker:",
+      "      kind: github",
+      "      owner: pmatos",
+      "      repo: symphonika",
+      '      token: "$GITHUB_TOKEN"',
+      "    issue_filters:",
+      '      states: ["open"]',
+      '      labels_all: ["agent-ready"]',
+      '      labels_none: ["blocked", "needs-human"]',
+      "    priority:",
+      "      labels:",
+      '        "priority:critical": 0',
+      "      default: 99",
+      "    workspace:",
+      "      root: ./.symphonika/workspaces/symphonika",
+      "      git:",
+      "        remote: git@github.com:pmatos/symphonika.git",
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      "    workflow: ./workflow.yml",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: tracer_bullet",
+      "  initial: run_agent",
+      "  states:",
+      "    run_agent:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: done",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n")
+  );
 }
 
 async function writeValidProject(

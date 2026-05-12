@@ -5,6 +5,8 @@ import type { Logger } from "pino";
 import { parse } from "yaml";
 import { z } from "zod";
 
+import type { WorkflowFormat } from "./config-schemas.js";
+import { workflowReferenceSchema } from "./config-schemas.js";
 import type {
   PollingProjectConfig,
   PollingServiceConfig
@@ -103,7 +105,7 @@ const runtimeProjectDetailSchema = z
           .passthrough()
       })
       .passthrough(),
-    workflow: z.string().trim().min(1)
+    workflow: workflowReferenceSchema
   })
   .passthrough();
 
@@ -269,7 +271,8 @@ async function loadRuntimeConfigSnapshot(input: {
     }
 
     const workflow = await readWorkflowSnapshot(
-      path.resolve(input.configDir, detail.data.workflow),
+      path.resolve(input.configDir, detail.data.workflow.path),
+      detail.data.workflow.format,
       errors
     );
     if (workflow === undefined) {
@@ -335,6 +338,7 @@ async function readRawServiceConfig(
 
 async function readWorkflowSnapshot(
   workflowPath: string,
+  format: WorkflowFormat,
   errors: string[]
 ): Promise<WorkflowSnapshot | undefined> {
   let contents: string;
@@ -346,7 +350,7 @@ async function readWorkflowSnapshot(
   }
 
   const workflow = parseWorkflowContract(contents, workflowPath);
-  const expanded = expandWorkflowDefinition(contents, workflowPath);
+  const expanded = expandWorkflowDefinition(contents, workflowPath, format);
   const workflowErrors = [...workflow.errors, ...expanded.errors];
   if (workflowErrors.length > 0) {
     errors.push(...workflowErrors);

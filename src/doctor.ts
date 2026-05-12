@@ -4,6 +4,7 @@ import { Octokit } from "@octokit/rest";
 import { parse } from "yaml";
 import { z } from "zod";
 
+import { workflowReferenceSchema } from "./config-schemas.js";
 import {
   DEFAULT_GITHUB_ISSUES_API,
   type GitHubIssuesApi
@@ -200,7 +201,7 @@ const projectSchema = z
         provider: providerNameSchema
       })
       .passthrough(),
-    workflow: pathStringSchema
+    workflow: workflowReferenceSchema
   })
   .passthrough();
 
@@ -259,7 +260,7 @@ export async function runDoctor(
       errors,
       githubApi
     );
-    const workflowPath = path.resolve(path.dirname(configPath), project.workflow);
+    const workflowPath = path.resolve(path.dirname(configPath), project.workflow.path);
     const workflowErrors = await validateWorkflowContract(workflowPath);
     errors.push(...workflowErrors);
     const staleIssues = await fetchStaleIssues(

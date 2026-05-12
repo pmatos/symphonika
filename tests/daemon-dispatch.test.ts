@@ -921,6 +921,17 @@ describe("daemon dispatch", () => {
         workspacePath
       });
 
+      // The rendered prompt should use the agent action's prompt file
+      // (prompt.md) rather than the YAML workflow body. The template
+      // substitutes {{issue.title}} so the resulting prompt contains the
+      // issue title verbatim and does NOT contain the raw YAML keywords.
+      const promptContents = await readFile(run.promptPath, "utf8");
+      expect(promptContents).toContain(
+        "Dispatch an end-to-end run through a test provider"
+      );
+      expect(promptContents).not.toContain("complete_when:");
+      expect(promptContents).not.toContain("workflow:\n  name:");
+
       const graphContents = JSON.parse(
         await readFile(run.workflowGraphPath, "utf8")
       ) as Record<string, unknown>;
@@ -1026,7 +1037,9 @@ describe("daemon dispatch", () => {
           )
           .get("run-raw-fsm-failed");
         expect(storedRun).toMatchObject({
-          current_state_id: null,
+          // Preserved so a transient retry (if scheduled) resumes at the
+          // stuck state instead of falling back to expandedWorkflow.initial.
+          current_state_id: "run_agent",
           terminal_state_id: "run_agent"
         });
         const reason = stringColumn(storedRun, "state_transition_reason");
@@ -1182,6 +1195,10 @@ async function writeRawFsmProject(root: string): Promise<void> {
       "      terminal: success",
       ""
     ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "prompt.md"),
+    "Work on #{{issue.number}}: {{issue.title}}.\n"
   );
 }
 

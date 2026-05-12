@@ -540,4 +540,8 @@ async function writeRawFsmTracerBulletProject(root: string): Promise<void> {
       ""
     ].join("\n")
   );
+  await writeFile(
+    path.join(root, "prompt.md"),
+    "Work on #{{issue.number}}: {{issue.title}}.\n"
+  );
 }

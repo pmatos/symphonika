@@ -432,6 +432,26 @@ export class RunStore {
       .run(input.terminalStateId, input.transitionReason, timestamp(), runId);
   }
 
+  recordWorkflowBlocked(
+    runId: string,
+    input: { stateId: string; transitionReason: string }
+  ): void {
+    // `current_state_id` is intentionally preserved so a transient retry
+    // (which reuses this run row) resumes at the stuck state instead of
+    // falling back to `expandedWorkflow.initial`.
+    this.database
+      .prepare(
+        [
+          "update runs set",
+          "terminal_state_id = ?,",
+          "state_transition_reason = ?,",
+          "updated_at = ?",
+          "where id = ?"
+        ].join(" ")
+      )
+      .run(input.stateId, input.transitionReason, timestamp(), runId);
+  }
+
   incrementRetryCount(runId: string): number {
     const updated = this.database
       .prepare(

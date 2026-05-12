@@ -814,6 +814,29 @@ export class RunController {
     }
 
     try {
+      // For raw FSM workflows, the agent action's `prompt` field points at the
+      // template file to send to the provider for this state. Resolve it here
+      // so startAttempt renders the right prompt (rather than the YAML body of
+      // the workflow file, which is meaningless input for the agent).
+      let promptTemplate: string | undefined;
+      if (
+        currentState !== undefined &&
+        loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm" &&
+        currentState.action?.kind === "agent" &&
+        currentState.action.prompt !== undefined
+      ) {
+        const workflowDir = path.dirname(loadedWorkflow.path);
+        const promptPath = path.resolve(workflowDir, currentState.action.prompt);
+        try {
+          promptTemplate = await readFile(promptPath, "utf8");
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `workflow state ${currentState.id} prompt not found at ${promptPath}: ${message}`
+          );
+        }
+      }
+
       started = await this.startAttempt({
         attemptId,
         attemptNumber: input.attemptNumber,
@@ -825,6 +848,7 @@ export class RunController {
         project: projectForAttempt,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
+        ...(promptTemplate === undefined ? {} : { promptTemplate }),
         runId: input.runId
       });
       await input.provider.validate(input.providerCommand);
@@ -985,6 +1009,7 @@ export class RunController {
     isContinuation: boolean;
     issue: IssueSnapshot;
     project: RunControllerProjectConfig;
+    promptTemplate?: string;
     providerCommand: string;
     providerName: AgentProviderName;
     runId: string;
@@ -1023,7 +1048,7 @@ export class RunController {
         continuation: input.isContinuation,
         id: input.runId
       },
-      template: workflow.body,
+      template: input.promptTemplate ?? workflow.body,
       workflowContentHash: workflow.contentHash,
       workflowPath,
       workspace: {
@@ -1102,8 +1127,8 @@ export class RunController {
     }
 
     if (decision.kind === "blocked") {
-      this.runStore.recordWorkflowTerminal(input.runId, {
-        terminalStateId: input.currentState.id,
+      this.runStore.recordWorkflowBlocked(input.runId, {
+        stateId: input.currentState.id,
         transitionReason: decision.reason
       });
       return { advancedToTerminal: false };
@@ -1126,12 +1151,25 @@ export class RunController {
     if (!("expandedWorkflow" in workflow)) {
       const workflowPath = path.resolve(this.configDir, workflow.path);
       const contents = await readFile(workflowPath, "utf8");
-      const contract = parseWorkflowContract(contents, workflowPath);
       const expanded = expandWorkflowDefinition(
         contents,
         workflowPath,
         workflow.format
       );
+      // Raw FSM YAML files commonly open with the `---` document marker; the
+      // markdown contract parser would reject those as missing a closing
+      // delimiter. Skip it entirely for raw FSM — per-state `action.prompt`
+      // files supply the actual prompt at dispatch time.
+      if (expanded.workflow.source.kind === "raw_fsm") {
+        return {
+          body: "",
+          contentHash: expanded.workflow.contentHash,
+          errors: expanded.errors,
+          expandedWorkflow: expanded.workflow,
+          path: workflowPath
+        };
+      }
+      const contract = parseWorkflowContract(contents, workflowPath);
       return {
         body: contract.body,
         contentHash: contract.contentHash,

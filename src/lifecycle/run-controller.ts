@@ -51,6 +51,7 @@ import { buildCapReachedReason } from "./terminal-reason.js";
 export type WorkflowSnapshot = {
   body: string;
   contentHash: string;
+  expandedWorkflow: ExpandedWorkflow;
   path: string;
 };
 
@@ -1042,12 +1043,11 @@ export class RunController {
       };
     }
 
-    const expanded = expandWorkflowDefinition(workflow.body, workflow.path);
     return {
       body: workflow.body,
       contentHash: workflow.contentHash,
-      errors: expanded.errors,
-      expandedWorkflow: { ...expanded.workflow, contentHash: workflow.contentHash },
+      errors: [],
+      expandedWorkflow: workflow.expandedWorkflow,
       path: workflow.path
     };
   }

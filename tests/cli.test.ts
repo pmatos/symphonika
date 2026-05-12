@@ -741,4 +741,99 @@ describe("CLI", () => {
       process.exitCode = previousExitCode;
     }
   });
+
+  it("reports the compatibility graph when validating a Markdown WORKFLOW.md", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeFile(
+      configPath,
+      [
+        "projects:",
+        "  - name: symphonika",
+        "    workflow: ./WORKFLOW.md",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}}.\n"
+    );
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({ registerSignalHandlers: false });
+    program.exitOverride();
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "workflow",
+      "validate",
+      "--config",
+      configPath,
+      "--project",
+      "symphonika"
+    ]);
+
+    expect(output.stderr).toBe("");
+    expect(output.stdout).toContain(
+      "workflow validate ok: symphonika -> single_agent_workflow"
+    );
+    expect(output.stdout).toContain(`source: ${path.join(root, "WORKFLOW.md")}`);
+    expect(output.stdout).toContain("states: 2");
+  });
+
+  it("explains the compatibility graph for a Markdown WORKFLOW.md", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeFile(
+      configPath,
+      [
+        "projects:",
+        "  - name: symphonika",
+        "    workflow: ./WORKFLOW.md",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}}.\n"
+    );
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({ registerSignalHandlers: false });
+    program.exitOverride();
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "workflow",
+      "explain",
+      "--config",
+      configPath,
+      "--project",
+      "symphonika"
+    ]);
+
+    expect(output.stderr).toBe("");
+    expect(output.stdout).toContain("workflow: single_agent_workflow");
+    expect(output.stdout).toContain(`source: ${path.join(root, "WORKFLOW.md")}`);
+    expect(output.stdout).toContain("initial: run_agent");
+    expect(output.stdout).toContain("state: run_agent");
+    expect(output.stdout).toContain("state: done");
+    expect(output.stdout).toContain("terminal: success");
+  });
 });

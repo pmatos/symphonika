@@ -6,11 +6,20 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startDaemon } from "../src/daemon.js";
+import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
+import {
+  RunController,
+  type RunControllerProjectConfig,
+  type WorkflowSnapshot
+} from "../src/lifecycle/run-controller.js";
 import type {
   AgentProvider,
   ProviderEvent,
   ProviderRunInput
 } from "../src/provider.js";
+import { RuntimeConfigReloader } from "../src/reload.js";
+import { openRunStore } from "../src/run-store.js";
+import { loadExpandedWorkflow } from "../src/workflow.js";
 import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
@@ -243,6 +252,12 @@ describe("daemon dispatch", () => {
       expect(path.relative(workspacePath, run.workflowGraphPath)).toMatch(
         /^\.\./
       );
+
+      const canonicalGraph = await loadExpandedWorkflow(
+        path.join(root, "WORKFLOW.md")
+      );
+      expect(canonicalGraph.errors).toEqual([]);
+      expect(graphContents).toEqual(canonicalGraph.workflow);
 
       const promptMetadataPath = path.join(
         root,
@@ -755,6 +770,106 @@ describe("daemon dispatch", () => {
       }
     } finally {
       await daemon.stop();
+    }
+  });
+
+  it("dispatches using the snapshot graph rather than re-expanding the workflow", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected reloader to expose symphonika project");
+    }
+    const snapshot = project.workflow;
+    if (typeof snapshot === "string") {
+      throw new Error("expected reloader to expose a workflow snapshot");
+    }
+    const sentinelTemplate = "sentinel-only-in-snapshot.txt";
+    const mutatedSnapshot: WorkflowSnapshot = {
+      ...snapshot,
+      expandedWorkflow: {
+        ...snapshot.expandedWorkflow,
+        templateFiles: [...snapshot.expandedWorkflow.templateFiles, sentinelTemplate]
+      }
+    };
+    const mutatedProject: RunControllerProjectConfig = {
+      ...project,
+      workflow: mutatedSnapshot
+    };
+
+    const codexProvider = successfulCodexProvider();
+    const runStore = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const controller = new RunController({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: codexProvider },
+        configDir: root,
+        createRunId: () => "run-sentinel",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+        },
+        lifecyclePolicy: {
+          continuation: { cap: 0, delayMs: 0 },
+          retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+        },
+        logger: pino({ enabled: false }),
+        prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[mutatedProject.name, mutatedProject]])),
+        providersLoader: () => Promise.resolve(reloader.providersConfig()),
+        runStore,
+        schedule: () => undefined,
+        stateRoot: path.join(root, ".symphonika")
+      });
+
+      const result = await controller.dispatchOneFresh({
+        candidateIssues: [
+          {
+            issue: {
+              body: "irrelevant",
+              created_at: "2026-05-01T10:00:00Z",
+              id: 5008,
+              labels: ["agent-ready"],
+              number: 8,
+              priority: 99,
+              state: "open",
+              title: "Dispatch an end-to-end run through a test provider",
+              updated_at: "2026-05-02T11:00:00Z",
+              url: "https://github.com/pmatos/symphonika/issues/8"
+            },
+            project: mutatedProject.name
+          }
+        ],
+        errors: [],
+        filteredIssues: [],
+        projects: []
+      });
+      expect(result).toEqual({ dispatched: true, runId: "run-sentinel" });
+
+      const graphPath = path.join(
+        root,
+        ".symphonika",
+        "logs",
+        "runs",
+        "run-sentinel",
+        "workflow-graph.json"
+      );
+      const graph = JSON.parse(await readFile(graphPath, "utf8")) as {
+        templateFiles: string[];
+      };
+      expect(graph.templateFiles).toContain(sentinelTemplate);
+    } finally {
+      runStore.close();
     }
   });
 });

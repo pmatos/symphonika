@@ -356,6 +356,7 @@ async function readWorkflowSnapshot(
   return {
     body: workflow.body,
     contentHash: workflow.contentHash,
+    expandedWorkflow: expanded.workflow,
     path: workflow.path
   };
 }

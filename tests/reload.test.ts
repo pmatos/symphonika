@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -138,5 +139,40 @@ describe("RuntimeConfigReloader workflow validation", () => {
     expect(status.errors).toEqual([]);
     expect(status.ok).toBe(true);
     expect(reloader.projectsByName().has("symphonika")).toBe(true);
+  });
+
+  it("exposes the expanded compatibility graph for a Markdown WORKFLOW.md", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    const workflowBody = "Work on {{issue.title}}.\n";
+    const workflowPath = path.join(root, "WORKFLOW.md");
+    await writeFile(workflowPath, workflowBody, "utf8");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    const project = reloader.projectsByName().get("symphonika");
+    expect(project).toBeDefined();
+    const workflow = project?.workflow;
+    expect(typeof workflow).toBe("object");
+    if (typeof workflow === "string" || workflow === undefined) {
+      throw new Error("expected workflow snapshot to be an object");
+    }
+
+    const onDisk = await readFile(workflowPath, "utf8");
+    const expectedHash = `sha256:${createHash("sha256").update(onDisk).digest("hex")}`;
+
+    expect(workflow.expandedWorkflow).toMatchObject({
+      initial: "run_agent",
+      name: "single_agent_workflow",
+      source: { kind: "markdown", path: workflowPath }
+    });
+    expect(workflow.expandedWorkflow.contentHash).toBe(expectedHash);
+    expect(workflow.expandedWorkflow.states.map((state) => state.id)).toEqual([
+      "run_agent",
+      "done"
+    ]);
   });
 });

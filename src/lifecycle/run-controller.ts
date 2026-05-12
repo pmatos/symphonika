@@ -900,14 +900,18 @@ export class RunController {
         terminal.reason,
         terminal.classification
       );
+      let advancedToTerminal = false;
       if (currentState !== undefined) {
-        this.applyWorkflowOutcome({
+        ({ advancedToTerminal } = this.applyWorkflowOutcome({
           currentState,
           runId: input.runId,
           terminal,
           workflow: loadedWorkflow.expandedWorkflow
-        });
+        }));
       }
+      const suppressContinuation =
+        advancedToTerminal &&
+        loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm";
       this.runStore.updateRunState(input.runId, outcomeState);
 
       const willRetry =
@@ -956,7 +960,8 @@ export class RunController {
           project: input.project,
           repository: input.repository,
           runId: input.runId,
-          runtimeAttemptNumber: input.attemptNumber
+          runtimeAttemptNumber: input.attemptNumber,
+          suppressContinuation
         });
       } catch (scheduleError) {
         this.logger?.error(
@@ -1075,7 +1080,7 @@ export class RunController {
     runId: string;
     terminal: ClassifiedTerminal;
     workflow: ExpandedWorkflow;
-  }): void {
+  }): { advancedToTerminal: boolean } {
     const signals = signalsFromTerminal(input.terminal);
     const decision = decideNextStep({
       actionExecuted: true,
@@ -1090,10 +1095,10 @@ export class RunController {
           terminalStateId: next.id,
           transitionReason: decision.reason
         });
-        return;
+        return { advancedToTerminal: true };
       }
       this.runStore.setRunCurrentState(input.runId, decision.to);
-      return;
+      return { advancedToTerminal: false };
     }
 
     if (decision.kind === "blocked") {
@@ -1101,7 +1106,7 @@ export class RunController {
         terminalStateId: input.currentState.id,
         transitionReason: decision.reason
       });
-      return;
+      return { advancedToTerminal: false };
     }
 
     if (decision.kind === "terminate") {
@@ -1109,7 +1114,10 @@ export class RunController {
         terminalStateId: decision.stateId,
         transitionReason: `entered terminal state ${decision.terminal}`
       });
+      return { advancedToTerminal: true };
     }
+
+    return { advancedToTerminal: false };
   }
 
   private async loadWorkflow(
@@ -1321,6 +1329,7 @@ export class RunController {
     repository: GitHubIssueRepositoryInput;
     runId: string;
     runtimeAttemptNumber: number;
+    suppressContinuation?: boolean;
   }): Promise<void> {
     if (input.outcome.kind === "cancelled" || input.outcome.kind === "input_required") {
       return;
@@ -1357,6 +1366,14 @@ export class RunController {
     }
 
     // success path: re-check eligibility, schedule continuation, enforce cap.
+    // For raw FSM workflows that reached an explicit terminal node, "terminal"
+    // means the workflow is done — do not schedule another continuation even
+    // if the issue still matches `agent-ready`. Markdown compatibility-graph
+    // workflows keep the legacy "loop on agent-ready" behavior.
+    if (input.suppressContinuation === true) {
+      return;
+    }
+
     const refreshed = await this.refreshIssue({
       project: input.project,
       issueNumber: input.issue.number,

@@ -414,6 +414,23 @@ export class RunStore {
       .run(currentStateId, timestamp(), runId);
   }
 
+  recordWorkflowStateAdvance(
+    runId: string,
+    input: { nextStateId: string; transitionReason: string }
+  ): void {
+    this.database
+      .prepare(
+        [
+          "update runs set",
+          "current_state_id = ?,",
+          "state_transition_reason = ?,",
+          "updated_at = ?",
+          "where id = ?"
+        ].join(" ")
+      )
+      .run(input.nextStateId, input.transitionReason, timestamp(), runId);
+  }
+
   recordWorkflowTerminal(
     runId: string,
     input: { terminalStateId: string; transitionReason: string }

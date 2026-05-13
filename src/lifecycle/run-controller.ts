@@ -92,7 +92,7 @@ export type ScheduleHandler = (input: {
   delayMs: number;
   fire: () => Promise<void>;
   issueNumber: number;
-  kind: "retry" | "continuation";
+  kind: "retry" | "continuation" | "state_advance";
   projectName: string;
   runId: string;
 }) => void;
@@ -183,6 +183,11 @@ type RetryPayload = {
   extraInstructions?: string;
   issue: IssueSnapshot;
   projectName: string;
+  // When false (raw FSM mid-walk runs), executeRetry skips the labels_all /
+  // labels_none re-check so a transient provider failure stays recoverable
+  // even when labels drift during the FSM walk. CLOSED_ISSUE still cancels.
+  // See ADR 0046.
+  respectsIssueLabels?: boolean;
   runId: string;
 };
 
@@ -190,6 +195,18 @@ type ContinuationPayload = {
   issue: IssueSnapshot;
   parentRunId: string;
   projectName: string;
+};
+
+type StateAdvancePayload = {
+  issue: IssueSnapshot;
+  parentRunId: string;
+  projectName: string;
+};
+
+type WorkflowOutcomeResult = {
+  advancedToState: string | null;
+  advancedToTerminal: boolean;
+  blocked: boolean;
 };
 
 export class RunController {
@@ -358,17 +375,23 @@ export class RunController {
       });
       return;
     }
-    const eligibility = evaluateProjectEligibility(refreshed, project, {
-      ignoreOperationalLabels: true
-    });
-    if (!eligibility.eligible) {
-      await this.cancelScheduledLifecycleWork({
-        issueNumber: payload.issue.number,
-        reason: CANCEL_REASONS.ELIGIBILITY_LOSS,
-        repository,
-        runId: payload.runId
+    // Raw FSM mid-walk runs: the FSM, not the issue labels, decides whether
+    // the agent keeps running. A transient retry of such a run must not be
+    // cancelled by label drift during the retry backoff. CLOSED_ISSUE above is
+    // still honored. See ADR 0046.
+    if (payload.respectsIssueLabels !== false) {
+      const eligibility = evaluateProjectEligibility(refreshed, project, {
+        ignoreOperationalLabels: true
       });
-      return;
+      if (!eligibility.eligible) {
+        await this.cancelScheduledLifecycleWork({
+          issueNumber: payload.issue.number,
+          reason: CANCEL_REASONS.ELIGIBILITY_LOSS,
+          repository,
+          runId: payload.runId
+        });
+        return;
+      }
     }
 
     // Re-assert sym:claimed best-effort in case operator clear-stale ran between attempts.
@@ -419,6 +442,73 @@ export class RunController {
       outcome: { kind: "cancelled", reason: input.reason },
       repository: input.repository,
       willRetry: false
+    });
+  }
+
+  async executeStateAdvance(payload: StateAdvancePayload): Promise<void> {
+    const projects = await this.projectsLoader();
+    const project = projects.get(payload.projectName);
+    if (project === undefined || project.disabled === true) {
+      this.logger?.warn(
+        { projectName: payload.projectName, parentRunId: payload.parentRunId },
+        "symphonika state advance dropped: project disabled or removed"
+      );
+      return;
+    }
+
+    const provider = this.agentProviders[project.agent.provider];
+    if (provider === undefined) {
+      return;
+    }
+
+    const providersConfig = await this.providersLoader();
+    const providerCommand = providersConfig[project.agent.provider].command;
+
+    if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
+      return;
+    }
+
+    const token = resolveTokenFromEnv(project.tracker.token, this.env);
+    if (token === undefined) {
+      return;
+    }
+    const repository = {
+      owner: project.tracker.owner,
+      repo: project.tracker.repo,
+      token
+    };
+
+    // State advance only re-checks that the issue is still open. The
+    // labels_all / labels_none filter is intentionally skipped: the FSM, not
+    // the issue label set, decides whether the next state runs. See ADR 0046.
+    const refreshed = await this.refreshIssue({
+      project,
+      issueNumber: payload.issue.number,
+      repository
+    });
+    if (refreshed === undefined) {
+      this.logger?.warn(
+        { projectName: payload.projectName, parentRunId: payload.parentRunId },
+        "symphonika state advance dropped: issue refresh unavailable"
+      );
+      return;
+    }
+    if (refreshed === null || refreshed.state !== "open") {
+      return;
+    }
+
+    const runId = this.createRunId();
+    await this.runFreshLifecycle({
+      attemptNumber: 1,
+      isContinuation: true,
+      issue: refreshed,
+      parentRunId: payload.parentRunId,
+      project,
+      provider,
+      providerCommand,
+      providerName: project.agent.provider,
+      repository,
+      runId
     });
   }
 
@@ -812,6 +902,15 @@ export class RunController {
         }
       };
     }
+    // Raw FSM continuations are state-advance runs: the FSM, not the issue
+    // labels, decides whether the agent keeps running. Computed here so both
+    // activeRuns.register (in the try block) and scheduleNext (in finally)
+    // can carry the same label-immunity guarantee — including into retry
+    // scheduling. See ADR 0046.
+    const respectsIssueLabels = !(
+      input.isContinuation &&
+      loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm"
+    );
 
     try {
       // For raw FSM workflows, the agent action's `prompt` field points at the
@@ -874,6 +973,7 @@ export class RunController {
         issueNumber: input.issue.number,
         projectName: input.project.name,
         provider: input.provider,
+        respectsIssueLabels,
         runId: input.runId
       });
       registered = true;
@@ -925,18 +1025,26 @@ export class RunController {
         terminal.reason,
         terminal.classification
       );
-      let advancedToTerminal = false;
+      let workflowOutcome: WorkflowOutcomeResult = {
+        advancedToState: null,
+        advancedToTerminal: false,
+        blocked: false
+      };
       if (currentState !== undefined) {
-        ({ advancedToTerminal } = this.applyWorkflowOutcome({
+        workflowOutcome = this.applyWorkflowOutcome({
           currentState,
           runId: input.runId,
           terminal,
           workflow: loadedWorkflow.expandedWorkflow
-        }));
+        });
       }
+      const sourceKind = loadedWorkflow.expandedWorkflow.source.kind;
+      const isRawFsm = sourceKind === "raw_fsm";
       const suppressContinuation =
-        advancedToTerminal &&
-        loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm";
+        isRawFsm &&
+        (workflowOutcome.advancedToTerminal ||
+          workflowOutcome.blocked ||
+          workflowOutcome.advancedToState !== null);
       this.runStore.updateRunState(input.runId, outcomeState);
 
       const willRetry =
@@ -984,8 +1092,13 @@ export class RunController {
           outcome: terminal,
           project: input.project,
           repository: input.repository,
+          respectsIssueLabels,
           runId: input.runId,
           runtimeAttemptNumber: input.attemptNumber,
+          stateAdvance:
+            isRawFsm && workflowOutcome.advancedToState !== null
+              ? { toStateId: workflowOutcome.advancedToState }
+              : null,
           suppressContinuation
         });
       } catch (scheduleError) {
@@ -1106,7 +1219,7 @@ export class RunController {
     runId: string;
     terminal: ClassifiedTerminal;
     workflow: ExpandedWorkflow;
-  }): { advancedToTerminal: boolean } {
+  }): WorkflowOutcomeResult {
     const signals = signalsFromTerminal(input.terminal);
     const decision = decideNextStep({
       actionExecuted: true,
@@ -1121,10 +1234,17 @@ export class RunController {
           terminalStateId: next.id,
           transitionReason: decision.reason
         });
-        return { advancedToTerminal: true };
+        return { advancedToState: null, advancedToTerminal: true, blocked: false };
       }
-      this.runStore.setRunCurrentState(input.runId, decision.to);
-      return { advancedToTerminal: false };
+      this.runStore.recordWorkflowStateAdvance(input.runId, {
+        nextStateId: decision.to,
+        transitionReason: decision.reason
+      });
+      return {
+        advancedToState: decision.to,
+        advancedToTerminal: false,
+        blocked: false
+      };
     }
 
     if (decision.kind === "blocked") {
@@ -1132,7 +1252,7 @@ export class RunController {
         stateId: input.currentState.id,
         transitionReason: decision.reason
       });
-      return { advancedToTerminal: false };
+      return { advancedToState: null, advancedToTerminal: false, blocked: true };
     }
 
     if (decision.kind === "terminate") {
@@ -1140,10 +1260,10 @@ export class RunController {
         terminalStateId: decision.stateId,
         transitionReason: `entered terminal state ${decision.terminal}`
       });
-      return { advancedToTerminal: true };
+      return { advancedToState: null, advancedToTerminal: true, blocked: false };
     }
 
-    return { advancedToTerminal: false };
+    return { advancedToState: null, advancedToTerminal: false, blocked: false };
   }
 
   private async loadWorkflow(
@@ -1366,8 +1486,10 @@ export class RunController {
     outcome: ClassifiedTerminal;
     project: RunControllerProjectConfig;
     repository: GitHubIssueRepositoryInput;
+    respectsIssueLabels?: boolean;
     runId: string;
     runtimeAttemptNumber: number;
+    stateAdvance?: { toStateId: string } | null;
     suppressContinuation?: boolean;
   }): Promise<void> {
     if (input.outcome.kind === "cancelled" || input.outcome.kind === "input_required") {
@@ -1394,6 +1516,14 @@ export class RunController {
               : { extraInstructions: input.extraInstructions }),
             issue: input.issue,
             projectName: input.project.name,
+            // Carry the FSM mid-walk label-immunity bit into the retry. Without
+            // this a transient provider failure during a raw FSM walk would be
+            // cancelled with ELIGIBILITY_LOSS the moment labels drift, even
+            // though the in-flight attempt and the success-to-next-state path
+            // are both label-immune. See ADR 0046.
+            ...(input.respectsIssueLabels === false
+              ? { respectsIssueLabels: false }
+              : {}),
             runId: input.runId
           }),
         issueNumber: input.issue.number,
@@ -1404,11 +1534,54 @@ export class RunController {
       return;
     }
 
+    // Raw FSM mid-walk: the state machine — not the issue label set — decides
+    // what runs next. Dispatch a state advance that skips the continuation cap
+    // and skips the labels_all / labels_none re-check; only require that the
+    // issue is still open. See ADR 0046.
+    if (input.stateAdvance != null) {
+      const refreshedForAdvance = await this.refreshIssue({
+        project: input.project,
+        issueNumber: input.issue.number,
+        repository: input.repository
+      });
+      if (refreshedForAdvance === undefined) {
+        return;
+      }
+      if (refreshedForAdvance === null || refreshedForAdvance.state !== "open") {
+        return;
+      }
+      this.logger?.info(
+        {
+          delayMs: this.lifecyclePolicy.continuation.delayMs,
+          issueNumber: refreshedForAdvance.number,
+          parentRunId: input.runId,
+          project: input.project.name,
+          toStateId: input.stateAdvance.toStateId
+        },
+        "symphonika scheduling state advance"
+      );
+      this.schedule({
+        delayMs: this.lifecyclePolicy.continuation.delayMs,
+        fire: () =>
+          this.executeStateAdvance({
+            issue: refreshedForAdvance,
+            parentRunId: input.runId,
+            projectName: input.project.name
+          }),
+        issueNumber: refreshedForAdvance.number,
+        kind: "state_advance",
+        projectName: input.project.name,
+        runId: input.runId
+      });
+      return;
+    }
+
     // success path: re-check eligibility, schedule continuation, enforce cap.
-    // For raw FSM workflows that reached an explicit terminal node, "terminal"
-    // means the workflow is done — do not schedule another continuation even
-    // if the issue still matches `agent-ready`. Markdown compatibility-graph
-    // workflows keep the legacy "loop on agent-ready" behavior.
+    // For raw FSM workflows that reached an explicit terminal node or blocked
+    // on a missing transition, the FSM owns the decision to stop — do not
+    // schedule another continuation even if the issue still matches
+    // `agent-ready`. Markdown compatibility-graph workflows keep the legacy
+    // "loop on agent-ready" behavior.
     if (input.suppressContinuation === true) {
       return;
     }

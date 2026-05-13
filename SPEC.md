@@ -381,7 +381,9 @@ Each provider attempt stores:
   `workflow-graph.json` next to `prompt-metadata.json`. Retries write
   `workflow-graph.attempt-<N>.json` so prior attempts' graphs remain inspectable. Markdown
   `WORKFLOW.md` workflows record their one-state compatibility graph; explicit raw FSM YAML
-  workflows record their parsed expanded graph without enabling multi-state dispatch.
+  workflows record their parsed expanded graph. Multi-state raw FSM walks advance through the
+  state machine via a `state_advance` dispatch path that is distinct from label-driven
+  continuations; see ADR 0046.
 
 ## 8. Scheduling
 

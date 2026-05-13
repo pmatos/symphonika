@@ -158,6 +158,85 @@ describe("reconcileActiveRuns", () => {
     });
   });
 
+  it("does not cancel a state-advance run when the issue loses required labels mid-walk", async () => {
+    await withRunStore(async (store) => {
+      store.createRun({
+        id: "run-a",
+        issue: snapshot(),
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const registry = new ActiveRunRegistry();
+      registry.register({
+        cancel,
+        issueNumber: 7,
+        projectName: project.name,
+        // Raw FSM mid-walk run: the FSM owns whether the agent keeps running,
+        // not the issue label set. See ADR 0046.
+        respectsIssueLabels: false,
+        runId: "run-a"
+      });
+
+      // Poll snapshot: agent-ready removed AND needs-human added. Under the
+      // default flag this would cancel with ELIGIBILITY_LOSS.
+      const status = pollStatus([
+        snapshot({ labels: ["needs-human", "sym:claimed", "sym:running"] })
+      ]);
+
+      await reconcileActiveRuns({
+        activeRuns: registry,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: { listOpenIssues: vi.fn().mockResolvedValue([]) },
+        logger,
+        pollStatus: status,
+        projects: new Map([[project.name, project]]),
+        runStore: store
+      });
+
+      expect(cancel).not.toHaveBeenCalled();
+      expect(registry.get("run-a")?.cancelReason).toBeUndefined();
+    });
+  });
+
+  it("still cancels a state-advance run with closed_issue when the issue is closed", async () => {
+    await withRunStore(async (store) => {
+      store.createRun({
+        id: "run-a",
+        issue: snapshot(),
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const registry = new ActiveRunRegistry();
+      registry.register({
+        cancel,
+        issueNumber: 7,
+        projectName: project.name,
+        respectsIssueLabels: false,
+        runId: "run-a"
+      });
+
+      const status = pollStatus([snapshot({ state: "closed" })]);
+
+      await reconcileActiveRuns({
+        activeRuns: registry,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: { listOpenIssues: vi.fn().mockResolvedValue([]) },
+        logger,
+        pollStatus: status,
+        projects: new Map([[project.name, project]]),
+        runStore: store
+      });
+
+      // Label-immunity does not extend to closed issues — the run still cancels.
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(registry.get("run-a")?.cancelReason).toBe(CANCEL_REASONS.CLOSED_ISSUE);
+    });
+  });
+
   it("does not cancel when project is removed from config", async () => {
     await withRunStore(async (store) => {
       store.createRun({

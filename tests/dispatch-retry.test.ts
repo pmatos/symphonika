@@ -115,6 +115,88 @@ async function writeProject(root: string): Promise<string> {
   return path.join(root, "symphonika.yml");
 }
 
+async function writeMultiStateRawFsmProject(root: string): Promise<void> {
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "polling:",
+      "  interval_ms: 30000",
+      "providers:",
+      "  codex:",
+      `    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"`,
+      "  claude:",
+      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      "projects:",
+      "  - name: symphonika",
+      "    disabled: false",
+      "    weight: 1",
+      "    tracker:",
+      "      kind: github",
+      "      owner: pmatos",
+      "      repo: symphonika",
+      '      token: "$GITHUB_TOKEN"',
+      "    issue_filters:",
+      '      states: ["open"]',
+      '      labels_all: ["agent-ready"]',
+      '      labels_none: ["blocked", "needs-human"]',
+      "    priority:",
+      "      labels: {}",
+      "      default: 99",
+      "    workspace:",
+      "      root: ./.symphonika/workspaces/symphonika",
+      "      git:",
+      "        remote: git@github.com:pmatos/symphonika.git",
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      "    workflow: ./workflow.yml",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: plan_then_implement",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: implementing",
+      "    implementing:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: implement-prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: done",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "plan-prompt.md"),
+    "Draft a plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+  await writeFile(
+    path.join(root, "implement-prompt.md"),
+    "Implement the plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
 async function waitForCondition(
   url: string,
   predicate: (body: { runs: Array<Record<string, unknown>>; active?: unknown[] }) => boolean,
@@ -312,6 +394,141 @@ describe("dispatch retry policy", () => {
         ([call]) => call as { labels: string[] }
       );
       expect(removeCalls.some((call) => call.labels[0] === "sym:claimed")).toBe(true);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("does not cancel a state-advance retry when the issue loses eligibility during backoff", async () => {
+    const root = await makeTempRoot();
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
+    await writeMultiStateRawFsmProject(root);
+
+    let attempts = 0;
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        attempts += 1;
+        // call 1: state-1 (planning) succeeds and triggers state_advance.
+        // call 2: state-2 (implementing) attempt 1 — transient failure.
+        // call 3: state-2 (implementing) attempt 2 — succeeds. This must run
+        // even though labels drifted, because the FSM owns the walk.
+        if (attempts === 2) {
+          yield {
+            normalized: { exitCode: 1, type: "process_exit" },
+            raw: { code: 1, kind: "exit" }
+          };
+          return;
+        }
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+
+    // After the first poll, getIssue returns the issue with the required
+    // label removed AND an excluded label added. Under the broken behavior
+    // executeRetry would cancel the state-advance retry with eligibility_loss.
+    // Under the fix, the retry runs because the run is mid-FSM-walk.
+    let listCalls = 0;
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue({
+        ...baseIssue,
+        labels: ["needs-human", "sym:claimed"]
+      }),
+      listOpenIssues: vi.fn(() => {
+        listCalls += 1;
+        if (listCalls === 1) {
+          return Promise.resolve([{ ...baseIssue, labels: ["agent-ready"] }]);
+        }
+        return Promise.resolve([]);
+      }),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const prepareIssueWorkspace = vi.fn(
+      (): Promise<PreparedIssueWorkspace> => Promise.resolve(prepared)
+    );
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => `run-fsm-retry-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        // cap=0 keeps the markdown-style continuation path off so we are
+        // exclusively testing state_advance + retry behavior.
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 3, delaysMs: [10, 20, 30], maxBackoffMs: 100 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      // Wait until two runs exist and the second one succeeds.
+      const deadline = Date.now() + 15_000;
+      const databasePath = path.join(root, ".symphonika", "symphonika.db");
+      while (Date.now() < deadline) {
+        try {
+          const database = new Database(databasePath, { readonly: true });
+          try {
+            const row = database
+              .prepare(
+                "select count(*) as c from runs where id = 'run-fsm-retry-2' and state = 'succeeded'"
+              )
+              .get() as { c: number };
+            if (row.c >= 1) {
+              break;
+            }
+          } finally {
+            database.close();
+          }
+        } catch {
+          // database may not be readable yet during startup
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const runs = database
+          .prepare(
+            "select id, state, is_continuation, cancel_reason, retry_count from runs order by created_at"
+          )
+          .all() as Array<Record<string, unknown>>;
+        // run-1 (planning, fresh dispatch) succeeded; run-2 (implementing,
+        // state-advance) needed one retry and then succeeded — proving the
+        // retry path didn't cancel on the label drift.
+        expect(runs).toHaveLength(2);
+        expect(runs[0]).toMatchObject({
+          id: "run-fsm-retry-1",
+          state: "succeeded",
+          is_continuation: 0
+        });
+        expect(runs[1]).toMatchObject({
+          id: "run-fsm-retry-2",
+          state: "succeeded",
+          is_continuation: 1,
+          retry_count: 1
+        });
+        expect(runs[1]?.["cancel_reason"]).toBeNull();
+      } finally {
+        database.close();
+      }
+
+      expect(attempts).toBe(3);
     } finally {
       await daemon.stop();
     }

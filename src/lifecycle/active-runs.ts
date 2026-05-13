@@ -49,6 +49,11 @@ export type ActiveRunEntry = {
   issueNumber: number;
   projectName: string;
   provider?: AgentProvider;
+  // When false, this run is part of an FSM walk where the state machine — not
+  // the issue label set — decides whether to keep running. Reconcile uses this
+  // to skip the labels_all / labels_none re-check while still honoring
+  // CLOSED_ISSUE. See ADR 0046.
+  respectsIssueLabels: boolean;
   runId: string;
 };
 
@@ -57,10 +62,11 @@ export type RegisterInput = {
   issueNumber: number;
   projectName: string;
   provider?: AgentProvider;
+  respectsIssueLabels?: boolean;
   runId: string;
 };
 
-export type ScheduledWorkKind = "retry" | "continuation";
+export type ScheduledWorkKind = "retry" | "continuation" | "state_advance";
 
 export type ScheduledWorkInput = {
   delayMs: number;
@@ -91,6 +97,7 @@ export class ActiveRunRegistry {
       cancelRequested: false,
       issueNumber: input.issueNumber,
       projectName: input.projectName,
+      respectsIssueLabels: input.respectsIssueLabels ?? true,
       runId: input.runId
     };
     if (input.provider !== undefined) {

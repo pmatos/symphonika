@@ -639,6 +639,7 @@ Normalized lifecycle states:
 - `succeeded`
 - `cancelled`
 - `stale`
+- `waiting`
 
 Terminal run state does not necessarily match GitHub issue state.
 
@@ -718,6 +719,42 @@ tracked. For each tracked open PR:
 Default PR follow-up policy: poll enabled, at most `3` review dispatches per PR, squash merge,
 require successful status checks, and do not require an explicit approval unless repository rules
 surface `REVIEW_REQUIRED`.
+
+### 12.5 Wait States
+
+Raw FSM workflows may declare `action.kind: "wait"` states that pause the workflow walk until
+observable pull-request conditions change. A wait state does not launch a provider; instead the
+daemon re-evaluates it on every tick and on `/poll-now`.
+
+Lifecycle:
+
+1. When an agent state succeeds and the FSM advances into a wait state, Symphonika persists a new
+   Run row with `state = "waiting"`, `current_state_id` set to the wait state id, and
+   `continuation_parent_run_id` set to the parent agent run. The parent run records the advance via
+   `state_transition_reason` exactly like any other state advance (per ADR 0046).
+2. On each daemon tick (and on `/poll-now`), the reconciliation phase calls
+   `reconcileWaitingRuns`, which iterates the rows in `state = "waiting"`, refreshes the issue,
+   looks up the tracked pull request, fetches its follow-up state, projects predicates
+   (`pr_open`, `pr_merged`, `mergeable`, `checks`, `unresolved_review_threads`) and emits a static
+   `provider_success: true`, then evaluates the wait state's transitions in file order.
+3. The first matching transition wins. If the destination is an agent state, Symphonika schedules
+   a `state_advance` that runs the agent through `runFreshLifecycle`. If the destination is another
+   wait state, Symphonika creates a new waiting Run row and schedules a `wait_park` re-evaluation.
+   If the destination is terminal, the waiting Run records `terminal_state_id` and transitions to
+   `succeeded`.
+4. If no transition matches and the wait state's `complete_when` is not violated, the wait stays
+   parked (`stay_waiting`); reconciliation will re-evaluate it on the next tick.
+5. Issue close cancels a waiting Run with `cancel_reason = "closed_issue"`. Operator cancel marks
+   the cancel reason; the next re-evaluation tick observes the cancel-requested flag and
+   transitions the Run to `cancelled`.
+6. Label drift does not cancel a waiting Run. Mid-walk runs are immune to `labels_all` and
+   `labels_none` re-checks; the FSM owns transitions while the walk is in flight (ADR 0046,
+   carried over to wait states by ADR 0047).
+
+Mergeability `UNKNOWN`/`null` is intentionally projected as the predicate key omitted — workflow
+transitions writing `mergeable: false` will not match on unknown values, so the wait stays parked
+until GitHub resolves the mergeability. The `timeout` predicate is reserved in the schema but
+unimplemented in v1.
 
 ## 13. CLI
 

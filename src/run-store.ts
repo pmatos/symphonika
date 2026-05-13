@@ -14,7 +14,8 @@ export type RunState =
   | "failed"
   | "succeeded"
   | "cancelled"
-  | "stale";
+  | "stale"
+  | "waiting";
 
 export type FailureClassification = "transient" | "deterministic" | "input_required";
 
@@ -344,6 +345,57 @@ export class RunStore {
       providerName: input.providerName,
       state: "queued"
     });
+  }
+
+  createWaitingRun(input: {
+    currentStateId: string;
+    id: string;
+    issue: IssueSnapshot;
+    parentRunId: string;
+    projectName: string;
+  }): void {
+    this.insertRunRow({
+      id: input.id,
+      isContinuation: true,
+      issue: input.issue,
+      parentRunId: input.parentRunId,
+      projectName: input.projectName,
+      providerCommand: null,
+      providerName: null,
+      state: "waiting"
+    });
+    this.setRunCurrentState(input.id, input.currentStateId);
+  }
+
+  listWaitingRuns(): Array<{
+    currentStateId: string;
+    issueNumber: number;
+    projectName: string;
+    runId: string;
+  }> {
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, issue_number, current_state_id",
+          "from runs",
+          "where state = 'waiting'",
+          "and cancel_requested = 0",
+          "and current_state_id is not null",
+          "order by created_at asc"
+        ].join(" ")
+      )
+      .all() as Array<{
+        id: string;
+        project_name: string;
+        issue_number: number;
+        current_state_id: string;
+      }>;
+    return rows.map((row) => ({
+      currentStateId: row.current_state_id,
+      issueNumber: row.issue_number,
+      projectName: row.project_name,
+      runId: row.id
+    }));
   }
 
   createContinuationRun(input: CreateRunInput & { parentRunId: string }): void {

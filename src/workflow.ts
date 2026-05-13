@@ -866,6 +866,19 @@ function parseWorkflowAction(
     }
   }
 
+  if (kind === "wait") {
+    if (provider !== undefined) {
+      errors.push(
+        `workflow state ${stateId} at ${workflowPath} wait action must not define provider`
+      );
+    }
+    if (prompt !== undefined) {
+      errors.push(
+        `workflow state ${stateId} at ${workflowPath} wait action must not define prompt`
+      );
+    }
+  }
+
   return {
     kind,
     ...(method === undefined ? {} : { method }),

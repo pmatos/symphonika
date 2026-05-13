@@ -65,7 +65,7 @@ export type HttpAppOptions = {
   getReloadStatus?: () => RuntimeReloadStatus;
   getScheduled?: () => Array<{
     dueAt: number;
-    kind: "retry" | "continuation" | "state_advance";
+    kind: "retry" | "continuation" | "state_advance" | "wait_park";
     runId: string;
   }>;
   getStatusSnapshot?: () => StatusSnapshot;
@@ -86,7 +86,8 @@ const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
   "failed",
   "succeeded",
   "cancelled",
-  "stale"
+  "stale",
+  "waiting"
 ]);
 
 const TERMINAL_RUN_STATES: ReadonlySet<RunState> = new Set([

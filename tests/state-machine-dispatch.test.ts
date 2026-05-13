@@ -144,6 +144,87 @@ describe("state-machine-dispatch", () => {
       }
     });
 
+    it("skips execute_action for a wait state even on first entry", () => {
+      const waitState: ExpandedWorkflowState = {
+        action: { kind: "wait" },
+        completeWhen: {},
+        id: "holding",
+        transitions: [{ to: "merge", when: { checks: "success" } }]
+      };
+
+      const decision = decideNextStep({
+        actionExecuted: false,
+        signals: {},
+        state: waitState
+      });
+
+      expect(decision.kind).not.toBe("execute_action");
+    });
+
+    it("returns stay_waiting for a wait state with no matching transition", () => {
+      const waitState: ExpandedWorkflowState = {
+        action: { kind: "wait" },
+        completeWhen: {},
+        id: "holding",
+        transitions: [{ to: "merge", when: { checks: "success" } }]
+      };
+
+      const decision = decideNextStep({
+        actionExecuted: true,
+        signals: { checks: "pending" },
+        state: waitState
+      });
+
+      expect(decision.kind).toBe("stay_waiting");
+      if (decision.kind === "stay_waiting") {
+        expect(decision.reason).toContain("holding");
+      }
+    });
+
+    it("advances a wait state when a transition's when predicates match", () => {
+      const waitState: ExpandedWorkflowState = {
+        action: { kind: "wait" },
+        completeWhen: {},
+        id: "holding",
+        transitions: [
+          { to: "autofix", when: { unresolved_review_threads: 1 } },
+          { to: "merge", when: { checks: "success", mergeable: true } }
+        ]
+      };
+
+      const decision = decideNextStep({
+        actionExecuted: true,
+        signals: {
+          checks: "success",
+          mergeable: true,
+          unresolved_review_threads: 0
+        },
+        state: waitState
+      });
+
+      expect(decision.kind).toBe("advance");
+      if (decision.kind === "advance") {
+        expect(decision.to).toBe("merge");
+      }
+    });
+
+    it("still returns blocked for a non-wait state with no matching transition", () => {
+      const state: ExpandedWorkflowState = {
+        action: { kind: "agent", provider: "codex" },
+        completeWhen: { provider_success: true },
+        id: "branching",
+        transitions: [{ to: "needs_extra", when: { pr_open: true } }]
+      };
+
+      const decision = decideNextStep({
+        actionExecuted: true,
+        signals: { provider_success: true },
+        state
+      });
+
+      expect(decision.kind).toBe("blocked");
+    });
+
     it("treats a state with no action as ready to evaluate transitions on entry", () => {
       const state: ExpandedWorkflowState = {
         completeWhen: {},

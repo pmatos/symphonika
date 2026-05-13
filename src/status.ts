@@ -32,7 +32,8 @@ const ACTIVE_STATES = new Set([
   "queued",
   "preparing_workspace",
   "running",
-  "input_required"
+  "input_required",
+  "waiting"
 ]);
 
 export function buildStatusSnapshot(

@@ -10,7 +10,8 @@ export type StateMachineDecision =
   | { action: WorkflowAction; kind: "execute_action"; stateId: string }
   | { kind: "terminate"; stateId: string; terminal: string }
   | { kind: "advance"; reason: string; to: string }
-  | { kind: "blocked"; reason: string };
+  | { kind: "blocked"; reason: string }
+  | { kind: "stay_waiting"; reason: string };
 
 export type StateMachineSignals = WorkflowPredicateMap;
 
@@ -32,7 +33,9 @@ export function decideNextStep(input: {
     return { kind: "terminate", stateId: state.id, terminal: state.terminal };
   }
 
-  if (!actionExecuted && state.action !== undefined) {
+  const isWait = state.action?.kind === "wait";
+
+  if (!isWait && !actionExecuted && state.action !== undefined) {
     return { action: state.action, kind: "execute_action", stateId: state.id };
   }
 
@@ -52,6 +55,13 @@ export function decideNextStep(input: {
         to: transition.to
       };
     }
+  }
+
+  if (isWait) {
+    return {
+      kind: "stay_waiting",
+      reason: `state ${state.id} wait predicates not yet satisfied`
+    };
   }
 
   return {

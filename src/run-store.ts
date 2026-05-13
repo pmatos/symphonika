@@ -560,6 +560,25 @@ export class RunStore {
     }));
   }
 
+  // Stale-claim liveness needs waiting rows too: a parked wait still wears
+  // `sym:claimed` (ADR 0046), and between scheduled `wait_park` callbacks it
+  // has no entry in `activeRuns` and no row in `listActiveRunIds`. Cancel-
+  // requested rows stay included for the same reason `listWaitingRuns`
+  // includes them — they are still live until `reEvaluateWaitingRun`
+  // transitions them.
+  listWaitingRunIds(): { runId: string; projectName: string; issueNumber: number }[] {
+    const rows = this.database
+      .prepare(
+        "select id, project_name, issue_number from runs where state = 'waiting'"
+      )
+      .all() as { id: string; project_name: string; issue_number: number }[];
+    return rows.map((row) => ({
+      issueNumber: row.issue_number,
+      projectName: row.project_name,
+      runId: row.id
+    }));
+  }
+
   private insertRunRow(input: {
     id: string;
     isContinuation: boolean;

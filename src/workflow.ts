@@ -185,6 +185,8 @@ const actionKinds = new Set<WorkflowActionKind>([
   "wait"
 ]);
 
+const mergeMethods = new Set<string>(["merge", "rebase", "squash"]);
+
 const completionPredicateKeys = new Set([
   "artifact_exists",
   "branch_ahead_of_base",
@@ -875,6 +877,24 @@ function parseWorkflowAction(
     if (prompt !== undefined) {
       errors.push(
         `workflow state ${stateId} at ${workflowPath} wait action must not define prompt`
+      );
+    }
+  }
+
+  if (kind === "merge_pr") {
+    if (provider !== undefined) {
+      errors.push(
+        `workflow state ${stateId} at ${workflowPath} merge_pr action must not define provider`
+      );
+    }
+    if (prompt !== undefined) {
+      errors.push(
+        `workflow state ${stateId} at ${workflowPath} merge_pr action must not define prompt`
+      );
+    }
+    if (method !== undefined && !mergeMethods.has(method)) {
+      errors.push(
+        `workflow state ${stateId} at ${workflowPath} merge_pr method must be one of ${[...mergeMethods].join(", ")}`
       );
     }
   }

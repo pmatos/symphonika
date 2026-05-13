@@ -524,6 +524,14 @@ export class RunStore {
       .run(input.stateId, input.transitionReason, timestamp(), runId);
   }
 
+  recordWaitingActivity(runId: string, reason: string): void {
+    this.database
+      .prepare(
+        "update runs set state_transition_reason = ?, updated_at = ? where id = ?"
+      )
+      .run(reason, timestamp(), runId);
+  }
+
   incrementRetryCount(runId: string): number {
     const updated = this.database
       .prepare(

@@ -36,7 +36,10 @@ import {
 import { detectStaleClaims } from "./lifecycle/stale-claims.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
-import { runPullRequestFollowup } from "./pull-request-followup.js";
+import {
+  runPullRequestFollowup,
+  type PullRequestFollowupPolicy
+} from "./pull-request-followup.js";
 import { RuntimeConfigReloader } from "./reload.js";
 import {
   openRunStore,
@@ -129,6 +132,9 @@ export async function startDaemon(
   const providersLoader = (): Promise<RunControllerProvidersConfig> => {
     return Promise.resolve(runtimeConfig.providersConfig());
   };
+  const pullRequestPolicyLoader = (): Promise<PullRequestFollowupPolicy> => {
+    return Promise.resolve(runtimeConfig.pullRequestPolicy());
+  };
   const enqueueScheduledWork = (work: () => Promise<void>): void => {
     scheduledWork = scheduledWork.then(work, work);
     void scheduledWork;
@@ -141,6 +147,7 @@ export async function startDaemon(
     logger,
     projectsLoader,
     providersLoader,
+    pullRequestPolicyLoader,
     runStore,
     schedule: (item: ScheduledWorkInput) => {
       activeRuns.scheduleDelayed({

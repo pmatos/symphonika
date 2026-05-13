@@ -773,6 +773,125 @@ describe("state machine workflow definitions", () => {
       `workflow definition at ${workflowPath} must define a top-level workflow mapping`
     );
   });
+
+  it("accepts a merge_pr action with an optional method override", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: merging",
+        "  states:",
+        "    merging:",
+        "      action:",
+        "        kind: merge_pr",
+        "        method: squash",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            pr_merged: true",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+    const merging = result.workflow.states.find((state) => state.id === "merging");
+
+    expect(result.errors).toEqual([]);
+    expect(merging?.action?.kind).toBe("merge_pr");
+    expect(merging?.action?.method).toBe("squash");
+  });
+
+  it("rejects a merge_pr action that declares a provider", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: merging",
+        "  states:",
+        "    merging:",
+        "      action:",
+        "        kind: merge_pr",
+        "        provider: codex",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state merging at ${workflowPath} merge_pr action must not define provider`
+    );
+  });
+
+  it("rejects a merge_pr action that declares a prompt", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: merging",
+        "  states:",
+        "    merging:",
+        "      action:",
+        "        kind: merge_pr",
+        "        prompt: please-merge",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state merging at ${workflowPath} merge_pr action must not define prompt`
+    );
+  });
+
+  it("rejects a merge_pr action with an unknown method", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: merging",
+        "  states:",
+        "    merging:",
+        "      action:",
+        "        kind: merge_pr",
+        "        method: fast-forward",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state merging at ${workflowPath} merge_pr method must be one of merge, rebase, squash`
+    );
+  });
 });
 
 describe("workflow format routing", () => {

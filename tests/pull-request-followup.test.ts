@@ -211,6 +211,126 @@ describe("pull request follow-up", () => {
     }
   });
 
+  it("skips the review-followup dispatch when a state_advance is already scheduled for the same issue", async () => {
+    // Regression for the wait→agent race: reconcileWaitingRuns advances a
+    // wait state into an agent state and schedules a state_advance, but the
+    // scheduled item is only in `activeRuns.scheduled` (not `entries`). PR
+    // follow-up runs later in the same tick and must NOT dispatch a parallel
+    // review-followup for the same issue.
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-review-followup-race";
+      const workspacePath = path.join(root, "workspace");
+      seedSucceededRun(store, { branchName, runId: "parent-run", workspacePath });
+
+      const providerInputs: ProviderRunInput[] = [];
+      const provider = fakeProvider(providerInputs);
+      const project = projectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue(issueFixture()),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(
+          prState({
+            reviewDecision: "CHANGES_REQUESTED",
+            unresolvedReviewThreads: [
+              {
+                comments: [],
+                id: "PRRT_kwDO",
+                isResolved: false,
+                line: 24,
+                path: "src/daemon.ts"
+              }
+            ]
+          })
+        ),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([
+          {
+            draft: false,
+            head: { ref: branchName, sha: "abc123" },
+            html_url: "https://github.com/pmatos/symphonika/pull/82",
+            number: 82,
+            state: "open"
+          }
+        ]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+
+      // Use a controller whose schedule handler actually goes through
+      // ActiveRunRegistry.scheduleDelayed so the scheduled state_advance is
+      // visible to isIssueScheduled. Keep the timeouts long enough that the
+      // fire() never runs during the test.
+      const activeRuns = new ActiveRunRegistry();
+      let nextRun = 0;
+      const controller = new RunController({
+        activeRuns,
+        agentProviders: { codex: provider },
+        configDir: root,
+        createRunId: () => {
+          nextRun += 1;
+          return `race-run-${nextRun}`;
+        },
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        prepareIssueWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".symphonika", "workspaces", ".cache"),
+            issueDirectoryName: "54-review-followup-race",
+            reused: true,
+            workspacePath
+          }),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        providersLoader: () => Promise.resolve(providersConfig()),
+        runStore: store,
+        schedule: (item) => {
+          activeRuns.scheduleDelayed({
+            delayMs: 60_000,
+            fire: item.fire,
+            issueNumber: item.issueNumber,
+            kind: item.kind,
+            projectName: item.projectName,
+            runId: item.runId
+          });
+        },
+        stateRoot: path.join(root, ".symphonika")
+      });
+
+      // Simulate the wait→agent advance: pretend the reconciler just
+      // scheduled a state_advance for issue 54.
+      activeRuns.scheduleDelayed({
+        delayMs: 60_000,
+        fire: () => Promise.resolve(),
+        issueNumber: 54,
+        kind: "state_advance",
+        projectName: project.name,
+        runId: "parent-run"
+      });
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () => Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      // PR follow-up either declined explicitly or did not produce a
+      // review_dispatch — what matters is that no provider attempt fired.
+      expect(result.action).not.toBe("review_dispatch");
+      expect(providerInputs).toHaveLength(0);
+
+      activeRuns.cancelAll();
+    } finally {
+      store.close();
+    }
+  });
+
   it("does not merge when status checks are missing under the default policy", () => {
     expect(
       pullRequestReadyToMerge(

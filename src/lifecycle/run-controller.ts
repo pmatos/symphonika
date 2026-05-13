@@ -805,6 +805,18 @@ export class RunController {
       };
     }
 
+    // Don't race a scheduled state_advance: a wait→agent transition may have
+    // just enqueued an autofix state for this issue in the same tick. The
+    // scheduled item is not yet in `activeRuns.entries`, so `isIssueInFlight`
+    // misses it. Consult `isIssueScheduled` to avoid dispatching a duplicate
+    // review-followup run on the same issue/branch.
+    if (this.activeRuns.isIssueScheduled(input.projectName, input.issueNumber)) {
+      return {
+        dispatched: false,
+        reason: "issue has scheduled work pending"
+      };
+    }
+
     const provider = this.agentProviders[project.agent.provider];
     if (provider === undefined) {
       return {

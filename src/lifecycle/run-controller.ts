@@ -948,11 +948,20 @@ export class RunController {
         state: "running"
       });
       attemptCreated = true;
+      // Raw FSM continuations are state-advance runs: the FSM, not the issue
+      // labels, decides whether the next state runs. Signal that to
+      // reconcileActiveRuns so it skips the labels_all / labels_none re-check
+      // for this run while still honoring CLOSED_ISSUE. See ADR 0046.
+      const respectsIssueLabels = !(
+        input.isContinuation &&
+        loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm"
+      );
       this.activeRuns.register({
         cancel: () => input.provider.cancel(input.runId),
         issueNumber: input.issue.number,
         projectName: input.project.name,
         provider: input.provider,
+        respectsIssueLabels,
         runId: input.runId
       });
       registered = true;

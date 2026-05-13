@@ -48,6 +48,13 @@ export async function reconcileActiveRuns(input: ReconcileInput): Promise<void> 
       continue;
     }
 
+    // State-advance runs (raw FSM walks) intentionally do not re-evaluate
+    // labels_all / labels_none — the state machine owns transitions while the
+    // walk is in flight. CLOSED_ISSUE above is still honored. See ADR 0046.
+    if (!entry.respectsIssueLabels) {
+      continue;
+    }
+
     const eligibility = evaluateProjectEligibility(snapshot, project, {
       ignoreOperationalLabels: true
     });

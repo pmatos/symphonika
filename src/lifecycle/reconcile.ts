@@ -11,6 +11,7 @@ import {
 import type { RunStore } from "../run-store.js";
 
 import { ActiveRunRegistry, CANCEL_REASONS } from "./active-runs.js";
+import type { RunController } from "./run-controller.js";
 import { resolveToken } from "./token.js";
 
 export type ReconcileInput = {
@@ -131,5 +132,23 @@ function findIssueSnapshot(
     }
   }
   return undefined;
+}
+
+export async function reconcileWaitingRuns(input: {
+  logger?: Logger;
+  runController: RunController;
+  runStore: RunStore;
+}): Promise<void> {
+  const waiting = input.runStore.listWaitingRuns();
+  for (const row of waiting) {
+    try {
+      await input.runController.reEvaluateWaitingRun(row.runId);
+    } catch (error) {
+      input.logger?.warn(
+        { err: error, runId: row.runId },
+        "symphonika wait re-eval failed"
+      );
+    }
+  }
 }
 

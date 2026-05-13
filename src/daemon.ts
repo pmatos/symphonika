@@ -24,7 +24,10 @@ import type {
   LifecyclePolicy,
   ScheduledWorkInput
 } from "./lifecycle/active-runs.js";
-import { reconcileActiveRuns } from "./lifecycle/reconcile.js";
+import {
+  reconcileActiveRuns,
+  reconcileWaitingRuns
+} from "./lifecycle/reconcile.js";
 import {
   RunController,
   type RunControllerProjectConfig,
@@ -250,6 +253,27 @@ export async function startDaemon(
       });
     } catch (error) {
       logger.error({ err: error }, "symphonika reconcile failed");
+    }
+
+    // Serialize against scheduled wait_park callbacks (and any other
+    // scheduled work that mutates run rows). Scheduled callbacks acquire
+    // `dispatchMutex` before firing; if one is in flight, skip this tick's
+    // wait reconciliation and let the callback handle the row it owns —
+    // the next tick will re-pick anything else. Acquiring the mutex here
+    // also prevents two concurrent waiting-run readers from both deciding
+    // to advance the same row.
+    if (dispatchMutex.tryAcquire()) {
+      try {
+        await reconcileWaitingRuns({
+          logger,
+          runController,
+          runStore
+        });
+      } catch (error) {
+        logger.error({ err: error }, "symphonika waiting reconcile failed");
+      } finally {
+        dispatchMutex.release();
+      }
     }
 
     if (dispatchMutex.held) {

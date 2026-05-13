@@ -662,6 +662,94 @@ describe("state machine workflow definitions", () => {
     );
   });
 
+  it("accepts a wait action that defines no provider or prompt", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    const holding = result.workflow.states.find((state) => state.id === "holding");
+    expect(holding?.action?.kind).toBe("wait");
+  });
+
+  it("rejects a wait action that declares a provider", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "        provider: claude",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state holding at ${workflowPath} wait action must not define provider`
+    );
+  });
+
+  it("rejects a wait action that declares a prompt", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "        prompt: hello",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state holding at ${workflowPath} wait action must not define prompt`
+    );
+  });
+
   it("rejects YAML workflow files that are missing the top-level workflow mapping", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");

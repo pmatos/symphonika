@@ -109,6 +109,13 @@ function collectLiveKeys(input: DetectStaleClaimsInput): Set<string> {
   for (const entry of input.runStore.listActiveRunIds()) {
     keys.add(issueKey(entry.projectName, entry.issueNumber));
   }
+  // Parked wait rows keep their `sym:claimed` label across the wait but have
+  // no entry in `activeRuns` and no row in `listActiveRunIds`. Without this
+  // pass, a long wait between `wait_park` re-evaluations would be marked
+  // `sym:stale`. See ADR 0047.
+  for (const entry of input.runStore.listWaitingRunIds()) {
+    keys.add(issueKey(entry.projectName, entry.issueNumber));
+  }
   return keys;
 }
 

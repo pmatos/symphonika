@@ -14,7 +14,8 @@ export type RunState =
   | "failed"
   | "succeeded"
   | "cancelled"
-  | "stale";
+  | "stale"
+  | "waiting";
 
 export type FailureClassification = "transient" | "deterministic" | "input_required";
 
@@ -346,6 +347,60 @@ export class RunStore {
     });
   }
 
+  createWaitingRun(input: {
+    currentStateId: string;
+    id: string;
+    issue: IssueSnapshot;
+    parentRunId: string;
+    projectName: string;
+  }): void {
+    this.insertRunRow({
+      id: input.id,
+      isContinuation: true,
+      issue: input.issue,
+      parentRunId: input.parentRunId,
+      projectName: input.projectName,
+      providerCommand: null,
+      providerName: null,
+      state: "waiting"
+    });
+    this.setRunCurrentState(input.id, input.currentStateId);
+  }
+
+  // Includes cancel-requested rows on purpose: a waiting run cancelled via
+  // cancelViaUi only flips `cancel_requested = 1`, and the cancellation branch
+  // lives inside reEvaluateWaitingRun. Filtering cancel-requested rows out
+  // here would leave the row stuck in `state = "waiting"` forever.
+  listWaitingRuns(): Array<{
+    currentStateId: string;
+    issueNumber: number;
+    projectName: string;
+    runId: string;
+  }> {
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, issue_number, current_state_id",
+          "from runs",
+          "where state = 'waiting'",
+          "and current_state_id is not null",
+          "order by created_at asc"
+        ].join(" ")
+      )
+      .all() as Array<{
+        id: string;
+        project_name: string;
+        issue_number: number;
+        current_state_id: string;
+      }>;
+    return rows.map((row) => ({
+      currentStateId: row.current_state_id,
+      issueNumber: row.issue_number,
+      projectName: row.project_name,
+      runId: row.id
+    }));
+  }
+
   createContinuationRun(input: CreateRunInput & { parentRunId: string }): void {
     this.insertRunRow({
       ...input,
@@ -496,6 +551,25 @@ export class RunStore {
     const rows = this.database
       .prepare(
         "select id, project_name, issue_number from runs where state in ('queued','preparing_workspace','running')"
+      )
+      .all() as { id: string; project_name: string; issue_number: number }[];
+    return rows.map((row) => ({
+      issueNumber: row.issue_number,
+      projectName: row.project_name,
+      runId: row.id
+    }));
+  }
+
+  // Stale-claim liveness needs waiting rows too: a parked wait still wears
+  // `sym:claimed` (ADR 0046), and between scheduled `wait_park` callbacks it
+  // has no entry in `activeRuns` and no row in `listActiveRunIds`. Cancel-
+  // requested rows stay included for the same reason `listWaitingRuns`
+  // includes them — they are still live until `reEvaluateWaitingRun`
+  // transitions them.
+  listWaitingRunIds(): { runId: string; projectName: string; issueNumber: number }[] {
+    const rows = this.database
+      .prepare(
+        "select id, project_name, issue_number from runs where state = 'waiting'"
       )
       .all() as { id: string; project_name: string; issue_number: number }[];
     return rows.map((row) => ({
@@ -1102,6 +1176,32 @@ export class RunStore {
         run_id: input.runId,
         updated_at: now
       });
+  }
+
+  // Wait re-evaluation needs to see merged/closed tracked PRs so a workflow
+  // waiting on `pr_merged: true` can advance after the PR follow-up
+  // dispatcher has marked the tracked row "merged". Returns the most-recent
+  // tracked PR for the (project, issue) pair regardless of `state`.
+  findTrackedPullRequestByIssue(input: {
+    issueNumber: number;
+    projectName: string;
+  }): TrackedPullRequest | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select id, project_name, issue_number, run_id, pr_number, pr_url,",
+          "branch_name, head_sha_at_dispatch, last_seen_head_sha,",
+          "last_review_dispatch_fingerprint, review_dispatch_count,",
+          "last_followup_run_id, state, last_observed_at, created_at, updated_at",
+          "from tracked_pull_requests",
+          "where project_name = ? and issue_number = ?",
+          "order by id desc limit 1"
+        ].join(" ")
+      )
+      .get(input.projectName, input.issueNumber) as
+      | TrackedPullRequestRow
+      | undefined;
+    return row === undefined ? undefined : mapTrackedPullRequestRow(row);
   }
 
   listOpenTrackedPullRequests(): TrackedPullRequest[] {

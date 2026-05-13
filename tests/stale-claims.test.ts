@@ -360,6 +360,48 @@ describe("detectStaleClaims", () => {
     });
   });
 
+  it("does not mark when the run-store reports a parked waiting run for the issue", async () => {
+    await withRunStore(async (store) => {
+      const issue = snapshot({ labels: ["agent-ready", "sym:claimed"] });
+      // Parked wait state: agent state succeeded and advanced into a wait
+      // state. The waiting row has no entry in `activeRuns` and no scheduled
+      // work between `wait_park` re-evaluations, but the issue still wears
+      // `sym:claimed` per ADR 0046.
+      store.createRun({
+        id: "parent-agent",
+        issue,
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      store.updateRunState("parent-agent", "succeeded");
+      store.createWaitingRun({
+        currentStateId: "holding",
+        id: "wait-row",
+        issue,
+        parentRunId: "parent-agent",
+        projectName: project.name
+      });
+
+      const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+      const marks = await detectStaleClaims({
+        activeRuns: new ActiveRunRegistry(),
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: {
+          addLabelsToIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        logger,
+        pollStatus: pollStatusWithFiltered([issue]),
+        projects: new Map([[project.name, project]]),
+        runStore: store
+      });
+
+      expect(addLabelsToIssue).not.toHaveBeenCalled();
+      expect(marks).toEqual([]);
+    });
+  });
+
   it("does not mark when an in-memory run is registered for the issue", async () => {
     await withRunStore(async (store) => {
       const issue = snapshot({ labels: ["agent-ready", "sym:claimed"] });

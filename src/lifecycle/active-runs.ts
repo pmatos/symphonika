@@ -66,7 +66,11 @@ export type RegisterInput = {
   runId: string;
 };
 
-export type ScheduledWorkKind = "retry" | "continuation" | "state_advance";
+export type ScheduledWorkKind =
+  | "retry"
+  | "continuation"
+  | "state_advance"
+  | "wait_park";
 
 export type ScheduledWorkInput = {
   delayMs: number;
@@ -127,6 +131,23 @@ export class ActiveRunRegistry {
 
   isIssueInFlight(projectName: string, issueNumber: number): boolean {
     return this.issueLocks.has(issueLockKey(projectName, issueNumber));
+  }
+
+  // Companion to `isIssueInFlight`: returns true when there is scheduled work
+  // (a delayed retry / continuation / state_advance / wait_park) pending for
+  // the issue. Dispatchers that gate on liveness should check both — a
+  // scheduled state_advance is not yet "in flight" but the issue is reserved
+  // for it. Mirrors the liveness precedent in stale-claims `collectLiveKeys`.
+  isIssueScheduled(projectName: string, issueNumber: number): boolean {
+    for (const item of this.scheduled) {
+      if (
+        item.projectName === projectName &&
+        item.issueNumber === issueNumber
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   async requestCancel(runId: string, reason: CancelReason): Promise<void> {

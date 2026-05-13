@@ -13,7 +13,12 @@ import type {
   PollingProjectConfig,
   RawGitHubPullRequestReviewThread
 } from "../issue-polling.js";
-import { evaluateProjectEligibility, tryGetIssue } from "../issue-polling.js";
+import {
+  evaluateProjectEligibility,
+  tryGetIssue,
+  tryGetPullRequestFollowupState
+} from "../issue-polling.js";
+import { projectPullRequestSignals } from "./pr-signal-projection.js";
 import type {
   AgentProvider,
   AgentProviderName,
@@ -92,7 +97,7 @@ export type ScheduleHandler = (input: {
   delayMs: number;
   fire: () => Promise<void>;
   issueNumber: number;
-  kind: "retry" | "continuation" | "state_advance";
+  kind: "retry" | "continuation" | "state_advance" | "wait_park";
   projectName: string;
   runId: string;
 }) => void;
@@ -207,6 +212,12 @@ type WorkflowOutcomeResult = {
   advancedToState: string | null;
   advancedToTerminal: boolean;
   blocked: boolean;
+  parkAsWait?: boolean;
+  waitingRunId?: string;
+};
+
+type WaitParkPayload = {
+  waitingRunId: string;
 };
 
 export class RunController {
@@ -445,6 +456,193 @@ export class RunController {
     });
   }
 
+  async executeWaitPark(payload: WaitParkPayload): Promise<void> {
+    await this.reEvaluateWaitingRun(payload.waitingRunId);
+  }
+
+  async reEvaluateWaitingRun(runId: string): Promise<void> {
+    const row = this.runStore.getRun(runId);
+    if (row === undefined || row.state !== "waiting") {
+      return;
+    }
+    if (row.cancelRequested) {
+      const reason: CancelReason = row.cancelReason ?? "operator";
+      this.runStore.markCancelRequested(runId, reason);
+      this.runStore.updateRunState(runId, "cancelled");
+      return;
+    }
+    if (row.currentStateId === null) {
+      return;
+    }
+
+    const projects = await this.projectsLoader();
+    const project = projects.get(row.project);
+    if (project === undefined || project.disabled === true) {
+      return;
+    }
+
+    const token = resolveTokenFromEnv(project.tracker.token, this.env);
+    if (token === undefined) {
+      return;
+    }
+    const repository: GitHubIssueRepositoryInput = {
+      owner: project.tracker.owner,
+      repo: project.tracker.repo,
+      token
+    };
+
+    const refreshed = await this.refreshIssue({
+      project,
+      issueNumber: row.issueNumber,
+      repository
+    });
+    if (refreshed === undefined) {
+      return;
+    }
+    if (refreshed === null || refreshed.state !== "open") {
+      this.runStore.markCancelRequested(runId, "closed_issue");
+      this.runStore.updateRunState(runId, "cancelled");
+      return;
+    }
+
+    const loaded = await this.loadWorkflow(project.workflow);
+    const waitState = findWorkflowState(
+      loaded.expandedWorkflow,
+      row.currentStateId
+    );
+    if (waitState === undefined) {
+      this.logger?.warn(
+        { runId, stateId: row.currentStateId },
+        "symphonika wait re-eval skipped: workflow state not found"
+      );
+      return;
+    }
+
+    // Use the all-states lookup: a wait state targeting `pr_merged: true` must
+    // still see the tracked row after PR follow-up has marked it "merged"; an
+    // open-only listing would strand the wait. The dispatcher's own open-only
+    // loop is unaffected — only wait re-evaluation widens the lookup.
+    const tracked = this.runStore.findTrackedPullRequestByIssue({
+      issueNumber: row.issueNumber,
+      projectName: row.project
+    });
+    if (tracked === undefined) {
+      this.logger?.debug(
+        { runId, issueNumber: row.issueNumber },
+        "symphonika wait re-eval skipped: no PR tracked yet"
+      );
+      return;
+    }
+
+    let prState;
+    try {
+      prState = await tryGetPullRequestFollowupState(this.githubIssuesApi, {
+        owner: repository.owner,
+        pullNumber: tracked.prNumber,
+        repo: repository.repo,
+        token: repository.token
+      });
+    } catch (error) {
+      this.logger?.warn(
+        { err: error, runId },
+        "symphonika wait re-eval skipped: PR state fetch failed"
+      );
+      return;
+    }
+    if (prState === undefined || prState === null) {
+      return;
+    }
+
+    const signals = {
+      provider_success: true,
+      ...projectPullRequestSignals(prState)
+    };
+
+    const decision = decideNextStep({
+      actionExecuted: true,
+      signals,
+      state: waitState
+    });
+
+    if (decision.kind === "stay_waiting") {
+      this.logger?.debug(
+        { reason: decision.reason, runId },
+        "symphonika wait re-eval: still waiting"
+      );
+      return;
+    }
+
+    if (decision.kind === "advance") {
+      const next = findWorkflowState(loaded.expandedWorkflow, decision.to);
+      if (next?.terminal !== undefined) {
+        this.runStore.recordWorkflowTerminal(runId, {
+          terminalStateId: next.id,
+          transitionReason: decision.reason
+        });
+        this.runStore.updateRunState(runId, "succeeded");
+        return;
+      }
+      this.runStore.recordWorkflowStateAdvance(runId, {
+        nextStateId: decision.to,
+        transitionReason: decision.reason
+      });
+      this.runStore.updateRunState(runId, "succeeded");
+
+      if (next?.action?.kind === "wait") {
+        const nextWaitingRunId = this.createRunId();
+        this.runStore.createWaitingRun({
+          currentStateId: decision.to,
+          id: nextWaitingRunId,
+          issue: refreshed,
+          parentRunId: runId,
+          projectName: project.name
+        });
+        this.schedule({
+          delayMs: this.lifecyclePolicy.continuation.delayMs,
+          fire: () =>
+            this.executeWaitPark({ waitingRunId: nextWaitingRunId }),
+          issueNumber: refreshed.number,
+          kind: "wait_park",
+          projectName: project.name,
+          runId
+        });
+        return;
+      }
+
+      this.schedule({
+        delayMs: this.lifecyclePolicy.continuation.delayMs,
+        fire: () =>
+          this.executeStateAdvance({
+            issue: refreshed,
+            parentRunId: runId,
+            projectName: project.name
+          }),
+        issueNumber: refreshed.number,
+        kind: "state_advance",
+        projectName: project.name,
+        runId
+      });
+      return;
+    }
+
+    if (decision.kind === "blocked") {
+      this.runStore.recordWorkflowBlocked(runId, {
+        stateId: waitState.id,
+        transitionReason: decision.reason
+      });
+      this.runStore.updateRunState(runId, "succeeded");
+      return;
+    }
+
+    if (decision.kind === "terminate") {
+      this.runStore.recordWorkflowTerminal(runId, {
+        terminalStateId: decision.stateId,
+        transitionReason: `entered terminal state ${decision.terminal}`
+      });
+      this.runStore.updateRunState(runId, "succeeded");
+    }
+  }
+
   async executeStateAdvance(payload: StateAdvancePayload): Promise<void> {
     const projects = await this.projectsLoader();
     const project = projects.get(payload.projectName);
@@ -604,6 +802,18 @@ export class RunController {
       return {
         dispatched: false,
         reason: "issue already has an active run"
+      };
+    }
+
+    // Don't race a scheduled state_advance: a wait→agent transition may have
+    // just enqueued an autofix state for this issue in the same tick. The
+    // scheduled item is not yet in `activeRuns.entries`, so `isIssueInFlight`
+    // misses it. Consult `isIssueScheduled` to avoid dispatching a duplicate
+    // review-followup run on the same issue/branch.
+    if (this.activeRuns.isIssueScheduled(input.projectName, input.issueNumber)) {
+      return {
+        dispatched: false,
+        reason: "issue has scheduled work pending"
       };
     }
 
@@ -1033,6 +1243,8 @@ export class RunController {
       if (currentState !== undefined) {
         workflowOutcome = this.applyWorkflowOutcome({
           currentState,
+          issue: input.issue,
+          project: input.project,
           runId: input.runId,
           terminal,
           workflow: loadedWorkflow.expandedWorkflow
@@ -1096,8 +1308,16 @@ export class RunController {
           runId: input.runId,
           runtimeAttemptNumber: input.attemptNumber,
           stateAdvance:
-            isRawFsm && workflowOutcome.advancedToState !== null
+            isRawFsm &&
+            workflowOutcome.advancedToState !== null &&
+            workflowOutcome.parkAsWait !== true
               ? { toStateId: workflowOutcome.advancedToState }
+              : null,
+          waitPark:
+            isRawFsm &&
+            workflowOutcome.parkAsWait === true &&
+            workflowOutcome.waitingRunId !== undefined
+              ? { waitingRunId: workflowOutcome.waitingRunId }
               : null,
           suppressContinuation
         });
@@ -1216,6 +1436,8 @@ export class RunController {
 
   private applyWorkflowOutcome(input: {
     currentState: ExpandedWorkflowState;
+    issue: IssueSnapshot;
+    project: RunControllerProjectConfig;
     runId: string;
     terminal: ClassifiedTerminal;
     workflow: ExpandedWorkflow;
@@ -1240,6 +1462,23 @@ export class RunController {
         nextStateId: decision.to,
         transitionReason: decision.reason
       });
+      if (next?.action?.kind === "wait") {
+        const waitingRunId = this.createRunId();
+        this.runStore.createWaitingRun({
+          currentStateId: decision.to,
+          id: waitingRunId,
+          issue: input.issue,
+          parentRunId: input.runId,
+          projectName: input.project.name
+        });
+        return {
+          advancedToState: decision.to,
+          advancedToTerminal: false,
+          blocked: false,
+          parkAsWait: true,
+          waitingRunId
+        };
+      }
       return {
         advancedToState: decision.to,
         advancedToTerminal: false,
@@ -1491,6 +1730,7 @@ export class RunController {
     runtimeAttemptNumber: number;
     stateAdvance?: { toStateId: string } | null;
     suppressContinuation?: boolean;
+    waitPark?: { waitingRunId: string } | null;
   }): Promise<void> {
     if (input.outcome.kind === "cancelled" || input.outcome.kind === "input_required") {
       return;
@@ -1570,6 +1810,33 @@ export class RunController {
           }),
         issueNumber: refreshedForAdvance.number,
         kind: "state_advance",
+        projectName: input.project.name,
+        runId: input.runId
+      });
+      return;
+    }
+
+    // Raw FSM advanced into a wait state: the waiting row was already created
+    // synchronously by applyWorkflowOutcome (so a daemon restart can recover
+    // it). Schedule a one-shot re-evaluation; subsequent re-evaluations come
+    // from the daemon tick's reconcileWaitingRuns pass.
+    if (input.waitPark != null) {
+      this.logger?.info(
+        {
+          delayMs: this.lifecyclePolicy.continuation.delayMs,
+          issueNumber: input.issue.number,
+          parentRunId: input.runId,
+          project: input.project.name,
+          waitingRunId: input.waitPark.waitingRunId
+        },
+        "symphonika scheduling wait re-evaluation"
+      );
+      const waitingRunId = input.waitPark.waitingRunId;
+      this.schedule({
+        delayMs: this.lifecyclePolicy.continuation.delayMs,
+        fire: () => this.executeWaitPark({ waitingRunId }),
+        issueNumber: input.issue.number,
+        kind: "wait_park",
         projectName: input.project.name,
         runId: input.runId
       });

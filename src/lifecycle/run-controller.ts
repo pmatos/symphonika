@@ -183,6 +183,11 @@ type RetryPayload = {
   extraInstructions?: string;
   issue: IssueSnapshot;
   projectName: string;
+  // When false (raw FSM mid-walk runs), executeRetry skips the labels_all /
+  // labels_none re-check so a transient provider failure stays recoverable
+  // even when labels drift during the FSM walk. CLOSED_ISSUE still cancels.
+  // See ADR 0046.
+  respectsIssueLabels?: boolean;
   runId: string;
 };
 
@@ -370,17 +375,23 @@ export class RunController {
       });
       return;
     }
-    const eligibility = evaluateProjectEligibility(refreshed, project, {
-      ignoreOperationalLabels: true
-    });
-    if (!eligibility.eligible) {
-      await this.cancelScheduledLifecycleWork({
-        issueNumber: payload.issue.number,
-        reason: CANCEL_REASONS.ELIGIBILITY_LOSS,
-        repository,
-        runId: payload.runId
+    // Raw FSM mid-walk runs: the FSM, not the issue labels, decides whether
+    // the agent keeps running. A transient retry of such a run must not be
+    // cancelled by label drift during the retry backoff. CLOSED_ISSUE above is
+    // still honored. See ADR 0046.
+    if (payload.respectsIssueLabels !== false) {
+      const eligibility = evaluateProjectEligibility(refreshed, project, {
+        ignoreOperationalLabels: true
       });
-      return;
+      if (!eligibility.eligible) {
+        await this.cancelScheduledLifecycleWork({
+          issueNumber: payload.issue.number,
+          reason: CANCEL_REASONS.ELIGIBILITY_LOSS,
+          repository,
+          runId: payload.runId
+        });
+        return;
+      }
     }
 
     // Re-assert sym:claimed best-effort in case operator clear-stale ran between attempts.
@@ -891,6 +902,15 @@ export class RunController {
         }
       };
     }
+    // Raw FSM continuations are state-advance runs: the FSM, not the issue
+    // labels, decides whether the agent keeps running. Computed here so both
+    // activeRuns.register (in the try block) and scheduleNext (in finally)
+    // can carry the same label-immunity guarantee — including into retry
+    // scheduling. See ADR 0046.
+    const respectsIssueLabels = !(
+      input.isContinuation &&
+      loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm"
+    );
 
     try {
       // For raw FSM workflows, the agent action's `prompt` field points at the
@@ -948,14 +968,6 @@ export class RunController {
         state: "running"
       });
       attemptCreated = true;
-      // Raw FSM continuations are state-advance runs: the FSM, not the issue
-      // labels, decides whether the next state runs. Signal that to
-      // reconcileActiveRuns so it skips the labels_all / labels_none re-check
-      // for this run while still honoring CLOSED_ISSUE. See ADR 0046.
-      const respectsIssueLabels = !(
-        input.isContinuation &&
-        loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm"
-      );
       this.activeRuns.register({
         cancel: () => input.provider.cancel(input.runId),
         issueNumber: input.issue.number,
@@ -1080,6 +1092,7 @@ export class RunController {
           outcome: terminal,
           project: input.project,
           repository: input.repository,
+          respectsIssueLabels,
           runId: input.runId,
           runtimeAttemptNumber: input.attemptNumber,
           stateAdvance:
@@ -1473,6 +1486,7 @@ export class RunController {
     outcome: ClassifiedTerminal;
     project: RunControllerProjectConfig;
     repository: GitHubIssueRepositoryInput;
+    respectsIssueLabels?: boolean;
     runId: string;
     runtimeAttemptNumber: number;
     stateAdvance?: { toStateId: string } | null;
@@ -1502,6 +1516,14 @@ export class RunController {
               : { extraInstructions: input.extraInstructions }),
             issue: input.issue,
             projectName: input.project.name,
+            // Carry the FSM mid-walk label-immunity bit into the retry. Without
+            // this a transient provider failure during a raw FSM walk would be
+            // cancelled with ELIGIBILITY_LOSS the moment labels drift, even
+            // though the in-flight attempt and the success-to-next-state path
+            // are both label-immune. See ADR 0046.
+            ...(input.respectsIssueLabels === false
+              ? { respectsIssueLabels: false }
+              : {}),
             runId: input.runId
           }),
         issueNumber: input.issue.number,

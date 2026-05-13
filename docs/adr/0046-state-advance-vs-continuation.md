@@ -16,9 +16,10 @@ Symphonika models state advancement as a distinct dispatch kind, `state_advance`
 - skips the continuation cap entirely (the FSM bounds the walk via terminal states);
 - skips the `labels_all` / `labels_none` re-check (the FSM, not the issue label set, decides the
   next state). Only the issue's open/closed state is re-verified to avoid acting on a closed issue.
-  `reconcileActiveRuns` honors the same rule for in-flight state-advance runs: it still cancels
-  with `CLOSED_ISSUE` when the issue closes, but skips the labels re-check that would otherwise
-  cancel the run with `ELIGIBILITY_LOSS` mid-walk;
+  `reconcileActiveRuns` honors the same rule for in-flight state-advance runs, and `executeRetry`
+  honors it for scheduled retries of state-advance runs: both still cancel with `CLOSED_ISSUE`
+  when the issue closes, but skip the labels re-check that would otherwise cancel the run with
+  `ELIGIBILITY_LOSS` mid-walk;
 - creates the next Run via the existing `createContinuationRun` helper so the new row inherits
   `current_state_id` (the next state id was already persisted by `applyWorkflowOutcome`) and
   records `continuation_parent_run_id`, keeping linkage compatible with existing status surfaces;

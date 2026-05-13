@@ -430,6 +430,142 @@ describe("wait state lifecycle", () => {
     }
   });
 
+  it("advances a wait state targeting pr_merged: true after the tracked PR has been merged", async () => {
+    const root = await makeTempRoot();
+    // Workflow uses `pr_merged: true` on the wait transition. Predicate
+    // projection only emits `pr_merged: true` from the live GitHub follow-up
+    // state, so the wait reconciler must still be able to find the tracked
+    // PR row after PR follow-up has marked its tracked state "merged".
+    await writeFile(
+      path.join(root, "symphonika.yml"),
+      [
+        "state:",
+        "  root: ./.symphonika",
+        "polling:",
+        "  interval_ms: 30000",
+        "providers:",
+        "  codex:",
+        `    command: "${DEFAULT_CODEX_COMMAND}"`,
+        "  claude:",
+        '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+        "projects:",
+        "  - name: symphonika",
+        "    disabled: false",
+        "    weight: 1",
+        "    tracker:",
+        "      kind: github",
+        "      owner: pmatos",
+        "      repo: symphonika",
+        '      token: "$GITHUB_TOKEN"',
+        "    issue_filters:",
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: ["blocked", "needs-human"]',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/symphonika",
+        "      git:",
+        "        remote: git@github.com:pmatos/symphonika.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    workflow: ./workflow.yml",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: wait_for_merge",
+        "  initial: awaiting_merge",
+        "  states:",
+        "    awaiting_merge:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: merged",
+        "          when:",
+        "            pr_merged: true",
+        "    merged:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.createWaitingRun({
+        currentStateId: "awaiting_merge",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika"
+      });
+      store.trackPullRequest({
+        branchName: "sym/symphonika/8-wait-state-acceptance-fixture",
+        headSha: "deadbeef",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+      // PR follow-up has already observed the merge: tracked row's state
+      // becomes "merged" and listOpenTrackedPullRequests would filter it out.
+      const tracked = store
+        .listOpenTrackedPullRequests()
+        .find((pr) => pr.prNumber === 99);
+      if (tracked === undefined) {
+        throw new Error("tracked PR row missing in fixture setup");
+      }
+      store.recordPullRequestObservation({
+        headSha: "deadbeef",
+        id: tracked.id,
+        prUrl: tracked.prUrl,
+        state: "merged"
+      });
+      expect(store.listOpenTrackedPullRequests()).toHaveLength(0);
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(
+          prState({ state: "MERGED", merged: true })
+        ),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      const after = store.getRun("waiting-run");
+      expect(after?.state).toBe("succeeded");
+      expect(after?.terminalStateId).toBe("merged");
+      expect(githubIssuesApi.getPullRequestFollowupState).toHaveBeenCalledTimes(1);
+    } finally {
+      store.close();
+    }
+  });
+
   it("keeps the run waiting when PR predicates do not match", async () => {
     const root = await makeTempRoot();
     await writeWaitStateProject(root);

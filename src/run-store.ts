@@ -1178,6 +1178,32 @@ export class RunStore {
       });
   }
 
+  // Wait re-evaluation needs to see merged/closed tracked PRs so a workflow
+  // waiting on `pr_merged: true` can advance after the PR follow-up
+  // dispatcher has marked the tracked row "merged". Returns the most-recent
+  // tracked PR for the (project, issue) pair regardless of `state`.
+  findTrackedPullRequestByIssue(input: {
+    issueNumber: number;
+    projectName: string;
+  }): TrackedPullRequest | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select id, project_name, issue_number, run_id, pr_number, pr_url,",
+          "branch_name, head_sha_at_dispatch, last_seen_head_sha,",
+          "last_review_dispatch_fingerprint, review_dispatch_count,",
+          "last_followup_run_id, state, last_observed_at, created_at, updated_at",
+          "from tracked_pull_requests",
+          "where project_name = ? and issue_number = ?",
+          "order by id desc limit 1"
+        ].join(" ")
+      )
+      .get(input.projectName, input.issueNumber) as
+      | TrackedPullRequestRow
+      | undefined;
+    return row === undefined ? undefined : mapTrackedPullRequestRow(row);
+  }
+
   listOpenTrackedPullRequests(): TrackedPullRequest[] {
     const rows = this.database
       .prepare(

@@ -518,12 +518,14 @@ export class RunController {
       return;
     }
 
-    const tracked = this.runStore
-      .listOpenTrackedPullRequests()
-      .find(
-        (pr) =>
-          pr.projectName === row.project && pr.issueNumber === row.issueNumber
-      );
+    // Use the all-states lookup: a wait state targeting `pr_merged: true` must
+    // still see the tracked row after PR follow-up has marked it "merged"; an
+    // open-only listing would strand the wait. The dispatcher's own open-only
+    // loop is unaffected — only wait re-evaluation widens the lookup.
+    const tracked = this.runStore.findTrackedPullRequestByIssue({
+      issueNumber: row.issueNumber,
+      projectName: row.project
+    });
     if (tracked === undefined) {
       this.logger?.debug(
         { runId, issueNumber: row.issueNumber },

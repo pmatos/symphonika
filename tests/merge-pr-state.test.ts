@@ -425,6 +425,93 @@ describe("merge_pr state lifecycle", () => {
     }
   });
 
+  it("parks a fresh dispatch whose initial state is merge_pr without launching a provider", async () => {
+    const root = await makeTempRoot();
+    await writeMergePrWorkflow(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      const runAttempt = vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      });
+      const provider: AgentProvider = {
+        cancel: vi.fn().mockResolvedValue(undefined),
+        name: "codex",
+        runAttempt,
+        validate: vi.fn().mockResolvedValue(undefined)
+      };
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        mergePullRequest: vi.fn().mockResolvedValue(undefined),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+
+      const scheduled: Array<{ runId: string; kind: string }> = [];
+      const project = projectFixture("./workflow.yml");
+      const controller = new RunController({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createRunId: () => "fresh-merge-pr-run",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        lifecyclePolicy: {
+          continuation: { cap: 0, delayMs: 0 },
+          retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+        },
+        logger: pino({ enabled: false }),
+        prepareIssueWorkspace: () =>
+          Promise.resolve(preparedWorkspaceFixture(root)),
+        projectsLoader: () => Promise.resolve(new Map([[project.name, project]])),
+        providersLoader: (): Promise<RunControllerProvidersConfig> =>
+          Promise.resolve({
+            claude: { command: "claude" },
+            codex: { command: DEFAULT_CODEX_COMMAND }
+          }),
+        pullRequestPolicyLoader: () =>
+          Promise.resolve(DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY),
+        runStore: store,
+        schedule: (item) => {
+          scheduled.push({ kind: item.kind, runId: item.runId });
+        },
+        stateRoot: path.join(root, ".symphonika")
+      });
+
+      const result = await controller.dispatchOneFresh({
+        candidateIssues: [{ issue, project: project.name }],
+        errors: [],
+        filteredIssues: [],
+        projects: []
+      });
+
+      expect(result).toEqual({ dispatched: true, runId: "fresh-merge-pr-run" });
+      expect(runAttempt).not.toHaveBeenCalled();
+      expect(provider.validate).not.toHaveBeenCalled();
+      expect(githubIssuesApi.mergePullRequest).not.toHaveBeenCalled();
+
+      const after = store.getRun("fresh-merge-pr-run");
+      expect(after?.state).toBe("waiting");
+      expect(after?.currentStateId).toBe("merging");
+
+      expect(scheduled).toEqual([
+        { kind: "wait_park", runId: "fresh-merge-pr-run" }
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("defers the merge when pull_requests.merge.enabled is false", async () => {
     const root = await makeTempRoot();
     await writeMergePrWorkflow(root);

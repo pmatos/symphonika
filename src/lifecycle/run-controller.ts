@@ -1206,6 +1206,33 @@ export class RunController {
         }
       };
     }
+    // Raw FSM workflows whose entry state is a parked action (wait/merge_pr)
+    // must never launch a provider — they have no prompt and must instead be
+    // parked into the waiting-row reconciliation path immediately. Without
+    // this guard, runAttemptLifecycle would call startAttempt with an empty
+    // raw-FSM prompt, terminate, and then fall through `applyWorkflowOutcome`
+    // (which has no `stay_waiting` branch) leaving the workflow with no
+    // waiting row and no merge attempt scheduled. Returning here keeps the
+    // run row durable (state="waiting", current_state_id set) so a daemon
+    // restart can resume the reconciliation. See SPEC §12.5 / §12.6.
+    if (
+      loadedWorkflow.errors.length === 0 &&
+      loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm" &&
+      currentState !== undefined &&
+      isParkedAction(currentState.action?.kind)
+    ) {
+      this.runStore.updateRunState(input.runId, "waiting");
+      this.schedule({
+        delayMs: this.lifecyclePolicy.continuation.delayMs,
+        fire: () => this.executeWaitPark({ waitingRunId: input.runId }),
+        issueNumber: input.issue.number,
+        kind: "wait_park",
+        projectName: input.project.name,
+        runId: input.runId
+      });
+      return;
+    }
+
     // Raw FSM continuations are state-advance runs: the FSM, not the issue
     // labels, decides whether the agent keeps running. Computed here so both
     // activeRuns.register (in the try block) and scheduleNext (in finally)

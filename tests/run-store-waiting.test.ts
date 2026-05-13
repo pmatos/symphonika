@@ -75,7 +75,7 @@ describe("RunStore waiting-run helpers", () => {
     }
   });
 
-  it("listWaitingRuns surfaces waiting rows and excludes cancel-requested ones", async () => {
+  it("listWaitingRuns surfaces waiting rows including cancel-requested ones so reconciliation can transition them", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
@@ -99,12 +99,15 @@ describe("RunStore waiting-run helpers", () => {
       store.markCancelRequested("wait-B", "operator");
 
       const waiting = store.listWaitingRuns();
-      expect(waiting.map((row: { runId: string }) => row.runId).sort()).toEqual(["wait-A"]);
-      expect(waiting[0]).toMatchObject({
-        currentStateId: "review_check",
-        issueNumber: 10,
+      expect(
+        waiting.map((row: { runId: string }) => row.runId).sort()
+      ).toEqual(["wait-A", "wait-B"]);
+      const waitB = waiting.find((row) => row.runId === "wait-B");
+      expect(waitB).toMatchObject({
+        currentStateId: "merge_gate",
+        issueNumber: 11,
         projectName: "symphonika",
-        runId: "wait-A"
+        runId: "wait-B"
       });
     } finally {
       store.close();

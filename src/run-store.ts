@@ -367,6 +367,10 @@ export class RunStore {
     this.setRunCurrentState(input.id, input.currentStateId);
   }
 
+  // Includes cancel-requested rows on purpose: a waiting run cancelled via
+  // cancelViaUi only flips `cancel_requested = 1`, and the cancellation branch
+  // lives inside reEvaluateWaitingRun. Filtering cancel-requested rows out
+  // here would leave the row stuck in `state = "waiting"` forever.
   listWaitingRuns(): Array<{
     currentStateId: string;
     issueNumber: number;
@@ -379,7 +383,6 @@ export class RunStore {
           "select id, project_name, issue_number, current_state_id",
           "from runs",
           "where state = 'waiting'",
-          "and cancel_requested = 0",
           "and current_state_id is not null",
           "order by created_at asc"
         ].join(" ")

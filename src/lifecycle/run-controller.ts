@@ -29,13 +29,18 @@ import type {
 import { prepareIssueWorkspace as defaultPrepareIssueWorkspace } from "../workspace.js";
 import { readFile } from "node:fs/promises";
 
+import type { WorkflowReference } from "../config-schemas.js";
 import {
   expandWorkflowDefinition,
   parseWorkflowContract,
   persistRunEvidence,
   renderAutonomousPrompt
 } from "../workflow.js";
-import type { ExpandedWorkflow } from "../workflow.js";
+import type {
+  ExpandedWorkflow,
+  ExpandedWorkflowState,
+  WorkflowPredicateMap
+} from "../workflow.js";
 
 import {
   ActiveRunRegistry,
@@ -46,6 +51,10 @@ import {
 } from "./active-runs.js";
 import { classifyCapReachedOutcome } from "./cap-reached-context.js";
 import { classifyFailure, type ClassifiedTerminal } from "./classify-failure.js";
+import {
+  decideNextStep,
+  findWorkflowState
+} from "./state-machine-dispatch.js";
 import { buildCapReachedReason } from "./terminal-reason.js";
 
 export type WorkflowSnapshot = {
@@ -64,7 +73,7 @@ type LoadedWorkflow = {
 };
 
 export type RunControllerProjectConfig = PollingProjectConfig & {
-  workflow: string | WorkflowSnapshot;
+  workflow: WorkflowReference | WorkflowSnapshot;
   workspace: {
     git: {
       base_branch: string;
@@ -777,7 +786,58 @@ export class RunController {
 
     this.runStore.updateRunState(input.runId, "preparing_workspace");
 
+    const loadedWorkflow = await this.loadWorkflow(input.project.workflow);
+    let projectForAttempt = input.project;
+    let currentState = undefined as
+      | ReturnType<typeof findWorkflowState>
+      | undefined;
+    if (loadedWorkflow.errors.length === 0) {
+      const persistedStateId = this.runStore.getRun(input.runId)?.currentStateId;
+      const startStateId =
+        persistedStateId ?? loadedWorkflow.expandedWorkflow.initial;
+      currentState = findWorkflowState(
+        loadedWorkflow.expandedWorkflow,
+        startStateId
+      );
+      if (currentState !== undefined) {
+        this.runStore.setRunCurrentState(input.runId, currentState.id);
+      }
+      projectForAttempt = {
+        ...input.project,
+        workflow: {
+          body: loadedWorkflow.body,
+          contentHash: loadedWorkflow.contentHash,
+          expandedWorkflow: loadedWorkflow.expandedWorkflow,
+          path: loadedWorkflow.path
+        }
+      };
+    }
+
     try {
+      // For raw FSM workflows, the agent action's `prompt` field points at the
+      // template file to send to the provider for this state. Resolve it here
+      // so startAttempt renders the right prompt (rather than the YAML body of
+      // the workflow file, which is meaningless input for the agent).
+      let promptTemplate: string | undefined;
+      if (
+        currentState !== undefined &&
+        loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm" &&
+        currentState.action?.kind === "agent" &&
+        currentState.action.prompt !== undefined
+      ) {
+        const workflowDir = path.dirname(loadedWorkflow.path);
+        const promptPath = path.resolve(workflowDir, currentState.action.prompt);
+        try {
+          promptTemplate = await readFile(promptPath, "utf8");
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `workflow state ${currentState.id} prompt not found at ${promptPath}: ${message}`,
+            { cause: error }
+          );
+        }
+      }
+
       started = await this.startAttempt({
         attemptId,
         attemptNumber: input.attemptNumber,
@@ -786,9 +846,10 @@ export class RunController {
           : { extraInstructions: input.extraInstructions }),
         isContinuation: input.isContinuation,
         issue: input.issue,
-        project: input.project,
+        project: projectForAttempt,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
+        ...(promptTemplate === undefined ? {} : { promptTemplate }),
         runId: input.runId
       });
       await input.provider.validate(input.providerCommand);
@@ -864,6 +925,18 @@ export class RunController {
         terminal.reason,
         terminal.classification
       );
+      let advancedToTerminal = false;
+      if (currentState !== undefined) {
+        ({ advancedToTerminal } = this.applyWorkflowOutcome({
+          currentState,
+          runId: input.runId,
+          terminal,
+          workflow: loadedWorkflow.expandedWorkflow
+        }));
+      }
+      const suppressContinuation =
+        advancedToTerminal &&
+        loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm";
       this.runStore.updateRunState(input.runId, outcomeState);
 
       const willRetry =
@@ -912,7 +985,8 @@ export class RunController {
           project: input.project,
           repository: input.repository,
           runId: input.runId,
-          runtimeAttemptNumber: input.attemptNumber
+          runtimeAttemptNumber: input.attemptNumber,
+          suppressContinuation
         });
       } catch (scheduleError) {
         this.logger?.error(
@@ -936,6 +1010,7 @@ export class RunController {
     isContinuation: boolean;
     issue: IssueSnapshot;
     project: RunControllerProjectConfig;
+    promptTemplate?: string;
     providerCommand: string;
     providerName: AgentProviderName;
     runId: string;
@@ -974,7 +1049,7 @@ export class RunController {
         continuation: input.isContinuation,
         id: input.runId
       },
-      template: workflow.body,
+      template: input.promptTemplate ?? workflow.body,
       workflowContentHash: workflow.contentHash,
       workflowPath,
       workspace: {
@@ -1026,14 +1101,76 @@ export class RunController {
     };
   }
 
+  private applyWorkflowOutcome(input: {
+    currentState: ExpandedWorkflowState;
+    runId: string;
+    terminal: ClassifiedTerminal;
+    workflow: ExpandedWorkflow;
+  }): { advancedToTerminal: boolean } {
+    const signals = signalsFromTerminal(input.terminal);
+    const decision = decideNextStep({
+      actionExecuted: true,
+      signals,
+      state: input.currentState
+    });
+
+    if (decision.kind === "advance") {
+      const next = findWorkflowState(input.workflow, decision.to);
+      if (next?.terminal !== undefined) {
+        this.runStore.recordWorkflowTerminal(input.runId, {
+          terminalStateId: next.id,
+          transitionReason: decision.reason
+        });
+        return { advancedToTerminal: true };
+      }
+      this.runStore.setRunCurrentState(input.runId, decision.to);
+      return { advancedToTerminal: false };
+    }
+
+    if (decision.kind === "blocked") {
+      this.runStore.recordWorkflowBlocked(input.runId, {
+        stateId: input.currentState.id,
+        transitionReason: decision.reason
+      });
+      return { advancedToTerminal: false };
+    }
+
+    if (decision.kind === "terminate") {
+      this.runStore.recordWorkflowTerminal(input.runId, {
+        terminalStateId: decision.stateId,
+        transitionReason: `entered terminal state ${decision.terminal}`
+      });
+      return { advancedToTerminal: true };
+    }
+
+    return { advancedToTerminal: false };
+  }
+
   private async loadWorkflow(
-    workflow: string | WorkflowSnapshot
+    workflow: WorkflowReference | WorkflowSnapshot
   ): Promise<LoadedWorkflow> {
-    if (typeof workflow === "string") {
-      const workflowPath = path.resolve(this.configDir, workflow);
+    if (!("expandedWorkflow" in workflow)) {
+      const workflowPath = path.resolve(this.configDir, workflow.path);
       const contents = await readFile(workflowPath, "utf8");
+      const expanded = expandWorkflowDefinition(
+        contents,
+        workflowPath,
+        workflow.format
+      );
+      // Raw FSM YAML files commonly open with the `---` document marker; the
+      // markdown contract parser would reject those as missing a closing
+      // delimiter. Skip it entirely for raw FSM — per-state `action.prompt`
+      // files supply the actual prompt at dispatch time.
+      if (expanded.workflow.source.kind === "raw_fsm") {
+        return {
+          body: "",
+          contentHash: expanded.workflow.contentHash,
+          errors: expanded.errors,
+          expandedWorkflow: expanded.workflow,
+          path: workflowPath
+        };
+      }
       const contract = parseWorkflowContract(contents, workflowPath);
-      const expanded = expandWorkflowDefinition(contents, workflowPath);
       return {
         body: contract.body,
         contentHash: contract.contentHash,
@@ -1231,6 +1368,7 @@ export class RunController {
     repository: GitHubIssueRepositoryInput;
     runId: string;
     runtimeAttemptNumber: number;
+    suppressContinuation?: boolean;
   }): Promise<void> {
     if (input.outcome.kind === "cancelled" || input.outcome.kind === "input_required") {
       return;
@@ -1267,6 +1405,14 @@ export class RunController {
     }
 
     // success path: re-check eligibility, schedule continuation, enforce cap.
+    // For raw FSM workflows that reached an explicit terminal node, "terminal"
+    // means the workflow is done — do not schedule another continuation even
+    // if the issue still matches `agent-ready`. Markdown compatibility-graph
+    // workflows keep the legacy "loop on agent-ready" behavior.
+    if (input.suppressContinuation === true) {
+      return;
+    }
+
     const refreshed = await this.refreshIssue({
       project: input.project,
       issueNumber: input.issue.number,
@@ -1560,4 +1706,16 @@ function normalizeProjectWeight(weight: number | undefined): number {
     return 1;
   }
   return weight;
+}
+
+function signalsFromTerminal(
+  terminal: ClassifiedTerminal
+): WorkflowPredicateMap {
+  if (terminal.kind === "success") {
+    return { branch_ahead_of_base: true, provider_success: true };
+  }
+  if (terminal.kind === "failed" && terminal.reason === "no_workspace_changes") {
+    return { branch_ahead_of_base: false, provider_success: true };
+  }
+  return { branch_ahead_of_base: false, provider_success: false };
 }

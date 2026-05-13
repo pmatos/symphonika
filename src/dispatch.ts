@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { parse } from "yaml";
 import { z } from "zod";
 
+import { workflowReferenceSchema } from "./config-schemas.js";
 import type {
   GitHubIssueLabelInput,
   GitHubIssuesApi,
@@ -103,7 +104,7 @@ const dispatchProjectSchema = z
         provider: providerNameSchema
       })
       .passthrough(),
-    workflow: z.string().trim().min(1)
+    workflow: workflowReferenceSchema
   })
   .passthrough();
 

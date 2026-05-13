@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
+import type { WorkflowFormat } from "./config-schemas.js";
 import type { IssueSnapshot } from "./issue-polling.js";
 import { isPathInside } from "./path-safety.js";
 
@@ -256,10 +257,11 @@ export async function loadWorkflowContract(
 }
 
 export async function loadExpandedWorkflow(
-  workflowPath: string
+  workflowPath: string,
+  format: WorkflowFormat = "auto"
 ): Promise<ExpandedWorkflowLoadResult> {
   const contents = await readFile(workflowPath, "utf8");
-  return expandWorkflowDefinition(contents, workflowPath);
+  return expandWorkflowDefinition(contents, workflowPath, format);
 }
 
 export async function loadProjectWorkflow(input: {
@@ -315,7 +317,7 @@ export async function loadProjectWorkflow(input: {
   const workflowPath = path.resolve(path.dirname(configPath), selected.workflowPath);
   let result: ExpandedWorkflowLoadResult;
   try {
-    result = await loadExpandedWorkflow(workflowPath);
+    result = await loadExpandedWorkflow(workflowPath, selected.workflowFormat);
   } catch (error) {
     return {
       errors: [
@@ -463,14 +465,35 @@ export function validateWorkflowTemplate(
 
 export function expandWorkflowDefinition(
   contents: string,
-  workflowPath: string
+  workflowPath: string,
+  format: WorkflowFormat = "auto"
 ): ExpandedWorkflowLoadResult {
-  const errors: string[] = [];
-  const explicit = parseExplicitWorkflowDefinition(contents, workflowPath, errors);
-  if (explicit !== undefined) {
-    return expandRawStateMachineWorkflow(explicit, workflowPath, contentHash(contents), errors);
+  const resolved = resolveWorkflowFormat(format, workflowPath);
+  if (resolved.kind === "error") {
+    return {
+      errors: [resolved.error],
+      workflow: emptyExpandedWorkflow(contents, workflowPath, "markdown")
+    };
   }
 
+  if (resolved.kind === "raw_fsm") {
+    const errors: string[] = [];
+    const explicit = parseExplicitWorkflowDefinition(contents, workflowPath, errors);
+    if (explicit === undefined) {
+      return {
+        errors,
+        workflow: emptyExpandedWorkflow(contents, workflowPath, "raw_fsm")
+      };
+    }
+    return expandRawStateMachineWorkflow(
+      explicit,
+      workflowPath,
+      contentHash(contents),
+      errors
+    );
+  }
+
+  const errors: string[] = [];
   const workflow = parseWorkflowContract(contents, workflowPath);
   errors.push(...workflow.errors);
   if (workflow.body.trim().length === 0) {
@@ -483,12 +506,58 @@ export function expandWorkflowDefinition(
   };
 }
 
+type ResolvedWorkflowFormat =
+  | { kind: "markdown" | "raw_fsm" }
+  | { error: string; kind: "error" };
+
+function resolveWorkflowFormat(
+  format: WorkflowFormat,
+  workflowPath: string
+): ResolvedWorkflowFormat {
+  if (format === "markdown") {
+    return { kind: "markdown" };
+  }
+  if (format === "raw_fsm") {
+    return { kind: "raw_fsm" };
+  }
+  const extension = path.extname(workflowPath).toLowerCase();
+  if (extension === ".md") {
+    return { kind: "markdown" };
+  }
+  if (extension === ".yaml" || extension === ".yml" || extension === ".json") {
+    return { kind: "raw_fsm" };
+  }
+  return {
+    error: `workflow at ${workflowPath} has no recognized extension (.md, .yaml, .yml, .json); declare format explicitly`,
+    kind: "error"
+  };
+}
+
+function emptyExpandedWorkflow(
+  contents: string,
+  workflowPath: string,
+  kind: WorkflowSourceKind
+): ExpandedWorkflow {
+  return {
+    contentHash: contentHash(contents),
+    initial: "",
+    name: path.basename(workflowPath, path.extname(workflowPath)),
+    source: { kind, path: workflowPath },
+    states: [],
+    templateFiles: []
+  };
+}
+
 function projectWorkflowReferences(
   rawProjects: unknown[],
   configPath: string,
   errors: string[]
-): Array<{ name: string; workflowPath: string }> {
-  const projects: Array<{ name: string; workflowPath: string }> = [];
+): Array<{ name: string; workflowFormat: WorkflowFormat; workflowPath: string }> {
+  const projects: Array<{
+    name: string;
+    workflowFormat: WorkflowFormat;
+    workflowPath: string;
+  }> = [];
   for (const [index, rawProject] of rawProjects.entries()) {
     if (!isRecord(rawProject)) {
       errors.push(`projects.${index} in ${configPath} must be a mapping`);
@@ -499,27 +568,78 @@ function projectWorkflowReferences(
       errors.push(`projects.${index}.name in ${configPath} must be a non-empty string`);
       continue;
     }
-    const workflowPath = stringProperty(rawProject, "workflow");
-    if (workflowPath === undefined) {
-      errors.push(
-        `projects.${name}.workflow in ${configPath} must be a non-empty path`
-      );
+    const reference = parseWorkflowReference(
+      rawProject.workflow,
+      `projects.${name}.workflow`,
+      configPath,
+      errors
+    );
+    if (reference === undefined) {
       continue;
     }
     projects.push({
       name,
-      workflowPath
+      workflowFormat: reference.format,
+      workflowPath: reference.path
     });
   }
   return projects;
 }
 
+function parseWorkflowReference(
+  rawWorkflow: unknown,
+  fieldLabel: string,
+  configPath: string,
+  errors: string[]
+): { format: WorkflowFormat; path: string } | undefined {
+  if (typeof rawWorkflow === "string") {
+    const trimmed = rawWorkflow.trim();
+    if (trimmed.length === 0) {
+      errors.push(`${fieldLabel} in ${configPath} must be a non-empty path`);
+      return undefined;
+    }
+    return { format: "auto", path: trimmed };
+  }
+  if (isRecord(rawWorkflow)) {
+    const pathValue = stringProperty(rawWorkflow, "path");
+    if (pathValue === undefined) {
+      errors.push(`${fieldLabel}.path in ${configPath} must be a non-empty path`);
+      return undefined;
+    }
+    const formatRaw = rawWorkflow.format;
+    let format: WorkflowFormat = "auto";
+    if (formatRaw !== undefined) {
+      if (
+        formatRaw === "markdown" ||
+        formatRaw === "raw_fsm" ||
+        formatRaw === "auto"
+      ) {
+        format = formatRaw;
+      } else {
+        errors.push(
+          `${fieldLabel}.format in ${configPath} must be one of markdown, raw_fsm, auto`
+        );
+        return undefined;
+      }
+    }
+    return { format, path: pathValue };
+  }
+  errors.push(`${fieldLabel} in ${configPath} must be a non-empty path or mapping`);
+  return undefined;
+}
+
 function selectProjectWorkflow(
-  projects: Array<{ name: string; workflowPath: string }>,
+  projects: Array<{
+    name: string;
+    workflowFormat: WorkflowFormat;
+    workflowPath: string;
+  }>,
   requestedProject: string | undefined,
   configPath: string,
   errors: string[]
-): { name: string; workflowPath: string } | undefined {
+):
+  | { name: string; workflowFormat: WorkflowFormat; workflowPath: string }
+  | undefined {
   if (requestedProject !== undefined) {
     const selected = projects.find((project) => project.name === requestedProject);
     if (selected === undefined) {
@@ -553,20 +673,16 @@ function parseExplicitWorkflowDefinition(
   try {
     parsed = parse(contents) ?? {};
   } catch (error) {
-    if (looksLikeYamlPath(workflowPath)) {
-      errors.push(
-        `workflow definition at ${workflowPath} could not be parsed: ${errorMessage(error)}`
-      );
-    }
+    errors.push(
+      `workflow definition at ${workflowPath} could not be parsed: ${errorMessage(error)}`
+    );
     return undefined;
   }
 
   if (!isRecord(parsed) || !isRecord(parsed.workflow)) {
-    if (looksLikeYamlPath(workflowPath)) {
-      errors.push(
-        `workflow definition at ${workflowPath} must define a top-level workflow mapping`
-      );
-    }
+    errors.push(
+      `workflow definition at ${workflowPath} must define a top-level workflow mapping`
+    );
     return undefined;
   }
 
@@ -916,11 +1032,6 @@ function recordProperty(
 ): Record<string, unknown> | undefined {
   const value = record[key];
   return isRecord(value) ? value : undefined;
-}
-
-function looksLikeYamlPath(workflowPath: string): boolean {
-  const extension = path.extname(workflowPath).toLowerCase();
-  return extension === ".yaml" || extension === ".yml";
 }
 
 export async function persistRunEvidence(

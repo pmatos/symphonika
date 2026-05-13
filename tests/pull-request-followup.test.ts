@@ -304,7 +304,7 @@ function projectConfig(): RunControllerProjectConfig {
       repo: "symphonika",
       token: "$GITHUB_TOKEN"
     },
-    workflow: "./WORKFLOW.md",
+    workflow: { format: "auto", path: "./WORKFLOW.md" },
     workspace: {
       git: {
         base_branch: "main",

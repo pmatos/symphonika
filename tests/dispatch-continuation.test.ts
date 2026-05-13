@@ -402,4 +402,146 @@ describe("dispatch continuation cap", () => {
       await daemon.stop();
     }
   });
+
+  it("suppresses continuations after a raw FSM workflow reaches a terminal node", async () => {
+    const root = await makeTempRoot();
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
+    await writeRawFsmTracerBulletProject(root);
+
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+
+    // Issue stays agent-ready after the run — without the raw-FSM terminal
+    // suppression, scheduleNext would refresh, see the label, and dispatch a
+    // continuation. We want the workflow's explicit `terminal: success` to
+    // mean "done" regardless of the label state.
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue({
+        ...baseIssue,
+        labels: ["agent-ready"]
+      }),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const prepareIssueWorkspace = vi.fn(
+      (): Promise<PreparedIssueWorkspace> => Promise.resolve(prepared)
+    );
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => "run-fsm-terminal",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: fastContinuationPolicy,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      await waitForCondition(daemon.url, ({ runs }) =>
+        runs.some((run) => run["state"] === "succeeded")
+      );
+
+      // Wait beyond the continuation delay (5ms in fastContinuationPolicy) to
+      // confirm no continuation gets dispatched.
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) => r.json())) as {
+        runs: Array<Record<string, unknown>>;
+      };
+      expect(status.runs).toHaveLength(1);
+      expect(status.runs[0]?.["isContinuation"]).toBe(false);
+      expect(status.runs[0]?.["state"]).toBe("succeeded");
+      // getIssue should not have been called — suppression short-circuits
+      // scheduleNext before the refresh.
+      expect(githubIssuesApi.getIssue).not.toHaveBeenCalled();
+    } finally {
+      await daemon.stop();
+    }
+  });
 });
+
+async function writeRawFsmTracerBulletProject(root: string): Promise<void> {
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "polling:",
+      "  interval_ms: 25",
+      "providers:",
+      "  codex:",
+      `    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"`,
+      "  claude:",
+      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      "projects:",
+      "  - name: symphonika",
+      "    disabled: false",
+      "    weight: 1",
+      "    tracker:",
+      "      kind: github",
+      "      owner: pmatos",
+      "      repo: symphonika",
+      '      token: "$GITHUB_TOKEN"',
+      "    issue_filters:",
+      '      states: ["open"]',
+      '      labels_all: ["agent-ready"]',
+      '      labels_none: ["blocked", "needs-human"]',
+      "    priority:",
+      "      labels: {}",
+      "      default: 99",
+      "    workspace:",
+      "      root: ./.symphonika/workspaces/symphonika",
+      "      git:",
+      "        remote: git@github.com:pmatos/symphonika.git",
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      "    workflow: ./workflow.yml",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: tracer_bullet",
+      "  initial: run_agent",
+      "  states:",
+      "    run_agent:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: done",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "prompt.md"),
+    "Work on #{{issue.number}}: {{issue.title}}.\n"
+  );
+}

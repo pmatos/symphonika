@@ -26,6 +26,7 @@ export type RunStatus = {
   cancelRequested: boolean;
   continuationParentRunId: string | null;
   createdAt: string;
+  currentStateId: string | null;
   failureClassification: FailureClassification | null;
   id: string;
   isContinuation: boolean;
@@ -40,7 +41,9 @@ export type RunStatus = {
   rawLogPath: string;
   retryCount: number;
   state: RunState;
+  stateTransitionReason: string | null;
   terminalReason: string | null;
+  terminalStateId: string | null;
   updatedAt: string;
   workflowGraphPath: string;
   workspacePath: string;
@@ -220,6 +223,7 @@ type RunRow = {
   cancel_requested: number;
   continuation_parent_run_id: string | null;
   created_at: string;
+  current_state_id: string | null;
   failure_classification: string | null;
   id: string;
   is_continuation: number;
@@ -234,7 +238,9 @@ type RunRow = {
   raw_log_path: string | null;
   retry_count: number;
   state: RunState;
+  state_transition_reason: string | null;
   terminal_reason: string | null;
+  terminal_state_id: string | null;
   updated_at: string;
   workflow_graph_path: string | null;
   workspace_path: string | null;
@@ -349,6 +355,12 @@ export class RunStore {
       providerName: input.providerName,
       state: "queued"
     });
+    const parent = this.database
+      .prepare("select current_state_id from runs where id = ?")
+      .get(input.parentRunId) as { current_state_id: string | null } | undefined;
+    if (parent?.current_state_id != null) {
+      this.setRunCurrentState(input.id, parent.current_state_id);
+    }
   }
 
   createCapReachedFailureRun(input: {
@@ -392,6 +404,52 @@ export class RunStore {
         "update runs set terminal_reason = ?, failure_classification = ?, updated_at = ? where id = ?"
       )
       .run(reason, classification, timestamp(), runId);
+  }
+
+  setRunCurrentState(runId: string, currentStateId: string): void {
+    this.database
+      .prepare(
+        "update runs set current_state_id = ?, updated_at = ? where id = ?"
+      )
+      .run(currentStateId, timestamp(), runId);
+  }
+
+  recordWorkflowTerminal(
+    runId: string,
+    input: { terminalStateId: string; transitionReason: string }
+  ): void {
+    this.database
+      .prepare(
+        [
+          "update runs set",
+          "current_state_id = null,",
+          "terminal_state_id = ?,",
+          "state_transition_reason = ?,",
+          "updated_at = ?",
+          "where id = ?"
+        ].join(" ")
+      )
+      .run(input.terminalStateId, input.transitionReason, timestamp(), runId);
+  }
+
+  recordWorkflowBlocked(
+    runId: string,
+    input: { stateId: string; transitionReason: string }
+  ): void {
+    // `current_state_id` is intentionally preserved so a transient retry
+    // (which reuses this run row) resumes at the stuck state instead of
+    // falling back to `expandedWorkflow.initial`.
+    this.database
+      .prepare(
+        [
+          "update runs set",
+          "terminal_state_id = ?,",
+          "state_transition_reason = ?,",
+          "updated_at = ?",
+          "where id = ?"
+        ].join(" ")
+      )
+      .run(input.stateId, input.transitionReason, timestamp(), runId);
   }
 
   incrementRetryCount(runId: string): number {
@@ -779,6 +837,7 @@ export class RunStore {
           "workspace_path, branch_name, prompt_path, metadata_path,",
           "issue_snapshot_path, raw_log_path, normalized_log_path,",
           "workflow_graph_path,",
+          "current_state_id, terminal_state_id, state_transition_reason,",
           "is_continuation, continuation_parent_run_id, retry_count,",
           "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
           "created_at, updated_at",
@@ -803,6 +862,7 @@ export class RunStore {
           "workspace_path, branch_name, prompt_path, metadata_path,",
           "issue_snapshot_path, raw_log_path, normalized_log_path,",
           "workflow_graph_path,",
+          "current_state_id, terminal_state_id, state_transition_reason,",
           "is_continuation, continuation_parent_run_id, retry_count,",
           "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
           "created_at, updated_at",
@@ -1244,6 +1304,9 @@ export class RunStore {
       ["runs", "cancel_reason", "text"],
       ["runs", "pr_discovery_attempts", "integer not null default 0"],
       ["runs", "workflow_graph_path", "text"],
+      ["runs", "current_state_id", "text"],
+      ["runs", "terminal_state_id", "text"],
+      ["runs", "state_transition_reason", "text"],
       ["attempts", "failure_classification", "text"],
       ["attempts", "workflow_graph_path", "text"]
     ];
@@ -1311,6 +1374,7 @@ function mapRunRow(row: RunRow): RunStatus {
     cancelRequested: row.cancel_requested === 1,
     continuationParentRunId: row.continuation_parent_run_id ?? null,
     createdAt: row.created_at,
+    currentStateId: row.current_state_id ?? null,
     failureClassification:
       (row.failure_classification as FailureClassification | null) ?? null,
     id: row.id,
@@ -1326,7 +1390,9 @@ function mapRunRow(row: RunRow): RunStatus {
     rawLogPath: row.raw_log_path ?? "",
     retryCount: row.retry_count ?? 0,
     state: row.state,
+    stateTransitionReason: row.state_transition_reason ?? null,
     terminalReason: row.terminal_reason ?? null,
+    terminalStateId: row.terminal_state_id ?? null,
     updatedAt: row.updated_at,
     workflowGraphPath: row.workflow_graph_path ?? "",
     workspacePath: row.workspace_path ?? ""

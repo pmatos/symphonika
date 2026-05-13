@@ -217,6 +217,76 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("createContinuationRun inherits the parent run's current FSM state", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const parentId = seedRun(store, { id: "parent-fsm", issueNumber: 11 });
+      store.setRunCurrentState(parentId, "implementing");
+
+      store.createContinuationRun({
+        id: "cont-fsm",
+        issue: {
+          body: "",
+          created_at: "2025-01-01T00:00:00Z",
+          id: 2011,
+          labels: ["agent-ready"],
+          number: 11,
+          priority: 1,
+          state: "open",
+          title: "fixture",
+          updated_at: "2025-01-01T00:00:00Z",
+          url: "https://example/11"
+        },
+        parentRunId: parentId,
+        projectName: "symphonika",
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+
+      const continuation = store.getRun("cont-fsm");
+      expect(continuation?.currentStateId).toBe("implementing");
+      expect(continuation?.isContinuation).toBe(true);
+      expect(continuation?.continuationParentRunId).toBe(parentId);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("createContinuationRun leaves current_state_id null when the parent never recorded one", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const parentId = seedRun(store, { id: "parent-no-fsm", issueNumber: 12 });
+      // Never call setRunCurrentState — simulates a Markdown workflow path that
+      // exits before applyWorkflowOutcome runs, or a parent that walked to a terminal.
+      store.createContinuationRun({
+        id: "cont-no-fsm",
+        issue: {
+          body: "",
+          created_at: "2025-01-01T00:00:00Z",
+          id: 2012,
+          labels: ["agent-ready"],
+          number: 12,
+          priority: 1,
+          state: "open",
+          title: "fixture",
+          updated_at: "2025-01-01T00:00:00Z",
+          url: "https://example/12"
+        },
+        parentRunId: parentId,
+        projectName: "symphonika",
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+
+      const continuation = store.getRun("cont-no-fsm");
+      expect(continuation?.currentStateId).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
   it("incrementRetryCount returns the new value across calls", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

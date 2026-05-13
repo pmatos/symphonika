@@ -5,6 +5,8 @@ import type { Logger } from "pino";
 import { parse } from "yaml";
 import { z } from "zod";
 
+import type { WorkflowFormat } from "./config-schemas.js";
+import { workflowReferenceSchema } from "./config-schemas.js";
 import type {
   PollingProjectConfig,
   PollingServiceConfig
@@ -103,7 +105,7 @@ const runtimeProjectDetailSchema = z
           .passthrough()
       })
       .passthrough(),
-    workflow: z.string().trim().min(1)
+    workflow: workflowReferenceSchema
   })
   .passthrough();
 
@@ -269,7 +271,8 @@ async function loadRuntimeConfigSnapshot(input: {
     }
 
     const workflow = await readWorkflowSnapshot(
-      path.resolve(input.configDir, detail.data.workflow),
+      path.resolve(input.configDir, detail.data.workflow.path),
+      detail.data.workflow.format,
       errors
     );
     if (workflow === undefined) {
@@ -335,6 +338,7 @@ async function readRawServiceConfig(
 
 async function readWorkflowSnapshot(
   workflowPath: string,
+  format: WorkflowFormat,
   errors: string[]
 ): Promise<WorkflowSnapshot | undefined> {
   let contents: string;
@@ -345,8 +349,25 @@ async function readWorkflowSnapshot(
     return undefined;
   }
 
+  const expanded = expandWorkflowDefinition(contents, workflowPath, format);
+  // Raw FSM YAML files can open with `---` (the YAML document marker); the
+  // markdown contract parser would mistake that for unterminated front matter,
+  // so skip it. The expanded workflow's contentHash is sufficient for snapshot
+  // equality; the body is unused for raw FSM (per-state action.prompt drives
+  // the actual prompt).
+  if (expanded.workflow.source.kind === "raw_fsm") {
+    if (expanded.errors.length > 0) {
+      errors.push(...expanded.errors);
+      return undefined;
+    }
+    return {
+      body: "",
+      contentHash: expanded.workflow.contentHash,
+      expandedWorkflow: expanded.workflow,
+      path: workflowPath
+    };
+  }
   const workflow = parseWorkflowContract(contents, workflowPath);
-  const expanded = expandWorkflowDefinition(contents, workflowPath);
   const workflowErrors = [...workflow.errors, ...expanded.errors];
   if (workflowErrors.length > 0) {
     errors.push(...workflowErrors);

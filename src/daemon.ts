@@ -24,7 +24,10 @@ import type {
   LifecyclePolicy,
   ScheduledWorkInput
 } from "./lifecycle/active-runs.js";
-import { reconcileActiveRuns } from "./lifecycle/reconcile.js";
+import {
+  reconcileActiveRuns,
+  reconcileWaitingRuns
+} from "./lifecycle/reconcile.js";
 import {
   RunController,
   type RunControllerProjectConfig,
@@ -250,6 +253,16 @@ export async function startDaemon(
       });
     } catch (error) {
       logger.error({ err: error }, "symphonika reconcile failed");
+    }
+
+    try {
+      await reconcileWaitingRuns({
+        logger,
+        runController,
+        runStore
+      });
+    } catch (error) {
+      logger.error({ err: error }, "symphonika waiting reconcile failed");
     }
 
     if (dispatchMutex.held) {

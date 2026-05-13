@@ -425,6 +425,71 @@ describe("merge_pr state lifecycle", () => {
     }
   });
 
+  it("advances on transitions written as { pr_merged: true, pr_open: false } after a successful merge", async () => {
+    const root = await makeTempRoot();
+    // Workflow that uses the post-merge shape a refetch would produce — this
+    // exercises the post-merge signal reprojection.
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: merge_then_done",
+        "  initial: merging",
+        "  states:",
+        "    merging:",
+        "      action:",
+        "        kind: merge_pr",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            pr_merged: true",
+        "            pr_open: false",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      seedWaitingMergePrRun(store, issue);
+      store.trackPullRequest({
+        branchName: "sym/symphonika/97-merge-pr-acceptance-fixture",
+        headSha: "abc123",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        mergePullRequest: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("merge-pr-run");
+
+      expect(githubIssuesApi.mergePullRequest).toHaveBeenCalledTimes(1);
+      const after = store.getRun("merge-pr-run");
+      expect(after?.state).toBe("succeeded");
+      expect(after?.terminalStateId).toBe("done");
+    } finally {
+      store.close();
+    }
+  });
+
   it("parks a fresh dispatch whose initial state is merge_pr without launching a provider", async () => {
     const root = await makeTempRoot();
     await writeMergePrWorkflow(root);

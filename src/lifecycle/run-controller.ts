@@ -637,7 +637,20 @@ export class RunController {
             token: repository.token
           });
           if (merged) {
-            signals.pr_merged = true;
+            // Reproject signals against the post-merge state so workflow
+            // transitions written in the natural shape (e.g.
+            // `when: { pr_merged: true, pr_open: false }`) match — without
+            // this, signals would still carry `pr_open: true` from the
+            // pre-merge fetch and a refetch-style transition would silently
+            // stay parked even though the merge succeeded.
+            const mergedSignals = projectPullRequestSignals({
+              ...prState,
+              merged: true,
+              state: "MERGED"
+            });
+            for (const key of Object.keys(mergedSignals)) {
+              signals[key] = mergedSignals[key]!;
+            }
             this.runStore.recordPullRequestObservation({
               headSha: prState.headSha,
               id: tracked.id,

@@ -524,6 +524,14 @@ export class RunStore {
       .run(input.stateId, input.transitionReason, timestamp(), runId);
   }
 
+  recordWaitingActivity(runId: string, reason: string): void {
+    this.database
+      .prepare(
+        "update runs set state_transition_reason = ?, updated_at = ? where id = ?"
+      )
+      .run(reason, timestamp(), runId);
+  }
+
   incrementRetryCount(runId: string): number {
     const updated = this.database
       .prepare(
@@ -1176,6 +1184,35 @@ export class RunStore {
         run_id: input.runId,
         updated_at: now
       });
+  }
+
+  // Used by the global PR follow-up loop to decide whether a tracked PR's
+  // merge belongs to the FSM (when a workflow has parked the run in a
+  // `merge_pr` state) or to the global auto-merge path. Returns the most
+  // recent waiting row for the (project, issue) pair, ignoring cancelled
+  // runs so a long-cancelled wait does not gate the global loop.
+  findWaitingRunByIssue(input: {
+    issueNumber: number;
+    projectName: string;
+  }): { currentStateId: string | null; runId: string } | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select id, current_state_id",
+          "from runs",
+          "where state = 'waiting'",
+          "and cancel_requested = 0",
+          "and project_name = ? and issue_number = ?",
+          "order by created_at desc limit 1"
+        ].join(" ")
+      )
+      .get(input.projectName, input.issueNumber) as
+      | { current_state_id: string | null; id: string }
+      | undefined;
+    if (row === undefined) {
+      return undefined;
+    }
+    return { currentStateId: row.current_state_id, runId: row.id };
   }
 
   // Wait re-evaluation needs to see merged/closed tracked PRs so a workflow

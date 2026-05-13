@@ -33,9 +33,10 @@ export function decideNextStep(input: {
     return { kind: "terminate", stateId: state.id, terminal: state.terminal };
   }
 
-  const isWait = state.action?.kind === "wait";
+  const actionKind = state.action?.kind;
+  const isParked = actionKind === "wait" || actionKind === "merge_pr";
 
-  if (!isWait && !actionExecuted && state.action !== undefined) {
+  if (!isParked && !actionExecuted && state.action !== undefined) {
     return { action: state.action, kind: "execute_action", stateId: state.id };
   }
 
@@ -57,10 +58,14 @@ export function decideNextStep(input: {
     }
   }
 
-  if (isWait) {
+  if (isParked) {
+    const reason =
+      actionKind === "merge_pr"
+        ? `state ${state.id} merge_pr predicates not yet satisfied`
+        : `state ${state.id} wait predicates not yet satisfied`;
     return {
       kind: "stay_waiting",
-      reason: `state ${state.id} wait predicates not yet satisfied`
+      reason
     };
   }
 

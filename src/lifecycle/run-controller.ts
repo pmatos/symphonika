@@ -16,8 +16,14 @@ import type {
 import {
   evaluateProjectEligibility,
   tryGetIssue,
-  tryGetPullRequestFollowupState
+  tryGetPullRequestFollowupState,
+  tryMergePullRequest
 } from "../issue-polling.js";
+import {
+  DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY,
+  pullRequestReadyToMerge,
+  type PullRequestFollowupPolicy
+} from "../pull-request-followup.js";
 import { projectPullRequestSignals } from "./pr-signal-projection.js";
 import type {
   AgentProvider,
@@ -116,6 +122,7 @@ export type RunControllerOptions = {
   ) => Promise<PreparedIssueWorkspace>;
   projectsLoader: () => Promise<Map<string, RunControllerProjectConfig>>;
   providersLoader: () => Promise<RunControllerProvidersConfig>;
+  pullRequestPolicyLoader?: () => Promise<PullRequestFollowupPolicy>;
   runStore: RunStore;
   schedule: ScheduleHandler;
   stateRoot: string;
@@ -236,6 +243,7 @@ export class RunController {
     Map<string, RunControllerProjectConfig>
   >;
   private readonly providersLoader: () => Promise<RunControllerProvidersConfig>;
+  private readonly pullRequestPolicyLoader: () => Promise<PullRequestFollowupPolicy>;
   private readonly runStore: RunStore;
   private readonly schedule: ScheduleHandler;
   private readonly stateRoot: string;
@@ -255,6 +263,10 @@ export class RunController {
       options.prepareIssueWorkspace ?? defaultPrepareIssueWorkspace;
     this.projectsLoader = options.projectsLoader;
     this.providersLoader = options.providersLoader;
+    this.pullRequestPolicyLoader =
+      options.pullRequestPolicyLoader ??
+      ((): Promise<PullRequestFollowupPolicy> =>
+        Promise.resolve(DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY));
     this.runStore = options.runStore;
     this.schedule = options.schedule;
     this.stateRoot = options.stateRoot;
@@ -460,6 +472,41 @@ export class RunController {
     await this.reEvaluateWaitingRun(payload.waitingRunId);
   }
 
+  // Tells the global PR follow-up loop whether a tracked PR's merge belongs
+  // to a workflow-controlled merge_pr state. When true, the global loop
+  // must skip the auto-merge so the next reEvaluateWaitingRun tick can
+  // apply the workflow's method override and record merge_pr evidence —
+  // otherwise discovery and global merge happen in the same tick before
+  // the merge_pr state's re-evaluation sees the tracked PR. See ADR 0048.
+  async isIssueParkedInMergePrState(input: {
+    issueNumber: number;
+    projectName: string;
+  }): Promise<boolean> {
+    const waiting = this.runStore.findWaitingRunByIssue(input);
+    if (waiting === undefined || waiting.currentStateId === null) {
+      return false;
+    }
+    const projects = await this.projectsLoader();
+    const project = projects.get(input.projectName);
+    if (project === undefined) {
+      return false;
+    }
+    let loaded;
+    try {
+      loaded = await this.loadWorkflow(project.workflow);
+    } catch {
+      return false;
+    }
+    if (loaded.errors.length > 0) {
+      return false;
+    }
+    const state = findWorkflowState(
+      loaded.expandedWorkflow,
+      waiting.currentStateId
+    );
+    return state?.action?.kind === "merge_pr";
+  }
+
   async reEvaluateWaitingRun(runId: string): Promise<void> {
     const row = this.runStore.getRun(runId);
     if (row === undefined || row.state !== "waiting") {
@@ -518,6 +565,8 @@ export class RunController {
       return;
     }
 
+    const isMergePr = waitState.action?.kind === "merge_pr";
+
     // Use the all-states lookup: a wait state targeting `pr_merged: true` must
     // still see the tracked row after PR follow-up has marked it "merged"; an
     // open-only listing would strand the wait. The dispatcher's own open-only
@@ -527,6 +576,12 @@ export class RunController {
       projectName: row.project
     });
     if (tracked === undefined) {
+      if (isMergePr) {
+        this.runStore.recordWaitingActivity(
+          runId,
+          `merge_pr awaiting Symphonika-tracked pull request for issue #${row.issueNumber}`
+        );
+      }
       this.logger?.debug(
         { runId, issueNumber: row.issueNumber },
         "symphonika wait re-eval skipped: no PR tracked yet"
@@ -553,10 +608,97 @@ export class RunController {
       return;
     }
 
-    const signals = {
+    const signals: WorkflowPredicateMap = {
       provider_success: true,
       ...projectPullRequestSignals(prState)
     };
+
+    if (isMergePr) {
+      const policy = await this.pullRequestPolicyLoader();
+      const method =
+        coerceMergeMethod(waitState.action?.method) ?? policy.merge.method;
+      if (!policy.merge.enabled) {
+        this.runStore.recordWaitingActivity(
+          runId,
+          "merge_pr deferred: pull_requests.merge.enabled is false"
+        );
+        this.logger?.debug(
+          { runId },
+          "symphonika merge_pr re-eval: merge disabled by policy"
+        );
+      } else if (pullRequestReadyToMerge(prState, policy)) {
+        try {
+          const merged = await tryMergePullRequest(this.githubIssuesApi, {
+            expectedHeadSha: prState.headSha,
+            method,
+            owner: repository.owner,
+            pullNumber: tracked.prNumber,
+            repo: repository.repo,
+            token: repository.token
+          });
+          if (merged) {
+            // Reproject signals against the post-merge state so workflow
+            // transitions written in the natural shape (e.g.
+            // `when: { pr_merged: true, pr_open: false }`) match — without
+            // this, signals would still carry `pr_open: true` from the
+            // pre-merge fetch and a refetch-style transition would silently
+            // stay parked even though the merge succeeded.
+            const mergedSignals = projectPullRequestSignals({
+              ...prState,
+              merged: true,
+              state: "MERGED"
+            });
+            for (const key of Object.keys(mergedSignals)) {
+              signals[key] = mergedSignals[key]!;
+            }
+            this.runStore.recordPullRequestObservation({
+              headSha: prState.headSha,
+              id: tracked.id,
+              prUrl: prState.url,
+              state: "merged"
+            });
+            this.runStore.recordWaitingActivity(
+              runId,
+              `merge_pr merged PR #${tracked.prNumber} via ${method}`
+            );
+            this.logger?.info(
+              { method, prNumber: tracked.prNumber, runId },
+              "symphonika merge_pr merged PR"
+            );
+          } else {
+            this.runStore.recordWaitingActivity(
+              runId,
+              `merge_pr unavailable: GitHub tracker does not expose mergePullRequest`
+            );
+            this.logger?.warn(
+              { runId },
+              "symphonika merge_pr: tracker has no mergePullRequest support"
+            );
+            return;
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.runStore.recordWaitingActivity(
+            runId,
+            `merge_pr attempt failed for PR #${tracked.prNumber}: ${message}`
+          );
+          this.logger?.warn(
+            { err: error, prNumber: tracked.prNumber, runId },
+            "symphonika merge_pr attempt failed"
+          );
+          return;
+        }
+      } else {
+        this.runStore.recordWaitingActivity(
+          runId,
+          `merge_pr deferred: PR #${tracked.prNumber} not yet ready under policy`
+        );
+        this.logger?.debug(
+          { runId },
+          "symphonika merge_pr re-eval: PR not yet ready to merge"
+        );
+      }
+    }
 
     const decision = decideNextStep({
       actionExecuted: true,
@@ -588,7 +730,7 @@ export class RunController {
       });
       this.runStore.updateRunState(runId, "succeeded");
 
-      if (next?.action?.kind === "wait") {
+      if (isParkedAction(next?.action?.kind)) {
         const nextWaitingRunId = this.createRunId();
         this.runStore.createWaitingRun({
           currentStateId: decision.to,
@@ -1112,6 +1254,33 @@ export class RunController {
         }
       };
     }
+    // Raw FSM workflows whose entry state is a parked action (wait/merge_pr)
+    // must never launch a provider — they have no prompt and must instead be
+    // parked into the waiting-row reconciliation path immediately. Without
+    // this guard, runAttemptLifecycle would call startAttempt with an empty
+    // raw-FSM prompt, terminate, and then fall through `applyWorkflowOutcome`
+    // (which has no `stay_waiting` branch) leaving the workflow with no
+    // waiting row and no merge attempt scheduled. Returning here keeps the
+    // run row durable (state="waiting", current_state_id set) so a daemon
+    // restart can resume the reconciliation. See SPEC §12.5 / §12.6.
+    if (
+      loadedWorkflow.errors.length === 0 &&
+      loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm" &&
+      currentState !== undefined &&
+      isParkedAction(currentState.action?.kind)
+    ) {
+      this.runStore.updateRunState(input.runId, "waiting");
+      this.schedule({
+        delayMs: this.lifecyclePolicy.continuation.delayMs,
+        fire: () => this.executeWaitPark({ waitingRunId: input.runId }),
+        issueNumber: input.issue.number,
+        kind: "wait_park",
+        projectName: input.project.name,
+        runId: input.runId
+      });
+      return;
+    }
+
     // Raw FSM continuations are state-advance runs: the FSM, not the issue
     // labels, decides whether the agent keeps running. Computed here so both
     // activeRuns.register (in the try block) and scheduleNext (in finally)
@@ -1462,7 +1631,7 @@ export class RunController {
         nextStateId: decision.to,
         transitionReason: decision.reason
       });
-      if (next?.action?.kind === "wait") {
+      if (isParkedAction(next?.action?.kind)) {
         const waitingRunId = this.createRunId();
         this.runStore.createWaitingRun({
           currentStateId: decision.to,
@@ -2158,4 +2327,17 @@ function signalsFromTerminal(
     return { branch_ahead_of_base: false, provider_success: true };
   }
   return { branch_ahead_of_base: false, provider_success: false };
+}
+
+function isParkedAction(kind: string | undefined): boolean {
+  return kind === "wait" || kind === "merge_pr";
+}
+
+function coerceMergeMethod(
+  method: string | undefined
+): PullRequestFollowupPolicy["merge"]["method"] | undefined {
+  if (method === "merge" || method === "rebase" || method === "squash") {
+    return method;
+  }
+  return undefined;
 }

@@ -17,10 +17,10 @@ import type {
   RunControllerProvidersConfig,
   WorkflowSnapshot
 } from "./lifecycle/run-controller.js";
-import type { PullRequestFollowupPolicy } from "./pull-request-followup.js";
 import {
   DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY,
-  pullRequestFollowupPolicyFromRaw
+  pullRequestFollowupPolicyFromRaw,
+  type PullRequestFollowupPolicy
 } from "./pull-request-followup.js";
 import {
   expandWorkflowDefinition,
@@ -169,6 +169,12 @@ export class RuntimeConfigReloader {
 
   providersConfig(): RunControllerProvidersConfig {
     return this.snapshot?.providers ?? defaultProvidersConfig();
+  }
+
+  pullRequestPolicy(): PullRequestFollowupPolicy {
+    return (
+      this.snapshot?.pullRequestPolicy ?? DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY
+    );
   }
 
   async reload(): Promise<RuntimeConfigSnapshot | undefined> {

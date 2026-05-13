@@ -756,6 +756,47 @@ transitions writing `mergeable: false` will not match on unknown values, so the 
 until GitHub resolves the mergeability. The `timeout` predicate is reserved in the schema but
 unimplemented in v1.
 
+### 12.6 Merge States
+
+Raw FSM workflows may declare `action.kind: "merge_pr"` states that merge the workflow instance's
+Symphonika-owned pull request when the configured policy is satisfied. A merge state does not
+launch a provider; it is poll-driven and reconciled on every daemon tick, exactly like a wait
+state. The optional `method` field overrides the merge method from `pull_requests.merge.method`
+for that single state.
+
+Lifecycle:
+
+1. When the FSM advances into a `merge_pr` state, Symphonika persists a new Run row with
+   `state = "waiting"` and `current_state_id` set to the merge state id, identical to a wait
+   parking. The parent Run records `state_transition_reason` for the advance.
+2. On each daemon tick (and on `/poll-now`), `reconcileWaitingRuns` calls
+   `reEvaluateWaitingRun`. For a merge state the handler looks up the tracked pull request
+   associated with the workflow instance's issue and project — Symphonika never merges a PR
+   that is not tied to its own issue branch. If no tracked PR exists yet, the run stays parked
+   and records `state_transition_reason = "merge_pr awaiting Symphonika-tracked pull request"`.
+3. If a tracked PR exists, the handler refreshes its follow-up state from GitHub, projects the
+   same predicate set used by wait states, and checks `pullRequestReadyToMerge` against the
+   configured `pull_requests.merge` policy (mergeable, required status success, required
+   review decision). If the policy is not satisfied, the run stays parked with a deferred
+   reason recorded. If `pull_requests.merge.enabled` is `false`, the merge is also deferred and
+   the policy gate is recorded.
+4. When the policy is satisfied, Symphonika calls `mergePullRequest` with the workflow's
+   `method` override (if any) or the policy default, pinning the merge to the observed head
+   SHA. On success the tracked-PR row is moved to `merged`, the signals projected for
+   `decideNextStep` include `pr_merged: true`, and the workflow advances via its transitions.
+   On a merge API failure the run records the error in `state_transition_reason` and stays
+   parked; the next tick retries from the same row.
+5. Successful merge transitions advancing into a terminal state record the terminal as
+   `succeeded`, exactly like wait-state terminals. Failed, deferred, blocked, or missing-PR
+   outcomes record deterministic `state_transition_reason` text on the merge state's Run row
+   and never delete the workspace, matching §10 (workspaces are never auto-deleted).
+
+The merge state is intentionally scoped to Symphonika-tracked PRs — arbitrary cross-issue or
+external PRs are out of scope. PR follow-up policy (`§12.4`) and merge-state evaluation share
+the same `pullRequestReadyToMerge` helper so the two paths cannot drift on what counts as
+mergeable. Cancellation, issue-close, and label-immunity semantics are inherited from wait
+states (§12.5).
+
 ## 13. CLI
 
 Bootstrap CLI commands:

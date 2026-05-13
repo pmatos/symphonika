@@ -208,6 +208,64 @@ describe("state-machine-dispatch", () => {
       }
     });
 
+    it("skips execute_action for a merge_pr state even on first entry", () => {
+      const mergeState: ExpandedWorkflowState = {
+        action: { kind: "merge_pr" },
+        completeWhen: {},
+        id: "merging",
+        transitions: [{ to: "done", when: { pr_merged: true } }]
+      };
+
+      const decision = decideNextStep({
+        actionExecuted: false,
+        signals: {},
+        state: mergeState
+      });
+
+      expect(decision.kind).not.toBe("execute_action");
+    });
+
+    it("returns stay_waiting for a merge_pr state with no matching transition", () => {
+      const mergeState: ExpandedWorkflowState = {
+        action: { kind: "merge_pr" },
+        completeWhen: {},
+        id: "merging",
+        transitions: [{ to: "done", when: { pr_merged: true } }]
+      };
+
+      const decision = decideNextStep({
+        actionExecuted: true,
+        signals: { pr_open: true, mergeable: true },
+        state: mergeState
+      });
+
+      expect(decision.kind).toBe("stay_waiting");
+      if (decision.kind === "stay_waiting") {
+        expect(decision.reason).toContain("merge_pr");
+        expect(decision.reason).toContain("merging");
+      }
+    });
+
+    it("advances a merge_pr state once pr_merged is signalled", () => {
+      const mergeState: ExpandedWorkflowState = {
+        action: { kind: "merge_pr" },
+        completeWhen: {},
+        id: "merging",
+        transitions: [{ to: "done", when: { pr_merged: true } }]
+      };
+
+      const decision = decideNextStep({
+        actionExecuted: true,
+        signals: { pr_merged: true },
+        state: mergeState
+      });
+
+      expect(decision.kind).toBe("advance");
+      if (decision.kind === "advance") {
+        expect(decision.to).toBe("done");
+      }
+    });
+
     it("still returns blocked for a non-wait state with no matching transition", () => {
       const state: ExpandedWorkflowState = {
         action: { kind: "agent", provider: "codex" },

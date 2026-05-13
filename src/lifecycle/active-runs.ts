@@ -60,7 +60,7 @@ export type RegisterInput = {
   runId: string;
 };
 
-export type ScheduledWorkKind = "retry" | "continuation";
+export type ScheduledWorkKind = "retry" | "continuation" | "state_advance";
 
 export type ScheduledWorkInput = {
   delayMs: number;

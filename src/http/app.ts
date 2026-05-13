@@ -65,7 +65,7 @@ export type HttpAppOptions = {
   getReloadStatus?: () => RuntimeReloadStatus;
   getScheduled?: () => Array<{
     dueAt: number;
-    kind: "retry" | "continuation";
+    kind: "retry" | "continuation" | "state_advance";
     runId: string;
   }>;
   getStatusSnapshot?: () => StatusSnapshot;

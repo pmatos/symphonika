@@ -965,6 +965,320 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("walks a multi-state raw FSM workflow through sequential agent states on the same workspace", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "symphonika",
+      "issues",
+      "8-dispatch-an-end-to-end-run-through-a-test-provider"
+    );
+    await writeMultiStateRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      // listOpenIssues only sees the issue on the first poll; subsequent polls
+      // return nothing so polling cannot dispatch a parallel claim. State
+      // advance uses getIssue to refresh.
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = successfulCodexProvider();
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => `run-fsm-multi-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      // cap=0 proves state advance bypasses the continuation cap: if the FSM
+      // walk went through the continuation path it would be blocked.
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      // Wait until the implementing run reaches terminal_state_id=done.
+      const deadline = Date.now() + 15_000;
+      const databasePath = path.join(root, ".symphonika", "symphonika.db");
+      while (Date.now() < deadline) {
+        try {
+          const database = new Database(databasePath, { readonly: true });
+          try {
+            const row = database
+              .prepare(
+                "select count(*) as c from runs where terminal_state_id = 'done'"
+              )
+              .get() as { c: number };
+            if (row.c >= 1) {
+              break;
+            }
+          } finally {
+            database.close();
+          }
+        } catch {
+          // database may not be readable yet during startup
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const rows = database
+          .prepare(
+            [
+              "select id, state, is_continuation, current_state_id,",
+              "terminal_state_id, state_transition_reason, branch_name,",
+              "workspace_path, continuation_parent_run_id",
+              "from runs order by created_at"
+            ].join(" ")
+          )
+          .all() as Array<Record<string, unknown>>;
+        expect(rows).toHaveLength(2);
+
+        const planningRun = rows[0]!;
+        const implementingRun = rows[1]!;
+
+        // Planning ran as the fresh dispatch, advanced to implementing, and
+        // recorded the advance in its row.
+        expect(planningRun).toMatchObject({
+          id: "run-fsm-multi-1",
+          state: "succeeded",
+          is_continuation: 0,
+          current_state_id: "implementing",
+          terminal_state_id: null
+        });
+        expect(stringColumn(planningRun, "state_transition_reason")).toContain(
+          "planning advanced to implementing"
+        );
+
+        // Implementing ran as a state-advance continuation, inherited the
+        // parent's current_state_id, and advanced into the terminal.
+        expect(implementingRun).toMatchObject({
+          id: "run-fsm-multi-2",
+          state: "succeeded",
+          is_continuation: 1,
+          current_state_id: null,
+          terminal_state_id: "done",
+          continuation_parent_run_id: "run-fsm-multi-1"
+        });
+        expect(
+          stringColumn(implementingRun, "state_transition_reason")
+        ).toContain("implementing advanced to done");
+
+        // Both runs share the same workspace and branch — they are two states
+        // of one workflow walk, not two parallel issue claims.
+        expect(planningRun["workspace_path"]).toBe(workspacePath);
+        expect(implementingRun["workspace_path"]).toBe(workspacePath);
+        expect(planningRun["branch_name"]).toBe(implementingRun["branch_name"]);
+      } finally {
+        database.close();
+      }
+
+      // The rendered prompts should reflect each state's prompt file (and not
+      // the YAML workflow body or each other).
+      const planningPrompt = await readFile(
+        path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-fsm-multi-1",
+          "prompt.md"
+        ),
+        "utf8"
+      );
+      expect(planningPrompt).toContain("Draft a plan");
+      expect(planningPrompt).not.toContain("Implement the plan");
+
+      const implementingPrompt = await readFile(
+        path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-fsm-multi-2",
+          "prompt.md"
+        ),
+        "utf8"
+      );
+      expect(implementingPrompt).toContain("Implement the plan");
+      expect(implementingPrompt).not.toContain("Draft a plan");
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("picks the first transition in YAML order when multiple transitions match the observed signals", async () => {
+    const root = await makeTempRoot();
+    await writeTransitionOrderRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = successfulCodexProvider();
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => "run-fsm-order",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForRun(daemon.url, "succeeded");
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        // Both `first_match` (when: branch_ahead_of_base) and `unconditional`
+        // (when: {}) match the success signals. The state machine must take
+        // the YAML-first match.
+        const storedRun = database
+          .prepare(
+            "select current_state_id, terminal_state_id, state_transition_reason from runs where id = ?"
+          )
+          .get("run-fsm-order");
+        expect(storedRun).toMatchObject({
+          current_state_id: null,
+          terminal_state_id: "first_match"
+        });
+        const reason = stringColumn(storedRun, "state_transition_reason");
+        expect(reason).toContain("advanced to first_match");
+        expect(reason).not.toContain("advanced to unconditional");
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("records the workflow as blocked when an agent state succeeds but no transition's when predicates match", async () => {
+    const root = await makeTempRoot();
+    await writeNoMatchingTransitionRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = successfulCodexProvider();
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => "run-fsm-blocked",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForRun(daemon.url, "succeeded");
+      // Wait beyond the continuation delay to confirm no state advance fires.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as { runs: Array<Record<string, unknown>> };
+      // Exactly one run row: no state advance and no continuation dispatched
+      // because the workflow blocked.
+      expect(status.runs).toHaveLength(1);
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const storedRun = database
+          .prepare(
+            [
+              "select state, current_state_id, terminal_state_id,",
+              "state_transition_reason from runs where id = ?"
+            ].join(" ")
+          )
+          .get("run-fsm-blocked");
+        expect(storedRun).toMatchObject({
+          // Agent succeeded; only the workflow instance is blocked.
+          state: "succeeded",
+          // Preserved on block so a future retry resumes at the stuck state
+          // instead of restarting the FSM at the initial state.
+          current_state_id: "planning",
+          terminal_state_id: "planning"
+        });
+        const reason = stringColumn(storedRun, "state_transition_reason");
+        expect(reason).toContain("no transition matching");
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("records terminal_state_id at the stuck agent state when a raw FSM run fails", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(
@@ -1199,6 +1513,161 @@ async function writeRawFsmProject(root: string): Promise<void> {
   await writeFile(
     path.join(root, "prompt.md"),
     "Work on #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
+async function writeTransitionOrderRawFsmProject(root: string): Promise<void> {
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: ordered_transitions",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: first_match",
+      "          when:",
+      "            branch_ahead_of_base: true",
+      "        - to: unconditional",
+      "    first_match:",
+      "      terminal: success",
+      "    unconditional:",
+      "      terminal: success",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "prompt.md"),
+    "Work on #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
+async function writeNoMatchingTransitionRawFsmProject(
+  root: string
+): Promise<void> {
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: requires_pr_open",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: review",
+      "          when:",
+      "            pr_open: true",
+      "    review:",
+      "      terminal: success",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "prompt.md"),
+    "Work on #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
+async function writeRawFsmProjectConfig(root: string): Promise<void> {
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "polling:",
+      "  interval_ms: 30000",
+      "providers:",
+      "  codex:",
+      `    command: "${DEFAULT_CODEX_COMMAND}"`,
+      "  claude:",
+      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      "projects:",
+      "  - name: symphonika",
+      "    disabled: false",
+      "    weight: 1",
+      "    tracker:",
+      "      kind: github",
+      "      owner: pmatos",
+      "      repo: symphonika",
+      '      token: "$GITHUB_TOKEN"',
+      "    issue_filters:",
+      '      states: ["open"]',
+      '      labels_all: ["agent-ready"]',
+      '      labels_none: ["blocked", "needs-human"]',
+      "    priority:",
+      "      labels: {}",
+      "      default: 99",
+      "    workspace:",
+      "      root: ./.symphonika/workspaces/symphonika",
+      "      git:",
+      "        remote: git@github.com:pmatos/symphonika.git",
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      "    workflow: ./workflow.yml",
+      ""
+    ].join("\n")
+  );
+}
+
+async function writeMultiStateRawFsmProject(root: string): Promise<void> {
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: plan_then_implement",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: implementing",
+      "    implementing:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: implement-prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: done",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "plan-prompt.md"),
+    "Draft a plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+  await writeFile(
+    path.join(root, "implement-prompt.md"),
+    "Implement the plan for #{{issue.number}}: {{issue.title}}.\n"
   );
 }
 

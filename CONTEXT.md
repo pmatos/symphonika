@@ -84,6 +84,10 @@ _Avoid_: issue when referring to execution status
 A follow-up run for the same issue after a provider completed successfully but the issue remains eligible.
 _Avoid_: retry when the prior run succeeded
 
+**State Advance**:
+The dispatch path that runs the next state of a raw FSM workflow after the current state advances to a non-terminal next state. State Advance bypasses the Continuation cap and label eligibility re-check; the state machine, not the issue label set, decides what runs next.
+_Avoid_: continuation when describing FSM state walking
+
 **Bootstrap Slice**:
 The first usable implementation slice that lets Symphonika run this repository as one real Project well enough to help implement later Symphonika issues.
 _Avoid_: prototype, toy
@@ -126,6 +130,7 @@ _Avoid_: chat session
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
 - A **Continuation** is capped so an eligible issue cannot loop forever
+- A **State Advance** is not capped by the continuation cap; the FSM bounds the walk via terminal states
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete
 - A **Project Cursor** belongs to exactly one **Project**
 - **Full-Permission Agent Execution** is the default and assumed provider posture

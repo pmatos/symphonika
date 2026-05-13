@@ -152,6 +152,73 @@ describe("pull request follow-up", () => {
     }
   });
 
+  it("defers auto-merge when the issue has a waiting merge_pr run so the workflow's method override wins", async () => {
+    const root = await makeTempRoot();
+    await writeMergePrProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-merge-pr-precedence";
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath: path.join(root, "workspace")
+      });
+      const project = mergePrProjectConfig();
+      // Existing tracked PR row that the global follow-up loop would otherwise
+      // happily merge on this very tick.
+      store.trackPullRequest({
+        branchName,
+        headSha: "abc123",
+        issueNumber: 54,
+        prNumber: 82,
+        prUrl: "https://example.test/pr/82",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+      // A waiting merge_pr run parked on the same issue must claim the merge.
+      store.createWaitingRun({
+        currentStateId: "merging",
+        id: "merge-pr-run",
+        issue: normalizedIssue(),
+        parentRunId: "parent-run",
+        projectName: "symphonika"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+        mergePullRequest: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider: fakeProvider([]),
+        root,
+        runStore: store,
+        workspacePath: path.join(root, "workspace")
+      });
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      expect(result).toEqual({
+        action: "none",
+        reason: "no pull request follow-up action"
+      });
+      expect(githubIssuesApi.mergePullRequest).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
+
   it("auto-merges a tracked PR when reviews are clear, checks pass, and GitHub says it is mergeable", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
@@ -486,6 +553,50 @@ async function writeProject(root: string): Promise<void> {
       ""
     ].join("\n")
   );
+}
+
+async function writeMergePrProject(root: string): Promise<void> {
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "providers:",
+      "  codex:",
+      `    command: "${DEFAULT_CODEX_COMMAND}"`,
+      "  claude:",
+      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      "projects: []",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: merge_pr_precedence",
+      "  initial: merging",
+      "  states:",
+      "    merging:",
+      "      action:",
+      "        kind: merge_pr",
+      "        method: merge",
+      "      transitions:",
+      "        - to: done",
+      "          when:",
+      "            pr_merged: true",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n")
+  );
+}
+
+function mergePrProjectConfig(): RunControllerProjectConfig {
+  return {
+    ...projectConfig(),
+    workflow: { format: "auto", path: "./workflow.yml" }
+  };
 }
 
 function issueFixture() {

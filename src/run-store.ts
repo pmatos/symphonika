@@ -1186,6 +1186,35 @@ export class RunStore {
       });
   }
 
+  // Used by the global PR follow-up loop to decide whether a tracked PR's
+  // merge belongs to the FSM (when a workflow has parked the run in a
+  // `merge_pr` state) or to the global auto-merge path. Returns the most
+  // recent waiting row for the (project, issue) pair, ignoring cancelled
+  // runs so a long-cancelled wait does not gate the global loop.
+  findWaitingRunByIssue(input: {
+    issueNumber: number;
+    projectName: string;
+  }): { currentStateId: string | null; runId: string } | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select id, current_state_id",
+          "from runs",
+          "where state = 'waiting'",
+          "and cancel_requested = 0",
+          "and project_name = ? and issue_number = ?",
+          "order by created_at desc limit 1"
+        ].join(" ")
+      )
+      .get(input.projectName, input.issueNumber) as
+      | { current_state_id: string | null; id: string }
+      | undefined;
+    if (row === undefined) {
+      return undefined;
+    }
+    return { currentStateId: row.current_state_id, runId: row.id };
+  }
+
   // Wait re-evaluation needs to see merged/closed tracked PRs so a workflow
   // waiting on `pr_merged: true` can advance after the PR follow-up
   // dispatcher has marked the tracked row "merged". Returns the most-recent

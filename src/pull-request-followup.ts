@@ -351,6 +351,22 @@ async function processTrackedPullRequests(input: {
     if (!pullRequestReadyToMerge(state, input.policy)) {
       continue;
     }
+    // Defer to the workflow when a merge_pr state is parked on this issue —
+    // otherwise the first-discovery tick would merge with the global method
+    // before reEvaluateWaitingRun has a chance to apply the workflow's
+    // method override and record merge_pr evidence. See ADR 0048.
+    if (
+      await input.runController.isIssueParkedInMergePrState({
+        issueNumber: tracked.issueNumber,
+        projectName: tracked.projectName
+      })
+    ) {
+      input.logger?.info(
+        { prNumber: tracked.prNumber, issueNumber: tracked.issueNumber },
+        "symphonika PR follow-up merge deferred: workflow merge_pr state will handle"
+      );
+      continue;
+    }
     const merged = await tryMergePullRequest(input.githubIssuesApi, {
       ...repository,
       expectedHeadSha: state.headSha,

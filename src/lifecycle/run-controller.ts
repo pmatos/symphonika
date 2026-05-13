@@ -472,6 +472,41 @@ export class RunController {
     await this.reEvaluateWaitingRun(payload.waitingRunId);
   }
 
+  // Tells the global PR follow-up loop whether a tracked PR's merge belongs
+  // to a workflow-controlled merge_pr state. When true, the global loop
+  // must skip the auto-merge so the next reEvaluateWaitingRun tick can
+  // apply the workflow's method override and record merge_pr evidence —
+  // otherwise discovery and global merge happen in the same tick before
+  // the merge_pr state's re-evaluation sees the tracked PR. See ADR 0048.
+  async isIssueParkedInMergePrState(input: {
+    issueNumber: number;
+    projectName: string;
+  }): Promise<boolean> {
+    const waiting = this.runStore.findWaitingRunByIssue(input);
+    if (waiting === undefined || waiting.currentStateId === null) {
+      return false;
+    }
+    const projects = await this.projectsLoader();
+    const project = projects.get(input.projectName);
+    if (project === undefined) {
+      return false;
+    }
+    let loaded;
+    try {
+      loaded = await this.loadWorkflow(project.workflow);
+    } catch {
+      return false;
+    }
+    if (loaded.errors.length > 0) {
+      return false;
+    }
+    const state = findWorkflowState(
+      loaded.expandedWorkflow,
+      waiting.currentStateId
+    );
+    return state?.action?.kind === "merge_pr";
+  }
+
   async reEvaluateWaitingRun(runId: string): Promise<void> {
     const row = this.runStore.getRun(runId);
     if (row === undefined || row.state !== "waiting") {

@@ -200,6 +200,108 @@ describe("CLI run commands", () => {
     );
   });
 
+  it("status --dashboard renders a compact terminal dashboard with active event context", async () => {
+    const stateRoot = await makeTempRoot();
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "dash-run",
+      issue: sampleIssue({ number: 17, title: "Dashboard issue" }),
+      projectName: "alpha",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    store.createAttempt({
+      attemptNumber: 1,
+      branchName: "sym/alpha/17-dashboard",
+      branchRef: "refs/heads/sym/alpha/17-dashboard",
+      id: "dash-run-attempt-1",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "dash-run",
+      state: "running",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    store.updateRunState("dash-run", "running");
+    store.recordProviderEvent({
+      attemptId: "dash-run-attempt-1",
+      normalized: { message: "hello from dashboard", type: "message" },
+      raw: { message: "hello from dashboard" },
+      runId: "dash-run",
+      sequence: 1
+    });
+    store.close();
+
+    const { output, program } = captureProgram(stateRoot, {
+      fetch: () =>
+        Promise.resolve(
+          Response.json({
+            candidateIssues: [{ issue: { number: 17 }, project: "alpha" }],
+            filteredIssues: [
+              { issue: { labels: ["sym:running"], number: 17 }, project: "alpha" }
+            ],
+            issuePolling: {
+              errors: [],
+              projects: [{ fetchedIssues: 1, name: "alpha", ok: true }]
+            },
+            reload: {
+              errors: [],
+              lastAttemptedAt: "2026-05-13T09:00:00.000Z",
+              lastLoadedAt: "2026-05-13T09:00:00.000Z",
+              ok: true,
+              usingLastKnownGood: false
+            },
+            state: "idle",
+            stateRoot: resolvedStateRoot
+          })
+        ),
+      runDoctor: () =>
+        Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          errors: [],
+          ok: true,
+          projects: [
+            {
+              missingOperationalLabels: [],
+              name: "alpha",
+              staleIssues: [],
+              validForDispatch: true,
+              workflowPath: "/tmp/WORKFLOW.md"
+            }
+          ]
+        } satisfies DoctorReport)
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "status",
+      "--config",
+      path.join(stateRoot, "symphonika.yml"),
+      "--daemon-url",
+      "http://127.0.0.1:3030",
+      "--dashboard"
+    ]);
+
+    expect(output.stdout).toContain("SYMPHONIKA STATUS");
+    expect(output.stdout).toContain("Daemon: idle at http://127.0.0.1:3030");
+    expect(output.stdout).toContain("Projects: 1 valid / 0 invalid");
+    expect(output.stdout).toContain(
+      "Issues: candidate 1 | filtered 1 | running 1 | failed 0 | stale 0"
+    );
+    expect(output.stdout).toContain("Active runs");
+    expect(output.stdout).toContain("dash-run");
+    expect(output.stdout).toContain("#17");
+    expect(output.stdout).toContain("hello from dashboard");
+    expect(output.stdout).toContain("No failed, input-required, or stale work");
+  });
+
   it("status discovers the local daemon endpoint descriptor", async () => {
     const stateRoot = await makeTempRoot();
     const resolvedStateRoot = path.join(stateRoot, ".symphonika");

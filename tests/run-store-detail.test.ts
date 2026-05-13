@@ -295,6 +295,11 @@ describe("RunStore detail queries", () => {
           .listProviderEvents("r-events", { afterSequence: 3 })
           .map((e) => e.sequence)
       ).toEqual([4, 5]);
+      expect(
+        store
+          .listProviderEvents("r-events", { limit: 1, order: "desc" })
+          .map((e) => e.sequence)
+      ).toEqual([5]);
     } finally {
       store.close();
     }

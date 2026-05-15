@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 import type { WorkflowFormat } from "./config-schemas.js";
@@ -323,12 +323,7 @@ export async function validateExpandedWorkflowReferences(
     }
     const promptPath = path.resolve(workflowDir, action.prompt);
     try {
-      const stats = await stat(promptPath);
-      if (!stats.isFile()) {
-        errors.push(
-          `workflow state ${state.id} prompt not found at ${promptPath}: path is not a regular file`
-        );
-      }
+      await readFile(promptPath, "utf8");
     } catch (error) {
       errors.push(
         `workflow state ${state.id} prompt not found at ${promptPath}: ${errorMessage(error)}`

@@ -4,6 +4,7 @@ Symphonika is a TypeScript/Node orchestrator that turns eligible GitHub issues i
 
 ## Documentation
 
+- [docs/tutorial.md](docs/tutorial.md) is a step-by-step walkthrough for setting up Symphonika against your own GitHub repository.
 - [SPEC.md](SPEC.md) is the implementation contract.
 - [CONTEXT.md](CONTEXT.md) defines the project language and domain boundaries.
 - [AGENTS.md](AGENTS.md) gives repository instructions for coding agents.

@@ -4,6 +4,16 @@ state:
 polling:
   interval_ms: 30000
 
+pull_requests:
+  enabled: true
+  review_followup:
+    max_dispatches_per_pr: 3
+  merge:
+    enabled: true
+    method: squash
+    require_status_success: true
+    require_review_decision: false
+
 providers:
   codex:
     command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
@@ -37,4 +47,4 @@ projects:
         base_branch: main
     agent:
       provider: codex
-    workflow: ./WORKFLOW.md
+    workflow: ./workflow.yml

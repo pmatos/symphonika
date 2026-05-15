@@ -1107,6 +1107,13 @@ function templateExitStateMap(
       errors.push(`workflow template state ${targetState} at ${template.path} must be a mapping`);
       continue;
     }
+    const existingExitName = exitStates.get(targetState);
+    if (existingExitName !== undefined) {
+      errors.push(
+        `workflow template at ${template.path} exits ${existingExitName} and ${exitName} both target state ${targetState}`
+      );
+      continue;
+    }
     const terminal = stringProperty(rawState, "terminal");
     if (terminal !== undefined && terminalStates.has(terminal)) {
       exitStates.set(targetState, exitName);

@@ -984,6 +984,61 @@ describe("state machine workflow definitions", () => {
     ]);
   });
 
+  it("rejects duplicate template exits that target the same terminal state", async () => {
+    const root = await makeTempRoot();
+    const templateDir = path.join(root, ".symphonika", "workflow-templates");
+    await mkdir(templateDir, { recursive: true });
+    const workflowPath = path.join(root, "workflow.yml");
+    const templatePath = path.join(templateDir, "plan-tdd-pr.yml");
+    await writeFile(
+      templatePath,
+      [
+        "name: plan_tdd_pr",
+        "entry: planning",
+        "exits:",
+        "  success: done",
+        "  blocked: done",
+        "states:",
+        "  planning:",
+        "    action:",
+        "      kind: agent",
+        "      provider: codex",
+        "      prompt: prompts/plan.md",
+        "    transitions:",
+        "      - to: done",
+        "  done:",
+        "    terminal: success",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: build_pr",
+        "  use:",
+        "    build_pr:",
+        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
+        "      exits:",
+        "        success: reviewed",
+        "        blocked: needs_operator",
+        "  states:",
+        "    reviewed:",
+        "      terminal: success",
+        "    needs_operator:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([
+      `workflow template at ${templatePath} exits success and blocked both target state done`
+    ]);
+  });
+
   it("loads and explains an explicit raw FSM workflow", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");

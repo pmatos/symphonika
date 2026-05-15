@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { InvalidArgumentError, Command } from "commander";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -710,6 +710,22 @@ export async function runCli(argv = process.argv): Promise<void> {
   await buildCli().parseAsync(argv);
 }
 
+function isDirectCliInvocation(moduleUrl: string, argvEntry: string | undefined): boolean {
+  if (argvEntry === undefined) {
+    return false;
+  }
+
+  let entryPath = argvEntry;
+  try {
+    entryPath = realpathSync(argvEntry);
+  } catch {
+    // Fall back to the raw argv path so direct invocation still works when
+    // the entrypoint disappears between process launch and this check.
+  }
+
+  return moduleUrl === pathToFileURL(entryPath).href;
+}
+
 function collectLatestDashboardEvents(
   store: RunStore,
   runs: RunStatus[]
@@ -1389,7 +1405,7 @@ function registerShutdownHandlers(daemon: DaemonHandle): void {
   process.once("SIGTERM", stop);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isDirectCliInvocation(import.meta.url, process.argv[1])) {
   runCli().catch((error: unknown) => {
     console.error(error);
     process.exitCode = 1;

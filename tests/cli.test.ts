@@ -1,6 +1,9 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile as execFileCallback } from "node:child_process";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { buildCli } from "../src/cli.js";
@@ -13,6 +16,8 @@ import type {
 import type { SmokeOptions, SmokeReport } from "../src/smoke.js";
 
 const tempRoots: string[] = [];
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const execFile = promisify(execFileCallback);
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-cli-test-"));
@@ -29,6 +34,26 @@ afterEach(async () => {
 });
 
 describe("CLI", () => {
+  it("prints top-level help when invoked through an npm-style bin symlink", async () => {
+    const root = await makeTempRoot();
+    const binPath = path.join(root, "symphonika");
+    await symlink(path.join(repoRoot, "src", "cli.ts"), binPath);
+
+    const { stdout } = await execFile(
+      process.execPath,
+      ["--import", "tsx", binPath, "--help"],
+      { cwd: repoRoot }
+    );
+
+    expect(stdout).toContain("Usage: symphonika");
+    expect(stdout).toContain("Commands:");
+    expect(stdout).toContain("doctor");
+    expect(stdout).toContain("clear-stale");
+    expect(stdout).toContain("workflow");
+    expect(stdout).toContain("status");
+    expect(stdout).toContain("show-run");
+  });
+
   it("starts the daemon with the selected config path and port", async () => {
     const starts: StartDaemonOptions[] = [];
     const program = buildCli({

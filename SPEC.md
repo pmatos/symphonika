@@ -170,16 +170,26 @@ Symphonika stores both:
 
 ### 5.1 Service Config
 
-The default service config file is `symphonika.yml`.
+The service config file is named `symphonika.yml`. By default the CLI uses
+`./symphonika.yml` when the current directory provides one; otherwise it uses the initialized
+user config at `$XDG_CONFIG_HOME/symphonika/symphonika.yml`, falling back to
+`~/.config/symphonika/symphonika.yml` when `XDG_CONFIG_HOME` is unset. Operators can always select
+another file with `--config`.
 
 It is reloadable and owned by the orchestrator. It lists Projects and service-level runtime
 settings.
 
-v1 implements reload by defensively re-reading `symphonika.yml` on each daemon tick and manual
-poll-now trigger. A valid reload replaces the effective snapshot used for future polling,
+v1 implements reload by defensively re-reading the selected `symphonika.yml` on each daemon tick
+and manual poll-now trigger. A valid reload replaces the effective snapshot used for future polling,
 dispatch, retry, continuation, provider-command selection, and PR follow-up policy. An invalid
 reload is surfaced in structured logs and operator status while the daemon keeps using the last
 known good effective snapshot.
+
+`symphonika init` is the default first-run path for a project checkout. It runs from inside a
+GitHub-backed repository, derives the Project from `origin`, writes the user service config, chooses
+`$XDG_STATE_HOME/symphonika` (or `~/.local/state/symphonika`) as the state root, and creates a
+starter repository-owned `WORKFLOW.md` only when one does not already exist. It does not create
+GitHub operational labels; `init-project --yes` remains the explicit label-creation step.
 
 Example:
 
@@ -302,7 +312,8 @@ Codex and Claude use their native local authentication.
 Default state root:
 
 ```text
-<directory-containing-symphonika.yml>/.symphonika
+$XDG_STATE_HOME/symphonika when using the initialized user config
+<directory-containing-symphonika.yml>/.symphonika for explicit or project-local configs
 ```
 
 The state root may be overridden in config, for example:
@@ -312,7 +323,9 @@ state:
   root: ~/.local/state/symphonika
 ```
 
-The repository should gitignore `.symphonika/`.
+Project repositories do not need a deploy-local state directory when using `symphonika init`; state
+and workspaces live under the user state root. Repositories that carry their own project-local
+`symphonika.yml` should gitignore `.symphonika/`.
 
 ### 7.2 Run Store
 
@@ -343,7 +356,7 @@ Raw logs live under the state root, outside issue workspaces.
 Recommended layout:
 
 ```text
-.symphonika/
+<state.root>/
   daemon.json
   symphonika.db
   logs/
@@ -408,7 +421,7 @@ The daemon owns:
 
 On daemon startup:
 
-1. Load `symphonika.yml`.
+1. Load the selected `symphonika.yml`.
 2. Open or initialize SQLite.
 3. Backfill legacy `input_required` Run rows older than 60 seconds to `failed` with
    `terminal_reason = "provider requested input (legacy)"`.
@@ -803,15 +816,19 @@ states (§12.5).
 
 Bootstrap CLI commands:
 
-- `symphonika doctor --config <path>`
-- `symphonika init-project <name> --config <path>`
-- `symphonika daemon --config <path> [--port <port>]`
-- `symphonika status --config <path> [--dashboard] [--watch] [--interval-ms <ms>]`
-- `symphonika poll-now --config <path>`
-- `symphonika runs --config <path>`
-- `symphonika show-run <run-id> --config <path>`
-- `symphonika cancel <run-id> --config <path>`
-- `symphonika clear-stale <project> <issue-number> --config <path>`
+- `symphonika init [--provider codex|claude] [--force]`
+- `symphonika doctor [--config <path>]`
+- `symphonika init-project [--config <path>] --yes`
+- `symphonika daemon [--config <path>] [--port <port>]`
+- `symphonika status [--config <path>] [--dashboard] [--watch] [--interval-ms <ms>]`
+- `symphonika poll-now [--config <path>]`
+- `symphonika runs [--config <path>]`
+- `symphonika show-run <run-id> [--config <path>]`
+- `symphonika cancel <run-id> [--config <path>]`
+- `symphonika clear-stale <project> <issue-number> [--config <path>] --yes`
+
+When neither a project-local config nor a user config exists, `doctor` reports the missing user
+config path and points the operator to `symphonika init`.
 
 `doctor` validates:
 
@@ -825,7 +842,8 @@ Bootstrap CLI commands:
 - database path
 - workspace root
 
-`init-project` creates missing operational labels only after explicit confirmation.
+`init` writes local files only and never mutates GitHub. `init-project` creates missing operational
+labels only after explicit confirmation.
 
 `status --dashboard` renders a compact terminal status dashboard from the run store and daemon
 `/api/status` endpoint. `status --watch` refreshes that read-only dashboard in place; it must not
@@ -861,6 +879,7 @@ The bootstrap slice is accepted when:
 
 - tests pass
 - lint passes
+- `init` can create a user service config and starter workflow from a GitHub-backed project checkout
 - `doctor` validates service config, GitHub auth, operational labels, Codex and Claude provider
   commands, workflow file, database path, and workspace root
 - `init-project` can create missing operational labels after confirmation

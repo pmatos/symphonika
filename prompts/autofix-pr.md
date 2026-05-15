@@ -31,7 +31,12 @@ if you need the PR number — do not assume one. Stay on branch
 - Do not modify the `symphony/` submodule.
 - If you genuinely cannot make progress (e.g. the failure requires a
   product decision), post a `gh pr comment` on the PR explaining what
-  blocked you and exit cleanly. Do not self-apply `needs-human`.
+  blocked you and **exit non-zero (e.g. `exit 1`)**. A non-zero exit
+  routes the FSM through `provider_success: false` to the `to: failed`
+  catch-all and terminates the run as `blocked`. Exiting 0 here would
+  set `provider_success: true`, return the FSM to `wait_for_pr`, which
+  would observe the same failing PR signals and route straight back
+  into this state — an infinite loop. Do not self-apply `needs-human`.
 
 ## Exit
 

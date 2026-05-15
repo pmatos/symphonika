@@ -37,8 +37,13 @@ second PR.
 - Do not modify operational labels in the `sym:*` namespace.
 - Do not modify the `symphony/` submodule.
 - If conflicts are genuinely unresolvable without a product decision,
-  post a `gh pr comment` describing what blocked you and exit cleanly. Do
-  not self-apply `needs-human`.
+  post a `gh pr comment` describing what blocked you and **exit non-zero
+  (e.g. `exit 1`)**. A non-zero exit routes the FSM through
+  `provider_success: false` to the `to: failed` catch-all and terminates
+  the run as `blocked`. Exiting 0 here would set `provider_success: true`,
+  return the FSM to `wait_for_pr`, which would observe the same
+  `mergeable: false` signal and route straight back into this state —
+  an infinite loop. Do not self-apply `needs-human`.
 
 ## Exit
 

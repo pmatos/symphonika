@@ -39,6 +39,15 @@ workflow:
         - to: merged
           when:
             pr_merged: true
+        # Closed-unmerged escape. projectPullRequestSignals leaves mergeable
+        # absent for closed PRs and emits pr_merged only when merged, so a
+        # PR closed without being merged would otherwise either park forever
+        # (if last checks were green) or mis-route into autofix on a dead
+        # branch (if last checks were failing). Must come AFTER pr_merged:
+        # true so merged PRs still take the merged path.
+        - to: failed
+          when:
+            pr_open: false
         - to: merge
           when:
             checks: success
@@ -103,6 +112,11 @@ workflow:
         - to: merged
           when:
             pr_merged: true
+        # Closed-unmerged escape (mirrors wait_for_pr). Must come AFTER
+        # pr_merged: true so merged PRs still terminate as merged.
+        - to: failed
+          when:
+            pr_open: false
         - to: resolve_conflicts
           when:
             mergeable: false

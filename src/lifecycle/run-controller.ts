@@ -220,6 +220,7 @@ type WorkflowOutcomeResult = {
   advancedToTerminal: boolean;
   blocked: boolean;
   parkAsWait?: boolean;
+  terminalLabel?: "success" | "failure" | "blocked";
   waitingRunId?: string;
 };
 
@@ -1395,15 +1396,6 @@ export class RunController {
               }
             })
       });
-      const outcomeState = mapOutcomeToRunState(terminal);
-      if (attemptCreated) {
-        this.runStore.updateAttemptState(attemptId, outcomeState);
-      }
-      this.runStore.recordTerminalReason(
-        input.runId,
-        terminal.reason,
-        terminal.classification
-      );
       let workflowOutcome: WorkflowOutcomeResult = {
         advancedToState: null,
         advancedToTerminal: false,
@@ -1419,6 +1411,19 @@ export class RunController {
           workflow: loadedWorkflow.expandedWorkflow
         });
       }
+      const effectiveOutcome = fuseWorkflowTerminal(
+        terminal,
+        workflowOutcome.terminalLabel
+      );
+      const outcomeState = mapOutcomeToRunState(effectiveOutcome);
+      if (attemptCreated) {
+        this.runStore.updateAttemptState(attemptId, outcomeState);
+      }
+      this.runStore.recordTerminalReason(
+        input.runId,
+        effectiveOutcome.reason,
+        effectiveOutcome.classification
+      );
       const sourceKind = loadedWorkflow.expandedWorkflow.source.kind;
       const isRawFsm = sourceKind === "raw_fsm";
       const suppressContinuation =
@@ -1429,8 +1434,8 @@ export class RunController {
       this.runStore.updateRunState(input.runId, outcomeState);
 
       const willRetry =
-        terminal.kind === "failed" &&
-        terminal.classification === "transient" &&
+        effectiveOutcome.kind === "failed" &&
+        effectiveOutcome.classification === "transient" &&
         this.runStore.runRetryCount(input.runId) < this.lifecyclePolicy.retry.cap;
 
       this.logger?.info(
@@ -1438,22 +1443,23 @@ export class RunController {
           attemptNumber: input.attemptNumber,
           cancelReason,
           cancelRequested,
-          classification: terminal.classification,
+          classification: effectiveOutcome.classification,
           isContinuation: input.isContinuation,
           issueNumber: input.issue.number,
-          kind: terminal.kind,
+          kind: effectiveOutcome.kind,
           project: input.project.name,
           runId: input.runId,
           state: outcomeState,
-          terminalReason: terminal.reason,
-          willRetry
+          terminalReason: effectiveOutcome.reason,
+          willRetry,
+          workflowTerminalLabel: workflowOutcome.terminalLabel
         },
         "symphonika run terminated"
       );
 
       const labelInput: ApplyLabelsInput = {
         issueNumber: input.issue.number,
-        outcome: terminal,
+        outcome: effectiveOutcome,
         repository: input.repository,
         willRetry
       };
@@ -1470,7 +1476,7 @@ export class RunController {
             ? {}
             : { extraInstructions: input.extraInstructions }),
           issue: input.issue,
-          outcome: terminal,
+          outcome: effectiveOutcome,
           project: input.project,
           repository: input.repository,
           respectsIssueLabels,
@@ -1625,7 +1631,13 @@ export class RunController {
           terminalStateId: next.id,
           transitionReason: decision.reason
         });
-        return { advancedToState: null, advancedToTerminal: true, blocked: false };
+        const terminalLabel = narrowTerminalLabel(next.terminal);
+        return {
+          advancedToState: null,
+          advancedToTerminal: true,
+          blocked: false,
+          ...(terminalLabel === undefined ? {} : { terminalLabel })
+        };
       }
       this.runStore.recordWorkflowStateAdvance(input.runId, {
         nextStateId: decision.to,
@@ -1668,7 +1680,13 @@ export class RunController {
         terminalStateId: decision.stateId,
         transitionReason: `entered terminal state ${decision.terminal}`
       });
-      return { advancedToState: null, advancedToTerminal: true, blocked: false };
+      const terminalLabel = narrowTerminalLabel(decision.terminal);
+      return {
+        advancedToState: null,
+        advancedToTerminal: true,
+        blocked: false,
+        ...(terminalLabel === undefined ? {} : { terminalLabel })
+      };
     }
 
     return { advancedToState: null, advancedToTerminal: false, blocked: false };
@@ -2222,6 +2240,40 @@ function mapOutcomeToRunState(outcome: ClassifiedTerminal): RunState {
     default:
       return "failed";
   }
+}
+
+function narrowTerminalLabel(
+  value: string | undefined
+): "success" | "failure" | "blocked" | undefined {
+  if (value === "success" || value === "failure" || value === "blocked") {
+    return value;
+  }
+  return undefined;
+}
+
+// When a raw FSM walks to a `failure` or `blocked` terminal node, the workflow
+// author has declared the run is a deterministic failure regardless of the
+// provider's exit code. Synthesize that classification so downstream code
+// (state write, terminal_reason, sym:failed label, scheduleNext) all observe
+// the workflow's verdict. Cancellation and input_required always win — they
+// reflect operator/system intent that an FSM terminal label cannot override.
+// This intentionally pre-empts the transient-retry policy for workflow-driven
+// failures.
+function fuseWorkflowTerminal(
+  terminal: ClassifiedTerminal,
+  terminalLabel: "success" | "failure" | "blocked" | undefined
+): ClassifiedTerminal {
+  if (terminal.kind === "cancelled" || terminal.kind === "input_required") {
+    return terminal;
+  }
+  if (terminalLabel !== "failure" && terminalLabel !== "blocked") {
+    return terminal;
+  }
+  return {
+    classification: "deterministic",
+    kind: "failed",
+    reason: `workflow_terminal_${terminalLabel}`
+  };
 }
 
 function isLabelWritingGitHubIssuesApi(

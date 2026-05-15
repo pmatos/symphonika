@@ -61,9 +61,10 @@ export function renderStatusDashboardRedrawFrame(
     ...lines.map((line) => `${line}\x1b[K`),
     ...trailingBlankErases
   ];
+  const initialFrameTrailingErase = previousLineCount === 0 ? "\x1b[J" : "";
   return {
     lineCount: lines.length,
-    output: `\x1b[H${frameLines.join("\n")}\n`
+    output: `\x1b[H${frameLines.join("\n")}\n${initialFrameTrailingErase}`
   };
 }
 

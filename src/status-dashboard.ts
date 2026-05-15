@@ -31,14 +31,19 @@ const ACTIVE_RUN_STATES = new Set<RunState>([
   "queued",
   "preparing_workspace",
   "running",
-  "input_required",
   "waiting"
 ]);
 
 const ATTENTION_RUN_STATES = new Set<RunState>([
   "failed",
-  "input_required",
   "stale"
+]);
+
+const RECENT_RUN_STATES = new Set<RunState>([
+  "cancelled",
+  "failed",
+  "stale",
+  "succeeded"
 ]);
 
 const RECENT_LIMIT = 5;
@@ -54,7 +59,7 @@ export function renderStatusDashboard(input: StatusDashboardInput): string {
   );
   const runCounts = countRunsByState(input.runs);
   const recentRuns = input.runs
-    .filter((run) => !ACTIVE_RUN_STATES.has(run.state))
+    .filter((run) => RECENT_RUN_STATES.has(run.state))
     .slice(0, RECENT_LIMIT);
 
   const lines = [

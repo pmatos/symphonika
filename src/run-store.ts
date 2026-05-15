@@ -324,6 +324,9 @@ type ProjectStateRow = {
 
 export const PULL_REQUEST_DISCOVERY_LIMIT = 25;
 export const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
+export const INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS = 60_000;
+export const INPUT_REQUIRED_LEGACY_TERMINAL_REASON =
+  "provider requested input (legacy)";
 
 export class RunStore {
   private readonly database: SqliteDatabase;
@@ -1346,6 +1349,53 @@ export class RunStore {
       this.updateRunState(entry.runId, "stale");
     }
     return swept;
+  }
+
+  failLegacyInputRequiredRuns(
+    options: { graceMs?: number; now?: Date } = {}
+  ): { runId: string; projectName: string; issueNumber: number }[] {
+    const graceMs = options.graceMs ?? INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS;
+    const now = options.now ?? new Date();
+    const cutoff = new Date(now.getTime() - graceMs).toISOString();
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, issue_number",
+          "from runs",
+          "where state = 'input_required'",
+          "and updated_at < ?",
+          "order by updated_at asc, id asc"
+        ].join(" ")
+      )
+      .all(cutoff) as { id: string; project_name: string; issue_number: number }[];
+    const migrated = rows.map((row) => ({
+      issueNumber: row.issue_number,
+      projectName: row.project_name,
+      runId: row.id
+    }));
+    const update = this.database.prepare(
+      [
+        "update runs set",
+        "state = 'failed',",
+        "terminal_reason = ?,",
+        "failure_classification = 'input_required',",
+        "updated_at = ?",
+        "where id = ?"
+      ].join(" ")
+    );
+    const apply = this.database.transaction(() => {
+      for (const entry of migrated) {
+        const updatedAt = timestamp();
+        update.run(
+          INPUT_REQUIRED_LEGACY_TERMINAL_REASON,
+          updatedAt,
+          entry.runId
+        );
+        this.recordRunTransition(entry.runId, "failed", updatedAt);
+      }
+    });
+    apply();
+    return migrated;
   }
 
   private migrate(): void {

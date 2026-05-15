@@ -749,7 +749,6 @@ function statusDashboardShowsLatestEvent(state: RunState): boolean {
     state === "queued" ||
     state === "preparing_workspace" ||
     state === "running" ||
-    state === "input_required" ||
     state === "waiting"
   );
 }
@@ -1030,7 +1029,7 @@ function issueCountsFromStatus(
       candidate: arrayLength(daemonStatus.status.candidateIssues),
       failed: Math.max(
         countIssuesWithLabel(filteredIssues, "sym:failed"),
-        (byState.get("failed") ?? 0) + (byState.get("input_required") ?? 0)
+        byState.get("failed") ?? 0
       ),
       filtered: arrayLength(filteredIssues),
       running: Math.max(
@@ -1048,7 +1047,7 @@ function issueCountsFromStatus(
 
   return {
     candidate: 0,
-    failed: (byState.get("failed") ?? 0) + (byState.get("input_required") ?? 0),
+    failed: byState.get("failed") ?? 0,
     filtered: 0,
     running: byState.get("running") ?? 0,
     stale: Math.max(

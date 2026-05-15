@@ -302,6 +302,99 @@ describe("CLI run commands", () => {
     expect(output.stdout).toContain("No failed, input-required, or stale work");
   });
 
+  it("status --dashboard does not report input_required rows as active", async () => {
+    const stateRoot = await makeTempRoot();
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "needs-input",
+      issue: sampleIssue({ number: 18, title: "Needs input" }),
+      projectName: "alpha",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    store.createAttempt({
+      attemptNumber: 1,
+      branchName: "sym/alpha/18-needs-input",
+      branchRef: "refs/heads/sym/alpha/18-needs-input",
+      id: "needs-input-attempt-1",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "needs-input",
+      state: "input_required",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    store.updateRunState("needs-input", "input_required");
+    store.recordProviderEvent({
+      attemptId: "needs-input-attempt-1",
+      normalized: { message: "approval prompt", type: "input_required" },
+      raw: { message: "approval prompt" },
+      runId: "needs-input",
+      sequence: 1
+    });
+    store.close();
+
+    const { output, program } = captureProgram(stateRoot, {
+      fetch: () =>
+        Promise.resolve(
+          Response.json({
+            candidateIssues: [],
+            filteredIssues: [],
+            issuePolling: {
+              errors: [],
+              projects: [{ fetchedIssues: 0, name: "alpha", ok: true }]
+            },
+            reload: {
+              errors: [],
+              lastAttemptedAt: null,
+              lastLoadedAt: null,
+              ok: true,
+              usingLastKnownGood: false
+            },
+            state: "idle",
+            stateRoot: resolvedStateRoot
+          })
+        ),
+      runDoctor: () =>
+        Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          errors: [],
+          ok: true,
+          projects: [
+            {
+              missingOperationalLabels: [],
+              name: "alpha",
+              staleIssues: [],
+              validForDispatch: true,
+              workflowPath: "/tmp/WORKFLOW.md"
+            }
+          ]
+        } satisfies DoctorReport)
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "status",
+      "--config",
+      path.join(stateRoot, "symphonika.yml"),
+      "--daemon-url",
+      "http://127.0.0.1:3030",
+      "--dashboard"
+    ]);
+
+    expect(output.stdout).toContain("Runs: active 0");
+    expect(output.stdout).toContain("No active runs");
+    expect(output.stdout).not.toContain("needs-input");
+    expect(output.stdout).not.toContain("approval prompt");
+  });
+
   it("status --watch reuses project validation across refresh ticks", async () => {
     const stateRoot = await makeTempRoot();
     const resolvedStateRoot = path.join(stateRoot, ".symphonika");

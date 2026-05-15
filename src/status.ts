@@ -32,7 +32,6 @@ const ACTIVE_STATES = new Set([
   "queued",
   "preparing_workspace",
   "running",
-  "input_required",
   "waiting"
 ]);
 

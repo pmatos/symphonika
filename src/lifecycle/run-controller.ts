@@ -2235,7 +2235,7 @@ function mapOutcomeToRunState(outcome: ClassifiedTerminal): RunState {
     case "cancelled":
       return "cancelled";
     case "input_required":
-      return "input_required";
+      return "failed";
     case "failed":
     default:
       return "failed";

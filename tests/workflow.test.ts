@@ -2044,6 +2044,16 @@ describe("built-in workflow templates", () => {
     });
     expect(advance({ checks: "pending" })).toMatchObject({ kind: "stay_waiting" });
     expect(advance({})).toMatchObject({ kind: "stay_waiting" });
+    // Closed-unmerged PR: pr_open=false, pr_merged absent, mergeable likely
+    // omitted (UNKNOWN). The merge_pr action can't merge a non-OPEN PR, so
+    // the template's blocked exit must take over.
+    expect(
+      advance({ pr_open: false, checks: "success" })
+    ).toMatchObject({ kind: "advance", to: "needs_human" });
+    // And a merged PR still wins done despite also having pr_open: false.
+    expect(
+      advance({ pr_merged: true, pr_open: false })
+    ).toMatchObject({ kind: "advance", to: "shipped" });
   });
 
   it("respects an explicit method input on builtin:merge-when-green", async () => {

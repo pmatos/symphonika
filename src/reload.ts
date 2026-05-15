@@ -265,6 +265,9 @@ async function loadRuntimeConfigSnapshot(input: {
           formatZodIssueWithPrefix(issue, ["projects", String(index)])
         )
       );
+      if (input.previous !== undefined) {
+        return lastKnownGoodOrNothing(input.previous, errors);
+      }
       continue;
     }
 

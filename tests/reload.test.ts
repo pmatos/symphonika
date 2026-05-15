@@ -66,6 +66,51 @@ async function writeProjectConfig(
   );
 }
 
+async function writeProjectConfigWithoutWorkspaceRoot(
+  root: string,
+  workflowFileName: string
+): Promise<void> {
+  await mkdir(root, { recursive: true });
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "polling:",
+      "  interval_ms: 500",
+      "providers:",
+      "  codex:",
+      '    command: "codex -p symphonika"',
+      "  claude:",
+      '    command: "claude -p"',
+      "projects:",
+      "  - name: symphonika",
+      "    disabled: false",
+      "    weight: 1",
+      "    tracker:",
+      "      kind: github",
+      "      owner: pmatos",
+      "      repo: symphonika",
+      '      token: "$GITHUB_TOKEN"',
+      "    issue_filters:",
+      '      states: ["open"]',
+      '      labels_all: ["next-ready"]',
+      '      labels_none: ["blocked"]',
+      "    priority:",
+      "      labels: {}",
+      "      default: 99",
+      "    workspace:",
+      "      git:",
+      "        remote: git@github.com:pmatos/symphonika.git",
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      `    workflow: ./${workflowFileName}`,
+      ""
+    ].join("\n")
+  );
+}
+
 describe("RuntimeConfigReloader workflow validation", () => {
   it("rejects raw FSM workflows whose transitions point at undeclared states", async () => {
     const root = await makeTempRoot();
@@ -218,6 +263,34 @@ describe("RuntimeConfigReloader workflow validation", () => {
       "run_agent",
       "done"
     ]);
+  });
+
+  it("keeps the last-known-good snapshot when project detail validation fails on reload", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const firstSnapshot = reloader.getSnapshot();
+    expect(firstSnapshot).toBeDefined();
+    expect(reloader.projectsByName().has("symphonika")).toBe(true);
+
+    await writeProjectConfigWithoutWorkspaceRoot(root, "WORKFLOW.md");
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()).toBe(firstSnapshot);
+    expect(reloader.projectsByName().has("symphonika")).toBe(true);
+    expect(
+      reloader.getSnapshot()?.polling.projects[0]?.issue_filters.labels_all
+    ).toEqual(["agent-ready"]);
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: true,
+      errors: [expect.stringContaining("projects.0.workspace.root")]
+    });
   });
 
   it("stores template-expanded raw FSM snapshots and refreshes when a template changes", async () => {

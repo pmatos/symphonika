@@ -29,6 +29,16 @@ workflow:
       action:
         kind: wait
       transitions:
+        # External-merge catch-all. Covers the race where the orchestrator-wide
+        # PR follow-up loop merges the tracked PR before reEvaluateWaitingRun
+        # has signals to advance us into merge (isIssueParkedInMergePrState
+        # only defers when the run is already in a merge_pr action). Also
+        # covers manual merges and any other path that lands the PR outside
+        # the FSM. pr_merged is only ever true post-merge, so this never
+        # short-circuits the normal wait -> merge -> merged path.
+        - to: merged
+          when:
+            pr_merged: true
         - to: merge
           when:
             checks: success
@@ -43,6 +53,14 @@ workflow:
 
     # Claude session that invokes the pm-autofix-pr skill. Skill triggering
     # is description-based, so the prompt phrasing is what activates it.
+    #
+    # KNOWN GAP: state.action.provider is currently ignored at runtime —
+    # executeStateAdvance always uses project.agent.provider (codex in this
+    # config). The schema validates `provider: claude` and `workflow explain`
+    # prints it, but until the per-state provider routing fix lands, this
+    # state will launch Codex with the Claude-targeted prompt. Codex will
+    # still attempt the autofix from the prompt text, just without skill
+    # auto-invocation. Tracked separately as a Symphonika extension.
     autofix:
       action:
         kind: agent
@@ -56,6 +74,7 @@ workflow:
 
     # Claude session for merge conflict resolution. Reuses pm-autofix-pr,
     # whose trigger set includes "fix the build" / "iterate on pr".
+    # Same provider-routing gap as the autofix state above.
     resolve_conflicts:
       action:
         kind: agent

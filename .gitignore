@@ -1,8 +1,11 @@
 .symphonika/
+.stryker-tmp/
 coverage/
 dist/
 node_modules/
 npm-debug.log*
+reports/
+crash-*
 *.local
 .DS_Store
 

@@ -751,6 +751,7 @@ describe("daemon dispatch", () => {
     }
 
     const daemon = await startDaemon({
+      configPath: path.join(root, "symphonika.yml"),
       cwd: root,
       legacyInputRequiredRecheckDelayMs: 0,
       logger: pino({ enabled: false }),
@@ -818,6 +819,7 @@ describe("daemon dispatch", () => {
     }
 
     const daemon = await startDaemon({
+      configPath: path.join(root, "symphonika.yml"),
       cwd: root,
       legacyInputRequiredRecheckDelayMs: 300,
       logger: pino({ enabled: false }),

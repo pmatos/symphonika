@@ -1,5 +1,3 @@
-import path from "node:path";
-
 import {
   dispatchOneEligibleIssue,
   type DispatchIssueOptions
@@ -15,6 +13,7 @@ import {
   type GitHubIssuesApi,
   type IssuePollStatus
 } from "./issue-polling.js";
+import { resolveServiceConfigPath } from "./config-paths.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { openRunStore, type RunDetail, type RunStore } from "./run-store.js";
@@ -69,8 +68,12 @@ export type SmokeReport = {
 
 export async function runSmoke(options: SmokeOptions = {}): Promise<SmokeReport> {
   const cwd = options.cwd ?? process.cwd();
-  const configPath = path.resolve(cwd, options.configPath ?? "symphonika.yml");
   const env = options.env ?? process.env;
+  const configPath = resolveServiceConfigPath({
+    ...withConfigPath(options.configPath),
+    cwd,
+    env
+  }).configPath;
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const githubIssuesApi =
     options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
@@ -239,6 +242,10 @@ function staleClaimWarnings(
   }
 
   return warnings;
+}
+
+function withConfigPath(configPath: string | undefined): { configPath?: string } {
+  return configPath === undefined ? {} : { configPath };
 }
 
 function issueKey(projectName: string, issueNumber: number): string {

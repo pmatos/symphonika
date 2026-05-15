@@ -48,6 +48,14 @@ hard ceiling override the built-in with a local template, or cancel the waiting 
 `builtin:merge-when-green` similarly does *not* inherit `pull_requests.merge.method`: the
 template's `method` input defaults to the string `"squash"` (matching the policy default), and
 operators who run with a different `policy.merge.method` use a local template override. The
+template's entry state is `merge_pr`, not a `wait` state guarding it. Starting in `merge_pr`
+means `isIssueParkedInMergePrState` (`src/lifecycle/run-controller.ts:481-508`) returns true
+from the first tick, so `runPullRequestFollowup` defers to the workflow instead of merging with
+the policy default method — preserving the `method` override and the merge_pr evidence path.
+A `wait`-first design (gate the merge with a wait-state predicate, then advance to `merge_pr`)
+leaves a window where the global PR follow-up can win the merge, losing both the override and
+the evidence; `merge_pr` already does its own policy-driven readiness check via
+`pullRequestReadyToMerge`, so the wait gate would be redundant anyway. The
 alternative — interpolating an empty string and relying on `coerceMergeMethod("")` returning
 `undefined` so policy can fall back — was rejected because
 `validateWorkflowTemplateInputValue` rejects empty strings outright and because an opaque

@@ -318,8 +318,10 @@ machinery as repo-local templates (ADR 0049):
 - `builtin:plan-tdd-pr` — planning followed by TDD implementation with named exits.
 - `builtin:autofix-until-clean` — a predicate-bounded wait/autofix loop that exits on
   `checks: success` + `unresolved_review_threads: 0`.
-- `builtin:merge-when-green` — wait/merge using the workflow's declared method (defaults to
-  `squash`).
+- `builtin:merge-when-green` — workflow-controlled merge through the `merge_pr` action with a
+  configurable `method` input (defaults to `squash`). The template enters `merge_pr` directly so
+  the global PR follow-up loop defers to it via `isIssueParkedInMergePrState`, preserving the
+  method override and merge evidence path even when a PR becomes merge-ready mid-tick.
 
 Built-ins are conveniences. Repositories can replace any built-in by changing the workflow's
 `template:` reference to a local `.symphonika/workflow-templates/<name>.yml` with equivalent

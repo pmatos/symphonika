@@ -1835,11 +1835,65 @@ describe("built-in workflow templates", () => {
     const result = await loadExpandedWorkflow(workflowPath);
 
     expect(result.errors).toEqual([]);
-    expect(result.workflow.initial).toBe("gate.waiting");
+    expect(result.workflow.initial).toBe("gate.merging");
     const merging = result.workflow.states.find(
       (state) => state.id === "gate.merging"
     );
     expect(merging?.action).toEqual({ kind: "merge_pr", method: "squash" });
+  });
+
+  it("starts builtin:merge-when-green directly in merge_pr so the workflow owns the merge from the first parked row", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: pr_merge",
+        "  initial: gate",
+        "  use:",
+        "    gate:",
+        "      template: builtin:merge-when-green",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "  states:",
+        "    shipped:",
+        "      terminal: success",
+        "    needs_human:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+    expect(result.errors).toEqual([]);
+    expect(result.workflow.initial).toBe("gate.merging");
+    expect(result.workflow.states.find((s) => s.id === "gate.waiting")).toBeUndefined();
+    const merging = result.workflow.states.find((s) => s.id === "gate.merging");
+    expect(merging).toBeDefined();
+    if (merging === undefined) {
+      throw new Error("expected gate.merging");
+    }
+    expect(merging.action?.kind).toBe("merge_pr");
+
+    const advance = (signals: Record<string, string | number | boolean>) =>
+      decideNextStep({ actionExecuted: true, signals, state: merging });
+
+    expect(advance({ pr_merged: true })).toMatchObject({
+      kind: "advance",
+      to: "shipped"
+    });
+    expect(advance({ checks: "failure" })).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    expect(advance({ mergeable: false })).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    expect(advance({ checks: "pending" })).toMatchObject({ kind: "stay_waiting" });
+    expect(advance({})).toMatchObject({ kind: "stay_waiting" });
   });
 
   it("respects an explicit method input on builtin:merge-when-green", async () => {

@@ -1065,7 +1065,7 @@ describe("CLI", () => {
     expect(output.stderr).toBe("");
     expect(output.stdout).toContain("workflow: pr_merge");
     expect(output.stdout).toContain("template files: builtin:merge-when-green");
-    expect(output.stdout).toContain("state: gate.waiting");
+    expect(output.stdout).toContain("initial: gate.merging");
     expect(output.stdout).toContain("state: gate.merging");
   });
 });

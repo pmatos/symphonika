@@ -524,8 +524,10 @@ export async function startDaemon(
     getScheduled: () => activeRuns.peekDelayed(),
     getStatusSnapshot: () =>
       buildStatusSnapshot({
+        configDir: state.configDir,
         configPath: state.configPath,
         issuePollStatus,
+        projectsByName: runtimeConfig.projectsByName(),
         reloadStatus: runtimeConfig.getStatus(),
         runStore,
         stateRoot: state.stateRoot

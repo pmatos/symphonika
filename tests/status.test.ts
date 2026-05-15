@@ -138,4 +138,55 @@ describe("buildStatusSnapshot", () => {
       runStore.close();
     }
   });
+
+  it("fills missing run branch and workspace fields from the deterministic path plan", async () => {
+    const stateRoot = await makeTempRoot();
+    const configDir = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    try {
+      runStore.createRun({
+        id: "r-planned",
+        issue: sampleIssue({
+          number: 146,
+          title: "Extract pure workspace paths"
+        }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      runStore.updateRunState("r-planned", "running");
+
+      const snapshot = buildStatusSnapshot({
+        configDir,
+        configPath: path.join(configDir, "symphonika.yml"),
+        issuePollStatus: emptyPollStatus(),
+        projectsByName: new Map([
+          [
+            "alpha",
+            {
+              name: "Alpha Project",
+              workspace: {
+                root: "./workspaces/alpha"
+              }
+            }
+          ]
+        ]),
+        runStore,
+        stateRoot
+      });
+
+      expect(snapshot.runs.active[0]).toMatchObject({
+        branchName: "sym/alpha-project/146-extract-pure-workspace-paths",
+        workspacePath: path.join(
+          configDir,
+          "workspaces",
+          "alpha",
+          "issues",
+          "146-extract-pure-workspace-paths"
+        )
+      });
+    } finally {
+      runStore.close();
+    }
+  });
 });

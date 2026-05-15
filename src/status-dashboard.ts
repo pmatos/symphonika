@@ -27,6 +27,11 @@ export type StatusDashboardInput = {
   stateRoot: string;
 };
 
+export type StatusDashboardRedrawFrame = {
+  lineCount: number;
+  output: string;
+};
+
 const ACTIVE_RUN_STATES = new Set<RunState>([
   "queued",
   "preparing_workspace",
@@ -42,6 +47,25 @@ const ATTENTION_RUN_STATES = new Set<RunState>([
 ]);
 
 const RECENT_LIMIT = 5;
+
+export function renderStatusDashboardRedrawFrame(
+  renderedDashboard: string,
+  previousLineCount = 0
+): StatusDashboardRedrawFrame {
+  const lines = linesWithoutFinalNewline(renderedDashboard);
+  const trailingBlankErases = Array.from(
+    { length: Math.max(0, previousLineCount - lines.length) },
+    () => "\x1b[K"
+  );
+  const frameLines = [
+    ...lines.map((line) => `${line}\x1b[K`),
+    ...trailingBlankErases
+  ];
+  return {
+    lineCount: lines.length,
+    output: `\x1b[H${frameLines.join("\n")}\n`
+  };
+}
 
 export function renderStatusDashboard(input: StatusDashboardInput): string {
   const validProjects = input.projects.filter(
@@ -215,6 +239,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function pad(value: string, width: number): string {
   return value.length >= width ? value : value.padEnd(width, " ");
+}
+
+function linesWithoutFinalNewline(value: string): string[] {
+  const trimmed = value.endsWith("\n") ? value.slice(0, -1) : value;
+  return trimmed.length === 0 ? [] : trimmed.split("\n");
 }
 
 function truncate(value: string, width: number): string {

@@ -401,7 +401,7 @@ describe("CLI run commands", () => {
     let doctorCalls = 0;
     let openStoreCalls = 0;
     let statusRequests = 0;
-    const { program } = captureProgram(stateRoot, {
+    const { output, program } = captureProgram(stateRoot, {
       fetch: () => {
         statusRequests += 1;
         return Promise.resolve(
@@ -459,6 +459,9 @@ describe("CLI run commands", () => {
     expect(statusRequests).toBeGreaterThan(1);
     expect(openStoreCalls).toBeGreaterThan(2);
     expect(doctorCalls).toBe(1);
+    expect(output.stdout).not.toContain("\x1b[2J");
+    expect(output.stdout).toContain("\x1b[H");
+    expect(output.stdout).toContain("\x1b[K");
   });
 
   it("status discovers the local daemon endpoint descriptor", async () => {

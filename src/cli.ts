@@ -36,6 +36,7 @@ import {
 } from "./lifecycle/terminal-reason.js";
 import { resolveStateRoot } from "./state.js";
 import {
+  renderStatusDashboardRedrawFrame,
   renderStatusDashboard,
   summarizeDashboardEvent,
   type DashboardEventSummary
@@ -366,7 +367,8 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       }) => {
         const printOnce = async (
           dashboard: boolean,
-          cachedReport?: DoctorReport
+          cachedReport?: DoctorReport,
+          redrawState?: { previousLineCount: number }
         ): Promise<void> => {
           const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
           const store = openRunStore({ stateRoot });
@@ -389,22 +391,29 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             );
 
             if (dashboard) {
-              writeOut(
-                program,
-                renderStatusDashboard({
-                  daemon:
-                    daemonUrl === undefined
-                      ? "unavailable (not configured)"
-                      : formatDaemonAvailability(daemonStatus, daemonUrl),
-                  issueCounts,
-                  lastPollOutcome: formatLastPollOutcome(daemonStatus),
-                  latestEvents: collectLatestDashboardEvents(store, all),
-                  projects: report.projects,
-                  reload: formatReloadOutcome(daemonStatus),
-                  runs: all,
-                  stateRoot
-                })
-              );
+              const dashboardOutput = renderStatusDashboard({
+                daemon:
+                  daemonUrl === undefined
+                    ? "unavailable (not configured)"
+                    : formatDaemonAvailability(daemonStatus, daemonUrl),
+                issueCounts,
+                lastPollOutcome: formatLastPollOutcome(daemonStatus),
+                latestEvents: collectLatestDashboardEvents(store, all),
+                projects: report.projects,
+                reload: formatReloadOutcome(daemonStatus),
+                runs: all,
+                stateRoot
+              });
+              if (redrawState !== undefined) {
+                const frame = renderStatusDashboardRedrawFrame(
+                  dashboardOutput,
+                  redrawState.previousLineCount
+                );
+                redrawState.previousLineCount = frame.lineCount;
+                writeOut(program, frame.output);
+                return;
+              }
+              writeOut(program, dashboardOutput);
               return;
             }
 
@@ -476,9 +485,9 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
 
         if (options.watch === true) {
           const report = await doctor({ configPath: options.config });
+          const redrawState = { previousLineCount: 0 };
           for (;;) {
-            writeOut(program, "\x1b[2J\x1b[H");
-            await printOnce(true, report);
+            await printOnce(true, report, redrawState);
             await sleep(options.intervalMs);
           }
         }

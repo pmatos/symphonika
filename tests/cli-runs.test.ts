@@ -302,6 +302,72 @@ describe("CLI run commands", () => {
     expect(output.stdout).toContain("No failed, input-required, or stale work");
   });
 
+  it("status --watch reuses project validation across refresh ticks", async () => {
+    const stateRoot = await makeTempRoot();
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    let doctorCalls = 0;
+    let openStoreCalls = 0;
+    let statusRequests = 0;
+    const { program } = captureProgram(stateRoot, {
+      fetch: () => {
+        statusRequests += 1;
+        return Promise.resolve(
+          Response.json({
+            issuePolling: {
+              errors: [],
+              projects: [{ fetchedIssues: 1, name: "alpha", ok: true }]
+            },
+            state: "idle",
+            stateRoot: resolvedStateRoot
+          })
+        );
+      },
+      openRunStore: () => {
+        openStoreCalls += 1;
+        if (openStoreCalls > 2) {
+          throw new Error("stop watch");
+        }
+        return openRunStore({ stateRoot });
+      },
+      runDoctor: () => {
+        doctorCalls += 1;
+        return Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          errors: [],
+          ok: true,
+          projects: [
+            {
+              missingOperationalLabels: [],
+              name: "alpha",
+              staleIssues: [],
+              validForDispatch: true,
+              workflowPath: "/tmp/WORKFLOW.md"
+            }
+          ]
+        } satisfies DoctorReport);
+      }
+    });
+
+    await expect(
+      program.parseAsync([
+        "node",
+        "symphonika",
+        "status",
+        "--config",
+        path.join(stateRoot, "symphonika.yml"),
+        "--daemon-url",
+        "http://127.0.0.1:3030",
+        "--watch",
+        "--interval-ms",
+        "1"
+      ])
+    ).rejects.toThrow("stop watch");
+
+    expect(statusRequests).toBeGreaterThan(1);
+    expect(openStoreCalls).toBeGreaterThan(2);
+    expect(doctorCalls).toBe(1);
+  });
+
   it("status discovers the local daemon endpoint descriptor", async () => {
     const stateRoot = await makeTempRoot();
     const resolvedStateRoot = path.join(stateRoot, ".symphonika");

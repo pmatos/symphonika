@@ -1749,6 +1749,109 @@ describe("built-in workflow templates", () => {
     });
   });
 
+  it("routes failed agent outcomes through every built-in's blocked exit", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: every_builtin",
+        "  initial: ship",
+        "  use:",
+        "    ship:",
+        "      template: builtin:single-agent-pr",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "    build:",
+        "      template: builtin:plan-tdd-pr",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "    review:",
+        "      template: builtin:autofix-until-clean",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "  states:",
+        "    shipped:",
+        "      terminal: success",
+        "    needs_human:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+    expect(result.errors).toEqual([]);
+
+    const stateById = (id: string) => {
+      const state = result.workflow.states.find((s) => s.id === id);
+      if (state === undefined) {
+        throw new Error(`expected state ${id}`);
+      }
+      return state;
+    };
+    const decide = (
+      id: string,
+      signals: Record<string, string | number | boolean>
+    ) =>
+      decideNextStep({ actionExecuted: true, signals, state: stateById(id) });
+
+    // signalsFromTerminal emits these three shapes; assert each agent state
+    // routes them through the template's mapped blocked exit (needs_human)
+    // instead of stalling with kind="blocked".
+    const failureSignals = {
+      branch_ahead_of_base: false,
+      provider_success: false
+    };
+    const noChangeSignals = {
+      branch_ahead_of_base: false,
+      provider_success: true
+    };
+
+    expect(decide("ship.agent", failureSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    expect(decide("ship.agent", noChangeSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+
+    expect(decide("build.planning", failureSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    // Planning that succeeded without a commit advances — PLAN.md may be
+    // uncommitted scratch the implementer reads.
+    expect(decide("build.planning", noChangeSignals)).toMatchObject({
+      kind: "advance",
+      to: "build.implementing"
+    });
+
+    expect(decide("build.implementing", failureSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    expect(decide("build.implementing", noChangeSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+
+    expect(decide("review.autofix", failureSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    // Autofix that succeeded without a commit re-enters waiting so the PR
+    // predicates decide next.
+    expect(decide("review.autofix", noChangeSignals)).toMatchObject({
+      kind: "advance",
+      to: "review.waiting"
+    });
+  });
+
   it("expands builtin:autofix-until-clean into a wait/autofix loop", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");

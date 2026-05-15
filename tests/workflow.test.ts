@@ -674,6 +674,69 @@ describe("state machine workflow definitions", () => {
     });
   });
 
+  it("does not rewrite expanded template transitions as instance targets", async () => {
+    const root = await makeTempRoot();
+    const templateDir = path.join(root, ".symphonika", "workflow-templates");
+    await mkdir(templateDir, { recursive: true });
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      path.join(templateDir, "build.yml"),
+      [
+        "name: build",
+        "entry: planning",
+        "states:",
+        "  planning:",
+        "    action:",
+        "      kind: agent",
+        "      provider: codex",
+        "      prompt: prompts/plan.md",
+        "    transitions:",
+        "      - to: pr",
+        "  pr:",
+        "    terminal: success",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(templateDir, "followup.yml"),
+      [
+        "name: followup",
+        "entry: start",
+        "states:",
+        "  start:",
+        "    terminal: success",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: build",
+        "  use:",
+        "    build:",
+        "      template: .symphonika/workflow-templates/build.yml",
+        "    build.pr:",
+        "      template: .symphonika/workflow-templates/followup.yml",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.workflow.states.map((state) => state.id)).toEqual([
+      "build.planning",
+      "build.pr",
+      "build.pr.start"
+    ]);
+    expect(result.workflow.states[0]).toMatchObject({
+      id: "build.planning",
+      transitions: [{ to: "build.pr", when: {} }]
+    });
+  });
+
   it("rejects workflow instance mappings for undeclared template exits", async () => {
     const root = await makeTempRoot();
     const templateDir = path.join(root, ".symphonika", "workflow-templates");

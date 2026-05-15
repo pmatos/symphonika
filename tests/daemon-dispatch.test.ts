@@ -18,7 +18,7 @@ import type {
   ProviderRunInput
 } from "../src/provider.js";
 import { RuntimeConfigReloader } from "../src/reload.js";
-import { openRunStore } from "../src/run-store.js";
+import { databasePath, openRunStore } from "../src/run-store.js";
 import { loadExpandedWorkflow } from "../src/workflow.js";
 import type {
   PreparedIssueWorkspace,
@@ -591,6 +591,195 @@ describe("daemon dispatch", () => {
         ]);
       } finally {
         database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("records provider input_required as a failed terminal run", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 8,
+          title: "Dispatch an end-to-end run through a test provider"
+        })
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: {
+            type: "input_required"
+          },
+          raw: {
+            kind: "input_required"
+          }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    const prepareIssueWorkspace = vi.fn(
+      (input: PrepareIssueWorkspaceInput): Promise<PreparedIssueWorkspace> => {
+        void input;
+        return Promise.resolve(preparedWorkspace);
+      }
+    );
+
+    const daemon = await startDaemon({
+      agentProviders: {
+        codex: codexProvider
+      },
+      createRunId: () => "run-issue-8-input-required",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 0 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      const status = await waitForRun(daemon.url, "failed");
+      const run = firstRun(status);
+      expect(run).toMatchObject({
+        id: "run-issue-8-input-required",
+        issueNumber: 8,
+        state: "failed"
+      });
+
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith({
+        issueNumber: 8,
+        labels: ["sym:running"],
+        owner: "pmatos",
+        repo: "symphonika",
+        token: "secret-token"
+      });
+      expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith({
+        issueNumber: 8,
+        labels: ["sym:failed"],
+        owner: "pmatos",
+        repo: "symphonika",
+        token: "secret-token"
+      });
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const storedRun = database
+          .prepare(
+            [
+              "select state, terminal_reason, failure_classification",
+              "from runs where id = ?"
+            ].join(" ")
+          )
+          .get("run-issue-8-input-required");
+        expect(storedRun).toMatchObject({
+          failure_classification: "input_required",
+          state: "failed",
+          terminal_reason: "provider requested input"
+        });
+        const transitions = database
+          .prepare("select state from run_state_transitions order by sequence")
+          .all()
+          .map((row) => stringColumn(row, "state"));
+        expect(transitions).toEqual([
+          "queued",
+          "preparing_workspace",
+          "running",
+          "failed"
+        ]);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("backfills old input_required rows on daemon startup and leaves recent rows untouched", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "legacy-input-required",
+      issue: issueSnapshotFixture({ number: 45, title: "Legacy input" }),
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    store.updateRunState("legacy-input-required", "input_required");
+    store.createRun({
+      id: "fresh-input-required",
+      issue: issueSnapshotFixture({ number: 46, title: "Fresh input" }),
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    store.updateRunState("fresh-input-required", "input_required");
+    store.close();
+
+    const database = new Database(databasePath(stateRoot));
+    try {
+      database
+        .prepare("update runs set updated_at = ? where id = ?")
+        .run(
+          new Date(Date.now() - 120_000).toISOString(),
+          "legacy-input-required"
+        );
+      database
+        .prepare("update runs set updated_at = ? where id = ?")
+        .run(new Date().toISOString(), "fresh-input-required");
+    } finally {
+      database.close();
+    }
+
+    const daemon = await startDaemon({
+      cwd: root,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const after = new Database(databasePath(stateRoot), { readonly: true });
+      try {
+        const rows = after
+          .prepare(
+            "select id, state, terminal_reason, failure_classification from runs order by id"
+          )
+          .all();
+        expect(rows).toEqual([
+          {
+            failure_classification: null,
+            id: "fresh-input-required",
+            state: "input_required",
+            terminal_reason: null
+          },
+          {
+            failure_classification: "input_required",
+            id: "legacy-input-required",
+            state: "failed",
+            terminal_reason: "provider requested input (legacy)"
+          }
+        ]);
+      } finally {
+        after.close();
       }
     } finally {
       await daemon.stop();
@@ -1580,6 +1769,35 @@ function issueFixture(overrides: {
     state: "open",
     title: overrides.title,
     updated_at: "2026-04-21T11:00:00Z"
+  };
+}
+
+function issueSnapshotFixture(overrides: {
+  number: number;
+  title: string;
+}): {
+  body: string;
+  created_at: string;
+  id: number;
+  labels: string[];
+  number: number;
+  priority: number;
+  state: "open";
+  title: string;
+  updated_at: string;
+  url: string;
+} {
+  return {
+    body: `${overrides.title} body.`,
+    created_at: "2026-04-20T10:00:00Z",
+    id: 6000 + overrides.number,
+    labels: ["agent-ready"],
+    number: overrides.number,
+    priority: 99,
+    state: "open",
+    title: overrides.title,
+    updated_at: "2026-04-21T11:00:00Z",
+    url: `https://github.com/pmatos/symphonika/issues/${overrides.number}`
   };
 }
 

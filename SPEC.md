@@ -410,11 +410,13 @@ On daemon startup:
 
 1. Load `symphonika.yml`.
 2. Open or initialize SQLite.
-3. Validate Projects.
-4. Reconcile stale labels and previous run state.
-5. Start local UI/API if enabled.
-6. Perform an immediate poll.
-7. Schedule interval polling.
+3. Backfill legacy `input_required` Run rows older than 60 seconds to `failed` with
+   `terminal_reason = "provider requested input (legacy)"`.
+4. Validate Projects.
+5. Reconcile stale labels and previous run state.
+6. Start local UI/API if enabled.
+7. Perform an immediate poll.
+8. Schedule interval polling.
 
 Default poll interval: `30000` ms.
 
@@ -613,7 +615,7 @@ credential isolation.
 Runs are autonomous. If a provider requests interactive input:
 
 - record normalized `input_required`
-- fail the attempt
+- fail the attempt and persist the Run as `failed` with terminal reason `provider requested input`
 - add `sym:failed`
 - preserve logs and workspace
 
@@ -634,7 +636,7 @@ Normalized lifecycle states:
 - `queued`
 - `preparing_workspace`
 - `running`
-- `input_required`
+- `input_required` (transient or legacy only; durable provider-input failures are `failed`)
 - `failed`
 - `succeeded`
 - `cancelled`

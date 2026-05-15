@@ -97,6 +97,13 @@ export async function startDaemon(
   const runStore = openRunStore({
     stateRoot: state.stateRoot
   });
+  const failedLegacyInputRequired = runStore.failLegacyInputRequiredRuns();
+  if (failedLegacyInputRequired.length > 0) {
+    logger.info(
+      { migrated: failedLegacyInputRequired },
+      "symphonika startup: failed legacy input_required runs"
+    );
+  }
   const sweptOnStartup = runStore.markLeakedRunsAsStale();
   if (sweptOnStartup.length > 0) {
     logger.info(

@@ -571,14 +571,23 @@ describe("Codex provider validate", () => {
     await writeFakeCodexValidator(fakePath, ["symphonika"], {
       hangFeaturesList: true
     });
-    process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS = "200";
+    const previousTimeout = process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS;
+    process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS = "1000";
     const provider = createCodexProvider();
 
-    await expect(
-      provider.validate(
-        `${process.execPath} ${fakePath} -p symphonika app-server`
-      )
-    ).rejects.toThrow(/profile probe for 'symphonika' timed out/i);
+    try {
+      await expect(
+        provider.validate(
+          `${process.execPath} ${fakePath} -p symphonika app-server`
+        )
+      ).rejects.toThrow(/profile probe for 'symphonika' timed out/i);
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS;
+      } else {
+        process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS = previousTimeout;
+      }
+    }
   });
 });
 

@@ -8,8 +8,10 @@ import {
   loadExpandedWorkflow,
   loadWorkflowContract,
   persistRunEvidence,
-  renderAutonomousPrompt
+  renderAutonomousPrompt,
+  validateExpandedWorkflowReferences
 } from "../src/workflow.js";
+import type { ExpandedWorkflow } from "../src/workflow.js";
 
 const tempRoots: string[] = [];
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
@@ -1688,6 +1690,124 @@ describe("workflow format routing", () => {
         )
       )
     ).toBe(true);
+  });
+});
+
+describe("validateExpandedWorkflowReferences", () => {
+  it("returns no errors when every raw FSM agent prompt resolves to an existing file", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    const promptRelPath = "prompts/plan.md";
+    await mkdir(path.join(root, "prompts"), { recursive: true });
+    await writeFile(path.join(root, promptRelPath), "Plan the work.\n");
+
+    const workflow: ExpandedWorkflow = {
+      contentHash: "sha256:placeholder",
+      initial: "planning",
+      name: "valid",
+      source: { kind: "raw_fsm", path: workflowPath },
+      states: [
+        {
+          action: { kind: "agent", provider: "codex", prompt: promptRelPath },
+          completeWhen: {},
+          id: "planning",
+          transitions: [{ to: "done", when: {} }]
+        },
+        { completeWhen: {}, id: "done", terminal: "success", transitions: [] }
+      ],
+      templateFiles: []
+    };
+
+    const errors = await validateExpandedWorkflowReferences(workflow, workflowPath);
+    expect(errors).toEqual([]);
+  });
+
+  it("reports a missing raw FSM agent prompt with the state id and resolved path", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    const promptRelPath = "prompts/missing.md";
+
+    const workflow: ExpandedWorkflow = {
+      contentHash: "sha256:placeholder",
+      initial: "planning",
+      name: "missing_prompt",
+      source: { kind: "raw_fsm", path: workflowPath },
+      states: [
+        {
+          action: { kind: "agent", provider: "codex", prompt: promptRelPath },
+          completeWhen: {},
+          id: "planning",
+          transitions: [{ to: "done", when: {} }]
+        },
+        { completeWhen: {}, id: "done", terminal: "success", transitions: [] }
+      ],
+      templateFiles: []
+    };
+
+    const errors = await validateExpandedWorkflowReferences(workflow, workflowPath);
+    expect(errors).toHaveLength(1);
+    const expectedPath = path.resolve(root, promptRelPath);
+    expect(errors[0]).toContain("planning");
+    expect(errors[0]).toContain("prompt not found");
+    expect(errors[0]).toContain(expectedPath);
+  });
+
+  it("aggregates one error per missing prompt across multiple agent states", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+
+    const workflow: ExpandedWorkflow = {
+      contentHash: "sha256:placeholder",
+      initial: "plan",
+      name: "two_missing",
+      source: { kind: "raw_fsm", path: workflowPath },
+      states: [
+        {
+          action: { kind: "agent", provider: "codex", prompt: "prompts/plan.md" },
+          completeWhen: {},
+          id: "plan",
+          transitions: [{ to: "build", when: {} }]
+        },
+        {
+          action: { kind: "agent", provider: "codex", prompt: "prompts/build.md" },
+          completeWhen: {},
+          id: "build",
+          transitions: [{ to: "done", when: {} }]
+        },
+        { completeWhen: {}, id: "done", terminal: "success", transitions: [] }
+      ],
+      templateFiles: []
+    };
+
+    const errors = await validateExpandedWorkflowReferences(workflow, workflowPath);
+    expect(errors).toHaveLength(2);
+    expect(errors.some((message) => message.includes("plan"))).toBe(true);
+    expect(errors.some((message) => message.includes("build"))).toBe(true);
+  });
+
+  it("skips validation for markdown-sourced workflows", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "WORKFLOW.md");
+
+    const workflow: ExpandedWorkflow = {
+      contentHash: "sha256:placeholder",
+      initial: "run_agent",
+      name: "markdown_workflow",
+      source: { kind: "markdown", path: workflowPath },
+      states: [
+        {
+          action: { kind: "agent", provider: "codex", prompt: "prompts/never.md" },
+          completeWhen: {},
+          id: "run_agent",
+          transitions: [{ to: "done", when: {} }]
+        },
+        { completeWhen: {}, id: "done", terminal: "success", transitions: [] }
+      ],
+      templateFiles: []
+    };
+
+    const errors = await validateExpandedWorkflowReferences(workflow, workflowPath);
+    expect(errors).toEqual([]);
   });
 });
 

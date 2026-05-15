@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 import type { WorkflowFormat } from "./config-schemas.js";
@@ -305,6 +305,32 @@ export async function loadExpandedWorkflow(
 ): Promise<ExpandedWorkflowLoadResult> {
   const contents = await readFile(workflowPath, "utf8");
   return expandWorkflowDefinition(contents, workflowPath, format);
+}
+
+export async function validateExpandedWorkflowReferences(
+  workflow: ExpandedWorkflow,
+  workflowPath: string
+): Promise<string[]> {
+  if (workflow.source.kind !== "raw_fsm") {
+    return [];
+  }
+  const workflowDir = path.dirname(workflowPath);
+  const errors: string[] = [];
+  for (const state of workflow.states) {
+    const action = state.action;
+    if (action?.kind !== "agent" || typeof action.prompt !== "string") {
+      continue;
+    }
+    const promptPath = path.resolve(workflowDir, action.prompt);
+    try {
+      await stat(promptPath);
+    } catch (error) {
+      errors.push(
+        `workflow state ${state.id} prompt not found at ${promptPath}: ${errorMessage(error)}`
+      );
+    }
+  }
+  return errors;
 }
 
 export async function loadProjectWorkflow(input: {

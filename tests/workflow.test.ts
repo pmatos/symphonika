@@ -1785,6 +1785,37 @@ describe("validateExpandedWorkflowReferences", () => {
     expect(errors.some((message) => message.includes("build"))).toBe(true);
   });
 
+  it("reports an error when a raw FSM agent prompt path resolves to a directory", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    const promptRelPath = "prompts/dir-not-file";
+    await mkdir(path.join(root, promptRelPath), { recursive: true });
+
+    const workflow: ExpandedWorkflow = {
+      contentHash: "sha256:placeholder",
+      initial: "planning",
+      name: "directory_target",
+      source: { kind: "raw_fsm", path: workflowPath },
+      states: [
+        {
+          action: { kind: "agent", provider: "codex", prompt: promptRelPath },
+          completeWhen: {},
+          id: "planning",
+          transitions: [{ to: "done", when: {} }]
+        },
+        { completeWhen: {}, id: "done", terminal: "success", transitions: [] }
+      ],
+      templateFiles: []
+    };
+
+    const errors = await validateExpandedWorkflowReferences(workflow, workflowPath);
+    expect(errors).toHaveLength(1);
+    const expectedPath = path.resolve(root, promptRelPath);
+    expect(errors[0]).toContain("planning");
+    expect(errors[0]).toContain("prompt not found");
+    expect(errors[0]).toContain(expectedPath);
+  });
+
   it("skips validation for markdown-sourced workflows", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "WORKFLOW.md");

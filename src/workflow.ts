@@ -323,7 +323,12 @@ export async function validateExpandedWorkflowReferences(
     }
     const promptPath = path.resolve(workflowDir, action.prompt);
     try {
-      await stat(promptPath);
+      const stats = await stat(promptPath);
+      if (!stats.isFile()) {
+        errors.push(
+          `workflow state ${state.id} prompt not found at ${promptPath}: path is not a regular file`
+        );
+      }
     } catch (error) {
       errors.push(
         `workflow state ${state.id} prompt not found at ${promptPath}: ${errorMessage(error)}`

@@ -70,6 +70,13 @@ workflow:
     # FSM-controlled merge. Respects symphonika.yml pull_requests.merge
     # policy per ADR 0048. reEvaluateWaitingRun calls tryMergePullRequest
     # on each tick this state is entered.
+    #
+    # Escape transitions cover the window between the wait_for_pr gate
+    # check and the next merge tick: a late check flip or a late conflict
+    # routes back to the right repair state instead of parking forever.
+    # No generic catch-all back to wait_for_pr — that would loop on
+    # transient merge failures (API hiccup, branch protection deadlock)
+    # because wait_for_pr's clean predicates would immediately re-advance.
     merge:
       action:
         kind: merge_pr
@@ -77,6 +84,12 @@ workflow:
         - to: merged
           when:
             pr_merged: true
+        - to: resolve_conflicts
+          when:
+            mergeable: false
+        - to: autofix
+          when:
+            checks: failure
 
     merged:
       terminal: success

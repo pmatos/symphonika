@@ -13,8 +13,8 @@ export function fuzz(data) {
 
   parseWorkflowContract(contents, "fuzz/WORKFLOW.md");
   validateWorkflowTemplate(contents, "fuzz/WORKFLOW.md");
-  expandWorkflowDefinition(contents, "fuzz/WORKFLOW.md", "markdown");
-  expandWorkflowDefinition(contents, "fuzz/workflow.yml", "raw_fsm");
+  void expandWorkflowDefinition(contents, "fuzz/WORKFLOW.md", "markdown");
+  void expandWorkflowDefinition(contents, "fuzz/workflow.yml", "raw_fsm");
 
   workflowReferenceSchema.safeParse(contents);
   workflowReferenceSchema.safeParse({

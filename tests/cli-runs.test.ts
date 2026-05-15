@@ -700,7 +700,7 @@ describe("CLI run commands", () => {
     expect(present.output.stdout).toContain("Detail");
     expect(present.output.stdout).toContain("started:");
     expect(present.output.stdout).toContain("updated:");
-    expect(present.output.stdout).toContain("prompt.md");
+    expect(present.output.stdout).toContain("artifacts:    (none)");
     expect(present.output.stdout).toContain("show-1-attempt-1");
     expect(present.output.stdout).toContain("normalized events");
     expect(present.output.stdout).toContain("hello from provider");
@@ -709,7 +709,9 @@ describe("CLI run commands", () => {
 
   it("show-run prints the workflow graph summary when graph evidence is present", async () => {
     const stateRoot = await makeTempRoot();
-    const graphPath = path.join(stateRoot, "workflow-graph.json");
+    const evidenceDir = path.join(stateRoot, "logs", "runs", "show-graph");
+    await mkdir(evidenceDir, { recursive: true });
+    const graphPath = path.join(evidenceDir, "workflow-graph.json");
     await writeFile(
       graphPath,
       JSON.stringify(
@@ -766,7 +768,7 @@ describe("CLI run commands", () => {
     expect(present.output.stdout).toContain("source path:  /repo/WORKFLOW.md");
     expect(present.output.stdout).toContain("initial:      run_agent");
     expect(present.output.stdout).toContain("states:       2");
-    expect(present.output.stdout).toContain(`workflow-graph.json:       ${graphPath}`);
+    expect(present.output.stdout).toContain("workflow_graph");
   });
 
   it("show-run reports no workflow graph evidence for runs without a graph file", async () => {

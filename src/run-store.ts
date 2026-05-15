@@ -1,10 +1,13 @@
-import { mkdirSync } from "node:fs";
+import { createReadStream, mkdirSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import DatabaseConstructor from "better-sqlite3";
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
 import type { IssueSnapshot } from "./issue-polling.js";
+import { isPathInside } from "./path-safety.js";
 import type { AgentProviderName, NormalizedProviderEvent } from "./provider.js";
+import type { ExpandedWorkflow } from "./workflow.js";
 
 export type RunState =
   | "queued"
@@ -32,21 +35,15 @@ export type RunStatus = {
   id: string;
   isContinuation: boolean;
   issueNumber: number;
-  issueSnapshotPath: string;
   issueTitle: string;
-  metadataPath: string;
-  normalizedLogPath: string;
   project: string;
-  promptPath: string;
   provider: string;
-  rawLogPath: string;
   retryCount: number;
   state: RunState;
   stateTransitionReason: string | null;
   terminalReason: string | null;
   terminalStateId: string | null;
   updatedAt: string;
-  workflowGraphPath: string;
   workspacePath: string;
 };
 
@@ -55,16 +52,11 @@ export type AttemptStatus = {
   branchName: string;
   createdAt: string;
   id: string;
-  issueSnapshotPath: string;
-  normalizedLogPath: string;
-  promptPath: string;
   providerCommand: string;
   providerName: string;
-  rawLogPath: string;
   runId: string;
   state: RunState;
   updatedAt: string;
-  workflowGraphPath: string;
   workspacePath: string;
 };
 
@@ -78,6 +70,22 @@ export type RunDetail = RunStatus & {
   attempts: AttemptStatus[];
   transitions: RunStateTransition[];
 };
+
+export type RunArtifactKind =
+  | "issue_snapshot"
+  | "prompt"
+  | "prompt_metadata"
+  | "workflow_graph"
+  | "provider_raw"
+  | "provider_normalized";
+
+export type RunArtifactDescriptor = {
+  kind: RunArtifactKind;
+  present: boolean;
+  sizeBytes: number | undefined;
+};
+
+export type PromptMetadata = Record<string, unknown>;
 
 export type PullRequestTrackingState = "closed" | "merged" | "open";
 
@@ -230,21 +238,15 @@ type RunRow = {
   id: string;
   is_continuation: number;
   issue_number: number;
-  issue_snapshot_path: string | null;
   issue_title: string;
-  metadata_path: string | null;
-  normalized_log_path: string | null;
   project_name: string;
-  prompt_path: string | null;
   provider_name: string | null;
-  raw_log_path: string | null;
   retry_count: number;
   state: RunState;
   state_transition_reason: string | null;
   terminal_reason: string | null;
   terminal_state_id: string | null;
   updated_at: string;
-  workflow_graph_path: string | null;
   workspace_path: string | null;
 };
 
@@ -253,17 +255,22 @@ type AttemptRow = {
   branch_name: string;
   created_at: string;
   id: string;
-  issue_snapshot_path: string;
-  normalized_log_path: string;
-  prompt_path: string;
   provider_command: string;
   provider_name: string;
-  raw_log_path: string;
   run_id: string;
   state: RunState;
   updated_at: string;
-  workflow_graph_path: string | null;
   workspace_path: string;
+};
+
+type RunArtifactRow = {
+  issue_snapshot_json: string;
+  issue_snapshot_path: string | null;
+  metadata_path: string | null;
+  normalized_log_path: string | null;
+  prompt_path: string | null;
+  raw_log_path: string | null;
+  workflow_graph_path: string | null;
 };
 
 type ProviderEventRow = {
@@ -330,9 +337,14 @@ export const INPUT_REQUIRED_LEGACY_TERMINAL_REASON =
 
 export class RunStore {
   private readonly database: SqliteDatabase;
+  private readonly stateRoot: string;
 
-  constructor(database: SqliteDatabase) {
+  constructor(
+    database: SqliteDatabase,
+    options: { stateRoot?: string } = {}
+  ) {
     this.database = database;
+    this.stateRoot = path.resolve(options.stateRoot ?? process.cwd());
     this.migrate();
   }
 
@@ -937,9 +949,7 @@ export class RunStore {
       .prepare(
         [
           "select id, project_name, issue_number, issue_title, state, provider_name,",
-          "workspace_path, branch_name, prompt_path, metadata_path,",
-          "issue_snapshot_path, raw_log_path, normalized_log_path,",
-          "workflow_graph_path,",
+          "workspace_path, branch_name,",
           "current_state_id, terminal_state_id, state_transition_reason,",
           "is_continuation, continuation_parent_run_id, retry_count,",
           "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
@@ -962,9 +972,7 @@ export class RunStore {
       .prepare(
         [
           "select id, project_name, issue_number, issue_title, state, provider_name,",
-          "workspace_path, branch_name, prompt_path, metadata_path,",
-          "issue_snapshot_path, raw_log_path, normalized_log_path,",
-          "workflow_graph_path,",
+          "workspace_path, branch_name,",
           "current_state_id, terminal_state_id, state_transition_reason,",
           "is_continuation, continuation_parent_run_id, retry_count,",
           "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
@@ -990,8 +998,7 @@ export class RunStore {
       .prepare(
         [
           "select id, run_id, attempt_number, state, provider_name, provider_command,",
-          "workspace_path, branch_name, prompt_path, issue_snapshot_path,",
-          "raw_log_path, normalized_log_path, workflow_graph_path,",
+          "workspace_path, branch_name,",
           "created_at, updated_at",
           "from attempts where run_id = ? order by attempt_number asc, id asc"
         ].join(" ")
@@ -1003,16 +1010,11 @@ export class RunStore {
       branchName: row.branch_name,
       createdAt: row.created_at,
       id: row.id,
-      issueSnapshotPath: row.issue_snapshot_path,
-      normalizedLogPath: row.normalized_log_path,
-      promptPath: row.prompt_path,
       providerCommand: row.provider_command,
       providerName: row.provider_name,
-      rawLogPath: row.raw_log_path,
       runId: row.run_id,
       state: row.state,
       updatedAt: row.updated_at,
-      workflowGraphPath: row.workflow_graph_path ?? "",
       workspacePath: row.workspace_path
     }));
   }
@@ -1072,6 +1074,99 @@ export class RunStore {
       sequence: row.sequence,
       type: row.type
     }));
+  }
+
+  listRunArtifacts(runId: string): RunArtifactDescriptor[] {
+    const row = this.getRunArtifactRow(runId);
+    if (row === undefined) {
+      return [];
+    }
+    return RUN_ARTIFACT_KINDS.map((kind) => {
+      const filePath = this.safeArtifactPath(runId, artifactPath(row, kind));
+      const sizeBytes = filePath === undefined ? undefined : artifactSize(filePath);
+      return {
+        kind,
+        present: sizeBytes !== undefined,
+        sizeBytes
+      };
+    });
+  }
+
+  async getIssueSnapshot(runId: string): Promise<IssueSnapshot | undefined> {
+    const row = this.getRunArtifactRow(runId);
+    if (row === undefined) {
+      return undefined;
+    }
+    const fileValue = await this.readJsonArtifact<IssueSnapshot>(
+      runId,
+      row.issue_snapshot_path
+    );
+    if (fileValue !== undefined) {
+      return fileValue;
+    }
+    return JSON.parse(row.issue_snapshot_json) as IssueSnapshot;
+  }
+
+  async getRenderedPrompt(runId: string): Promise<string | undefined> {
+    const row = this.getRunArtifactRow(runId);
+    if (row === undefined) {
+      return undefined;
+    }
+    return this.readTextArtifact(runId, row.prompt_path);
+  }
+
+  async getPromptMetadata(runId: string): Promise<PromptMetadata | undefined> {
+    const row = this.getRunArtifactRow(runId);
+    if (row === undefined) {
+      return undefined;
+    }
+    return this.readJsonArtifact<PromptMetadata>(runId, row.metadata_path);
+  }
+
+  async getWorkflowGraph(runId: string): Promise<ExpandedWorkflow | undefined> {
+    const row = this.getRunArtifactRow(runId);
+    if (row === undefined) {
+      return undefined;
+    }
+    return this.readJsonArtifact<ExpandedWorkflow>(runId, row.workflow_graph_path);
+  }
+
+  getRawProviderLog(
+    runId: string
+  ): Promise<NodeJS.ReadableStream | undefined> {
+    const row = this.getRunArtifactRow(runId);
+    if (row === undefined) {
+      return Promise.resolve(undefined);
+    }
+    return Promise.resolve(this.openArtifactPath(runId, row.raw_log_path));
+  }
+
+  async getNormalizedEventLog(
+    runId: string
+  ): Promise<NormalizedProviderEvent[] | undefined> {
+    const row = this.getRunArtifactRow(runId);
+    if (row === undefined) {
+      return undefined;
+    }
+    const contents = await this.readTextArtifact(runId, row.normalized_log_path);
+    if (contents === undefined) {
+      return undefined;
+    }
+    return contents
+      .split(/\r?\n/)
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as NormalizedProviderEvent);
+  }
+
+  openArtifactStream(
+    runId: string,
+    kind: RunArtifactKind
+  ): Promise<NodeJS.ReadableStream | undefined> {
+    const row = this.getRunArtifactRow(runId);
+    if (row === undefined) {
+      return Promise.resolve(undefined);
+    }
+    return Promise.resolve(this.openArtifactPath(runId, artifactPath(row, kind)));
   }
 
   listRunsAwaitingPullRequestDiscovery(
@@ -1551,11 +1646,83 @@ export class RunStore {
       )
       .run(runId, sequence, state, createdAt);
   }
+
+  private getRunArtifactRow(runId: string): RunArtifactRow | undefined {
+    return this.database
+      .prepare(
+        [
+          "select issue_snapshot_json, issue_snapshot_path, metadata_path,",
+          "normalized_log_path, prompt_path, raw_log_path, workflow_graph_path",
+          "from runs where id = ?"
+        ].join(" ")
+      )
+      .get(runId) as RunArtifactRow | undefined;
+  }
+
+  private async readTextArtifact(
+    runId: string,
+    filePath: string | null
+  ): Promise<string | undefined> {
+    const safePath = this.safeArtifactPath(runId, filePath);
+    if (safePath === undefined) {
+      return undefined;
+    }
+    try {
+      return await readFile(safePath, "utf8");
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async readJsonArtifact<T>(
+    runId: string,
+    filePath: string | null
+  ): Promise<T | undefined> {
+    const contents = await this.readTextArtifact(runId, filePath);
+    if (contents === undefined) {
+      return undefined;
+    }
+    try {
+      return JSON.parse(contents) as T;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private openArtifactPath(
+    runId: string,
+    filePath: string | null
+  ): NodeJS.ReadableStream | undefined {
+    const safePath = this.safeArtifactPath(runId, filePath);
+    if (safePath === undefined) {
+      return undefined;
+    }
+    if (artifactSize(safePath) === undefined) {
+      return undefined;
+    }
+    return createReadStream(safePath);
+  }
+
+  private safeArtifactPath(
+    runId: string,
+    filePath: string | null
+  ): string | undefined {
+    if (filePath === null || filePath.length === 0) {
+      return undefined;
+    }
+    const evidenceRoot = path.join(this.stateRoot, "logs", "runs", runId);
+    if (!isPathInside(filePath, evidenceRoot)) {
+      return undefined;
+    }
+    return filePath;
+  }
 }
 
 export function openRunStore(options: OpenRunStoreOptions): RunStore {
   mkdirSync(options.stateRoot, { recursive: true });
-  return new RunStore(new DatabaseConstructor(databasePath(options.stateRoot)));
+  return new RunStore(new DatabaseConstructor(databasePath(options.stateRoot)), {
+    stateRoot: options.stateRoot
+  });
 }
 
 export function databasePath(stateRoot: string): string {
@@ -1589,23 +1756,55 @@ function mapRunRow(row: RunRow): RunStatus {
     id: row.id,
     isContinuation: row.is_continuation === 1,
     issueNumber: row.issue_number,
-    issueSnapshotPath: row.issue_snapshot_path ?? "",
     issueTitle: row.issue_title,
-    metadataPath: row.metadata_path ?? "",
-    normalizedLogPath: row.normalized_log_path ?? "",
     project: row.project_name,
-    promptPath: row.prompt_path ?? "",
     provider: row.provider_name ?? "",
-    rawLogPath: row.raw_log_path ?? "",
     retryCount: row.retry_count ?? 0,
     state: row.state,
     stateTransitionReason: row.state_transition_reason ?? null,
     terminalReason: row.terminal_reason ?? null,
     terminalStateId: row.terminal_state_id ?? null,
     updatedAt: row.updated_at,
-    workflowGraphPath: row.workflow_graph_path ?? "",
     workspacePath: row.workspace_path ?? ""
   };
+}
+
+const RUN_ARTIFACT_KINDS: readonly RunArtifactKind[] = [
+  "issue_snapshot",
+  "prompt",
+  "prompt_metadata",
+  "workflow_graph",
+  "provider_raw",
+  "provider_normalized"
+];
+
+function artifactPath(
+  row: RunArtifactRow,
+  kind: RunArtifactKind
+): string | null {
+  switch (kind) {
+    case "issue_snapshot":
+      return row.issue_snapshot_path;
+    case "prompt":
+      return row.prompt_path;
+    case "prompt_metadata":
+      return row.metadata_path;
+    case "workflow_graph":
+      return row.workflow_graph_path;
+    case "provider_raw":
+      return row.raw_log_path;
+    case "provider_normalized":
+      return row.normalized_log_path;
+  }
+}
+
+function artifactSize(filePath: string): number | undefined {
+  try {
+    const stats = statSync(filePath);
+    return stats.isFile() ? stats.size : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function mapProjectStateRow(row: ProjectStateRow): ProjectState {

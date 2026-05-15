@@ -179,7 +179,7 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
-  it("streams /api/runs/:id/files/raw-log only for paths inside the run evidence dir", async () => {
+  it("streams /api/runs/:id/files/provider_raw only for artifacts inside the run evidence dir", async () => {
     const test = await setup();
     try {
       const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-files");
@@ -243,21 +243,21 @@ describe("HTTP app — runs API and pages", () => {
         version: "0.1.0"
       });
 
-      const ok = await app.request("/api/runs/run-files/files/raw-log");
+      const ok = await app.request("/api/runs/run-files/files/provider_raw");
       expect(ok.status).toBe(200);
       expect(ok.headers.get("content-type")).toContain("application/x-ndjson");
       expect(await ok.text()).toContain('{"x":1}');
 
-      const log = await app.request("/logs/runs/run-files/provider.raw.jsonl");
+      const log = await app.request("/logs/runs/run-files/provider_raw");
       expect(log.status).toBe(200);
       expect(log.headers.get("content-type")).toContain("application/x-ndjson");
       expect(await log.text()).toContain('{"x":1}');
 
       expect(
-        (await app.request("/api/runs/run-empty/files/raw-log")).status
+        (await app.request("/api/runs/run-empty/files/provider_raw")).status
       ).toBe(404);
       expect(
-        (await app.request("/api/runs/run-escape/files/raw-log")).status
+        (await app.request("/api/runs/run-escape/files/provider_raw")).status
       ).toBe(404);
     } finally {
       test.cleanup();
@@ -456,7 +456,7 @@ describe("HTTP app — runs API and pages", () => {
       expect(runPageBody).toContain("Attempt started");
       expect(runPageBody).toContain("run-page-attempt-1");
       expect(runPageBody).toContain(detail?.attempts[0]?.createdAt);
-      expect(runPageBody).toContain("/logs/runs/run-page/provider.raw.jsonl");
+      expect(runPageBody).toContain("/logs/runs/run-page/provider_raw");
     } finally {
       test.cleanup();
     }
@@ -519,7 +519,7 @@ describe("HTTP app — runs API and pages", () => {
       expect(body).toContain("single_agent_workflow");
       expect(body).toContain("markdown");
       expect(body).toContain("run_agent");
-      expect(body).toContain(`href="/logs/runs/run-graph/workflow-graph.json"`);
+      expect(body).toContain(`href="/logs/runs/run-graph/workflow_graph"`);
     } finally {
       test.cleanup();
     }
@@ -566,7 +566,7 @@ describe("HTTP app — runs API and pages", () => {
         version: "0.1.0"
       });
 
-      const response = await app.request("/logs/runs/run-graph-serve/workflow-graph.json");
+      const response = await app.request("/logs/runs/run-graph-serve/workflow_graph");
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toContain("application/json");
       const body = await response.text();
@@ -576,7 +576,7 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
-  it("serves the original attempt-1 workflow-graph.json after a retry overwrites the run-level path", async () => {
+  it("serves the latest workflow graph artifact after a retry updates the run", async () => {
     const test = await setup();
     try {
       const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-graph-retry");
@@ -657,12 +657,7 @@ describe("HTTP app — runs API and pages", () => {
         version: "0.1.0"
       });
 
-      const original = await app.request("/logs/runs/run-graph-retry/workflow-graph.json");
-      expect(original.status).toBe(200);
-      const originalBody = await original.text();
-      expect(JSON.parse(originalBody)).toMatchObject({ name: "single_agent_workflow" });
-
-      const latest = await app.request("/logs/runs/run-graph-retry/workflow-graph.attempt-2.json");
+      const latest = await app.request("/logs/runs/run-graph-retry/workflow_graph");
       expect(latest.status).toBe(200);
       const latestBody = await latest.text();
       expect(JSON.parse(latestBody)).toMatchObject({ name: "single_agent_workflow_v2" });
@@ -671,7 +666,7 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
-  it("serves per-attempt workflow-graph.attempt-N.json files", async () => {
+  it("does not expose per-attempt workflow graph filenames as log assets", async () => {
     const test = await setup();
     try {
       const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-graph-attempt");
@@ -723,9 +718,7 @@ describe("HTTP app — runs API and pages", () => {
       const response = await app.request(
         "/logs/runs/run-graph-attempt/workflow-graph.attempt-2.json"
       );
-      expect(response.status).toBe(200);
-      const body = await response.text();
-      expect(JSON.parse(body)).toMatchObject({ name: "single_agent_workflow" });
+      expect(response.status).toBe(404);
     } finally {
       test.cleanup();
     }

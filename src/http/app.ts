@@ -1,6 +1,3 @@
-import { createReadStream, type ReadStream } from "node:fs";
-import { access } from "node:fs/promises";
-import path from "node:path";
 import { Readable } from "node:stream";
 
 import { Hono, type Context } from "hono";
@@ -10,11 +7,11 @@ import type {
   ProjectIssuePollReport
 } from "../issue-polling.js";
 import { emptyIssuePollStatus } from "../issue-polling.js";
-import { isPathInside } from "../path-safety.js";
 import type { RuntimeReloadStatus } from "../reload.js";
 import type { StatusSnapshot } from "../status.js";
 import type {
   ListRunsFilter,
+  RunArtifactKind,
   RunState,
   RunStatus,
   RunStore
@@ -98,63 +95,18 @@ const TERMINAL_RUN_STATES: ReadonlySet<RunState> = new Set([
   "succeeded"
 ]);
 
-type FileColumn =
-  | "issueSnapshotPath"
-  | "metadataPath"
-  | "normalizedLogPath"
-  | "promptPath"
-  | "rawLogPath";
-
-type RunFileDescriptor = { column: FileColumn; contentType: string };
-
-const FILE_DESCRIPTORS: Record<
-  string,
-  RunFileDescriptor
-> = {
-  "issue-snapshot": {
-    column: "issueSnapshotPath",
-    contentType: "application/json; charset=utf-8"
-  },
-  metadata: {
-    column: "metadataPath",
-    contentType: "application/json; charset=utf-8"
-  },
-  "normalized-log": {
-    column: "normalizedLogPath",
-    contentType: "application/x-ndjson"
-  },
-  prompt: {
-    column: "promptPath",
-    contentType: "text/markdown; charset=utf-8"
-  },
-  "raw-log": {
-    column: "rawLogPath",
-    contentType: "application/x-ndjson"
-  }
+const RUN_ARTIFACT_CONTENT_TYPES: Record<RunArtifactKind, string> = {
+  issue_snapshot: "application/json; charset=utf-8",
+  prompt: "text/markdown; charset=utf-8",
+  prompt_metadata: "application/json; charset=utf-8",
+  workflow_graph: "application/json; charset=utf-8",
+  provider_raw: "application/x-ndjson",
+  provider_normalized: "application/x-ndjson"
 };
 
-const LOG_FILE_DESCRIPTORS: Record<string, RunFileDescriptor> = {
-  "issue-snapshot.json": {
-    column: "issueSnapshotPath",
-    contentType: "application/json; charset=utf-8"
-  },
-  "prompt-metadata.json": {
-    column: "metadataPath",
-    contentType: "application/json; charset=utf-8"
-  },
-  "prompt.md": {
-    column: "promptPath",
-    contentType: "text/markdown; charset=utf-8"
-  },
-  "provider.normalized.jsonl": {
-    column: "normalizedLogPath",
-    contentType: "application/x-ndjson"
-  },
-  "provider.raw.jsonl": {
-    column: "rawLogPath",
-    contentType: "application/x-ndjson"
-  }
-};
+const RUN_ARTIFACT_KINDS: ReadonlySet<string> = new Set(
+  Object.keys(RUN_ARTIFACT_CONTENT_TYPES)
+);
 
 export function createHttpApp(options: HttpAppOptions): Hono {
   const app = new Hono();
@@ -271,32 +223,20 @@ export function createHttpApp(options: HttpAppOptions): Hono {
 
     app.get("/api/runs/:id/files/:fileKind", async (context) => {
       const id = context.req.param("id");
-      const fileKind = context.req.param("fileKind");
-      const descriptor = FILE_DESCRIPTORS[fileKind];
-      if (descriptor === undefined) {
+      const kind = parseRunArtifactKind(context.req.param("fileKind"));
+      if (kind === undefined) {
         return context.json({ error: "unknown file kind" }, 404);
       }
-      return streamRunFile(context, runStore, options.stateRoot, id, descriptor);
+      return streamRunArtifact(context, runStore, id, kind);
     });
 
-    app.get("/logs/runs/:id/:fileName", async (context) => {
+    app.get("/logs/runs/:id/:kind", async (context) => {
       const id = context.req.param("id");
-      const fileName = context.req.param("fileName");
-      const descriptor = LOG_FILE_DESCRIPTORS[fileName];
-      if (descriptor !== undefined) {
-        return streamRunFile(context, runStore, options.stateRoot, id, descriptor);
+      const kind = parseRunArtifactKind(context.req.param("kind"));
+      if (kind === undefined) {
+        return context.json({ error: "unknown file" }, 404);
       }
-      const workflowGraphRequest = parseWorkflowGraphFileName(fileName);
-      if (workflowGraphRequest !== undefined) {
-        return streamWorkflowGraphFile(
-          context,
-          runStore,
-          options.stateRoot,
-          id,
-          workflowGraphRequest
-        );
-      }
-      return context.json({ error: "unknown file" }, 404);
+      return streamRunArtifact(context, runStore, id, kind);
     });
 
     app.post("/api/runs/:id/cancel", async (context) => {
@@ -355,92 +295,28 @@ function emptyReloadStatus(): RuntimeReloadStatus {
   };
 }
 
-async function streamRunFile(
+async function streamRunArtifact(
   context: Context,
   runStore: RunStore,
-  stateRoot: string,
   id: string,
-  descriptor: RunFileDescriptor
+  kind: RunArtifactKind
 ): Promise<Response> {
   const detail = runStore.getRun(id);
   if (detail === undefined) {
     return context.json({ error: "run not found" }, 404);
   }
-  const filePath = detail[descriptor.column];
-  if (typeof filePath !== "string" || filePath.length === 0) {
-    return context.json({ error: "file not yet recorded" }, 404);
-  }
-  return streamEvidenceFile(context, stateRoot, id, filePath, descriptor.contentType);
-}
-
-type WorkflowGraphRequest = { attemptNumber: number | null };
-
-function parseWorkflowGraphFileName(
-  fileName: string
-): WorkflowGraphRequest | undefined {
-  if (fileName === "workflow-graph.json") {
-    return { attemptNumber: null };
-  }
-  const match = /^workflow-graph\.attempt-(\d+)\.json$/.exec(fileName);
-  if (match === null) {
-    return undefined;
-  }
-  return { attemptNumber: Number(match[1]) };
-}
-
-async function streamWorkflowGraphFile(
-  context: Context,
-  runStore: RunStore,
-  stateRoot: string,
-  id: string,
-  request: WorkflowGraphRequest
-): Promise<Response> {
-  const detail = runStore.getRun(id);
-  if (detail === undefined) {
-    return context.json({ error: "run not found" }, 404);
-  }
-  const attemptNumber = request.attemptNumber ?? 1;
-  const attemptPath = detail.attempts.find(
-    (attempt) => attempt.attemptNumber === attemptNumber
-  )?.workflowGraphPath;
-  const filePath = (attemptPath !== undefined && attemptPath.length > 0)
-    ? attemptPath
-    : request.attemptNumber === null
-      ? detail.workflowGraphPath
-      : "";
-  if (filePath.length === 0) {
-    return context.json({ error: "file not yet recorded" }, 404);
-  }
-  return streamEvidenceFile(
-    context,
-    stateRoot,
-    id,
-    filePath,
-    "application/json; charset=utf-8"
-  );
-}
-
-async function streamEvidenceFile(
-  context: Context,
-  stateRoot: string,
-  id: string,
-  filePath: string,
-  contentType: string
-): Promise<Response> {
-  const evidenceRoot = path.join(path.resolve(stateRoot), "logs", "runs", id);
-  if (!isPathInside(filePath, evidenceRoot)) {
-    return context.json({ error: "file not available" }, 404);
-  }
-  try {
-    await access(filePath);
-  } catch {
+  const stream = await runStore.openArtifactStream(id, kind);
+  if (stream === undefined) {
     return context.json({ error: "file not found" }, 404);
   }
-  const stream: ReadStream = createReadStream(filePath);
   return new Response(Readable.toWeb(stream) as ReadableStream, {
-    headers: { "content-type": contentType },
+    headers: { "content-type": RUN_ARTIFACT_CONTENT_TYPES[kind] },
     status: 200
   });
+}
+
+function parseRunArtifactKind(value: string): RunArtifactKind | undefined {
+  return RUN_ARTIFACT_KINDS.has(value) ? (value as RunArtifactKind) : undefined;
 }
 
 function cancelRunInStore(

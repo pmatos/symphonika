@@ -35,6 +35,16 @@ projects:
       git:
         remote: git@github.com:pmatos/symphonika.git
         base_branch: main
+      # hooks:
+      #   after_create:
+      #     command: "npm ci"
+      #     timeout_ms: 600000
+      #   before_run:
+      #     command: "./scripts/bootstrap.sh"
+      #   after_run:
+      #     command: "npm test"
+      #   before_remove:
+      #     command: "./scripts/archive-evidence.sh"
     agent:
       provider: codex
     workflow: ./WORKFLOW.md

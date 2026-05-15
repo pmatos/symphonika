@@ -99,6 +99,32 @@ describe("doctor", () => {
     expect(output.stderr).toContain("codex");
   });
 
+  it("reports unknown workspace hook lifecycle keys", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, {
+      workspaceHookLines: [
+        "      hooks:",
+        "        after_merge:",
+        '          command: "npm ci"'
+      ]
+    });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const output = await runDoctorCommand(configPath);
+
+    expect(process.exitCode).toBe(1);
+    expect(output.stderr).toContain("projects.0.workspace.hooks.after_merge");
+    expect(output.stderr).toContain("allowed lifecycles");
+    expect(output.stderr).toContain(
+      "after_create, before_run, after_run, before_remove"
+    );
+  });
+
   it("reports missing workflow contract paths", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");
@@ -399,6 +425,7 @@ async function writeValidConfig(
     codexCommand?: string;
     token?: string;
     trackerKind?: string;
+    workspaceHookLines?: string[];
     workflowPath?: string;
   } = {}
 ): Promise<void> {
@@ -441,6 +468,7 @@ async function writeValidConfig(
       "      git:",
       "        remote: git@github.com:pmatos/symphonika.git",
       "        base_branch: main",
+      ...(overrides.workspaceHookLines ?? []),
       "    agent:",
       `      provider: ${overrides.agentProvider ?? "codex"}`,
       `    workflow: ${overrides.workflowPath ?? "./WORKFLOW.md"}`,

@@ -7,6 +7,7 @@ export default tseslint.config(
       "dist/**",
       "coverage/**",
       "node_modules/**",
+      ".stryker-tmp/**",
       "symphony/**",
       "eslint.config.js"
     ]
@@ -16,7 +17,9 @@ export default tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        projectService: true,
+        projectService: {
+          allowDefaultProject: ["*.mjs", "fuzz/*.mjs"]
+        },
         tsconfigRootDir: import.meta.dirname
       }
     }
@@ -24,6 +27,13 @@ export default tseslint.config(
   {
     rules: {
       "@typescript-eslint/no-floating-promises": "error"
+    }
+  },
+  {
+    files: ["fuzz/**/*.mjs"],
+    rules: {
+      "@typescript-eslint/no-unsafe-call": "off",
+      "@typescript-eslint/no-unsafe-member-access": "off"
     }
   }
 );

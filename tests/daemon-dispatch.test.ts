@@ -752,6 +752,7 @@ describe("daemon dispatch", () => {
 
     const daemon = await startDaemon({
       cwd: root,
+      legacyInputRequiredRecheckDelayMs: 0,
       logger: pino({ enabled: false }),
       port: 0
     });
@@ -781,6 +782,93 @@ describe("daemon dispatch", () => {
       } finally {
         after.close();
       }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("rechecks input_required rows after the grace window so freshly-written legacy rows do not require a second restart", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "fresh-input-required",
+      issue: issueSnapshotFixture({ number: 47, title: "Fresh input recheck" }),
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    store.updateRunState("fresh-input-required", "input_required");
+    store.close();
+
+    // Age the row to 30s ago: inside the 60s grace window, so the
+    // startup sweep skips it. Then start the daemon with a 300ms recheck
+    // delay and, before that timer fires, age the row past the grace
+    // window. The recheck must observe the new updated_at and reap it.
+    const seeding = new Database(databasePath(stateRoot));
+    try {
+      seeding
+        .prepare("update runs set updated_at = ? where id = ?")
+        .run(
+          new Date(Date.now() - 30_000).toISOString(),
+          "fresh-input-required"
+        );
+    } finally {
+      seeding.close();
+    }
+
+    const daemon = await startDaemon({
+      cwd: root,
+      legacyInputRequiredRecheckDelayMs: 300,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const initial = new Database(databasePath(stateRoot), { readonly: true });
+      try {
+        const stateAfterStartup = initial
+          .prepare("select state from runs where id = ?")
+          .get("fresh-input-required") as { state: string } | undefined;
+        expect(stateAfterStartup?.state).toBe("input_required");
+      } finally {
+        initial.close();
+      }
+
+      const aging = new Database(databasePath(stateRoot));
+      try {
+        aging
+          .prepare("update runs set updated_at = ? where id = ?")
+          .run(
+            new Date(Date.now() - 120_000).toISOString(),
+            "fresh-input-required"
+          );
+      } finally {
+        aging.close();
+      }
+
+      await vi.waitFor(
+        () => {
+          const after = new Database(databasePath(stateRoot), {
+            readonly: true
+          });
+          try {
+            const row = after
+              .prepare(
+                "select state, terminal_reason, failure_classification from runs where id = ?"
+              )
+              .get("fresh-input-required");
+            expect(row).toEqual({
+              failure_classification: "input_required",
+              state: "failed",
+              terminal_reason: "provider requested input (legacy)"
+            });
+          } finally {
+            after.close();
+          }
+        },
+        { interval: 25, timeout: 3_000 }
+      );
     } finally {
       await daemon.stop();
     }

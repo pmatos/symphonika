@@ -42,6 +42,7 @@ import {
 } from "./pull-request-followup.js";
 import { RuntimeConfigReloader } from "./reload.js";
 import {
+  INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS,
   openRunStore,
   type RunState,
   type SyncProjectStateInput
@@ -62,6 +63,7 @@ export type StartDaemonOptions = {
   env?: NodeJS.ProcessEnv;
   githubIssuesApi?: GitHubIssuesApi;
   host?: string;
+  legacyInputRequiredRecheckDelayMs?: number;
   lifecyclePolicy?: LifecyclePolicy;
   logger?: Logger;
   port?: number;
@@ -103,6 +105,33 @@ export async function startDaemon(
       { migrated: failedLegacyInputRequired },
       "symphonika startup: failed legacy input_required runs"
     );
+  }
+  // Rows updated within the grace window at startup are skipped by the
+  // initial sweep, so schedule one more pass after the window elapses to
+  // catch rows that an outgoing daemon wrote moments before restart.
+  const legacyRecheckDelayMs =
+    options.legacyInputRequiredRecheckDelayMs ??
+    INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS * 2;
+  let legacyRecheckTimer: ReturnType<typeof setTimeout> | undefined;
+  if (legacyRecheckDelayMs > 0) {
+    legacyRecheckTimer = setTimeout(() => {
+      legacyRecheckTimer = undefined;
+      try {
+        const migrated = runStore.failLegacyInputRequiredRuns();
+        if (migrated.length > 0) {
+          logger.info(
+            { migrated },
+            "symphonika legacy input_required recheck: failed remaining runs"
+          );
+        }
+      } catch (error) {
+        logger.error(
+          { err: error },
+          "symphonika legacy input_required recheck failed"
+        );
+      }
+    }, legacyRecheckDelayMs);
+    legacyRecheckTimer.unref?.();
   }
   const sweptOnStartup = runStore.markLeakedRunsAsStale();
   if (sweptOnStartup.length > 0) {
@@ -554,6 +583,10 @@ export async function startDaemon(
     stop: async () => {
       if (pollTimer !== undefined) {
         clearInterval(pollTimer);
+      }
+      if (legacyRecheckTimer !== undefined) {
+        clearTimeout(legacyRecheckTimer);
+        legacyRecheckTimer = undefined;
       }
       activeRuns.cancelAll();
       await scheduledWork;

@@ -122,6 +122,47 @@ export type ExpandedWorkflow = {
   templateFiles: string[];
 };
 
+type WorkflowTemplateInputType =
+  | "boolean"
+  | "label"
+  | "number"
+  | "path"
+  | "provider"
+  | "string";
+
+type WorkflowTemplateScalar = boolean | number | string;
+
+type WorkflowTemplateInput = {
+  type: WorkflowTemplateInputType;
+  defaultValue?: WorkflowTemplateScalar;
+};
+
+type WorkflowTemplateUse = {
+  exitMappings: Record<string, string>;
+  id: string;
+  template: string;
+  withValues: Record<string, unknown>;
+};
+
+type ParsedWorkflowTemplate = {
+  contents: string;
+  entry: string;
+  exits: Record<string, string>;
+  inputs: Record<string, WorkflowTemplateInput>;
+  path: string;
+  states: Record<string, unknown>;
+};
+
+type LoadedWorkflowTemplateUse = {
+  template: ParsedWorkflowTemplate;
+  use: WorkflowTemplateUse;
+};
+
+type WorkflowTemplateUseExpansion = {
+  states: ExpandedWorkflowState[];
+  unresolvedExitTargets: Set<string>;
+};
+
 export type ExpandedWorkflowLoadResult = {
   errors: string[];
   workflow: ExpandedWorkflow;
@@ -465,11 +506,11 @@ export function validateWorkflowTemplate(
   return errors;
 }
 
-export function expandWorkflowDefinition(
+export async function expandWorkflowDefinition(
   contents: string,
   workflowPath: string,
   format: WorkflowFormat = "auto"
-): ExpandedWorkflowLoadResult {
+): Promise<ExpandedWorkflowLoadResult> {
   const resolved = resolveWorkflowFormat(format, workflowPath);
   if (resolved.kind === "error") {
     return {
@@ -490,7 +531,7 @@ export function expandWorkflowDefinition(
     return expandRawStateMachineWorkflow(
       explicit,
       workflowPath,
-      contentHash(contents),
+      contents,
       errors
     );
   }
@@ -691,12 +732,12 @@ function parseExplicitWorkflowDefinition(
   return parsed.workflow;
 }
 
-function expandRawStateMachineWorkflow(
+async function expandRawStateMachineWorkflow(
   rawWorkflow: Record<string, unknown>,
   workflowPath: string,
-  workflowContentHash: string,
+  workflowContents: string,
   errors: string[]
-): ExpandedWorkflowLoadResult {
+): Promise<ExpandedWorkflowLoadResult> {
   const name = stringProperty(rawWorkflow, "name");
   if (name === undefined) {
     errors.push(`workflow definition at ${workflowPath} must define workflow.name`);
@@ -708,7 +749,9 @@ function expandRawStateMachineWorkflow(
   }
 
   const rawStates = recordProperty(rawWorkflow, "states");
-  if (rawStates === undefined) {
+  const rawUse = rawWorkflow.use;
+  const uses = parseWorkflowTemplateUses(rawUse, workflowPath, errors);
+  if (rawStates === undefined && uses.length === 0) {
     errors.push(`workflow definition at ${workflowPath} must define workflow.states`);
   }
 
@@ -719,15 +762,48 @@ function expandRawStateMachineWorkflow(
     }
   }
 
+  const rawStateIds = new Set(states.map((state) => state.id));
+  for (const use of uses) {
+    if (rawStateIds.has(use.id)) {
+      errors.push(
+        `workflow template instance ${use.id} at ${workflowPath} conflicts with a workflow state`
+      );
+    }
+  }
+
+  const loadedUses = await loadWorkflowTemplateUses(uses, workflowPath, errors);
+  const templateEntryTargets = new Map(
+    loadedUses.map((loaded) => [
+      loaded.use.id,
+      `${loaded.use.id}.${loaded.template.entry}`
+    ])
+  );
+  const unresolvedTemplateExitTargets = new Set<string>();
+  for (const loaded of loadedUses) {
+    const expansion = expandWorkflowTemplateUse(
+      loaded,
+      templateEntryTargets,
+      workflowPath,
+      errors
+    );
+    states.push(...expansion.states);
+    for (const target of expansion.unresolvedExitTargets) {
+      unresolvedTemplateExitTargets.add(target);
+    }
+  }
+
+  const templateFiles = uniqueStrings(loadedUses.map((loaded) => loaded.template.path));
   const stateIds = new Set(states.map((state) => state.id));
-  if (initial !== undefined && !stateIds.has(initial)) {
+  const expandedInitial =
+    initial === undefined ? undefined : templateEntryTargets.get(initial) ?? initial;
+  if (expandedInitial !== undefined && !stateIds.has(expandedInitial)) {
     errors.push(
       `workflow definition at ${workflowPath} initial state ${initial} is not declared`
     );
   }
   for (const state of states) {
     for (const transition of state.transitions) {
-      if (!stateIds.has(transition.to)) {
+      if (!stateIds.has(transition.to) && !unresolvedTemplateExitTargets.has(transition.to)) {
         errors.push(
           `workflow state ${state.id} at ${workflowPath} transitions to unknown state ${transition.to}`
         );
@@ -738,17 +814,351 @@ function expandRawStateMachineWorkflow(
   return {
     errors,
     workflow: {
-      contentHash: workflowContentHash,
-      initial: initial ?? "",
+      contentHash: contentHash(
+        [
+          workflowContents,
+          ...loadedUses.map(
+            (loaded) => `${loaded.template.path}\n${loaded.template.contents}`
+          )
+        ].join("\n\0\n")
+      ),
+      initial: expandedInitial ?? "",
       name: name ?? path.basename(workflowPath, path.extname(workflowPath)),
       source: {
         kind: "raw_fsm",
         path: workflowPath
       },
       states,
-      templateFiles: []
+      templateFiles
     }
   };
+}
+
+function parseWorkflowTemplateUses(
+  rawUse: unknown,
+  workflowPath: string,
+  errors: string[]
+): WorkflowTemplateUse[] {
+  if (rawUse === undefined) {
+    return [];
+  }
+  if (!isRecord(rawUse)) {
+    errors.push(`workflow definition at ${workflowPath} workflow.use must be a mapping`);
+    return [];
+  }
+
+  const uses: WorkflowTemplateUse[] = [];
+  for (const [instanceId, rawInstance] of Object.entries(rawUse)) {
+    if (!isPathSafeIdentifier(instanceId)) {
+      errors.push(
+        `workflow template instance ${instanceId} at ${workflowPath} must use a path-safe identifier`
+      );
+    }
+    if (!isRecord(rawInstance)) {
+      errors.push(
+        `workflow template instance ${instanceId} at ${workflowPath} must be a mapping`
+      );
+      continue;
+    }
+    const template = stringProperty(rawInstance, "template");
+    if (template === undefined) {
+      errors.push(
+        `workflow template instance ${instanceId} at ${workflowPath} must define template`
+      );
+      continue;
+    }
+    if (template.startsWith("builtin:")) {
+      errors.push(
+        `workflow template instance ${instanceId} at ${workflowPath} uses unsupported built-in template ${template}`
+      );
+      continue;
+    }
+    if (path.isAbsolute(template)) {
+      errors.push(
+        `workflow template instance ${instanceId} at ${workflowPath} template must be a repo-local relative path`
+      );
+      continue;
+    }
+    uses.push({
+      exitMappings: parseStringMap(
+        rawInstance.exits,
+        `workflow template instance ${instanceId} at ${workflowPath} exits`,
+        errors
+      ),
+      id: instanceId,
+      template,
+      withValues: parseUnknownMap(
+        rawInstance.with,
+        `workflow template instance ${instanceId} at ${workflowPath} with`,
+        errors
+      )
+    });
+  }
+  return uses;
+}
+
+async function loadWorkflowTemplateUses(
+  uses: WorkflowTemplateUse[],
+  workflowPath: string,
+  errors: string[]
+): Promise<LoadedWorkflowTemplateUse[]> {
+  const loaded: LoadedWorkflowTemplateUse[] = [];
+  for (const use of uses) {
+    const template = await loadWorkflowTemplate(use, workflowPath, errors);
+    if (template !== undefined) {
+      loaded.push({ template, use });
+    }
+  }
+  return loaded;
+}
+
+async function loadWorkflowTemplate(
+  use: WorkflowTemplateUse,
+  workflowPath: string,
+  errors: string[]
+): Promise<ParsedWorkflowTemplate | undefined> {
+  const workflowDir = path.dirname(workflowPath);
+  const templatePath = path.resolve(workflowDir, use.template);
+  if (!isPathInside(templatePath, workflowDir)) {
+    errors.push(
+      `workflow template instance ${use.id} at ${workflowPath} template ${use.template} must stay inside ${workflowDir}`
+    );
+    return undefined;
+  }
+
+  let contents: string;
+  try {
+    contents = await readFile(templatePath, "utf8");
+  } catch (error) {
+    errors.push(
+      `workflow template instance ${use.id} at ${workflowPath} could not read ${templatePath}: ${errorMessage(error)}`
+    );
+    return undefined;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = parse(contents) ?? {};
+  } catch (error) {
+    errors.push(
+      `workflow template at ${templatePath} could not be parsed: ${errorMessage(error)}`
+    );
+    return undefined;
+  }
+  if (!isRecord(parsed)) {
+    errors.push(`workflow template at ${templatePath} must be a mapping`);
+    return undefined;
+  }
+
+  const entry = stringProperty(parsed, "entry");
+  if (entry === undefined) {
+    errors.push(`workflow template at ${templatePath} must define entry`);
+  }
+  const states = recordProperty(parsed, "states");
+  if (states === undefined) {
+    errors.push(`workflow template at ${templatePath} must define states`);
+  }
+  const exits = parseStringMap(
+    parsed.exits,
+    `workflow template at ${templatePath} exits`,
+    errors
+  );
+
+  return {
+    contents,
+    entry: entry ?? "",
+    exits,
+    inputs: parseWorkflowTemplateInputs(parsed.inputs, templatePath, errors),
+    path: templatePath,
+    states: states ?? {}
+  };
+}
+
+function parseWorkflowTemplateInputs(
+  rawInputs: unknown,
+  templatePath: string,
+  errors: string[]
+): Record<string, WorkflowTemplateInput> {
+  if (rawInputs === undefined) {
+    return {};
+  }
+  if (!isRecord(rawInputs)) {
+    errors.push(`workflow template at ${templatePath} inputs must be a mapping`);
+    return {};
+  }
+  const inputs: Record<string, WorkflowTemplateInput> = {};
+  for (const [name, rawInput] of Object.entries(rawInputs)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      errors.push(`workflow template input ${name} at ${templatePath} must be an identifier`);
+      continue;
+    }
+    if (!isRecord(rawInput)) {
+      errors.push(`workflow template input ${name} at ${templatePath} must be a mapping`);
+      continue;
+    }
+    const type = stringProperty(rawInput, "type");
+    if (!isWorkflowTemplateInputType(type)) {
+      errors.push(
+        `workflow template input ${name} at ${templatePath} type must be one of boolean, label, number, path, provider, string`
+      );
+      continue;
+    }
+    const defaultValue = Object.hasOwn(rawInput, "default")
+      ? validateWorkflowTemplateInputValue(
+          name,
+          type,
+          rawInput.default,
+          templatePath,
+          errors
+        )
+      : undefined;
+    inputs[name] = {
+      type,
+      ...(defaultValue === undefined ? {} : { defaultValue })
+    };
+  }
+  return inputs;
+}
+
+function expandWorkflowTemplateUse(
+  loaded: LoadedWorkflowTemplateUse,
+  templateEntryTargets: Map<string, string>,
+  workflowPath: string,
+  errors: string[]
+): WorkflowTemplateUseExpansion {
+  const { template, use } = loaded;
+  const inputValues = resolveWorkflowTemplateInputs(template, use, errors);
+  const templateExitStates = templateExitStateMap(template, errors);
+  const expandedStates: ExpandedWorkflowState[] = [];
+  const unresolvedExitTargets = new Set<string>();
+  for (const exitName of Object.keys(use.exitMappings)) {
+    if (!Object.hasOwn(template.exits, exitName)) {
+      errors.push(
+        `workflow template instance ${use.id} at ${workflowPath} maps undeclared exit ${exitName} from ${template.path}`
+      );
+    }
+  }
+  if (!Object.hasOwn(template.states, template.entry)) {
+    errors.push(`workflow template at ${template.path} entry state ${template.entry} is not declared`);
+  }
+
+  for (const [stateId, rawState] of Object.entries(template.states)) {
+    const exitName = templateExitStates.get(stateId);
+    if (
+      exitName !== undefined &&
+      (Object.hasOwn(use.exitMappings, exitName) ||
+        !isTemplateTerminalState(template, stateId))
+    ) {
+      continue;
+    }
+    const expandedStateId = `${use.id}.${stateId}`;
+    const interpolated = interpolateWorkflowTemplateValue(
+      rawState,
+      inputValues,
+      template.path,
+      errors
+    );
+    const state = parseWorkflowState(expandedStateId, interpolated, template.path, errors);
+    state.transitions = state.transitions.map((transition) => ({
+      ...transition,
+      to: rewriteTemplateTransitionTarget(
+        stateId,
+        transition.to,
+        loaded,
+        templateExitStates,
+        templateEntryTargets,
+        unresolvedExitTargets,
+        workflowPath,
+        errors
+      )
+    }));
+    expandedStates.push(state);
+  }
+  return { states: expandedStates, unresolvedExitTargets };
+}
+
+function templateExitStateMap(
+  template: ParsedWorkflowTemplate,
+  errors: string[]
+): Map<string, string> {
+  const exitStates = new Map<string, string>();
+  for (const [exitName, targetState] of Object.entries(template.exits)) {
+    if (!Object.hasOwn(template.states, targetState)) {
+      errors.push(
+        `workflow template at ${template.path} exit ${exitName} targets unknown state ${targetState}`
+      );
+      continue;
+    }
+    const rawState = template.states[targetState];
+    if (!isRecord(rawState)) {
+      errors.push(`workflow template state ${targetState} at ${template.path} must be a mapping`);
+      continue;
+    }
+    const terminal = stringProperty(rawState, "terminal");
+    if (terminal !== undefined && terminalStates.has(terminal)) {
+      exitStates.set(targetState, exitName);
+      continue;
+    }
+    const declaredExit = stringProperty(rawState, "exit");
+    if (declaredExit !== exitName) {
+      errors.push(
+        `workflow template at ${template.path} exit ${exitName} must target a state declaring exit: ${exitName}`
+      );
+      continue;
+    }
+    exitStates.set(targetState, exitName);
+  }
+  return exitStates;
+}
+
+function rewriteTemplateTransitionTarget(
+  fromStateId: string,
+  target: string,
+  loaded: LoadedWorkflowTemplateUse,
+  templateExitStates: Map<string, string>,
+  templateEntryTargets: Map<string, string>,
+  unresolvedExitTargets: Set<string>,
+  workflowPath: string,
+  errors: string[]
+): string {
+  const { template, use } = loaded;
+  if (!Object.hasOwn(template.states, target)) {
+    errors.push(
+      `workflow template state ${fromStateId} at ${template.path} transitions to ${target} outside declared exits`
+    );
+    return target;
+  }
+
+  const exitName = templateExitStates.get(target);
+  if (exitName === undefined) {
+    return `${use.id}.${target}`;
+  }
+
+  const mappedTarget = use.exitMappings[exitName];
+  if (mappedTarget === undefined) {
+    if (isTemplateTerminalState(template, target)) {
+      return `${use.id}.${target}`;
+    }
+    const unresolvedTarget = `${use.id}.${target}`;
+    unresolvedExitTargets.add(unresolvedTarget);
+    errors.push(
+      `workflow template instance ${use.id} at ${workflowPath} must map exit ${exitName}`
+    );
+    return unresolvedTarget;
+  }
+  return templateEntryTargets.get(mappedTarget) ?? mappedTarget;
+}
+
+function isTemplateTerminalState(
+  template: ParsedWorkflowTemplate,
+  stateId: string
+): boolean {
+  const state = template.states[stateId];
+  if (!isRecord(state)) {
+    return false;
+  }
+  const terminal = stringProperty(state, "terminal");
+  return terminal !== undefined && terminalStates.has(terminal);
 }
 
 function parseWorkflowState(
@@ -757,7 +1167,7 @@ function parseWorkflowState(
   workflowPath: string,
   errors: string[]
 ): ExpandedWorkflowState {
-  if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(stateId)) {
+  if (!isPathSafeIdentifier(stateId)) {
     errors.push(
       `workflow state ${stateId} at ${workflowPath} must use a path-safe identifier`
     );
@@ -1065,6 +1475,208 @@ function recordProperty(
 ): Record<string, unknown> | undefined {
   const value = record[key];
   return isRecord(value) ? value : undefined;
+}
+
+function parseStringMap(
+  rawValue: unknown,
+  fieldLabel: string,
+  errors: string[]
+): Record<string, string> {
+  if (rawValue === undefined) {
+    return {};
+  }
+  if (!isRecord(rawValue)) {
+    errors.push(`${fieldLabel} must be a mapping`);
+    return {};
+  }
+  const values: Record<string, string> = {};
+  for (const [key, value] of Object.entries(rawValue)) {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      errors.push(`${fieldLabel}.${key} must be a non-empty string`);
+      continue;
+    }
+    values[key] = value.trim();
+  }
+  return values;
+}
+
+function parseUnknownMap(
+  rawValue: unknown,
+  fieldLabel: string,
+  errors: string[]
+): Record<string, unknown> {
+  if (rawValue === undefined) {
+    return {};
+  }
+  if (!isRecord(rawValue)) {
+    errors.push(`${fieldLabel} must be a mapping`);
+    return {};
+  }
+  return rawValue;
+}
+
+function resolveWorkflowTemplateInputs(
+  template: ParsedWorkflowTemplate,
+  use: WorkflowTemplateUse,
+  errors: string[]
+): Record<string, WorkflowTemplateScalar> {
+  const values: Record<string, WorkflowTemplateScalar> = {};
+
+  for (const key of Object.keys(use.withValues)) {
+    if (!Object.hasOwn(template.inputs, key)) {
+      errors.push(
+        `workflow template instance ${use.id} at ${template.path} supplies undeclared input ${key}`
+      );
+    }
+  }
+
+  for (const [name, input] of Object.entries(template.inputs)) {
+    const rawValue = Object.hasOwn(use.withValues, name)
+      ? use.withValues[name]
+      : input.defaultValue;
+    if (rawValue === undefined) {
+      errors.push(
+        `workflow template instance ${use.id} at ${template.path} must provide input ${name}`
+      );
+      continue;
+    }
+    const value = validateWorkflowTemplateInputValue(
+      name,
+      input.type,
+      rawValue,
+      template.path,
+      errors
+    );
+    if (value !== undefined) {
+      values[name] = value;
+    }
+  }
+
+  return values;
+}
+
+function validateWorkflowTemplateInputValue(
+  inputName: string,
+  inputType: WorkflowTemplateInputType,
+  value: unknown,
+  templatePath: string,
+  errors: string[]
+): WorkflowTemplateScalar | undefined {
+  if (inputType === "boolean") {
+    if (typeof value === "boolean") {
+      return value;
+    }
+  } else if (inputType === "number") {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  } else if (inputType === "provider") {
+    if (value === "codex" || value === "claude") {
+      return value;
+    }
+  } else if (typeof value === "string" && value.trim().length > 0) {
+    if (inputType !== "path" || !value.includes("\0")) {
+      return value.trim();
+    }
+  }
+
+  errors.push(
+    `workflow template input ${inputName} at ${templatePath} must be a ${inputType} scalar`
+  );
+  return undefined;
+}
+
+function interpolateWorkflowTemplateValue(
+  value: unknown,
+  inputValues: Record<string, WorkflowTemplateScalar>,
+  templatePath: string,
+  errors: string[]
+): unknown {
+  if (typeof value === "string") {
+    return interpolateWorkflowTemplateString(value, inputValues, templatePath, errors);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) =>
+      interpolateWorkflowTemplateValue(item, inputValues, templatePath, errors)
+    );
+  }
+  if (isRecord(value)) {
+    const result: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value)) {
+      result[key] = interpolateWorkflowTemplateValue(
+        nested,
+        inputValues,
+        templatePath,
+        errors
+      );
+    }
+    return result;
+  }
+  return value;
+}
+
+function interpolateWorkflowTemplateString(
+  value: string,
+  inputValues: Record<string, WorkflowTemplateScalar>,
+  templatePath: string,
+  errors: string[]
+): WorkflowTemplateScalar {
+  const exact = /^{{\s*([^{}]+?)\s*}}$/.exec(value);
+  if (exact !== null) {
+    const expression = exact[1]?.trim() ?? "";
+    const input = workflowTemplateInputValue(expression, inputValues, templatePath, errors);
+    return input ?? value;
+  }
+
+  return value.replace(tagPattern, (_tag, expression) => {
+    const input = workflowTemplateInputValue(
+      String(expression).trim(),
+      inputValues,
+      templatePath,
+      errors
+    );
+    return input === undefined ? "" : String(input);
+  });
+}
+
+function workflowTemplateInputValue(
+  expression: string,
+  inputValues: Record<string, WorkflowTemplateScalar>,
+  templatePath: string,
+  errors: string[]
+): WorkflowTemplateScalar | undefined {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(expression)) {
+    errors.push(`workflow template at ${templatePath} has unsupported tag {{${expression}}}`);
+    return undefined;
+  }
+  if (!Object.hasOwn(inputValues, expression)) {
+    errors.push(
+      `workflow template at ${templatePath} references unknown input {{${expression}}}`
+    );
+    return undefined;
+  }
+  return inputValues[expression];
+}
+
+function isWorkflowTemplateInputType(
+  value: string | undefined
+): value is WorkflowTemplateInputType {
+  return (
+    value === "boolean" ||
+    value === "label" ||
+    value === "number" ||
+    value === "path" ||
+    value === "provider" ||
+    value === "string"
+  );
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function isPathSafeIdentifier(value: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_.-]*$/.test(value);
 }
 
 export async function persistRunEvidence(

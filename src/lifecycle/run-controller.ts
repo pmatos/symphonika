@@ -1680,7 +1680,7 @@ export class RunController {
     if (!("expandedWorkflow" in workflow)) {
       const workflowPath = path.resolve(this.configDir, workflow.path);
       const contents = await readFile(workflowPath, "utf8");
-      const expanded = expandWorkflowDefinition(
+      const expanded = await expandWorkflowDefinition(
         contents,
         workflowPath,
         workflow.format

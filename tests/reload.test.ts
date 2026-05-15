@@ -175,4 +175,107 @@ describe("RuntimeConfigReloader workflow validation", () => {
       "done"
     ]);
   });
+
+  it("stores template-expanded raw FSM snapshots and refreshes when a template changes", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "workflow.yml");
+    const templateDir = path.join(root, ".symphonika", "workflow-templates");
+    await mkdir(templateDir, { recursive: true });
+    const workflowPath = path.join(root, "workflow.yml");
+    const templatePath = path.join(templateDir, "plan-tdd-pr.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: build_pr",
+        "  use:",
+        "    build_pr:",
+        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
+        "      exits:",
+        "        success: done",
+        "  states:",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    await writeFile(
+      templatePath,
+      [
+        "name: plan_tdd_pr",
+        "entry: planning",
+        "exits:",
+        "  success: pr_open",
+        "states:",
+        "  planning:",
+        "    action:",
+        "      kind: agent",
+        "      provider: codex",
+        "      prompt: prompts/plan.md",
+        "    transitions:",
+        "      - to: pr_open",
+        "  pr_open:",
+        "    exit: success",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const firstWorkflow = reloader.projectsByName().get("symphonika")?.workflow;
+    if (firstWorkflow === undefined || !("expandedWorkflow" in firstWorkflow)) {
+      throw new Error("expected workflow snapshot to be an object");
+    }
+    const firstHash = firstWorkflow.expandedWorkflow.contentHash;
+
+    expect(firstWorkflow.expandedWorkflow.templateFiles).toEqual([templatePath]);
+    expect(firstWorkflow.expandedWorkflow.states.map((state) => state.id)).toEqual([
+      "done",
+      "build_pr.planning"
+    ]);
+
+    await writeFile(
+      templatePath,
+      [
+        "name: plan_tdd_pr",
+        "entry: planning",
+        "exits:",
+        "  success: pr_open",
+        "states:",
+        "  planning:",
+        "    action:",
+        "      kind: agent",
+        "      provider: codex",
+        "      prompt: prompts/revised-plan.md",
+        "    transitions:",
+        "      - to: pr_open",
+        "  pr_open:",
+        "    exit: success",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    await reloader.reload();
+    const secondWorkflow = reloader.projectsByName().get("symphonika")?.workflow;
+    if (secondWorkflow === undefined || !("expandedWorkflow" in secondWorkflow)) {
+      throw new Error("expected workflow snapshot to be an object");
+    }
+
+    expect(secondWorkflow.expandedWorkflow.contentHash).not.toBe(firstHash);
+    expect(secondWorkflow.expandedWorkflow.states).toContainEqual({
+      action: {
+        kind: "agent",
+        prompt: "prompts/revised-plan.md",
+        provider: "codex"
+      },
+      completeWhen: {},
+      id: "build_pr.planning",
+      transitions: [{ to: "done", when: {} }]
+    });
+  });
 });

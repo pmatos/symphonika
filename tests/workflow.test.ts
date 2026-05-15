@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -428,6 +428,459 @@ describe("state machine workflow definitions", () => {
         }
       ]
     });
+  });
+
+  it("expands repo-local workflow templates into a prefixed raw FSM graph", async () => {
+    const root = await makeTempRoot();
+    const templateDir = path.join(root, ".symphonika", "workflow-templates");
+    await mkdir(templateDir, { recursive: true });
+    const workflowPath = path.join(root, "workflow.yml");
+    const templatePath = path.join(templateDir, "plan-tdd-pr.yml");
+    await writeFile(
+      templatePath,
+      [
+        "name: plan_tdd_pr",
+        "inputs:",
+        "  planner:",
+        "    type: provider",
+        "    default: codex",
+        "  plan_prompt:",
+        "    type: path",
+        "    default: prompts/plan.md",
+        "entry: planning",
+        "exits:",
+        "  success: pr_open",
+        "  blocked: blocked",
+        "states:",
+        "  planning:",
+        "    action:",
+        "      kind: agent",
+        "      provider: \"{{ planner }}\"",
+        "      prompt: \"{{ plan_prompt }}\"",
+        "    complete_when:",
+        "      artifact_exists: PLAN.md",
+        "    transitions:",
+        "      - to: pr_open",
+        "  pr_open:",
+        "    exit: success",
+        "  blocked:",
+        "    exit: blocked",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: build_pr",
+        "  use:",
+        "    build_pr:",
+        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
+        "      with:",
+        "        planner: claude",
+        "        plan_prompt: prompts/custom-plan.md",
+        "      exits:",
+        "        success: done",
+        "        blocked: needs_operator",
+        "  states:",
+        "    done:",
+        "      terminal: success",
+        "    needs_operator:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+    const explanation = explainWorkflow(result.workflow);
+
+    expect(result.errors).toEqual([]);
+    expect(result.workflow.initial).toBe("build_pr.planning");
+    expect(result.workflow.templateFiles).toEqual([templatePath]);
+    expect(result.workflow.states.map((state) => state.id)).toEqual([
+      "done",
+      "needs_operator",
+      "build_pr.planning"
+    ]);
+    expect(result.workflow.states).toContainEqual({
+      action: {
+        kind: "agent",
+        prompt: "prompts/custom-plan.md",
+        provider: "claude"
+      },
+      completeWhen: {
+        artifact_exists: "PLAN.md"
+      },
+      id: "build_pr.planning",
+      transitions: [{ to: "done", when: {} }]
+    });
+    expect(explanation).toContain(`template files: ${templatePath}`);
+    expect(explanation).toContain("state: build_pr.planning");
+    expect(explanation).not.toContain("state: pr_open");
+  });
+
+  it("rejects template exits that are not mapped by the workflow instance", async () => {
+    const root = await makeTempRoot();
+    const templateDir = path.join(root, ".symphonika", "workflow-templates");
+    await mkdir(templateDir, { recursive: true });
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      path.join(templateDir, "plan-tdd-pr.yml"),
+      [
+        "name: plan_tdd_pr",
+        "entry: planning",
+        "exits:",
+        "  success: pr_open",
+        "  blocked: blocked",
+        "states:",
+        "  planning:",
+        "    action:",
+        "      kind: agent",
+        "      provider: codex",
+        "      prompt: prompts/plan.md",
+        "    transitions:",
+        "      - to: blocked",
+        "  pr_open:",
+        "    exit: success",
+        "  blocked:",
+        "    exit: blocked",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: build_pr",
+        "  use:",
+        "    build_pr:",
+        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
+        "      exits:",
+        "        success: done",
+        "  states:",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([
+      `workflow template instance build_pr at ${workflowPath} must map exit blocked`
+    ]);
+  });
+
+  it("rejects workflow instance mappings for undeclared template exits", async () => {
+    const root = await makeTempRoot();
+    const templateDir = path.join(root, ".symphonika", "workflow-templates");
+    await mkdir(templateDir, { recursive: true });
+    const workflowPath = path.join(root, "workflow.yml");
+    const templatePath = path.join(templateDir, "plan-tdd-pr.yml");
+    await writeFile(
+      templatePath,
+      [
+        "name: plan_tdd_pr",
+        "entry: planning",
+        "exits:",
+        "  success: pr_open",
+        "states:",
+        "  planning:",
+        "    action:",
+        "      kind: agent",
+        "      provider: codex",
+        "      prompt: prompts/plan.md",
+        "    transitions:",
+        "      - to: pr_open",
+        "  pr_open:",
+        "    exit: success",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: build_pr",
+        "  use:",
+        "    build_pr:",
+        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
+        "      exits:",
+        "        success: done",
+        "        exhausted: needs_operator",
+        "  states:",
+        "    done:",
+        "      terminal: success",
+        "    needs_operator:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([
+      `workflow template instance build_pr at ${workflowPath} maps undeclared exit exhausted from ${templatePath}`
+    ]);
+  });
+
+  it("rejects undeclared and non-scalar template inputs", async () => {
+    const root = await makeTempRoot();
+    const templateDir = path.join(root, ".symphonika", "workflow-templates");
+    await mkdir(templateDir, { recursive: true });
+    const workflowPath = path.join(root, "workflow.yml");
+    const templatePath = path.join(templateDir, "plan-tdd-pr.yml");
+    await writeFile(
+      templatePath,
+      [
+        "name: plan_tdd_pr",
+        "inputs:",
+        "  planner:",
+        "    type: provider",
+        "  branch_label:",
+        "    type: label",
+        "  retries:",
+        "    type: number",
+        "    default: 1",
+        "entry: planning",
+        "states:",
+        "  planning:",
+        "    action:",
+        "      kind: agent",
+        "      provider: codex",
+        "      prompt: prompts/plan.md",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: build_pr",
+        "  use:",
+        "    build_pr:",
+        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
+        "      with:",
+        "        planner: gemini",
+        "        branch_label:",
+        "          - agent-ready",
+        "        extra: true",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([
+      `workflow template instance build_pr at ${templatePath} supplies undeclared input extra`,
+      `workflow template input planner at ${templatePath} must be a provider scalar`,
+      `workflow template input branch_label at ${templatePath} must be a label scalar`
+    ]);
+  });
+
+  it("rejects template interpolation that references undeclared inputs", async () => {
+    const root = await makeTempRoot();
+    const templateDir = path.join(root, ".symphonika", "workflow-templates");
+    await mkdir(templateDir, { recursive: true });
+    const workflowPath = path.join(root, "workflow.yml");
+    const templatePath = path.join(templateDir, "plan-tdd-pr.yml");
+    await writeFile(
+      templatePath,
+      [
+        "name: plan_tdd_pr",
+        "entry: planning",
+        "states:",
+        "  planning:",
+        "    action:",
+        "      kind: agent",
+        "      provider: codex",
+        "      prompt: \"{{ missing_prompt }}\"",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: build_pr",
+        "  use:",
+        "    build_pr:",
+        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([
+      `workflow template at ${templatePath} references unknown input {{missing_prompt}}`
+    ]);
+  });
+
+  it("rejects template-internal transitions that bypass declared exits", async () => {
+    const root = await makeTempRoot();
+    const templateDir = path.join(root, ".symphonika", "workflow-templates");
+    await mkdir(templateDir, { recursive: true });
+    const workflowPath = path.join(root, "workflow.yml");
+    const templatePath = path.join(templateDir, "plan-tdd-pr.yml");
+    await writeFile(
+      templatePath,
+      [
+        "name: plan_tdd_pr",
+        "entry: planning",
+        "exits:",
+        "  success: pr_open",
+        "states:",
+        "  planning:",
+        "    action:",
+        "      kind: agent",
+        "      provider: codex",
+        "      prompt: prompts/plan.md",
+        "    transitions:",
+        "      - to: done",
+        "  pr_open:",
+        "    exit: success",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: build_pr",
+        "  use:",
+        "    build_pr:",
+        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
+        "      exits:",
+        "        success: done",
+        "  states:",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([
+      `workflow template state planning at ${templatePath} transitions to done outside declared exits`
+    ]);
+  });
+
+  it("allows unmapped template exits that target a terminal state inside the template", async () => {
+    const root = await makeTempRoot();
+    const templateDir = path.join(root, ".symphonika", "workflow-templates");
+    await mkdir(templateDir, { recursive: true });
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      path.join(templateDir, "plan-tdd-pr.yml"),
+      [
+        "name: plan_tdd_pr",
+        "entry: planning",
+        "exits:",
+        "  success: done",
+        "states:",
+        "  planning:",
+        "    action:",
+        "      kind: agent",
+        "      provider: codex",
+        "      prompt: prompts/plan.md",
+        "    transitions:",
+        "      - to: done",
+        "  done:",
+        "    terminal: success",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: build_pr",
+        "  use:",
+        "    build_pr:",
+        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.workflow.initial).toBe("build_pr.planning");
+    expect(result.workflow.states.map((state) => state.id)).toEqual([
+      "build_pr.planning",
+      "build_pr.done"
+    ]);
+    expect(result.workflow.states[0]?.transitions).toEqual([
+      { to: "build_pr.done", when: {} }
+    ]);
+    expect(result.workflow.states[1]).toMatchObject({
+      id: "build_pr.done",
+      terminal: "success"
+    });
+  });
+
+  it("uses explicit workflow mappings for terminal template exits when provided", async () => {
+    const root = await makeTempRoot();
+    const templateDir = path.join(root, ".symphonika", "workflow-templates");
+    await mkdir(templateDir, { recursive: true });
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      path.join(templateDir, "plan-tdd-pr.yml"),
+      [
+        "name: plan_tdd_pr",
+        "entry: planning",
+        "exits:",
+        "  success: done",
+        "states:",
+        "  planning:",
+        "    action:",
+        "      kind: agent",
+        "      provider: codex",
+        "      prompt: prompts/plan.md",
+        "    transitions:",
+        "      - to: done",
+        "  done:",
+        "    terminal: success",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: build_pr",
+        "  use:",
+        "    build_pr:",
+        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
+        "      exits:",
+        "        success: reviewed",
+        "  states:",
+        "    reviewed:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.workflow.states.map((state) => state.id)).toEqual([
+      "reviewed",
+      "build_pr.planning"
+    ]);
+    expect(result.workflow.states[1]?.transitions).toEqual([
+      { to: "reviewed", when: {} }
+    ]);
   });
 
   it("loads and explains an explicit raw FSM workflow", async () => {

@@ -316,6 +316,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       );
       writeOut(program, `source: ${report.workflowPath ?? report.workflow.source.path}\n`);
       writeOut(program, `states: ${report.workflow.states.length}\n`);
+      writeOut(program, explainWorkflow(report.workflow));
     });
 
   workflowCommand

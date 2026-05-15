@@ -355,7 +355,7 @@ async function readWorkflowSnapshot(
     return undefined;
   }
 
-  const expanded = expandWorkflowDefinition(contents, workflowPath, format);
+  const expanded = await expandWorkflowDefinition(contents, workflowPath, format);
   // Raw FSM YAML files can open with `---` (the YAML document marker); the
   // markdown contract parser would mistake that for unterminated front matter,
   // so skip it. The expanded workflow's contentHash is sufficient for snapshot

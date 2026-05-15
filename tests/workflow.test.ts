@@ -1702,6 +1702,53 @@ describe("built-in workflow templates", () => {
     );
   });
 
+  it("completes builtin:plan-tdd-pr planning on the signals signalsFromTerminal actually emits", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_pr",
+        "  initial: build",
+        "  use:",
+        "    build:",
+        "      template: builtin:plan-tdd-pr",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "  states:",
+        "    shipped:",
+        "      terminal: success",
+        "    needs_human:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+    expect(result.errors).toEqual([]);
+    const planning = result.workflow.states.find(
+      (state) => state.id === "build.planning"
+    );
+    if (planning === undefined) {
+      throw new Error("expected build.planning");
+    }
+
+    // signalsFromTerminal emits exactly {branch_ahead_of_base, provider_success};
+    // planning.complete_when must be satisfiable with just those, or the state
+    // parks indefinitely after a successful planner run.
+    const decision = decideNextStep({
+      actionExecuted: true,
+      signals: { branch_ahead_of_base: true, provider_success: true },
+      state: planning
+    });
+    expect(decision).toMatchObject({
+      kind: "advance",
+      to: "build.implementing"
+    });
+  });
+
   it("expands builtin:autofix-until-clean into a wait/autofix loop", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");

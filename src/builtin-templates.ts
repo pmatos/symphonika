@@ -60,7 +60,6 @@ const PLAN_TDD_PR = [
   "      provider: \"{{ planner }}\"",
   "      prompt: \"{{ plan_prompt }}\"",
   "    complete_when:",
-  "      artifact_exists: PLAN.md",
   "      provider_success: true",
   "    transitions:",
   "      - to: implementing",

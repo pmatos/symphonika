@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { BUILTIN_WORKFLOW_TEMPLATES } from "../src/builtin-templates.js";
+import { decideNextStep } from "../src/lifecycle/state-machine-dispatch.js";
 import {
   explainWorkflow,
   loadExpandedWorkflow,
@@ -1746,6 +1747,65 @@ describe("built-in workflow templates", () => {
     });
     expect(waiting?.transitions.map((t) => t.to)).toContain("review.autofix");
     expect(autofix?.transitions.map((t) => t.to)).toContain("review.waiting");
+  });
+
+  it("routes builtin:autofix-until-clean to autofix on any non-zero unresolved review thread count", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: pr_autofix",
+        "  initial: review",
+        "  use:",
+        "    review:",
+        "      template: builtin:autofix-until-clean",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "  states:",
+        "    shipped:",
+        "      terminal: success",
+        "    needs_human:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+    expect(result.errors).toEqual([]);
+    const waiting = result.workflow.states.find(
+      (state) => state.id === "review.waiting"
+    );
+    expect(waiting).toBeDefined();
+    if (waiting === undefined) {
+      throw new Error("expected review.waiting state");
+    }
+
+    const advance = (signals: Record<string, string | number>) =>
+      decideNextStep({ actionExecuted: true, signals, state: waiting });
+
+    expect(advance({ checks: "success", unresolved_review_threads: 0 })).toMatchObject({
+      kind: "advance",
+      to: "shipped"
+    });
+    expect(advance({ checks: "success", unresolved_review_threads: 1 })).toMatchObject({
+      kind: "advance",
+      to: "review.autofix"
+    });
+    expect(advance({ checks: "success", unresolved_review_threads: 2 })).toMatchObject({
+      kind: "advance",
+      to: "review.autofix"
+    });
+    expect(advance({ checks: "success", unresolved_review_threads: 7 })).toMatchObject({
+      kind: "advance",
+      to: "review.autofix"
+    });
+    expect(advance({ checks: "failure", unresolved_review_threads: 3 })).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
   });
 
   it("expands builtin:merge-when-green with the default squash merge method", async () => {

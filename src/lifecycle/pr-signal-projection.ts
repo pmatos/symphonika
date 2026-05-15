@@ -1,70 +1,45 @@
-import type { RawGitHubPullRequestFollowupState } from "../issue-polling.js";
+import type { PullRequestState } from "../pull-request-state.js";
 import type { WorkflowPredicateMap } from "../workflow.js";
 
-// Wait-state re-evaluation uses these signals via decideNextStep. The PR
-// follow-up dispatcher in src/pull-request-followup.ts reads the same
-// `RawGitHubPullRequestFollowupState` but produces binary verdicts
-// (pullRequestNeedsReviewFollowup, pullRequestReadyToMerge) rather than a
-// predicate map. If either side changes how it interprets a given GitHub
-// state (e.g. mergeable=UNKNOWN), update both to keep them aligned. See
-// ADR 0047.
 export function projectPullRequestSignals(
-  state: RawGitHubPullRequestFollowupState
+  state: PullRequestState
 ): WorkflowPredicateMap {
   const signals: WorkflowPredicateMap = {
-    pr_open: state.state === "OPEN"
+    pr_open: state.open
   };
 
-  if (state.merged === true) {
+  if (state.merged) {
     signals.pr_merged = true;
   }
 
-  if (state.mergeable === "MERGEABLE") {
+  if (state.mergeable === "mergeable") {
     signals.mergeable = true;
-  } else if (state.mergeable === "CONFLICTING") {
+  } else if (state.mergeable === "conflicting") {
     signals.mergeable = false;
   }
 
-  const checks = mapStatusCheckRollup(state.statusCheckRollupState);
-  if (checks !== null) {
-    signals.checks = checks;
+  if (state.checks !== "unknown") {
+    signals.checks = state.checks;
   }
 
   signals.review_decision = mapReviewDecision(state.reviewDecision);
-  signals.unresolved_review_threads = state.unresolvedReviewThreads.length;
-  signals.has_unresolved_reviews = state.unresolvedReviewThreads.length > 0;
+  signals.unresolved_review_threads = state.unresolvedReviewThreads;
+  signals.has_unresolved_reviews = state.unresolvedReviewThreads > 0;
 
   return signals;
 }
 
 function mapReviewDecision(
-  reviewDecision: RawGitHubPullRequestFollowupState["reviewDecision"]
+  reviewDecision: PullRequestState["reviewDecision"]
 ): "approved" | "changes_requested" | "none" | "review_required" {
   switch (reviewDecision) {
-    case "APPROVED":
+    case "approved":
       return "approved";
-    case "CHANGES_REQUESTED":
+    case "changes_requested":
       return "changes_requested";
-    case "REVIEW_REQUIRED":
+    case "review_required":
       return "review_required";
     default:
       return "none";
-  }
-}
-
-function mapStatusCheckRollup(
-  rollup: RawGitHubPullRequestFollowupState["statusCheckRollupState"]
-): "failure" | "pending" | "success" | null {
-  switch (rollup) {
-    case "SUCCESS":
-      return "success";
-    case "FAILURE":
-    case "ERROR":
-      return "failure";
-    case "PENDING":
-    case "EXPECTED":
-      return "pending";
-    default:
-      return null;
   }
 }

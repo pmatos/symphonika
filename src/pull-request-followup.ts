@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import type { Logger } from "pino";
@@ -22,6 +21,10 @@ import type {
   RunController,
   RunControllerProjectConfig
 } from "./lifecycle/run-controller.js";
+import {
+  interpretPullRequest,
+  type PullRequestState
+} from "./pull-request-state.js";
 import type { RunStore, TrackedPullRequest } from "./run-store.js";
 
 export type PullRequestFollowupPolicy = {
@@ -173,65 +176,44 @@ export function pullRequestFollowupPolicyFromRaw(
 }
 
 export function pullRequestNeedsReviewFollowup(
-  state: RawGitHubPullRequestFollowupState
+  state: PullRequestState
 ): boolean {
   return (
-    state.reviewDecision === "CHANGES_REQUESTED" ||
-    state.unresolvedReviewThreads.length > 0
+    state.reviewDecision === "changes_requested" ||
+    state.unresolvedReviewThreads > 0
   );
 }
 
 export function pullRequestReadyToMerge(
-  state: RawGitHubPullRequestFollowupState,
+  state: PullRequestState,
   policy: PullRequestFollowupPolicy = DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY
 ): boolean {
-  if (!policy.merge.enabled || state.draft || state.merged || state.state !== "OPEN") {
+  if (!policy.merge.enabled || state.draft || state.merged || !state.open) {
     return false;
   }
-  if (state.mergeable !== "MERGEABLE") {
+  if (state.mergeable !== "mergeable") {
     return false;
   }
-  if (
-    policy.merge.requireStatusSuccess &&
-    state.statusCheckRollupState !== "SUCCESS"
-  ) {
+  if (policy.merge.requireStatusSuccess && state.checks !== "success") {
     return false;
   }
   if (
     policy.merge.requireReviewDecision &&
-    state.reviewDecision !== "APPROVED"
+    state.reviewDecision !== "approved"
   ) {
     return false;
   }
   return (
-    state.reviewDecision !== "CHANGES_REQUESTED" &&
-    state.reviewDecision !== "REVIEW_REQUIRED" &&
-    state.unresolvedReviewThreads.length === 0
+    state.reviewDecision !== "changes_requested" &&
+    state.reviewDecision !== "review_required" &&
+    state.unresolvedReviewThreads === 0
   );
 }
 
 export function reviewFeedbackFingerprint(
-  state: RawGitHubPullRequestFollowupState
+  state: PullRequestState
 ): string {
-  return `sha256:${createHash("sha256")
-    .update(
-      JSON.stringify({
-        headSha: state.headSha,
-        reviewDecision: state.reviewDecision,
-        threads: state.unresolvedReviewThreads.map((thread) => ({
-          comments: thread.comments.map((comment) => ({
-            body: comment.body,
-            createdAt: comment.createdAt,
-            url: comment.url
-          })),
-          id: thread.id,
-          isOutdated: thread.isOutdated,
-          line: thread.line,
-          path: thread.path
-        }))
-      })
-    )
-    .digest("hex")}`;
+  return state.reviewFollowup.feedbackFingerprint;
 }
 
 async function discoverPullRequests(input: {
@@ -304,16 +286,16 @@ async function processTrackedPullRequests(input: {
     if (project === undefined || repository === undefined) {
       continue;
     }
-    const state = await loadPullRequestState({
+    const rawState = await loadRawPullRequestState({
       api: input.githubIssuesApi,
       ...(input.logger === undefined ? {} : { logger: input.logger }),
       repository,
       tracked
     });
-    if (state === undefined) {
+    if (rawState === undefined) {
       continue;
     }
-    if (state === null) {
+    if (rawState === null) {
       input.runStore.recordPullRequestObservation({
         headSha: tracked.lastSeenHeadSha,
         id: tracked.id,
@@ -323,6 +305,7 @@ async function processTrackedPullRequests(input: {
       continue;
     }
 
+    const state = interpretPullRequest(rawState);
     const trackingState = trackedStateFor(state);
     input.runStore.recordPullRequestObservation({
       headSha: state.headSha,
@@ -396,7 +379,7 @@ async function dispatchReviewFollowupIfNeeded(input: {
   policy: PullRequestFollowupPolicy;
   runController: RunController;
   runStore: RunStore;
-  state: RawGitHubPullRequestFollowupState;
+  state: PullRequestState;
   tracked: TrackedPullRequest;
 }): Promise<PullRequestFollowupResult | undefined> {
   if (
@@ -434,7 +417,7 @@ async function dispatchReviewFollowupIfNeeded(input: {
   };
 }
 
-async function loadPullRequestState(input: {
+async function loadRawPullRequestState(input: {
   api: GitHubIssuesApi;
   logger?: Logger;
   repository: GitHubIssueRepositoryInput;
@@ -488,27 +471,19 @@ function selectOpenPullRequest(
   );
 }
 
-function trackedStateFor(
-  state: RawGitHubPullRequestFollowupState
-): "closed" | "merged" | "open" {
-  if (state.merged || state.state === "MERGED") {
-    return "merged";
-  }
-  if (state.state === "CLOSED") {
-    return "closed";
-  }
-  return "open";
+function trackedStateFor(state: PullRequestState): "closed" | "merged" | "open" {
+  return state.trackingState;
 }
 
 function reviewContextFromState(
-  state: RawGitHubPullRequestFollowupState
+  state: PullRequestState
 ): ReviewFollowupContext {
   return {
     headSha: state.headSha,
     pullRequestNumber: state.number,
     pullRequestUrl: state.url,
-    reviewDecision: state.reviewDecision,
-    statusCheckRollupState: state.statusCheckRollupState,
-    unresolvedThreads: state.unresolvedReviewThreads
+    reviewDecision: state.reviewFollowup.decision,
+    statusCheckRollupState: state.reviewFollowup.checks,
+    unresolvedThreads: state.reviewFollowup.unresolvedThreads
   };
 }

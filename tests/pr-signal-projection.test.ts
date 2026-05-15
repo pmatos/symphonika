@@ -1,21 +1,28 @@
 import { describe, expect, it } from "vitest";
 
-import type { RawGitHubPullRequestFollowupState } from "../src/issue-polling.js";
 import { projectPullRequestSignals } from "../src/lifecycle/pr-signal-projection.js";
+import type { PullRequestState } from "../src/pull-request-state.js";
 
 function makePullRequestState(
-  overrides: Partial<RawGitHubPullRequestFollowupState> = {}
-): RawGitHubPullRequestFollowupState {
+  overrides: Partial<PullRequestState> = {}
+): PullRequestState {
   return {
+    checks: "unknown",
     draft: false,
     headSha: "deadbeef",
-    mergeable: null,
+    mergeable: "unknown",
     merged: false,
     number: 42,
-    reviewDecision: null,
-    state: "OPEN",
-    statusCheckRollupState: null,
-    unresolvedReviewThreads: [],
+    open: true,
+    reviewDecision: "unknown",
+    reviewFollowup: {
+      checks: null,
+      decision: null,
+      feedbackFingerprint: "sha256:test",
+      unresolvedThreads: []
+    },
+    trackingState: "open",
+    unresolvedReviewThreads: 0,
     url: "https://example.test/pr/42",
     ...overrides
   };
@@ -23,18 +30,18 @@ function makePullRequestState(
 
 describe("projectPullRequestSignals", () => {
   it("emits pr_open: true for an open pull request", () => {
-    const signals = projectPullRequestSignals(makePullRequestState({ state: "OPEN" }));
+    const signals = projectPullRequestSignals(makePullRequestState({ open: true }));
     expect(signals.pr_open).toBe(true);
   });
 
   it("emits pr_open: false for a closed pull request", () => {
-    const signals = projectPullRequestSignals(makePullRequestState({ state: "CLOSED" }));
+    const signals = projectPullRequestSignals(makePullRequestState({ open: false }));
     expect(signals.pr_open).toBe(false);
   });
 
   it("emits pr_merged: true when the pull request is merged", () => {
     const signals = projectPullRequestSignals(
-      makePullRequestState({ state: "MERGED", merged: true })
+      makePullRequestState({ merged: true, open: false })
     );
     expect(signals.pr_merged).toBe(true);
     expect(signals.pr_open).toBe(false);
@@ -46,63 +53,52 @@ describe("projectPullRequestSignals", () => {
   });
 
   it("emits mergeable: true for MERGEABLE state", () => {
-    const signals = projectPullRequestSignals(makePullRequestState({ mergeable: "MERGEABLE" }));
+    const signals = projectPullRequestSignals(makePullRequestState({ mergeable: "mergeable" }));
     expect(signals.mergeable).toBe(true);
   });
 
   it("emits mergeable: false for CONFLICTING state", () => {
-    const signals = projectPullRequestSignals(makePullRequestState({ mergeable: "CONFLICTING" }));
+    const signals = projectPullRequestSignals(makePullRequestState({ mergeable: "conflicting" }));
     expect(signals.mergeable).toBe(false);
   });
 
-  it("omits mergeable when state is UNKNOWN", () => {
-    const signals = projectPullRequestSignals(makePullRequestState({ mergeable: "UNKNOWN" }));
+  it("omits mergeable when state is unknown", () => {
+    const signals = projectPullRequestSignals(makePullRequestState({ mergeable: "unknown" }));
     expect("mergeable" in signals).toBe(false);
   });
 
-  it("omits mergeable when state is null", () => {
-    const signals = projectPullRequestSignals(makePullRequestState({ mergeable: null }));
-    expect("mergeable" in signals).toBe(false);
-  });
-
-  it("emits checks: 'success' for SUCCESS rollup", () => {
+  it("emits checks: 'success' for successful checks", () => {
     const signals = projectPullRequestSignals(
-      makePullRequestState({ statusCheckRollupState: "SUCCESS" })
+      makePullRequestState({ checks: "success" })
     );
     expect(signals.checks).toBe("success");
   });
 
-  it("emits checks: 'failure' for FAILURE and ERROR rollups", () => {
-    for (const rollup of ["FAILURE", "ERROR"] as const) {
-      const signals = projectPullRequestSignals(
-        makePullRequestState({ statusCheckRollupState: rollup })
-      );
-      expect(signals.checks).toBe("failure");
-    }
-  });
-
-  it("emits checks: 'pending' for PENDING and EXPECTED rollups", () => {
-    for (const rollup of ["PENDING", "EXPECTED"] as const) {
-      const signals = projectPullRequestSignals(
-        makePullRequestState({ statusCheckRollupState: rollup })
-      );
-      expect(signals.checks).toBe("pending");
-    }
-  });
-
-  it("omits checks when rollup is null", () => {
+  it("emits checks: 'failure' for failed checks", () => {
     const signals = projectPullRequestSignals(
-      makePullRequestState({ statusCheckRollupState: null })
+      makePullRequestState({ checks: "failure" })
     );
+    expect(signals.checks).toBe("failure");
+  });
+
+  it("emits checks: 'pending' for pending checks", () => {
+    const signals = projectPullRequestSignals(
+      makePullRequestState({ checks: "pending" })
+    );
+    expect(signals.checks).toBe("pending");
+  });
+
+  it("omits checks when checks are unknown", () => {
+    const signals = projectPullRequestSignals(makePullRequestState({ checks: "unknown" }));
     expect("checks" in signals).toBe(false);
   });
 
   it("emits normalized review_decision states", () => {
     const cases = [
-      ["APPROVED", "approved"],
-      ["CHANGES_REQUESTED", "changes_requested"],
-      ["REVIEW_REQUIRED", "review_required"],
-      [null, "none"]
+      ["approved", "approved"],
+      ["changes_requested", "changes_requested"],
+      ["review_required", "review_required"],
+      ["unknown", "none"]
     ] as const;
 
     for (const [reviewDecision, expected] of cases) {
@@ -115,31 +111,24 @@ describe("projectPullRequestSignals", () => {
 
   it("emits unresolved_review_threads as the numeric count", () => {
     const zero = projectPullRequestSignals(
-      makePullRequestState({ unresolvedReviewThreads: [] })
+      makePullRequestState({ unresolvedReviewThreads: 0 })
     );
     expect(zero.unresolved_review_threads).toBe(0);
 
     const two = projectPullRequestSignals(
-      makePullRequestState({
-        unresolvedReviewThreads: [
-          { id: "t1", isResolved: false, comments: [] },
-          { id: "t2", isResolved: false, comments: [] }
-        ]
-      })
+      makePullRequestState({ unresolvedReviewThreads: 2 })
     );
     expect(two.unresolved_review_threads).toBe(2);
   });
 
   it("emits has_unresolved_reviews from the unresolved review thread count", () => {
     const zero = projectPullRequestSignals(
-      makePullRequestState({ unresolvedReviewThreads: [] })
+      makePullRequestState({ unresolvedReviewThreads: 0 })
     );
     expect(zero.has_unresolved_reviews).toBe(false);
 
     const one = projectPullRequestSignals(
-      makePullRequestState({
-        unresolvedReviewThreads: [{ id: "t1", isResolved: false, comments: [] }]
-      })
+      makePullRequestState({ unresolvedReviewThreads: 1 })
     );
     expect(one.has_unresolved_reviews).toBe(true);
   });

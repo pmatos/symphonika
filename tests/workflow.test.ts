@@ -623,6 +623,57 @@ describe("state machine workflow definitions", () => {
     ]);
   });
 
+  it("resolves raw workflow transitions that target template instances", async () => {
+    const root = await makeTempRoot();
+    const templateDir = path.join(root, ".symphonika", "workflow-templates");
+    await mkdir(templateDir, { recursive: true });
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      path.join(templateDir, "plan-tdd-pr.yml"),
+      [
+        "name: plan_tdd_pr",
+        "entry: planning",
+        "states:",
+        "  planning:",
+        "    action:",
+        "      kind: agent",
+        "      provider: codex",
+        "      prompt: prompts/plan.md",
+        "    transitions:",
+        "      - to: done",
+        "  done:",
+        "    terminal: success",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: triage",
+        "  use:",
+        "    build_pr:",
+        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
+        "  states:",
+        "    triage:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: build_pr",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.workflow.states[0]).toMatchObject({
+      id: "triage",
+      transitions: [{ to: "build_pr.planning", when: {} }]
+    });
+  });
+
   it("rejects workflow instance mappings for undeclared template exits", async () => {
     const root = await makeTempRoot();
     const templateDir = path.join(root, ".symphonika", "workflow-templates");

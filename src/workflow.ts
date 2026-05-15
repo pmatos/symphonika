@@ -811,6 +811,10 @@ async function expandRawStateMachineWorkflow(
     );
   }
   for (const state of states) {
+    state.transitions = state.transitions.map((transition) => ({
+      ...transition,
+      to: templateEntryTargets.get(transition.to) ?? transition.to
+    }));
     for (const transition of state.transitions) {
       if (!stateIds.has(transition.to) && !unresolvedTemplateExitTargets.has(transition.to)) {
         errors.push(

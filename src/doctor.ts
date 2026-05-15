@@ -11,6 +11,10 @@ import {
   workflowReferenceSchema
 } from "./config-schemas.js";
 import {
+  missingUserConfigHint,
+  resolveServiceConfigPath
+} from "./config-paths.js";
+import {
   DEFAULT_GITHUB_ISSUES_API,
   type GitHubIssuesApi
 } from "./issue-polling.js";
@@ -225,8 +229,13 @@ export async function runDoctor(
   options: DoctorOptions = {}
 ): Promise<DoctorReport> {
   const cwd = options.cwd ?? process.cwd();
-  const configPath = path.resolve(cwd, options.configPath ?? "symphonika.yml");
   const env = options.env ?? process.env;
+  const resolvedConfig = resolveServiceConfigPath({
+    ...withConfigPath(options.configPath),
+    cwd,
+    env
+  });
+  const configPath = resolvedConfig.configPath;
   const githubApi = options.githubApi ?? DEFAULT_GITHUB_API;
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
@@ -235,6 +244,9 @@ export async function runDoctor(
   const rawConfig = await readConfig(configPath, errors);
 
   if (rawConfig === undefined) {
+    if (resolvedConfig.source === "user" && !resolvedConfig.configExists) {
+      errors.push(missingUserConfigHint(configPath));
+    }
     return report(configPath, errors, projects);
   }
 
@@ -357,14 +369,22 @@ export async function runInitProject(
   options: InitProjectOptions = {}
 ): Promise<InitProjectReport> {
   const cwd = options.cwd ?? process.cwd();
-  const configPath = path.resolve(cwd, options.configPath ?? "symphonika.yml");
   const env = options.env ?? process.env;
+  const resolvedConfig = resolveServiceConfigPath({
+    ...withConfigPath(options.configPath),
+    cwd,
+    env
+  });
+  const configPath = resolvedConfig.configPath;
   const errors: string[] = [];
   const warnings: string[] = [];
   const projects: InitProjectProjectReport[] = [];
   const rawConfig = await readConfig(configPath, errors);
 
   if (rawConfig === undefined) {
+    if (resolvedConfig.source === "user" && !resolvedConfig.configExists) {
+      errors.push(missingUserConfigHint(configPath));
+    }
     return initProjectReport(configPath, errors, warnings, projects);
   }
 
@@ -459,8 +479,13 @@ export async function runClearStale(
   options: ClearStaleOptions
 ): Promise<ClearStaleReport> {
   const cwd = options.cwd ?? process.cwd();
-  const configPath = path.resolve(cwd, options.configPath ?? "symphonika.yml");
   const env = options.env ?? process.env;
+  const resolvedConfig = resolveServiceConfigPath({
+    ...withConfigPath(options.configPath),
+    cwd,
+    env
+  });
+  const configPath = resolvedConfig.configPath;
   const errors: string[] = [];
   const warnings: string[] = [];
   const removedLabels: string[] = [];
@@ -480,6 +505,9 @@ export async function runClearStale(
 
   const rawConfig = await readConfig(configPath, errors);
   if (rawConfig === undefined) {
+    if (resolvedConfig.source === "user" && !resolvedConfig.configExists) {
+      errors.push(missingUserConfigHint(configPath));
+    }
     return result("");
   }
   const parsedConfig = parseServiceConfig(rawConfig, errors);
@@ -670,6 +698,10 @@ function parseServiceConfig(
   }
 
   return parsed.data;
+}
+
+function withConfigPath(configPath: string | undefined): { configPath?: string } {
+  return configPath === undefined ? {} : { configPath };
 }
 
 async function validateProject(

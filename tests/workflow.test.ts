@@ -573,6 +573,56 @@ describe("state machine workflow definitions", () => {
     ]);
   });
 
+  it("rejects template-expanded state IDs that collide with workflow states", async () => {
+    const root = await makeTempRoot();
+    const templateDir = path.join(root, ".symphonika", "workflow-templates");
+    await mkdir(templateDir, { recursive: true });
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      path.join(templateDir, "plan-tdd-pr.yml"),
+      [
+        "name: plan_tdd_pr",
+        "entry: planning",
+        "states:",
+        "  planning:",
+        "    action:",
+        "      kind: agent",
+        "      provider: codex",
+        "      prompt: prompts/plan.md",
+        "    transitions:",
+        "      - to: done",
+        "  done:",
+        "    terminal: success",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: build_pr",
+        "  use:",
+        "    build_pr:",
+        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
+        "  states:",
+        "    build_pr.planning:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([
+      `workflow template instance build_pr at ${workflowPath} expands state build_pr.planning that conflicts with an existing workflow state`
+    ]);
+    expect(result.workflow.states.map((state) => state.id)).toEqual([
+      "build_pr.planning",
+      "build_pr.done"
+    ]);
+  });
+
   it("rejects workflow instance mappings for undeclared template exits", async () => {
     const root = await makeTempRoot();
     const templateDir = path.join(root, ".symphonika", "workflow-templates");

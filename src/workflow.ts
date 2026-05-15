@@ -763,6 +763,7 @@ async function expandRawStateMachineWorkflow(
   }
 
   const rawStateIds = new Set(states.map((state) => state.id));
+  const stateIds = new Set(rawStateIds);
   for (const use of uses) {
     if (rawStateIds.has(use.id)) {
       errors.push(
@@ -786,14 +787,22 @@ async function expandRawStateMachineWorkflow(
       workflowPath,
       errors
     );
-    states.push(...expansion.states);
+    for (const state of expansion.states) {
+      if (stateIds.has(state.id)) {
+        errors.push(
+          `workflow template instance ${loaded.use.id} at ${workflowPath} expands state ${state.id} that conflicts with an existing workflow state`
+        );
+        continue;
+      }
+      stateIds.add(state.id);
+      states.push(state);
+    }
     for (const target of expansion.unresolvedExitTargets) {
       unresolvedTemplateExitTargets.add(target);
     }
   }
 
   const templateFiles = uniqueStrings(loadedUses.map((loaded) => loaded.template.path));
-  const stateIds = new Set(states.map((state) => state.id));
   const expandedInitial =
     initial === undefined ? undefined : templateEntryTargets.get(initial) ?? initial;
   if (expandedInitial !== undefined && !stateIds.has(expandedInitial)) {

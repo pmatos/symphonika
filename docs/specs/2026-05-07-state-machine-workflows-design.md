@@ -311,15 +311,24 @@ This keeps templates close to reusable workflow fragments rather than a general 
 
 ## Built-In Templates
 
-Symphonika may ship a small set of built-in templates once the raw FSM is implemented:
+Symphonika ships a small set of built-in templates that expand through the same template
+machinery as repo-local templates (ADR 0049):
 
-- `builtin:single-agent-pr`
-- `builtin:plan-tdd-pr`
-- `builtin:autofix-until-clean`
-- `builtin:merge-when-green`
+- `builtin:single-agent-pr` — a compatibility-style one-agent PR workflow.
+- `builtin:plan-tdd-pr` — planning followed by TDD implementation with named exits.
+- `builtin:autofix-until-clean` — a predicate-bounded wait/autofix loop that exits on
+  `checks: success` + `unresolved_review_threads: 0`.
+- `builtin:merge-when-green` — workflow-controlled merge through the `merge_pr` action with a
+  configurable `method` input (defaults to `squash`). The template enters `merge_pr` directly so
+  the global PR follow-up loop defers to it via `isIssueParkedInMergePrState`, preserving the
+  method override and merge evidence path even when a PR becomes merge-ready mid-tick.
 
-Built-ins are conveniences. Repositories can replace them with local templates when they need a
-different workflow culture.
+Built-ins are conveniences. Repositories can replace any built-in by changing the workflow's
+`template:` reference to a local `.symphonika/workflow-templates/<name>.yml` with equivalent
+content and get an identical expanded graph; resolution does not auto-shadow.
+
+The expanded graph shows clear provenance: `workflow validate` / `workflow explain` print
+`template files: builtin:<name>` so operators can audit which fragments contributed.
 
 ## Operator Surface
 

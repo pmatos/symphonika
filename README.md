@@ -57,6 +57,29 @@ npm run dev -- status --config symphonika.yml --watch
 
 The `symphony/` directory in the tree is a git submodule of an unrelated upstream project (`openai/symphony`) used as a reference — it is not a launcher for Symphonika.
 
+### Built-in workflow templates
+
+Raw-FSM workflows can reference built-in templates by prefix without authoring local YAML, for example:
+
+```yaml
+workflow:
+  name: ship_pr
+  initial: shipit
+  use:
+    shipit:
+      template: builtin:single-agent-pr
+      exits:
+        success: done
+        blocked: failed
+  states:
+    done:
+      terminal: success
+    failed:
+      terminal: blocked
+```
+
+The built-ins (`builtin:single-agent-pr`, `builtin:plan-tdd-pr`, `builtin:autofix-until-clean`, `builtin:merge-when-green`) expand through the same template machinery as repo-local templates and surface as `template files: builtin:<name>` in `workflow validate` / `workflow explain`. Override a built-in by writing the equivalent YAML to `.symphonika/workflow-templates/<name>.yml` and swapping the `template:` reference. See [docs/adr/0049-builtin-workflow-templates.md](docs/adr/0049-builtin-workflow-templates.md).
+
 ## Self-Hosting
 
 The bootstrap dogfooding path is documented in [docs/smoke.md](docs/smoke.md). The repository includes a bootstrap [symphonika.yml](symphonika.yml) service config and [WORKFLOW.md](WORKFLOW.md) workflow contract for running Symphonika against its own issues.

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
+import { BUILTIN_WORKFLOW_TEMPLATES } from "./builtin-templates.js";
 import type { WorkflowFormat } from "./config-schemas.js";
 import type { IssueSnapshot } from "./issue-polling.js";
 import { isPathInside } from "./path-safety.js";
@@ -908,13 +909,7 @@ function parseWorkflowTemplateUses(
       );
       continue;
     }
-    if (template.startsWith("builtin:")) {
-      errors.push(
-        `workflow template instance ${instanceId} at ${workflowPath} uses unsupported built-in template ${template}`
-      );
-      continue;
-    }
-    if (path.isAbsolute(template)) {
+    if (!template.startsWith("builtin:") && path.isAbsolute(template)) {
       errors.push(
         `workflow template instance ${instanceId} at ${workflowPath} template must be a repo-local relative path`
       );
@@ -958,6 +953,10 @@ async function loadWorkflowTemplate(
   workflowPath: string,
   errors: string[]
 ): Promise<ParsedWorkflowTemplate | undefined> {
+  if (use.template.startsWith("builtin:")) {
+    return loadBuiltinWorkflowTemplate(use, workflowPath, errors);
+  }
+
   const workflowDir = path.dirname(workflowPath);
   const templatePath = path.resolve(workflowDir, use.template);
   if (!isPathInside(templatePath, workflowDir)) {
@@ -977,6 +976,30 @@ async function loadWorkflowTemplate(
     return undefined;
   }
 
+  return parseWorkflowTemplate(contents, templatePath, errors);
+}
+
+function loadBuiltinWorkflowTemplate(
+  use: WorkflowTemplateUse,
+  workflowPath: string,
+  errors: string[]
+): ParsedWorkflowTemplate | undefined {
+  const name = use.template.slice("builtin:".length);
+  const contents = BUILTIN_WORKFLOW_TEMPLATES[name];
+  if (contents === undefined) {
+    errors.push(
+      `workflow template instance ${use.id} at ${workflowPath} references unknown built-in template ${use.template}`
+    );
+    return undefined;
+  }
+  return parseWorkflowTemplate(contents, use.template, errors);
+}
+
+function parseWorkflowTemplate(
+  contents: string,
+  templatePath: string,
+  errors: string[]
+): ParsedWorkflowTemplate | undefined {
   let parsed: unknown;
   try {
     parsed = parse(contents) ?? {};

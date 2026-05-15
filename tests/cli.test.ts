@@ -940,4 +940,132 @@ describe("CLI", () => {
     expect(output.stdout).toContain("state: done");
     expect(output.stdout).toContain("terminal: success");
   });
+
+  it("validates a workflow backed by a built-in template and surfaces builtin: provenance", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeFile(
+      configPath,
+      [
+        "projects:",
+        "  - name: symphonika",
+        "    workflow: ./workflow.yml",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: issue_to_pr",
+        "  initial: shipit",
+        "  use:",
+        "    shipit:",
+        "      template: builtin:single-agent-pr",
+        "      with:",
+        "        provider: codex",
+        "        prompt: prompts/single-agent.md",
+        "      exits:",
+        "        success: done",
+        "        blocked: failed",
+        "  states:",
+        "    done:",
+        "      terminal: success",
+        "    failed:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({ registerSignalHandlers: false });
+    program.exitOverride();
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "workflow",
+      "validate",
+      "--config",
+      configPath,
+      "--project",
+      "symphonika"
+    ]);
+
+    expect(output.stderr).toBe("");
+    expect(output.stdout).toContain(
+      "workflow validate ok: symphonika -> issue_to_pr"
+    );
+    expect(output.stdout).toContain("template files: builtin:single-agent-pr");
+    expect(output.stdout).toContain("state: shipit.agent");
+  });
+
+  it("explains a workflow that gates merge on the builtin:merge-when-green template", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeFile(
+      configPath,
+      [
+        "projects:",
+        "  - name: symphonika",
+        "    workflow: ./workflow.yml",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: pr_merge",
+        "  initial: gate",
+        "  use:",
+        "    gate:",
+        "      template: builtin:merge-when-green",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "  states:",
+        "    shipped:",
+        "      terminal: success",
+        "    needs_human:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({ registerSignalHandlers: false });
+    program.exitOverride();
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "workflow",
+      "explain",
+      "--config",
+      configPath,
+      "--project",
+      "symphonika"
+    ]);
+
+    expect(output.stderr).toBe("");
+    expect(output.stdout).toContain("workflow: pr_merge");
+    expect(output.stdout).toContain("template files: builtin:merge-when-green");
+    expect(output.stdout).toContain("initial: gate.merging");
+    expect(output.stdout).toContain("state: gate.merging");
+  });
 });

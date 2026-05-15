@@ -30,9 +30,26 @@ export function projectPullRequestSignals(
     signals.checks = checks;
   }
 
+  signals.review_decision = mapReviewDecision(state.reviewDecision);
   signals.unresolved_review_threads = state.unresolvedReviewThreads.length;
+  signals.has_unresolved_reviews = state.unresolvedReviewThreads.length > 0;
 
   return signals;
+}
+
+function mapReviewDecision(
+  reviewDecision: RawGitHubPullRequestFollowupState["reviewDecision"]
+): "approved" | "changes_requested" | "none" | "review_required" {
+  switch (reviewDecision) {
+    case "APPROVED":
+      return "approved";
+    case "CHANGES_REQUESTED":
+      return "changes_requested";
+    case "REVIEW_REQUIRED":
+      return "review_required";
+    default:
+      return "none";
+  }
 }
 
 function mapStatusCheckRollup(

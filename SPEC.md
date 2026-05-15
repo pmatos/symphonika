@@ -750,7 +750,8 @@ Lifecycle:
 2. On each daemon tick (and on `/poll-now`), the reconciliation phase calls
    `reconcileWaitingRuns`, which iterates the rows in `state = "waiting"`, refreshes the issue,
    looks up the tracked pull request, fetches its follow-up state, projects predicates
-   (`pr_open`, `pr_merged`, `mergeable`, `checks`, `unresolved_review_threads`) and emits a static
+   (`pr_open`, `pr_merged`, `mergeable`, `checks`, `review_decision`,
+   `has_unresolved_reviews`, `unresolved_review_threads`) and emits a static
    `provider_success: true`, then evaluates the wait state's transitions in file order.
 3. The first matching transition wins. If the destination is an agent state, Symphonika schedules
    a `state_advance` that runs the agent through `runFreshLifecycle`. If the destination is another
@@ -770,6 +771,12 @@ Mergeability `UNKNOWN`/`null` is intentionally projected as the predicate key om
 transitions writing `mergeable: false` will not match on unknown values, so the wait stays parked
 until GitHub resolves the mergeability. The `timeout` predicate is reserved in the schema but
 unimplemented in v1.
+
+Review decisions are projected as `review_decision: approved|changes_requested|review_required|none`.
+The `none` value covers GitHub `null`. Unresolved review feedback is projected both as
+`unresolved_review_threads: <number>` for exact-count workflows and
+`has_unresolved_reviews: <boolean>` for strict-equality workflows that only need to detect whether
+any unresolved threads exist.
 
 ### 12.6 Merge States
 

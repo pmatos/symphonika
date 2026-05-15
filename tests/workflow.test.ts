@@ -1307,6 +1307,51 @@ describe("state machine workflow definitions", () => {
     );
   });
 
+  it("accepts pull request review-state predicates in raw FSM transitions", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: review_wait",
+        "  initial: wait_for_review",
+        "  states:",
+        "    wait_for_review:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: autofix",
+        "          when:",
+        "            has_unresolved_reviews: true",
+        "        - to: ready",
+        "          when:",
+        "            review_decision: approved",
+        "    autofix:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/autofix.md",
+        "      transitions:",
+        "        - to: wait_for_review",
+        "    ready:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    const waitState = result.workflow.states.find(
+      (state) => state.id === "wait_for_review"
+    );
+    expect(waitState?.transitions).toEqual([
+      { to: "autofix", when: { has_unresolved_reviews: true } },
+      { to: "ready", when: { review_decision: "approved" } }
+    ]);
+  });
+
   it("rejects terminal states that also declare work or outgoing transitions", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");

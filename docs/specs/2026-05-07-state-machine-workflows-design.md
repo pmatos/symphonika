@@ -97,7 +97,7 @@ workflow:
       transitions:
         - to: autofixing
           when:
-            unresolved_review_threads: ">0"
+            has_unresolved_reviews: true
         - to: merging
           when:
             checks: success
@@ -160,6 +160,8 @@ Initial completion predicates:
 - `pr_merged`
 - `checks`
 - `mergeable`
+- `review_decision`
+- `has_unresolved_reviews`
 - `unresolved_review_threads`
 - `timeout`
 

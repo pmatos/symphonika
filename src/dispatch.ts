@@ -2,7 +2,10 @@ import { readFile } from "node:fs/promises";
 import { parse } from "yaml";
 import { z } from "zod";
 
-import { workflowReferenceSchema } from "./config-schemas.js";
+import {
+  projectWorkspaceSchema,
+  workflowReferenceSchema
+} from "./config-schemas.js";
 import type {
   GitHubIssueLabelInput,
   GitHubIssuesApi,
@@ -88,17 +91,7 @@ const dispatchProjectSchema = z
         default: z.number().int().nonnegative()
       })
       .passthrough(),
-    workspace: z
-      .object({
-        root: z.string().trim().min(1),
-        git: z
-          .object({
-            remote: z.string().trim().min(1),
-            base_branch: z.string().trim().min(1)
-          })
-          .passthrough()
-      })
-      .passthrough(),
+    workspace: projectWorkspaceSchema,
     agent: z
       .object({
         provider: providerNameSchema

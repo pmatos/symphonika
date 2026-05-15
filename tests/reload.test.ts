@@ -22,7 +22,8 @@ afterEach(async () => {
 
 async function writeProjectConfig(
   root: string,
-  workflowFileName: string
+  workflowFileName: string,
+  options: { workspaceHookLines?: string[] } = {}
 ): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(
@@ -58,6 +59,7 @@ async function writeProjectConfig(
       "      git:",
       "        remote: git@github.com:pmatos/symphonika.git",
       "        base_branch: main",
+      ...(options.workspaceHookLines ?? []),
       "    agent:",
       "      provider: codex",
       `    workflow: ./${workflowFileName}`,
@@ -67,6 +69,30 @@ async function writeProjectConfig(
 }
 
 describe("RuntimeConfigReloader workflow validation", () => {
+  it("rejects unknown workspace hook lifecycle keys during config reload", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      workspaceHookLines: [
+        "      hooks:",
+        "        after_merge:",
+        '          command: "npm ci"'
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const status = reloader.getStatus();
+
+    expect(status.ok).toBe(false);
+    expect(status.errors).toContain(
+      'projects.0.workspace.hooks.after_merge: unknown workspace hook lifecycle "after_merge"; allowed lifecycles: after_create, before_run, after_run, before_remove'
+    );
+    expect(reloader.projectsByName().has("symphonika")).toBe(false);
+  });
+
   it("rejects raw FSM workflows whose transitions point at undeclared states", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "workflow.yml");

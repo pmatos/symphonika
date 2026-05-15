@@ -5,7 +5,11 @@ import { parse } from "yaml";
 import { z } from "zod";
 
 import type { WorkflowFormat } from "./config-schemas.js";
-import { workflowReferenceSchema } from "./config-schemas.js";
+import {
+  pathStringSchema,
+  projectWorkspaceSchema,
+  workflowReferenceSchema
+} from "./config-schemas.js";
 import {
   DEFAULT_GITHUB_ISSUES_API,
   type GitHubIssuesApi
@@ -151,12 +155,6 @@ const SILENT_OCTOKIT_LOG = {
 };
 
 const providerNameSchema = z.enum(["codex", "claude"]);
-const pathStringSchema = z
-  .string()
-  .trim()
-  .min(1)
-  .refine((value) => !value.includes("\0"), "path must not contain NUL bytes");
-
 const providerCommandSchema = z
   .object({
     command: z.string().trim().min(1)
@@ -189,17 +187,7 @@ const projectSchema = z
         default: z.number().int().nonnegative()
       })
       .passthrough(),
-    workspace: z
-      .object({
-        root: pathStringSchema,
-        git: z
-          .object({
-            remote: z.string().trim().min(1),
-            base_branch: z.string().trim().min(1)
-          })
-          .passthrough()
-      })
-      .passthrough(),
+    workspace: projectWorkspaceSchema,
     agent: z
       .object({
         provider: providerNameSchema

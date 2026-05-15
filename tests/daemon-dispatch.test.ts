@@ -1367,6 +1367,192 @@ describe("daemon dispatch", () => {
       await daemon.stop();
     }
   });
+
+  it("walks a raw FSM workflow to a terminal failure node and records the run as failed", async () => {
+    const root = await makeTempRoot();
+    await writeFailureTerminalRawFsmProject(root);
+
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([
+          issueFixture({
+            labels: ["agent-ready"],
+            number: 8,
+            title: "Dispatch an end-to-end run through a test provider"
+          })
+        ])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = successfulCodexProvider();
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => "run-raw-fsm-terminal-failure",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 0 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      const status = await waitForRun(daemon.url, "failed");
+      // Wait beyond continuation delay to confirm no follow-up run is dispatched.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const run = firstRun(status);
+      expect(run).toMatchObject({
+        id: "run-raw-fsm-terminal-failure",
+        issueNumber: 8,
+        state: "failed"
+      });
+
+      const finalStatus = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as { runs: StatusRun[] };
+      expect(finalStatus.runs).toHaveLength(1);
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const storedRun = database
+          .prepare(
+            [
+              "select state, current_state_id, terminal_state_id,",
+              "terminal_reason, failure_classification from runs",
+              "where id = ?"
+            ].join(" ")
+          )
+          .get("run-raw-fsm-terminal-failure");
+        expect(storedRun).toMatchObject({
+          state: "failed",
+          current_state_id: null,
+          terminal_state_id: "done",
+          terminal_reason: "workflow_terminal_failure",
+          failure_classification: "deterministic"
+        });
+      } finally {
+        database.close();
+      }
+
+      // The workflow drove the failure (not a transient provider crash) so
+      // the issue must end up with sym:failed applied.
+      const failedLabelCalls = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+        (call) => {
+          const arg = call[0] as { labels?: string[] } | undefined;
+          return arg?.labels?.includes("sym:failed") ?? false;
+        }
+      );
+      expect(failedLabelCalls.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Distinct from the "no transition matching observed signals" test above,
+  // which exercises decideNextStep returning `kind: "blocked"` without ever
+  // entering a terminal node — that case still records state="succeeded"
+  // because the workflow merely stalled. This test exercises the explicit
+  // `terminal: blocked` node path, which is a workflow-author-declared failure.
+  it("walks a raw FSM workflow to a terminal blocked node and records the run as failed", async () => {
+    const root = await makeTempRoot();
+    await writeBlockedTerminalRawFsmProject(root);
+
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([
+          issueFixture({
+            labels: ["agent-ready"],
+            number: 8,
+            title: "Dispatch an end-to-end run through a test provider"
+          })
+        ])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = successfulCodexProvider();
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => "run-raw-fsm-terminal-blocked",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 0 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      const status = await waitForRun(daemon.url, "failed");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const run = firstRun(status);
+      expect(run).toMatchObject({
+        id: "run-raw-fsm-terminal-blocked",
+        issueNumber: 8,
+        state: "failed"
+      });
+
+      const finalStatus = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as { runs: StatusRun[] };
+      expect(finalStatus.runs).toHaveLength(1);
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const storedRun = database
+          .prepare(
+            [
+              "select state, current_state_id, terminal_state_id,",
+              "terminal_reason, failure_classification from runs",
+              "where id = ?"
+            ].join(" ")
+          )
+          .get("run-raw-fsm-terminal-blocked");
+        expect(storedRun).toMatchObject({
+          state: "failed",
+          current_state_id: null,
+          terminal_state_id: "done",
+          terminal_reason: "workflow_terminal_blocked",
+          failure_classification: "deterministic"
+        });
+      } finally {
+        database.close();
+      }
+
+      const failedLabelCalls = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+        (call) => {
+          const arg = call[0] as { labels?: string[] } | undefined;
+          return arg?.labels?.includes("sym:failed") ?? false;
+        }
+      );
+      expect(failedLabelCalls.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
 });
 
 function issueFixture(overrides: {
@@ -1507,6 +1693,66 @@ async function writeRawFsmProject(root: string): Promise<void> {
       "        - to: done",
       "    done:",
       "      terminal: success",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "prompt.md"),
+    "Work on #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
+async function writeFailureTerminalRawFsmProject(root: string): Promise<void> {
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: failure_terminal",
+      "  initial: run_agent",
+      "  states:",
+      "    run_agent:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: done",
+      "    done:",
+      "      terminal: failure",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "prompt.md"),
+    "Work on #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
+async function writeBlockedTerminalRawFsmProject(root: string): Promise<void> {
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: blocked_terminal",
+      "  initial: run_agent",
+      "  states:",
+      "    run_agent:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: done",
+      "    done:",
+      "      terminal: blocked",
       ""
     ].join("\n")
   );

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { BUILTIN_WORKFLOW_TEMPLATES } from "../src/builtin-templates.js";
 import {
   explainWorkflow,
   loadExpandedWorkflow,
@@ -1563,6 +1564,315 @@ describe("state machine workflow definitions", () => {
     expect(result.errors).toContain(
       `workflow state merging at ${workflowPath} merge_pr method must be one of merge, rebase, squash`
     );
+  });
+});
+
+describe("built-in workflow templates", () => {
+  it("expands builtin:single-agent-pr through the same template machinery as repo-local templates", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_pr",
+        "  initial: shipit",
+        "  use:",
+        "    shipit:",
+        "      template: builtin:single-agent-pr",
+        "      with:",
+        "        provider: codex",
+        "        prompt: prompts/single-agent.md",
+        "      exits:",
+        "        success: done",
+        "        blocked: failed",
+        "  states:",
+        "    done:",
+        "      terminal: success",
+        "    failed:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.workflow.initial).toBe("shipit.agent");
+    expect(result.workflow.templateFiles).toEqual(["builtin:single-agent-pr"]);
+    expect(result.workflow.states.map((state) => state.id).sort()).toEqual([
+      "done",
+      "failed",
+      "shipit.agent"
+    ]);
+    const agentState = result.workflow.states.find(
+      (state) => state.id === "shipit.agent"
+    );
+    expect(agentState?.action).toEqual({
+      kind: "agent",
+      prompt: "prompts/single-agent.md",
+      provider: "codex"
+    });
+  });
+
+  it("reports an actionable error when a workflow references an unknown built-in template", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_pr",
+        "  initial: mystery",
+        "  use:",
+        "    mystery:",
+        "      template: builtin:does-not-exist",
+        "      exits:",
+        "        success: done",
+        "        blocked: failed",
+        "  states:",
+        "    done:",
+        "      terminal: success",
+        "    failed:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow template instance mystery at ${workflowPath} references unknown built-in template builtin:does-not-exist`
+    );
+  });
+
+  it("expands builtin:plan-tdd-pr into planning and implementation agent states", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_pr",
+        "  initial: build",
+        "  use:",
+        "    build:",
+        "      template: builtin:plan-tdd-pr",
+        "      with:",
+        "        planner: codex",
+        "        implementer: claude",
+        "        plan_prompt: prompts/plan.md",
+        "        impl_prompt: prompts/impl.md",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "  states:",
+        "    shipped:",
+        "      terminal: success",
+        "    needs_human:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.workflow.initial).toBe("build.planning");
+    expect(result.workflow.templateFiles).toEqual(["builtin:plan-tdd-pr"]);
+    const planning = result.workflow.states.find(
+      (state) => state.id === "build.planning"
+    );
+    expect(planning?.action).toEqual({
+      kind: "agent",
+      prompt: "prompts/plan.md",
+      provider: "codex"
+    });
+    const implementing = result.workflow.states.find(
+      (state) => state.id === "build.implementing"
+    );
+    expect(implementing?.action).toEqual({
+      kind: "agent",
+      prompt: "prompts/impl.md",
+      provider: "claude"
+    });
+    expect(planning?.transitions.map((t) => t.to)).toContain(
+      "build.implementing"
+    );
+  });
+
+  it("expands builtin:autofix-until-clean into a wait/autofix loop", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: pr_autofix",
+        "  initial: review",
+        "  use:",
+        "    review:",
+        "      template: builtin:autofix-until-clean",
+        "      with:",
+        "        provider: codex",
+        "        fix_prompt: prompts/autofix.md",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "  states:",
+        "    shipped:",
+        "      terminal: success",
+        "    needs_human:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.workflow.initial).toBe("review.waiting");
+    const waiting = result.workflow.states.find(
+      (state) => state.id === "review.waiting"
+    );
+    expect(waiting?.action).toEqual({ kind: "wait" });
+    const autofix = result.workflow.states.find(
+      (state) => state.id === "review.autofix"
+    );
+    expect(autofix?.action).toEqual({
+      kind: "agent",
+      prompt: "prompts/autofix.md",
+      provider: "codex"
+    });
+    expect(waiting?.transitions.map((t) => t.to)).toContain("review.autofix");
+    expect(autofix?.transitions.map((t) => t.to)).toContain("review.waiting");
+  });
+
+  it("expands builtin:merge-when-green with the default squash merge method", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: pr_merge",
+        "  initial: gate",
+        "  use:",
+        "    gate:",
+        "      template: builtin:merge-when-green",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "  states:",
+        "    shipped:",
+        "      terminal: success",
+        "    needs_human:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.workflow.initial).toBe("gate.waiting");
+    const merging = result.workflow.states.find(
+      (state) => state.id === "gate.merging"
+    );
+    expect(merging?.action).toEqual({ kind: "merge_pr", method: "squash" });
+  });
+
+  it("respects an explicit method input on builtin:merge-when-green", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: pr_merge",
+        "  initial: gate",
+        "  use:",
+        "    gate:",
+        "      template: builtin:merge-when-green",
+        "      with:",
+        "        method: rebase",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "  states:",
+        "    shipped:",
+        "      terminal: success",
+        "    needs_human:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    const merging = result.workflow.states.find(
+      (state) => state.id === "gate.merging"
+    );
+    expect(merging?.action).toEqual({ kind: "merge_pr", method: "rebase" });
+  });
+
+  it("produces the same expanded states whether single-agent-pr is referenced as builtin or copied to a local template file", async () => {
+    const builtinRoot = await makeTempRoot();
+    const localRoot = await makeTempRoot();
+
+    const wrapper = (templateRef: string) =>
+      [
+        "workflow:",
+        "  name: issue_to_pr",
+        "  initial: shipit",
+        "  use:",
+        "    shipit:",
+        `      template: ${templateRef}`,
+        "      with:",
+        "        provider: codex",
+        "        prompt: prompts/single-agent.md",
+        "      exits:",
+        "        success: done",
+        "        blocked: failed",
+        "  states:",
+        "    done:",
+        "      terminal: success",
+        "    failed:",
+        "      terminal: blocked",
+        ""
+      ].join("\n");
+
+    const builtinPath = path.join(builtinRoot, "workflow.yml");
+    await writeFile(builtinPath, wrapper("builtin:single-agent-pr"));
+
+    const localTemplateDir = path.join(
+      localRoot,
+      ".symphonika",
+      "workflow-templates"
+    );
+    await mkdir(localTemplateDir, { recursive: true });
+    const builtinYaml = BUILTIN_WORKFLOW_TEMPLATES["single-agent-pr"];
+    if (builtinYaml === undefined) {
+      throw new Error("BUILTIN_WORKFLOW_TEMPLATES missing single-agent-pr");
+    }
+    await writeFile(
+      path.join(localTemplateDir, "single-agent-pr.yml"),
+      builtinYaml
+    );
+    const localPath = path.join(localRoot, "workflow.yml");
+    await writeFile(
+      localPath,
+      wrapper(".symphonika/workflow-templates/single-agent-pr.yml")
+    );
+
+    const builtinResult = await loadExpandedWorkflow(builtinPath);
+    const localResult = await loadExpandedWorkflow(localPath);
+
+    expect(builtinResult.errors).toEqual([]);
+    expect(localResult.errors).toEqual([]);
+    expect(builtinResult.workflow.initial).toBe(localResult.workflow.initial);
+    expect(builtinResult.workflow.states).toEqual(localResult.workflow.states);
   });
 });
 

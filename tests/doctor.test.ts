@@ -299,6 +299,40 @@ describe("doctor", () => {
     expect(output.stderr).toContain("unknown variable");
     expect(output.stderr).toContain("{{ticket.title}}");
   });
+
+  it("rejects raw FSM workflows whose agent prompt files are missing on disk", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, { workflowPath: "./workflow.yml" });
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: missing_prompt",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/plan.md",
+        "      complete_when:",
+        "        artifact_exists: PLAN.md",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const output = await runDoctorCommand(configPath);
+
+    expect(process.exitCode).toBe(1);
+    expect(output.stderr).toContain("prompt not found");
+    expect(output.stderr).toContain("planning");
+  });
 });
 
 async function runDoctorCommand(

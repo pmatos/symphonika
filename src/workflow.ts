@@ -307,6 +307,32 @@ export async function loadExpandedWorkflow(
   return expandWorkflowDefinition(contents, workflowPath, format);
 }
 
+export async function validateExpandedWorkflowReferences(
+  workflow: ExpandedWorkflow,
+  workflowPath: string
+): Promise<string[]> {
+  if (workflow.source.kind !== "raw_fsm") {
+    return [];
+  }
+  const workflowDir = path.dirname(workflowPath);
+  const errors: string[] = [];
+  for (const state of workflow.states) {
+    const action = state.action;
+    if (action?.kind !== "agent" || typeof action.prompt !== "string") {
+      continue;
+    }
+    const promptPath = path.resolve(workflowDir, action.prompt);
+    try {
+      await readFile(promptPath, "utf8");
+    } catch (error) {
+      errors.push(
+        `workflow state ${state.id} prompt not found at ${promptPath}: ${errorMessage(error)}`
+      );
+    }
+  }
+  return errors;
+}
+
 export async function loadProjectWorkflow(input: {
   configPath: string;
   projectName?: string;

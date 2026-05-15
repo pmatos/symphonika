@@ -104,9 +104,53 @@ describe("RuntimeConfigReloader workflow validation", () => {
     expect(reloader.projectsByName().has("symphonika")).toBe(false);
   });
 
+  it("rejects raw FSM workflows whose agent prompt files do not exist on disk", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "workflow.yml");
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: missing_prompt",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/missing.md",
+        "      complete_when:",
+        "        artifact_exists: PLAN.md",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const status = reloader.getStatus();
+
+    expect(status.ok).toBe(false);
+    expect(
+      status.errors.some((message) => message.includes("prompt not found"))
+    ).toBe(true);
+    expect(
+      status.errors.some((message) => message.includes("planning"))
+    ).toBe(true);
+    expect(reloader.projectsByName().has("symphonika")).toBe(false);
+  });
+
   it("accepts a valid raw FSM workflow at reload time", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "workflow.yml");
+    await mkdir(path.join(root, "prompts"), { recursive: true });
+    await writeFile(path.join(root, "prompts/plan.md"), "Plan the work.\n", "utf8");
     await writeFile(
       path.join(root, "workflow.yml"),
       [
@@ -181,6 +225,9 @@ describe("RuntimeConfigReloader workflow validation", () => {
     await writeProjectConfig(root, "workflow.yml");
     const templateDir = path.join(root, ".symphonika", "workflow-templates");
     await mkdir(templateDir, { recursive: true });
+    await mkdir(path.join(root, "prompts"), { recursive: true });
+    await writeFile(path.join(root, "prompts/plan.md"), "Plan.\n", "utf8");
+    await writeFile(path.join(root, "prompts/revised-plan.md"), "Revised plan.\n", "utf8");
     const workflowPath = path.join(root, "workflow.yml");
     const templatePath = path.join(templateDir, "plan-tdd-pr.yml");
     await writeFile(

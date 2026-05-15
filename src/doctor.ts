@@ -13,7 +13,10 @@ import {
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
-import { loadExpandedWorkflow } from "./workflow.js";
+import {
+  loadExpandedWorkflow,
+  validateExpandedWorkflowReferences
+} from "./workflow.js";
 
 export { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 
@@ -289,7 +292,10 @@ async function collectWorkflowErrors(
 ): Promise<string[]> {
   try {
     const expanded = await loadExpandedWorkflow(workflowPath, format);
-    return expanded.errors;
+    if (expanded.errors.length > 0) {
+      return expanded.errors;
+    }
+    return validateExpandedWorkflowReferences(expanded.workflow, workflowPath);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return [`workflow contract not found at ${workflowPath}: ${message}`];

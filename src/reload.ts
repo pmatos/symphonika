@@ -24,7 +24,8 @@ import {
 } from "./pull-request-followup.js";
 import {
   expandWorkflowDefinition,
-  parseWorkflowContract
+  parseWorkflowContract,
+  validateExpandedWorkflowReferences
 } from "./workflow.js";
 
 export type RuntimeConfigSnapshot = {
@@ -364,6 +365,14 @@ async function readWorkflowSnapshot(
   if (expanded.workflow.source.kind === "raw_fsm") {
     if (expanded.errors.length > 0) {
       errors.push(...expanded.errors);
+      return undefined;
+    }
+    const referenceErrors = await validateExpandedWorkflowReferences(
+      expanded.workflow,
+      workflowPath
+    );
+    if (referenceErrors.length > 0) {
+      errors.push(...referenceErrors);
       return undefined;
     }
     return {

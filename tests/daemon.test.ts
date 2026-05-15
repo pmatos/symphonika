@@ -28,7 +28,6 @@ describe("startDaemon", () => {
   it("starts a non-dispatching local HTTP daemon", async () => {
     const cwd = await makeTempRoot();
     const daemon = await startDaemon({
-      configPath: "symphonika.yml",
       cwd,
       logger: pino({ enabled: false }),
       port: 0
@@ -69,7 +68,6 @@ describe("startDaemon", () => {
 
     await expect(
       startDaemon({
-        configPath: "symphonika.yml",
         cwd,
         logger: pino({ enabled: false }),
         port
@@ -81,7 +79,6 @@ describe("startDaemon", () => {
   it("closes the run store when endpoint descriptor removal fails during stop", async () => {
     const cwd = await makeTempRoot();
     const daemon = await startDaemon({
-      configPath: "symphonika.yml",
       cwd,
       logger: pino({ enabled: false }),
       port: 0

@@ -6,7 +6,6 @@ import { pathToFileURL } from "node:url";
 
 import type { DaemonHandle, StartDaemonOptions } from "./daemon.js";
 import { startDaemon } from "./daemon.js";
-import { resolveServiceConfigPath } from "./config-paths.js";
 import { daemonEndpointPath, readDaemonEndpoint } from "./daemon-endpoint.js";
 import type {
   ClearStaleOptions,
@@ -18,8 +17,6 @@ import type {
   InitProjectReport
 } from "./doctor.js";
 import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
-import type { InitOptions, InitProvider, InitReport } from "./init.js";
-import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
 import type { RuntimeReloadStatus } from "./reload.js";
 import type {
@@ -53,7 +50,6 @@ export type CliDependencies = {
   registerSignalHandlers?: boolean;
   runClearStale?: (options: ClearStaleOptions) => Promise<ClearStaleReport>;
   runDoctor?: (options: DoctorOptions) => Promise<DoctorReport>;
-  runInit?: (options: InitOptions) => Promise<InitReport>;
   runInitProject?: (options: InitProjectOptions) => Promise<InitProjectReport>;
   runSmoke?: (options: SmokeOptions) => Promise<SmokeReport>;
   startDaemon?: (options: StartDaemonOptions) => Promise<DaemonHandle>;
@@ -90,7 +86,6 @@ type PollNowResponse = {
 
 export function buildCli(dependencies: CliDependencies = {}): Command {
   const doctor = dependencies.runDoctor ?? runDoctor;
-  const init = dependencies.runInit ?? runInit;
   const initProject = dependencies.runInitProject ?? runInitProject;
   const clearStale = dependencies.runClearStale ?? runClearStale;
   const smoke = dependencies.runSmoke ?? runSmoke;
@@ -108,9 +103,9 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   program
     .command("doctor")
     .description("validate service config and workflow contracts without dispatching work")
-    .option("--config <path>", "service config path")
-    .action(async (options: { config?: string }) => {
-      const report = await doctor(withConfigPath(options.config));
+    .option("--config <path>", "service config path", "symphonika.yml")
+    .action(async (options: { config: string }) => {
+      const report = await doctor({ configPath: options.config });
 
       if (report.ok) {
         writeOut(
@@ -130,53 +125,14 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     });
 
   program
-    .command("init")
-    .description("create a user service config for the current GitHub repository")
-    .option("--provider <name>", "agent provider for the project", parseProvider, "codex")
-    .option("--force", "overwrite an existing user service config")
-    .action(async (options: { force?: boolean; provider: InitProvider }) => {
-      const report = await init({
-        force: options.force === true,
-        provider: options.provider
-      });
-
-      if (!report.ok) {
-        writeErr(program, "init failed:\n");
-        for (const error of report.errors) {
-          writeErr(program, `- ${error}\n`);
-        }
-        process.exitCode = 1;
-        return;
-      }
-
-      writeOut(program, "init ok\n");
-      writeOut(program, `config:    ${report.configPath}\n`);
-      writeOut(program, `state:     ${report.stateRoot}\n`);
-      if (report.repository !== null) {
-        writeOut(program, `repo:      ${report.repository}\n`);
-      }
-      if (report.projectName !== null) {
-        writeOut(program, `project:   ${report.projectName}\n`);
-      }
-      if (report.workflowPath !== null) {
-        const workflowLabel = report.createdWorkflow
-          ? "workflow:"
-          : "workflow:  existing";
-        writeOut(program, `${workflowLabel} ${report.workflowPath}\n`);
-      }
-      writeOut(program, "next:      export GITHUB_TOKEN=... && symphonika doctor\n");
-      writeOut(program, "then:      symphonika init-project --yes\n");
-    });
-
-  program
     .command("init-project")
     .description("create missing GitHub operational labels after explicit confirmation")
-    .option("--config <path>", "service config path")
+    .option("--config <path>", "service config path", "symphonika.yml")
     .option("--yes", "create missing operational labels without an interactive prompt")
-    .action(async (options: { config?: string; yes?: boolean }) => {
+    .action(async (options: { config: string; yes?: boolean }) => {
       const emittedWarnings = new Set<string>();
       const report = await initProject({
-        ...withConfigPath(options.config),
+        configPath: options.config,
         onWarning: (warning) => {
           emittedWarnings.add(warning);
           writeErr(program, `warning: ${warning}\n`);
@@ -223,17 +179,17 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     )
     .argument("<project>", "project name from symphonika.yml")
     .argument("<issue-number>", "GitHub issue number", parseIssueNumber)
-    .option("--config <path>", "service config path")
+    .option("--config <path>", "service config path", "symphonika.yml")
     .option("--yes", "remove labels without an interactive prompt")
     .action(
       async (
         project: string,
         issueNumber: number,
-        options: { config?: string; yes?: boolean }
+        options: { config: string; yes?: boolean }
       ) => {
         const emittedWarnings = new Set<string>();
         const report = await clearStale({
-          ...withConfigPath(options.config),
+          configPath: options.config,
           issueNumber,
           onWarning: (warning) => {
             emittedWarnings.add(warning);
@@ -272,11 +228,11 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   program
     .command("daemon")
     .description("start the local Symphonika daemon without dispatching work")
-    .option("--config <path>", "service config path")
+    .option("--config <path>", "service config path", "symphonika.yml")
     .option("--port <port>", "local HTTP port", parsePort, 3000)
-    .action(async (options: { config?: string; port: number }) => {
+    .action(async (options: { config: string; port: number }) => {
       const daemon = await start({
-        ...withConfigPath(options.config),
+        configPath: options.config,
         port: options.port
       });
 
@@ -290,9 +246,9 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .description(
       "claim and run one agent-ready issue once via the configured provider, then exit"
     )
-    .option("--config <path>", "service config path")
-    .action(async (options: { config?: string }) => {
-      const report = await smoke(withConfigPath(options.config));
+    .option("--config <path>", "service config path", "symphonika.yml")
+    .action(async (options: { config: string }) => {
+      const report = await smoke({ configPath: options.config });
 
       for (const warning of report.warnings) {
         writeErr(program, `warning: ${warning}\n`);
@@ -344,13 +300,11 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   workflowCommand
     .command("validate")
     .description("validate the expanded workflow graph without dispatching work")
-    .option("--config <path>", "service config path")
+    .option("--config <path>", "service config path", "symphonika.yml")
     .option("--project <name>", "project name from symphonika.yml")
-    .action(async (options: { config?: string; project?: string }) => {
+    .action(async (options: { config: string; project?: string }) => {
       const report = await loadProjectWorkflow({
-        configPath: resolveServiceConfigPath(
-          withConfigPath(options.config)
-        ).configPath,
+        configPath: options.config,
         ...(options.project === undefined ? {} : { projectName: options.project })
       });
 
@@ -375,13 +329,11 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   workflowCommand
     .command("explain")
     .description("print the expanded workflow graph without dispatching work")
-    .option("--config <path>", "service config path")
+    .option("--config <path>", "service config path", "symphonika.yml")
     .option("--project <name>", "project name from symphonika.yml")
-    .action(async (options: { config?: string; project?: string }) => {
+    .action(async (options: { config: string; project?: string }) => {
       const report = await loadProjectWorkflow({
-        configPath: resolveServiceConfigPath(
-          withConfigPath(options.config)
-        ).configPath,
+        configPath: options.config,
         ...(options.project === undefined ? {} : { projectName: options.project })
       });
 
@@ -400,14 +352,14 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   program
     .command("status")
     .description("print project validation, issue polling, and run summaries")
-    .option("--config <path>", "service config path")
+    .option("--config <path>", "service config path", "symphonika.yml")
     .option("--daemon-url <url>", "local daemon base URL")
     .option("--dashboard", "render a compact terminal status dashboard")
     .option("--watch", "refresh the terminal dashboard until interrupted")
     .option("--interval-ms <n>", "watch refresh interval in milliseconds", parsePositiveInt, 1000)
     .action(
       async (options: {
-        config?: string;
+        config: string;
         daemonUrl?: string;
         dashboard?: boolean;
         intervalMs: number;
@@ -418,11 +370,10 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           cachedReport?: DoctorReport,
           redrawState?: { previousLineCount: number }
         ): Promise<void> => {
-          const stateRoot = resolveStateRoot(withConfigPath(options.config)).stateRoot;
+          const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
           const store = openRunStore({ stateRoot });
           try {
-            const report =
-              cachedReport ?? (await doctor(withConfigPath(options.config)));
+            const report = cachedReport ?? (await doctor({ configPath: options.config }));
             const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
             const daemonStatus =
               daemonUrl === undefined
@@ -533,7 +484,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         };
 
         if (options.watch === true) {
-          const report = await doctor(withConfigPath(options.config));
+          const report = await doctor({ configPath: options.config });
           const redrawState = { previousLineCount: 0 };
           for (;;) {
             await printOnce(true, report, redrawState);
@@ -548,10 +499,10 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   program
     .command("poll-now")
     .description("ask the running daemon to reconcile and poll immediately")
-    .option("--config <path>", "service config path")
+    .option("--config <path>", "service config path", "symphonika.yml")
     .option("--daemon-url <url>", "local daemon base URL")
-    .action(async (options: { config?: string; daemonUrl?: string }) => {
-      const stateRoot = resolveStateRoot(withConfigPath(options.config)).stateRoot;
+    .action(async (options: { config: string; daemonUrl?: string }) => {
+      const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
       const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
       if (daemonUrl === undefined) {
         const descriptorPath = daemonEndpointPath(stateRoot);
@@ -587,18 +538,18 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   program
     .command("runs")
     .description("list runs from the run store")
-    .option("--config <path>", "service config path")
+    .option("--config <path>", "service config path", "symphonika.yml")
     .option("--state <state>", "filter by run state")
     .option("--project <project>", "filter by project name")
     .option("--limit <n>", "max rows", parsePositiveInt)
     .action(
       (options: {
-        config?: string;
+        config: string;
         limit?: number;
         project?: string;
         state?: string;
       }) => {
-        const stateRoot = resolveStateRoot(withConfigPath(options.config)).stateRoot;
+        const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
         const store = openRunStore({ stateRoot });
         try {
           const filter: ListRunsFilter = {};
@@ -633,10 +584,10 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .command("show-run")
     .description("show run detail, attempts, transitions, and recent events")
     .argument("<id>", "run id")
-    .option("--config <path>", "service config path")
+    .option("--config <path>", "service config path", "symphonika.yml")
     .option("--events <n>", "max recent events", parsePositiveInt, 25)
-    .action((id: string, options: { config?: string; events: number }) => {
-      const stateRoot = resolveStateRoot(withConfigPath(options.config)).stateRoot;
+    .action((id: string, options: { config: string; events: number }) => {
+      const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
       const store = openRunStore({ stateRoot });
       try {
         const detail = store.getRun(id);
@@ -724,10 +675,10 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .command("cancel")
     .description("request cancellation of an active run via the run store")
     .argument("<id>", "run id")
-    .option("--config <path>", "service config path")
+    .option("--config <path>", "service config path", "symphonika.yml")
     .option("--daemon-url <url>", "local daemon base URL")
-    .action(async (id: string, options: { config?: string; daemonUrl?: string }) => {
-      const stateRoot = resolveStateRoot(withConfigPath(options.config)).stateRoot;
+    .action(async (id: string, options: { config: string; daemonUrl?: string }) => {
+      const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
       const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
       if (daemonUrl === undefined) {
         const descriptorPath = daemonEndpointPath(stateRoot);
@@ -1311,10 +1262,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function withConfigPath(configPath: string | undefined): { configPath?: string } {
-  return configPath === undefined ? {} : { configPath };
-}
-
 function parsePositiveInt(value: string): number {
   const n = Number(value);
   if (!Number.isInteger(n) || n <= 0) {
@@ -1405,13 +1352,6 @@ function parseIssueNumber(value: string): number {
   }
 
   return issue;
-}
-
-function parseProvider(value: string): InitProvider {
-  if (value === "codex" || value === "claude") {
-    return value;
-  }
-  throw new InvalidArgumentError("provider must be one of codex, claude");
 }
 
 function pluralize(word: string, count: number): string {

@@ -47,7 +47,7 @@ While the daemon is running, force a debugging poll without waiting for the conf
 npm run dev -- poll-now --config symphonika.yml
 ```
 
-The command discovers the selected state root's `daemon.json`, preflights that the daemon reports the same state root, then posts to the local `/api/poll-now` endpoint. The daemon uses the same reconcile, polling, and dispatch gates as interval ticks, so invalid Projects, operational labels, excluded labels, active runs, and the dispatch mutex still apply.
+The command discovers `.symphonika/daemon.json`, preflights that the daemon reports the same state root, then posts to the local `/api/poll-now` endpoint. The daemon uses the same reconcile, polling, and dispatch gates as interval ticks, so invalid Projects, operational labels, excluded labels, active runs, and the dispatch mutex still apply.
 
 For a compact terminal dashboard inspired by the upstream Symphony status surface:
 

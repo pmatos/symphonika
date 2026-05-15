@@ -1,14 +1,8 @@
 import path from "node:path";
 import { homedir } from "node:os";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { z } from "zod";
-
-import {
-  defaultUserStateRoot,
-  isDefaultUserConfigPath,
-  resolveServiceConfigPath
-} from "./config-paths.js";
 
 export type StateRootResolution = {
   configPath: string;
@@ -20,7 +14,6 @@ export type StateRootResolution = {
 export type ResolveStateRootOptions = {
   configPath?: string;
   cwd?: string;
-  env?: NodeJS.ProcessEnv;
   homeDir?: string;
 };
 
@@ -37,17 +30,14 @@ const serviceConfigSchema = z
 export function resolveStateRoot(
   options: ResolveStateRootOptions = {}
 ): StateRootResolution {
-  const resolvedConfig = resolveServiceConfigPath(options);
-  const configPath = resolvedConfig.configPath;
-  const configDir = resolvedConfig.configDir;
+  const cwd = options.cwd ?? process.cwd();
+  const configPath = path.resolve(cwd, options.configPath ?? "symphonika.yml");
+  const configDir = path.dirname(configPath);
   const homeDir = options.homeDir ?? homedir();
-  const configExists = resolvedConfig.configExists;
+  const configExists = existsSync(configPath);
   const configuredStateRoot = configExists
     ? readConfiguredStateRoot(configPath)
     : undefined;
-  const defaultStateRoot = isDefaultUserConfigPath(configPath, options)
-    ? defaultUserStateRoot(options)
-    : path.join(configDir, ".symphonika");
 
   return {
     configPath,
@@ -55,7 +45,7 @@ export function resolveStateRoot(
     configExists,
     stateRoot:
       configuredStateRoot === undefined
-        ? defaultStateRoot
+        ? path.join(configDir, ".symphonika")
         : resolveConfiguredPath(configuredStateRoot, configDir, homeDir)
   };
 }

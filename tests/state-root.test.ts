@@ -22,40 +22,14 @@ afterEach(async () => {
 });
 
 describe("resolveStateRoot", () => {
-  it("defaults the state root beside an explicit service config", async () => {
+  it("defaults the state root beside the default service config", async () => {
     const cwd = await makeTempRoot();
-    const configPath = path.join(cwd, "symphonika.yml");
 
-    const resolved = resolveStateRoot({ configPath, cwd });
+    const resolved = resolveStateRoot({ cwd });
 
     expect(resolved.configPath).toBe(path.join(cwd, "symphonika.yml"));
     expect(resolved.stateRoot).toBe(path.join(cwd, ".symphonika"));
     expect(resolved.configExists).toBe(false);
-  });
-
-  it("uses the initialized user config and XDG state root when no local config exists", async () => {
-    const cwd = await makeTempRoot();
-    const xdgConfigHome = path.join(cwd, "config");
-    const xdgStateHome = path.join(cwd, "state");
-    const userConfigPath = path.join(
-      xdgConfigHome,
-      "symphonika",
-      "symphonika.yml"
-    );
-    await mkdir(path.dirname(userConfigPath), { recursive: true });
-    await writeFile(userConfigPath, "providers:\n  codex:\n    command: codex\n");
-
-    const resolved = resolveStateRoot({
-      cwd,
-      env: {
-        XDG_CONFIG_HOME: xdgConfigHome,
-        XDG_STATE_HOME: xdgStateHome
-      }
-    });
-
-    expect(resolved.configPath).toBe(userConfigPath);
-    expect(resolved.stateRoot).toBe(path.join(xdgStateHome, "symphonika"));
-    expect(resolved.configExists).toBe(true);
   });
 
   it("honors a relative state root from an existing service config", async () => {

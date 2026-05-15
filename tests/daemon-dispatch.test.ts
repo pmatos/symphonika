@@ -1410,6 +1410,233 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("routes a state advance through the provider declared on the next agent state", async () => {
+    const root = await makeTempRoot();
+    await writePerStateProviderRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexInputs: ProviderRunInput[] = [];
+    const claudeInputs: ProviderRunInput[] = [];
+    const codexProvider = successfulProvider("codex", codexInputs);
+    const claudeProvider = successfulProvider("claude", claudeInputs);
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { claude: claudeProvider, codex: codexProvider },
+      createRunId: () => `run-fsm-provider-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForTerminalState(root, "done");
+
+      expect(codexInputs).toHaveLength(1);
+      expect(claudeInputs).toHaveLength(1);
+      expect(codexInputs[0]?.provider).toMatchObject({
+        name: "codex",
+        command: DEFAULT_CODEX_COMMAND
+      });
+      expect(claudeInputs[0]?.provider).toMatchObject({
+        name: "claude",
+        command:
+          "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"
+      });
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const rows = database
+          .prepare("select id, provider_name from runs order by created_at")
+          .all() as Array<Record<string, unknown>>;
+        expect(rows).toMatchObject([
+          { id: "run-fsm-provider-1", provider_name: "codex" },
+          { id: "run-fsm-provider-2", provider_name: "claude" }
+        ]);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("falls back to the project provider when the next agent state omits provider", async () => {
+    const root = await makeTempRoot();
+    await writeFallbackProviderRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexInputs: ProviderRunInput[] = [];
+    const claudeInputs: ProviderRunInput[] = [];
+    const codexProvider = successfulProvider("codex", codexInputs);
+    const claudeProvider = successfulProvider("claude", claudeInputs);
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { claude: claudeProvider, codex: codexProvider },
+      createRunId: () => `run-fsm-fallback-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForTerminalState(root, "done");
+
+      expect(codexInputs).toHaveLength(2);
+      expect(claudeInputs).toHaveLength(0);
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const rows = database
+          .prepare("select id, provider_name from runs order by created_at")
+          .all() as Array<Record<string, unknown>>;
+        expect(rows).toMatchObject([
+          { id: "run-fsm-fallback-1", provider_name: "codex" },
+          { id: "run-fsm-fallback-2", provider_name: "codex" }
+        ]);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("records a deterministic state-advance failure when the chosen provider is not registered", async () => {
+    const root = await makeTempRoot();
+    await writePerStateProviderRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = successfulProvider("codex");
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => `run-fsm-missing-provider-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForStoredRunState(root, "failed");
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const rows = database
+          .prepare(
+            [
+              "select id, state, provider_name, terminal_reason,",
+              "failure_classification from runs order by created_at"
+            ].join(" ")
+          )
+          .all() as Array<Record<string, unknown>>;
+        expect(rows).toMatchObject([
+          {
+            id: "run-fsm-missing-provider-1",
+            provider_name: "codex",
+            state: "succeeded"
+          },
+          {
+            failure_classification: "deterministic",
+            id: "run-fsm-missing-provider-2",
+            provider_name: "claude",
+            state: "failed",
+            terminal_reason: "provider_not_registered: claude"
+          }
+        ]);
+      } finally {
+        database.close();
+      }
+
+      const failedLabelCalls = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+        (call) => {
+          const arg = call[0] as { labels?: string[] } | undefined;
+          return arg?.labels?.includes("sym:failed") ?? false;
+        }
+      );
+      expect(failedLabelCalls.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("picks the first transition in YAML order when multiple transitions match the observed signals", async () => {
     const root = await makeTempRoot();
     await writeTransitionOrderRawFsmProject(root);
@@ -1892,11 +2119,21 @@ function issueSnapshotFixture(overrides: {
 }
 
 function successfulCodexProvider(): AgentProvider {
+  return successfulProvider("codex");
+}
+
+function successfulProvider(
+  name: "codex" | "claude",
+  inputs: ProviderRunInput[] = []
+): AgentProvider {
   return {
     cancel: vi.fn().mockResolvedValue(undefined),
-    name: "codex",
-    runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+    name,
+    runAttempt: vi.fn(async function* (
+      input: ProviderRunInput
+    ): AsyncGenerator<ProviderEvent> {
       await Promise.resolve();
+      inputs.push(input);
       yield {
         normalized: {
           exitCode: 0,
@@ -2139,7 +2376,10 @@ async function writeNoMatchingTransitionRawFsmProject(
   );
 }
 
-async function writeRawFsmProjectConfig(root: string): Promise<void> {
+async function writeRawFsmProjectConfig(
+  root: string,
+  options: { agentProvider?: "codex" | "claude" } = {}
+): Promise<void> {
   await writeFile(
     path.join(root, "symphonika.yml"),
     [
@@ -2174,7 +2414,7 @@ async function writeRawFsmProjectConfig(root: string): Promise<void> {
       "        remote: git@github.com:pmatos/symphonika.git",
       "        base_branch: main",
       "    agent:",
-      "      provider: codex",
+      `      provider: ${options.agentProvider ?? "codex"}`,
       "    workflow: ./workflow.yml",
       ""
     ].join("\n")
@@ -2204,6 +2444,93 @@ async function writeMultiStateRawFsmProject(root: string): Promise<void> {
       "      action:",
       "        kind: agent",
       "        provider: codex",
+      "        prompt: implement-prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: done",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "plan-prompt.md"),
+    "Draft a plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+  await writeFile(
+    path.join(root, "implement-prompt.md"),
+    "Implement the plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
+async function writePerStateProviderRawFsmProject(root: string): Promise<void> {
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: provider_routing",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: autofix",
+      "    autofix:",
+      "      action:",
+      "        kind: agent",
+      "        provider: claude",
+      "        prompt: autofix-prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: done",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "plan-prompt.md"),
+    "Draft a plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+  await writeFile(
+    path.join(root, "autofix-prompt.md"),
+    "Apply the autofix for #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
+async function writeFallbackProviderRawFsmProject(root: string): Promise<void> {
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: provider_fallback",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: implementation",
+      "    implementation:",
+      "      action:",
+      "        kind: agent",
       "        prompt: implement-prompt.md",
       "      complete_when:",
       "        provider_success: true",
@@ -2330,6 +2657,72 @@ async function waitForRun(
   }
 
   throw new Error(`run did not reach ${state} before timeout`);
+}
+
+async function waitForTerminalState(
+  root: string,
+  terminalStateId: string,
+  options: { intervalMs?: number; timeoutMs?: number } = {}
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const intervalMs = options.intervalMs ?? 20;
+  const deadline = Date.now() + timeoutMs;
+  const databaseFile = path.join(root, ".symphonika", "symphonika.db");
+
+  while (Date.now() < deadline) {
+    try {
+      const database = new Database(databaseFile, { readonly: true });
+      try {
+        const row = database
+          .prepare("select count(*) as c from runs where terminal_state_id = ?")
+          .get(terminalStateId) as { c: number };
+        if (row.c >= 1) {
+          return;
+        }
+      } finally {
+        database.close();
+      }
+    } catch {
+      // The daemon may still be starting and creating its SQLite store.
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(`run did not reach terminal state ${terminalStateId}`);
+}
+
+async function waitForStoredRunState(
+  root: string,
+  state: string,
+  options: { intervalMs?: number; timeoutMs?: number } = {}
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const intervalMs = options.intervalMs ?? 20;
+  const deadline = Date.now() + timeoutMs;
+  const databaseFile = path.join(root, ".symphonika", "symphonika.db");
+
+  while (Date.now() < deadline) {
+    try {
+      const database = new Database(databaseFile, { readonly: true });
+      try {
+        const row = database
+          .prepare("select count(*) as c from runs where state = ?")
+          .get(state) as { c: number };
+        if (row.c >= 1) {
+          return;
+        }
+      } finally {
+        database.close();
+      }
+    } catch {
+      // The daemon may still be starting and creating its SQLite store.
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(`run did not reach state ${state}`);
 }
 
 async function waitForStatusError(

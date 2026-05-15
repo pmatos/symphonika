@@ -296,10 +296,20 @@ database path, workspace root. It dispatches no work.
 symphonika doctor --config symphonika.yml
 ```
 
-The first time you run this, expect a warning that the four `sym:*` operational
-labels do not yet exist on the target repository — that is what the next step
-fixes. If `doctor` reports errors (rather than warnings), fix them before
-continuing; smoke and daemon refuse to start when `doctor` is unhappy.
+The first time you run this against a fresh repository, `doctor` will exit
+non-zero and report the four `sym:*` operational labels as missing — for
+example:
+
+```
+doctor failed:
+- projects.my-app.tracker.repository your-handle/your-repo is missing operational labels: sym:claimed, sym:running, sym:failed, sym:stale
+```
+
+That specific error is expected and is exactly what step 8 (`init-project --yes`)
+resolves; re-run `doctor` after step 8 and it should print `doctor ok`. Any
+*other* error — a bad token, an unreadable workflow file, a missing provider
+binary — is a real problem and must be fixed before continuing, because smoke
+and daemon refuse to start when `doctor` is unhappy.
 
 Common first-run errors and what they mean:
 

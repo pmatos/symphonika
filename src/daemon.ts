@@ -94,7 +94,6 @@ export async function startDaemon(
   if (options.cwd !== undefined) {
     stateRootOptions.cwd = options.cwd;
   }
-  stateRootOptions.env = env;
   const state = resolveStateRoot(stateRootOptions);
   const issuePollStatus = emptyIssuePollStatus();
   const runStore = openRunStore({

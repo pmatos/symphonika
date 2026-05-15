@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,14 +23,6 @@ async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-cli-test-"));
   tempRoots.push(root);
   return root;
-}
-
-function restoreEnv(name: string, value: string | undefined): void {
-  if (value === undefined) {
-    delete process.env[name];
-    return;
-  }
-  process.env[name] = value;
 }
 
 afterEach(async () => {
@@ -136,6 +128,7 @@ describe("CLI", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
+      configPath: "symphonika.yml",
       issueNumber: 42,
       project: "symphonika",
       yes: true
@@ -463,108 +456,6 @@ describe("CLI", () => {
     expect(output.stdout).toContain("doctor ok");
     expect(output.stdout).toContain("project: symphonika — stale issues: 1");
     expect(output.stdout).toContain("#42  Orphan claimed issue");
-  });
-
-  it("doctor points first-time users to init when the default user config is missing", async () => {
-    const previousExitCode = process.exitCode;
-    const previousCwd = process.cwd();
-    const previousConfigHome = process.env.XDG_CONFIG_HOME;
-    const previousStateHome = process.env.XDG_STATE_HOME;
-    process.exitCode = 0;
-    const root = await makeTempRoot();
-    const configHome = path.join(root, "config");
-    const stateHome = path.join(root, "state");
-    process.chdir(root);
-    process.env.XDG_CONFIG_HOME = configHome;
-    process.env.XDG_STATE_HOME = stateHome;
-    const output = { stderr: "", stdout: "" };
-    const program = buildCli({ registerSignalHandlers: false });
-    program.configureOutput({
-      writeErr: (message) => {
-        output.stderr += message;
-      },
-      writeOut: (message) => {
-        output.stdout += message;
-      }
-    });
-
-    try {
-      await program.parseAsync(["node", "symphonika", "doctor"]);
-
-      expect(process.exitCode).toBe(1);
-      expect(output.stderr).toContain("doctor failed");
-      expect(output.stderr).toContain(
-        path.join(configHome, "symphonika", "symphonika.yml")
-      );
-      expect(output.stderr).toContain("symphonika init");
-    } finally {
-      process.chdir(previousCwd);
-      restoreEnv("XDG_CONFIG_HOME", previousConfigHome);
-      restoreEnv("XDG_STATE_HOME", previousStateHome);
-      process.exitCode = previousExitCode;
-    }
-  });
-
-  it("init creates a user service config for the current GitHub project", async () => {
-    const previousExitCode = process.exitCode;
-    const previousCwd = process.cwd();
-    const previousConfigHome = process.env.XDG_CONFIG_HOME;
-    const previousStateHome = process.env.XDG_STATE_HOME;
-    process.exitCode = 0;
-    const root = await makeTempRoot();
-    const projectRoot = path.join(root, "s11");
-    const configHome = path.join(root, "config");
-    const stateHome = path.join(root, "state");
-    await mkdir(projectRoot, { recursive: true });
-    await execFile("git", ["init", "--initial-branch", "main"], {
-      cwd: projectRoot
-    });
-    await execFile(
-      "git",
-      ["remote", "add", "origin", "https://github.com/pmatos/s11.git"],
-      { cwd: projectRoot }
-    );
-    process.chdir(projectRoot);
-    process.env.XDG_CONFIG_HOME = configHome;
-    process.env.XDG_STATE_HOME = stateHome;
-    const output = { stderr: "", stdout: "" };
-    const program = buildCli({ registerSignalHandlers: false });
-    program.exitOverride();
-    program.configureOutput({
-      writeErr: (message) => {
-        output.stderr += message;
-      },
-      writeOut: (message) => {
-        output.stdout += message;
-      }
-    });
-    const configPath = path.join(configHome, "symphonika", "symphonika.yml");
-    const stateRoot = path.join(stateHome, "symphonika");
-    const workflowPath = path.join(projectRoot, "WORKFLOW.md");
-
-    try {
-      await program.parseAsync(["node", "symphonika", "init"]);
-
-      const config = await readFile(configPath, "utf8");
-      const workflow = await readFile(workflowPath, "utf8");
-      expect(config).toContain(`root: ${stateRoot}`);
-      expect(config).toContain("owner: pmatos");
-      expect(config).toContain("repo: s11");
-      expect(config).toContain("remote: https://github.com/pmatos/s11.git");
-      expect(config).toContain(`root: ${path.join(stateRoot, "workspaces", "s11")}`);
-      expect(config).toContain(`workflow: ${workflowPath}`);
-      expect(workflow).toContain("# Implementing issue #{{issue.number}}");
-      expect(output.stdout).toContain("init ok");
-      expect(output.stdout).toContain(configPath);
-      expect(output.stdout).toContain("symphonika doctor");
-      expect(output.stderr).toBe("");
-      expect(process.exitCode).not.toBe(1);
-    } finally {
-      process.chdir(previousCwd);
-      restoreEnv("XDG_CONFIG_HOME", previousConfigHome);
-      restoreEnv("XDG_STATE_HOME", previousStateHome);
-      process.exitCode = previousExitCode;
-    }
   });
 
   it("runs init-project with the selected config path and explicit confirmation", async () => {

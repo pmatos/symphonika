@@ -168,6 +168,7 @@ export type ProviderEventRecord = {
 export type ListProviderEventsOptions = {
   afterSequence?: number;
   limit?: number;
+  order?: "asc" | "desc";
 };
 
 export type ListRunsFilter = {
@@ -1041,13 +1042,17 @@ export class RunStore {
       options.limit !== undefined
         ? `limit ${Math.max(0, Math.floor(options.limit))}`
         : "";
+    const order =
+      options.order === "desc"
+        ? "created_at desc, id desc"
+        : "sequence asc, created_at asc, id asc";
     const rows = this.database
       .prepare(
         [
           "select run_id, attempt_id, sequence, type, raw_json, normalized_json, created_at",
           "from provider_events",
           `where ${conditions.join(" and ")}`,
-          "order by sequence asc",
+          `order by ${order}`,
           limit
         ]
           .filter((part) => part.length > 0)

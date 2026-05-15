@@ -24,6 +24,7 @@ import type {
   OpenRunStoreOptions,
   ProjectState,
   RunState,
+  RunStatus,
   RunStore
 } from "./run-store.js";
 import { openRunStore as openRunStoreReal } from "./run-store.js";
@@ -34,6 +35,11 @@ import {
   parseCapReachedReason
 } from "./lifecycle/terminal-reason.js";
 import { resolveStateRoot } from "./state.js";
+import {
+  renderStatusDashboard,
+  summarizeDashboardEvent,
+  type DashboardEventSummary
+} from "./status-dashboard.js";
 import { VERSION } from "./version.js";
 import { explainWorkflow, loadProjectWorkflow } from "./workflow.js";
 
@@ -346,91 +352,139 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .description("print project validation, issue polling, and run summaries")
     .option("--config <path>", "service config path", "symphonika.yml")
     .option("--daemon-url <url>", "local daemon base URL")
-    .action(async (options: { config: string; daemonUrl?: string }) => {
-      const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
-      const store = openRunStore({ stateRoot });
-      try {
-        const report = await doctor({ configPath: options.config });
-        const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
-        const daemonStatus =
-          daemonUrl === undefined
-            ? ({ error: "not configured", kind: "unavailable" } as const)
-            : await fetchDaemonStatus(fetcher, daemonUrl, stateRoot);
-        const all = store.listRuns();
-        const byState = new Map<string, number>();
-        for (const run of all) {
-          byState.set(run.state, (byState.get(run.state) ?? 0) + 1);
-        }
-        writeOut(program, `state root: ${stateRoot}\n`);
-        if (daemonUrl !== undefined) {
-          writeOut(
-            program,
-            `daemon: ${formatDaemonAvailability(daemonStatus, daemonUrl)}\n`
-          );
-          writeOut(program, `config reload: ${formatReloadOutcome(daemonStatus)}\n`);
-        }
-        writeOut(program, "\nProjects:\n");
-        if (report.projects.length === 0) {
-          writeOut(program, "  (no projects validated)\n");
-        }
-        for (const project of report.projects) {
-          writeOut(
-            program,
-            `  ${project.name}: ${project.validForDispatch ? "valid" : "invalid"}\n`
-          );
-          writeOut(program, `    workflow: ${project.workflowPath}\n`);
-          writeOut(
-            program,
-            `    missing operational labels: ${formatList(project.missingOperationalLabels)}\n`
-          );
-          const cursor = projectCursorFromStatus(daemonStatus, project.name);
-          if (cursor !== undefined) {
-            writeOut(program, `    ${formatProjectCursor(cursor)}\n`);
-            writeOut(program, `    ${formatProjectLastPoll(cursor)}\n`);
-            writeOut(program, `    ${formatProjectLastDispatch(cursor)}\n`);
-          }
-        }
-        if (report.errors.length > 0) {
-          writeOut(program, "validation errors:\n");
-          for (const error of report.errors) {
-            writeOut(program, `  - ${error}\n`);
-          }
-        }
-        const issueCounts = issueCountsFromStatus(
-          daemonStatus,
-          report.projects,
-          byState
-        );
-        writeOut(program, "\nIssue counts:\n");
-        writeOut(program, `  candidate: ${issueCounts.candidate}\n`);
-        writeOut(program, `  filtered:  ${issueCounts.filtered}\n`);
-        writeOut(program, `  running:   ${issueCounts.running}\n`);
-        writeOut(program, `  failed:    ${issueCounts.failed}\n`);
-        writeOut(program, `  stale:     ${issueCounts.stale}\n`);
-        writeOut(
-          program,
-          `last poll outcome: ${formatLastPollOutcome(daemonStatus)}\n`
-        );
-        writeOut(program, "\nRun state counts:\n");
-        writeOut(program, `total runs: ${all.length}\n`);
-        for (const [state, count] of [...byState.entries()].sort()) {
-          writeOut(program, `${state}: ${count}\n`);
-        }
-        if (all.length > 0) {
-          writeOut(program, "\nrecent runs:\n");
-          for (const run of all.slice(0, 25)) {
-            const suffix = formatRecentRunSuffix(run, store);
+    .option("--dashboard", "render a compact terminal status dashboard")
+    .option("--watch", "refresh the terminal dashboard until interrupted")
+    .option("--interval-ms <n>", "watch refresh interval in milliseconds", parsePositiveInt, 1000)
+    .action(
+      async (options: {
+        config: string;
+        daemonUrl?: string;
+        dashboard?: boolean;
+        intervalMs: number;
+        watch?: boolean;
+      }) => {
+        const printOnce = async (
+          dashboard: boolean,
+          cachedReport?: DoctorReport
+        ): Promise<void> => {
+          const stateRoot = resolveStateRoot({ configPath: options.config }).stateRoot;
+          const store = openRunStore({ stateRoot });
+          try {
+            const report = cachedReport ?? (await doctor({ configPath: options.config }));
+            const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
+            const daemonStatus =
+              daemonUrl === undefined
+                ? ({ error: "not configured", kind: "unavailable" } as const)
+                : await fetchDaemonStatus(fetcher, daemonUrl, stateRoot);
+            const all = store.listRuns();
+            const byState = new Map<string, number>();
+            for (const run of all) {
+              byState.set(run.state, (byState.get(run.state) ?? 0) + 1);
+            }
+            const issueCounts = issueCountsFromStatus(
+              daemonStatus,
+              report.projects,
+              byState
+            );
+
+            if (dashboard) {
+              writeOut(
+                program,
+                renderStatusDashboard({
+                  daemon:
+                    daemonUrl === undefined
+                      ? "unavailable (not configured)"
+                      : formatDaemonAvailability(daemonStatus, daemonUrl),
+                  issueCounts,
+                  lastPollOutcome: formatLastPollOutcome(daemonStatus),
+                  latestEvents: collectLatestDashboardEvents(store, all),
+                  projects: report.projects,
+                  reload: formatReloadOutcome(daemonStatus),
+                  runs: all,
+                  stateRoot
+                })
+              );
+              return;
+            }
+
+            writeOut(program, `state root: ${stateRoot}\n`);
+            if (daemonUrl !== undefined) {
+              writeOut(
+                program,
+                `daemon: ${formatDaemonAvailability(daemonStatus, daemonUrl)}\n`
+              );
+              writeOut(program, `config reload: ${formatReloadOutcome(daemonStatus)}\n`);
+            }
+            writeOut(program, "\nProjects:\n");
+            if (report.projects.length === 0) {
+              writeOut(program, "  (no projects validated)\n");
+            }
+            for (const project of report.projects) {
+              writeOut(
+                program,
+                `  ${project.name}: ${project.validForDispatch ? "valid" : "invalid"}\n`
+              );
+              writeOut(program, `    workflow: ${project.workflowPath}\n`);
+              writeOut(
+                program,
+                `    missing operational labels: ${formatList(project.missingOperationalLabels)}\n`
+              );
+              const cursor = projectCursorFromStatus(daemonStatus, project.name);
+              if (cursor !== undefined) {
+                writeOut(program, `    ${formatProjectCursor(cursor)}\n`);
+                writeOut(program, `    ${formatProjectLastPoll(cursor)}\n`);
+                writeOut(program, `    ${formatProjectLastDispatch(cursor)}\n`);
+              }
+            }
+            if (report.errors.length > 0) {
+              writeOut(program, "validation errors:\n");
+              for (const error of report.errors) {
+                writeOut(program, `  - ${error}\n`);
+              }
+            }
+            writeOut(program, "\nIssue counts:\n");
+            writeOut(program, `  candidate: ${issueCounts.candidate}\n`);
+            writeOut(program, `  filtered:  ${issueCounts.filtered}\n`);
+            writeOut(program, `  running:   ${issueCounts.running}\n`);
+            writeOut(program, `  failed:    ${issueCounts.failed}\n`);
+            writeOut(program, `  stale:     ${issueCounts.stale}\n`);
             writeOut(
               program,
-              `  ${run.id}  ${run.project}  #${run.issueNumber}  ${run.state}  ${run.provider}${suffix}\n`
+              `last poll outcome: ${formatLastPollOutcome(daemonStatus)}\n`
             );
+            writeOut(program, "\nRun state counts:\n");
+            writeOut(program, `total runs: ${all.length}\n`);
+            for (const [state, count] of [...byState.entries()].sort()) {
+              writeOut(program, `${state}: ${count}\n`);
+            }
+            if (all.length > 0) {
+              writeOut(program, "\nrecent runs:\n");
+              for (const run of all.slice(0, 25)) {
+                const suffix = formatRecentRunSuffix(run, store);
+                writeOut(
+                  program,
+                  `  ${run.id}  ${run.project}  #${run.issueNumber}  ${run.state}  ${run.provider}${suffix}\n`
+                );
+              }
+            }
+            printStaleSection(program, report.projects);
+          } finally {
+            store.close();
+          }
+        };
+
+        if (options.watch === true) {
+          const report = await doctor({ configPath: options.config });
+          for (;;) {
+            writeOut(program, "\x1b[2J\x1b[H");
+            await printOnce(true, report);
+            await sleep(options.intervalMs);
           }
         }
-        printStaleSection(program, report.projects);
-      } finally {
-        store.close();
+
+        await printOnce(options.dashboard === true);
       }
-    });
+    );
 
   program
     .command("poll-now")
@@ -653,6 +707,38 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
 
 export async function runCli(argv = process.argv): Promise<void> {
   await buildCli().parseAsync(argv);
+}
+
+function collectLatestDashboardEvents(
+  store: RunStore,
+  runs: RunStatus[]
+): Map<string, DashboardEventSummary> {
+  const latestEvents = new Map<string, DashboardEventSummary>();
+  for (const run of runs) {
+    if (!statusDashboardShowsLatestEvent(run.state)) {
+      continue;
+    }
+    const events = store.listProviderEvents(run.id, { limit: 1, order: "desc" });
+    const summary = summarizeDashboardEvent(events[0]);
+    if (summary !== undefined) {
+      latestEvents.set(run.id, summary);
+    }
+  }
+  return latestEvents;
+}
+
+function statusDashboardShowsLatestEvent(state: RunState): boolean {
+  return (
+    state === "queued" ||
+    state === "preparing_workspace" ||
+    state === "running" ||
+    state === "input_required" ||
+    state === "waiting"
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function fetchDaemonStatus(

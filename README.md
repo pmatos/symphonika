@@ -48,6 +48,13 @@ npm run dev -- poll-now --config symphonika.yml
 
 The command discovers `.symphonika/daemon.json`, preflights that the daemon reports the same state root, then posts to the local `/api/poll-now` endpoint. The daemon uses the same reconcile, polling, and dispatch gates as interval ticks, so invalid Projects, operational labels, excluded labels, active runs, and the dispatch mutex still apply.
 
+For a compact terminal dashboard inspired by the upstream Symphony status surface:
+
+```sh
+npm run dev -- status --config symphonika.yml --dashboard
+npm run dev -- status --config symphonika.yml --watch
+```
+
 The `symphony/` directory in the tree is a git submodule of an unrelated upstream project (`openai/symphony`) used as a reference — it is not a launcher for Symphonika.
 
 ## Self-Hosting

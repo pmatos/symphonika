@@ -804,7 +804,7 @@ Bootstrap CLI commands:
 - `symphonika doctor --config <path>`
 - `symphonika init-project <name> --config <path>`
 - `symphonika daemon --config <path> [--port <port>]`
-- `symphonika status --config <path>`
+- `symphonika status --config <path> [--dashboard] [--watch] [--interval-ms <ms>]`
 - `symphonika poll-now --config <path>`
 - `symphonika runs --config <path>`
 - `symphonika show-run <run-id> --config <path>`
@@ -824,6 +824,10 @@ Bootstrap CLI commands:
 - workspace root
 
 `init-project` creates missing operational labels only after explicit confirmation.
+
+`status --dashboard` renders a compact terminal status dashboard from the run store and daemon
+`/api/status` endpoint. `status --watch` refreshes that read-only dashboard in place; it must not
+dispatch work or mutate GitHub state.
 
 `clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
 

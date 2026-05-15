@@ -272,6 +272,23 @@ describe("RunStore detail queries", () => {
         workflowGraphPath: "",
         workspacePath: "/tmp/work"
       });
+      store.createAttempt({
+        attemptNumber: 2,
+        branchName: "branch",
+        branchRef: "refs/heads/branch",
+        id: "r-events-attempt-2",
+        issueSnapshotPath: "/tmp/snap-2.json",
+        metadataPath: "/tmp/meta-2.json",
+        normalizedLogPath: "/tmp/normalized-2.jsonl",
+        promptPath: "/tmp/prompt-2.md",
+        providerCommand: "x",
+        providerName: "codex",
+        rawLogPath: "/tmp/raw-2.jsonl",
+        runId: "r-events",
+        state: "running",
+        workflowGraphPath: "",
+        workspacePath: "/tmp/work"
+      });
       for (let i = 1; i <= 5; i += 1) {
         store.recordProviderEvent({
           attemptId: "r-events-attempt-1",
@@ -281,20 +298,32 @@ describe("RunStore detail queries", () => {
           sequence: i
         });
       }
+      store.recordProviderEvent({
+        attemptId: "r-events-attempt-2",
+        normalized: { type: "message", message: "retry started" },
+        raw: { kind: "message", body: "retry started" },
+        runId: "r-events",
+        sequence: 1
+      });
 
       expect(store.listProviderEvents("r-events").map((e) => e.sequence)).toEqual([
-        1, 2, 3, 4, 5
+        1, 1, 2, 3, 4, 5
       ]);
       expect(
         store
           .listProviderEvents("r-events", { limit: 2 })
           .map((e) => e.sequence)
-      ).toEqual([1, 2]);
+      ).toEqual([1, 1]);
       expect(
         store
           .listProviderEvents("r-events", { afterSequence: 3 })
           .map((e) => e.sequence)
       ).toEqual([4, 5]);
+      expect(
+        store
+          .listProviderEvents("r-events", { limit: 1, order: "desc" })
+          .map((e) => [e.attemptId, e.sequence])
+      ).toEqual([["r-events-attempt-2", 1]]);
     } finally {
       store.close();
     }

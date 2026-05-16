@@ -2,9 +2,9 @@
 
 Symphonika's raw FSM workflow contract allows `action.kind: "wait"` states whose purpose is to pause
 a workflow walk until observable pull-request conditions change (status-check rollup, mergeability,
-unresolved review threads). Unlike `action.kind: "agent"` states, a wait state must not launch a
-provider — it only re-evaluates predicates against externally-observed GitHub state and either
-advances to the next workflow state or stays parked.
+review decision, unresolved review threads). Unlike `action.kind: "agent"` states, a wait state
+must not launch a provider — it only re-evaluates predicates against externally-observed GitHub
+state and either advances to the next workflow state or stays parked.
 
 Two design choices follow from that contract.
 
@@ -61,6 +61,11 @@ Projection of `mergeable` deliberately omits the predicate key when GitHub repor
 UNKNOWN — the wait state stays parked until GitHub resolves the value. This is the correct
 behavior: matching unknown against either branch would race the GitHub mergeability computation
 that runs right after a push.
+
+Review decisions are projected as `review_decision: approved|changes_requested|review_required|none`.
+Unresolved review feedback is projected as both the exact `unresolved_review_threads` count and the
+derived `has_unresolved_reviews` boolean, so strict-equality transitions can match "any unresolved
+review exists" without comparator syntax.
 
 The PR follow-up logic in `src/pull-request-followup.ts` shares `projectPullRequestSignals` with
 the wait handler so the two paths cannot drift in how they interpret a given GitHub state.

@@ -45,9 +45,10 @@ asymmetry keeps the workflow file focused on FSM semantics while operators retai
 through service config: setting `pull_requests.merge.enabled: false` defers every FSM-driven
 merge attempt without changes to workflow files.
 
-The merge state intentionally does not invent new predicates. Workflow authors expressing "the
-merge succeeded" use `pr_merged: true`, the same predicate the wait state uses; expressing
-"the merge cannot proceed" uses the existing `mergeable`, `checks`, and
+The merge state intentionally reuses the wait-state predicate vocabulary instead of inventing
+merge-only predicates. Workflow authors expressing "the merge succeeded" use `pr_merged: true`,
+the same predicate the wait state uses; expressing "the merge cannot proceed" uses the existing
+`mergeable`, `checks`, `review_decision`, `has_unresolved_reviews`, and
 `unresolved_review_threads` predicates. This keeps the predicate vocabulary small and avoids a
 divergence between the orchestrator-wide PR follow-up loop and the FSM-controlled merge path,
 echoing ADR 0047's reasoning for sharing `projectPullRequestSignals`.

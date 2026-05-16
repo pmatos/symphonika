@@ -97,6 +97,22 @@ describe("projectPullRequestSignals", () => {
     expect("checks" in signals).toBe(false);
   });
 
+  it("emits normalized review_decision states", () => {
+    const cases = [
+      ["APPROVED", "approved"],
+      ["CHANGES_REQUESTED", "changes_requested"],
+      ["REVIEW_REQUIRED", "review_required"],
+      [null, "none"]
+    ] as const;
+
+    for (const [reviewDecision, expected] of cases) {
+      const signals = projectPullRequestSignals(
+        makePullRequestState({ reviewDecision })
+      );
+      expect(signals.review_decision).toBe(expected);
+    }
+  });
+
   it("emits unresolved_review_threads as the numeric count", () => {
     const zero = projectPullRequestSignals(
       makePullRequestState({ unresolvedReviewThreads: [] })
@@ -112,5 +128,19 @@ describe("projectPullRequestSignals", () => {
       })
     );
     expect(two.unresolved_review_threads).toBe(2);
+  });
+
+  it("emits has_unresolved_reviews from the unresolved review thread count", () => {
+    const zero = projectPullRequestSignals(
+      makePullRequestState({ unresolvedReviewThreads: [] })
+    );
+    expect(zero.has_unresolved_reviews).toBe(false);
+
+    const one = projectPullRequestSignals(
+      makePullRequestState({
+        unresolvedReviewThreads: [{ id: "t1", isResolved: false, comments: [] }]
+      })
+    );
+    expect(one.has_unresolved_reviews).toBe(true);
   });
 });

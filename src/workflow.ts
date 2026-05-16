@@ -234,10 +234,12 @@ const completionPredicateKeys = new Set([
   "branch_ahead_of_base",
   "branch_pushed",
   "checks",
+  "has_unresolved_reviews",
   "mergeable",
   "pr_merged",
   "pr_open",
   "provider_success",
+  "review_decision",
   "timeout",
   "unresolved_review_threads"
 ]);

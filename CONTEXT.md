@@ -32,6 +32,17 @@ _Avoid_: ticket, task
 An open issue that matches a Project's required labels, avoids excluded labels, and is not already claimed by the orchestrator; v1 treats excluded labels such as `blocked` as the only blocker signal.
 _Avoid_: active issue unless referring to tracker state
 
+**Dispatch Eligibility**:
+The question "may this Project freshly claim this Issue?", including open state, required labels,
+excluded labels, and blocking operational labels.
+_Avoid_: continuation eligibility when referring to first claim selection
+
+**Continuation Eligibility**:
+The question "may this already-owned Run lifecycle keep going?", including open state for every Run,
+and label re-checks only for label-controlled work. State Advance and waiting rows keep going on
+label drift but still stop when the Issue closes.
+_Avoid_: dispatch eligibility when referring to active-run or scheduled-work re-checks
+
 **Operational Label**:
 A GitHub issue label owned by the orchestrator for dispatch safety and runtime bookkeeping; v1 labels are `sym:claimed`, `sym:running`, `sym:failed`, and `sym:stale`.
 _Avoid_: workflow label
@@ -130,6 +141,8 @@ _Avoid_: chat session
 - A **Project** references one **Workflow Contract**
 - An **Issue Tracker** provides many **Issues**
 - An **Eligible Issue** is an **Issue** that a **Project** may dispatch
+- **Dispatch Eligibility** and **Continuation Eligibility** are separate questions over the same
+  Issue predicate family
 - An **Orchestrator** dispatches zero or more **Issues** across one or more **Projects**
 - An **Orchestrator** may write **Operational Labels**
 - A **Stale Claim** blocks automatic dispatch until explicitly cleared in v1

@@ -1477,6 +1477,75 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("recomputes the target state provider when a delayed state advance fires", async () => {
+    const root = await makeTempRoot();
+    await writePerStateProviderRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexInputs: ProviderRunInput[] = [];
+    const claudeInputs: ProviderRunInput[] = [];
+    const codexProvider = successfulProvider("codex", codexInputs);
+    const claudeProvider = successfulProvider("claude", claudeInputs);
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { claude: claudeProvider, codex: codexProvider },
+      createRunId: () => `run-fsm-reloaded-provider-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 250 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForStoredRunState(root, "succeeded");
+      await writeProviderRoutingWorkflow(root, "codex");
+      await waitForTerminalState(root, "done");
+
+      expect(codexInputs).toHaveLength(2);
+      expect(claudeInputs).toHaveLength(0);
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const rows = database
+          .prepare("select id, provider_name from runs order by created_at")
+          .all() as Array<Record<string, unknown>>;
+        expect(rows).toMatchObject([
+          { id: "run-fsm-reloaded-provider-1", provider_name: "codex" },
+          { id: "run-fsm-reloaded-provider-2", provider_name: "codex" }
+        ]);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("falls back to the project provider when the next agent state omits provider", async () => {
     const root = await makeTempRoot();
     await writeFallbackProviderRawFsmProject(root);
@@ -2723,6 +2792,13 @@ async function writeMultiStateRawFsmProject(root: string): Promise<void> {
 
 async function writePerStateProviderRawFsmProject(root: string): Promise<void> {
   await writeRawFsmProjectConfig(root);
+  await writeProviderRoutingWorkflow(root, "claude");
+}
+
+async function writeProviderRoutingWorkflow(
+  root: string,
+  autofixProvider: "codex" | "claude"
+): Promise<void> {
   await writeFile(
     path.join(root, "workflow.yml"),
     [
@@ -2743,7 +2819,7 @@ async function writePerStateProviderRawFsmProject(root: string): Promise<void> {
       "    autofix:",
       "      action:",
       "        kind: agent",
-      "        provider: claude",
+      `        provider: ${autofixProvider}`,
       "        prompt: autofix-prompt.md",
       "      complete_when:",
       "        provider_success: true",

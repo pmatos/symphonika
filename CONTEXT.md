@@ -80,6 +80,21 @@ _Avoid_: event log when referring to scheduler state
 One orchestrator-managed execution lifecycle for one issue in one workspace.
 _Avoid_: issue when referring to execution status
 
+**Run Lifecycle**:
+The stateful progression of one Run from dispatch selection through provider execution, scheduling,
+waiting, cancellation, or terminal labels.
+_Avoid_: daemon loop when referring to Run-local progression
+
+**Lifecycle Event**:
+A value that asks the Run Lifecycle to decide what should happen next, such as a fresh dispatch
+request, retry timer firing, provider attempt completion, or waiting-row recheck.
+_Avoid_: entrypoint payload
+
+**Planned Step**:
+The next effect chosen by the Run Lifecycle, such as start a label-eligible run, start an FSM-owned
+run, schedule retry, re-evaluate a waiting row, cancel, or mark failed.
+_Avoid_: callback when referring to lifecycle policy
+
 **Continuation**:
 A follow-up run for the same issue after a provider completed successfully but the issue remains eligible.
 _Avoid_: retry when the prior run succeeded
@@ -129,6 +144,7 @@ _Avoid_: chat session
 - A **Normalized Event Log** is derived from a **Provider Event Log**
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
+- A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
 - A **Continuation** is capped so an eligible issue cannot loop forever
 - A **State Advance** is not capped by the continuation cap; the FSM bounds the walk via terminal states
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete

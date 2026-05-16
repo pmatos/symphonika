@@ -319,8 +319,67 @@ export class RunController {
       repo: target.project.tracker.repo,
       token
     };
-    const providerCommand =
-      providersConfig[target.project.agent.provider].command;
+
+    // Honor action.provider on the initial raw-FSM state, matching the
+    // per-state routing executeStateAdvance applies to subsequent advances.
+    // runAttemptLifecycle reloads the workflow downstream regardless, so
+    // loading it once here pays only on actually-selected dispatches. Falls
+    // back to the project default for contract workflows or when the
+    // initial agent action declares no provider.
+    let initialAction: WorkflowAction | undefined;
+    try {
+      const loaded = await this.loadWorkflow(target.project.workflow);
+      if (
+        loaded.errors.length === 0 &&
+        loaded.expandedWorkflow.source.kind === "raw_fsm"
+      ) {
+        const initialState = findWorkflowState(
+          loaded.expandedWorkflow,
+          loaded.expandedWorkflow.initial
+        );
+        if (initialState?.action !== undefined) {
+          initialAction = initialState.action;
+        }
+      }
+    } catch {
+      // Workflow load failure falls back to the project default; the same
+      // error surfaces from runAttemptLifecycle's reload during the attempt.
+    }
+
+    const providerName =
+      initialAction?.kind === "agent" && initialAction.provider !== undefined
+        ? initialAction.provider
+        : target.project.agent.provider;
+    const providerCommand = (
+      providersConfig as Partial<RunControllerProvidersConfig>
+    )[providerName]?.command;
+
+    if (providerCommand === undefined || providerCommand.trim().length === 0) {
+      await this.failFreshDispatchBeforeProvider({
+        issue: target.candidate.issue,
+        project: target.project,
+        providerCommand: providerCommand ?? "",
+        providerName,
+        reason: `provider_command_missing: ${providerName}`,
+        repository,
+        runId
+      });
+      return { dispatched: true, runId };
+    }
+
+    const provider = this.agentProviders[providerName];
+    if (provider === undefined) {
+      await this.failFreshDispatchBeforeProvider({
+        issue: target.candidate.issue,
+        project: target.project,
+        providerCommand,
+        providerName,
+        reason: `provider_not_registered: ${providerName}`,
+        repository,
+        runId
+      });
+      return { dispatched: true, runId };
+    }
 
     await this.runFreshLifecycle({
       attemptNumber: 1,
@@ -328,15 +387,75 @@ export class RunController {
       issue: target.candidate.issue,
       parentRunId: null,
       project: target.project,
-      provider: target.provider,
+      provider,
       providerCommand,
-      providerName: target.project.agent.provider,
+      providerName,
       repository,
       runId,
       schedulerWeights: target.schedulerWeights
     });
 
     return { dispatched: true, runId };
+  }
+
+  private async failFreshDispatchBeforeProvider(input: {
+    issue: IssueSnapshot;
+    project: RunControllerProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    reason: string;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    await this.bestEffort(
+      () =>
+        (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
+          ...input.repository,
+          issueNumber: input.issue.number,
+          labels: ["sym:claimed"]
+        }),
+      {
+        issueNumber: input.issue.number,
+        label: "sym:claimed",
+        operation: "addLabel",
+        phase: "fresh-dispatch-provider-resolution",
+        project: input.project.name,
+        runId: input.runId
+      }
+    );
+    this.runStore.createRun({
+      id: input.runId,
+      issue: input.issue,
+      projectName: input.project.name,
+      providerCommand: input.providerCommand,
+      providerName: input.providerName
+    });
+    this.runStore.recordTerminalReason(
+      input.runId,
+      input.reason,
+      "deterministic"
+    );
+    this.runStore.updateRunState(input.runId, "failed");
+    this.logger?.warn(
+      {
+        issueNumber: input.issue.number,
+        project: input.project.name,
+        provider: input.providerName,
+        reason: input.reason,
+        runId: input.runId
+      },
+      "symphonika fresh dispatch failed before provider launch"
+    );
+    await this.applyTerminalLabels({
+      issueNumber: input.issue.number,
+      outcome: {
+        classification: "deterministic",
+        kind: "failed",
+        reason: input.reason
+      },
+      repository: input.repository,
+      willRetry: false
+    });
   }
 
   async executeRetry(payload: RetryPayload): Promise<void> {

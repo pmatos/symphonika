@@ -1748,6 +1748,160 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("honors action.provider on the initial raw-FSM state during fresh dispatch", async () => {
+    const root = await makeTempRoot();
+    await writeInitialStateClaudeRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexInputs: ProviderRunInput[] = [];
+    const claudeInputs: ProviderRunInput[] = [];
+    const codexProvider = successfulProvider("codex", codexInputs);
+    const claudeProvider = successfulProvider("claude", claudeInputs);
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { claude: claudeProvider, codex: codexProvider },
+      createRunId: () => `run-fsm-initial-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForTerminalState(root, "done");
+
+      // Project default is codex, initial state declares provider: claude.
+      // The first attempt MUST launch claude, not codex — the SPEC contract
+      // applies to raw-FSM agent states broadly, including the initial one.
+      expect(claudeInputs).toHaveLength(1);
+      expect(codexInputs).toHaveLength(0);
+      expect(claudeInputs[0]?.provider).toMatchObject({
+        command:
+          "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json",
+        name: "claude"
+      });
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const rows = database
+          .prepare("select id, provider_name from runs order by created_at")
+          .all() as Array<Record<string, unknown>>;
+        expect(rows[0]).toMatchObject({
+          id: "run-fsm-initial-1",
+          provider_name: "claude"
+        });
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("records a deterministic fresh-dispatch failure when the initial state's provider is not registered", async () => {
+    const root = await makeTempRoot();
+    await writeInitialStateClaudeRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = successfulProvider("codex");
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => `run-fsm-initial-missing-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForStoredRunState(root, "failed");
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const row = database
+          .prepare(
+            [
+              "select id, state, provider_name, terminal_reason,",
+              "failure_classification, is_continuation from runs",
+              "order by created_at"
+            ].join(" ")
+          )
+          .get() as Record<string, unknown>;
+        expect(row).toMatchObject({
+          failure_classification: "deterministic",
+          id: "run-fsm-initial-missing-1",
+          is_continuation: 0,
+          provider_name: "claude",
+          state: "failed",
+          terminal_reason: "provider_not_registered: claude"
+        });
+      } finally {
+        database.close();
+      }
+
+      const failedLabelCalls = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+        (call) => {
+          const arg = call[0] as { labels?: string[] } | undefined;
+          return arg?.labels?.includes("sym:failed") ?? false;
+        }
+      );
+      expect(failedLabelCalls.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("picks the first transition in YAML order when multiple transitions match the observed signals", async () => {
     const root = await makeTempRoot();
     await writeTransitionOrderRawFsmProject(root);
@@ -2660,6 +2814,38 @@ async function writeFallbackProviderRawFsmProject(root: string): Promise<void> {
   await writeFile(
     path.join(root, "implement-prompt.md"),
     "Implement the plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
+async function writeInitialStateClaudeRawFsmProject(root: string): Promise<void> {
+  // Project default is codex; the initial raw-FSM state declares claude so a
+  // fresh dispatch must honor the per-state override on attempt 1.
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: initial_state_provider_routing",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: claude",
+      "        prompt: plan-prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: done",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "plan-prompt.md"),
+    "Draft a plan for #{{issue.number}}: {{issue.title}}.\n"
   );
 }
 

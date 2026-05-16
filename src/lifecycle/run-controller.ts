@@ -74,6 +74,7 @@ export type WorkflowSnapshot = {
   body: string;
   contentHash: string;
   expandedWorkflow: ExpandedWorkflow;
+  format: WorkflowReference["format"];
   path: string;
 };
 
@@ -82,6 +83,7 @@ type LoadedWorkflow = {
   contentHash: string;
   errors: string[];
   expandedWorkflow: ExpandedWorkflow;
+  format: WorkflowReference["format"];
   path: string;
 };
 
@@ -219,14 +221,13 @@ type ContinuationPayload = {
 };
 
 type StateAdvancePayload = {
-  action?: WorkflowAction;
   issue: IssueSnapshot;
   parentRunId: string;
   projectName: string;
+  toStateId: string;
 };
 
 type WorkflowOutcomeResult = {
-  advancedToAction?: WorkflowAction;
   advancedToState: string | null;
   advancedToTerminal: boolean;
   blocked: boolean;
@@ -890,10 +891,10 @@ export class RunController {
         delayMs: this.lifecyclePolicy.continuation.delayMs,
         fire: () =>
           this.executeStateAdvance({
-            ...(next?.action === undefined ? {} : { action: next.action }),
             issue: refreshed,
             parentRunId: runId,
-            projectName: project.name
+            projectName: project.name,
+            toStateId: decision.to
           }),
         issueNumber: refreshed.number,
         kind: "state_advance",
@@ -932,15 +933,7 @@ export class RunController {
       return;
     }
 
-    const providerName =
-      payload.action?.kind === "agent" && payload.action.provider !== undefined
-        ? payload.action.provider
-        : project.agent.provider;
     const providersConfig = await this.providersLoader();
-    const providerConfig = (providersConfig as Partial<RunControllerProvidersConfig>)[
-      providerName
-    ];
-    const providerCommand = providerConfig?.command;
 
     if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
       return;
@@ -976,6 +969,79 @@ export class RunController {
     }
 
     const runId = this.createRunId();
+    let loadedWorkflow: LoadedWorkflow;
+    try {
+      loadedWorkflow = await this.loadWorkflow(project.workflow, {
+        forceReload: true
+      });
+    } catch (error) {
+      const providerName = project.agent.provider;
+      const providerCommand =
+        (providersConfig as Partial<RunControllerProvidersConfig>)[providerName]
+          ?.command ?? "";
+      const message = error instanceof Error ? error.message : String(error);
+      await this.failStateAdvanceBeforeProvider({
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        project,
+        providerCommand,
+        providerName,
+        reason: `workflow_load_failed: ${message}`,
+        repository,
+        runId
+      });
+      return;
+    }
+    if (loadedWorkflow.errors.length > 0) {
+      const providerName = project.agent.provider;
+      const providerCommand =
+        (providersConfig as Partial<RunControllerProvidersConfig>)[providerName]
+          ?.command ?? "";
+      await this.failStateAdvanceBeforeProvider({
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        project,
+        providerCommand,
+        providerName,
+        reason: `workflow_load_failed: ${loadedWorkflow.errors.join("; ")}`,
+        repository,
+        runId
+      });
+      return;
+    }
+
+    const targetState = findWorkflowState(
+      loadedWorkflow.expandedWorkflow,
+      payload.toStateId
+    );
+    if (targetState === undefined) {
+      const providerName = project.agent.provider;
+      const providerCommand =
+        (providersConfig as Partial<RunControllerProvidersConfig>)[providerName]
+          ?.command ?? "";
+      await this.failStateAdvanceBeforeProvider({
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        project,
+        providerCommand,
+        providerName,
+        reason: `workflow_state_not_found: ${payload.toStateId}`,
+        repository,
+        runId
+      });
+      return;
+    }
+
+    const providerName =
+      targetState.action?.kind === "agent" &&
+      targetState.action.provider !== undefined
+        ? targetState.action.provider
+        : project.agent.provider;
+    const providerConfig = (providersConfig as Partial<RunControllerProvidersConfig>)[
+      providerName
+    ];
+    const providerCommand = providerConfig?.command;
+
     if (providerCommand === undefined || providerCommand.trim().length === 0) {
       await this.failStateAdvanceBeforeProvider({
         issue: refreshed,
@@ -1010,7 +1076,16 @@ export class RunController {
       isContinuation: true,
       issue: refreshed,
       parentRunId: payload.parentRunId,
-      project,
+      project: {
+        ...project,
+        workflow: {
+          body: loadedWorkflow.body,
+          contentHash: loadedWorkflow.contentHash,
+          expandedWorkflow: loadedWorkflow.expandedWorkflow,
+          format: loadedWorkflow.format,
+          path: loadedWorkflow.path
+        }
+      },
       provider,
       providerCommand,
       providerName,
@@ -1480,6 +1555,7 @@ export class RunController {
           body: loadedWorkflow.body,
           contentHash: loadedWorkflow.contentHash,
           expandedWorkflow: loadedWorkflow.expandedWorkflow,
+          format: loadedWorkflow.format,
           path: loadedWorkflow.path
         }
       };
@@ -1718,9 +1794,6 @@ export class RunController {
             workflowOutcome.advancedToState !== null &&
             workflowOutcome.parkAsWait !== true
               ? {
-                  ...(workflowOutcome.advancedToAction === undefined
-                    ? {}
-                    : { action: workflowOutcome.advancedToAction }),
                   toStateId: workflowOutcome.advancedToState
                 }
               : null,
@@ -1897,7 +1970,6 @@ export class RunController {
         };
       }
       return {
-        ...(next?.action === undefined ? {} : { advancedToAction: next.action }),
         advancedToState: decision.to,
         advancedToTerminal: false,
         blocked: false
@@ -1930,15 +2002,17 @@ export class RunController {
   }
 
   private async loadWorkflow(
-    workflow: WorkflowReference | WorkflowSnapshot
+    workflow: WorkflowReference | WorkflowSnapshot,
+    options: { forceReload?: boolean } = {}
   ): Promise<LoadedWorkflow> {
-    if (!("expandedWorkflow" in workflow)) {
+    if (!("expandedWorkflow" in workflow) || options.forceReload === true) {
       const workflowPath = path.resolve(this.configDir, workflow.path);
       const contents = await readFile(workflowPath, "utf8");
+      const format = workflow.format;
       const expanded = await expandWorkflowDefinition(
         contents,
         workflowPath,
-        workflow.format
+        format
       );
       // Raw FSM YAML files commonly open with the `---` document marker; the
       // markdown contract parser would reject those as missing a closing
@@ -1950,6 +2024,7 @@ export class RunController {
           contentHash: expanded.workflow.contentHash,
           errors: expanded.errors,
           expandedWorkflow: expanded.workflow,
+          format,
           path: workflowPath
         };
       }
@@ -1959,6 +2034,7 @@ export class RunController {
         contentHash: contract.contentHash,
         errors: [...contract.errors, ...expanded.errors],
         expandedWorkflow: expanded.workflow,
+        format,
         path: workflowPath
       };
     }
@@ -1968,6 +2044,7 @@ export class RunController {
       contentHash: workflow.contentHash,
       errors: [],
       expandedWorkflow: workflow.expandedWorkflow,
+      format: workflow.format,
       path: workflow.path
     };
   }
@@ -2154,7 +2231,7 @@ export class RunController {
     respectsIssueLabels?: boolean;
     runId: string;
     runtimeAttemptNumber: number;
-    stateAdvance?: { action?: WorkflowAction; toStateId: string } | null;
+    stateAdvance?: { toStateId: string } | null;
     suppressContinuation?: boolean;
     waitPark?: { waitingRunId: string } | null;
   }): Promise<void> {
@@ -2233,12 +2310,10 @@ export class RunController {
         delayMs: this.lifecyclePolicy.continuation.delayMs,
         fire: () =>
           this.executeStateAdvance({
-            ...(stateAdvance.action === undefined
-              ? {}
-              : { action: stateAdvance.action }),
             issue: refreshedForAdvance,
             parentRunId: input.runId,
-            projectName: input.project.name
+            projectName: input.project.name,
+            toStateId: stateAdvance.toStateId
           }),
         issueNumber: refreshedForAdvance.number,
         kind: "state_advance",

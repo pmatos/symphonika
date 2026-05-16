@@ -1637,6 +1637,117 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("retries a transient failure on the state-selected provider, not the project default", async () => {
+    const root = await makeTempRoot();
+    await writePerStateProviderRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexInputs: ProviderRunInput[] = [];
+    const claudeInputs: ProviderRunInput[] = [];
+    const codexProvider = successfulProvider("codex", codexInputs);
+    let claudeAttempts = 0;
+    const claudeProvider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "claude",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        claudeInputs.push(input);
+        claudeAttempts += 1;
+        if (claudeAttempts === 1) {
+          yield {
+            normalized: { exitCode: 1, type: "process_exit" },
+            raw: { code: 1, kind: "exit" }
+          };
+          return;
+        }
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { claude: claudeProvider, codex: codexProvider },
+      createRunId: () => `run-fsm-retry-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 1, delaysMs: [5], maxBackoffMs: 10 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForTerminalState(root, "done");
+
+      // planning runs once on codex; autofix runs twice on claude
+      // (transient failure, then retry succeeds — both on claude, not the
+      // project default of codex).
+      expect(codexInputs).toHaveLength(1);
+      expect(claudeInputs).toHaveLength(2);
+      expect(claudeInputs[0]?.provider).toMatchObject({
+        command:
+          "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json",
+        name: "claude"
+      });
+      expect(claudeInputs[1]?.provider).toMatchObject({
+        command:
+          "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json",
+        name: "claude"
+      });
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const attemptRows = database
+          .prepare(
+            "select run_id, attempt_number, provider_name from attempts order by created_at"
+          )
+          .all() as Array<Record<string, unknown>>;
+        // Attempts: 1 planning (codex), 2 autofix (claude x2 — both retries).
+        expect(attemptRows).toMatchObject([
+          { provider_name: "codex", run_id: "run-fsm-retry-1" },
+          { provider_name: "claude", run_id: "run-fsm-retry-2" },
+          { provider_name: "claude", run_id: "run-fsm-retry-2" }
+        ]);
+        const retriedRun = database
+          .prepare("select retry_count from runs where id = ?")
+          .get("run-fsm-retry-2") as { retry_count: number } | undefined;
+        expect(retriedRun?.retry_count).toBe(1);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("picks the first transition in YAML order when multiple transitions match the observed signals", async () => {
     const root = await makeTempRoot();
     await writeTransitionOrderRawFsmProject(root);

@@ -196,6 +196,13 @@ type RetryPayload = {
   extraInstructions?: string;
   issue: IssueSnapshot;
   projectName: string;
+  // Carry the provider chosen for this run (which may be a per-state override
+  // from a raw FSM action.provider) so the retry executes the same provider
+  // and command, not the project default. Without this, a state declaring
+  // action.provider: claude in a project whose default is codex would retry
+  // on codex and produce inconsistent prompts/evidence.
+  providerCommand: string;
+  providerName: AgentProviderName;
   // When false (raw FSM mid-walk runs), executeRetry skips the labels_all /
   // labels_none re-check so a transient provider failure stays recoverable
   // even when labels drift during the FSM walk. CLOSED_ISSUE still cancels.
@@ -343,17 +350,20 @@ export class RunController {
       return;
     }
 
-    const provider = this.agentProviders[project.agent.provider];
+    const provider = this.agentProviders[payload.providerName];
     if (provider === undefined) {
       this.logger?.warn(
-        { projectName: payload.projectName, runId: payload.runId },
+        {
+          projectName: payload.projectName,
+          providerName: payload.providerName,
+          runId: payload.runId
+        },
         "symphonika retry dropped: provider missing"
       );
       return;
     }
 
-    const providersConfig = await this.providersLoader();
-    const providerCommand = providersConfig[project.agent.provider].command;
+    const providerCommand = payload.providerCommand;
 
     if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
       this.logger?.warn(
@@ -448,7 +458,7 @@ export class RunController {
       project,
       provider,
       providerCommand,
-      providerName: project.agent.provider,
+      providerName: payload.providerName,
       repository,
       runId: payload.runId
     });
@@ -1576,6 +1586,8 @@ export class RunController {
           issue: input.issue,
           outcome: effectiveOutcome,
           project: input.project,
+          providerCommand: input.providerCommand,
+          providerName: input.providerName,
           repository: input.repository,
           respectsIssueLabels,
           runId: input.runId,
@@ -2015,6 +2027,8 @@ export class RunController {
     issue: IssueSnapshot;
     outcome: ClassifiedTerminal;
     project: RunControllerProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
     repository: GitHubIssueRepositoryInput;
     respectsIssueLabels?: boolean;
     runId: string;
@@ -2047,6 +2061,8 @@ export class RunController {
               : { extraInstructions: input.extraInstructions }),
             issue: input.issue,
             projectName: input.project.name,
+            providerCommand: input.providerCommand,
+            providerName: input.providerName,
             // Carry the FSM mid-walk label-immunity bit into the retry. Without
             // this a transient provider failure during a raw FSM walk would be
             // cancelled with ELIGIBILITY_LOSS the moment labels drift, even

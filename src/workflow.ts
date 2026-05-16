@@ -1774,9 +1774,18 @@ export async function persistRunEvidence(
 
   await mkdir(runEvidenceDirectory, { recursive: true });
 
-  const promptPath = path.join(runEvidenceDirectory, "prompt.md");
-  const metadataPath = path.join(runEvidenceDirectory, "prompt-metadata.json");
-  const issueSnapshotPath = path.join(runEvidenceDirectory, "issue-snapshot.json");
+  const promptPath = path.join(
+    runEvidenceDirectory,
+    attemptEvidenceFileName("prompt", input.attemptNumber, "md")
+  );
+  const metadataPath = path.join(
+    runEvidenceDirectory,
+    attemptEvidenceFileName("prompt-metadata", input.attemptNumber, "json")
+  );
+  const issueSnapshotPath = path.join(
+    runEvidenceDirectory,
+    attemptEvidenceFileName("issue-snapshot", input.attemptNumber, "json")
+  );
   const workflowGraphPath = path.join(
     runEvidenceDirectory,
     workflowGraphFileName(input.attemptNumber)
@@ -1823,9 +1832,17 @@ export async function persistRunEvidence(
 }
 
 function workflowGraphFileName(attemptNumber: number): string {
+  return attemptEvidenceFileName("workflow-graph", attemptNumber, "json");
+}
+
+function attemptEvidenceFileName(
+  stem: string,
+  attemptNumber: number,
+  extension: string
+): string {
   return attemptNumber === 1
-    ? "workflow-graph.json"
-    : `workflow-graph.attempt-${attemptNumber}.json`;
+    ? `${stem}.${extension}`
+    : `${stem}.attempt-${attemptNumber}.${extension}`;
 }
 
 function previousAttemptNotice(workspace: PromptWorkspace): string {

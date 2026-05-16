@@ -24,6 +24,7 @@ import {
   pullRequestReadyToMerge,
   type PullRequestFollowupPolicy
 } from "../pull-request-followup.js";
+import { interpretPullRequest } from "../pull-request-state.js";
 import { projectPullRequestSignals } from "./pr-signal-projection.js";
 import type {
   AgentProvider,
@@ -741,9 +742,10 @@ export class RunController {
       return;
     }
 
+    const pullRequestState = interpretPullRequest(prState);
     const signals: WorkflowPredicateMap = {
       provider_success: true,
-      ...projectPullRequestSignals(prState)
+      ...projectPullRequestSignals(pullRequestState)
     };
 
     if (isMergePr) {
@@ -759,10 +761,10 @@ export class RunController {
           { runId },
           "symphonika merge_pr re-eval: merge disabled by policy"
         );
-      } else if (pullRequestReadyToMerge(prState, policy)) {
+      } else if (pullRequestReadyToMerge(pullRequestState, policy)) {
         try {
           const merged = await tryMergePullRequest(this.githubIssuesApi, {
-            expectedHeadSha: prState.headSha,
+            expectedHeadSha: pullRequestState.headSha,
             method,
             owner: repository.owner,
             pullNumber: tracked.prNumber,
@@ -777,17 +779,17 @@ export class RunController {
             // pre-merge fetch and a refetch-style transition would silently
             // stay parked even though the merge succeeded.
             const mergedSignals = projectPullRequestSignals({
-              ...prState,
+              ...pullRequestState,
               merged: true,
-              state: "MERGED"
+              open: false
             });
             for (const key of Object.keys(mergedSignals)) {
               signals[key] = mergedSignals[key]!;
             }
             this.runStore.recordPullRequestObservation({
-              headSha: prState.headSha,
+              headSha: pullRequestState.headSha,
               id: tracked.id,
-              prUrl: prState.url,
+              prUrl: pullRequestState.url,
               state: "merged"
             });
             this.runStore.recordWaitingActivity(

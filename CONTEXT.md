@@ -93,6 +93,10 @@ _Avoid_: orchestrator workflow
 The orchestrator-owned polling loop for pull requests discovered from Symphonika-created Issue Branches; it re-dispatches review feedback and merges PRs only when policy says they are clear.
 _Avoid_: arbitrary PR detection
 
+**Pull Request State**:
+Symphonika's normalized interpretation of a GitHub PR's merged, mergeable, checks, unresolved-thread, and review-decision state; it is the single source of meaning consumed by both Workflow Predicate projection and PR Follow-up verdicts.
+_Avoid_: raw GitHub pull request state
+
 **Coding Agent**:
 An external automation runtime that works on an issue inside a workspace.
 _Avoid_: orchestrator, worker
@@ -176,6 +180,7 @@ _Avoid_: chat session
 - A **Coding Agent** may write **Workflow Labels**
 - A **Coding Agent** owns the **PR Workflow**
 - A **PR Follow-up** watches only PRs associated with completed Symphonika **Runs**
+- **Pull Request State** is derived from tracker observations and feeds **Workflow Predicate** projection and **PR Follow-up** verdicts
 - Each dispatched **Issue** has exactly one active **Workspace** per run
 - Each **Workspace** uses one **Issue Branch**
 - A **Coding Agent** executes within a **Workspace** for one **Issue**

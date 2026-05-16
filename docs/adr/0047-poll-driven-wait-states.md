@@ -67,5 +67,6 @@ Unresolved review feedback is projected as both the exact `unresolved_review_thr
 derived `has_unresolved_reviews` boolean, so strict-equality transitions can match "any unresolved
 review exists" without comparator syntax.
 
-The PR follow-up logic in `src/pull-request-followup.ts` shares `projectPullRequestSignals` with
-the wait handler so the two paths cannot drift in how they interpret a given GitHub state.
+Raw GitHub PR observations are first interpreted as **Pull Request State**. The PR follow-up
+verdicts in `src/pull-request-followup.ts` and the wait-handler predicate projection both derive
+from that normalized value so the two paths cannot drift in how they interpret a given GitHub state.

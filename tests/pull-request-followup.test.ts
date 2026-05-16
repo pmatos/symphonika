@@ -20,9 +20,11 @@ import type {
   ProviderRunInput
 } from "../src/provider.js";
 import {
+  pullRequestNeedsReviewFollowup,
   pullRequestReadyToMerge,
   runPullRequestFollowup
 } from "../src/pull-request-followup.js";
+import { interpretPullRequest } from "../src/pull-request-state.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
 import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
@@ -401,11 +403,45 @@ describe("pull request follow-up", () => {
   it("does not merge when status checks are missing under the default policy", () => {
     expect(
       pullRequestReadyToMerge(
-        prState({
-          statusCheckRollupState: null
-        })
+        interpretPullRequest(
+          prState({
+            statusCheckRollupState: null
+          })
+        )
       )
     ).toBe(false);
+  });
+
+  it("needs review follow-up when requested changes are unresolved", () => {
+    expect(
+      pullRequestNeedsReviewFollowup(
+        interpretPullRequest(
+          prState({
+            reviewDecision: "CHANGES_REQUESTED"
+          })
+        )
+      )
+    ).toBe(true);
+  });
+
+  it("needs review follow-up when unresolved review threads remain", () => {
+    expect(
+      pullRequestNeedsReviewFollowup(
+        interpretPullRequest(
+          prState({
+            unresolvedReviewThreads: [
+              {
+                comments: [],
+                id: "PRRT_kwDO",
+                isResolved: false,
+                line: 24,
+                path: "src/daemon.ts"
+              }
+            ]
+          })
+        )
+      )
+    ).toBe(true);
   });
 });
 

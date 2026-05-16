@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-
 import { Hono } from "hono";
 
 import type {
@@ -13,11 +11,13 @@ import {
 import type {
   ListRunsFilter,
   ProjectState,
+  RunArtifactDescriptor,
   RunState,
   RunStatus,
   RunStore
 } from "../run-store.js";
 import type { StatusSnapshot } from "../status.js";
+import type { ExpandedWorkflow } from "../workflow.js";
 
 export type RegisterPagesOptions = {
   app: Hono;
@@ -78,7 +78,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     return context.html(html);
   });
 
-  options.app.get("/runs/:id", (context) => {
+  options.app.get("/runs/:id", async (context) => {
     const id = context.req.param("id");
     const detail = options.runStore.getRun(id);
     if (detail === undefined) {
@@ -89,6 +89,8 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
 
     const events = options.runStore.listProviderEvents(id, { limit: 100 });
+    const artifacts = options.runStore.listRunArtifacts(id);
+    const workflowGraph = await options.runStore.getWorkflowGraph(id);
     const capKind = parseCapReachedReason(detail.terminalReason);
     const capContext =
       capKind === null
@@ -103,12 +105,12 @@ export function registerPages(options: RegisterPagesOptions): void {
     const sections = [
       `<h1>Run ${escapeHtml(detail.id)}</h1>`,
       renderRunSummary(detail, capContext),
-      renderWorkflowGraphSummary(detail.workflowGraphPath),
+      renderWorkflowGraphSummary(workflowGraph),
       renderCancelForm(detail),
       renderAttemptsTable(detail.attempts),
       renderTransitionsTable(detail.transitions),
       renderEventsTable(events),
-      renderRunFileLinks(detail)
+      renderRunFileLinks(detail.id, artifacts)
     ].join("");
     return context.html(layout(`Run ${detail.id}`, sections));
   });
@@ -324,7 +326,6 @@ function renderAttemptsTable(
     createdAt: string;
     updatedAt: string;
     branchName: string;
-    promptPath: string;
   }[]
 ): string {
   if (attempts.length === 0) {
@@ -333,10 +334,10 @@ function renderAttemptsTable(
   const rows = attempts
     .map(
       (attempt) =>
-        `<tr><td>${attempt.attemptNumber}</td><td><code>${escapeHtml(attempt.id)}</code></td><td><span class="state-${escapeHtml(attempt.state)}">${escapeHtml(attempt.state)}</span></td><td>${escapeHtml(attempt.providerName)}</td><td>${escapeHtml(attempt.createdAt)}</td><td>${escapeHtml(attempt.updatedAt)}</td><td><code>${escapeHtml(attempt.branchName)}</code></td><td><code>${escapeHtml(attempt.promptPath)}</code></td></tr>`
+        `<tr><td>${attempt.attemptNumber}</td><td><code>${escapeHtml(attempt.id)}</code></td><td><span class="state-${escapeHtml(attempt.state)}">${escapeHtml(attempt.state)}</span></td><td>${escapeHtml(attempt.providerName)}</td><td>${escapeHtml(attempt.createdAt)}</td><td>${escapeHtml(attempt.updatedAt)}</td><td><code>${escapeHtml(attempt.branchName)}</code></td></tr>`
     )
     .join("");
-  return `<section><h2>Attempts</h2><table><thead><tr><th>#</th><th>Attempt id</th><th>State</th><th>Provider</th><th>Attempt started</th><th>Attempt updated</th><th>Branch</th><th>Prompt</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+  return `<section><h2>Attempts</h2><table><thead><tr><th>#</th><th>Attempt id</th><th>State</th><th>Provider</th><th>Attempt started</th><th>Attempt updated</th><th>Branch</th></tr></thead><tbody>${rows}</tbody></table></section>`;
 }
 
 function renderTransitionsTable(
@@ -377,57 +378,29 @@ function renderEventsTable(
   return `<section><h2>Recent events (last ${events.length})</h2><table><thead><tr><th>Seq</th><th>Type</th><th>Detail</th><th>At</th></tr></thead><tbody>${rows}</tbody></table></section>`;
 }
 
-function renderRunFileLinks(detail: RunStatus): string {
-  const items: string[] = [];
-  const linkIfPresent = (label: string, fileName: string, value: string): void => {
-    if (value.length === 0) {
-      return;
-    }
-    items.push(
-      `<li><a href="/logs/runs/${encodeURIComponent(detail.id)}/${encodeURIComponent(fileName)}">${escapeHtml(label)}</a></li>`
-    );
-  };
-  linkIfPresent("prompt.md", "prompt.md", detail.promptPath);
-  linkIfPresent("provider.raw.jsonl", "provider.raw.jsonl", detail.rawLogPath);
-  linkIfPresent(
-    "provider.normalized.jsonl",
-    "provider.normalized.jsonl",
-    detail.normalizedLogPath
-  );
-  linkIfPresent("issue-snapshot.json", "issue-snapshot.json", detail.issueSnapshotPath);
-  linkIfPresent("prompt-metadata.json", "prompt-metadata.json", detail.metadataPath);
-  if (detail.workflowGraphPath.length > 0) {
-    const fileName = path_basename(detail.workflowGraphPath);
-    items.push(
-      `<li><a href="/logs/runs/${encodeURIComponent(detail.id)}/${encodeURIComponent(fileName)}">${escapeHtml(fileName)}</a></li>`
-    );
-  }
+function renderRunFileLinks(
+  runId: string,
+  artifacts: RunArtifactDescriptor[]
+): string {
+  const items = artifacts
+    .filter((artifact) => artifact.present)
+    .map((artifact) => {
+      const size =
+        artifact.sizeBytes === undefined
+          ? ""
+          : ` <small>(${artifact.sizeBytes} bytes)</small>`;
+      return `<li><a href="/logs/runs/${encodeURIComponent(runId)}/${encodeURIComponent(artifact.kind)}">${escapeHtml(formatArtifactKind(artifact.kind))}</a>${size}</li>`;
+    });
   if (items.length === 0) {
     return "";
   }
   return `<section><h2>Files</h2><ul>${items.join("")}</ul></section>`;
 }
 
-function renderWorkflowGraphSummary(graphPath: string): string {
-  if (graphPath.length === 0) {
+function renderWorkflowGraphSummary(graph: ExpandedWorkflow | undefined): string {
+  if (graph === undefined) {
     return "";
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(graphPath, "utf8"));
-  } catch {
-    return "";
-  }
-  if (typeof parsed !== "object" || parsed === null) {
-    return "";
-  }
-  const graph = parsed as {
-    contentHash?: unknown;
-    initial?: unknown;
-    name?: unknown;
-    source?: { kind?: unknown; path?: unknown };
-    states?: unknown;
-  };
   const name = typeof graph.name === "string" ? graph.name : "(unknown)";
   const sourceKind =
     typeof graph.source?.kind === "string" ? graph.source.kind : "(unknown)";
@@ -448,9 +421,21 @@ function renderWorkflowGraphSummary(graphPath: string): string {
 </section>`;
 }
 
-function path_basename(p: string): string {
-  const ix = p.lastIndexOf("/");
-  return ix === -1 ? p : p.slice(ix + 1);
+function formatArtifactKind(kind: RunArtifactDescriptor["kind"]): string {
+  switch (kind) {
+    case "issue_snapshot":
+      return "Issue snapshot";
+    case "prompt":
+      return "Rendered prompt";
+    case "prompt_metadata":
+      return "Prompt metadata";
+    case "workflow_graph":
+      return "Workflow graph";
+    case "provider_raw":
+      return "Provider event log";
+    case "provider_normalized":
+      return "Normalized event log";
+  }
 }
 
 function escapeHtml(value: string): string {

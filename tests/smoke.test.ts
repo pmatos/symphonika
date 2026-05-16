@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,7 @@ import type {
   ProviderEvent
 } from "../src/provider.js";
 import { runSmoke } from "../src/smoke.js";
+import { openRunStore } from "../src/run-store.js";
 import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
@@ -246,12 +247,16 @@ describe("runSmoke", () => {
 
     expect(report.runDetail).toBeDefined();
     const detail = report.runDetail!;
-    await expect(readFile(detail.promptPath, "utf8")).resolves.toContain(
-      "Autonomous run instructions"
-    );
-    await expect(readFile(detail.promptPath, "utf8")).resolves.toContain(
-      issueTitle
-    );
+    expect(detail.artifacts.map((artifact) => artifact.kind)).toContain("prompt");
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      await expect(store.getRenderedPrompt(detail.id)).resolves.toContain(
+        "Autonomous run instructions"
+      );
+      await expect(store.getRenderedPrompt(detail.id)).resolves.toContain(issueTitle);
+    } finally {
+      store.close();
+    }
   });
 
   it("surfaces no_workspace_changes when an exit-0 provider leaves the issue branch at base", async () => {
@@ -434,8 +439,7 @@ describe("runSmoke", () => {
     expect(report.errors).toHaveLength(1);
     expect(report.errors[0]).toContain(report.runId);
     expect(report.errors[0]).toContain("terminalReason=turn_failed");
-    expect(report.errors[0]).toContain("provider.normalized.jsonl");
-    expect(report.errors[0]).toContain(report.runDetail?.normalizedLogPath);
+    expect(report.errors[0]).toContain("provider_normalized");
 
     expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith({
       issueNumber,

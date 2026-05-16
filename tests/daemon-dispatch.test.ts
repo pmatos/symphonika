@@ -150,6 +150,26 @@ describe("daemon dispatch", () => {
     try {
       const status = await waitForRun(daemon.url, "succeeded");
       const run = firstRun(status);
+      const expectedEvidenceDir = path.join(
+        root,
+        ".symphonika",
+        "logs",
+        "runs",
+        "run-issue-8"
+      );
+      const expectedNormalizedLogPath = path.join(
+        expectedEvidenceDir,
+        "provider.normalized.jsonl"
+      );
+      const expectedPromptPath = path.join(expectedEvidenceDir, "prompt.md");
+      const expectedRawLogPath = path.join(
+        expectedEvidenceDir,
+        "provider.raw.jsonl"
+      );
+      const expectedWorkflowGraphPath = path.join(
+        expectedEvidenceDir,
+        "workflow-graph.json"
+      );
 
       expect(githubIssuesApi.addLabelsToIssue.mock.calls).toEqual([
         [
@@ -191,7 +211,7 @@ describe("daemon dispatch", () => {
         issue: {
           number: 8
         },
-        promptPath: run.promptPath,
+        promptPath: expectedPromptPath,
         run: {
           attempt: 1,
           id: "run-issue-8"
@@ -203,53 +223,21 @@ describe("daemon dispatch", () => {
         branchName:
           "sym/symphonika/8-dispatch-an-end-to-end-run-through-a-test-provider",
         issueNumber: 8,
-        normalizedLogPath: path.join(
-          root,
-          ".symphonika",
-          "logs",
-          "runs",
-          "run-issue-8",
-          "provider.normalized.jsonl"
-        ),
         project: "symphonika",
-        promptPath: path.join(
-          root,
-          ".symphonika",
-          "logs",
-          "runs",
-          "run-issue-8",
-          "prompt.md"
-        ),
         provider: "codex",
-        rawLogPath: path.join(
-          root,
-          ".symphonika",
-          "logs",
-          "runs",
-          "run-issue-8",
-          "provider.raw.jsonl"
-        ),
         state: "succeeded",
-        workflowGraphPath: path.join(
-          root,
-          ".symphonika",
-          "logs",
-          "runs",
-          "run-issue-8",
-          "workflow-graph.json"
-        ),
         workspacePath
       });
 
       const graphContents = JSON.parse(
-        await readFile(run.workflowGraphPath, "utf8")
+        await fetchRunArtifact(daemon.url, run.id, "workflow_graph")
       ) as Record<string, unknown>;
       expect(graphContents).toMatchObject({
         initial: "run_agent",
         name: "single_agent_workflow",
         source: { kind: "markdown" }
       });
-      expect(path.relative(workspacePath, run.workflowGraphPath)).toMatch(
+      expect(path.relative(workspacePath, expectedWorkflowGraphPath)).toMatch(
         /^\.\./
       );
 
@@ -272,14 +260,13 @@ describe("daemon dispatch", () => {
       ) as { workflow: { content_hash: string } };
       expect(graphContents.contentHash).toBe(promptMetadata.workflow.content_hash);
 
-      expect(path.relative(workspacePath, run.promptPath)).toMatch(/^\.\./);
-      await expect(readFile(run.promptPath, "utf8")).resolves.toContain(
-        "Autonomous run instructions"
-      );
-      await expect(readFile(run.promptPath, "utf8")).resolves.toContain(
+      expect(path.relative(workspacePath, expectedPromptPath)).toMatch(/^\.\./);
+      const promptContents = await fetchRunArtifact(daemon.url, run.id, "prompt");
+      expect(promptContents).toContain("Autonomous run instructions");
+      expect(promptContents).toContain(
         "Dispatch an end-to-end run through a test provider"
       );
-      expect(readJsonl(await readFile(run.rawLogPath, "utf8"))).toEqual([
+      expect(readJsonl(await fetchRunArtifact(daemon.url, run.id, "provider_raw"))).toEqual([
         {
           id: "fake-session-8",
           kind: "session"
@@ -293,7 +280,9 @@ describe("daemon dispatch", () => {
           kind: "exit"
         }
       ]);
-      expect(readJsonl(await readFile(run.normalizedLogPath, "utf8"))).toEqual([
+      expect(
+        readJsonl(await fetchRunArtifact(daemon.url, run.id, "provider_normalized"))
+      ).toEqual([
         {
           sessionId: "fake-session-8",
           type: "session_started"
@@ -317,12 +306,12 @@ describe("daemon dispatch", () => {
             "sym/symphonika/8-dispatch-an-end-to-end-run-through-a-test-provider",
           id: "run-issue-8",
           issue_number: 8,
-          normalized_log_path: run.normalizedLogPath,
+          normalized_log_path: expectedNormalizedLogPath,
           project_name: "symphonika",
-          prompt_path: run.promptPath,
+          prompt_path: expectedPromptPath,
           provider_command: DEFAULT_CODEX_COMMAND,
           provider_name: "codex",
-          raw_log_path: run.rawLogPath,
+          raw_log_path: expectedRawLogPath,
           state: "succeeded",
           workspace_path: workspacePath
         });
@@ -340,10 +329,10 @@ describe("daemon dispatch", () => {
         expect(attempts).toHaveLength(1);
         expect(attempts[0]).toMatchObject({
           attempt_number: 1,
-          normalized_log_path: run.normalizedLogPath,
-          prompt_path: run.promptPath,
+          normalized_log_path: expectedNormalizedLogPath,
+          prompt_path: expectedPromptPath,
           provider_name: "codex",
-          raw_log_path: run.rawLogPath,
+          raw_log_path: expectedRawLogPath,
           run_id: "run-issue-8",
           state: "succeeded"
         });
@@ -562,13 +551,15 @@ describe("daemon dispatch", () => {
         issueNumber: 8,
         state: "failed"
       });
-      expect(readJsonl(await readFile(run.rawLogPath, "utf8"))).toEqual([
+      expect(readJsonl(await fetchRunArtifact(daemon.url, run.id, "provider_raw"))).toEqual([
         {
           code: 1,
           kind: "exit"
         }
       ]);
-      expect(readJsonl(await readFile(run.normalizedLogPath, "utf8"))).toEqual([
+      expect(
+        readJsonl(await fetchRunArtifact(daemon.url, run.id, "provider_normalized"))
+      ).toEqual([
         {
           exitCode: 1,
           type: "process_exit"
@@ -1204,7 +1195,7 @@ describe("daemon dispatch", () => {
       // (prompt.md) rather than the YAML workflow body. The template
       // substitutes {{issue.title}} so the resulting prompt contains the
       // issue title verbatim and does NOT contain the raw YAML keywords.
-      const promptContents = await readFile(run.promptPath, "utf8");
+      const promptContents = await fetchRunArtifact(daemon.url, run.id, "prompt");
       expect(promptContents).toContain(
         "Dispatch an end-to-end run through a test provider"
       );
@@ -1212,7 +1203,7 @@ describe("daemon dispatch", () => {
       expect(promptContents).not.toContain("workflow:\n  name:");
 
       const graphContents = JSON.parse(
-        await readFile(run.workflowGraphPath, "utf8")
+        await fetchRunArtifact(daemon.url, run.id, "workflow_graph")
       ) as Record<string, unknown>;
       expect(graphContents).toMatchObject({
         initial: "run_agent",
@@ -2915,13 +2906,9 @@ type StatusRun = {
   branchName: string;
   id: string;
   issueNumber: number;
-  normalizedLogPath: string;
   project: string;
-  promptPath: string;
   provider: string;
-  rawLogPath: string;
   state: string;
-  workflowGraphPath: string;
   workspacePath: string;
 };
 
@@ -3054,6 +3041,20 @@ function readJsonl(contents: string): unknown[] {
     .split(/\r?\n/)
     .filter((line) => line.length > 0)
     .map((line) => JSON.parse(line) as unknown);
+}
+
+async function fetchRunArtifact(
+  daemonUrl: string,
+  runId: string,
+  kind: string
+): Promise<string> {
+  const response = await fetch(
+    `${daemonUrl}/logs/runs/${encodeURIComponent(runId)}/${encodeURIComponent(kind)}`
+  );
+  if (!response.ok) {
+    throw new Error(`expected artifact ${kind} for ${runId}: HTTP ${response.status}`);
+  }
+  return response.text();
 }
 
 function firstRun(status: { runs: StatusRun[] }): StatusRun {

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { InvalidArgumentError, Command } from "commander";
-import { readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -26,6 +26,7 @@ import type {
   ListRunsFilter,
   OpenRunStoreOptions,
   ProjectState,
+  RunArtifactDescriptor,
   RunState,
   RunStatus,
   RunStore
@@ -45,7 +46,11 @@ import {
   type DashboardEventSummary
 } from "./status-dashboard.js";
 import { VERSION } from "./version.js";
-import { explainWorkflow, loadProjectWorkflow } from "./workflow.js";
+import {
+  explainWorkflow,
+  loadProjectWorkflow,
+  type ExpandedWorkflow
+} from "./workflow.js";
 
 export type CliDependencies = {
   fetch?: FetchFn;
@@ -326,11 +331,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         writeOut(program, `updated:      ${detail.updatedAt}\n`);
         writeOut(program, `branch:       ${formatPath(detail.branchName)}\n`);
         writeOut(program, `workspace:    ${formatPath(detail.workspacePath)}\n`);
-        writeOut(program, `prompt.md:                 ${formatEvidencePath(detail.promptPath)}\n`);
-        writeOut(program, `provider.raw.jsonl:        ${formatEvidencePath(detail.rawLogPath)}\n`);
-        writeOut(program, `provider.normalized.jsonl: ${formatEvidencePath(detail.normalizedLogPath)}\n`);
-        writeOut(program, `issue-snapshot.json:       ${formatEvidencePath(detail.issueSnapshotPath)}\n`);
-        writeOut(program, `prompt-metadata.json:      ${formatEvidencePath(detail.metadataPath)}\n`);
+        writeOut(program, `artifacts:    ${formatArtifactKinds(detail.artifacts)}\n`);
         if (detail.terminalReason !== null) {
           writeOut(program, `terminal:     ${detail.terminalReason}\n`);
         }
@@ -635,7 +636,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .argument("<id>", "run id")
     .option("--config <path>", "service config path")
     .option("--events <n>", "max recent events", parsePositiveInt, 25)
-    .action((id: string, options: { config?: string; events: number }) => {
+    .action(async (id: string, options: { config?: string; events: number }) => {
       const stateRoot = resolveStateRoot(withConfigPath(options.config)).stateRoot;
       const store = openRunStore({ stateRoot });
       try {
@@ -654,16 +655,8 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         writeOut(program, `updated:      ${detail.updatedAt}\n`);
         writeOut(program, `branch:       ${formatPath(detail.branchName)}\n`);
         writeOut(program, `workspace:    ${formatPath(detail.workspacePath)}\n`);
-        writeOut(program, `prompt.md:                 ${formatEvidencePath(detail.promptPath)}\n`);
-        writeOut(program, `provider.raw.jsonl:        ${formatEvidencePath(detail.rawLogPath)}\n`);
-        writeOut(program, `provider.normalized.jsonl: ${formatEvidencePath(detail.normalizedLogPath)}\n`);
-        writeOut(program, `issue-snapshot.json:       ${formatEvidencePath(detail.issueSnapshotPath)}\n`);
-        writeOut(program, `prompt-metadata.json:      ${formatEvidencePath(detail.metadataPath)}\n`);
-        writeOut(
-          program,
-          `workflow-graph.json:       ${formatEvidencePath(detail.workflowGraphPath)}\n`
-        );
-        writeOut(program, formatWorkflowGraphSummary(detail.workflowGraphPath));
+        writeOut(program, `artifacts:    ${formatArtifactKinds(store.listRunArtifacts(detail.id))}\n`);
+        writeOut(program, formatWorkflowGraphSummary(await store.getWorkflowGraph(detail.id)));
         writeOut(program, `retries:      ${detail.retryCount}${detail.isContinuation ? " (continuation)" : ""}\n`);
         if (detail.terminalReason !== null) {
           writeOut(program, `terminal:     ${detail.terminalReason}\n`);
@@ -1327,30 +1320,21 @@ function formatPath(value: string): string {
   return value.length === 0 ? "<not yet recorded>" : value;
 }
 
-function formatEvidencePath(value: string): string {
-  return formatPath(value);
+function formatArtifactKinds(artifacts: RunArtifactDescriptor[]): string {
+  const present = artifacts
+    .filter((artifact) => artifact.present)
+    .map((artifact) =>
+      artifact.sizeBytes === undefined
+        ? artifact.kind
+        : `${artifact.kind}(${artifact.sizeBytes} bytes)`
+    );
+  return present.length === 0 ? "(none)" : present.join(", ");
 }
 
-function formatWorkflowGraphSummary(graphPath: string): string {
-  if (graphPath.length === 0) {
+function formatWorkflowGraphSummary(graph: ExpandedWorkflow | undefined): string {
+  if (graph === undefined) {
     return "workflow:     (no workflow graph evidence)\n";
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(graphPath, "utf8"));
-  } catch {
-    return "workflow:     (no workflow graph evidence)\n";
-  }
-  if (typeof parsed !== "object" || parsed === null) {
-    return "workflow:     (no workflow graph evidence)\n";
-  }
-  const graph = parsed as {
-    contentHash?: unknown;
-    initial?: unknown;
-    name?: unknown;
-    source?: { kind?: unknown; path?: unknown };
-    states?: unknown;
-  };
   const name = typeof graph.name === "string" ? graph.name : "(unknown)";
   const sourceKind =
     typeof graph.source?.kind === "string" ? graph.source.kind : "(unknown)";

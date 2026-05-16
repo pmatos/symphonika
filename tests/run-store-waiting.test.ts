@@ -69,7 +69,11 @@ describe("RunStore waiting-run helpers", () => {
       expect(detail?.continuationParentRunId).toBe("parent-1");
       expect(detail?.isContinuation).toBe(true);
       expect(detail?.provider).toBe("");
-      expect(detail?.promptPath).toBe("");
+      expect(store.listRunArtifacts("wait-1")).toContainEqual({
+        kind: "prompt",
+        present: false,
+        sizeBytes: undefined
+      });
     } finally {
       store.close();
     }

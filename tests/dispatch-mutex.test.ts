@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -283,11 +283,17 @@ describe("dispatch mutex", () => {
       );
       expect(fresh).toBeDefined();
       expect(continuation).toBeDefined();
+      const freshId = fresh?.["id"];
+      const continuationId = continuation?.["id"];
+      if (typeof freshId !== "string" || typeof continuationId !== "string") {
+        throw new Error("expected fresh and continuation run ids");
+      }
 
-      const freshPrompt = await readFile(fresh?.["promptPath"] as string, "utf8");
-      const continuationPrompt = await readFile(
-        continuation?.["promptPath"] as string,
-        "utf8"
+      const freshPrompt = await fetchRunArtifact(daemon.url, freshId, "prompt");
+      const continuationPrompt = await fetchRunArtifact(
+        daemon.url,
+        continuationId,
+        "prompt"
       );
 
       expect(freshPrompt).toContain("Continuation? false");
@@ -297,3 +303,17 @@ describe("dispatch mutex", () => {
     }
   });
 });
+
+async function fetchRunArtifact(
+  daemonUrl: string,
+  runId: string,
+  kind: string
+): Promise<string> {
+  const response = await fetch(
+    `${daemonUrl}/logs/runs/${encodeURIComponent(runId)}/${encodeURIComponent(kind)}`
+  );
+  if (!response.ok) {
+    throw new Error(`expected artifact ${kind} for ${runId}: HTTP ${response.status}`);
+  }
+  return response.text();
+}

@@ -16,7 +16,12 @@ import {
 import { resolveServiceConfigPath } from "./config-paths.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
-import { openRunStore, type RunDetail, type RunStore } from "./run-store.js";
+import {
+  openRunStore,
+  type RunArtifactDescriptor,
+  type RunDetail,
+  type RunStore
+} from "./run-store.js";
 import { resolveStateRoot } from "./state.js";
 import type {
   PreparedIssueWorkspace,
@@ -41,19 +46,16 @@ export type SmokeRunDetail = Pick<
   | "createdAt"
   | "id"
   | "issueNumber"
-  | "issueSnapshotPath"
   | "issueTitle"
-  | "metadataPath"
-  | "normalizedLogPath"
   | "project"
-  | "promptPath"
   | "provider"
-  | "rawLogPath"
   | "state"
   | "terminalReason"
   | "updatedAt"
   | "workspacePath"
->;
+> & {
+  artifacts: RunArtifactDescriptor[];
+};
 
 export type SmokeReport = {
   configPath: string;
@@ -162,7 +164,8 @@ export async function runSmoke(options: SmokeOptions = {}): Promise<SmokeReport>
     }
 
     const detail = runStore.getRun(dispatchResult.runId);
-    const runDetail = detail === undefined ? undefined : pickRunDetail(detail);
+    const runDetail =
+      detail === undefined ? undefined : pickRunDetail(detail, runStore);
     const ok = runDetail === undefined ? true : isTerminalSuccess(runDetail.state);
     if (!ok && runDetail !== undefined) {
       errors.push(formatRunFailure(runDetail));
@@ -181,20 +184,16 @@ export async function runSmoke(options: SmokeOptions = {}): Promise<SmokeReport>
   }
 }
 
-function pickRunDetail(detail: RunDetail): SmokeRunDetail {
+function pickRunDetail(detail: RunDetail, runStore: RunStore): SmokeRunDetail {
   return {
+    artifacts: runStore.listRunArtifacts(detail.id),
     branchName: detail.branchName,
     createdAt: detail.createdAt,
     id: detail.id,
     issueNumber: detail.issueNumber,
-    issueSnapshotPath: detail.issueSnapshotPath,
     issueTitle: detail.issueTitle,
-    metadataPath: detail.metadataPath,
-    normalizedLogPath: detail.normalizedLogPath,
     project: detail.project,
-    promptPath: detail.promptPath,
     provider: detail.provider,
-    rawLogPath: detail.rawLogPath,
     state: detail.state,
     terminalReason: detail.terminalReason,
     updatedAt: detail.updatedAt,
@@ -211,7 +210,14 @@ function formatRunFailure(detail: SmokeRunDetail): string {
     detail.terminalReason === null
       ? `provider terminated in state ${detail.state}`
       : `terminalReason=${detail.terminalReason}`;
-  return `run ${detail.id} terminated in state ${detail.state}; ${reason}; provider.normalized.jsonl: ${detail.normalizedLogPath}`;
+  return `run ${detail.id} terminated in state ${detail.state}; ${reason}; artifacts: ${formatArtifactKinds(detail.artifacts)}`;
+}
+
+function formatArtifactKinds(artifacts: RunArtifactDescriptor[]): string {
+  const present = artifacts
+    .filter((artifact) => artifact.present)
+    .map((artifact) => artifact.kind);
+  return present.length === 0 ? "(none)" : present.join(", ");
 }
 
 function staleClaimWarnings(

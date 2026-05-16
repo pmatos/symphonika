@@ -207,19 +207,14 @@ describe("CLI", () => {
           errors: [],
           ok: true,
           runDetail: {
+            artifacts: [{ kind: "prompt", present: true, sizeBytes: 123 }],
             branchName: "sym/symphonika/42-x",
             createdAt: "2026-05-04T17:00:00.000Z",
             id: "run-x",
             issueNumber: 42,
-            issueSnapshotPath: "/tmp/state/logs/runs/run-x/issue-snapshot.json",
             issueTitle: "Title",
-            metadataPath: "/tmp/state/logs/runs/run-x/prompt-metadata.json",
-            normalizedLogPath:
-              "/tmp/state/logs/runs/run-x/provider.normalized.jsonl",
             project: "symphonika",
-            promptPath: "/tmp/state/logs/runs/run-x/prompt.md",
             provider: "codex",
-            rawLogPath: "/tmp/state/logs/runs/run-x/provider.raw.jsonl",
             state: "succeeded",
             terminalReason: null,
             updatedAt: "2026-05-04T17:00:01.000Z",
@@ -253,6 +248,7 @@ describe("CLI", () => {
       expect(output.stdout).toContain("smoke ok");
       expect(output.stdout).toContain("run-x");
       expect(output.stdout).toContain("succeeded");
+      expect(output.stdout).toContain("prompt(123 bytes)");
       expect(process.exitCode).not.toBe(1);
     } finally {
       process.exitCode = previousExitCode;
@@ -307,24 +303,20 @@ describe("CLI", () => {
           configPath: "/tmp/symphonika.yml",
           dispatched: true,
           errors: [
-            "run run-failed terminated in state failed; terminalReason=turn_failed: boom; provider.normalized.jsonl: /tmp/state/logs/runs/run-failed/provider.normalized.jsonl"
+            "run run-failed terminated in state failed; terminalReason=turn_failed: boom; artifacts: provider_normalized"
           ],
           ok: false,
           runDetail: {
+            artifacts: [
+              { kind: "provider_normalized", present: true, sizeBytes: 456 }
+            ],
             branchName: "sym/symphonika/99-x",
             createdAt: "2026-05-04T17:00:00.000Z",
             id: "run-failed",
             issueNumber: 99,
-            issueSnapshotPath:
-              "/tmp/state/logs/runs/run-failed/issue-snapshot.json",
             issueTitle: "Failure",
-            metadataPath: "/tmp/state/logs/runs/run-failed/prompt-metadata.json",
-            normalizedLogPath:
-              "/tmp/state/logs/runs/run-failed/provider.normalized.jsonl",
             project: "symphonika",
-            promptPath: "/tmp/state/logs/runs/run-failed/prompt.md",
             provider: "codex",
-            rawLogPath: "/tmp/state/logs/runs/run-failed/provider.raw.jsonl",
             state: "failed",
             terminalReason: "turn_failed: boom",
             updatedAt: "2026-05-04T17:00:01.000Z",
@@ -350,7 +342,7 @@ describe("CLI", () => {
       expect(output.stderr).toContain("smoke failed");
       expect(output.stderr).toContain("run run-failed terminated in state failed");
       expect(output.stderr).toContain("terminalReason=turn_failed");
-      expect(output.stderr).toContain("provider.normalized.jsonl");
+      expect(output.stderr).toContain("provider_normalized");
     } finally {
       process.exitCode = previousExitCode;
     }

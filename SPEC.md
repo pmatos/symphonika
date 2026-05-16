@@ -353,6 +353,10 @@ SQLite stores durable orchestration state:
 The run store is not a replacement for GitHub as the canonical tracker. It is durable runtime
 evidence and restart state.
 
+Run-store readers expose evidence as typed values, readable streams, and artifact descriptors.
+Absolute evidence file paths remain an internal persistence detail used by writers and migrations;
+operator surfaces link artifacts by stable artifact kind rather than by on-disk filename.
+
 ### 7.3 Log Layout
 
 Raw logs live under the state root, outside issue workspaces.

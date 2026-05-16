@@ -48,6 +48,7 @@ export type RunStatus = {
 };
 
 export type AttemptStatus = {
+  artifacts: RunArtifactDescriptor[];
   attemptNumber: number;
   branchName: string;
   createdAt: string;
@@ -255,11 +256,14 @@ type AttemptRow = {
   branch_name: string;
   created_at: string;
   id: string;
+  normalized_log_path: string | null;
   provider_command: string;
   provider_name: string;
+  raw_log_path: string | null;
   run_id: string;
   state: RunState;
   updated_at: string;
+  workflow_graph_path: string | null;
   workspace_path: string;
 };
 
@@ -270,6 +274,13 @@ type RunArtifactRow = {
   normalized_log_path: string | null;
   prompt_path: string | null;
   raw_log_path: string | null;
+  workflow_graph_path: string | null;
+};
+
+type AttemptArtifactRow = {
+  normalized_log_path: string | null;
+  raw_log_path: string | null;
+  run_id: string;
   workflow_graph_path: string | null;
 };
 
@@ -999,6 +1010,7 @@ export class RunStore {
         [
           "select id, run_id, attempt_number, state, provider_name, provider_command,",
           "workspace_path, branch_name,",
+          "raw_log_path, normalized_log_path, workflow_graph_path,",
           "created_at, updated_at",
           "from attempts where run_id = ? order by attempt_number asc, id asc"
         ].join(" ")
@@ -1006,6 +1018,7 @@ export class RunStore {
       .all(runId) as AttemptRow[];
 
     return rows.map((row) => ({
+      artifacts: this.describeAttemptArtifacts(row),
       attemptNumber: row.attempt_number,
       branchName: row.branch_name,
       createdAt: row.created_at,
@@ -1017,6 +1030,30 @@ export class RunStore {
       updatedAt: row.updated_at,
       workspacePath: row.workspace_path
     }));
+  }
+
+  listAttemptArtifacts(attemptId: string): RunArtifactDescriptor[] {
+    const row = this.getAttemptArtifactRow(attemptId);
+    if (row === undefined) {
+      return [];
+    }
+    return this.describeAttemptArtifacts(row);
+  }
+
+  openAttemptArtifactStream(
+    attemptId: string,
+    kind: RunArtifactKind
+  ): Promise<NodeJS.ReadableStream | undefined> {
+    if (!ATTEMPT_ARTIFACT_KIND_SET.has(kind)) {
+      return Promise.resolve(undefined);
+    }
+    const row = this.getAttemptArtifactRow(attemptId);
+    if (row === undefined) {
+      return Promise.resolve(undefined);
+    }
+    return Promise.resolve(
+      this.openArtifactPath(row.run_id, attemptArtifactPath(row, kind))
+    );
   }
 
   listRunStateTransitions(runId: string): RunStateTransition[] {
@@ -1659,6 +1696,37 @@ export class RunStore {
       .get(runId) as RunArtifactRow | undefined;
   }
 
+  private getAttemptArtifactRow(
+    attemptId: string
+  ): AttemptArtifactRow | undefined {
+    return this.database
+      .prepare(
+        [
+          "select run_id, raw_log_path, normalized_log_path, workflow_graph_path",
+          "from attempts where id = ?"
+        ].join(" ")
+      )
+      .get(attemptId) as AttemptArtifactRow | undefined;
+  }
+
+  private describeAttemptArtifacts(
+    row: AttemptArtifactRow
+  ): RunArtifactDescriptor[] {
+    return ATTEMPT_ARTIFACT_KINDS.map((kind) => {
+      const filePath = this.safeArtifactPath(
+        row.run_id,
+        attemptArtifactPath(row, kind)
+      );
+      const sizeBytes =
+        filePath === undefined ? undefined : artifactSize(filePath);
+      return {
+        kind,
+        present: sizeBytes !== undefined,
+        sizeBytes
+      };
+    });
+  }
+
   private async readTextArtifact(
     runId: string,
     filePath: string | null
@@ -1778,6 +1846,16 @@ const RUN_ARTIFACT_KINDS: readonly RunArtifactKind[] = [
   "provider_normalized"
 ];
 
+const ATTEMPT_ARTIFACT_KINDS: readonly RunArtifactKind[] = [
+  "workflow_graph",
+  "provider_raw",
+  "provider_normalized"
+];
+
+const ATTEMPT_ARTIFACT_KIND_SET: ReadonlySet<RunArtifactKind> = new Set(
+  ATTEMPT_ARTIFACT_KINDS
+);
+
 function artifactPath(
   row: RunArtifactRow,
   kind: RunArtifactKind
@@ -1795,6 +1873,22 @@ function artifactPath(
       return row.raw_log_path;
     case "provider_normalized":
       return row.normalized_log_path;
+  }
+}
+
+function attemptArtifactPath(
+  row: AttemptArtifactRow,
+  kind: RunArtifactKind
+): string | null {
+  switch (kind) {
+    case "workflow_graph":
+      return row.workflow_graph_path;
+    case "provider_raw":
+      return row.raw_log_path;
+    case "provider_normalized":
+      return row.normalized_log_path;
+    default:
+      return null;
   }
 }
 

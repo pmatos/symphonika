@@ -239,6 +239,28 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       return streamRunArtifact(context, runStore, id, kind);
     });
 
+    app.get(
+      "/api/runs/:id/attempts/:attemptId/files/:fileKind",
+      async (context) =>
+        streamAttemptArtifact(
+          context,
+          runStore,
+          context.req.param("id"),
+          context.req.param("attemptId"),
+          parseRunArtifactKind(context.req.param("fileKind"))
+        )
+    );
+
+    app.get("/logs/runs/:id/attempts/:attemptId/:kind", async (context) =>
+      streamAttemptArtifact(
+        context,
+        runStore,
+        context.req.param("id"),
+        context.req.param("attemptId"),
+        parseRunArtifactKind(context.req.param("kind"))
+      )
+    );
+
     app.post("/api/runs/:id/cancel", async (context) => {
       const id = context.req.param("id");
       const wantsRedirect = (
@@ -306,6 +328,33 @@ async function streamRunArtifact(
     return context.json({ error: "run not found" }, 404);
   }
   const stream = await runStore.openArtifactStream(id, kind);
+  if (stream === undefined) {
+    return context.json({ error: "file not found" }, 404);
+  }
+  return new Response(Readable.toWeb(stream) as ReadableStream, {
+    headers: { "content-type": RUN_ARTIFACT_CONTENT_TYPES[kind] },
+    status: 200
+  });
+}
+
+async function streamAttemptArtifact(
+  context: Context,
+  runStore: RunStore,
+  runId: string,
+  attemptId: string,
+  kind: RunArtifactKind | undefined
+): Promise<Response> {
+  if (kind === undefined) {
+    return context.json({ error: "unknown file kind" }, 404);
+  }
+  const detail = runStore.getRun(runId);
+  if (detail === undefined) {
+    return context.json({ error: "run not found" }, 404);
+  }
+  if (!detail.attempts.some((attempt) => attempt.id === attemptId)) {
+    return context.json({ error: "attempt not found" }, 404);
+  }
+  const stream = await runStore.openAttemptArtifactStream(attemptId, kind);
   if (stream === undefined) {
     return context.json({ error: "file not found" }, 404);
   }

@@ -661,6 +661,37 @@ describe("HTTP app — runs API and pages", () => {
       expect(latest.status).toBe(200);
       const latestBody = await latest.text();
       expect(JSON.parse(latestBody)).toMatchObject({ name: "single_agent_workflow_v2" });
+
+      const attempt1Response = await app.request(
+        "/logs/runs/run-graph-retry/attempts/run-graph-retry-attempt-1/workflow_graph"
+      );
+      expect(attempt1Response.status).toBe(200);
+      expect(JSON.parse(await attempt1Response.text())).toMatchObject({
+        name: "single_agent_workflow"
+      });
+
+      const attempt2Response = await app.request(
+        "/logs/runs/run-graph-retry/attempts/run-graph-retry-attempt-2/workflow_graph"
+      );
+      expect(attempt2Response.status).toBe(200);
+      expect(JSON.parse(await attempt2Response.text())).toMatchObject({
+        name: "single_agent_workflow_v2"
+      });
+
+      const wrongRun = await app.request(
+        "/logs/runs/missing-run/attempts/run-graph-retry-attempt-1/workflow_graph"
+      );
+      expect(wrongRun.status).toBe(404);
+
+      const wrongAttempt = await app.request(
+        "/logs/runs/run-graph-retry/attempts/missing-attempt/workflow_graph"
+      );
+      expect(wrongAttempt.status).toBe(404);
+
+      const wrongKind = await app.request(
+        "/logs/runs/run-graph-retry/attempts/run-graph-retry-attempt-1/prompt"
+      );
+      expect(wrongKind.status).toBe(404);
     } finally {
       test.cleanup();
     }

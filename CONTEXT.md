@@ -24,6 +24,22 @@ _Avoid_: workflow when referring to the multi-project registry
 The reloadable canonical repository-owned instructions and runtime policy used to execute one issue.
 _Avoid_: service config when referring to repo-owned agent policy
 
+**Expanded Workflow Graph**:
+The fully resolved state machine the Orchestrator validates, stores as run evidence, and executes
+after Markdown compatibility and Workflow Template expansion.
+_Avoid_: workflow template when referring to the executable graph
+
+**Workflow Template**:
+A reusable, side-effect-free FSM fragment with scalar inputs, one entry state, and named exits,
+resolved into an Expanded Workflow Graph during workflow expansion.
+_Avoid_: prompt template when referring to reusable workflow states
+
+**Autonomous Prompt**:
+The exact provider prompt rendered for one Run, including the standard autonomy preamble, optional
+run-specific instructions, and the Workflow Contract or state prompt body after strict variable
+substitution.
+_Avoid_: workflow contract when referring to the rendered provider input
+
 **Issue**:
 A normalized unit of project work read from the issue tracker.
 _Avoid_: ticket, task
@@ -145,6 +161,10 @@ _Avoid_: chat session
 - A **Service Config** lists one or more **Projects**
 - A **Project** owns one **Issue Tracker** configuration
 - A **Project** references one **Workflow Contract**
+- A **Workflow Contract** compiles to an **Expanded Workflow Graph**
+- A **Workflow Template** contributes resolved states to an **Expanded Workflow Graph**
+- An **Autonomous Prompt** is rendered from a **Workflow Contract** or workflow state prompt for one
+  **Run**
 - An **Issue Tracker** provides many **Issues**
 - An **Eligible Issue** is an **Issue** that a **Project** may dispatch
 - **Dispatch Eligibility** and **Continuation Eligibility** are separate questions over the same

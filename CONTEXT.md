@@ -55,6 +55,12 @@ _Avoid_: operational label
 A durable orchestrator claim on an issue for which no live local run exists.
 _Avoid_: failed run
 
+**Issue Reservation**:
+The orchestrator's exclusive claim on a Project's Issue, whether currently in flight as an
+executing Run or scheduled for imminent dispatch as a delayed retry, Continuation, State Advance,
+or wait park.
+_Avoid_: lock, in-flight when the claim spans both in-flight and scheduled work
+
 **Workspace**:
 The operational Git worktree assigned to one issue run, used as the coding-agent cwd and prepared from the Project's repository before hooks run.
 _Avoid_: checkout, repo clone
@@ -146,6 +152,7 @@ _Avoid_: chat session
 - An **Orchestrator** dispatches zero or more **Issues** across one or more **Projects**
 - An **Orchestrator** may write **Operational Labels**
 - A **Stale Claim** blocks automatic dispatch until explicitly cleared in v1
+- An **Issue Reservation** prevents duplicate dispatch while an Issue is either executing or scheduled
 - A **Coding Agent** may write **Workflow Labels**
 - A **Coding Agent** owns the **PR Workflow**
 - A **PR Follow-up** watches only PRs associated with completed Symphonika **Runs**

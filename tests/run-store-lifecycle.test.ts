@@ -621,9 +621,23 @@ describe("run-store schema migration", () => {
         );
         insert into runs (
           id, project_name, issue_number, issue_title, state, issue_snapshot_json,
-          created_at, updated_at
+          metadata_path, created_at, updated_at
         ) values (
           'legacy-run', 'symphonika', 99, 't', 'succeeded', '{}',
+          '/state/logs/runs/legacy-run/prompt-metadata.attempt-2.json',
+          '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'
+        );
+        insert into attempts (
+          id, run_id, attempt_number, state, provider_name, provider_command,
+          workspace_path, branch_name, prompt_path, issue_snapshot_path,
+          raw_log_path, normalized_log_path, created_at, updated_at
+        ) values (
+          'legacy-attempt-2', 'legacy-run', 2, 'succeeded', 'codex', 'codex',
+          '/workspace', 'sym/symphonika/99-t',
+          '/state/logs/runs/legacy-run/prompt.attempt-2.md',
+          '/state/logs/runs/legacy-run/issue-snapshot.attempt-2.json',
+          '/state/logs/runs/legacy-run/provider.raw.attempt-2.jsonl',
+          '/state/logs/runs/legacy-run/provider.normalized.attempt-2.jsonl',
           '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'
         );
       `);
@@ -643,6 +657,9 @@ describe("run-store schema migration", () => {
           "cancel_requested"
         ])
       );
+      expect(columnNames(reader, "attempts")).toEqual(
+        expect.arrayContaining(["metadata_path"])
+      );
       const row = reader.prepare("select id, retry_count, is_continuation from runs where id = ?").get("legacy-run") as
         | { id: string; retry_count: number; is_continuation: number }
         | undefined;
@@ -650,6 +667,12 @@ describe("run-store schema migration", () => {
         id: "legacy-run",
         retry_count: 0,
         is_continuation: 0
+      });
+      const attempt = reader
+        .prepare("select metadata_path from attempts where id = ?")
+        .get("legacy-attempt-2") as { metadata_path: string } | undefined;
+      expect(attempt).toEqual({
+        metadata_path: "/state/logs/runs/legacy-run/prompt-metadata.attempt-2.json"
       });
     } finally {
       reader.close();
@@ -677,7 +700,9 @@ describe("run-store schema migration", () => {
       );
 
       const attempts = columnNames(database, "attempts");
-      expect(attempts).toEqual(expect.arrayContaining(["failure_classification"]));
+      expect(attempts).toEqual(
+        expect.arrayContaining(["failure_classification", "metadata_path"])
+      );
     } finally {
       database.close();
     }

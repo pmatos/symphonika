@@ -256,7 +256,10 @@ type AttemptRow = {
   branch_name: string;
   created_at: string;
   id: string;
+  issue_snapshot_path: string | null;
+  metadata_path: string | null;
   normalized_log_path: string | null;
+  prompt_path: string | null;
   provider_command: string;
   provider_name: string;
   raw_log_path: string | null;
@@ -278,7 +281,10 @@ type RunArtifactRow = {
 };
 
 type AttemptArtifactRow = {
+  issue_snapshot_path: string | null;
+  metadata_path: string | null;
   normalized_log_path: string | null;
+  prompt_path: string | null;
   raw_log_path: string | null;
   run_id: string;
   workflow_graph_path: string | null;
@@ -877,12 +883,12 @@ export class RunStore {
         [
           "insert into attempts (",
           "id, run_id, attempt_number, state, provider_name, provider_command,",
-          "workspace_path, branch_name, prompt_path, issue_snapshot_path,",
+          "workspace_path, branch_name, prompt_path, metadata_path, issue_snapshot_path,",
           "raw_log_path, normalized_log_path, workflow_graph_path,",
           "created_at, updated_at",
           ") values (",
           "@id, @run_id, @attempt_number, @state, @provider_name, @provider_command,",
-          "@workspace_path, @branch_name, @prompt_path, @issue_snapshot_path,",
+          "@workspace_path, @branch_name, @prompt_path, @metadata_path, @issue_snapshot_path,",
           "@raw_log_path, @normalized_log_path, @workflow_graph_path,",
           "@created_at, @updated_at",
           ")"
@@ -894,6 +900,7 @@ export class RunStore {
         created_at: now,
         id: input.id,
         issue_snapshot_path: input.issueSnapshotPath,
+        metadata_path: input.metadataPath,
         normalized_log_path: input.normalizedLogPath,
         prompt_path: input.promptPath,
         provider_command: input.providerCommand,
@@ -1009,7 +1016,7 @@ export class RunStore {
       .prepare(
         [
           "select id, run_id, attempt_number, state, provider_name, provider_command,",
-          "workspace_path, branch_name,",
+          "workspace_path, branch_name, prompt_path, metadata_path, issue_snapshot_path,",
           "raw_log_path, normalized_log_path, workflow_graph_path,",
           "created_at, updated_at",
           "from attempts where run_id = ? order by attempt_number asc, id asc"
@@ -1563,6 +1570,7 @@ export class RunStore {
         workspace_path text not null,
         branch_name text not null,
         prompt_path text not null,
+        metadata_path text not null,
         issue_snapshot_path text not null,
         raw_log_path text not null,
         normalized_log_path text not null,
@@ -1649,12 +1657,51 @@ export class RunStore {
       ["runs", "terminal_state_id", "text"],
       ["runs", "state_transition_reason", "text"],
       ["attempts", "failure_classification", "text"],
+      ["attempts", "metadata_path", "text"],
       ["attempts", "workflow_graph_path", "text"]
     ];
 
     const apply = this.database.transaction(() => {
       for (const [table, column, decl] of additions) {
         this.ensureColumn(table, column, decl);
+      }
+    });
+    apply();
+    this.backfillAttemptMetadataPaths();
+  }
+
+  private backfillAttemptMetadataPaths(): void {
+    const rows = this.database
+      .prepare(
+        [
+          "select attempts.id, attempts.attempt_number, attempts.prompt_path,",
+          "attempts.metadata_path, runs.metadata_path as run_metadata_path",
+          "from attempts left join runs on runs.id = attempts.run_id",
+          "where attempts.metadata_path is null or attempts.metadata_path = ''"
+        ].join(" ")
+      )
+      .all() as Array<{
+        attempt_number: number;
+        id: string;
+        metadata_path: string | null;
+        prompt_path: string | null;
+        run_metadata_path: string | null;
+      }>;
+    if (rows.length === 0) {
+      return;
+    }
+
+    const update = this.database.prepare(
+      "update attempts set metadata_path = ? where id = ?"
+    );
+    const apply = this.database.transaction(() => {
+      for (const row of rows) {
+        const metadataPath =
+          inferAttemptMetadataPath(row.prompt_path, row.attempt_number) ??
+          row.run_metadata_path;
+        if (metadataPath !== null && metadataPath.length > 0) {
+          update.run(metadataPath, row.id);
+        }
       }
     });
     apply();
@@ -1702,7 +1749,8 @@ export class RunStore {
     return this.database
       .prepare(
         [
-          "select run_id, raw_log_path, normalized_log_path, workflow_graph_path",
+          "select run_id, issue_snapshot_path, prompt_path, metadata_path,",
+          "raw_log_path, normalized_log_path, workflow_graph_path",
           "from attempts where id = ?"
         ].join(" ")
       )
@@ -1847,6 +1895,9 @@ const RUN_ARTIFACT_KINDS: readonly RunArtifactKind[] = [
 ];
 
 const ATTEMPT_ARTIFACT_KINDS: readonly RunArtifactKind[] = [
+  "issue_snapshot",
+  "prompt",
+  "prompt_metadata",
   "workflow_graph",
   "provider_raw",
   "provider_normalized"
@@ -1881,15 +1932,44 @@ function attemptArtifactPath(
   kind: RunArtifactKind
 ): string | null {
   switch (kind) {
+    case "issue_snapshot":
+      return row.issue_snapshot_path;
+    case "prompt":
+      return row.prompt_path;
+    case "prompt_metadata":
+      return row.metadata_path;
     case "workflow_graph":
       return row.workflow_graph_path;
     case "provider_raw":
       return row.raw_log_path;
     case "provider_normalized":
       return row.normalized_log_path;
-    default:
-      return null;
   }
+}
+
+function inferAttemptMetadataPath(
+  promptPath: string | null,
+  attemptNumber: number
+): string | null {
+  if (promptPath === null || promptPath.length === 0) {
+    return null;
+  }
+  const directory = path.dirname(promptPath);
+  const basename = path.basename(promptPath);
+  if (basename === "prompt.md") {
+    return path.join(directory, "prompt-metadata.json");
+  }
+  const attemptMatch = /^prompt\.attempt-(\d+)\.md$/.exec(basename);
+  if (attemptMatch !== null) {
+    return path.join(
+      directory,
+      `prompt-metadata.attempt-${attemptMatch[1]}.json`
+    );
+  }
+  if (attemptNumber > 1) {
+    return path.join(directory, `prompt-metadata.attempt-${attemptNumber}.json`);
+  }
+  return null;
 }
 
 function artifactSize(filePath: string): number | undefined {

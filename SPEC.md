@@ -398,13 +398,16 @@ Each provider attempt stores:
 - issue branch
 - issue snapshot
 - expanded workflow graph (workflow name, source kind, source path, content hash, initial
-  state, states, transitions, terminal markers, template files), persisted as
-  `workflow-graph.json` next to `prompt-metadata.json`. Retries write
-  `workflow-graph.attempt-<N>.json` so prior attempts' graphs remain inspectable. Markdown
-  `WORKFLOW.md` workflows record their one-state compatibility graph; explicit raw FSM YAML
-  workflows record their parsed expanded graph. Multi-state raw FSM walks advance through the
-  state machine via a `state_advance` dispatch path that is distinct from label-driven
-  continuations; see ADR 0046.
+  state, states, transitions, terminal markers, template files)
+
+First attempts write `prompt.md`, `prompt-metadata.json`, `issue-snapshot.json`, and
+`workflow-graph.json`. Retries write `prompt.attempt-<N>.md`,
+`prompt-metadata.attempt-<N>.json`, `issue-snapshot.attempt-<N>.json`, and
+`workflow-graph.attempt-<N>.json` so prior attempts' rendered prompts, issue snapshots, metadata,
+and workflow graphs remain inspectable through attempt-scoped artifact descriptors. Markdown
+`WORKFLOW.md` workflows record their one-state compatibility graph; explicit raw FSM YAML workflows
+record their parsed expanded graph. Multi-state raw FSM walks advance through the state machine via
+a `state_advance` dispatch path that is distinct from label-driven continuations; see ADR 0046.
 
 ## 8. Scheduling
 

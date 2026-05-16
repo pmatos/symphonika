@@ -583,6 +583,18 @@ describe("HTTP app — runs API and pages", () => {
       await mkdir(evidenceDir, { recursive: true });
       const attempt1Path = path.join(evidenceDir, "workflow-graph.json");
       const attempt2Path = path.join(evidenceDir, "workflow-graph.attempt-2.json");
+      const attempt1Prompt = path.join(evidenceDir, "prompt.md");
+      const attempt2Prompt = path.join(evidenceDir, "prompt.attempt-2.md");
+      const attempt1Metadata = path.join(evidenceDir, "prompt-metadata.json");
+      const attempt2Metadata = path.join(
+        evidenceDir,
+        "prompt-metadata.attempt-2.json"
+      );
+      const attempt1Snapshot = path.join(evidenceDir, "issue-snapshot.json");
+      const attempt2Snapshot = path.join(
+        evidenceDir,
+        "issue-snapshot.attempt-2.json"
+      );
       await writeFile(
         attempt1Path,
         JSON.stringify({
@@ -593,6 +605,18 @@ describe("HTTP app — runs API and pages", () => {
           states: [],
           templateFiles: []
         })
+      );
+      await writeFile(attempt1Prompt, "attempt 1 prompt\n");
+      await writeFile(attempt2Prompt, "attempt 2 prompt\n");
+      await writeFile(attempt1Metadata, JSON.stringify({ attempt: 1 }));
+      await writeFile(attempt2Metadata, JSON.stringify({ attempt: 2 }));
+      await writeFile(
+        attempt1Snapshot,
+        JSON.stringify({ number: 93, title: "attempt 1" })
+      );
+      await writeFile(
+        attempt2Snapshot,
+        JSON.stringify({ number: 93, title: "attempt 2" })
       );
       await writeFile(
         attempt2Path,
@@ -616,10 +640,7 @@ describe("HTTP app — runs API and pages", () => {
       const baseAttempt = {
         branchName: "sym/run-graph-retry",
         branchRef: "refs/heads/sym/run-graph-retry",
-        issueSnapshotPath: "",
-        metadataPath: "",
         normalizedLogPath: "",
-        promptPath: "",
         providerCommand: "x",
         providerName: "codex" as const,
         rawLogPath: "",
@@ -631,21 +652,27 @@ describe("HTTP app — runs API and pages", () => {
         ...baseAttempt,
         attemptNumber: 1,
         id: "run-graph-retry-attempt-1",
+        issueSnapshotPath: attempt1Snapshot,
+        metadataPath: attempt1Metadata,
+        promptPath: attempt1Prompt,
         workflowGraphPath: attempt1Path
       });
       test.runStore.createAttempt({
         ...baseAttempt,
         attemptNumber: 2,
         id: "run-graph-retry-attempt-2",
+        issueSnapshotPath: attempt2Snapshot,
+        metadataPath: attempt2Metadata,
+        promptPath: attempt2Prompt,
         workflowGraphPath: attempt2Path
       });
       test.runStore.updateRunEvidence("run-graph-retry", {
         branchName: baseAttempt.branchName,
         branchRef: baseAttempt.branchRef,
-        issueSnapshotPath: "",
-        metadataPath: "",
+        issueSnapshotPath: attempt2Snapshot,
+        metadataPath: attempt2Metadata,
         normalizedLogPath: "",
-        promptPath: "",
+        promptPath: attempt2Prompt,
         rawLogPath: "",
         workflowGraphPath: attempt2Path,
         workspacePath: test.stateRoot
@@ -669,6 +696,25 @@ describe("HTTP app — runs API and pages", () => {
       expect(JSON.parse(await attempt1Response.text())).toMatchObject({
         name: "single_agent_workflow"
       });
+      const attempt1PromptResponse = await app.request(
+        "/logs/runs/run-graph-retry/attempts/run-graph-retry-attempt-1/prompt"
+      );
+      expect(attempt1PromptResponse.status).toBe(200);
+      expect(await attempt1PromptResponse.text()).toBe("attempt 1 prompt\n");
+      const attempt1MetadataResponse = await app.request(
+        "/logs/runs/run-graph-retry/attempts/run-graph-retry-attempt-1/prompt_metadata"
+      );
+      expect(attempt1MetadataResponse.status).toBe(200);
+      expect(JSON.parse(await attempt1MetadataResponse.text())).toMatchObject({
+        attempt: 1
+      });
+      const attempt1SnapshotResponse = await app.request(
+        "/logs/runs/run-graph-retry/attempts/run-graph-retry-attempt-1/issue_snapshot"
+      );
+      expect(attempt1SnapshotResponse.status).toBe(200);
+      expect(JSON.parse(await attempt1SnapshotResponse.text())).toMatchObject({
+        title: "attempt 1"
+      });
 
       const attempt2Response = await app.request(
         "/logs/runs/run-graph-retry/attempts/run-graph-retry-attempt-2/workflow_graph"
@@ -689,7 +735,7 @@ describe("HTTP app — runs API and pages", () => {
       expect(wrongAttempt.status).toBe(404);
 
       const wrongKind = await app.request(
-        "/logs/runs/run-graph-retry/attempts/run-graph-retry-attempt-1/prompt"
+        "/logs/runs/run-graph-retry/attempts/run-graph-retry-attempt-1/not_a_kind"
       );
       expect(wrongKind.status).toBe(404);
     } finally {

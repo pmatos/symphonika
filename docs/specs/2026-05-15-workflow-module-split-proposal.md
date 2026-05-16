@@ -75,12 +75,15 @@ kept as narrow helpers from `contract-loading.ts`, so CLI callers do not learn a
 
 Private helpers should move with the public function that uses them most directly:
 
-- `resolveWorkflowFormat`, `projectWorkflowReferences`, `parseWorkflowReference`,
-  `selectProjectWorkflow`, and `parseExplicitWorkflowDefinition` are loader/reference helpers.
-- `expandRawStateMachineWorkflow`, `parseWorkflowTemplateUses`, `loadWorkflowTemplateUses`,
-  `loadWorkflowTemplate`, `loadBuiltinWorkflowTemplate`, `parseWorkflowTemplate`,
-  `parseWorkflowTemplateInputs`, `expandWorkflowTemplateUse`, and `templateExitStateMap` are FSM
-  expansion helpers.
+- `resolveWorkflowFormat`, `projectWorkflowReferences`, `parseWorkflowReference`, and
+  `selectProjectWorkflow` are loader/reference helpers.
+- `parseExplicitWorkflowDefinition`, `expandRawStateMachineWorkflow`, `parseWorkflowTemplateUses`,
+  `loadWorkflowTemplateUses`, `loadWorkflowTemplate`, `loadBuiltinWorkflowTemplate`,
+  `parseWorkflowTemplate`, `parseWorkflowTemplateInputs`, `expandWorkflowTemplateUse`, and
+  `templateExitStateMap` are FSM expansion helpers. `parseExplicitWorkflowDefinition` parses the raw
+  FSM top-level `workflow` mapping, so it owns raw FSM structural knowledge and must live with
+  `fsm-expansion.ts`; otherwise `contract-loading.ts` would have to understand raw FSM structure,
+  which contradicts the boundary set above.
 - `resolveTemplateValue`, prompt allow-lists, previous-attempt notice rendering, and evidence file
   naming are Autonomous Prompt helpers.
 

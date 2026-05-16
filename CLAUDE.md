@@ -24,3 +24,17 @@ Symphony reference spec.
 - Update `SPEC.md`, `CONTEXT.md`, or `docs/adr/` when implementation work resolves a domain or
   architecture decision.
 - Do not silently change the upstream `symphony/` submodule unless the task explicitly asks for it.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues at `pmatos/symphonika` (via `gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Mapped to existing repo labels (`agent-ready`, `needs-human`, `wontfix`) with new `needs-triage` / `needs-info`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.

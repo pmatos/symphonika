@@ -1339,9 +1339,13 @@ function parseWorkflowAction(
   const method = stringProperty(rawAction, "method");
 
   if (kind === "agent") {
-    if (provider !== "codex" && provider !== "claude") {
+    if (
+      provider !== undefined &&
+      provider !== "codex" &&
+      provider !== "claude"
+    ) {
       errors.push(
-        `workflow state ${stateId} at ${workflowPath} agent action must define provider codex or claude`
+        `workflow state ${stateId} at ${workflowPath} agent action provider must be codex or claude`
       );
     }
     if (prompt === undefined) {

@@ -50,6 +50,7 @@ import {
 import type {
   ExpandedWorkflow,
   ExpandedWorkflowState,
+  WorkflowAction,
   WorkflowPredicateMap
 } from "../workflow.js";
 
@@ -195,6 +196,13 @@ type RetryPayload = {
   extraInstructions?: string;
   issue: IssueSnapshot;
   projectName: string;
+  // Carry the provider chosen for this run (which may be a per-state override
+  // from a raw FSM action.provider) so the retry executes the same provider
+  // and command, not the project default. Without this, a state declaring
+  // action.provider: claude in a project whose default is codex would retry
+  // on codex and produce inconsistent prompts/evidence.
+  providerCommand: string;
+  providerName: AgentProviderName;
   // When false (raw FSM mid-walk runs), executeRetry skips the labels_all /
   // labels_none re-check so a transient provider failure stays recoverable
   // even when labels drift during the FSM walk. CLOSED_ISSUE still cancels.
@@ -210,12 +218,14 @@ type ContinuationPayload = {
 };
 
 type StateAdvancePayload = {
+  action?: WorkflowAction;
   issue: IssueSnapshot;
   parentRunId: string;
   projectName: string;
 };
 
 type WorkflowOutcomeResult = {
+  advancedToAction?: WorkflowAction;
   advancedToState: string | null;
   advancedToTerminal: boolean;
   blocked: boolean;
@@ -309,8 +319,67 @@ export class RunController {
       repo: target.project.tracker.repo,
       token
     };
-    const providerCommand =
-      providersConfig[target.project.agent.provider].command;
+
+    // Honor action.provider on the initial raw-FSM state, matching the
+    // per-state routing executeStateAdvance applies to subsequent advances.
+    // runAttemptLifecycle reloads the workflow downstream regardless, so
+    // loading it once here pays only on actually-selected dispatches. Falls
+    // back to the project default for contract workflows or when the
+    // initial agent action declares no provider.
+    let initialAction: WorkflowAction | undefined;
+    try {
+      const loaded = await this.loadWorkflow(target.project.workflow);
+      if (
+        loaded.errors.length === 0 &&
+        loaded.expandedWorkflow.source.kind === "raw_fsm"
+      ) {
+        const initialState = findWorkflowState(
+          loaded.expandedWorkflow,
+          loaded.expandedWorkflow.initial
+        );
+        if (initialState?.action !== undefined) {
+          initialAction = initialState.action;
+        }
+      }
+    } catch {
+      // Workflow load failure falls back to the project default; the same
+      // error surfaces from runAttemptLifecycle's reload during the attempt.
+    }
+
+    const providerName =
+      initialAction?.kind === "agent" && initialAction.provider !== undefined
+        ? initialAction.provider
+        : target.project.agent.provider;
+    const providerCommand = (
+      providersConfig as Partial<RunControllerProvidersConfig>
+    )[providerName]?.command;
+
+    if (providerCommand === undefined || providerCommand.trim().length === 0) {
+      await this.failFreshDispatchBeforeProvider({
+        issue: target.candidate.issue,
+        project: target.project,
+        providerCommand: providerCommand ?? "",
+        providerName,
+        reason: `provider_command_missing: ${providerName}`,
+        repository,
+        runId
+      });
+      return { dispatched: true, runId };
+    }
+
+    const provider = this.agentProviders[providerName];
+    if (provider === undefined) {
+      await this.failFreshDispatchBeforeProvider({
+        issue: target.candidate.issue,
+        project: target.project,
+        providerCommand,
+        providerName,
+        reason: `provider_not_registered: ${providerName}`,
+        repository,
+        runId
+      });
+      return { dispatched: true, runId };
+    }
 
     await this.runFreshLifecycle({
       attemptNumber: 1,
@@ -318,15 +387,75 @@ export class RunController {
       issue: target.candidate.issue,
       parentRunId: null,
       project: target.project,
-      provider: target.provider,
+      provider,
       providerCommand,
-      providerName: target.project.agent.provider,
+      providerName,
       repository,
       runId,
       schedulerWeights: target.schedulerWeights
     });
 
     return { dispatched: true, runId };
+  }
+
+  private async failFreshDispatchBeforeProvider(input: {
+    issue: IssueSnapshot;
+    project: RunControllerProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    reason: string;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    await this.bestEffort(
+      () =>
+        (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
+          ...input.repository,
+          issueNumber: input.issue.number,
+          labels: ["sym:claimed"]
+        }),
+      {
+        issueNumber: input.issue.number,
+        label: "sym:claimed",
+        operation: "addLabel",
+        phase: "fresh-dispatch-provider-resolution",
+        project: input.project.name,
+        runId: input.runId
+      }
+    );
+    this.runStore.createRun({
+      id: input.runId,
+      issue: input.issue,
+      projectName: input.project.name,
+      providerCommand: input.providerCommand,
+      providerName: input.providerName
+    });
+    this.runStore.recordTerminalReason(
+      input.runId,
+      input.reason,
+      "deterministic"
+    );
+    this.runStore.updateRunState(input.runId, "failed");
+    this.logger?.warn(
+      {
+        issueNumber: input.issue.number,
+        project: input.project.name,
+        provider: input.providerName,
+        reason: input.reason,
+        runId: input.runId
+      },
+      "symphonika fresh dispatch failed before provider launch"
+    );
+    await this.applyTerminalLabels({
+      issueNumber: input.issue.number,
+      outcome: {
+        classification: "deterministic",
+        kind: "failed",
+        reason: input.reason
+      },
+      repository: input.repository,
+      willRetry: false
+    });
   }
 
   async executeRetry(payload: RetryPayload): Promise<void> {
@@ -340,17 +469,20 @@ export class RunController {
       return;
     }
 
-    const provider = this.agentProviders[project.agent.provider];
+    const provider = this.agentProviders[payload.providerName];
     if (provider === undefined) {
       this.logger?.warn(
-        { projectName: payload.projectName, runId: payload.runId },
+        {
+          projectName: payload.projectName,
+          providerName: payload.providerName,
+          runId: payload.runId
+        },
         "symphonika retry dropped: provider missing"
       );
       return;
     }
 
-    const providersConfig = await this.providersLoader();
-    const providerCommand = providersConfig[project.agent.provider].command;
+    const providerCommand = payload.providerCommand;
 
     if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
       this.logger?.warn(
@@ -445,7 +577,7 @@ export class RunController {
       project,
       provider,
       providerCommand,
-      providerName: project.agent.provider,
+      providerName: payload.providerName,
       repository,
       runId: payload.runId
     });
@@ -756,6 +888,7 @@ export class RunController {
         delayMs: this.lifecyclePolicy.continuation.delayMs,
         fire: () =>
           this.executeStateAdvance({
+            ...(next?.action === undefined ? {} : { action: next.action }),
             issue: refreshed,
             parentRunId: runId,
             projectName: project.name
@@ -797,13 +930,15 @@ export class RunController {
       return;
     }
 
-    const provider = this.agentProviders[project.agent.provider];
-    if (provider === undefined) {
-      return;
-    }
-
+    const providerName =
+      payload.action?.kind === "agent" && payload.action.provider !== undefined
+        ? payload.action.provider
+        : project.agent.provider;
     const providersConfig = await this.providersLoader();
-    const providerCommand = providersConfig[project.agent.provider].command;
+    const providerConfig = (providersConfig as Partial<RunControllerProvidersConfig>)[
+      providerName
+    ];
+    const providerCommand = providerConfig?.command;
 
     if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
       return;
@@ -839,6 +974,35 @@ export class RunController {
     }
 
     const runId = this.createRunId();
+    if (providerCommand === undefined || providerCommand.trim().length === 0) {
+      await this.failStateAdvanceBeforeProvider({
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        project,
+        providerCommand: providerCommand ?? "",
+        providerName,
+        reason: `provider_command_missing: ${providerName}`,
+        repository,
+        runId
+      });
+      return;
+    }
+
+    const provider = this.agentProviders[providerName];
+    if (provider === undefined) {
+      await this.failStateAdvanceBeforeProvider({
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        project,
+        providerCommand,
+        providerName,
+        reason: `provider_not_registered: ${providerName}`,
+        repository,
+        runId
+      });
+      return;
+    }
+
     await this.runFreshLifecycle({
       attemptNumber: 1,
       isContinuation: true,
@@ -847,9 +1011,72 @@ export class RunController {
       project,
       provider,
       providerCommand,
-      providerName: project.agent.provider,
+      providerName,
       repository,
       runId
+    });
+  }
+
+  private async failStateAdvanceBeforeProvider(input: {
+    issue: IssueSnapshot;
+    parentRunId: string;
+    project: RunControllerProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    reason: string;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    await this.bestEffort(
+      () =>
+        (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
+          ...input.repository,
+          issueNumber: input.issue.number,
+          labels: ["sym:claimed"]
+        }),
+      {
+        issueNumber: input.issue.number,
+        label: "sym:claimed",
+        operation: "addLabel",
+        phase: "state-advance-provider-resolution",
+        project: input.project.name,
+        runId: input.runId
+      }
+    );
+    this.runStore.createContinuationRun({
+      id: input.runId,
+      issue: input.issue,
+      parentRunId: input.parentRunId,
+      projectName: input.project.name,
+      providerCommand: input.providerCommand,
+      providerName: input.providerName
+    });
+    this.runStore.recordTerminalReason(
+      input.runId,
+      input.reason,
+      "deterministic"
+    );
+    this.runStore.updateRunState(input.runId, "failed");
+    this.logger?.warn(
+      {
+        issueNumber: input.issue.number,
+        parentRunId: input.parentRunId,
+        project: input.project.name,
+        provider: input.providerName,
+        reason: input.reason,
+        runId: input.runId
+      },
+      "symphonika state advance failed before provider launch"
+    );
+    await this.applyTerminalLabels({
+      issueNumber: input.issue.number,
+      outcome: {
+        classification: "deterministic",
+        kind: "failed",
+        reason: input.reason
+      },
+      repository: input.repository,
+      willRetry: false
     });
   }
 
@@ -1478,6 +1705,8 @@ export class RunController {
           issue: input.issue,
           outcome: effectiveOutcome,
           project: input.project,
+          providerCommand: input.providerCommand,
+          providerName: input.providerName,
           repository: input.repository,
           respectsIssueLabels,
           runId: input.runId,
@@ -1486,7 +1715,12 @@ export class RunController {
             isRawFsm &&
             workflowOutcome.advancedToState !== null &&
             workflowOutcome.parkAsWait !== true
-              ? { toStateId: workflowOutcome.advancedToState }
+              ? {
+                  ...(workflowOutcome.advancedToAction === undefined
+                    ? {}
+                    : { action: workflowOutcome.advancedToAction }),
+                  toStateId: workflowOutcome.advancedToState
+                }
               : null,
           waitPark:
             isRawFsm &&
@@ -1661,6 +1895,7 @@ export class RunController {
         };
       }
       return {
+        ...(next?.action === undefined ? {} : { advancedToAction: next.action }),
         advancedToState: decision.to,
         advancedToTerminal: false,
         blocked: false
@@ -1911,11 +2146,13 @@ export class RunController {
     issue: IssueSnapshot;
     outcome: ClassifiedTerminal;
     project: RunControllerProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
     repository: GitHubIssueRepositoryInput;
     respectsIssueLabels?: boolean;
     runId: string;
     runtimeAttemptNumber: number;
-    stateAdvance?: { toStateId: string } | null;
+    stateAdvance?: { action?: WorkflowAction; toStateId: string } | null;
     suppressContinuation?: boolean;
     waitPark?: { waitingRunId: string } | null;
   }): Promise<void> {
@@ -1943,6 +2180,8 @@ export class RunController {
               : { extraInstructions: input.extraInstructions }),
             issue: input.issue,
             projectName: input.project.name,
+            providerCommand: input.providerCommand,
+            providerName: input.providerName,
             // Carry the FSM mid-walk label-immunity bit into the retry. Without
             // this a transient provider failure during a raw FSM walk would be
             // cancelled with ELIGIBILITY_LOSS the moment labels drift, even
@@ -1966,6 +2205,7 @@ export class RunController {
     // and skips the labels_all / labels_none re-check; only require that the
     // issue is still open. See ADR 0046.
     if (input.stateAdvance != null) {
+      const stateAdvance = input.stateAdvance;
       const refreshedForAdvance = await this.refreshIssue({
         project: input.project,
         issueNumber: input.issue.number,
@@ -1983,7 +2223,7 @@ export class RunController {
           issueNumber: refreshedForAdvance.number,
           parentRunId: input.runId,
           project: input.project.name,
-          toStateId: input.stateAdvance.toStateId
+          toStateId: stateAdvance.toStateId
         },
         "symphonika scheduling state advance"
       );
@@ -1991,6 +2231,9 @@ export class RunController {
         delayMs: this.lifecyclePolicy.continuation.delayMs,
         fire: () =>
           this.executeStateAdvance({
+            ...(stateAdvance.action === undefined
+              ? {}
+              : { action: stateAdvance.action }),
             issue: refreshedForAdvance,
             parentRunId: input.runId,
             projectName: input.project.name

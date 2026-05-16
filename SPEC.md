@@ -264,6 +264,10 @@ workflow snapshot for future work until a valid reload is available.
 Service discovery, tracker settings, workspace roots, provider selection, and GitHub labels belong
 in `symphonika.yml`, not in `WORKFLOW.md`.
 
+Raw FSM agent states may declare `action.provider` to route that state to a specific configured
+Agent Provider. If an agent state omits `action.provider`, Symphonika uses the Project's
+`agent.provider` from `symphonika.yml`.
+
 The daemon must not dispatch a Project when its workflow contract is missing or invalid.
 
 ### 5.3 Templating

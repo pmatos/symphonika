@@ -707,6 +707,36 @@ describe("CLI run commands", () => {
     expect(present.output.stdout).toContain("<not yet recorded>");
   });
 
+  it("show-run fills missing branch and workspace fields from the deterministic path plan", async () => {
+    const stateRoot = await makeTempRoot();
+    const configDir = await makeTempRoot();
+    const cfg = await writeWorkspacePlanningConfig(configDir, stateRoot);
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "show-planned",
+      issue: sampleIssue({ number: 31, title: "Missing evidence" }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.close();
+
+    const present = captureProgram(stateRoot);
+    await present.program.parseAsync([
+      "node",
+      "symphonika",
+      "show-run",
+      "show-planned",
+      "--config",
+      cfg
+    ]);
+
+    expect(present.output.stdout).toContain("branch:       sym/alpha/31-missing-evidence");
+    expect(present.output.stdout).toContain(
+      `workspace:    ${path.join(configDir, "workspaces", "alpha", "issues", "31-missing-evidence")}`
+    );
+  });
+
   it("show-run prints the workflow graph summary when graph evidence is present", async () => {
     const stateRoot = await makeTempRoot();
     const evidenceDir = path.join(stateRoot, "logs", "runs", "show-graph");
@@ -1121,3 +1151,48 @@ describe("CLI run commands", () => {
     );
   });
 });
+
+async function writeWorkspacePlanningConfig(
+  configDir: string,
+  stateRoot: string
+): Promise<string> {
+  await mkdir(configDir, { recursive: true });
+  await writeFile(path.join(configDir, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+  const configPath = path.join(configDir, "symphonika.yml");
+  await writeFile(
+    configPath,
+    [
+      "state:",
+      `  root: ${stateRoot}`,
+      "providers:",
+      "  codex:",
+      '    command: "codex app-server"',
+      "  claude:",
+      '    command: "claude -p"',
+      "projects:",
+      "  - name: alpha",
+      "    tracker:",
+      "      kind: github",
+      "      owner: pmatos",
+      "      repo: symphonika",
+      '      token: "$GITHUB_TOKEN"',
+      "    issue_filters:",
+      '      states: ["open"]',
+      '      labels_all: ["agent-ready"]',
+      '      labels_none: ["blocked"]',
+      "    priority:",
+      "      labels: {}",
+      "      default: 99",
+      "    workspace:",
+      "      root: ./workspaces/alpha",
+      "      git:",
+      "        remote: git@github.com:pmatos/symphonika.git",
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      "    workflow: ./WORKFLOW.md",
+      ""
+    ].join("\n")
+  );
+  return configPath;
+}

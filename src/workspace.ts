@@ -3,6 +3,11 @@ import { mkdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import {
+  planWorkspacePaths,
+  type WorkspacePathPlan
+} from "./workspace-paths.js";
+
 const execFileAsync = promisify(execFile);
 
 export type WorkspaceProject = {
@@ -27,14 +32,7 @@ export type PrepareIssueWorkspaceInput = {
   project: WorkspaceProject;
 };
 
-export type PreparedIssueWorkspace = {
-  branchName: string;
-  branchRef: string;
-  cachePath: string;
-  issueDirectoryName: string;
-  reused: boolean;
-  workspacePath: string;
-};
+export type PreparedIssueWorkspace = WorkspacePathPlan & { reused: boolean };
 
 export type WorkspacePreparationErrorCode =
   | "branch_conflict"
@@ -62,16 +60,16 @@ export class WorkspacePreparationError extends Error {
 export async function prepareIssueWorkspace(
   input: PrepareIssueWorkspaceInput
 ): Promise<PreparedIssueWorkspace> {
-  const prepared = issueWorkspacePaths(input);
+  const plan = planWorkspacePaths(input);
 
-  await ensureRepositoryCache(input.project, prepared.cachePath);
-  await ensureIssueBranch(input.project, prepared.cachePath, prepared.branchName);
-  if (await exists(prepared.workspacePath)) {
+  await ensureRepositoryCache(input.project, plan.cachePath);
+  await ensureIssueBranch(input.project, plan.cachePath, plan.branchName);
+  if (await exists(plan.workspacePath)) {
     let currentBranch: string;
     try {
       currentBranch = await git([
         "-C",
-        prepared.workspacePath,
+        plan.workspacePath,
         "rev-parse",
         "--abbrev-ref",
         "HEAD"
@@ -79,60 +77,63 @@ export async function prepareIssueWorkspace(
     } catch (error) {
       throw new WorkspacePreparationError(
         "workspace_conflict",
-        `workspace path ${prepared.workspacePath} exists but is not a reusable Git worktree for ${prepared.branchName}`,
+        `workspace path ${plan.workspacePath} exists but is not a reusable Git worktree for ${plan.branchName}`,
         error
       );
     }
 
-    if (currentBranch === prepared.branchName) {
-      if (!(await isWorktreeRoot(prepared.workspacePath))) {
+    if (currentBranch === plan.branchName) {
+      if (!(await isWorktreeRoot(plan.workspacePath))) {
         throw new WorkspacePreparationError(
           "workspace_conflict",
-          `workspace path ${prepared.workspacePath} is checked out on ${prepared.branchName} but is not the Git worktree root`
+          `workspace path ${plan.workspacePath} is checked out on ${plan.branchName} but is not the Git worktree root`
         );
       }
 
-      if (!(await isWorktreeForCache(prepared.workspacePath, prepared.cachePath))) {
+      if (!(await isWorktreeForCache(plan.workspacePath, plan.cachePath))) {
         throw new WorkspacePreparationError(
           "workspace_conflict",
-          `workspace path ${prepared.workspacePath} is checked out on ${prepared.branchName} but is not linked to cache ${prepared.cachePath}`
+          `workspace path ${plan.workspacePath} is checked out on ${plan.branchName} but is not linked to cache ${plan.cachePath}`
         );
       }
 
       return {
-        ...prepared,
+        ...plan,
         reused: true
       };
     }
 
     throw new WorkspacePreparationError(
       "workspace_conflict",
-      `workspace path ${prepared.workspacePath} is already checked out on ${currentBranch}, expected ${prepared.branchName}`
+      `workspace path ${plan.workspacePath} is already checked out on ${currentBranch}, expected ${plan.branchName}`
     );
   }
 
   const conflictingWorktreePath = await worktreePathForBranch(
-    prepared.cachePath,
-    prepared.branchName
+    plan.cachePath,
+    plan.branchName
   );
   if (conflictingWorktreePath !== undefined) {
     throw new WorkspacePreparationError(
       "branch_conflict",
-      `issue branch ${prepared.branchName} is already checked out at ${conflictingWorktreePath}`
+      `issue branch ${plan.branchName} is already checked out at ${conflictingWorktreePath}`
     );
   }
 
-  await mkdir(path.dirname(prepared.workspacePath), { recursive: true });
+  await mkdir(path.dirname(plan.workspacePath), { recursive: true });
   await git([
     "-C",
-    prepared.cachePath,
+    plan.cachePath,
     "worktree",
     "add",
-    prepared.workspacePath,
-    prepared.branchName
+    plan.workspacePath,
+    plan.branchName
   ]);
 
-  return prepared;
+  return {
+    ...plan,
+    reused: false
+  };
 }
 
 async function isWorktreeRoot(workspacePath: string): Promise<boolean> {
@@ -189,28 +190,6 @@ async function worktreePathForBranch(
   }
 
   return undefined;
-}
-
-function issueWorkspacePaths(
-  input: PrepareIssueWorkspaceInput
-): PreparedIssueWorkspace {
-  const projectSlug = slugify(input.project.name, "project");
-  const issueSlug = slugify(input.issue.title, "issue");
-  const issueDirectoryName = `${input.issue.number}-${issueSlug}`;
-  const workspaceRoot = path.resolve(
-    input.configDir ?? process.cwd(),
-    input.project.workspace.root
-  );
-  const branchName = `sym/${projectSlug}/${issueDirectoryName}`;
-
-  return {
-    branchName,
-    branchRef: `refs/heads/${branchName}`,
-    cachePath: path.join(workspaceRoot, ".cache", "repo.git"),
-    issueDirectoryName,
-    reused: false,
-    workspacePath: path.join(workspaceRoot, "issues", issueDirectoryName)
-  };
 }
 
 async function ensureRepositoryCache(
@@ -272,18 +251,6 @@ async function ensureIssueBranch(
     branchName,
     `origin/${project.workspace.git.base_branch}`
   ]);
-}
-
-function slugify(input: string, fallback: string): string {
-  const asciiInput = Array.from(input.normalize("NFKD"))
-    .filter((character) => character.charCodeAt(0) <= 0x7f)
-    .join("");
-  const slug = asciiInput
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-
-  return slug.length === 0 ? fallback : slug;
 }
 
 async function exists(filePath: string): Promise<boolean> {

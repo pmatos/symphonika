@@ -1,7 +1,13 @@
+import path from "node:path";
+
 import type { DoctorProjectReport, DoctorReport } from "./doctor.js";
 import type { IssuePollStatus } from "./issue-polling.js";
 import type { RuntimeReloadStatus } from "./reload.js";
 import type { ProjectState, RunStatus, RunStore } from "./run-store.js";
+import {
+  planWorkspacePaths,
+  type WorkspacePathInputs
+} from "./workspace-paths.js";
 
 export type StatusSnapshot = {
   configPath: string;
@@ -20,9 +26,11 @@ export type StatusSnapshot = {
 };
 
 export type BuildStatusSnapshotInput = {
+  configDir?: string;
   configPath: string;
   doctorReport?: DoctorReport;
   issuePollStatus: IssuePollStatus;
+  projectsByName?: ReadonlyMap<string, WorkspacePathInputs["project"]>;
   reloadStatus?: RuntimeReloadStatus;
   runStore: RunStore;
   stateRoot: string;
@@ -38,7 +46,9 @@ const ACTIVE_STATES = new Set([
 export function buildStatusSnapshot(
   input: BuildStatusSnapshotInput
 ): StatusSnapshot {
-  const allRuns = input.runStore.listRuns();
+  const allRuns = input.runStore
+    .listRuns()
+    .map((run) => fillMissingWorkspacePlan(run, input));
   const active = allRuns.filter((run) => ACTIVE_STATES.has(run.state));
   const failed = allRuns.filter((run) => run.state === "failed");
   const stale = allRuns.filter((run) => run.state === "stale");
@@ -62,6 +72,33 @@ export function buildStatusSnapshot(
       stale
     },
     stateRoot: input.stateRoot
+  };
+}
+
+function fillMissingWorkspacePlan(
+  run: RunStatus,
+  input: BuildStatusSnapshotInput
+): RunStatus {
+  if (run.branchName.length > 0 && run.workspacePath.length > 0) {
+    return run;
+  }
+  const project = input.projectsByName?.get(run.project);
+  if (project === undefined) {
+    return run;
+  }
+  const plan = planWorkspacePaths({
+    configDir: input.configDir ?? path.dirname(input.configPath),
+    issue: {
+      number: run.issueNumber,
+      title: run.issueTitle
+    },
+    project
+  });
+  return {
+    ...run,
+    branchName: run.branchName.length === 0 ? plan.branchName : run.branchName,
+    workspacePath:
+      run.workspacePath.length === 0 ? plan.workspacePath : run.workspacePath
   };
 }
 

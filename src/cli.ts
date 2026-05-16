@@ -21,10 +21,11 @@ import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
 import type { InitOptions, InitProvider, InitReport } from "./init.js";
 import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
-import type { RuntimeReloadStatus } from "./reload.js";
+import { RuntimeConfigReloader, type RuntimeReloadStatus } from "./reload.js";
 import type {
   ListRunsFilter,
   OpenRunStoreOptions,
+  RunDetail,
   ProjectState,
   RunArtifactDescriptor,
   RunState,
@@ -51,6 +52,10 @@ import {
   loadProjectWorkflow,
   type ExpandedWorkflow
 } from "./workflow.js";
+import {
+  planWorkspacePaths,
+  type WorkspacePathPlan
+} from "./workspace-paths.js";
 
 export type CliDependencies = {
   fetch?: FetchFn;
@@ -637,8 +642,8 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .option("--config <path>", "service config path")
     .option("--events <n>", "max recent events", parsePositiveInt, 25)
     .action(async (id: string, options: { config?: string; events: number }) => {
-      const stateRoot = resolveStateRoot(withConfigPath(options.config)).stateRoot;
-      const store = openRunStore({ stateRoot });
+      const state = resolveStateRoot(withConfigPath(options.config));
+      const store = openRunStore({ stateRoot: state.stateRoot });
       try {
         const detail = store.getRun(id);
         if (detail === undefined) {
@@ -646,15 +651,19 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           program.error(`run ${id} not found`, { exitCode: 1 });
           return;
         }
-        writeOut(program, `id:           ${detail.id}\n`);
-        writeOut(program, `project:      ${detail.project}\n`);
-        writeOut(program, `issue:        #${detail.issueNumber} ${detail.issueTitle}\n`);
-        writeOut(program, `state:        ${detail.state}\n`);
-        writeOut(program, `provider:     ${detail.provider}\n`);
-        writeOut(program, `started:      ${detail.createdAt}\n`);
-        writeOut(program, `updated:      ${detail.updatedAt}\n`);
-        writeOut(program, `branch:       ${formatPath(detail.branchName)}\n`);
-        writeOut(program, `workspace:    ${formatPath(detail.workspacePath)}\n`);
+        const displayDetail = await fillMissingRunDisplayPaths(detail, {
+          configDir: state.configDir,
+          configPath: state.configPath
+        });
+        writeOut(program, `id:           ${displayDetail.id}\n`);
+        writeOut(program, `project:      ${displayDetail.project}\n`);
+        writeOut(program, `issue:        #${displayDetail.issueNumber} ${displayDetail.issueTitle}\n`);
+        writeOut(program, `state:        ${displayDetail.state}\n`);
+        writeOut(program, `provider:     ${displayDetail.provider}\n`);
+        writeOut(program, `started:      ${displayDetail.createdAt}\n`);
+        writeOut(program, `updated:      ${displayDetail.updatedAt}\n`);
+        writeOut(program, `branch:       ${formatPath(displayDetail.branchName)}\n`);
+        writeOut(program, `workspace:    ${formatPath(displayDetail.workspacePath)}\n`);
         writeOut(program, `artifacts:    ${formatArtifactKinds(store.listRunArtifacts(detail.id))}\n`);
         writeOut(program, formatWorkflowGraphSummary(await store.getWorkflowGraph(detail.id)));
         writeOut(program, `retries:      ${detail.retryCount}${detail.isContinuation ? " (continuation)" : ""}\n`);
@@ -1329,6 +1338,51 @@ function formatArtifactKinds(artifacts: RunArtifactDescriptor[]): string {
         : `${artifact.kind}(${artifact.sizeBytes} bytes)`
     );
   return present.length === 0 ? "(none)" : present.join(", ");
+}
+
+async function fillMissingRunDisplayPaths(
+  detail: RunDetail,
+  input: { configDir: string; configPath: string }
+): Promise<RunDetail> {
+  if (detail.branchName.length > 0 && detail.workspacePath.length > 0) {
+    return detail;
+  }
+
+  const plan = await planRunWorkspacePaths(detail, input);
+  if (plan === undefined) {
+    return detail;
+  }
+
+  return {
+    ...detail,
+    branchName: detail.branchName.length === 0 ? plan.branchName : detail.branchName,
+    workspacePath:
+      detail.workspacePath.length === 0 ? plan.workspacePath : detail.workspacePath
+  };
+}
+
+async function planRunWorkspacePaths(
+  detail: RunStatus,
+  input: { configDir: string; configPath: string }
+): Promise<WorkspacePathPlan | undefined> {
+  try {
+    const reloader = new RuntimeConfigReloader({ configPath: input.configPath });
+    const snapshot = await reloader.reload();
+    const project = snapshot?.projects.find((entry) => entry.name === detail.project);
+    if (project === undefined) {
+      return undefined;
+    }
+    return planWorkspacePaths({
+      configDir: input.configDir,
+      issue: {
+        number: detail.issueNumber,
+        title: detail.issueTitle
+      },
+      project
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 function formatWorkflowGraphSummary(graph: ExpandedWorkflow | undefined): string {

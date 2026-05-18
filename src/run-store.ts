@@ -1472,14 +1472,25 @@ export class RunStore {
 
   markLeakedRunsAsStale(
     reason = "leaked_active_run"
-  ): { runId: string; projectName: string; issueNumber: number }[] {
+  ): {
+    runId: string;
+    projectName: string;
+    issueNumber: number;
+    previousState: RunState;
+  }[] {
     const rows = this.database
       .prepare(
-        "select id, project_name, issue_number from runs where state in ('queued','preparing_workspace','running')"
+        "select id, project_name, issue_number, state from runs where state in ('queued','preparing_workspace','running','waiting')"
       )
-      .all() as { id: string; project_name: string; issue_number: number }[];
+      .all() as {
+        id: string;
+        project_name: string;
+        issue_number: number;
+        state: RunState;
+      }[];
     const swept = rows.map((row) => ({
       issueNumber: row.issue_number,
+      previousState: row.state,
       projectName: row.project_name,
       runId: row.id
     }));

@@ -365,6 +365,8 @@ describe("run-store lifecycle CRUD", () => {
       store.updateRunState("running", "running");
       seedRun(store, { id: "preparing", issueNumber: 3 });
       store.updateRunState("preparing", "preparing_workspace");
+      seedRun(store, { id: "waiting", issueNumber: 6 });
+      store.updateRunState("waiting", "waiting");
       seedRun(store, { id: "succeeded", issueNumber: 4 });
       store.updateRunState("succeeded", "succeeded");
       seedRun(store, { id: "failed", issueNumber: 5 });
@@ -375,13 +377,15 @@ describe("run-store lifecycle CRUD", () => {
       expect(swept.map((entry) => entry.runId).sort()).toEqual([
         "preparing",
         "queued",
-        "running"
+        "running",
+        "waiting"
       ]);
       expect(swept).toEqual(
         expect.arrayContaining([
-          { runId: "queued", projectName: "symphonika", issueNumber: 1 },
-          { runId: "running", projectName: "symphonika", issueNumber: 2 },
-          { runId: "preparing", projectName: "symphonika", issueNumber: 3 }
+          expect.objectContaining({ runId: "queued", projectName: "symphonika", issueNumber: 1 }),
+          expect.objectContaining({ runId: "running", projectName: "symphonika", issueNumber: 2 }),
+          expect.objectContaining({ runId: "preparing", projectName: "symphonika", issueNumber: 3 }),
+          expect.objectContaining({ runId: "waiting", projectName: "symphonika", issueNumber: 6 })
         ])
       );
 
@@ -392,6 +396,7 @@ describe("run-store lifecycle CRUD", () => {
       });
       expect(runsById.get("running")?.state).toBe("stale");
       expect(runsById.get("preparing")?.state).toBe("stale");
+      expect(runsById.get("waiting")?.state).toBe("stale");
       expect(runsById.get("succeeded")?.state).toBe("succeeded");
       expect(runsById.get("failed")?.state).toBe("failed");
       expect(store.listActiveRunIds()).toEqual([]);
@@ -405,6 +410,32 @@ describe("run-store lifecycle CRUD", () => {
     const store = openRunStore({ stateRoot: root });
     try {
       expect(store.markLeakedRunsAsStale()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("markLeakedRunsAsStale returns previousState per row", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      seedRun(store, { id: "queued", issueNumber: 1 });
+      seedRun(store, { id: "running", issueNumber: 2 });
+      store.updateRunState("running", "running");
+      seedRun(store, { id: "preparing", issueNumber: 3 });
+      store.updateRunState("preparing", "preparing_workspace");
+      seedRun(store, { id: "waiting", issueNumber: 4 });
+      store.updateRunState("waiting", "waiting");
+
+      const swept = store.markLeakedRunsAsStale();
+      const previousByRunId = new Map(
+        swept.map((entry) => [entry.runId, entry.previousState])
+      );
+
+      expect(previousByRunId.get("queued")).toBe("queued");
+      expect(previousByRunId.get("running")).toBe("running");
+      expect(previousByRunId.get("preparing")).toBe("preparing_workspace");
+      expect(previousByRunId.get("waiting")).toBe("waiting");
     } finally {
       store.close();
     }

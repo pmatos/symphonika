@@ -1032,6 +1032,29 @@ export class RunController {
       return;
     }
 
+    // Mirror the schedule-time terminal short-circuit in executeWaitPark
+    // (see the `next?.terminal !== undefined` branch above). When a workflow
+    // edit during the continuation delay rewrites payload.toStateId into a
+    // terminal state, recording the transition is the entire intent — no
+    // provider should be launched on a state with no agent action.
+    if (targetState.terminal !== undefined) {
+      const providerName = project.agent.provider;
+      const providerCommand =
+        (providersConfig as Partial<RunControllerProvidersConfig>)[providerName]
+          ?.command ?? "";
+      await this.recordStateAdvanceTerminalTarget({
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        project,
+        providerCommand,
+        providerName,
+        repository,
+        runId,
+        targetState
+      });
+      return;
+    }
+
     const providerName =
       targetState.action?.kind === "agent" &&
       targetState.action.provider !== undefined
@@ -1152,6 +1175,75 @@ export class RunController {
         kind: "failed",
         reason: input.reason
       },
+      repository: input.repository,
+      willRetry: false
+    });
+  }
+
+  private async recordStateAdvanceTerminalTarget(input: {
+    issue: IssueSnapshot;
+    parentRunId: string;
+    project: RunControllerProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+    targetState: ExpandedWorkflowState;
+  }): Promise<void> {
+    await this.bestEffort(
+      () =>
+        (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
+          ...input.repository,
+          issueNumber: input.issue.number,
+          labels: ["sym:claimed"]
+        }),
+      {
+        issueNumber: input.issue.number,
+        label: "sym:claimed",
+        operation: "addLabel",
+        phase: "state-advance-terminal-target",
+        project: input.project.name,
+        runId: input.runId
+      }
+    );
+    this.runStore.createContinuationRun({
+      id: input.runId,
+      issue: input.issue,
+      parentRunId: input.parentRunId,
+      projectName: input.project.name,
+      providerCommand: input.providerCommand,
+      providerName: input.providerName
+    });
+    const transitionReason = `reloaded target ${input.targetState.id} is terminal`;
+    this.runStore.recordWorkflowTerminal(input.runId, {
+      terminalStateId: input.targetState.id,
+      transitionReason
+    });
+    const terminalLabel = narrowTerminalLabel(input.targetState.terminal);
+    const outcome = fuseWorkflowTerminal(
+      { kind: "success", reason: transitionReason },
+      terminalLabel
+    );
+    this.runStore.recordTerminalReason(
+      input.runId,
+      outcome.reason,
+      outcome.classification
+    );
+    this.runStore.updateRunState(input.runId, mapOutcomeToRunState(outcome));
+    this.logger?.info(
+      {
+        issueNumber: input.issue.number,
+        parentRunId: input.parentRunId,
+        project: input.project.name,
+        runId: input.runId,
+        targetStateId: input.targetState.id,
+        terminal: input.targetState.terminal
+      },
+      "symphonika state advance recorded reloaded terminal target without launching provider"
+    );
+    await this.applyTerminalLabels({
+      issueNumber: input.issue.number,
+      outcome,
       repository: input.repository,
       willRetry: false
     });

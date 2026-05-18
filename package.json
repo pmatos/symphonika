@@ -14,6 +14,7 @@
     "lint": "eslint .",
     "mutation": "stryker run",
     "mutation:dry": "stryker run --dryRunOnly",
+    "prepare": "npm run build",
     "quality": "npm run lint && npm run typecheck && npm test && npm run build",
     "smoke": "tsx src/cli.ts smoke",
     "smoke:local": "scripts/smoke.sh",

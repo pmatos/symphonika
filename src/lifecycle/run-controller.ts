@@ -975,39 +975,71 @@ export class RunController {
         forceReload: true
       });
     } catch (error) {
-      const providerName = project.agent.provider;
-      const providerCommand =
-        (providersConfig as Partial<RunControllerProvidersConfig>)[providerName]
-          ?.command ?? "";
       const message = error instanceof Error ? error.message : String(error);
-      await this.failStateAdvanceBeforeProvider({
-        issue: refreshed,
-        parentRunId: payload.parentRunId,
-        project,
-        providerCommand,
-        providerName,
-        reason: `workflow_load_failed: ${message}`,
-        repository,
-        runId
-      });
-      return;
+      const fallback = this.lastKnownGoodLoadedWorkflow(project.workflow);
+      if (fallback === undefined) {
+        const providerName = project.agent.provider;
+        const providerCommand =
+          (providersConfig as Partial<RunControllerProvidersConfig>)[providerName]
+            ?.command ?? "";
+        await this.failStateAdvanceBeforeProvider({
+          issue: refreshed,
+          parentRunId: payload.parentRunId,
+          project,
+          providerCommand,
+          providerName,
+          reason: `workflow_load_failed: ${message}`,
+          repository,
+          runId
+        });
+        return;
+      }
+      // SPEC §5.2: report the reload error but continue with the last-known-good
+      // workflow snapshot. A transient malformed edit during the delay must not
+      // mark an otherwise valid mid-walk run as failed.
+      this.logger?.warn(
+        {
+          issueNumber: refreshed.number,
+          parentRunId: payload.parentRunId,
+          project: project.name,
+          reason: `workflow_load_failed: ${message}`,
+          runId
+        },
+        "symphonika state advance reload failed; using last known good workflow"
+      );
+      loadedWorkflow = fallback;
     }
     if (loadedWorkflow.errors.length > 0) {
-      const providerName = project.agent.provider;
-      const providerCommand =
-        (providersConfig as Partial<RunControllerProvidersConfig>)[providerName]
-          ?.command ?? "";
-      await this.failStateAdvanceBeforeProvider({
-        issue: refreshed,
-        parentRunId: payload.parentRunId,
-        project,
-        providerCommand,
-        providerName,
-        reason: `workflow_load_failed: ${loadedWorkflow.errors.join("; ")}`,
-        repository,
-        runId
-      });
-      return;
+      const fallback = this.lastKnownGoodLoadedWorkflow(project.workflow);
+      const reason = `workflow_load_failed: ${loadedWorkflow.errors.join("; ")}`;
+      if (fallback === undefined) {
+        const providerName = project.agent.provider;
+        const providerCommand =
+          (providersConfig as Partial<RunControllerProvidersConfig>)[providerName]
+            ?.command ?? "";
+        await this.failStateAdvanceBeforeProvider({
+          issue: refreshed,
+          parentRunId: payload.parentRunId,
+          project,
+          providerCommand,
+          providerName,
+          reason,
+          repository,
+          runId
+        });
+        return;
+      }
+      this.logger?.warn(
+        {
+          issueNumber: refreshed.number,
+          parentRunId: payload.parentRunId,
+          project: project.name,
+          reason,
+          runId
+        },
+        "symphonika state advance reload invalid; using last known good workflow"
+      );
+      loadedWorkflow = fallback;
     }
 
     const targetState = findWorkflowState(
@@ -2091,6 +2123,22 @@ export class RunController {
     }
 
     return { advancedToState: null, advancedToTerminal: false, blocked: false };
+  }
+
+  private lastKnownGoodLoadedWorkflow(
+    workflow: WorkflowReference | WorkflowSnapshot
+  ): LoadedWorkflow | undefined {
+    if (!("expandedWorkflow" in workflow)) {
+      return undefined;
+    }
+    return {
+      body: workflow.body,
+      contentHash: workflow.contentHash,
+      errors: [],
+      expandedWorkflow: workflow.expandedWorkflow,
+      format: workflow.format,
+      path: workflow.path
+    };
   }
 
   private async loadWorkflow(

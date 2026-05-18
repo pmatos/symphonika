@@ -1623,6 +1623,64 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("falls back to last-known-good workflow when a delayed advance reload is invalid", async () => {
+    const root = await makeTempRoot();
+    await writePerStateProviderRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 10,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexInputs: ProviderRunInput[] = [];
+    const claudeInputs: ProviderRunInput[] = [];
+    const codexProvider = successfulProvider("codex", codexInputs);
+    const claudeProvider = successfulProvider("claude", claudeInputs);
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { claude: claudeProvider, codex: codexProvider },
+      createRunId: () => `run-fsm-stale-reload-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 250 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForStoredRunState(root, "succeeded");
+      // Simulate a mid-save / malformed edit during the continuation delay.
+      // SPEC §5.2: the daemon must keep the last-known-good effective workflow
+      // for future work and must not fail the mid-walk run.
+      await writeFile(path.join(root, "workflow.yml"), "workflow:\n  initial:\n    -\n");
+      await waitForTerminalState(root, "done");
+
+      // The state-advance must still complete the autofix state using the
+      // last-known-good workflow (claude per writePerStateProviderRawFsmProject).
+      expect(claudeInputs).toHaveLength(1);
+      expect(codexInputs).toHaveLength(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("falls back to the project provider when the next agent state omits provider", async () => {
     const root = await makeTempRoot();
     await writeFallbackProviderRawFsmProject(root);

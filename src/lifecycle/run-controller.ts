@@ -251,6 +251,14 @@ type WaitParkPayload = {
   waitingRunId: string;
 };
 
+// Thrown by claimAndPersistRun's in-mutex cap re-check when a concurrent
+// dispatch already filled the last available slot. runFreshLifecycle catches
+// this and returns silently — the caller treats it as "no dispatch this
+// tick" rather than a real failure. See ADR 0053.
+class CapBreachedError extends Error {
+  readonly name = "CapBreachedError";
+}
+
 export class RunController {
   private readonly activeRuns: ActiveRunRegistry;
   private readonly agentProviders: AgentProviderRegistry;
@@ -1618,6 +1626,19 @@ export class RunController {
     await this.dispatchMutex.acquire();
     try {
       await this.claimAndPersistRun(input);
+    } catch (error) {
+      if (error instanceof CapBreachedError) {
+        // A concurrent dispatch filled the last cap slot between
+        // pickTargetFromCandidates (which ran lock-free) and this in-mutex
+        // re-check. Treat as "skipped this tick"; the next tick will pick
+        // up the work once the cap clears.
+        this.logger?.debug(
+          { reason: error.message, runId: input.runId },
+          "symphonika dispatch skipped: cap breached at claim"
+        );
+        return;
+      }
+      throw error;
     } finally {
       this.dispatchMutex.release();
     }
@@ -1653,6 +1674,33 @@ export class RunController {
       weight: number;
     }>;
   }): Promise<void> {
+    // Re-check concurrency caps inside the mutex. pickTargetFromCandidates
+    // ran without the lock, so two concurrent ticks could both observe a
+    // below-cap count before either reserves a slot — without this guard,
+    // both would proceed and the cap would be breached. Continuations of an
+    // already-in-flight issue are exempt: their parent run releases its slot
+    // in runAttemptLifecycle's finally before the scheduled continuation
+    // fires, so the count is below cap by construction. See ADR 0053.
+    if (!input.isContinuation) {
+      const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
+      if (
+        globalMax !== undefined &&
+        this.activeRuns.countInFlight() >= globalMax
+      ) {
+        throw new CapBreachedError(
+          `global max_in_flight (${globalMax}) reached`
+        );
+      }
+      const projectMax = input.project.max_in_flight ?? 1;
+      if (
+        this.activeRuns.countInFlightByProject(input.project.name) >= projectMax
+      ) {
+        throw new CapBreachedError(
+          `project ${input.project.name} max_in_flight (${projectMax}) reached`
+        );
+      }
+    }
+
     let claimed = false;
     let runCreated = false;
     try {
@@ -1738,6 +1786,18 @@ export class RunController {
     let attemptCreated = false;
     let started: StartedAttempt | undefined;
     let caughtError: unknown;
+    // Hoisted so the finally can read them on any exit path (including a
+    // loadWorkflow throw or a parked-state early return). Initial values
+    // are safe defaults: respectsIssueLabels=true (matches reserveSlot's
+    // default), parkedAsWaiting=false (default failure pipeline runs).
+    // See ADR 0052 — slot-leak fix.
+    let loadedWorkflow: Awaited<
+      ReturnType<typeof this.loadWorkflow>
+    > | undefined;
+    let currentState: ReturnType<typeof findWorkflowState> | undefined;
+    let projectForAttempt = input.project;
+    let respectsIssueLabels = true;
+    let parkedAsWaiting = false;
 
     this.runStore.updateRunState(input.runId, "preparing_workspace");
 
@@ -1750,76 +1810,80 @@ export class RunController {
         ? new Error(`run ${input.runId} was cancelled before provider start`)
         : undefined;
 
-    const loadedWorkflow = await this.loadWorkflow(input.project.workflow);
-    let projectForAttempt = input.project;
-    let currentState = undefined as
-      | ReturnType<typeof findWorkflowState>
-      | undefined;
-    if (loadedWorkflow.errors.length === 0) {
-      const persistedStateId = this.runStore.getRun(input.runId)?.currentStateId;
-      const startStateId =
-        persistedStateId ?? loadedWorkflow.expandedWorkflow.initial;
-      currentState = findWorkflowState(
-        loadedWorkflow.expandedWorkflow,
-        startStateId
-      );
-      if (currentState !== undefined) {
-        this.runStore.setRunCurrentState(input.runId, currentState.id);
-      }
-      projectForAttempt = {
-        ...input.project,
-        workflow: {
-          body: loadedWorkflow.body,
-          contentHash: loadedWorkflow.contentHash,
-          expandedWorkflow: loadedWorkflow.expandedWorkflow,
-          format: loadedWorkflow.format,
-          path: loadedWorkflow.path
-        }
-      };
-    }
-    // Raw FSM workflows whose entry state is a parked action (wait/merge_pr)
-    // must never launch a provider — they have no prompt and must instead be
-    // parked into the waiting-row reconciliation path immediately. Without
-    // this guard, runAttemptLifecycle would call startAttempt with an empty
-    // raw-FSM prompt, terminate, and then fall through `applyWorkflowOutcome`
-    // (which has no `stay_waiting` branch) leaving the workflow with no
-    // waiting row and no merge attempt scheduled. Returning here keeps the
-    // run row durable (state="waiting", current_state_id set) so a daemon
-    // restart can resume the reconciliation. See SPEC §12.5 / §12.6.
-    if (
-      loadedWorkflow.errors.length === 0 &&
-      loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm" &&
-      currentState !== undefined &&
-      isParkedAction(currentState.action?.kind)
-    ) {
-      this.runStore.updateRunState(input.runId, "waiting");
-      this.schedule({
-        delayMs: this.lifecyclePolicy.continuation.delayMs,
-        fire: () => this.executeWaitPark({ waitingRunId: input.runId }),
-        issueNumber: input.issue.number,
-        kind: "wait_park",
-        projectName: input.project.name,
-        runId: input.runId
-      });
-      return;
-    }
-
-    // Raw FSM continuations are state-advance runs: the FSM, not the issue
-    // labels, decides whether the agent keeps running. Computed here so both
-    // activeRuns.register (in the try block) and scheduleNext (in finally)
-    // can carry the same label-immunity guarantee — including into retry
-    // scheduling. See ADR 0046.
-    const respectsIssueLabels = !(
-      input.isContinuation &&
-      loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm"
-    );
-
     try {
       // If pre-attempt cancel-request was observed above, jump straight to
       // the finally block so the caller sees a cancelled outcome.
       if (cancelBeforeAttach !== undefined) {
         throw cancelBeforeAttach;
       }
+
+      // loadWorkflow lives inside the try so a throw still routes through
+      // the unregister in finally (preventing the slot leak the previous
+      // structure had: throw -> early exit -> reserveSlot'd entry stranded
+      // until daemon restart). See ADR 0052.
+      loadedWorkflow = await this.loadWorkflow(input.project.workflow);
+      if (loadedWorkflow.errors.length === 0) {
+        const persistedStateId = this.runStore.getRun(input.runId)?.currentStateId;
+        const startStateId =
+          persistedStateId ?? loadedWorkflow.expandedWorkflow.initial;
+        currentState = findWorkflowState(
+          loadedWorkflow.expandedWorkflow,
+          startStateId
+        );
+        if (currentState !== undefined) {
+          this.runStore.setRunCurrentState(input.runId, currentState.id);
+        }
+        projectForAttempt = {
+          ...input.project,
+          workflow: {
+            body: loadedWorkflow.body,
+            contentHash: loadedWorkflow.contentHash,
+            expandedWorkflow: loadedWorkflow.expandedWorkflow,
+            format: loadedWorkflow.format,
+            path: loadedWorkflow.path
+          }
+        };
+      }
+      // Raw FSM workflows whose entry state is a parked action (wait/merge_pr)
+      // must never launch a provider — they have no prompt and must instead be
+      // parked into the waiting-row reconciliation path immediately. Without
+      // this guard, runAttemptLifecycle would call startAttempt with an empty
+      // raw-FSM prompt, terminate, and then fall through `applyWorkflowOutcome`
+      // (which has no `stay_waiting` branch) leaving the workflow with no
+      // waiting row and no merge attempt scheduled. Returning here keeps the
+      // run row durable (state="waiting", current_state_id set) so a daemon
+      // restart can resume the reconciliation. See SPEC §12.5 / §12.6.
+      if (
+        loadedWorkflow.errors.length === 0 &&
+        loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm" &&
+        currentState !== undefined &&
+        isParkedAction(currentState.action?.kind)
+      ) {
+        this.runStore.updateRunState(input.runId, "waiting");
+        this.schedule({
+          delayMs: this.lifecyclePolicy.continuation.delayMs,
+          fire: () => this.executeWaitPark({ waitingRunId: input.runId }),
+          issueNumber: input.issue.number,
+          kind: "wait_park",
+          projectName: input.project.name,
+          runId: input.runId
+        });
+        // Set the flag so finally skips the failure-classification pipeline
+        // (the wait_park scheduled callback owns re-evaluation), but still
+        // runs the unconditional unregister that releases the in-flight slot.
+        parkedAsWaiting = true;
+        return;
+      }
+
+      // Raw FSM continuations are state-advance runs: the FSM, not the issue
+      // labels, decides whether the agent keeps running. Computed here so both
+      // activeRuns.attachProvider and scheduleNext (in finally) carry the
+      // same label-immunity guarantee — including into retry scheduling.
+      // See ADR 0046.
+      respectsIssueLabels = !(
+        input.isContinuation &&
+        loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm"
+      );
       // For raw FSM workflows, the agent action's `prompt` field points at the
       // template file to send to the provider for this state. Resolve it here
       // so startAttempt renders the right prompt (rather than the YAML body of
@@ -1912,6 +1976,15 @@ export class RunController {
         cancelRequested = removed.cancelRequested;
         cancelReason = removed.cancelReason;
       }
+      // Parked-as-waiting runs have already committed their "waiting" state
+      // and scheduled the wait_park callback that will own re-evaluation.
+      // The failure-classification + scheduleNext pipeline below would
+      // overwrite the waiting state and double-schedule, so short-circuit
+      // here. The unconditional unregister above already released the
+      // in-flight slot. See ADR 0052 — slot-leak fix.
+      if (parkedAsWaiting) {
+        return;
+      }
       const terminal = await classifyFailure({
         cancelRequested,
         ...(caughtError === undefined ? {} : { error: caughtError }),
@@ -1930,7 +2003,10 @@ export class RunController {
         advancedToTerminal: false,
         blocked: false
       };
-      if (currentState !== undefined) {
+      // loadedWorkflow can be undefined if this.loadWorkflow itself threw
+      // before currentState was set; in that case we run the bare
+      // classifyFailure outcome without an FSM-driven overlay.
+      if (currentState !== undefined && loadedWorkflow !== undefined) {
         workflowOutcome = this.applyWorkflowOutcome({
           currentState,
           issue: input.issue,
@@ -1953,7 +2029,7 @@ export class RunController {
         effectiveOutcome.reason,
         effectiveOutcome.classification
       );
-      const sourceKind = loadedWorkflow.expandedWorkflow.source.kind;
+      const sourceKind = loadedWorkflow?.expandedWorkflow.source.kind;
       const isRawFsm = sourceKind === "raw_fsm";
       const suppressContinuation =
         isRawFsm &&

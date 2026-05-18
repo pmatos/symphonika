@@ -44,7 +44,7 @@ Set `PINO_LOG_LEVEL=debug` (or the alias `LOG_LEVEL=debug`) to raise daemon log 
 While the daemon is running, force a debugging poll without waiting for the configured interval:
 
 ```sh
-npm run dev -- poll-now --config symphonika.yml
+npm run dev -- poll-now --config symphonika.example.yml
 ```
 
 The command discovers the selected state root's `daemon.json`, preflights that the daemon reports the same state root, then posts to the local `/api/poll-now` endpoint. The daemon uses the same reconcile, polling, and dispatch gates as interval ticks, so invalid Projects, operational labels, excluded labels, active runs, and the dispatch mutex still apply.
@@ -52,8 +52,8 @@ The command discovers the selected state root's `daemon.json`, preflights that t
 For a compact terminal dashboard inspired by the upstream Symphony status surface:
 
 ```sh
-npm run dev -- status --config symphonika.yml --dashboard
-npm run dev -- status --config symphonika.yml --watch
+npm run dev -- status --config symphonika.example.yml --dashboard
+npm run dev -- status --config symphonika.example.yml --watch
 ```
 
 The `symphony/` directory in the tree is a git submodule of an unrelated upstream project (`openai/symphony`) used as a reference — it is not a launcher for Symphonika.
@@ -83,7 +83,7 @@ The built-ins (`builtin:single-agent-pr`, `builtin:plan-tdd-pr`, `builtin:autofi
 
 ## Self-Hosting
 
-The bootstrap dogfooding path is documented in [docs/smoke.md](docs/smoke.md). The repository includes a bootstrap [symphonika.yml](symphonika.yml) service config and [WORKFLOW.md](WORKFLOW.md) workflow contract for running Symphonika against its own issues.
+The bootstrap dogfooding path is documented in [docs/smoke.md](docs/smoke.md). The repository includes a bootstrap [symphonika.example.yml](symphonika.example.yml) service config and [WORKFLOW.md](WORKFLOW.md) workflow contract for running Symphonika against its own issues.
 
 ### Autonomy contract for agent runs
 

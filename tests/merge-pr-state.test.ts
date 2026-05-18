@@ -524,8 +524,9 @@ describe("merge_pr state lifecycle", () => {
 
       const scheduled: Array<{ runId: string; kind: string }> = [];
       const project = projectFixture("./workflow.yml");
+      const activeRuns = new ActiveRunRegistry();
       const controller = new RunController({
-        activeRuns: new ActiveRunRegistry(),
+        activeRuns,
         agentProviders: { codex: provider },
         configDir: root,
         createRunId: () => "fresh-merge-pr-run",
@@ -572,6 +573,12 @@ describe("merge_pr state lifecycle", () => {
       expect(scheduled).toEqual([
         { kind: "wait_park", runId: "fresh-merge-pr-run" }
       ]);
+      // ADR 0052 slot-leak fix: the reserveSlot inside claimAndPersistRun
+      // must be released even though runAttemptLifecycle took the parked-
+      // state early-return path. If this assertion regresses, the issue
+      // remains permanently locked and cap counters never decrement.
+      expect(activeRuns.countInFlight()).toBe(0);
+      expect(activeRuns.isIssueInFlight(project.name, issue.number)).toBe(false);
     } finally {
       store.close();
     }

@@ -1979,12 +1979,10 @@ export class RunController {
       // Parked-as-waiting runs have already committed their "waiting" state
       // and scheduled the wait_park callback that will own re-evaluation.
       // The failure-classification + scheduleNext pipeline below would
-      // overwrite the waiting state and double-schedule, so short-circuit
-      // here. The unconditional unregister above already released the
-      // in-flight slot. See ADR 0052 — slot-leak fix.
-      if (parkedAsWaiting) {
-        return;
-      }
+      // overwrite the waiting state and double-schedule, so it's gated on
+      // !parkedAsWaiting. The unconditional unregister above already
+      // released the in-flight slot. See ADR 0052 — slot-leak fix.
+      if (!parkedAsWaiting) {
       const terminal = await classifyFailure({
         cancelRequested,
         ...(caughtError === undefined ? {} : { error: caughtError }),
@@ -2111,6 +2109,7 @@ export class RunController {
           "symphonika scheduleNext failed"
         );
       }
+      } // end if (!parkedAsWaiting)
     }
 
     if (caughtError !== undefined) {

@@ -100,10 +100,7 @@ export async function detectStaleClaims(
 
 function collectLiveKeys(input: DetectStaleClaimsInput): Set<string> {
   const keys = new Set<string>();
-  for (const entry of input.activeRuns.list()) {
-    keys.add(issueKey(entry.projectName, entry.issueNumber));
-  }
-  for (const entry of input.activeRuns.scheduledIssueKeys()) {
+  for (const entry of input.activeRuns.issueKeys()) {
     keys.add(issueKey(entry.projectName, entry.issueNumber));
   }
   for (const entry of input.runStore.listActiveRunIds()) {

@@ -89,6 +89,35 @@ describe("InFlightRunRegistry", () => {
     ).toThrow(/no in-flight run for/);
   });
 
+  it("attachProvider invokes the newly attached cancel when cancelRequested is already set", async () => {
+    const registry = new InFlightRunRegistry();
+    registry.reserveSlot({
+      issueNumber: 7,
+      projectName: "symphonika",
+      runId: "run-a"
+    });
+
+    // Cancel arrives BEFORE the provider is attached — the reserveSlot noop
+    // is what got invoked, but the next stage of the dispatch (attachProvider)
+    // must hand the cancel off to the real handler so the provider is
+    // actually cancelled. See ADR 0052.
+    await registry.requestCancel("run-a", "closed_issue");
+
+    let realCancelCalled = false;
+    const realCancel = (): Promise<void> => {
+      realCancelCalled = true;
+      return Promise.resolve();
+    };
+    registry.attachProvider("run-a", {
+      cancel: realCancel,
+      provider: { name: "codex" } as never
+    });
+
+    // Give the void-awaited cancel a microtask to run.
+    await Promise.resolve();
+    expect(realCancelCalled).toBe(true);
+  });
+
   it("requestCancel on a reserved-only slot still flips cancelRequested", async () => {
     const registry = new InFlightRunRegistry();
     registry.reserveSlot({

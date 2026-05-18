@@ -81,6 +81,20 @@ export class InFlightRunRegistry {
     if (input.respectsIssueLabels !== undefined) {
       entry.respectsIssueLabels = input.respectsIssueLabels;
     }
+    // If a cancel arrived BETWEEN reserveSlot and attachProvider (e.g. during
+    // prepareIssueWorkspace / provider.validate / sym:running label write),
+    // it ran against the reserveSlot noop cancel handler and left
+    // cancelRequested=true on the entry. Subsequent requestCancel calls
+    // return early because cancelRequested is already true, so without this
+    // hand-off the real provider would never be cancelled and the run would
+    // execute to natural completion. Invoke the newly-attached cancel
+    // synchronously here to close the gap. See ADR 0052.
+    if (entry.cancelRequested) {
+      void input.cancel().catch(() => {
+        // The dispatch path observes cancelRequested via the entry and
+        // unwinds itself; we don't need to propagate cancel-handler errors.
+      });
+    }
   }
 
   register(input: RegisterRunInput): void {

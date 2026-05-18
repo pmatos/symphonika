@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import path from "node:path";
 import { parse } from "yaml";
 
 import type { WorkflowFormat } from "../config-schemas.js";
@@ -18,10 +17,6 @@ export type ProjectWorkflowReference = {
   workflowFormat: WorkflowFormat;
   workflowPath: string;
 };
-
-export type ResolvedWorkflowFormat =
-  | { kind: "markdown" | "raw_fsm" }
-  | { error: string; kind: "error" };
 
 const serviceDiscoveryFrontMatterKeys = new Set([
   "agent",
@@ -118,29 +113,6 @@ export function validateWorkflowTemplate(
   workflowPath: string
 ): string[] {
   return validatePromptTemplateExpressions(template, workflowPath);
-}
-
-export function resolveWorkflowFormat(
-  format: WorkflowFormat,
-  workflowPath: string
-): ResolvedWorkflowFormat {
-  if (format === "markdown") {
-    return { kind: "markdown" };
-  }
-  if (format === "raw_fsm") {
-    return { kind: "raw_fsm" };
-  }
-  const extension = path.extname(workflowPath).toLowerCase();
-  if (extension === ".md") {
-    return { kind: "markdown" };
-  }
-  if (extension === ".yaml" || extension === ".yml" || extension === ".json") {
-    return { kind: "raw_fsm" };
-  }
-  return {
-    error: `workflow at ${workflowPath} has no recognized extension (.md, .yaml, .yml, .json); declare format explicitly`,
-    kind: "error"
-  };
 }
 
 export function projectWorkflowReferences(

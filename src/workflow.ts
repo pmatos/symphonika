@@ -6,6 +6,26 @@ import { BUILTIN_WORKFLOW_TEMPLATES } from "./builtin-templates.js";
 import type { WorkflowFormat } from "./config-schemas.js";
 import type { IssueSnapshot } from "./issue-polling.js";
 import { isPathInside } from "./path-safety.js";
+import type {
+  ExpandedWorkflow,
+  ExpandedWorkflowState,
+  WorkflowAction,
+  WorkflowActionKind,
+  WorkflowPredicateMap,
+  WorkflowSourceKind,
+  WorkflowTransition
+} from "./workflow/types.js";
+
+export type {
+  ExpandedWorkflow,
+  ExpandedWorkflowState,
+  WorkflowAction,
+  WorkflowActionKind,
+  WorkflowPredicateMap,
+  WorkflowPredicateValue,
+  WorkflowSourceKind,
+  WorkflowTransition
+} from "./workflow/types.js";
 
 export const AUTONOMY_PREAMBLE_VERSION = "autonomy-preamble-v2";
 
@@ -74,53 +94,6 @@ export type WorkflowContract = {
   contentHash: string;
   errors: string[];
   path: string;
-};
-
-export type WorkflowSourceKind = "markdown" | "raw_fsm";
-
-export type WorkflowActionKind =
-  | "agent"
-  | "close_issue"
-  | "comment"
-  | "fail"
-  | "label_issue"
-  | "merge_pr"
-  | "wait";
-
-export type WorkflowPredicateValue = boolean | number | string;
-
-export type WorkflowPredicateMap = Record<string, WorkflowPredicateValue>;
-
-export type WorkflowAction = {
-  kind: WorkflowActionKind;
-  method?: string;
-  prompt?: string;
-  provider?: "codex" | "claude";
-};
-
-export type WorkflowTransition = {
-  to: string;
-  when: WorkflowPredicateMap;
-};
-
-export type ExpandedWorkflowState = {
-  action?: WorkflowAction;
-  completeWhen: WorkflowPredicateMap;
-  id: string;
-  terminal?: string;
-  transitions: WorkflowTransition[];
-};
-
-export type ExpandedWorkflow = {
-  contentHash: string;
-  initial: string;
-  name: string;
-  source: {
-    kind: WorkflowSourceKind;
-    path: string;
-  };
-  states: ExpandedWorkflowState[];
-  templateFiles: string[];
 };
 
 type WorkflowTemplateInputType =

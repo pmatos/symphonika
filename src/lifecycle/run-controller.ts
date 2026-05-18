@@ -62,6 +62,7 @@ import {
   LIFECYCLE_POLICY,
   type LifecyclePolicy
 } from "./active-runs.js";
+import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
 import { classifyCapReachedOutcome } from "./cap-reached-context.js";
 import { classifyFailure, type ClassifiedTerminal } from "./classify-failure.js";
 import {
@@ -117,8 +118,18 @@ export type RunControllerOptions = {
   agentProviders: AgentProviderRegistry;
   configDir: string;
   createRunId?: () => string;
+  // Mutex that guards the narrowed dispatch claim section (candidate
+  // selection + sym:claimed label + scheduler-cursor write + createRun +
+  // reserveSlot). Released BEFORE runAttemptLifecycle streams provider
+  // events. Daemon and one-shot CLI pass their own instance so reconcile
+  // gates (reconcileWaitingRuns, stale-claims) can still consult it. See
+  // ADR 0052.
+  dispatchMutex?: AsyncMutex;
   env?: NodeJS.ProcessEnv;
   githubIssuesApi: GitHubIssuesApi;
+  // Returns the global concurrency cap (undefined = unbounded). Per-project
+  // caps are read from the project config inside the picker. See ADR 0053.
+  globalConcurrencyLoader?: () => Promise<{ maxInFlight: number | undefined }>;
   lifecyclePolicy?: LifecyclePolicy;
   logger?: Logger;
   prepareIssueWorkspace?: (
@@ -240,13 +251,32 @@ type WaitParkPayload = {
   waitingRunId: string;
 };
 
+// Thrown by claimAndPersistRun's in-mutex re-check when a concurrent
+// dispatch already filled the last available slot, or when the same
+// (project, issue) was reserved by a concurrent tick that beat us into
+// claimAndPersistRun. Callers handle these as "skip this fire": fresh
+// dispatch silently no-ops (next tick will pick again); scheduled paths
+// (continuation / state advance / retry / review followup) reschedule the
+// callback. See ADR 0053.
+export class CapBreachedError extends Error {
+  readonly name = "CapBreachedError";
+}
+
+export class IssueReservedError extends Error {
+  readonly name = "IssueReservedError";
+}
+
 export class RunController {
   private readonly activeRuns: ActiveRunRegistry;
   private readonly agentProviders: AgentProviderRegistry;
   private readonly configDir: string;
   private readonly createRunId: () => string;
+  private readonly dispatchMutex: AsyncMutex;
   private readonly env: NodeJS.ProcessEnv;
   private readonly githubIssuesApi: GitHubIssuesApi;
+  private readonly globalConcurrencyLoader: () => Promise<{
+    maxInFlight: number | undefined;
+  }>;
   private readonly lifecyclePolicy: LifecyclePolicy;
   private readonly logger?: Logger;
   private readonly prepareIssueWorkspace: (
@@ -266,8 +296,13 @@ export class RunController {
     this.agentProviders = options.agentProviders;
     this.configDir = options.configDir;
     this.createRunId = options.createRunId ?? randomUUID;
+    this.dispatchMutex = options.dispatchMutex ?? createAsyncMutex();
     this.env = options.env ?? process.env;
     this.githubIssuesApi = options.githubIssuesApi;
+    this.globalConcurrencyLoader =
+      options.globalConcurrencyLoader ??
+      ((): Promise<{ maxInFlight: number | undefined }> =>
+        Promise.resolve({ maxInFlight: undefined }));
     this.lifecyclePolicy = options.lifecyclePolicy ?? LIFECYCLE_POLICY;
     if (options.logger !== undefined) {
       this.logger = options.logger;
@@ -292,7 +327,7 @@ export class RunController {
     const candidates = pollStatus.candidateIssues.slice();
     const projects = await this.projectsLoader();
     const providersConfig = await this.providersLoader();
-    const target = this.pickTargetFromCandidates(candidates, projects);
+    const target = await this.pickTargetFromCandidates(candidates, projects);
     if (target === undefined) {
       return {
         dispatched: false,
@@ -383,19 +418,37 @@ export class RunController {
       return { dispatched: true, runId };
     }
 
-    await this.runFreshLifecycle({
-      attemptNumber: 1,
-      isContinuation: false,
-      issue: target.candidate.issue,
-      parentRunId: null,
-      project: target.project,
-      provider,
-      providerCommand,
-      providerName,
-      repository,
-      runId,
-      schedulerWeights: target.schedulerWeights
-    });
+    try {
+      await this.runFreshLifecycle({
+        attemptNumber: 1,
+        isContinuation: false,
+        issue: target.candidate.issue,
+        parentRunId: null,
+        project: target.project,
+        provider,
+        providerCommand,
+        providerName,
+        repository,
+        runId,
+        schedulerWeights: target.schedulerWeights
+      });
+    } catch (error) {
+      if (
+        error instanceof CapBreachedError ||
+        error instanceof IssueReservedError
+      ) {
+        // A concurrent dispatch took the slot between
+        // pickTargetFromCandidates (lock-free) and claimAndPersistRun's
+        // in-mutex re-check. Next tick will pick this candidate again once
+        // the cap clears. See ADR 0053.
+        this.logger?.debug(
+          { reason: error.message, runId },
+          "symphonika fresh dispatch skipped: contended at claim"
+        );
+        return { dispatched: false, reason: error.message };
+      }
+      throw error;
+    }
 
     return { dispatched: true, runId };
   }
@@ -552,22 +605,92 @@ export class RunController {
       }
     }
 
-    // Re-assert sym:claimed best-effort in case operator clear-stale ran between attempts.
-    await this.bestEffort(
-      () =>
-        this.githubIssuesApi.addLabelsToIssue!({
-          ...repository,
-          issueNumber: refreshed.number,
-          labels: ["sym:claimed"]
-        }),
-      {
-        issueNumber: refreshed.number,
-        label: "sym:claimed",
-        operation: "addLabel",
-        project: project.name,
-        runId: payload.runId
+    // Re-assert sym:claimed and reserve the in-flight slot under the mutex so
+    // a concurrent fresh dispatch on the same daemon tick cannot beat this
+    // retry to the (project, issue) key. The previous attempt unregistered
+    // in its finally, so the slot is currently free — but a fresh dispatch
+    // on a DIFFERENT issue in this project (or globally) could have filled
+    // the cap during the retry's backoff window. Re-check caps and
+    // reservation inside the mutex; on contention, reschedule the retry
+    // instead of breaching the cap. See ADR 0053.
+    let contention: CapBreachedError | IssueReservedError | undefined;
+    await this.dispatchMutex.acquire();
+    try {
+      const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
+      if (
+        globalMax !== undefined &&
+        this.activeRuns.countInFlight() >= globalMax
+      ) {
+        contention = new CapBreachedError(
+          `global max_in_flight (${globalMax}) reached`
+        );
+      } else {
+        const projectMax = project.max_in_flight ?? 1;
+        if (
+          this.activeRuns.countInFlightByProject(project.name) >= projectMax
+        ) {
+          contention = new CapBreachedError(
+            `project ${project.name} max_in_flight (${projectMax}) reached`
+          );
+        } else if (
+          this.activeRuns.isIssueReserved(project.name, refreshed.number)
+        ) {
+          contention = new IssueReservedError(
+            `issue ${project.name}#${refreshed.number} is already reserved`
+          );
+        }
       }
-    );
+      if (contention === undefined) {
+        await this.bestEffort(
+          () =>
+            this.githubIssuesApi.addLabelsToIssue!({
+              ...repository,
+              issueNumber: refreshed.number,
+              labels: ["sym:claimed"]
+            }),
+          {
+            issueNumber: refreshed.number,
+            label: "sym:claimed",
+            operation: "addLabel",
+            project: project.name,
+            runId: payload.runId
+          }
+        );
+        this.activeRuns.reserveSlot({
+          issueNumber: refreshed.number,
+          projectName: project.name,
+          ...(payload.respectsIssueLabels === undefined
+            ? {}
+            : { respectsIssueLabels: payload.respectsIssueLabels }),
+          runId: payload.runId
+        });
+      }
+    } finally {
+      this.dispatchMutex.release();
+    }
+
+    if (contention !== undefined) {
+      // Reschedule the retry with the configured continuation delay; the
+      // next fire will re-check caps and proceed when contention clears.
+      this.logger?.warn(
+        {
+          issueNumber: refreshed.number,
+          project: project.name,
+          reason: contention.message,
+          runId: payload.runId
+        },
+        "symphonika retry rescheduled: contention at claim"
+      );
+      this.schedule({
+        delayMs: this.lifecyclePolicy.continuation.delayMs,
+        fire: () => this.executeRetry(payload),
+        issueNumber: refreshed.number,
+        kind: "retry",
+        projectName: project.name,
+        runId: payload.runId
+      });
+      return;
+    }
 
     await this.runAttemptLifecycle({
       attemptNumber: payload.attemptNumber,
@@ -604,7 +727,17 @@ export class RunController {
   }
 
   async executeWaitPark(payload: WaitParkPayload): Promise<void> {
-    await this.reEvaluateWaitingRun(payload.waitingRunId);
+    // Wait re-evaluation mutates the waiting run row and may call
+    // tryMergePullRequest / recordPullRequestObservation. Hold the dispatch
+    // mutex around the whole body so the reconcileWaitingRuns tryAcquire
+    // gate in the daemon (src/daemon.ts) provides actual exclusion against
+    // a concurrent tick's wait reconciliation on the same row. See ADR 0052.
+    await this.dispatchMutex.acquire();
+    try {
+      await this.reEvaluateWaitingRun(payload.waitingRunId);
+    } finally {
+      this.dispatchMutex.release();
+    }
   }
 
   // Tells the global PR follow-up loop whether a tracked PR's merge belongs
@@ -1126,27 +1259,54 @@ export class RunController {
       return;
     }
 
-    await this.runFreshLifecycle({
-      attemptNumber: 1,
-      isContinuation: true,
-      issue: refreshed,
-      parentRunId: payload.parentRunId,
-      project: {
-        ...project,
-        workflow: {
-          body: loadedWorkflow.body,
-          contentHash: loadedWorkflow.contentHash,
-          expandedWorkflow: loadedWorkflow.expandedWorkflow,
-          format: loadedWorkflow.format,
-          path: loadedWorkflow.path
-        }
-      },
-      provider,
-      providerCommand,
-      providerName,
-      repository,
-      runId
-    });
+    try {
+      await this.runFreshLifecycle({
+        attemptNumber: 1,
+        isContinuation: true,
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        project: {
+          ...project,
+          workflow: {
+            body: loadedWorkflow.body,
+            contentHash: loadedWorkflow.contentHash,
+            expandedWorkflow: loadedWorkflow.expandedWorkflow,
+            format: loadedWorkflow.format,
+            path: loadedWorkflow.path
+          }
+        },
+        provider,
+        providerCommand,
+        providerName,
+        repository,
+        runId
+      });
+    } catch (error) {
+      if (
+        error instanceof CapBreachedError ||
+        error instanceof IssueReservedError
+      ) {
+        this.logger?.warn(
+          {
+            issueNumber: refreshed.number,
+            project: project.name,
+            reason: error.message,
+            runId
+          },
+          "symphonika state_advance rescheduled: contention at claim"
+        );
+        this.schedule({
+          delayMs: this.lifecyclePolicy.continuation.delayMs,
+          fire: () => this.executeStateAdvance(payload),
+          issueNumber: refreshed.number,
+          kind: "state_advance",
+          projectName: project.name,
+          runId
+        });
+        return;
+      }
+      throw error;
+    }
   }
 
   private async failStateAdvanceBeforeProvider(input: {
@@ -1340,18 +1500,45 @@ export class RunController {
     }
 
     const runId = this.createRunId();
-    await this.runFreshLifecycle({
-      attemptNumber: 1,
-      isContinuation: true,
-      issue: refreshed,
-      parentRunId: payload.parentRunId,
-      project,
-      provider,
-      providerCommand,
-      providerName: project.agent.provider,
-      repository,
-      runId
-    });
+    try {
+      await this.runFreshLifecycle({
+        attemptNumber: 1,
+        isContinuation: true,
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        project,
+        provider,
+        providerCommand,
+        providerName: project.agent.provider,
+        repository,
+        runId
+      });
+    } catch (error) {
+      if (
+        error instanceof CapBreachedError ||
+        error instanceof IssueReservedError
+      ) {
+        this.logger?.warn(
+          {
+            issueNumber: refreshed.number,
+            project: project.name,
+            reason: error.message,
+            runId
+          },
+          "symphonika continuation rescheduled: contention at claim"
+        );
+        this.schedule({
+          delayMs: this.lifecyclePolicy.continuation.delayMs,
+          fire: () => this.executeContinuation(payload),
+          issueNumber: refreshed.number,
+          kind: "continuation",
+          projectName: project.name,
+          runId
+        });
+        return;
+      }
+      throw error;
+    }
   }
 
   async dispatchReviewFollowup(input: {
@@ -1426,27 +1613,48 @@ export class RunController {
     }
 
     const runId = this.createRunId();
-    await this.runFreshLifecycle({
-      attemptNumber: 1,
-      extraInstructions: renderReviewFollowupInstructions(input.review),
-      isContinuation: true,
-      issue: refreshed,
-      parentRunId: input.parentRunId,
-      project,
-      provider,
-      providerCommand,
-      providerName: project.agent.provider,
-      repository,
-      runId
-    });
+    try {
+      await this.runFreshLifecycle({
+        attemptNumber: 1,
+        extraInstructions: renderReviewFollowupInstructions(input.review),
+        isContinuation: true,
+        issue: refreshed,
+        parentRunId: input.parentRunId,
+        project,
+        provider,
+        providerCommand,
+        providerName: project.agent.provider,
+        repository,
+        runId
+      });
+    } catch (error) {
+      if (
+        error instanceof CapBreachedError ||
+        error instanceof IssueReservedError
+      ) {
+        // The PR follow-up loop retries on the next tick. No explicit
+        // reschedule needed here. See ADR 0053.
+        return { dispatched: false, reason: error.message };
+      }
+      throw error;
+    }
 
     return { dispatched: true, runId };
   }
 
-  private pickTargetFromCandidates(
+  private async pickTargetFromCandidates(
     candidates: ReadonlyArray<{ issue: IssueSnapshot; project: string }>,
     projects: Map<string, RunControllerProjectConfig>
-  ): DispatchTarget | undefined {
+  ): Promise<DispatchTarget | undefined> {
+    // Global cap check first: if the daemon is already at its global limit,
+    // no project's candidate is dispatchable. See ADR 0053.
+    const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
+    if (
+      globalMax !== undefined &&
+      this.activeRuns.countInFlight() >= globalMax
+    ) {
+      return undefined;
+    }
     const states = this.runStore.getProjectStatesByName();
     const buckets = new Map<
       string,
@@ -1477,6 +1685,12 @@ export class RunController {
       }
       const provider = this.agentProviders[project.agent.provider];
       if (provider === undefined) {
+        continue;
+      }
+      // Per-project concurrency cap. Default cap of 1 preserves the legacy
+      // serial behavior when max_in_flight is omitted. See ADR 0053.
+      const projectMax = project.max_in_flight ?? 1;
+      if (this.activeRuns.countInFlightByProject(projectName) >= projectMax) {
         continue;
       }
       const candidate = bucket
@@ -1551,6 +1765,90 @@ export class RunController {
       weight: number;
     }>;
   }): Promise<void> {
+    // Narrowed critical section: claim label + scheduler cursor + createRun
+    // + reserveSlot all happen while the mutex is held. Provider event
+    // streaming runs AFTER mutex release. CapBreachedError and
+    // IssueReservedError propagate to the caller, which decides whether to
+    // silently no-op (fresh dispatch) or reschedule (continuation / state
+    // advance / PR followup). See ADR 0052 / ADR 0053.
+    await this.dispatchMutex.acquire();
+    try {
+      await this.claimAndPersistRun(input);
+    } finally {
+      this.dispatchMutex.release();
+    }
+
+    await this.runAttemptLifecycle({
+      attemptNumber: input.attemptNumber,
+      ...(input.extraInstructions === undefined
+        ? {}
+        : { extraInstructions: input.extraInstructions }),
+      isContinuation: input.isContinuation,
+      issue: input.issue,
+      project: input.project,
+      provider: input.provider,
+      providerCommand: input.providerCommand,
+      providerName: input.providerName,
+      repository: input.repository,
+      runId: input.runId
+    });
+  }
+
+  private async claimAndPersistRun(input: {
+    isContinuation: boolean;
+    issue: IssueSnapshot;
+    parentRunId: string | null;
+    project: RunControllerProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+    schedulerWeights?: Array<{
+      currentWeight: number;
+      projectName: string;
+      weight: number;
+    }>;
+  }): Promise<void> {
+    // Re-check concurrency caps inside the mutex. pickTargetFromCandidates
+    // ran without the lock, so two concurrent ticks could both observe a
+    // below-cap count before either reserves a slot — without this guard,
+    // both would proceed and the cap would be breached. Continuations are
+    // NOT exempt: a continuation fires after the parent's `finally` released
+    // its slot, but during that gap a fresh dispatch on another issue may
+    // have filled the cap. Scheduled callers catch CapBreachedError and
+    // reschedule. See ADR 0053.
+    const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
+    if (
+      globalMax !== undefined &&
+      this.activeRuns.countInFlight() >= globalMax
+    ) {
+      throw new CapBreachedError(
+        `global max_in_flight (${globalMax}) reached`
+      );
+    }
+    const projectMax = input.project.max_in_flight ?? 1;
+    if (
+      this.activeRuns.countInFlightByProject(input.project.name) >= projectMax
+    ) {
+      throw new CapBreachedError(
+        `project ${input.project.name} max_in_flight (${projectMax}) reached`
+      );
+    }
+
+    // Re-check per-(project, issue) reservation inside the mutex. With
+    // max_in_flight > 1, two re-entrant ticks can both observe a candidate
+    // as unreserved in pickTargetFromCandidates (because neither has called
+    // reserveSlot yet). Without this guard the second one would write a
+    // duplicate sym:claimed label + create a duplicate run row before
+    // reserveSlot throws on the (project, issue) lock. See ADR 0052.
+    if (
+      this.activeRuns.isIssueReserved(input.project.name, input.issue.number)
+    ) {
+      throw new IssueReservedError(
+        `issue ${input.project.name}#${input.issue.number} is already reserved`
+      );
+    }
+
     let claimed = false;
     let runCreated = false;
     try {
@@ -1594,18 +1892,13 @@ export class RunController {
         this.runStore.createRun(createInput);
       }
       runCreated = true;
-      await this.runAttemptLifecycle({
-        attemptNumber: input.attemptNumber,
-        ...(input.extraInstructions === undefined
-          ? {}
-          : { extraInstructions: input.extraInstructions }),
-        isContinuation: input.isContinuation,
-        issue: input.issue,
-        project: input.project,
-        provider: input.provider,
-        providerCommand: input.providerCommand,
-        providerName: input.providerName,
-        repository: input.repository,
+      // Reserve the in-flight slot BEFORE mutex release so subsequent picks
+      // (per-issue reservation + Slice-2 cap counts) observe the run. The
+      // provider cancel handler is bound later in runAttemptLifecycle via
+      // attachProvider once provider.validate has succeeded. See ADR 0052.
+      this.activeRuns.reserveSlot({
+        issueNumber: input.issue.number,
+        projectName: input.project.name,
         runId: input.runId
       });
     } catch (error) {
@@ -1639,77 +1932,106 @@ export class RunController {
       events: []
     };
     let attemptCreated = false;
-    let registered = false;
     let started: StartedAttempt | undefined;
     let caughtError: unknown;
+    // Hoisted so the finally can read them on any exit path (including a
+    // loadWorkflow throw or a parked-state early return). Initial values
+    // are safe defaults: respectsIssueLabels=true (matches reserveSlot's
+    // default), parkedAsWaiting=false (default failure pipeline runs).
+    // See ADR 0052 — slot-leak fix.
+    let loadedWorkflow: Awaited<
+      ReturnType<typeof this.loadWorkflow>
+    > | undefined;
+    let currentState: ReturnType<typeof findWorkflowState> | undefined;
+    let projectForAttempt = input.project;
+    let respectsIssueLabels = true;
+    let parkedAsWaiting = false;
 
     this.runStore.updateRunState(input.runId, "preparing_workspace");
 
-    const loadedWorkflow = await this.loadWorkflow(input.project.workflow);
-    let projectForAttempt = input.project;
-    let currentState = undefined as
-      | ReturnType<typeof findWorkflowState>
-      | undefined;
-    if (loadedWorkflow.errors.length === 0) {
-      const persistedStateId = this.runStore.getRun(input.runId)?.currentStateId;
-      const startStateId =
-        persistedStateId ?? loadedWorkflow.expandedWorkflow.initial;
-      currentState = findWorkflowState(
-        loadedWorkflow.expandedWorkflow,
-        startStateId
-      );
-      if (currentState !== undefined) {
-        this.runStore.setRunCurrentState(input.runId, currentState.id);
-      }
-      projectForAttempt = {
-        ...input.project,
-        workflow: {
-          body: loadedWorkflow.body,
-          contentHash: loadedWorkflow.contentHash,
-          expandedWorkflow: loadedWorkflow.expandedWorkflow,
-          format: loadedWorkflow.format,
-          path: loadedWorkflow.path
-        }
-      };
-    }
-    // Raw FSM workflows whose entry state is a parked action (wait/merge_pr)
-    // must never launch a provider — they have no prompt and must instead be
-    // parked into the waiting-row reconciliation path immediately. Without
-    // this guard, runAttemptLifecycle would call startAttempt with an empty
-    // raw-FSM prompt, terminate, and then fall through `applyWorkflowOutcome`
-    // (which has no `stay_waiting` branch) leaving the workflow with no
-    // waiting row and no merge attempt scheduled. Returning here keeps the
-    // run row durable (state="waiting", current_state_id set) so a daemon
-    // restart can resume the reconciliation. See SPEC §12.5 / §12.6.
-    if (
-      loadedWorkflow.errors.length === 0 &&
-      loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm" &&
-      currentState !== undefined &&
-      isParkedAction(currentState.action?.kind)
-    ) {
-      this.runStore.updateRunState(input.runId, "waiting");
-      this.schedule({
-        delayMs: this.lifecyclePolicy.continuation.delayMs,
-        fire: () => this.executeWaitPark({ waitingRunId: input.runId }),
-        issueNumber: input.issue.number,
-        kind: "wait_park",
-        projectName: input.project.name,
-        runId: input.runId
-      });
-      return;
-    }
-
-    // Raw FSM continuations are state-advance runs: the FSM, not the issue
-    // labels, decides whether the agent keeps running. Computed here so both
-    // activeRuns.register (in the try block) and scheduleNext (in finally)
-    // can carry the same label-immunity guarantee — including into retry
-    // scheduling. See ADR 0046.
-    const respectsIssueLabels = !(
-      input.isContinuation &&
-      loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm"
-    );
+    // If reconcile flipped cancelRequested between reserveSlot (inside the
+    // narrowed dispatch mutex) and entry into runAttemptLifecycle, honor it
+    // immediately without launching the provider. See ADR 0052.
+    const reservedEntry = this.activeRuns.getInFlight(input.runId);
+    const cancelBeforeAttach: Error | undefined =
+      reservedEntry !== undefined && reservedEntry.cancelRequested
+        ? new Error(`run ${input.runId} was cancelled before provider start`)
+        : undefined;
 
     try {
+      // If pre-attempt cancel-request was observed above, jump straight to
+      // the finally block so the caller sees a cancelled outcome.
+      if (cancelBeforeAttach !== undefined) {
+        throw cancelBeforeAttach;
+      }
+
+      // loadWorkflow lives inside the try so a throw still routes through
+      // the unregister in finally (preventing the slot leak the previous
+      // structure had: throw -> early exit -> reserveSlot'd entry stranded
+      // until daemon restart). See ADR 0052.
+      loadedWorkflow = await this.loadWorkflow(input.project.workflow);
+      if (loadedWorkflow.errors.length === 0) {
+        const persistedStateId = this.runStore.getRun(input.runId)?.currentStateId;
+        const startStateId =
+          persistedStateId ?? loadedWorkflow.expandedWorkflow.initial;
+        currentState = findWorkflowState(
+          loadedWorkflow.expandedWorkflow,
+          startStateId
+        );
+        if (currentState !== undefined) {
+          this.runStore.setRunCurrentState(input.runId, currentState.id);
+        }
+        projectForAttempt = {
+          ...input.project,
+          workflow: {
+            body: loadedWorkflow.body,
+            contentHash: loadedWorkflow.contentHash,
+            expandedWorkflow: loadedWorkflow.expandedWorkflow,
+            format: loadedWorkflow.format,
+            path: loadedWorkflow.path
+          }
+        };
+      }
+      // Raw FSM workflows whose entry state is a parked action (wait/merge_pr)
+      // must never launch a provider — they have no prompt and must instead be
+      // parked into the waiting-row reconciliation path immediately. Without
+      // this guard, runAttemptLifecycle would call startAttempt with an empty
+      // raw-FSM prompt, terminate, and then fall through `applyWorkflowOutcome`
+      // (which has no `stay_waiting` branch) leaving the workflow with no
+      // waiting row and no merge attempt scheduled. Returning here keeps the
+      // run row durable (state="waiting", current_state_id set) so a daemon
+      // restart can resume the reconciliation. See SPEC §12.5 / §12.6.
+      if (
+        loadedWorkflow.errors.length === 0 &&
+        loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm" &&
+        currentState !== undefined &&
+        isParkedAction(currentState.action?.kind)
+      ) {
+        this.runStore.updateRunState(input.runId, "waiting");
+        this.schedule({
+          delayMs: this.lifecyclePolicy.continuation.delayMs,
+          fire: () => this.executeWaitPark({ waitingRunId: input.runId }),
+          issueNumber: input.issue.number,
+          kind: "wait_park",
+          projectName: input.project.name,
+          runId: input.runId
+        });
+        // Set the flag so finally skips the failure-classification pipeline
+        // (the wait_park scheduled callback owns re-evaluation), but still
+        // runs the unconditional unregister that releases the in-flight slot.
+        parkedAsWaiting = true;
+        return;
+      }
+
+      // Raw FSM continuations are state-advance runs: the FSM, not the issue
+      // labels, decides whether the agent keeps running. Computed here so both
+      // activeRuns.attachProvider and scheduleNext (in finally) carry the
+      // same label-immunity guarantee — including into retry scheduling.
+      // See ADR 0046.
+      respectsIssueLabels = !(
+        input.isContinuation &&
+        loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm"
+      );
       // For raw FSM workflows, the agent action's `prompt` field points at the
       // template file to send to the provider for this state. Resolve it here
       // so startAttempt renders the right prompt (rather than the YAML body of
@@ -1765,15 +2087,14 @@ export class RunController {
         state: "running"
       });
       attemptCreated = true;
-      this.activeRuns.register({
+      // Slot was reserved upstream in claimAndPersistRun. Bind the live
+      // provider cancel handler (and update respectsIssueLabels once the
+      // workflow kind is known) onto the existing entry.
+      this.activeRuns.attachProvider(input.runId, {
         cancel: () => input.provider.cancel(input.runId),
-        issueNumber: input.issue.number,
-        projectName: input.project.name,
         provider: input.provider,
-        respectsIssueLabels,
-        runId: input.runId
+        respectsIssueLabels
       });
-      registered = true;
 
       await this.iterateAttempt({
         attemptId,
@@ -1793,13 +2114,23 @@ export class RunController {
     } finally {
       let cancelRequested = false;
       let cancelReason: CancelReason | undefined;
-      if (registered) {
-        const removed = this.activeRuns.unregister(input.runId);
-        if (removed !== undefined) {
-          cancelRequested = removed.cancelRequested;
-          cancelReason = removed.cancelReason;
-        }
+      // Slot was reserved unconditionally upstream in claimAndPersistRun, so
+      // unregister is unconditional here. The previous `if (registered)`
+      // guard would leak the slot if a throw happened between reserveSlot
+      // and attachProvider (loadWorkflow / prepareIssueWorkspace / validate /
+      // sym:running label / createAttempt). See ADR 0052.
+      const removed = this.activeRuns.unregister(input.runId);
+      if (removed !== undefined) {
+        cancelRequested = removed.cancelRequested;
+        cancelReason = removed.cancelReason;
       }
+      // Parked-as-waiting runs have already committed their "waiting" state
+      // and scheduled the wait_park callback that will own re-evaluation.
+      // The failure-classification + scheduleNext pipeline below would
+      // overwrite the waiting state and double-schedule, so it's gated on
+      // !parkedAsWaiting. The unconditional unregister above already
+      // released the in-flight slot. See ADR 0052 — slot-leak fix.
+      if (!parkedAsWaiting) {
       const terminal = await classifyFailure({
         cancelRequested,
         ...(caughtError === undefined ? {} : { error: caughtError }),
@@ -1818,7 +2149,10 @@ export class RunController {
         advancedToTerminal: false,
         blocked: false
       };
-      if (currentState !== undefined) {
+      // loadedWorkflow can be undefined if this.loadWorkflow itself threw
+      // before currentState was set; in that case we run the bare
+      // classifyFailure outcome without an FSM-driven overlay.
+      if (currentState !== undefined && loadedWorkflow !== undefined) {
         workflowOutcome = this.applyWorkflowOutcome({
           currentState,
           issue: input.issue,
@@ -1841,7 +2175,7 @@ export class RunController {
         effectiveOutcome.reason,
         effectiveOutcome.classification
       );
-      const sourceKind = loadedWorkflow.expandedWorkflow.source.kind;
+      const sourceKind = loadedWorkflow?.expandedWorkflow.source.kind;
       const isRawFsm = sourceKind === "raw_fsm";
       const suppressContinuation =
         isRawFsm &&
@@ -1923,6 +2257,7 @@ export class RunController {
           "symphonika scheduleNext failed"
         );
       }
+      } // end if (!parkedAsWaiting)
     }
 
     if (caughtError !== undefined) {

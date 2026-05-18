@@ -35,6 +35,12 @@ which already chains daemon ticks through a single promise queue, so two reconci
 cannot overlap. Manual `/poll-now` calls `tick()` like the periodic timer, so the handler runs
 the same way under operator-triggered polls.
 
+_See ADR 0052 for the narrowed scope of `dispatchMutex` that landed after this ADR. The mutex
+now covers only the claim/persist critical section (label POST + scheduler cursor + createRun +
+reserveSlot); provider event streaming runs outside it. `executeWaitPark` explicitly acquires the
+narrowed mutex around `reEvaluateWaitingRun` so the `tryAcquire` gate above still provides
+exclusion._
+
 The waiting row is persisted synchronously the moment the parent agent run terminates and the FSM
 decides to advance into a wait state. `applyWorkflowOutcome` calls `createWaitingRun` inside the
 same code path that records the parent's `state_transition_reason`. This places the wait state on

@@ -32,19 +32,21 @@ npm run build
 There is no `npm run daemon` script. The `daemon` is a subcommand of the `symphonika` CLI, so run it one of these ways from a clone of this repo:
 
 ```sh
-npm run dev -- daemon            # runs src/cli.ts via tsx (recommended for development)
-npm run build && node dist/cli.js daemon
-npm link && symphonika daemon    # link the bin once, then run from anywhere
+npm run dev -- daemon --config symphonika.example.yml            # runs src/cli.ts via tsx (recommended for development)
+npm run build && node dist/cli.js daemon --config symphonika.example.yml
+npm link && symphonika daemon --config symphonika.example.yml    # link the bin once, then run from anywhere
 ```
 
 `npx symphonika daemon` does **not** work from inside this repo: a package's `bin` is only linked into a *consuming* project's `node_modules/.bin`, not its own, so npx silently finds nothing and exits.
 
-Set `PINO_LOG_LEVEL=debug` (or the alias `LOG_LEVEL=debug`) to raise daemon log verbosity for per-tick visibility, e.g. `PINO_LOG_LEVEL=debug npm run dev -- daemon`. Accepted values match pino's level set: `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent`.
+Pass the same `--config symphonika.example.yml` to the `poll-now` and `status` commands below so they target the same state root as the daemon started with. Without it, each command falls back to its own default state-root resolution and the auxiliary commands will not find the running daemon.
+
+Set `PINO_LOG_LEVEL=debug` (or the alias `LOG_LEVEL=debug`) to raise daemon log verbosity for per-tick visibility, e.g. `PINO_LOG_LEVEL=debug npm run dev -- daemon --config symphonika.example.yml`. Accepted values match pino's level set: `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent`.
 
 While the daemon is running, force a debugging poll without waiting for the configured interval:
 
 ```sh
-npm run dev -- poll-now --config symphonika.yml
+npm run dev -- poll-now --config symphonika.example.yml
 ```
 
 The command discovers the selected state root's `daemon.json`, preflights that the daemon reports the same state root, then posts to the local `/api/poll-now` endpoint. The daemon uses the same reconcile, polling, and dispatch gates as interval ticks, so invalid Projects, operational labels, excluded labels, active runs, and the dispatch mutex still apply.
@@ -52,8 +54,8 @@ The command discovers the selected state root's `daemon.json`, preflights that t
 For a compact terminal dashboard inspired by the upstream Symphony status surface:
 
 ```sh
-npm run dev -- status --config symphonika.yml --dashboard
-npm run dev -- status --config symphonika.yml --watch
+npm run dev -- status --config symphonika.example.yml --dashboard
+npm run dev -- status --config symphonika.example.yml --watch
 ```
 
 The `symphony/` directory in the tree is a git submodule of an unrelated upstream project (`openai/symphony`) used as a reference — it is not a launcher for Symphonika.
@@ -83,7 +85,7 @@ The built-ins (`builtin:single-agent-pr`, `builtin:plan-tdd-pr`, `builtin:autofi
 
 ## Self-Hosting
 
-The bootstrap dogfooding path is documented in [docs/smoke.md](docs/smoke.md). The repository includes a bootstrap [symphonika.yml](symphonika.yml) service config and [WORKFLOW.md](WORKFLOW.md) workflow contract for running Symphonika against its own issues.
+The bootstrap dogfooding path is documented in [docs/smoke.md](docs/smoke.md). The repository includes a bootstrap [symphonika.example.yml](symphonika.example.yml) service config and [WORKFLOW.md](WORKFLOW.md) workflow contract for running Symphonika against its own issues.
 
 ### Autonomy contract for agent runs
 

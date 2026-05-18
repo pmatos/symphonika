@@ -4,6 +4,11 @@ state:
 polling:
   interval_ms: 30000
 
+# Optional global cap on the total number of concurrent provider runs across
+# all projects. Omit (or comment out) for unbounded. See ADR 0053.
+# global:
+#   max_in_flight: 8
+
 providers:
   codex:
     command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
@@ -14,6 +19,11 @@ projects:
   - name: symphonika
     disabled: false
     weight: 1
+    # Per-project cap on the number of concurrent provider runs for this
+    # project. Default 1 (legacy serial behavior). Setting >1 requires a
+    # per-project shared bare-repo fetch lock — see ADR 0053. Omit (or
+    # leave commented) to keep the default.
+    # max_in_flight: 1
     tracker:
       kind: github
       owner: pmatos

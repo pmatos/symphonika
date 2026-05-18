@@ -33,6 +33,9 @@ import {
 
 export type RuntimeConfigSnapshot = {
   configPath: string;
+  // Global concurrency cap snapshot. `maxInFlight: undefined` means
+  // unbounded. See ADR 0053.
+  globalConcurrency: { maxInFlight: number | undefined };
   loadedAt: string;
   polling: PollingServiceConfig;
   pollingIntervalMs: number;
@@ -66,6 +69,9 @@ const pollingProjectSchema = z
     name: z.string().trim().min(1),
     disabled: z.boolean().optional(),
     weight: z.number().int().positive().optional(),
+    // Per-project concurrency cap. Omitted defaults to 1 at consume-time.
+    // Zero / negative values are rejected. See ADR 0053.
+    max_in_flight: z.number().int().positive().optional(),
     tracker: z
       .object({
         kind: z.literal("github"),
@@ -108,6 +114,13 @@ const serviceConfigSchema = z
     polling: z
       .object({
         interval_ms: z.number().int().positive().optional()
+      })
+      .passthrough()
+      .optional(),
+    // Optional global concurrency cap. Omitted = unbounded. See ADR 0053.
+    global: z
+      .object({
+        max_in_flight: z.number().int().positive().optional()
       })
       .passthrough()
       .optional(),
@@ -168,6 +181,12 @@ export class RuntimeConfigReloader {
   pullRequestPolicy(): PullRequestFollowupPolicy {
     return (
       this.snapshot?.pullRequestPolicy ?? DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY
+    );
+  }
+
+  globalConcurrency(): { maxInFlight: number | undefined } {
+    return (
+      this.snapshot?.globalConcurrency ?? { maxInFlight: undefined }
     );
   }
 
@@ -303,6 +322,9 @@ async function loadRuntimeConfigSnapshot(input: {
     errors,
     snapshot: {
       configPath: input.configPath,
+      globalConcurrency: {
+        maxInFlight: parsed.data.global?.max_in_flight
+      },
       loadedAt: input.attemptedAt,
       polling,
       pollingIntervalMs:

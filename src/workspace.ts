@@ -192,24 +192,46 @@ async function worktreePathForBranch(
   return undefined;
 }
 
+// Per-cache-path serialization for ensureRepositoryCache. `git fetch` on the
+// same bare repo is not safe under concurrent invocations — git tries to
+// create the same packed-refs.lock and one of the two fetches fails. Once a
+// project sets max_in_flight > 1, two prepareIssueWorkspace calls hit the
+// same cachePath, so we serialize them per-cache-path here. Per-issue
+// worktree creation (the rest of prepareIssueWorkspace) remains concurrent.
+// See ADR 0053.
+const fetchLocks = new Map<string, Promise<unknown>>();
+
 async function ensureRepositoryCache(
   project: WorkspaceProject,
   cachePath: string
 ): Promise<void> {
-  if (!(await exists(cachePath))) {
-    await mkdir(path.dirname(cachePath), { recursive: true });
-    await git(["clone", "--bare", project.workspace.git.remote, cachePath]);
-  } else {
-    await ensureRepositoryCacheRemote(project, cachePath);
+  const prior = fetchLocks.get(cachePath) ?? Promise.resolve();
+  const next = prior
+    .catch(() => undefined)
+    .then(async () => {
+      if (!(await exists(cachePath))) {
+        await mkdir(path.dirname(cachePath), { recursive: true });
+        await git(["clone", "--bare", project.workspace.git.remote, cachePath]);
+      } else {
+        await ensureRepositoryCacheRemote(project, cachePath);
+      }
+      await git([
+        "-C",
+        cachePath,
+        "fetch",
+        "origin",
+        `${project.workspace.git.base_branch}:refs/remotes/origin/${project.workspace.git.base_branch}`
+      ]);
+    });
+  fetchLocks.set(cachePath, next);
+  try {
+    await next;
+  } finally {
+    // Only clear the slot if no later caller has overwritten it.
+    if (fetchLocks.get(cachePath) === next) {
+      fetchLocks.delete(cachePath);
+    }
   }
-
-  await git([
-    "-C",
-    cachePath,
-    "fetch",
-    "origin",
-    `${project.workspace.git.base_branch}:refs/remotes/origin/${project.workspace.git.base_branch}`
-  ]);
 }
 
 async function ensureRepositoryCacheRemote(

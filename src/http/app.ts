@@ -50,6 +50,16 @@ export type HttpAppOptions = {
   cancelRun?: CancelRunFn;
   dispatchRuntime?: {
     dispatching: boolean;
+    inFlight?: number;
+  };
+  // Per-Slice-2: cap snapshot + live in-flight counts. See ADR 0053.
+  getConcurrency?: () => {
+    global: { inFlight: number; maxInFlight: number | null };
+    perProject: Array<{
+      inFlight: number;
+      maxInFlight: number;
+      projectName: string;
+    }>;
   };
   getActiveRuns?: () => Array<{
     cancelReason: string | null;
@@ -155,6 +165,11 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ),
       state: dispatchRuntime.dispatching ? "dispatching" : "idle",
       dispatching: dispatchRuntime.dispatching,
+      inFlight: dispatchRuntime.inFlight ?? 0,
+      concurrency:
+        options.getConcurrency === undefined
+          ? undefined
+          : options.getConcurrency(),
       stateRoot: options.stateRoot,
       uptimeMs: uptimeMs(startedAtMs, now)
     })

@@ -25,6 +25,35 @@ describe("ActiveRunRegistry", () => {
     expect(registry.list()).toHaveLength(1);
   });
 
+  it("reserveSlot + attachProvider compose into the same locked state as register", async () => {
+    const registry = new ActiveRunRegistry();
+    registry.reserveSlot({
+      issueNumber: 7,
+      projectName: "symphonika",
+      runId: "run-a"
+    });
+    expect(registry.isIssueInFlight("symphonika", 7)).toBe(true);
+    expect(registry.countInFlight()).toBe(1);
+    expect(registry.countInFlightByProject("symphonika")).toBe(1);
+
+    const cancel = vi.fn(() => Promise.resolve());
+    registry.attachProvider("run-a", { cancel });
+    await registry.requestCancel("run-a", CANCEL_REASONS.OPERATOR);
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("getInFlight exposes the entry shape (including cancelRequested)", () => {
+    const registry = new ActiveRunRegistry();
+    registry.reserveSlot({
+      issueNumber: 7,
+      projectName: "symphonika",
+      runId: "run-a"
+    });
+
+    const before = registry.getInFlight("run-a");
+    expect(before?.cancelRequested).toBe(false);
+  });
+
   it("isIssueInFlight reports per-(project,issue) lock", () => {
     const registry = new ActiveRunRegistry();
     registry.register(entry({ runId: "run-a" }));

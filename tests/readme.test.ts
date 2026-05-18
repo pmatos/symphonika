@@ -36,7 +36,7 @@ describe("README", () => {
     expect(readme).toContain("npm run build");
     expect(readme).toContain("[docs/smoke.md](docs/smoke.md)");
     expect(readme).toContain("[WORKFLOW.md](WORKFLOW.md)");
-    expect(readme).toContain("[symphonika.yml](symphonika.yml)");
+    expect(readme).toContain("[symphonika.example.yml](symphonika.example.yml)");
     expect(readme).toContain("private and experimental");
     expect(readme).toContain("single-operator workflow");
     expect(readme).toContain("Autonomy contract");

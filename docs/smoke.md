@@ -9,7 +9,7 @@ not retry, and does not schedule continuations after a successful run.
 
 ## What it does
 
-1. Validates `symphonika.yml` and `WORKFLOW.md` via `symphonika doctor`. If any
+1. Validates `symphonika.example.yml` and `WORKFLOW.md` via `symphonika doctor`. If any
    doctor error is reported, smoke aborts before touching the issue tracker.
 2. Polls GitHub once for issues that match the Project's `labels_all` /
    `labels_none` filters.
@@ -34,9 +34,13 @@ Exit codes:
 
 ## Prerequisites
 
-1. **Service config and workflow contract** at the repo root: `symphonika.yml`
-   and `WORKFLOW.md`. The non-secret bootstrap config in this repository
-   targets the `pmatos/symphonika` Project with `agent.provider: codex`.
+1. **Service config and workflow contract** at the repo root:
+   `symphonika.example.yml` and `WORKFLOW.md`. The non-secret bootstrap
+   config in this repository targets the `pmatos/symphonika` Project with
+   `agent.provider: codex`. Pass it to every command via
+   `--config symphonika.example.yml`, or copy it to a local
+   `symphonika.local.yml` (already gitignored) for operator-specific
+   overrides.
 2. **GitHub credentials**: export `GITHUB_TOKEN` (or the variable referenced
    by `tracker.token` in your config) with write access to issues for the
    target repository.
@@ -52,13 +56,13 @@ Exit codes:
 
 ```sh
 export GITHUB_TOKEN=<your-personal-token>
-npx symphonika doctor
-npx symphonika init-project --yes   # one-time, creates sym:* labels
-npm run smoke                       # equivalent to: symphonika smoke
+npx symphonika doctor --config symphonika.example.yml
+npx symphonika init-project --config symphonika.example.yml --yes   # one-time, creates sym:* labels
+npm run smoke -- --config symphonika.example.yml                    # equivalent to: symphonika smoke --config …
 ```
 
 The first invocation will create `.symphonika/` under the directory containing
-`symphonika.yml`. That path is already gitignored.
+the config file passed via `--config`. That path is already gitignored.
 
 ## CI gating
 
@@ -96,7 +100,7 @@ present.
   `sym:claimed` or `sym:running` and there is no live local run, doctor will
   surface a `sym:stale` warning. Clear it with
   `symphonika clear-stale <project> <issue> --yes`.
-- **Workspace remote is HTTPS by default.** The bootstrap `symphonika.yml`
+- **Workspace remote is HTTPS by default.** The bootstrap `symphonika.example.yml`
   uses an HTTPS remote so clones work in stock GitHub-hosted runners and on
   any machine without configured SSH keys. Operators who prefer SSH (e.g.
   for push convenience) can override `workspace.git.remote` locally — most

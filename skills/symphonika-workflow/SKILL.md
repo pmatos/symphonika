@@ -77,11 +77,14 @@ If anything is unsupported, **stop drafting** and run the feature-request flow b
 
 After the design is fully resolved and supported:
 
-1. Show the user the final rendered `WORKFLOW.md` or `workflow.yml` (full content, in chat) and ask for explicit approval to write.
-2. On approval, write to the project path the user named. Use `Write` (overwrite) only if the user has confirmed they want to replace any existing file there.
-3. Remind the user to run `symphonika doctor` to validate the workflow before dispatching.
+1. **Reconcile the artifact path with `symphonika.yml`.** Read the target project's `symphonika.yml` and find the `projects[].workflow:` entry for the Project under work. Compare it against the artifact filename you chose (`WORKFLOW.md` vs. `workflow.yml`):
+   - If the configured path already matches, keep it.
+   - If it diverges, present both options to the user and proceed only after explicit approval: (a) write to the existing configured path (rename the rendered artifact to match), or (b) update `projects[].workflow:` in `symphonika.yml` to point at the new artifact. Symphonika loads exactly the configured path, so writing the new artifact under a different name without (a) or (b) produces a valid but inert workflow file that `symphonika doctor` will not even validate.
+2. Show the user the final rendered `WORKFLOW.md` or `workflow.yml` (full content, in chat) and ask for explicit approval to write.
+3. On approval, write to the path resolved in step 1. Use `Write` (overwrite) only if the user has confirmed they want to replace any existing file there. If step 1 chose option (b), also `Edit` `symphonika.yml` to update `projects[].workflow:` — a narrow `Edit` only, never a full rewrite.
+4. Remind the user to run `symphonika doctor` to validate the workflow before dispatching.
 
-Do not edit `symphonika.yml` from this skill — workflow contract changes never require service-config edits.
+`symphonika.yml` edits from this skill are limited to the `projects[].workflow:` reconciliation in step 1 (option b). Do not touch any other field — service-level runtime settings, providers, tracker config, and workspace roots are out of scope for a workflow-design skill.
 
 ## See also
 

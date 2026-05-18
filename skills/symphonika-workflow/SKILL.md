@@ -22,7 +22,7 @@ Cover at minimum:
 
 1. **Goal** — what should one Run of this workflow accomplish?
 2. **Shape** — single-state (Markdown `WORKFLOW.md`) or multi-state (raw FSM `workflow.yml`)? Default to single-state unless the user names at least one of: review-feedback loop, conflict resolution, wait-then-merge, conditional branches.
-3. **Providers** — Codex or Claude per agent state? Note ADR-0049 / per-state `action.provider` gap if relevant.
+3. **Providers** — Codex or Claude per agent state? Per-state `action.provider` routing is fully supported at runtime; mix providers across states freely (see [REFERENCE.md](REFERENCE.md#providers)).
 4. **States** — for each FSM node: kind (`agent` | `wait` | `merge_pr`), prompt path (for `agent`), transitions, terminal flag.
 5. **Predicates** — which of the supported predicates (see REFERENCE) gate each transition? Reject predicates that do not exist.
 6. **Prompt body** — what does the agent need to be told? What templating variables (`issue`, `project`, `workspace`, `branch`, `run`, `provider`) does it use? Confirm every `{{var}}` resolves; strict Mustache fails on unknown vars.

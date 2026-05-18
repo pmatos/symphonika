@@ -425,3 +425,178 @@ describe("RuntimeConfigReloader workflow validation", () => {
     });
   });
 });
+
+describe("RuntimeConfigReloader concurrency caps", () => {
+  it("parses a project max_in_flight and exposes it on the project config", async () => {
+    const root = await makeTempRoot();
+    await writeFile(
+      path.join(root, "symphonika.yml"),
+      [
+        "state:",
+        "  root: ./.symphonika",
+        "polling:",
+        "  interval_ms: 1000",
+        "providers:",
+        "  codex:",
+        '    command: "codex"',
+        "  claude:",
+        '    command: "claude"',
+        "projects:",
+        "  - name: symphonika",
+        "    disabled: false",
+        "    weight: 1",
+        "    max_in_flight: 3",
+        "    tracker:",
+        "      kind: github",
+        "      owner: pmatos",
+        "      repo: symphonika",
+        '      token: "$GITHUB_TOKEN"',
+        "    issue_filters:",
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: []',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/symphonika",
+        "      git:",
+        "        remote: git@github.com:pmatos/symphonika.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    workflow: ./WORKFLOW.md",
+        ""
+      ].join("\n")
+    );
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work {{issue.title}}\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    const project = reloader.projectsByName().get("symphonika");
+    expect(project?.max_in_flight).toBe(3);
+  });
+
+  it("parses global max_in_flight into the snapshot", async () => {
+    const root = await makeTempRoot();
+    await writeFile(
+      path.join(root, "symphonika.yml"),
+      [
+        "state:",
+        "  root: ./.symphonika",
+        "polling:",
+        "  interval_ms: 1000",
+        "global:",
+        "  max_in_flight: 8",
+        "providers:",
+        "  codex:",
+        '    command: "codex"',
+        "  claude:",
+        '    command: "claude"',
+        "projects:",
+        "  - name: symphonika",
+        "    disabled: false",
+        "    weight: 1",
+        "    tracker:",
+        "      kind: github",
+        "      owner: pmatos",
+        "      repo: symphonika",
+        '      token: "$GITHUB_TOKEN"',
+        "    issue_filters:",
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: []',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/symphonika",
+        "      git:",
+        "        remote: git@github.com:pmatos/symphonika.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    workflow: ./WORKFLOW.md",
+        ""
+      ].join("\n")
+    );
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.globalConcurrency()).toEqual({ maxInFlight: 8 });
+  });
+
+  it("returns undefined global maxInFlight when global is omitted", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.globalConcurrency()).toEqual({ maxInFlight: undefined });
+  });
+
+  it("rejects max_in_flight values that are zero or negative", async () => {
+    const root = await makeTempRoot();
+    await writeFile(
+      path.join(root, "symphonika.yml"),
+      [
+        "state:",
+        "  root: ./.symphonika",
+        "polling:",
+        "  interval_ms: 1000",
+        "providers:",
+        "  codex:",
+        '    command: "codex"',
+        "  claude:",
+        '    command: "claude"',
+        "projects:",
+        "  - name: symphonika",
+        "    disabled: false",
+        "    weight: 1",
+        "    max_in_flight: 0",
+        "    tracker:",
+        "      kind: github",
+        "      owner: pmatos",
+        "      repo: symphonika",
+        '      token: "$GITHUB_TOKEN"',
+        "    issue_filters:",
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: []',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/symphonika",
+        "      git:",
+        "        remote: git@github.com:pmatos/symphonika.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    workflow: ./WORKFLOW.md",
+        ""
+      ].join("\n")
+    );
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    const status = reloader.getStatus();
+    expect(status.ok).toBe(false);
+    expect(status.errors.join("\n")).toMatch(/max_in_flight/);
+  });
+});

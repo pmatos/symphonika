@@ -70,6 +70,9 @@ const dispatchProjectSchema = z
     name: z.string().trim().min(1),
     disabled: z.boolean().optional(),
     weight: z.number().int().positive().optional(),
+    // Accept but ignore in the one-shot CLI; preserves parsing parity with
+    // the runtime daemon path. See ADR 0053.
+    max_in_flight: z.number().int().positive().optional(),
     tracker: z
       .object({
         kind: z.literal("github"),

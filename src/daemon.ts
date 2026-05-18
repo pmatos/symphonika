@@ -20,6 +20,7 @@ import {
   replaceIssuePollStatus
 } from "./issue-polling.js";
 import { ActiveRunRegistry } from "./lifecycle/active-runs.js";
+import { createAsyncMutex } from "./lifecycle/async-mutex.js";
 import type {
   LifecyclePolicy,
   ScheduledWorkInput
@@ -149,9 +150,17 @@ export async function startDaemon(
   });
   const activeRuns = new ActiveRunRegistry();
   const dispatchMutex = createAsyncMutex();
+  // After Slice 1 narrowing, dispatchMutex is held only during the brief
+  // claim section, so consumers that want "is a provider run active" should
+  // read inFlight instead. The legacy dispatching boolean is preserved as a
+  // derived alias (true iff inFlight > 0) so existing clients keep working.
+  // See ADR 0052.
   const dispatchRuntime = {
     get dispatching(): boolean {
-      return dispatchMutex.held;
+      return activeRuns.countInFlight() > 0;
+    },
+    get inFlight(): number {
+      return activeRuns.countInFlight();
     }
   };
   let pollTimer: ReturnType<typeof setInterval> | undefined;
@@ -172,6 +181,11 @@ export async function startDaemon(
   const pullRequestPolicyLoader = (): Promise<PullRequestFollowupPolicy> => {
     return Promise.resolve(runtimeConfig.pullRequestPolicy());
   };
+  const globalConcurrencyLoader = (): Promise<{
+    maxInFlight: number | undefined;
+  }> => {
+    return Promise.resolve(runtimeConfig.globalConcurrency());
+  };
   const enqueueScheduledWork = (work: () => Promise<void>): void => {
     scheduledWork = scheduledWork.then(work, work);
     void scheduledWork;
@@ -180,7 +194,12 @@ export async function startDaemon(
     activeRuns,
     agentProviders,
     configDir: state.configDir,
+    // Share the daemon's mutex so RunController's narrowed claim section
+    // and reconcile/stale-claim gates (which consult held/tryAcquire) all
+    // serialize on the same primitive. See ADR 0052.
+    dispatchMutex,
     githubIssuesApi,
+    globalConcurrencyLoader,
     logger,
     projectsLoader,
     providersLoader,
@@ -190,18 +209,16 @@ export async function startDaemon(
       activeRuns.scheduleDelayed({
         delayMs: item.delayMs,
         fire: async () => {
-          // Register the entire fire callback in inflightDispatches BEFORE
-          // awaiting the mutex, so a shutdown that races with a freshly-fired
-          // timer (while another dispatch still holds the mutex) cannot snapshot
-          // the set early and miss this work.
+          // The scheduled fire callback no longer wraps a mutex acquire — each
+          // execute* path (retry / continuation / state_advance / wait_park)
+          // acquires the (shared) mutex internally over its own narrowed
+          // critical section. inflightDispatches still tracks the full fire
+          // promise so shutdown drain works.
           const promise = (async () => {
-            await dispatchMutex.acquire();
             try {
               await item.fire();
             } catch (error) {
               logger.error({ err: error }, "symphonika scheduled work failed");
-            } finally {
-              dispatchMutex.release();
             }
           })();
           inflightDispatches.add(promise);
@@ -339,13 +356,14 @@ export async function startDaemon(
     }
   };
   const launchWork = (): void => {
-    if (
-      !state.configExists ||
-      !hasRegisteredProviders(agentProviders) ||
-      !dispatchMutex.tryAcquire()
-    ) {
+    if (!state.configExists || !hasRegisteredProviders(agentProviders)) {
       return;
     }
+    // The mutex is acquired INSIDE runController.dispatchOneFresh (and inside
+    // dispatchReviewFollowup) around the narrowed claim section. launchWork
+    // itself is re-entrant per tick; provider event streaming runs outside
+    // the mutex so two ticks' worth of fresh dispatches can overlap. See
+    // ADR 0052.
     const promise = (async () => {
       try {
         const now = Date.now();
@@ -388,8 +406,6 @@ export async function startDaemon(
       } catch (error) {
         issuePollStatus.errors.push(errorMessage(error));
         logger.error({ err: error }, "symphonika dispatch failed");
-      } finally {
-        dispatchMutex.release();
       }
     })();
     inflightDispatches.add(promise);
@@ -405,7 +421,7 @@ export async function startDaemon(
     logger.debug(
       {
         candidates: issuePollStatus.candidateIssues.length,
-        dispatching: dispatchMutex.held,
+        dispatching: dispatchRuntime.dispatching,
         errors: issuePollStatus.errors.length,
         filtered: issuePollStatus.filteredIssues.length,
         projects: issuePollStatus.projects.length
@@ -440,7 +456,7 @@ export async function startDaemon(
   };
   const pollNowSummary = (kind: PollNowResult["kind"]): PollNowResult => ({
     candidateIssues: issuePollStatus.candidateIssues.length,
-    dispatching: dispatchMutex.held,
+    dispatching: dispatchRuntime.dispatching,
     errors: issuePollStatus.errors.length,
     filteredIssues: issuePollStatus.filteredIssues.length,
     issuePolling: {
@@ -448,7 +464,7 @@ export async function startDaemon(
       projects: issuePollStatus.projects.map((project) => ({ ...project }))
     },
     kind,
-    state: dispatchMutex.held ? "dispatching" : "idle"
+    state: dispatchRuntime.dispatching ? "dispatching" : "idle"
   });
   const triggerPollNow = (): Promise<PollNowResult> => {
     if (pendingPollNow !== undefined) {
@@ -520,6 +536,28 @@ export async function startDaemon(
         projectName: entry.projectName,
         runId: entry.runId
       })),
+    getConcurrency: () => {
+      const { maxInFlight } = runtimeConfig.globalConcurrency();
+      const perProject: Array<{
+        inFlight: number;
+        maxInFlight: number;
+        projectName: string;
+      }> = [];
+      for (const project of runtimeConfig.projectsByName().values()) {
+        perProject.push({
+          inFlight: activeRuns.countInFlightByProject(project.name),
+          maxInFlight: project.max_in_flight ?? 1,
+          projectName: project.name
+        });
+      }
+      return {
+        global: {
+          inFlight: activeRuns.countInFlight(),
+          maxInFlight: maxInFlight ?? null
+        },
+        perProject
+      };
+    },
     getRuns: () => runStore.listRuns(),
     getScheduled: () => activeRuns.peekDelayed(),
     getStatusSnapshot: () =>
@@ -761,43 +799,3 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-type AsyncMutex = {
-  acquire: () => Promise<void>;
-  readonly held: boolean;
-  release: () => void;
-  tryAcquire: () => boolean;
-};
-
-function createAsyncMutex(): AsyncMutex {
-  const waiters: Array<() => void> = [];
-  let locked = false;
-  return {
-    acquire(): Promise<void> {
-      if (!locked) {
-        locked = true;
-        return Promise.resolve();
-      }
-      return new Promise<void>((resolve) => {
-        waiters.push(resolve);
-      });
-    },
-    get held(): boolean {
-      return locked;
-    },
-    release(): void {
-      const next = waiters.shift();
-      if (next !== undefined) {
-        next();
-        return;
-      }
-      locked = false;
-    },
-    tryAcquire(): boolean {
-      if (locked) {
-        return false;
-      }
-      locked = true;
-      return true;
-    }
-  };
-}

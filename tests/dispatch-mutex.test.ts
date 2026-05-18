@@ -8,6 +8,7 @@ import { startDaemon } from "../src/daemon.js";
 import type { LifecyclePolicy } from "../src/lifecycle/active-runs.js";
 import type { AgentProvider, ProviderEvent } from "../src/provider.js";
 import type { PreparedIssueWorkspace } from "../src/workspace.js";
+import { createDeferred } from "./helpers/deferred.js";
 import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
@@ -299,6 +300,237 @@ describe("dispatch mutex", () => {
       expect(freshPrompt).toContain("Continuation? false");
       expect(continuationPrompt).toContain("Continuation? true");
     } finally {
+      await daemon.stop();
+    }
+  });
+});
+
+describe("dispatch concurrency (slice 1 narrowing)", () => {
+  it("runs two fresh dispatches concurrently when two projects have ready issues", async () => {
+    const root = await makeTempRoot();
+
+    async function preparedFor(
+      projectName: string,
+      issueNumber: number,
+      slug: string
+    ): Promise<PreparedIssueWorkspace> {
+      const workspacePath = path.join(
+        root,
+        ".symphonika",
+        "workspaces",
+        projectName,
+        "issues",
+        `${issueNumber}-${slug}`
+      );
+      const prepared: PreparedIssueWorkspace = {
+        branchName: `sym/${projectName}/${issueNumber}-${slug}`,
+        branchRef: `refs/heads/sym/${projectName}/${issueNumber}-${slug}`,
+        cachePath: path.join(
+          root,
+          ".symphonika",
+          "workspaces",
+          projectName,
+          ".cache",
+          "repo.git"
+        ),
+        issueDirectoryName: `${issueNumber}-${slug}`,
+        reused: false,
+        workspacePath
+      };
+      await createGitWorkspaceAhead(prepared);
+      return prepared;
+    }
+
+    const issueA = {
+      ...baseIssue,
+      id: 6001,
+      number: 11,
+      title: "Project A issue"
+    };
+    const issueB = {
+      ...baseIssue,
+      id: 6002,
+      number: 22,
+      title: "Project B issue"
+    };
+
+    const preparedByIssue = new Map<number, PreparedIssueWorkspace>();
+    preparedByIssue.set(11, await preparedFor("project-a", 11, "project-a-issue"));
+    preparedByIssue.set(22, await preparedFor("project-b", 22, "project-b-issue"));
+
+    await writeFile(
+      path.join(root, "symphonika.yml"),
+      [
+        "state:",
+        "  root: ./.symphonika",
+        "polling:",
+        "  interval_ms: 25",
+        "providers:",
+        "  codex:",
+        '    command: "codex"',
+        "  claude:",
+        '    command: "claude"',
+        "projects:",
+        "  - name: project-a",
+        "    disabled: false",
+        "    weight: 1",
+        "    tracker:",
+        "      kind: github",
+        "      owner: acme",
+        "      repo: project-a",
+        '      token: "$GITHUB_TOKEN"',
+        "    issue_filters:",
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: ["blocked", "needs-human"]',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/project-a",
+        "      git:",
+        "        remote: git@github.com:acme/project-a.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    workflow: ./WORKFLOW.md",
+        "  - name: project-b",
+        "    disabled: false",
+        "    weight: 1",
+        "    tracker:",
+        "      kind: github",
+        "      owner: acme",
+        "      repo: project-b",
+        '      token: "$GITHUB_TOKEN"',
+        "    issue_filters:",
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: ["blocked", "needs-human"]',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/project-b",
+        "      git:",
+        "        remote: git@github.com:acme/project-b.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    workflow: ./WORKFLOW.md",
+        ""
+      ].join("\n")
+    );
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work {{issue.number}}\n");
+
+    const gate = createDeferred<void>();
+    let active = 0;
+    let maxActive = 0;
+    const enteredCount = createDeferred<void>();
+    let enteredObserved = 0;
+
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        active += 1;
+        if (active > maxActive) {
+          maxActive = active;
+        }
+        enteredObserved += 1;
+        if (enteredObserved >= 2) {
+          enteredCount.resolve();
+        }
+        try {
+          await gate.promise;
+          yield {
+            normalized: { exitCode: 0, type: "process_exit" },
+            raw: { code: 0, kind: "exit" }
+          };
+        } finally {
+          active -= 1;
+        }
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const issuesByProject = new Map<string, typeof baseIssue>([
+      ["project-a", issueA],
+      ["project-b", issueB]
+    ]);
+
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockImplementation(({ issueNumber }: { issueNumber: number }) => {
+        const issue =
+          issueNumber === 11 ? issueA : issueNumber === 22 ? issueB : baseIssue;
+        return Promise.resolve({ ...issue, labels: ["agent-ready"] });
+      }),
+      listBranchCommits: vi.fn().mockResolvedValue([]),
+      listOpenIssues: vi
+        .fn()
+        .mockImplementation(({ owner, repo }: { owner: string; repo: string }) => {
+          const projectName =
+            owner === "acme" && repo === "project-a"
+              ? "project-a"
+              : owner === "acme" && repo === "project-b"
+                ? "project-b"
+                : undefined;
+          if (projectName === undefined) return Promise.resolve([]);
+          const issue = issuesByProject.get(projectName);
+          if (issue === undefined) return Promise.resolve([]);
+          return Promise.resolve([{ ...issue, labels: ["agent-ready"] }]);
+        }),
+      listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const prepareIssueWorkspace = vi.fn(
+      ({ issue }: { issue: { number: number } }): Promise<PreparedIssueWorkspace> => {
+        const prepared = preparedByIssue.get(issue.number);
+        if (prepared === undefined) {
+          return Promise.reject(new Error(`no prepared workspace for issue ${issue.number}`));
+        }
+        return Promise.resolve(prepared);
+      }
+    );
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => `run-concurrent-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 0 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      // Drive a few ticks to ensure both projects' fresh dispatches enter the
+      // provider event stream. Each pollNow triggers a single launchWork which
+      // dispatches one issue; the second tick picks the other project's issue.
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+
+      // Wait for both providers to be in their runAttempt body simultaneously.
+      const timeoutId = setTimeout(() => {
+        enteredCount.reject(
+          new Error(
+            `expected 2 concurrent runAttempts; observed ${enteredObserved} (active=${active}, maxActive=${maxActive})`
+          )
+        );
+      }, 5_000);
+      await enteredCount.promise.finally(() => clearTimeout(timeoutId));
+
+      expect(maxActive).toBe(2);
+    } finally {
+      gate.resolve();
       await daemon.stop();
     }
   });

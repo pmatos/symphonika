@@ -100,6 +100,7 @@ describe("HTTP app", () => {
       active: [],
       candidateIssues: [],
       dispatching: false,
+      inFlight: 0,
       filteredIssues: [],
       issuePolling: {
         errors: [],

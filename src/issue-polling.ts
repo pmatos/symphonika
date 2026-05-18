@@ -174,6 +174,9 @@ const pollingProjectSchema = z
     name: z.string().trim().min(1),
     disabled: z.boolean().optional(),
     weight: z.number().int().positive().optional(),
+    // Per-project concurrency cap; consumed by the runtime picker only.
+    // Kept in this duplicate schema to preserve parsing parity. See ADR 0053.
+    max_in_flight: z.number().int().positive().optional(),
     tracker: z
       .object({
         kind: z.literal("github"),

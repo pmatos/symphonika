@@ -2,8 +2,10 @@ import type { CancelReason } from "../run-store.js";
 
 import {
   InFlightRunRegistry,
+  type AttachProviderInput,
   type InFlightRunEntry,
-  type RegisterRunInput
+  type RegisterRunInput,
+  type ReserveSlotInput
 } from "./in-flight-runs.js";
 import {
   IssueReservationRegistry,
@@ -16,7 +18,12 @@ import {
 } from "./scheduled-work.js";
 
 export { InFlightRunRegistry } from "./in-flight-runs.js";
-export type { InFlightRunEntry, RegisterRunInput } from "./in-flight-runs.js";
+export type {
+  AttachProviderInput,
+  InFlightRunEntry,
+  RegisterRunInput,
+  ReserveSlotInput
+} from "./in-flight-runs.js";
 export { IssueReservationRegistry } from "./issue-reservations.js";
 export type { IssueReservationKey } from "./issue-reservations.js";
 export { ScheduledWorkRegistry } from "./scheduled-work.js";
@@ -88,6 +95,14 @@ export class ActiveRunRegistry {
     this.inFlightRuns.register(input);
   }
 
+  reserveSlot(input: ReserveSlotInput): void {
+    this.inFlightRuns.reserveSlot(input);
+  }
+
+  attachProvider(runId: string, input: AttachProviderInput): void {
+    this.inFlightRuns.attachProvider(runId, input);
+  }
+
   unregister(runId: string): ActiveRunEntry | undefined {
     return this.inFlightRuns.unregister(runId);
   }
@@ -96,8 +111,20 @@ export class ActiveRunRegistry {
     return this.inFlightRuns.get(runId);
   }
 
+  getInFlight(runId: string): ActiveRunEntry | undefined {
+    return this.inFlightRuns.get(runId);
+  }
+
   list(): ActiveRunEntry[] {
     return this.inFlightRuns.list();
+  }
+
+  countInFlight(): number {
+    return this.inFlightRuns.count();
+  }
+
+  countInFlightByProject(projectName: string): number {
+    return this.inFlightRuns.countByProject(projectName);
   }
 
   isIssueInFlight(projectName: string, issueNumber: number): boolean {

@@ -528,6 +528,11 @@ On stale startup state:
 
 - if GitHub has `sym:claimed` or `sym:running` but there is no live local run, mark `sym:stale`
 - do not auto-clear stale claims in v1
+- sweep run rows in `queued`, `preparing_workspace`, or `running` to terminal `stale` —
+  their scheduler callback and provider stream were lost with the previous daemon
+- sweep run rows in `state = "waiting"` only when `current_state_id IS NULL` (a pre-atomicity
+  crash artifact, see ADR 0047); preserve valid waits so `reconcileWaitingRuns` can pick them
+  up on the next tick
 
 ### 9.4 PR Follow-up Scope
 
@@ -756,8 +761,11 @@ Lifecycle:
 
 1. When an agent state succeeds and the FSM advances into a wait state, Symphonika persists a new
    Run row with `state = "waiting"`, `current_state_id` set to the wait state id, and
-   `continuation_parent_run_id` set to the parent agent run. The parent run records the advance via
-   `state_transition_reason` exactly like any other state advance (per ADR 0046).
+   `continuation_parent_run_id` set to the parent agent run. Both `state` and `current_state_id`
+   are written inside a single SQLite transaction so the row is durable as a complete wait
+   (a crash cannot leave a `state = "waiting"` row with `current_state_id IS NULL`). The parent
+   run records the advance via `state_transition_reason` exactly like any other state advance
+   (per ADR 0046).
 2. On each daemon tick (and on `/poll-now`), the reconciliation phase calls
    `reconcileWaitingRuns`, which iterates the rows in `state = "waiting"`, refreshes the issue,
    looks up the tracked pull request, fetches its follow-up state, projects predicates

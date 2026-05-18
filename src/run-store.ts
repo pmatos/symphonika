@@ -387,17 +387,25 @@ export class RunStore {
     parentRunId: string;
     projectName: string;
   }): void {
-    this.insertRunRow({
-      id: input.id,
-      isContinuation: true,
-      issue: input.issue,
-      parentRunId: input.parentRunId,
-      projectName: input.projectName,
-      providerCommand: null,
-      providerName: null,
-      state: "waiting"
+    // ADR 0047 depends on the waiting row being durable — `listWaitingRuns`
+    // filters out rows whose `current_state_id` is null, so a crash between
+    // these two writes would silently orphan the row forever. Wrap them in a
+    // single SQLite transaction so the row either exists with both fields set
+    // or not at all.
+    const apply = this.database.transaction(() => {
+      this.insertRunRow({
+        id: input.id,
+        isContinuation: true,
+        issue: input.issue,
+        parentRunId: input.parentRunId,
+        projectName: input.projectName,
+        providerCommand: null,
+        providerName: null,
+        state: "waiting"
+      });
+      this.setRunCurrentState(input.id, input.currentStateId);
     });
-    this.setRunCurrentState(input.id, input.currentStateId);
+    apply();
   }
 
   // Includes cancel-requested rows on purpose: a waiting run cancelled via

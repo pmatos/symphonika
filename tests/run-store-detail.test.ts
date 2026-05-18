@@ -300,6 +300,9 @@ describe("RunStore detail queries", () => {
         (artifact) => artifact.kind
       );
       expect(attemptKinds).toEqual([
+        "issue_snapshot",
+        "prompt",
+        "prompt_metadata",
         "workflow_graph",
         "provider_raw",
         "provider_normalized"
@@ -326,6 +329,18 @@ describe("RunStore detail queries", () => {
       const attempt2Graph = path.join(
         evidenceDir,
         "workflow-graph.attempt-2.json"
+      );
+      const attempt1Prompt = path.join(evidenceDir, "prompt.md");
+      const attempt2Prompt = path.join(evidenceDir, "prompt.attempt-2.md");
+      const attempt1Metadata = path.join(evidenceDir, "prompt-metadata.json");
+      const attempt2Metadata = path.join(
+        evidenceDir,
+        "prompt-metadata.attempt-2.json"
+      );
+      const attempt1Snapshot = path.join(evidenceDir, "issue-snapshot.json");
+      const attempt2Snapshot = path.join(
+        evidenceDir,
+        "issue-snapshot.attempt-2.json"
       );
       const attempt1Raw = path.join(evidenceDir, "provider.raw.jsonl");
       const attempt2Raw = path.join(
@@ -360,6 +375,28 @@ describe("RunStore detail queries", () => {
           `${JSON.stringify(attempt2Workflow)}\n`,
           "utf8"
         ),
+        writeFile(attempt1Prompt, "attempt 1 prompt\n", "utf8"),
+        writeFile(attempt2Prompt, "attempt 2 prompt\n", "utf8"),
+        writeFile(
+          attempt1Metadata,
+          `${JSON.stringify({ attempt: 1 })}\n`,
+          "utf8"
+        ),
+        writeFile(
+          attempt2Metadata,
+          `${JSON.stringify({ attempt: 2 })}\n`,
+          "utf8"
+        ),
+        writeFile(
+          attempt1Snapshot,
+          `${JSON.stringify({ number: 42, title: "attempt 1" })}\n`,
+          "utf8"
+        ),
+        writeFile(
+          attempt2Snapshot,
+          `${JSON.stringify({ number: 42, title: "attempt 2" })}\n`,
+          "utf8"
+        ),
         writeFile(attempt1Raw, '{"raw":"a1"}\n', "utf8"),
         writeFile(attempt2Raw, '{"raw":"a2"}\n', "utf8"),
         writeFile(attempt1Normalized, '{"normalized":"a1"}\n', "utf8"),
@@ -377,9 +414,6 @@ describe("RunStore detail queries", () => {
       const baseAttempt = {
         branchName: "sym/symphonika/42-retry",
         branchRef: "refs/heads/sym/symphonika/42-retry",
-        issueSnapshotPath: path.join(evidenceDir, "issue-snapshot.json"),
-        metadataPath: path.join(evidenceDir, "prompt-metadata.json"),
-        promptPath: path.join(evidenceDir, "prompt.md"),
         providerCommand: "codex",
         providerName: "codex" as const,
         runId: "run-retry",
@@ -390,7 +424,10 @@ describe("RunStore detail queries", () => {
         ...baseAttempt,
         attemptNumber: 1,
         id: "run-retry-attempt-1",
+        issueSnapshotPath: attempt1Snapshot,
+        metadataPath: attempt1Metadata,
         normalizedLogPath: attempt1Normalized,
+        promptPath: attempt1Prompt,
         rawLogPath: attempt1Raw,
         workflowGraphPath: attempt1Graph
       });
@@ -398,17 +435,20 @@ describe("RunStore detail queries", () => {
         ...baseAttempt,
         attemptNumber: 2,
         id: "run-retry-attempt-2",
+        issueSnapshotPath: attempt2Snapshot,
+        metadataPath: attempt2Metadata,
         normalizedLogPath: attempt2Normalized,
+        promptPath: attempt2Prompt,
         rawLogPath: attempt2Raw,
         workflowGraphPath: attempt2Graph
       });
       store.updateRunEvidence("run-retry", {
         branchName: baseAttempt.branchName,
         branchRef: baseAttempt.branchRef,
-        issueSnapshotPath: baseAttempt.issueSnapshotPath,
-        metadataPath: baseAttempt.metadataPath,
+        issueSnapshotPath: attempt2Snapshot,
+        metadataPath: attempt2Metadata,
         normalizedLogPath: attempt2Normalized,
-        promptPath: baseAttempt.promptPath,
+        promptPath: attempt2Prompt,
         rawLogPath: attempt2Raw,
         workflowGraphPath: attempt2Graph,
         workspacePath: baseAttempt.workspacePath
@@ -416,6 +456,9 @@ describe("RunStore detail queries", () => {
 
       const descriptors1 = store.listAttemptArtifacts("run-retry-attempt-1");
       expect(descriptors1.map((descriptor) => descriptor.kind)).toEqual([
+        "issue_snapshot",
+        "prompt",
+        "prompt_metadata",
         "workflow_graph",
         "provider_raw",
         "provider_normalized"
@@ -434,6 +477,26 @@ describe("RunStore detail queries", () => {
       expect(stream1).toBeDefined();
       const contents1 = await streamText(stream1);
       expect(JSON.parse(contents1)).toMatchObject({ name: "attempt-1" });
+      const prompt1 = await store.openAttemptArtifactStream(
+        "run-retry-attempt-1",
+        "prompt"
+      );
+      expect(prompt1).toBeDefined();
+      await expect(streamText(prompt1)).resolves.toBe("attempt 1 prompt\n");
+      const metadata1 = await store.openAttemptArtifactStream(
+        "run-retry-attempt-1",
+        "prompt_metadata"
+      );
+      expect(metadata1).toBeDefined();
+      await expect(streamText(metadata1)).resolves.toBe('{"attempt":1}\n');
+      const snapshot1 = await store.openAttemptArtifactStream(
+        "run-retry-attempt-1",
+        "issue_snapshot"
+      );
+      expect(snapshot1).toBeDefined();
+      await expect(streamText(snapshot1)).resolves.toBe(
+        '{"number":42,"title":"attempt 1"}\n'
+      );
 
       const stream2 = await store.openAttemptArtifactStream(
         "run-retry-attempt-2",
@@ -442,12 +505,6 @@ describe("RunStore detail queries", () => {
       const contents2 = await streamText(stream2);
       expect(JSON.parse(contents2)).toMatchObject({ name: "attempt-2" });
 
-      expect(
-        await store.openAttemptArtifactStream(
-          "run-retry-attempt-1",
-          "prompt"
-        )
-      ).toBeUndefined();
       expect(
         await store.openAttemptArtifactStream("missing-attempt", "workflow_graph")
       ).toBeUndefined();

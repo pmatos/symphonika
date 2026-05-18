@@ -339,6 +339,83 @@ describe("workflow prompt rendering", () => {
     });
   });
 
+  it("suffixes all provider-attempt evidence files for retries", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "symphonika",
+      "issues",
+      "7-render-prompts"
+    );
+    const workflowPath = path.join(root, "WORKFLOW.md");
+    await writeFile(workflowPath, "Work on {{issue.title}}.\n");
+    const expanded = await loadExpandedWorkflow(workflowPath);
+    expect(expanded.errors).toEqual([]);
+
+    const input = {
+      branch: {
+        name: "sym/symphonika/7-render-prompts",
+        ref: "refs/heads/sym/symphonika/7-render-prompts"
+      },
+      issue: issueSnapshot(),
+      project: { name: "symphonika" },
+      provider: {
+        command: DEFAULT_CODEX_COMMAND,
+        name: "codex" as const
+      },
+      run: {
+        attempt: 2,
+        continuation: false,
+        id: "run-7"
+      },
+      template: "Work on {{issue.title}}.",
+      workflowContentHash: expanded.workflow.contentHash,
+      workflowPath,
+      workspace: {
+        path: workspacePath,
+        previous_attempt: true,
+        root: path.dirname(path.dirname(workspacePath))
+      }
+    };
+    const rendered = renderAutonomousPrompt(input);
+
+    const evidence = await persistRunEvidence({
+      ...input,
+      attemptNumber: 2,
+      expandedWorkflow: expanded.workflow,
+      renderedPrompt: rendered,
+      stateRoot
+    });
+
+    expect(path.basename(evidence.promptPath)).toBe("prompt.attempt-2.md");
+    expect(path.basename(evidence.metadataPath)).toBe(
+      "prompt-metadata.attempt-2.json"
+    );
+    expect(path.basename(evidence.issueSnapshotPath)).toBe(
+      "issue-snapshot.attempt-2.json"
+    );
+    expect(path.basename(evidence.workflowGraphPath)).toBe(
+      "workflow-graph.attempt-2.json"
+    );
+    await expect(readFile(evidence.promptPath, "utf8")).resolves.toBe(
+      rendered.prompt
+    );
+    const metadata = parseJsonRecord(await readFile(evidence.metadataPath, "utf8"));
+    expect(metadata).toMatchObject({
+      issue_snapshot_path: evidence.issueSnapshotPath,
+      prompt_path: evidence.promptPath,
+      workflow: {
+        graph_path: evidence.workflowGraphPath
+      }
+    });
+    await expect(readFile(evidence.issueSnapshotPath, "utf8")).resolves.toContain(
+      "Render autonomous prompts and persist run evidence"
+    );
+  });
+
   it("loads WORKFLOW.md body without front matter and carries its content hash into the rendered prompt", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "WORKFLOW.md");

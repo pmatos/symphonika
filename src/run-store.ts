@@ -1486,9 +1486,22 @@ export class RunStore {
     issueNumber: number;
     previousState: RunState;
   }[] {
+    // Sweeps three classes of orphaned rows:
+    // - queued / preparing_workspace / running: their in-memory scheduler
+    //   callback and provider stream are gone after a crash; they cannot
+    //   resume.
+    // - waiting with current_state_id IS NULL: pre-atomicity crash artifact
+    //   from createWaitingRun's two-write window (now closed by the
+    //   transaction wrapper); listWaitingRuns filters these out so
+    //   reconcileWaitingRuns can never re-evaluate them. Valid durable waits
+    //   (current_state_id set) are intentionally preserved per ADR 0047.
     const rows = this.database
       .prepare(
-        "select id, project_name, issue_number, state from runs where state in ('queued','preparing_workspace','running')"
+        [
+          "select id, project_name, issue_number, state from runs",
+          "where state in ('queued','preparing_workspace','running')",
+          "or (state = 'waiting' and current_state_id is null)"
+        ].join(" ")
       )
       .all() as {
         id: string;

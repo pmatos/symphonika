@@ -201,14 +201,20 @@ describe("startDaemon orphan sweep logging", () => {
     }
   });
 
-  // ADR 0047 guarantees waiting rows survive daemon restart so the next tick
-  // can re-evaluate them; the startup sweep must leave them alone.
-  it("preserves waiting rows across daemon startup", async () => {
+  // ADR 0047 guarantees valid waiting rows (current_state_id set) survive
+  // daemon restart so the next tick can re-evaluate them; the startup sweep
+  // must leave them alone.
+  it("preserves valid waiting rows across daemon startup", async () => {
     const cwd = await makeTempRoot();
     const stateRoot = path.join(cwd, ".symphonika");
     await mkdir(stateRoot, { recursive: true });
     seedOrphans(stateRoot, [
-      { id: "wait-survivor", issueNumber: 303, state: "waiting" }
+      {
+        id: "wait-survivor",
+        issueNumber: 303,
+        state: "waiting",
+        currentStateId: "pr_review"
+      }
     ]);
 
     const { logger, lines } = createCapturingLogger();
@@ -238,6 +244,66 @@ describe("startDaemon orphan sweep logging", () => {
         expect(survivorStore.getRun("wait-survivor")?.state).toBe("waiting");
       } finally {
         survivorStore.close();
+      }
+    } finally {
+      if (!stopped) {
+        await daemon.stop();
+      }
+    }
+  });
+
+  // A pre-fix crash inside the old non-atomic createWaitingRun could leave a
+  // row at state='waiting' with current_state_id=NULL. listWaitingRuns hides
+  // those rows, so reconcileWaitingRuns can never see them — they need a
+  // surgical sweep on startup.
+  it("sweeps waiting rows with NULL current_state_id (pre-atomicity orphans)", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    seedOrphans(stateRoot, [
+      // valid durable wait — must survive
+      {
+        id: "wait-valid",
+        issueNumber: 401,
+        state: "waiting",
+        currentStateId: "pr_review"
+      },
+      // pre-atomicity crash artifact — must be swept
+      { id: "wait-orphan", issueNumber: 402, state: "waiting" }
+    ]);
+
+    const { logger, lines } = createCapturingLogger();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger,
+      port: 0
+    });
+    let stopped = false;
+    try {
+      const orphanLines = lines.filter(
+        (line) => line.msg === "symphonika startup: marked orphaned run as stale"
+      );
+      expect(orphanLines).toHaveLength(1);
+      expect(orphanLines[0]).toMatchObject({
+        runId: "wait-orphan",
+        previousState: "waiting",
+        issueNumber: 402,
+        terminalReason: "leaked_active_run"
+      });
+
+      await daemon.stop();
+      stopped = true;
+
+      const verifyStore = openRunStore({ stateRoot });
+      try {
+        expect(verifyStore.getRun("wait-valid")?.state).toBe("waiting");
+        expect(verifyStore.getRun("wait-orphan")?.state).toBe("stale");
+        expect(verifyStore.getRun("wait-orphan")?.terminalReason).toBe(
+          "leaked_active_run"
+        );
+      } finally {
+        verifyStore.close();
       }
     } finally {
       if (!stopped) {
@@ -298,6 +364,7 @@ type OrphanSeed = {
   id: string;
   issueNumber: number;
   state: "queued" | "preparing_workspace" | "running" | "waiting";
+  currentStateId?: string;
 };
 
 function seedOrphans(stateRoot: string, seeds: OrphanSeed[]): void {
@@ -324,6 +391,9 @@ function seedOrphans(stateRoot: string, seeds: OrphanSeed[]): void {
       });
       if (seed.state !== "queued") {
         store.updateRunState(seed.id, seed.state);
+      }
+      if (seed.currentStateId !== undefined) {
+        store.setRunCurrentState(seed.id, seed.currentStateId);
       }
     }
   } finally {

@@ -365,8 +365,10 @@ describe("run-store lifecycle CRUD", () => {
       store.updateRunState("running", "running");
       seedRun(store, { id: "preparing", issueNumber: 3 });
       store.updateRunState("preparing", "preparing_workspace");
+      // valid durable wait — has current_state_id set (ADR 0047)
       seedRun(store, { id: "waiting", issueNumber: 6 });
       store.updateRunState("waiting", "waiting");
+      store.setRunCurrentState("waiting", "pr_review");
       seedRun(store, { id: "succeeded", issueNumber: 4 });
       store.updateRunState("succeeded", "succeeded");
       seedRun(store, { id: "failed", issueNumber: 5 });
@@ -394,13 +396,46 @@ describe("run-store lifecycle CRUD", () => {
       });
       expect(runsById.get("running")?.state).toBe("stale");
       expect(runsById.get("preparing")?.state).toBe("stale");
-      // waiting rows are intentionally durable across daemon restarts (ADR 0047);
-      // reconcileWaitingRuns re-evaluates them on the next tick — the startup
-      // sweep must not touch them.
+      // valid waiting rows (current_state_id set) are intentionally durable
+      // across daemon restarts (ADR 0047); reconcileWaitingRuns re-evaluates
+      // them on the next tick — the startup sweep must not touch them.
       expect(runsById.get("waiting")?.state).toBe("waiting");
       expect(runsById.get("succeeded")?.state).toBe("succeeded");
       expect(runsById.get("failed")?.state).toBe("failed");
       expect(store.listActiveRunIds()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("markLeakedRunsAsStale sweeps waiting rows missing current_state_id", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      // valid durable wait (current_state_id set) — must survive
+      seedRun(store, { id: "wait-valid", issueNumber: 10 });
+      store.updateRunState("wait-valid", "waiting");
+      store.setRunCurrentState("wait-valid", "pr_review");
+
+      // pre-atomicity crash artifact (current_state_id NULL) — must be swept
+      seedRun(store, { id: "wait-orphan", issueNumber: 11 });
+      store.updateRunState("wait-orphan", "waiting");
+
+      const swept = store.markLeakedRunsAsStale();
+
+      expect(swept.map((entry) => entry.runId)).toEqual(["wait-orphan"]);
+      expect(swept[0]).toMatchObject({
+        runId: "wait-orphan",
+        previousState: "waiting",
+        issueNumber: 11
+      });
+
+      const runsById = new Map(store.listRuns().map((entry) => [entry.id, entry]));
+      expect(runsById.get("wait-valid")?.state).toBe("waiting");
+      expect(runsById.get("wait-orphan")).toMatchObject({
+        state: "stale",
+        terminalReason: "leaked_active_run"
+      });
     } finally {
       store.close();
     }

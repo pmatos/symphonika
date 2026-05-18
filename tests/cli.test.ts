@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,23 +46,37 @@ describe("CLI", () => {
     const root = await makeTempRoot();
     const prefix = path.join(root, "prefix");
     const binPath = path.join(prefix, "bin", "symphonika");
-    await rm(path.join(repoRoot, "dist"), { force: true, recursive: true });
+    const distPath = path.join(repoRoot, "dist");
+    const distBackup = path.join(repoRoot, "dist.cli-test-backup");
 
-    await execFile("npm", ["link"], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        NPM_CONFIG_PREFIX: prefix
+    await rm(distBackup, { force: true, recursive: true });
+    const hadDist = await rename(distPath, distBackup).then(
+      () => true,
+      () => false
+    );
+
+    try {
+      await execFile("npm", ["link"], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          NPM_CONFIG_PREFIX: prefix
+        }
+      });
+
+      const { stdout } = await execFile(binPath, ["help"], { cwd: repoRoot });
+
+      expect(stdout).toContain("Usage: symphonika");
+      expect(stdout).toContain("Commands:");
+      expect(stdout).toContain("doctor");
+      expect(stdout).toContain("workflow");
+      expect(stdout).toContain("show-run");
+    } finally {
+      await rm(distPath, { force: true, recursive: true });
+      if (hadDist) {
+        await rename(distBackup, distPath);
       }
-    });
-
-    const { stdout } = await execFile(binPath, ["help"], { cwd: repoRoot });
-
-    expect(stdout).toContain("Usage: symphonika");
-    expect(stdout).toContain("Commands:");
-    expect(stdout).toContain("doctor");
-    expect(stdout).toContain("workflow");
-    expect(stdout).toContain("show-run");
+    }
   });
 
   it("prints top-level help when invoked through an npm-style bin symlink", async () => {

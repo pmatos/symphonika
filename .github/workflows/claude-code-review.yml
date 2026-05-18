@@ -37,9 +37,35 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          show_full_output: true
+          claude_args: '--allowedTools "Bash(gh:*),Read,Grep,Glob"'
+          prompt: |
+            Review pull request ${{ github.repository }}#${{ github.event.pull_request.number }} and post a comment back with your findings. You must ALWAYS post exactly one comment, even if you find nothing.
+
+            Steps:
+            1. Read the PR with `gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }}` and `gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }}`.
+            2. Read the root `CLAUDE.md` and any per-directory `CLAUDE.md` files relevant to the changed paths.
+            3. Look for real bugs and CLAUDE.md violations. Skip nitpicks, style, formatting, missing tests, and anything a linter/typechecker/CI would catch.
+            4. Post the comment via `gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body "<markdown>"`.
+
+            Comment format when issues were found:
+
+            ### Code review
+
+            Found N issue(s):
+
+            1. <brief description> — cite the CLAUDE.md text or code reference.
+               <permalink to the file at the PR head sha with a line range>
+
+            🤖 Generated with [Claude Code](https://claude.ai/code)
+
+            Comment format when no issues were found:
+
+            ### Code review
+
+            No issues found.
+
+            🤖 Generated with [Claude Code](https://claude.ai/code)
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 

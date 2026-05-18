@@ -44,7 +44,7 @@ Transitions without `when` are catch-alls. Top-down order matters: first match w
 - `codex` — JSON-RPC app-server, default command in `symphonika.yml` `providers.codex`.
 - `claude` — `stream-json` CLI, default command in `providers.claude`.
 
-Per-state `action.provider` is declared in the FSM, but **may currently be ignored at runtime** — `executeStateAdvance` uses `project.agent.provider` in some configurations (see the inline comment in this repo's `workflow.yml`). If the user depends on per-state routing working today, verify with `symphonika doctor` and the latest code; if it is still gapped, treat per-state provider routing as **partially supported** and flag this to the user.
+Per-state `action.provider` is fully honored at runtime. `RunController` selects the action's provider on both the initial raw-FSM state (`src/lifecycle/run-controller.ts:325-354`) and every subsequent state advance (`:1090-1094`), falling back to `project.agent.provider` only when the agent action declares no provider. The "known gap" inline comment in this repo's own `workflow.yml` is stale and does not reflect current behavior — design workflows that route Codex and Claude per state freely.
 
 ## Templating
 
@@ -73,6 +73,7 @@ The autonomy preamble (SPEC §5.3) is prepended automatically; do not duplicate 
 
 - Single-state markdown workflow
 - Multi-state FSM with `agent` / `wait` / `merge_pr` actions
+- Per-state `action.provider` routing (mix Codex and Claude across states in the same FSM)
 - Strict-equality predicates from the list above
 - Mustache substitution of the documented top-level objects
 - Continuations on success when issue still eligible (default cap 3)
@@ -98,7 +99,6 @@ The autonomy preamble (SPEC §5.3) is prepended automatically; do not duplicate 
 
 ### Partially supported (verify before relying on)
 
-- Per-state `action.provider` routing — schema-validated but may not route at runtime; check current code
 - `unresolved_review_threads` exact-count matching (works) vs. ranged comparisons (not supported)
 
 ## Run lifecycle reminders for prompt design

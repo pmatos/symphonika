@@ -329,8 +329,8 @@ describe("pull request follow-up", () => {
 
       // Use a controller whose schedule handler actually goes through
       // ActiveRunRegistry.scheduleDelayed so the scheduled state_advance is
-      // visible to isIssueScheduled. Keep the timeouts long enough that the
-      // fire() never runs during the test.
+      // visible to the issue-reservation facade. Keep the timeouts long enough
+      // that the fire() never runs during the test.
       const activeRuns = new ActiveRunRegistry();
       let nextRun = 0;
       const controller = new RunController({

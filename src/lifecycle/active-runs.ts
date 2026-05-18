@@ -1,5 +1,30 @@
-import type { AgentProvider } from "../provider.js";
 import type { CancelReason } from "../run-store.js";
+
+import {
+  InFlightRunRegistry,
+  type InFlightRunEntry,
+  type RegisterRunInput
+} from "./in-flight-runs.js";
+import {
+  IssueReservationRegistry,
+  type IssueReservationKey
+} from "./issue-reservations.js";
+import {
+  ScheduledWorkRegistry,
+  type ScheduledWorkInput,
+  type ScheduledWorkSnapshot
+} from "./scheduled-work.js";
+
+export { InFlightRunRegistry } from "./in-flight-runs.js";
+export type { InFlightRunEntry, RegisterRunInput } from "./in-flight-runs.js";
+export { IssueReservationRegistry } from "./issue-reservations.js";
+export type { IssueReservationKey } from "./issue-reservations.js";
+export { ScheduledWorkRegistry } from "./scheduled-work.js";
+export type {
+  ScheduledWorkInput,
+  ScheduledWorkKind,
+  ScheduledWorkSnapshot
+} from "./scheduled-work.js";
 
 export const CANCEL_REASONS = {
   CLOSED_ISSUE: "closed_issue",
@@ -42,166 +67,72 @@ export function computeRetryDelayMs(
   return Math.min(slot, policy.retry.maxBackoffMs);
 }
 
-export type ActiveRunEntry = {
-  cancel: () => Promise<void>;
-  cancelReason?: CancelReason;
-  cancelRequested: boolean;
-  issueNumber: number;
-  projectName: string;
-  provider?: AgentProvider;
-  // When false, this run is part of an FSM walk where the state machine — not
-  // the issue label set — decides whether to keep running. Reconcile uses this
-  // to skip the labels_all / labels_none re-check while still honoring
-  // CLOSED_ISSUE. See ADR 0046.
-  respectsIssueLabels: boolean;
-  runId: string;
-};
-
-export type RegisterInput = {
-  cancel: () => Promise<void>;
-  issueNumber: number;
-  projectName: string;
-  provider?: AgentProvider;
-  respectsIssueLabels?: boolean;
-  runId: string;
-};
-
-export type ScheduledWorkKind =
-  | "retry"
-  | "continuation"
-  | "state_advance"
-  | "wait_park";
-
-export type ScheduledWorkInput = {
-  delayMs: number;
-  fire: () => Promise<void>;
-  issueNumber: number;
-  kind: ScheduledWorkKind;
-  projectName: string;
-  runId: string;
-};
-
-type ScheduledItem = {
-  dueAt: number;
-  issueNumber: number;
-  kind: ScheduledWorkKind;
-  projectName: string;
-  runId: string;
-  timeout: ReturnType<typeof setTimeout>;
-};
+export type ActiveRunEntry = InFlightRunEntry;
+export type RegisterInput = RegisterRunInput;
 
 export class ActiveRunRegistry {
-  private readonly entries = new Map<string, ActiveRunEntry>();
-  private readonly issueLocks = new Set<string>();
-  private readonly scheduled = new Set<ScheduledItem>();
+  private readonly inFlightRuns: InFlightRunRegistry;
+  private readonly issueReservations: IssueReservationRegistry;
+  private readonly scheduledWork: ScheduledWorkRegistry;
+
+  constructor() {
+    this.inFlightRuns = new InFlightRunRegistry();
+    this.scheduledWork = new ScheduledWorkRegistry();
+    this.issueReservations = new IssueReservationRegistry({
+      inFlightRuns: this.inFlightRuns,
+      scheduledWork: this.scheduledWork
+    });
+  }
 
   register(input: RegisterInput): void {
-    const entry: ActiveRunEntry = {
-      cancel: input.cancel,
-      cancelRequested: false,
-      issueNumber: input.issueNumber,
-      projectName: input.projectName,
-      respectsIssueLabels: input.respectsIssueLabels ?? true,
-      runId: input.runId
-    };
-    if (input.provider !== undefined) {
-      entry.provider = input.provider;
-    }
-    this.entries.set(input.runId, entry);
-    this.issueLocks.add(issueLockKey(input.projectName, input.issueNumber));
+    this.inFlightRuns.register(input);
   }
 
   unregister(runId: string): ActiveRunEntry | undefined {
-    const entry = this.entries.get(runId);
-    if (entry === undefined) {
-      return undefined;
-    }
-    this.entries.delete(runId);
-    this.issueLocks.delete(issueLockKey(entry.projectName, entry.issueNumber));
-    return entry;
+    return this.inFlightRuns.unregister(runId);
   }
 
   get(runId: string): ActiveRunEntry | undefined {
-    return this.entries.get(runId);
+    return this.inFlightRuns.get(runId);
   }
 
   list(): ActiveRunEntry[] {
-    return Array.from(this.entries.values());
+    return this.inFlightRuns.list();
   }
 
   isIssueInFlight(projectName: string, issueNumber: number): boolean {
-    return this.issueLocks.has(issueLockKey(projectName, issueNumber));
+    return this.inFlightRuns.isIssueInFlight(projectName, issueNumber);
   }
 
-  // Companion to `isIssueInFlight`: returns true when there is scheduled work
-  // (a delayed retry / continuation / state_advance / wait_park) pending for
-  // the issue. Dispatchers that gate on liveness should check both — a
-  // scheduled state_advance is not yet "in flight" but the issue is reserved
-  // for it. Mirrors the liveness precedent in stale-claims `collectLiveKeys`.
   isIssueScheduled(projectName: string, issueNumber: number): boolean {
-    for (const item of this.scheduled) {
-      if (
-        item.projectName === projectName &&
-        item.issueNumber === issueNumber
-      ) {
-        return true;
-      }
-    }
-    return false;
+    return this.scheduledWork.isIssueScheduled(projectName, issueNumber);
+  }
+
+  isIssueReserved(projectName: string, issueNumber: number): boolean {
+    return this.issueReservations.isIssueReserved(projectName, issueNumber);
+  }
+
+  issueKeys(): IssueReservationKey[] {
+    return this.issueReservations.issueKeys();
   }
 
   async requestCancel(runId: string, reason: CancelReason): Promise<void> {
-    const entry = this.entries.get(runId);
-    if (entry === undefined || entry.cancelRequested) {
-      return;
-    }
-    entry.cancelRequested = true;
-    entry.cancelReason = reason;
-    await entry.cancel();
+    await this.inFlightRuns.requestCancel(runId, reason);
   }
 
   scheduleDelayed(input: ScheduledWorkInput): void {
-    const dueAt = Date.now() + input.delayMs;
-    const item: ScheduledItem = {
-      dueAt,
-      issueNumber: input.issueNumber,
-      kind: input.kind,
-      projectName: input.projectName,
-      runId: input.runId,
-      timeout: setTimeout(() => {
-        this.scheduled.delete(item);
-        input.fire().catch(() => {
-          /* caller is responsible for surfacing scheduled-work failures */
-        });
-      }, input.delayMs)
-    };
-    item.timeout.unref?.();
-    this.scheduled.add(item);
+    this.scheduledWork.scheduleDelayed(input);
   }
 
-  peekDelayed(): { runId: string; kind: ScheduledWorkKind; dueAt: number }[] {
-    return Array.from(this.scheduled, (item) => ({
-      dueAt: item.dueAt,
-      kind: item.kind,
-      runId: item.runId
-    }));
+  peekDelayed(): ScheduledWorkSnapshot[] {
+    return this.scheduledWork.peekDelayed();
   }
 
   scheduledIssueKeys(): { issueNumber: number; projectName: string }[] {
-    return Array.from(this.scheduled, (item) => ({
-      issueNumber: item.issueNumber,
-      projectName: item.projectName
-    }));
+    return this.scheduledWork.issueKeys();
   }
 
   cancelAll(): void {
-    for (const item of this.scheduled) {
-      clearTimeout(item.timeout);
-    }
-    this.scheduled.clear();
+    this.scheduledWork.cancelAll();
   }
-}
-
-function issueLockKey(projectName: string, issueNumber: number): string {
-  return `${projectName}#${issueNumber}`;
 }

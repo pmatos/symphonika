@@ -1369,22 +1369,10 @@ export class RunController {
       };
     }
 
-    if (this.activeRuns.isIssueInFlight(input.projectName, input.issueNumber)) {
+    if (this.activeRuns.isIssueReserved(input.projectName, input.issueNumber)) {
       return {
         dispatched: false,
-        reason: "issue already has an active run"
-      };
-    }
-
-    // Don't race a scheduled state_advance: a wait→agent transition may have
-    // just enqueued an autofix state for this issue in the same tick. The
-    // scheduled item is not yet in `activeRuns.entries`, so `isIssueInFlight`
-    // misses it. Consult `isIssueScheduled` to avoid dispatching a duplicate
-    // review-followup run on the same issue/branch.
-    if (this.activeRuns.isIssueScheduled(input.projectName, input.issueNumber)) {
-      return {
-        dispatched: false,
-        reason: "issue has scheduled work pending"
+        reason: "issue already has an active or scheduled run"
       };
     }
 
@@ -1496,7 +1484,7 @@ export class RunController {
         .sort(compareCandidateIssues)
         .find(
           (entry) =>
-            !this.activeRuns.isIssueInFlight(entry.project, entry.issue.number)
+            !this.activeRuns.isIssueReserved(entry.project, entry.issue.number)
         );
       if (candidate === undefined) {
         continue;

@@ -1480,7 +1480,7 @@ export class RunStore {
   }[] {
     const rows = this.database
       .prepare(
-        "select id, project_name, issue_number, state from runs where state in ('queued','preparing_workspace','running','waiting')"
+        "select id, project_name, issue_number, state from runs where state in ('queued','preparing_workspace','running')"
       )
       .all() as {
         id: string;

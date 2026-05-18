@@ -377,15 +377,13 @@ describe("run-store lifecycle CRUD", () => {
       expect(swept.map((entry) => entry.runId).sort()).toEqual([
         "preparing",
         "queued",
-        "running",
-        "waiting"
+        "running"
       ]);
       expect(swept).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ runId: "queued", projectName: "symphonika", issueNumber: 1 }),
           expect.objectContaining({ runId: "running", projectName: "symphonika", issueNumber: 2 }),
-          expect.objectContaining({ runId: "preparing", projectName: "symphonika", issueNumber: 3 }),
-          expect.objectContaining({ runId: "waiting", projectName: "symphonika", issueNumber: 6 })
+          expect.objectContaining({ runId: "preparing", projectName: "symphonika", issueNumber: 3 })
         ])
       );
 
@@ -396,7 +394,10 @@ describe("run-store lifecycle CRUD", () => {
       });
       expect(runsById.get("running")?.state).toBe("stale");
       expect(runsById.get("preparing")?.state).toBe("stale");
-      expect(runsById.get("waiting")?.state).toBe("stale");
+      // waiting rows are intentionally durable across daemon restarts (ADR 0047);
+      // reconcileWaitingRuns re-evaluates them on the next tick — the startup
+      // sweep must not touch them.
+      expect(runsById.get("waiting")?.state).toBe("waiting");
       expect(runsById.get("succeeded")?.state).toBe("succeeded");
       expect(runsById.get("failed")?.state).toBe("failed");
       expect(store.listActiveRunIds()).toEqual([]);
@@ -424,8 +425,6 @@ describe("run-store lifecycle CRUD", () => {
       store.updateRunState("running", "running");
       seedRun(store, { id: "preparing", issueNumber: 3 });
       store.updateRunState("preparing", "preparing_workspace");
-      seedRun(store, { id: "waiting", issueNumber: 4 });
-      store.updateRunState("waiting", "waiting");
 
       const swept = store.markLeakedRunsAsStale();
       const previousByRunId = new Map(
@@ -435,7 +434,6 @@ describe("run-store lifecycle CRUD", () => {
       expect(previousByRunId.get("queued")).toBe("queued");
       expect(previousByRunId.get("running")).toBe("running");
       expect(previousByRunId.get("preparing")).toBe("preparing_workspace");
-      expect(previousByRunId.get("waiting")).toBe("waiting");
     } finally {
       store.close();
     }

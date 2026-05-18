@@ -132,7 +132,7 @@ describe("startDaemon orphan sweep logging", () => {
     await mkdir(stateRoot, { recursive: true });
     seedOrphans(stateRoot, [
       { id: "leaked-running", issueNumber: 101, state: "running" },
-      { id: "leaked-waiting", issueNumber: 202, state: "waiting" }
+      { id: "leaked-preparing", issueNumber: 202, state: "preparing_workspace" }
     ]);
 
     const { logger, lines } = createCapturingLogger();
@@ -151,7 +151,7 @@ describe("startDaemon orphan sweep logging", () => {
       const [summary] = summaries;
       expect(summary?.level).toBe(pino.levels.values.info);
       expect(summary?.count).toBe(2);
-      expect(summary?.byState).toEqual({ running: 1, waiting: 1 });
+      expect(summary?.byState).toEqual({ preparing_workspace: 1, running: 1 });
     } finally {
       await daemon.stop();
     }
@@ -163,7 +163,7 @@ describe("startDaemon orphan sweep logging", () => {
     await mkdir(stateRoot, { recursive: true });
     seedOrphans(stateRoot, [
       { id: "leaked-running", issueNumber: 101, state: "running" },
-      { id: "leaked-waiting", issueNumber: 202, state: "waiting" }
+      { id: "leaked-preparing", issueNumber: 202, state: "preparing_workspace" }
     ]);
 
     const { logger, lines } = createCapturingLogger();
@@ -192,12 +192,57 @@ describe("startDaemon orphan sweep logging", () => {
         previousState: "running",
         issueNumber: 101
       });
-      expect(byRunId.get("leaked-waiting")).toMatchObject({
-        previousState: "waiting",
+      expect(byRunId.get("leaked-preparing")).toMatchObject({
+        previousState: "preparing_workspace",
         issueNumber: 202
       });
     } finally {
       await daemon.stop();
+    }
+  });
+
+  // ADR 0047 guarantees waiting rows survive daemon restart so the next tick
+  // can re-evaluate them; the startup sweep must leave them alone.
+  it("preserves waiting rows across daemon startup", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    seedOrphans(stateRoot, [
+      { id: "wait-survivor", issueNumber: 303, state: "waiting" }
+    ]);
+
+    const { logger, lines } = createCapturingLogger();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger,
+      port: 0
+    });
+    let stopped = false;
+    try {
+      const orphanLines = lines.filter(
+        (line) => line.msg === "symphonika startup: marked orphaned run as stale"
+      );
+      expect(orphanLines).toHaveLength(0);
+
+      const cleanLines = lines.filter(
+        (line) => line.msg === "symphonika startup: no orphaned runs found"
+      );
+      expect(cleanLines).toHaveLength(1);
+
+      await daemon.stop();
+      stopped = true;
+
+      const survivorStore = openRunStore({ stateRoot });
+      try {
+        expect(survivorStore.getRun("wait-survivor")?.state).toBe("waiting");
+      } finally {
+        survivorStore.close();
+      }
+    } finally {
+      if (!stopped) {
+        await daemon.stop();
+      }
     }
   });
 });

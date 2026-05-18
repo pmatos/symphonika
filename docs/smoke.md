@@ -56,9 +56,9 @@ Exit codes:
 
 ```sh
 export GITHUB_TOKEN=<your-personal-token>
-npx symphonika doctor
-npx symphonika init-project --yes   # one-time, creates sym:* labels
-npm run smoke                       # equivalent to: symphonika smoke
+npx symphonika doctor --config symphonika.example.yml
+npx symphonika init-project --config symphonika.example.yml --yes   # one-time, creates sym:* labels
+npm run smoke -- --config symphonika.example.yml                    # equivalent to: symphonika smoke --config …
 ```
 
 The first invocation will create `.symphonika/` under the directory containing

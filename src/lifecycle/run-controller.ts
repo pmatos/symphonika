@@ -251,12 +251,19 @@ type WaitParkPayload = {
   waitingRunId: string;
 };
 
-// Thrown by claimAndPersistRun's in-mutex cap re-check when a concurrent
-// dispatch already filled the last available slot. runFreshLifecycle catches
-// this and returns silently — the caller treats it as "no dispatch this
-// tick" rather than a real failure. See ADR 0053.
-class CapBreachedError extends Error {
+// Thrown by claimAndPersistRun's in-mutex re-check when a concurrent
+// dispatch already filled the last available slot, or when the same
+// (project, issue) was reserved by a concurrent tick that beat us into
+// claimAndPersistRun. Callers handle these as "skip this fire": fresh
+// dispatch silently no-ops (next tick will pick again); scheduled paths
+// (continuation / state advance / retry / review followup) reschedule the
+// callback. See ADR 0053.
+export class CapBreachedError extends Error {
   readonly name = "CapBreachedError";
+}
+
+export class IssueReservedError extends Error {
+  readonly name = "IssueReservedError";
 }
 
 export class RunController {
@@ -411,19 +418,37 @@ export class RunController {
       return { dispatched: true, runId };
     }
 
-    await this.runFreshLifecycle({
-      attemptNumber: 1,
-      isContinuation: false,
-      issue: target.candidate.issue,
-      parentRunId: null,
-      project: target.project,
-      provider,
-      providerCommand,
-      providerName,
-      repository,
-      runId,
-      schedulerWeights: target.schedulerWeights
-    });
+    try {
+      await this.runFreshLifecycle({
+        attemptNumber: 1,
+        isContinuation: false,
+        issue: target.candidate.issue,
+        parentRunId: null,
+        project: target.project,
+        provider,
+        providerCommand,
+        providerName,
+        repository,
+        runId,
+        schedulerWeights: target.schedulerWeights
+      });
+    } catch (error) {
+      if (
+        error instanceof CapBreachedError ||
+        error instanceof IssueReservedError
+      ) {
+        // A concurrent dispatch took the slot between
+        // pickTargetFromCandidates (lock-free) and claimAndPersistRun's
+        // in-mutex re-check. Next tick will pick this candidate again once
+        // the cap clears. See ADR 0053.
+        this.logger?.debug(
+          { reason: error.message, runId },
+          "symphonika fresh dispatch skipped: contended at claim"
+        );
+        return { dispatched: false, reason: error.message };
+      }
+      throw error;
+    }
 
     return { dispatched: true, runId };
   }
@@ -583,34 +608,88 @@ export class RunController {
     // Re-assert sym:claimed and reserve the in-flight slot under the mutex so
     // a concurrent fresh dispatch on the same daemon tick cannot beat this
     // retry to the (project, issue) key. The previous attempt unregistered
-    // in its finally, so the slot is currently free. See ADR 0052.
+    // in its finally, so the slot is currently free — but a fresh dispatch
+    // on a DIFFERENT issue in this project (or globally) could have filled
+    // the cap during the retry's backoff window. Re-check caps and
+    // reservation inside the mutex; on contention, reschedule the retry
+    // instead of breaching the cap. See ADR 0053.
+    let contention: CapBreachedError | IssueReservedError | undefined;
     await this.dispatchMutex.acquire();
     try {
-      await this.bestEffort(
-        () =>
-          this.githubIssuesApi.addLabelsToIssue!({
-            ...repository,
-            issueNumber: refreshed.number,
-            labels: ["sym:claimed"]
-          }),
-        {
-          issueNumber: refreshed.number,
-          label: "sym:claimed",
-          operation: "addLabel",
-          project: project.name,
-          runId: payload.runId
+      const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
+      if (
+        globalMax !== undefined &&
+        this.activeRuns.countInFlight() >= globalMax
+      ) {
+        contention = new CapBreachedError(
+          `global max_in_flight (${globalMax}) reached`
+        );
+      } else {
+        const projectMax = project.max_in_flight ?? 1;
+        if (
+          this.activeRuns.countInFlightByProject(project.name) >= projectMax
+        ) {
+          contention = new CapBreachedError(
+            `project ${project.name} max_in_flight (${projectMax}) reached`
+          );
+        } else if (
+          this.activeRuns.isIssueReserved(project.name, refreshed.number)
+        ) {
+          contention = new IssueReservedError(
+            `issue ${project.name}#${refreshed.number} is already reserved`
+          );
         }
-      );
-      this.activeRuns.reserveSlot({
-        issueNumber: refreshed.number,
-        projectName: project.name,
-        ...(payload.respectsIssueLabels === undefined
-          ? {}
-          : { respectsIssueLabels: payload.respectsIssueLabels }),
-        runId: payload.runId
-      });
+      }
+      if (contention === undefined) {
+        await this.bestEffort(
+          () =>
+            this.githubIssuesApi.addLabelsToIssue!({
+              ...repository,
+              issueNumber: refreshed.number,
+              labels: ["sym:claimed"]
+            }),
+          {
+            issueNumber: refreshed.number,
+            label: "sym:claimed",
+            operation: "addLabel",
+            project: project.name,
+            runId: payload.runId
+          }
+        );
+        this.activeRuns.reserveSlot({
+          issueNumber: refreshed.number,
+          projectName: project.name,
+          ...(payload.respectsIssueLabels === undefined
+            ? {}
+            : { respectsIssueLabels: payload.respectsIssueLabels }),
+          runId: payload.runId
+        });
+      }
     } finally {
       this.dispatchMutex.release();
+    }
+
+    if (contention !== undefined) {
+      // Reschedule the retry with the configured continuation delay; the
+      // next fire will re-check caps and proceed when contention clears.
+      this.logger?.warn(
+        {
+          issueNumber: refreshed.number,
+          project: project.name,
+          reason: contention.message,
+          runId: payload.runId
+        },
+        "symphonika retry rescheduled: contention at claim"
+      );
+      this.schedule({
+        delayMs: this.lifecyclePolicy.continuation.delayMs,
+        fire: () => this.executeRetry(payload),
+        issueNumber: refreshed.number,
+        kind: "retry",
+        projectName: project.name,
+        runId: payload.runId
+      });
+      return;
     }
 
     await this.runAttemptLifecycle({
@@ -1180,27 +1259,54 @@ export class RunController {
       return;
     }
 
-    await this.runFreshLifecycle({
-      attemptNumber: 1,
-      isContinuation: true,
-      issue: refreshed,
-      parentRunId: payload.parentRunId,
-      project: {
-        ...project,
-        workflow: {
-          body: loadedWorkflow.body,
-          contentHash: loadedWorkflow.contentHash,
-          expandedWorkflow: loadedWorkflow.expandedWorkflow,
-          format: loadedWorkflow.format,
-          path: loadedWorkflow.path
-        }
-      },
-      provider,
-      providerCommand,
-      providerName,
-      repository,
-      runId
-    });
+    try {
+      await this.runFreshLifecycle({
+        attemptNumber: 1,
+        isContinuation: true,
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        project: {
+          ...project,
+          workflow: {
+            body: loadedWorkflow.body,
+            contentHash: loadedWorkflow.contentHash,
+            expandedWorkflow: loadedWorkflow.expandedWorkflow,
+            format: loadedWorkflow.format,
+            path: loadedWorkflow.path
+          }
+        },
+        provider,
+        providerCommand,
+        providerName,
+        repository,
+        runId
+      });
+    } catch (error) {
+      if (
+        error instanceof CapBreachedError ||
+        error instanceof IssueReservedError
+      ) {
+        this.logger?.warn(
+          {
+            issueNumber: refreshed.number,
+            project: project.name,
+            reason: error.message,
+            runId
+          },
+          "symphonika state_advance rescheduled: contention at claim"
+        );
+        this.schedule({
+          delayMs: this.lifecyclePolicy.continuation.delayMs,
+          fire: () => this.executeStateAdvance(payload),
+          issueNumber: refreshed.number,
+          kind: "state_advance",
+          projectName: project.name,
+          runId
+        });
+        return;
+      }
+      throw error;
+    }
   }
 
   private async failStateAdvanceBeforeProvider(input: {
@@ -1394,18 +1500,45 @@ export class RunController {
     }
 
     const runId = this.createRunId();
-    await this.runFreshLifecycle({
-      attemptNumber: 1,
-      isContinuation: true,
-      issue: refreshed,
-      parentRunId: payload.parentRunId,
-      project,
-      provider,
-      providerCommand,
-      providerName: project.agent.provider,
-      repository,
-      runId
-    });
+    try {
+      await this.runFreshLifecycle({
+        attemptNumber: 1,
+        isContinuation: true,
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        project,
+        provider,
+        providerCommand,
+        providerName: project.agent.provider,
+        repository,
+        runId
+      });
+    } catch (error) {
+      if (
+        error instanceof CapBreachedError ||
+        error instanceof IssueReservedError
+      ) {
+        this.logger?.warn(
+          {
+            issueNumber: refreshed.number,
+            project: project.name,
+            reason: error.message,
+            runId
+          },
+          "symphonika continuation rescheduled: contention at claim"
+        );
+        this.schedule({
+          delayMs: this.lifecyclePolicy.continuation.delayMs,
+          fire: () => this.executeContinuation(payload),
+          issueNumber: refreshed.number,
+          kind: "continuation",
+          projectName: project.name,
+          runId
+        });
+        return;
+      }
+      throw error;
+    }
   }
 
   async dispatchReviewFollowup(input: {
@@ -1480,19 +1613,31 @@ export class RunController {
     }
 
     const runId = this.createRunId();
-    await this.runFreshLifecycle({
-      attemptNumber: 1,
-      extraInstructions: renderReviewFollowupInstructions(input.review),
-      isContinuation: true,
-      issue: refreshed,
-      parentRunId: input.parentRunId,
-      project,
-      provider,
-      providerCommand,
-      providerName: project.agent.provider,
-      repository,
-      runId
-    });
+    try {
+      await this.runFreshLifecycle({
+        attemptNumber: 1,
+        extraInstructions: renderReviewFollowupInstructions(input.review),
+        isContinuation: true,
+        issue: refreshed,
+        parentRunId: input.parentRunId,
+        project,
+        provider,
+        providerCommand,
+        providerName: project.agent.provider,
+        repository,
+        runId
+      });
+    } catch (error) {
+      if (
+        error instanceof CapBreachedError ||
+        error instanceof IssueReservedError
+      ) {
+        // The PR follow-up loop retries on the next tick. No explicit
+        // reschedule needed here. See ADR 0053.
+        return { dispatched: false, reason: error.message };
+      }
+      throw error;
+    }
 
     return { dispatched: true, runId };
   }
@@ -1622,23 +1767,13 @@ export class RunController {
   }): Promise<void> {
     // Narrowed critical section: claim label + scheduler cursor + createRun
     // + reserveSlot all happen while the mutex is held. Provider event
-    // streaming runs AFTER mutex release. See ADR 0052.
+    // streaming runs AFTER mutex release. CapBreachedError and
+    // IssueReservedError propagate to the caller, which decides whether to
+    // silently no-op (fresh dispatch) or reschedule (continuation / state
+    // advance / PR followup). See ADR 0052 / ADR 0053.
     await this.dispatchMutex.acquire();
     try {
       await this.claimAndPersistRun(input);
-    } catch (error) {
-      if (error instanceof CapBreachedError) {
-        // A concurrent dispatch filled the last cap slot between
-        // pickTargetFromCandidates (which ran lock-free) and this in-mutex
-        // re-check. Treat as "skipped this tick"; the next tick will pick
-        // up the work once the cap clears.
-        this.logger?.debug(
-          { reason: error.message, runId: input.runId },
-          "symphonika dispatch skipped: cap breached at claim"
-        );
-        return;
-      }
-      throw error;
     } finally {
       this.dispatchMutex.release();
     }
@@ -1677,28 +1812,41 @@ export class RunController {
     // Re-check concurrency caps inside the mutex. pickTargetFromCandidates
     // ran without the lock, so two concurrent ticks could both observe a
     // below-cap count before either reserves a slot — without this guard,
-    // both would proceed and the cap would be breached. Continuations of an
-    // already-in-flight issue are exempt: their parent run releases its slot
-    // in runAttemptLifecycle's finally before the scheduled continuation
-    // fires, so the count is below cap by construction. See ADR 0053.
-    if (!input.isContinuation) {
-      const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
-      if (
-        globalMax !== undefined &&
-        this.activeRuns.countInFlight() >= globalMax
-      ) {
-        throw new CapBreachedError(
-          `global max_in_flight (${globalMax}) reached`
-        );
-      }
-      const projectMax = input.project.max_in_flight ?? 1;
-      if (
-        this.activeRuns.countInFlightByProject(input.project.name) >= projectMax
-      ) {
-        throw new CapBreachedError(
-          `project ${input.project.name} max_in_flight (${projectMax}) reached`
-        );
-      }
+    // both would proceed and the cap would be breached. Continuations are
+    // NOT exempt: a continuation fires after the parent's `finally` released
+    // its slot, but during that gap a fresh dispatch on another issue may
+    // have filled the cap. Scheduled callers catch CapBreachedError and
+    // reschedule. See ADR 0053.
+    const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
+    if (
+      globalMax !== undefined &&
+      this.activeRuns.countInFlight() >= globalMax
+    ) {
+      throw new CapBreachedError(
+        `global max_in_flight (${globalMax}) reached`
+      );
+    }
+    const projectMax = input.project.max_in_flight ?? 1;
+    if (
+      this.activeRuns.countInFlightByProject(input.project.name) >= projectMax
+    ) {
+      throw new CapBreachedError(
+        `project ${input.project.name} max_in_flight (${projectMax}) reached`
+      );
+    }
+
+    // Re-check per-(project, issue) reservation inside the mutex. With
+    // max_in_flight > 1, two re-entrant ticks can both observe a candidate
+    // as unreserved in pickTargetFromCandidates (because neither has called
+    // reserveSlot yet). Without this guard the second one would write a
+    // duplicate sym:claimed label + create a duplicate run row before
+    // reserveSlot throws on the (project, issue) lock. See ADR 0052.
+    if (
+      this.activeRuns.isIssueReserved(input.project.name, input.issue.number)
+    ) {
+      throw new IssueReservedError(
+        `issue ${input.project.name}#${input.issue.number} is already reserved`
+      );
     }
 
     let claimed = false;

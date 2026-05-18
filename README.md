@@ -32,14 +32,16 @@ npm run build
 There is no `npm run daemon` script. The `daemon` is a subcommand of the `symphonika` CLI, so run it one of these ways from a clone of this repo:
 
 ```sh
-npm run dev -- daemon            # runs src/cli.ts via tsx (recommended for development)
-npm run build && node dist/cli.js daemon
-npm link && symphonika daemon    # link the bin once, then run from anywhere
+npm run dev -- daemon --config symphonika.example.yml            # runs src/cli.ts via tsx (recommended for development)
+npm run build && node dist/cli.js daemon --config symphonika.example.yml
+npm link && symphonika daemon --config symphonika.example.yml    # link the bin once, then run from anywhere
 ```
 
 `npx symphonika daemon` does **not** work from inside this repo: a package's `bin` is only linked into a *consuming* project's `node_modules/.bin`, not its own, so npx silently finds nothing and exits.
 
-Set `PINO_LOG_LEVEL=debug` (or the alias `LOG_LEVEL=debug`) to raise daemon log verbosity for per-tick visibility, e.g. `PINO_LOG_LEVEL=debug npm run dev -- daemon`. Accepted values match pino's level set: `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent`.
+Pass the same `--config symphonika.example.yml` to the `poll-now` and `status` commands below so they target the same state root as the daemon started with. Without it, each command falls back to its own default state-root resolution and the auxiliary commands will not find the running daemon.
+
+Set `PINO_LOG_LEVEL=debug` (or the alias `LOG_LEVEL=debug`) to raise daemon log verbosity for per-tick visibility, e.g. `PINO_LOG_LEVEL=debug npm run dev -- daemon --config symphonika.example.yml`. Accepted values match pino's level set: `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent`.
 
 While the daemon is running, force a debugging poll without waiting for the configured interval:
 

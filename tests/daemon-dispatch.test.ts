@@ -1477,6 +1477,210 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("recomputes the target state provider when a delayed state advance fires", async () => {
+    const root = await makeTempRoot();
+    await writePerStateProviderRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexInputs: ProviderRunInput[] = [];
+    const claudeInputs: ProviderRunInput[] = [];
+    const codexProvider = successfulProvider("codex", codexInputs);
+    const claudeProvider = successfulProvider("claude", claudeInputs);
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { claude: claudeProvider, codex: codexProvider },
+      createRunId: () => `run-fsm-reloaded-provider-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 250 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForStoredRunState(root, "succeeded");
+      await writeProviderRoutingWorkflow(root, "codex");
+      await waitForTerminalState(root, "done");
+
+      expect(codexInputs).toHaveLength(2);
+      expect(claudeInputs).toHaveLength(0);
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const rows = database
+          .prepare("select id, provider_name from runs order by created_at")
+          .all() as Array<Record<string, unknown>>;
+        expect(rows).toMatchObject([
+          { id: "run-fsm-reloaded-provider-1", provider_name: "codex" },
+          { id: "run-fsm-reloaded-provider-2", provider_name: "codex" }
+        ]);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("records a reloaded terminal target without launching the next provider", async () => {
+    const root = await makeTempRoot();
+    await writePerStateProviderRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 9,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexInputs: ProviderRunInput[] = [];
+    const claudeInputs: ProviderRunInput[] = [];
+    const codexProvider = successfulProvider("codex", codexInputs);
+    const claudeProvider = successfulProvider("claude", claudeInputs);
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { claude: claudeProvider, codex: codexProvider },
+      createRunId: () => `run-fsm-terminal-target-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 250 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForStoredRunState(root, "succeeded");
+      await writeWorkflowWithTerminalAutofix(root);
+      await waitForTerminalState(root, "autofix");
+
+      // planning ran once (codex); the reloaded autofix is terminal, so neither
+      // provider was invoked for the state-advance attempt.
+      expect(codexInputs).toHaveLength(1);
+      expect(claudeInputs).toHaveLength(0);
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const rows = database
+          .prepare(
+            "select id, state, terminal_state_id from runs order by created_at"
+          )
+          .all() as Array<Record<string, unknown>>;
+        expect(rows).toMatchObject([
+          { id: "run-fsm-terminal-target-1", state: "succeeded" },
+          {
+            id: "run-fsm-terminal-target-2",
+            state: "succeeded",
+            terminal_state_id: "autofix"
+          }
+        ]);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("falls back to last-known-good workflow when a delayed advance reload is invalid", async () => {
+    const root = await makeTempRoot();
+    await writePerStateProviderRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 10,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexInputs: ProviderRunInput[] = [];
+    const claudeInputs: ProviderRunInput[] = [];
+    const codexProvider = successfulProvider("codex", codexInputs);
+    const claudeProvider = successfulProvider("claude", claudeInputs);
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { claude: claudeProvider, codex: codexProvider },
+      createRunId: () => `run-fsm-stale-reload-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 250 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForStoredRunState(root, "succeeded");
+      // Simulate a mid-save / malformed edit during the continuation delay.
+      // SPEC §5.2: the daemon must keep the last-known-good effective workflow
+      // for future work and must not fail the mid-walk run.
+      await writeFile(path.join(root, "workflow.yml"), "workflow:\n  initial:\n    -\n");
+      await waitForTerminalState(root, "done");
+
+      // The state-advance must still complete the autofix state using the
+      // last-known-good workflow (claude per writePerStateProviderRawFsmProject).
+      expect(claudeInputs).toHaveLength(1);
+      expect(codexInputs).toHaveLength(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("falls back to the project provider when the next agent state omits provider", async () => {
     const root = await makeTempRoot();
     await writeFallbackProviderRawFsmProject(root);
@@ -2723,6 +2927,13 @@ async function writeMultiStateRawFsmProject(root: string): Promise<void> {
 
 async function writePerStateProviderRawFsmProject(root: string): Promise<void> {
   await writeRawFsmProjectConfig(root);
+  await writeProviderRoutingWorkflow(root, "claude");
+}
+
+async function writeProviderRoutingWorkflow(
+  root: string,
+  autofixProvider: "codex" | "claude"
+): Promise<void> {
   await writeFile(
     path.join(root, "workflow.yml"),
     [
@@ -2743,7 +2954,7 @@ async function writePerStateProviderRawFsmProject(root: string): Promise<void> {
       "    autofix:",
       "      action:",
       "        kind: agent",
-      "        provider: claude",
+      `        provider: ${autofixProvider}`,
       "        prompt: autofix-prompt.md",
       "      complete_when:",
       "        provider_success: true",
@@ -2762,6 +2973,33 @@ async function writePerStateProviderRawFsmProject(root: string): Promise<void> {
   await writeFile(
     path.join(root, "autofix-prompt.md"),
     "Apply the autofix for #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
+async function writeWorkflowWithTerminalAutofix(root: string): Promise<void> {
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: provider_routing",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: autofix",
+      "    autofix:",
+      "      terminal: success",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n")
   );
 }
 

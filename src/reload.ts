@@ -375,6 +375,7 @@ async function readWorkflowSnapshot(
       body: "",
       contentHash: expanded.workflow.contentHash,
       expandedWorkflow: expanded.workflow,
+      format,
       path: workflowPath
     };
   }
@@ -389,6 +390,7 @@ async function readWorkflowSnapshot(
     body: workflow.body,
     contentHash: workflow.contentHash,
     expandedWorkflow: expanded.workflow,
+    format,
     path: workflow.path
   };
 }

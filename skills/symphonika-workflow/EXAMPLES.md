@@ -52,6 +52,8 @@ You are on issue branch {{branch.name}} ({{branch.ref}}).
 
 Use when you want the orchestrator to walk the run through review feedback, conflict resolution, and a policy-gated merge.
 
+This shape references two per-state prompt files (`prompts/autofix-pr.md` and `prompts/resolve-conflicts.md`) via `action.prompt:`. The skill must write both alongside the workflow contract — Symphonika fails workflow validation/launch with `workflow state ... prompt not found` if any referenced prompt file is missing. Use [Example 4](#4-per-state-prompt-file) as the template body for each one, specialized for its state's responsibility.
+
 ```yaml
 workflow:
   name: implement_review_merge

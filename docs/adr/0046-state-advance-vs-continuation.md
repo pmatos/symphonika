@@ -10,8 +10,24 @@ labels, and the continuation cap is intended to bound repeated end-to-end attemp
 workflow rather than the length of a single workflow walk.
 
 Symphonika models state advancement as a distinct dispatch kind, `state_advance`, scheduled by
-`RunController.executeStateAdvance` whenever an agent state finishes with `outcome=success`,
-`workflow.source.kind=raw_fsm`, and the FSM advanced to a non-terminal next state. State advance:
+`RunController.executeStateAdvance` whenever the FSM predicate engine advanced the workflow to a
+non-terminal next state for a `workflow.source.kind=raw_fsm` run. The per-state
+`ClassifiedTerminal` does **not** gate the advance: a step that exits `provider_success: true`
+without committing (a deterministic `no_workspace_changes` outcome) still advances when a
+transition matches on `provider_success: true` alone, because the state machine — not the
+classification of the per-state result — owns the "what runs next" decision. The same rule
+applies to `wait_park`. Two concrete consequences:
+
+- `scheduleNext` evaluates the `stateAdvance` / `waitPark` branches before the failed-deterministic
+  early-return. Otherwise a planning step that legitimately advances on `provider_success: true`
+  but did not commit would never spawn its implementer.
+- `applyTerminalLabels` honors an `fsmContinuing` flag (set when `workflowOutcome.advancedToState
+  !== null || workflowOutcome.parkAsWait === true`) and skips `sym:failed` when the workflow is
+  continuing. Subsequent applyTerminalLabels calls only remove `sym:running`, so without this
+  gate a plan→implement workflow that legitimately advanced through a no-commit planning step
+  would stay externally marked failed even after a later state succeeded.
+
+State advance:
 
 - skips the continuation cap entirely (the FSM bounds the walk via terminal states);
 - skips the `labels_all` / `labels_none` re-check (the FSM, not the issue label set, decides the

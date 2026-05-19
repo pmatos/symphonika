@@ -2766,10 +2766,33 @@ export class RunController {
         issueNumber: input.issue.number,
         repository: input.repository
       });
+      // `applyTerminalLabels` was called before `scheduleNext` with
+      // `fsmContinuing=true` (any stateAdvance != null implies it), which
+      // suppresses `sym:failed` for `failed && !willRetry` outcomes on the
+      // assumption that the FSM will actually continue. If `refreshIssue`
+      // bails here — either due to a transient API error (undefined) or the
+      // issue being closed/missing (null or non-open state) — no continuation
+      // is enqueued, so the suppression promise is broken. Restore
+      // `sym:failed` for per-state failed outcomes so the issue is not
+      // orphaned with only `sym:claimed`. For success outcomes that advance
+      // into a non-terminal state, no restoration is needed because
+      // `applyTerminalLabels` never added `sym:failed` for them.
       if (refreshedForAdvance === undefined) {
+        if (input.outcome.kind === "failed") {
+          await this.markIssueFailed({
+            issueNumber: input.issue.number,
+            repository: input.repository
+          });
+        }
         return;
       }
       if (refreshedForAdvance === null || refreshedForAdvance.state !== "open") {
+        if (input.outcome.kind === "failed") {
+          await this.markIssueFailed({
+            issueNumber: input.issue.number,
+            repository: input.repository
+          });
+        }
         return;
       }
       this.logger?.info(

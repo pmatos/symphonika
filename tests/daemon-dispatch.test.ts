@@ -1556,6 +1556,118 @@ describe("daemon dispatch", () => {
     }
   });
 
+  // Regression: when the FSM intends to advance after a failed-deterministic
+  // outcome, `applyTerminalLabels` suppresses `sym:failed` on the assumption
+  // that `executeStateAdvance` will run. But `scheduleNext`'s `stateAdvance`
+  // branch calls `refreshIssue` first, and that can bail on a transient
+  // GitHub API failure. Without restoration the run is persisted as failed
+  // and the issue has had `sym:running` removed but never gets `sym:failed`
+  // — stuck wearing only `sym:claimed`. Verify the rollback puts
+  // `sym:failed` back on `refreshIssue` failures.
+  it("restores sym:failed when a state-advance refresh aborts after fsmContinuing suppression", async () => {
+    const root = await makeTempRoot();
+    await writeTransitionOnlyMultiStateRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      // Throw on every getIssue so refreshIssue returns undefined, which
+      // takes scheduleNext's stateAdvance bail-out path.
+      getIssue: vi.fn().mockRejectedValue(new Error("transient API hiccup")),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = successfulCodexProvider();
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    // Base commit only — planning exits clean without committing →
+    // outcome.kind = failed, classification = deterministic. FSM matches
+    // `to: implementing when: provider_success: true`, so stateAdvance
+    // fires, but getIssue (via refreshIssue) throws → scheduleNext bails.
+    await createGitWorkspaceAtBase(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => `run-fsm-advance-abort-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      // Wait until the planning row terminates. Only one row will ever exist
+      // because the stateAdvance bail prevents a continuation row from being
+      // created.
+      const deadline = Date.now() + 15_000;
+      const databaseFile = path.join(root, ".symphonika", "symphonika.db");
+      while (Date.now() < deadline) {
+        try {
+          const database = new Database(databaseFile, { readonly: true });
+          try {
+            const row = database
+              .prepare("select count(*) as c from runs where state = 'failed'")
+              .get() as { c: number };
+            if (row.c >= 1) {
+              break;
+            }
+          } finally {
+            database.close();
+          }
+        } catch {
+          // database may not be readable yet during startup
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      // Give scheduleNext's bail-out path time to call markIssueFailed
+      // before reading the mock call list.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const database = new Database(databaseFile, { readonly: true });
+      try {
+        const rows = database
+          .prepare(
+            "select id, state, is_continuation, current_state_id from runs order by created_at"
+          )
+          .all() as Array<Record<string, unknown>>;
+        // Only the planning row exists — the stateAdvance bail prevented
+        // any implementing row from being created.
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          state: "failed",
+          is_continuation: 0,
+          current_state_id: "implementing"
+        });
+      } finally {
+        database.close();
+      }
+
+      // The rollback restored `sym:failed` so the issue is not orphaned.
+      const failedLabelAdds = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+        (call: unknown[]) => {
+          const args = call[0] as { labels?: string[] } | undefined;
+          return args?.labels?.includes("sym:failed") === true;
+        }
+      );
+      expect(failedLabelAdds).toHaveLength(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   // Regression: when an agent emits `input_required` from a state whose
   // fallback transition advances to another non-terminal state, the FSM's
   // `advancedToState` is non-null and `fsmContinuing` would be true. But

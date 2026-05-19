@@ -199,6 +199,15 @@ type AttemptEvidence = {
 
 type ApplyLabelsInput = {
   cancelReason?: CancelReason;
+  // True when applyWorkflowOutcome advanced the raw-FSM walk to a non-terminal
+  // next state or parked into a wait/merge_pr action. The per-state
+  // ClassifiedTerminal may still be `failed` (e.g. a planning step that
+  // exited provider_success=true without committing → no_workspace_changes),
+  // but the workflow as a whole is continuing — so `sym:failed` must not be
+  // added on this transition or the issue will stay externally marked failed
+  // even after a later state succeeds (subsequent applyTerminalLabels calls
+  // only remove `sym:running`).
+  fsmContinuing: boolean;
   issueNumber: number;
   outcome: ClassifiedTerminal;
   repository: GitHubIssueRepositoryInput;
@@ -502,6 +511,7 @@ export class RunController {
       "symphonika fresh dispatch failed before provider launch"
     );
     await this.applyTerminalLabels({
+      fsmContinuing: false,
       issueNumber: input.issue.number,
       outcome: {
         classification: "deterministic",
@@ -719,6 +729,7 @@ export class RunController {
     this.runStore.updateRunState(input.runId, "cancelled");
     await this.applyTerminalLabels({
       cancelReason: input.reason,
+      fsmContinuing: false,
       issueNumber: input.issueNumber,
       outcome: { kind: "cancelled", reason: input.reason },
       repository: input.repository,
@@ -1361,6 +1372,7 @@ export class RunController {
       "symphonika state advance failed before provider launch"
     );
     await this.applyTerminalLabels({
+      fsmContinuing: false,
       issueNumber: input.issue.number,
       outcome: {
         classification: "deterministic",
@@ -1434,6 +1446,7 @@ export class RunController {
       "symphonika state advance recorded reloaded terminal target without launching provider"
     );
     await this.applyTerminalLabels({
+      fsmContinuing: false,
       issueNumber: input.issue.number,
       outcome,
       repository: input.repository,
@@ -2208,7 +2221,20 @@ export class RunController {
         "symphonika run terminated"
       );
 
+      // The raw-FSM walk is "continuing" when applyWorkflowOutcome either
+      // advanced into a non-terminal next state or parked into a wait/merge_pr
+      // action. In both cases the per-state ClassifiedTerminal may legitimately
+      // be `failed` (e.g. a planning step that exited provider_success=true
+      // without committing → no_workspace_changes) while the workflow as a
+      // whole is not failing. applyTerminalLabels uses this to suppress
+      // `sym:failed`, which subsequent successful states would otherwise leave
+      // on the issue forever.
+      const fsmContinuing =
+        isRawFsm &&
+        (workflowOutcome.advancedToState !== null ||
+          workflowOutcome.parkAsWait === true);
       const labelInput: ApplyLabelsInput = {
+        fsmContinuing,
         issueNumber: input.issue.number,
         outcome: effectiveOutcome,
         repository: input.repository,
@@ -2672,9 +2698,16 @@ export class RunController {
       }
     );
 
+    // Skip `sym:failed` when the raw-FSM walk advanced or parked: the
+    // per-state outcome is failed (e.g. no_workspace_changes on a planning
+    // step that exited provider_success=true) but the workflow as a whole
+    // is continuing, and a later successful state would otherwise leave
+    // `sym:failed` on the issue because the success path here only removes
+    // `sym:running`.
     if (
-      input.outcome.kind === "input_required" ||
-      (input.outcome.kind === "failed" && !input.willRetry)
+      !input.fsmContinuing &&
+      (input.outcome.kind === "input_required" ||
+        (input.outcome.kind === "failed" && !input.willRetry))
     ) {
       await this.markIssueFailed({
         issueNumber: input.issueNumber,

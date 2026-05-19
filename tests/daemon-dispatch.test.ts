@@ -1533,6 +1533,24 @@ describe("daemon dispatch", () => {
       } finally {
         database.close();
       }
+
+      // Label hygiene: the planning step's per-state outcome classifies as
+      // failed (no_workspace_changes), but its workflow outcome advanced to
+      // `implementing`. applyTerminalLabels must NOT add `sym:failed` on
+      // that transition — otherwise the issue stays externally marked
+      // failed even though a later state may succeed (subsequent
+      // applyTerminalLabels calls only remove `sym:running`). The
+      // implementing step does legitimately fail here (provider exits clean
+      // without committing → no_workspace_changes → no transition matches
+      // except the fallback `to: failed` terminal), so we expect exactly
+      // one `sym:failed` label add (from implementing's terminal), not two.
+      const failedLabelAdds = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+        (call: unknown[]) => {
+          const args = call[0] as { labels?: string[] } | undefined;
+          return args?.labels?.includes("sym:failed") === true;
+        }
+      );
+      expect(failedLabelAdds).toHaveLength(1);
     } finally {
       await daemon.stop();
     }

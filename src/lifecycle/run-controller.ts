@@ -199,6 +199,15 @@ type AttemptEvidence = {
 
 type ApplyLabelsInput = {
   cancelReason?: CancelReason;
+  // True when applyWorkflowOutcome advanced the raw-FSM walk to a non-terminal
+  // next state or parked into a wait/merge_pr action. The per-state
+  // ClassifiedTerminal may still be `failed` (e.g. a planning step that
+  // exited provider_success=true without committing → no_workspace_changes),
+  // but the workflow as a whole is continuing — so `sym:failed` must not be
+  // added on this transition or the issue will stay externally marked failed
+  // even after a later state succeeds (subsequent applyTerminalLabels calls
+  // only remove `sym:running`).
+  fsmContinuing: boolean;
   issueNumber: number;
   outcome: ClassifiedTerminal;
   repository: GitHubIssueRepositoryInput;
@@ -502,6 +511,7 @@ export class RunController {
       "symphonika fresh dispatch failed before provider launch"
     );
     await this.applyTerminalLabels({
+      fsmContinuing: false,
       issueNumber: input.issue.number,
       outcome: {
         classification: "deterministic",
@@ -719,6 +729,7 @@ export class RunController {
     this.runStore.updateRunState(input.runId, "cancelled");
     await this.applyTerminalLabels({
       cancelReason: input.reason,
+      fsmContinuing: false,
       issueNumber: input.issueNumber,
       outcome: { kind: "cancelled", reason: input.reason },
       repository: input.repository,
@@ -1361,6 +1372,7 @@ export class RunController {
       "symphonika state advance failed before provider launch"
     );
     await this.applyTerminalLabels({
+      fsmContinuing: false,
       issueNumber: input.issue.number,
       outcome: {
         classification: "deterministic",
@@ -1434,6 +1446,7 @@ export class RunController {
       "symphonika state advance recorded reloaded terminal target without launching provider"
     );
     await this.applyTerminalLabels({
+      fsmContinuing: false,
       issueNumber: input.issue.number,
       outcome,
       repository: input.repository,
@@ -2208,7 +2221,20 @@ export class RunController {
         "symphonika run terminated"
       );
 
+      // The raw-FSM walk is "continuing" when applyWorkflowOutcome either
+      // advanced into a non-terminal next state or parked into a wait/merge_pr
+      // action. In both cases the per-state ClassifiedTerminal may legitimately
+      // be `failed` (e.g. a planning step that exited provider_success=true
+      // without committing → no_workspace_changes) while the workflow as a
+      // whole is not failing. applyTerminalLabels uses this to suppress
+      // `sym:failed`, which subsequent successful states would otherwise leave
+      // on the issue forever.
+      const fsmContinuing =
+        isRawFsm &&
+        (workflowOutcome.advancedToState !== null ||
+          workflowOutcome.parkAsWait === true);
       const labelInput: ApplyLabelsInput = {
+        fsmContinuing,
         issueNumber: input.issue.number,
         outcome: effectiveOutcome,
         repository: input.repository,
@@ -2235,6 +2261,7 @@ export class RunController {
           respectsIssueLabels,
           runId: input.runId,
           runtimeAttemptNumber: input.attemptNumber,
+          willRetry,
           stateAdvance:
             isRawFsm &&
             workflowOutcome.advancedToState !== null &&
@@ -2672,9 +2699,30 @@ export class RunController {
       }
     );
 
+    // Skip `sym:failed` only for `failed && !willRetry` outcomes when the
+    // raw-FSM walk advanced or parked: the per-state outcome is failed
+    // (e.g. no_workspace_changes on a planning step that exited
+    // provider_success=true) but the workflow as a whole is continuing,
+    // and a later successful state would otherwise leave `sym:failed` on
+    // the issue because the success path here only removes `sym:running`.
+    //
+    // `input_required` is always terminal regardless of `fsmContinuing`:
+    // `scheduleNext` returns immediately for input_required at the top of
+    // its method, so no FSM continuation is actually scheduled even when
+    // applyWorkflowOutcome's signals matched a non-terminal transition.
+    // Suppressing `sym:failed` there would orphan the issue with neither
+    // `sym:running` nor `sym:failed` nor a continuation.
+    if (input.outcome.kind === "input_required") {
+      await this.markIssueFailed({
+        issueNumber: input.issueNumber,
+        repository: input.repository
+      });
+      return;
+    }
     if (
-      input.outcome.kind === "input_required" ||
-      (input.outcome.kind === "failed" && !input.willRetry)
+      input.outcome.kind === "failed" &&
+      !input.willRetry &&
+      !input.fsmContinuing
     ) {
       await this.markIssueFailed({
         issueNumber: input.issueNumber,
@@ -2697,8 +2745,117 @@ export class RunController {
     stateAdvance?: { toStateId: string } | null;
     suppressContinuation?: boolean;
     waitPark?: { waitingRunId: string } | null;
+    // Same boolean computed at the call site for applyTerminalLabels. Used
+    // by the stateAdvance bail-out path to decide between restoring
+    // `sym:failed` (failed && !willRetry — applyTerminalLabels suppressed it
+    // because fsmContinuing was true) and falling through to the failed
+    // branch so the retry can fire (failed && willRetry).
+    willRetry: boolean;
   }): Promise<void> {
     if (input.outcome.kind === "cancelled" || input.outcome.kind === "input_required") {
+      return;
+    }
+
+    // Raw FSM mid-walk: the workflow predicate engine — not the per-state
+    // ClassifiedTerminal — decides what runs next. A step that exits
+    // provider_success=true without committing yields a deterministic
+    // `no_workspace_changes` outcome, but applyWorkflowOutcome may still have
+    // advanced the FSM (e.g. plan -> implement gated only on
+    // provider_success). Fire the FSM continuation before the failed branch
+    // so the next state runs even when the source state's per-state result
+    // classifies as failed. State advance also skips the continuation cap
+    // and the labels_all / labels_none re-check; only require that the
+    // issue is still open. See ADR 0046.
+    if (input.stateAdvance != null) {
+      const stateAdvance = input.stateAdvance;
+      const refreshedForAdvance = await this.refreshIssue({
+        project: input.project,
+        issueNumber: input.issue.number,
+        repository: input.repository
+      });
+      const canScheduleAdvance =
+        refreshedForAdvance !== undefined &&
+        refreshedForAdvance !== null &&
+        refreshedForAdvance.state === "open";
+      if (canScheduleAdvance) {
+        this.logger?.info(
+          {
+            delayMs: this.lifecyclePolicy.continuation.delayMs,
+            issueNumber: refreshedForAdvance.number,
+            parentRunId: input.runId,
+            project: input.project.name,
+            toStateId: stateAdvance.toStateId
+          },
+          "symphonika scheduling state advance"
+        );
+        this.schedule({
+          delayMs: this.lifecyclePolicy.continuation.delayMs,
+          fire: () =>
+            this.executeStateAdvance({
+              issue: refreshedForAdvance,
+              parentRunId: input.runId,
+              projectName: input.project.name,
+              toStateId: stateAdvance.toStateId
+            }),
+          issueNumber: refreshedForAdvance.number,
+          kind: "state_advance",
+          projectName: input.project.name,
+          runId: input.runId
+        });
+        return;
+      }
+      // Bail-out: `refreshIssue` returned `undefined` (transient API error)
+      // or the issue is closed/missing (null or non-open). `applyTerminalLabels`
+      // was called before `scheduleNext` with `fsmContinuing=true` (any
+      // stateAdvance != null implies it). What it did depends on the outcome:
+      //
+      // - `failed && !willRetry`: applyTerminalLabels suppressed `sym:failed`
+      //   on the assumption that the FSM would continue. The suppression
+      //   promise is now broken; restore `sym:failed` so the issue is not
+      //   orphaned with only `sym:claimed`. Then return — there is no retry
+      //   to fire and no continuation to schedule.
+      // - `failed && willRetry`: applyTerminalLabels did not add `sym:failed`
+      //   (it short-circuited on `willRetry`). The transient-retry branch
+      //   below is the right path; fall through so it fires.
+      // - `success`: applyTerminalLabels did not add `sym:failed`, and no
+      //   retry applies. Fall through; `suppressContinuation` (always true
+      //   when `stateAdvance != null`) ends the call.
+      if (input.outcome.kind === "failed" && !input.willRetry) {
+        await this.markIssueFailed({
+          issueNumber: input.issue.number,
+          repository: input.repository
+        });
+        return;
+      }
+      // For all other outcomes, fall through to the subsequent branches.
+    }
+
+    // Raw FSM advanced into a wait state: the waiting row was already created
+    // synchronously by applyWorkflowOutcome (so a daemon restart can recover
+    // it). Schedule a one-shot re-evaluation; subsequent re-evaluations come
+    // from the daemon tick's reconcileWaitingRuns pass. Sits above the failed
+    // branch for the same reason as state advance: the FSM may legitimately
+    // park even when the source state's per-state result classifies as failed.
+    if (input.waitPark != null) {
+      this.logger?.info(
+        {
+          delayMs: this.lifecyclePolicy.continuation.delayMs,
+          issueNumber: input.issue.number,
+          parentRunId: input.runId,
+          project: input.project.name,
+          waitingRunId: input.waitPark.waitingRunId
+        },
+        "symphonika scheduling wait re-evaluation"
+      );
+      const waitingRunId = input.waitPark.waitingRunId;
+      this.schedule({
+        delayMs: this.lifecyclePolicy.continuation.delayMs,
+        fire: () => this.executeWaitPark({ waitingRunId }),
+        issueNumber: input.issue.number,
+        kind: "wait_park",
+        projectName: input.project.name,
+        runId: input.runId
+      });
       return;
     }
 
@@ -2736,77 +2893,6 @@ export class RunController {
           }),
         issueNumber: input.issue.number,
         kind: "retry",
-        projectName: input.project.name,
-        runId: input.runId
-      });
-      return;
-    }
-
-    // Raw FSM mid-walk: the state machine — not the issue label set — decides
-    // what runs next. Dispatch a state advance that skips the continuation cap
-    // and skips the labels_all / labels_none re-check; only require that the
-    // issue is still open. See ADR 0046.
-    if (input.stateAdvance != null) {
-      const stateAdvance = input.stateAdvance;
-      const refreshedForAdvance = await this.refreshIssue({
-        project: input.project,
-        issueNumber: input.issue.number,
-        repository: input.repository
-      });
-      if (refreshedForAdvance === undefined) {
-        return;
-      }
-      if (refreshedForAdvance === null || refreshedForAdvance.state !== "open") {
-        return;
-      }
-      this.logger?.info(
-        {
-          delayMs: this.lifecyclePolicy.continuation.delayMs,
-          issueNumber: refreshedForAdvance.number,
-          parentRunId: input.runId,
-          project: input.project.name,
-          toStateId: stateAdvance.toStateId
-        },
-        "symphonika scheduling state advance"
-      );
-      this.schedule({
-        delayMs: this.lifecyclePolicy.continuation.delayMs,
-        fire: () =>
-          this.executeStateAdvance({
-            issue: refreshedForAdvance,
-            parentRunId: input.runId,
-            projectName: input.project.name,
-            toStateId: stateAdvance.toStateId
-          }),
-        issueNumber: refreshedForAdvance.number,
-        kind: "state_advance",
-        projectName: input.project.name,
-        runId: input.runId
-      });
-      return;
-    }
-
-    // Raw FSM advanced into a wait state: the waiting row was already created
-    // synchronously by applyWorkflowOutcome (so a daemon restart can recover
-    // it). Schedule a one-shot re-evaluation; subsequent re-evaluations come
-    // from the daemon tick's reconcileWaitingRuns pass.
-    if (input.waitPark != null) {
-      this.logger?.info(
-        {
-          delayMs: this.lifecyclePolicy.continuation.delayMs,
-          issueNumber: input.issue.number,
-          parentRunId: input.runId,
-          project: input.project.name,
-          waitingRunId: input.waitPark.waitingRunId
-        },
-        "symphonika scheduling wait re-evaluation"
-      );
-      const waitingRunId = input.waitPark.waitingRunId;
-      this.schedule({
-        delayMs: this.lifecyclePolicy.continuation.delayMs,
-        fire: () => this.executeWaitPark({ waitingRunId }),
-        issueNumber: input.issue.number,
-        kind: "wait_park",
         projectName: input.project.name,
         runId: input.runId
       });

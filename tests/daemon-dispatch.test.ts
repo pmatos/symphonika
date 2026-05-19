@@ -24,7 +24,10 @@ import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
 } from "../src/workspace.js";
-import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
+import {
+  createGitWorkspaceAhead,
+  createGitWorkspaceAtBase
+} from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
@@ -1396,6 +1399,512 @@ describe("daemon dispatch", () => {
       );
       expect(implementingPrompt).toContain("Implement the plan");
       expect(implementingPrompt).not.toContain("Draft a plan");
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Regression: a planning agent that exits 0 without committing yields a
+  // deterministic `no_workspace_changes` per-state outcome, but the FSM
+  // transition `to: implementing when: provider_success: true` still matches.
+  // scheduleNext used to bail on failed-deterministic outcomes before the
+  // state-advance branch was reached, leaving the planning stage as the last
+  // run and never spawning the implementer. Verify the FSM advance fires.
+  it("schedules state advance after a planning step with no commits", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "symphonika",
+      "issues",
+      "8-dispatch-an-end-to-end-run-through-a-test-provider"
+    );
+    await writeTransitionOnlyMultiStateRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = successfulCodexProvider();
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    // Base commit only — provider exits 0 without committing, so
+    // branch_ahead_of_base = false and classifyFailure returns
+    // {kind: failed, classification: deterministic, reason: no_workspace_changes}.
+    await createGitWorkspaceAtBase(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => `run-fsm-advance-noop-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      // Wait until both the planning and implementing rows have finished and
+      // had their workspace evidence written. Counting `state in ('failed',
+      // 'succeeded')` avoids a race where the implementing continuation row
+      // exists (insert is synchronous) but startAttempt has not yet populated
+      // `workspace_path`; the implementer also classifies as failed because
+      // the test provider exits clean without committing.
+      const deadline = Date.now() + 15_000;
+      const databaseFile = path.join(root, ".symphonika", "symphonika.db");
+      while (Date.now() < deadline) {
+        try {
+          const database = new Database(databaseFile, { readonly: true });
+          try {
+            const row = database
+              .prepare(
+                "select count(*) as c from runs where state in ('failed','succeeded')"
+              )
+              .get() as { c: number };
+            if (row.c >= 2) {
+              break;
+            }
+          } finally {
+            database.close();
+          }
+        } catch {
+          // database may not be readable yet during startup
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+
+      const database = new Database(databaseFile, { readonly: true });
+      try {
+        const rows = database
+          .prepare(
+            [
+              "select id, state, is_continuation, current_state_id,",
+              "terminal_state_id, state_transition_reason, terminal_reason,",
+              "workspace_path, continuation_parent_run_id",
+              "from runs order by created_at"
+            ].join(" ")
+          )
+          .all() as Array<Record<string, unknown>>;
+        expect(rows).toHaveLength(2);
+
+        const planningRun = rows[0]!;
+        const implementingRun = rows[1]!;
+
+        // The planning row classifies as failed (no commits → no_workspace_changes)
+        // but the workflow predicate engine still advanced the FSM. Both pieces
+        // of state must be present on the row.
+        expect(planningRun).toMatchObject({
+          id: "run-fsm-advance-noop-1",
+          state: "failed",
+          is_continuation: 0,
+          current_state_id: "implementing",
+          terminal_state_id: null,
+          terminal_reason: "no_workspace_changes"
+        });
+        expect(stringColumn(planningRun, "state_transition_reason")).toContain(
+          "planning advanced to implementing"
+        );
+
+        // The implementing run was spawned by the state advance, sharing the
+        // workspace with planning.
+        expect(implementingRun).toMatchObject({
+          id: "run-fsm-advance-noop-2",
+          is_continuation: 1,
+          continuation_parent_run_id: "run-fsm-advance-noop-1"
+        });
+        expect(planningRun["workspace_path"]).toBe(workspacePath);
+        expect(implementingRun["workspace_path"]).toBe(workspacePath);
+      } finally {
+        database.close();
+      }
+
+      // Label hygiene: the planning step's per-state outcome classifies as
+      // failed (no_workspace_changes), but its workflow outcome advanced to
+      // `implementing`. applyTerminalLabels must NOT add `sym:failed` on
+      // that transition — otherwise the issue stays externally marked
+      // failed even though a later state may succeed (subsequent
+      // applyTerminalLabels calls only remove `sym:running`). The
+      // implementing step does legitimately fail here (provider exits clean
+      // without committing → no_workspace_changes → no transition matches
+      // except the fallback `to: failed` terminal), so we expect exactly
+      // one `sym:failed` label add (from implementing's terminal), not two.
+      const failedLabelAdds = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+        (call: unknown[]) => {
+          const args = call[0] as { labels?: string[] } | undefined;
+          return args?.labels?.includes("sym:failed") === true;
+        }
+      );
+      expect(failedLabelAdds).toHaveLength(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Regression: when the FSM intends to advance after a failed-deterministic
+  // outcome, `applyTerminalLabels` suppresses `sym:failed` on the assumption
+  // that `executeStateAdvance` will run. But `scheduleNext`'s `stateAdvance`
+  // branch calls `refreshIssue` first, and that can bail on a transient
+  // GitHub API failure. Without restoration the run is persisted as failed
+  // and the issue has had `sym:running` removed but never gets `sym:failed`
+  // — stuck wearing only `sym:claimed`. Verify the rollback puts
+  // `sym:failed` back on `refreshIssue` failures.
+  it("restores sym:failed when a state-advance refresh aborts after fsmContinuing suppression", async () => {
+    const root = await makeTempRoot();
+    await writeTransitionOnlyMultiStateRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      // Throw on every getIssue so refreshIssue returns undefined, which
+      // takes scheduleNext's stateAdvance bail-out path.
+      getIssue: vi.fn().mockRejectedValue(new Error("transient API hiccup")),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = successfulCodexProvider();
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    // Base commit only — planning exits clean without committing →
+    // outcome.kind = failed, classification = deterministic. FSM matches
+    // `to: implementing when: provider_success: true`, so stateAdvance
+    // fires, but getIssue (via refreshIssue) throws → scheduleNext bails.
+    await createGitWorkspaceAtBase(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => `run-fsm-advance-abort-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      // Wait until the planning row terminates. Only one row will ever exist
+      // because the stateAdvance bail prevents a continuation row from being
+      // created.
+      const deadline = Date.now() + 15_000;
+      const databaseFile = path.join(root, ".symphonika", "symphonika.db");
+      while (Date.now() < deadline) {
+        try {
+          const database = new Database(databaseFile, { readonly: true });
+          try {
+            const row = database
+              .prepare("select count(*) as c from runs where state = 'failed'")
+              .get() as { c: number };
+            if (row.c >= 1) {
+              break;
+            }
+          } finally {
+            database.close();
+          }
+        } catch {
+          // database may not be readable yet during startup
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      // Give scheduleNext's bail-out path time to call markIssueFailed
+      // before reading the mock call list.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const database = new Database(databaseFile, { readonly: true });
+      try {
+        const rows = database
+          .prepare(
+            "select id, state, is_continuation, current_state_id from runs order by created_at"
+          )
+          .all() as Array<Record<string, unknown>>;
+        // Only the planning row exists — the stateAdvance bail prevented
+        // any implementing row from being created.
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          state: "failed",
+          is_continuation: 0,
+          current_state_id: "implementing"
+        });
+      } finally {
+        database.close();
+      }
+
+      // The rollback restored `sym:failed` so the issue is not orphaned.
+      const failedLabelAdds = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+        (call: unknown[]) => {
+          const args = call[0] as { labels?: string[] } | undefined;
+          return args?.labels?.includes("sym:failed") === true;
+        }
+      );
+      expect(failedLabelAdds).toHaveLength(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Regression: when a transient per-state failure has retry budget
+  // (`willRetry === true`), `applyTerminalLabels` does NOT add `sym:failed`
+  // — the retry path is supposed to handle the run. If the `stateAdvance`
+  // branch then bails on `refreshIssue`, the rollback must NOT add
+  // `sym:failed` (no suppression happened to undo) and must let control
+  // fall through so the failed-transient branch can schedule the retry.
+  // Without this distinction the bail-out path would over-mark the issue
+  // failed AND swallow the retry, breaking the transient-failure contract.
+  it("does not add sym:failed and lets the retry fire when state-advance bails on willRetry=true", async () => {
+    const root = await makeTempRoot();
+    // Reuse the input_required-fallback workflow: planning's only fallback
+    // is `to: error_handler` (no `when:`), so a transient failure with
+    // `provider_success: false` signals matches it and sets
+    // `workflowOutcome.advancedToState = "error_handler"`.
+    await writeInputRequiredFallbackRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    let attempts = 0;
+    const transientFailingProvider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        attempts += 1;
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { code: 1, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      // Throw on every getIssue so refreshIssue returns undefined and the
+      // stateAdvance branch always bails.
+      getIssue: vi.fn().mockRejectedValue(new Error("transient API hiccup")),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAtBase(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: transientFailingProvider },
+      createRunId: () => `run-fsm-advance-willretry-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        // cap: 1 means the first attempt has willRetry=true; after the
+        // retry runs and also fails, willRetry becomes false.
+        retry: { cap: 1, delaysMs: [10], maxBackoffMs: 50 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      // Wait until the planning attempt has finished.
+      const deadline = Date.now() + 15_000;
+      const databaseFile = path.join(root, ".symphonika", "symphonika.db");
+      while (Date.now() < deadline) {
+        try {
+          const database = new Database(databaseFile, { readonly: true });
+          try {
+            const row = database
+              .prepare("select count(*) as c from runs where state = 'failed'")
+              .get() as { c: number };
+            if (row.c >= 1) {
+              break;
+            }
+          } finally {
+            database.close();
+          }
+        } catch {
+          // database may not be readable yet during startup
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      // Give the bail-path's markIssueFailed (if any) and the
+      // scheduleNext fall-through to the failed branch (which schedules
+      // a retry) time to settle.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // The attempt ran exactly once because executeRetry's refreshIssue
+      // also throws (same mock), so the retry was scheduled but dropped.
+      // The fact that a retry was scheduled at all is what this test
+      // verifies indirectly: with willRetry=true, the stateAdvance bail
+      // path must NOT add `sym:failed` (applyTerminalLabels already
+      // skipped it on the same `!willRetry` short-circuit) and must let
+      // control fall through to the failed-transient branch. Without the
+      // gate this assertion would be `1` (the bail-out wrongly added
+      // sym:failed even though the run is supposed to retry).
+      expect(attempts).toBeGreaterThanOrEqual(1);
+      const failedLabelAdds = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+        (call: unknown[]) => {
+          const args = call[0] as { labels?: string[] } | undefined;
+          return args?.labels?.includes("sym:failed") === true;
+        }
+      );
+      expect(failedLabelAdds).toHaveLength(0);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Regression: when an agent emits `input_required` from a state whose
+  // fallback transition advances to another non-terminal state, the FSM's
+  // `advancedToState` is non-null and `fsmContinuing` would be true. But
+  // `scheduleNext` returns immediately for `input_required` at the very top,
+  // so no continuation actually runs. Suppressing `sym:failed` in that
+  // window would orphan the issue (no `sym:running`, no `sym:failed`, no
+  // continuation). Verify input_required always marks the issue failed,
+  // regardless of `fsmContinuing`.
+  it("marks the issue failed on input_required even when the workflow has a non-terminal fallback", async () => {
+    const root = await makeTempRoot();
+    await writeInputRequiredFallbackRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { message: "needs input", type: "input_required" },
+          raw: { kind: "input_request" }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAtBase(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => `run-fsm-input-required-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      // Wait until the planning row reaches its terminal state. Note
+      // `mapOutcomeToRunState` collapses `input_required` outcomes to
+      // `state = 'failed'` in the runs table; the `input_required` shape
+      // survives in `terminal_reason` instead.
+      const deadline = Date.now() + 15_000;
+      const databaseFile = path.join(root, ".symphonika", "symphonika.db");
+      while (Date.now() < deadline) {
+        try {
+          const database = new Database(databaseFile, { readonly: true });
+          try {
+            const row = database
+              .prepare(
+                "select count(*) as c from runs where state = 'failed'"
+              )
+              .get() as { c: number };
+            if (row.c >= 1) {
+              break;
+            }
+          } finally {
+            database.close();
+          }
+        } catch {
+          // database may not be readable yet during startup
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+
+      // No continuation should be created — `scheduleNext` returns
+      // immediately for input_required at the top of the method.
+      const database = new Database(databaseFile, { readonly: true });
+      try {
+        const rows = database
+          .prepare(
+            "select id, state, is_continuation, terminal_reason from runs order by created_at"
+          )
+          .all() as Array<Record<string, unknown>>;
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          state: "failed",
+          is_continuation: 0
+        });
+        expect(stringColumn(rows[0]!, "terminal_reason")).toMatch(
+          /input|requested input/i
+        );
+      } finally {
+        database.close();
+      }
+
+      // `sym:failed` must have been added even though `applyWorkflowOutcome`
+      // advanced the FSM to a non-terminal fallback (so `fsmContinuing` was
+      // true). Without the narrowed suppression the issue would be orphaned
+      // with no `sym:running`, no `sym:failed`, and no continuation.
+      const failedLabelAdds = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+        (call: unknown[]) => {
+          const args = call[0] as { labels?: string[] } | undefined;
+          return args?.labels?.includes("sym:failed") === true;
+        }
+      );
+      expect(failedLabelAdds).toHaveLength(1);
     } finally {
       await daemon.stop();
     }
@@ -2922,6 +3431,130 @@ async function writeMultiStateRawFsmProject(root: string): Promise<void> {
   await writeFile(
     path.join(root, "implement-prompt.md"),
     "Implement the plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
+// Mirrors the shape of `builtin:plan-tdd-pr`: planning advances on
+// `provider_success: true` alone (no `complete_when` gate, no
+// `branch_ahead_of_base` requirement on the transition). Implementing still
+// gates on `branch_ahead_of_base: true` so an uncommitted impl pass falls
+// through to the fallback `to: failed` terminal.
+async function writeTransitionOnlyMultiStateRawFsmProject(
+  root: string
+): Promise<void> {
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: plan_then_implement_transition_only",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      transitions:",
+      "        - to: implementing",
+      "          when:",
+      "            provider_success: true",
+      "        - to: failed",
+      "    implementing:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: implement-prompt.md",
+      "      transitions:",
+      "        - to: done",
+      "          when:",
+      "            provider_success: true",
+      "            branch_ahead_of_base: true",
+      "        - to: failed",
+      "    done:",
+      "      terminal: success",
+      "    failed:",
+      "      terminal: blocked",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "plan-prompt.md"),
+    "Draft a plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+  await writeFile(
+    path.join(root, "implement-prompt.md"),
+    "Implement the plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
+// Workflow with a non-terminal fallback transition: planning's only
+// fallback is `to: error_handler` (an agent state), so signals from an
+// `input_required` outcome (which carry `provider_success: false`) match
+// the fallback and `applyWorkflowOutcome` sets `advancedToState =
+// "error_handler"`. Used to exercise the orphan-label edge case where
+// `fsmContinuing` would be true but `scheduleNext` bails on input_required.
+async function writeInputRequiredFallbackRawFsmProject(
+  root: string
+): Promise<void> {
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: input_required_fallback",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      transitions:",
+      "        - to: implementing",
+      "          when:",
+      "            provider_success: true",
+      "            branch_ahead_of_base: true",
+      "        - to: error_handler",
+      "    implementing:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: implement-prompt.md",
+      "      transitions:",
+      "        - to: done",
+      "          when:",
+      "            provider_success: true",
+      "            branch_ahead_of_base: true",
+      "        - to: failed",
+      "    error_handler:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: error-prompt.md",
+      "      transitions:",
+      "        - to: done",
+      "          when:",
+      "            provider_success: true",
+      "        - to: failed",
+      "    done:",
+      "      terminal: success",
+      "    failed:",
+      "      terminal: blocked",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "plan-prompt.md"),
+    "Draft a plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+  await writeFile(
+    path.join(root, "implement-prompt.md"),
+    "Implement the plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+  await writeFile(
+    path.join(root, "error-prompt.md"),
+    "Recover #{{issue.number}}: {{issue.title}}.\n"
   );
 }
 

@@ -1556,6 +1556,132 @@ describe("daemon dispatch", () => {
     }
   });
 
+  // Regression: when an agent emits `input_required` from a state whose
+  // fallback transition advances to another non-terminal state, the FSM's
+  // `advancedToState` is non-null and `fsmContinuing` would be true. But
+  // `scheduleNext` returns immediately for `input_required` at the very top,
+  // so no continuation actually runs. Suppressing `sym:failed` in that
+  // window would orphan the issue (no `sym:running`, no `sym:failed`, no
+  // continuation). Verify input_required always marks the issue failed,
+  // regardless of `fsmContinuing`.
+  it("marks the issue failed on input_required even when the workflow has a non-terminal fallback", async () => {
+    const root = await makeTempRoot();
+    await writeInputRequiredFallbackRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { message: "needs input", type: "input_required" },
+          raw: { kind: "input_request" }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAtBase(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => `run-fsm-input-required-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      // Wait until the planning row reaches its terminal state. Note
+      // `mapOutcomeToRunState` collapses `input_required` outcomes to
+      // `state = 'failed'` in the runs table; the `input_required` shape
+      // survives in `terminal_reason` instead.
+      const deadline = Date.now() + 15_000;
+      const databaseFile = path.join(root, ".symphonika", "symphonika.db");
+      while (Date.now() < deadline) {
+        try {
+          const database = new Database(databaseFile, { readonly: true });
+          try {
+            const row = database
+              .prepare(
+                "select count(*) as c from runs where state = 'failed'"
+              )
+              .get() as { c: number };
+            if (row.c >= 1) {
+              break;
+            }
+          } finally {
+            database.close();
+          }
+        } catch {
+          // database may not be readable yet during startup
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+
+      // No continuation should be created — `scheduleNext` returns
+      // immediately for input_required at the top of the method.
+      const database = new Database(databaseFile, { readonly: true });
+      try {
+        const rows = database
+          .prepare(
+            "select id, state, is_continuation, terminal_reason from runs order by created_at"
+          )
+          .all() as Array<Record<string, unknown>>;
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          state: "failed",
+          is_continuation: 0
+        });
+        expect(stringColumn(rows[0]!, "terminal_reason")).toMatch(
+          /input|requested input/i
+        );
+      } finally {
+        database.close();
+      }
+
+      // `sym:failed` must have been added even though `applyWorkflowOutcome`
+      // advanced the FSM to a non-terminal fallback (so `fsmContinuing` was
+      // true). Without the narrowed suppression the issue would be orphaned
+      // with no `sym:running`, no `sym:failed`, and no continuation.
+      const failedLabelAdds = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+        (call: unknown[]) => {
+          const args = call[0] as { labels?: string[] } | undefined;
+          return args?.labels?.includes("sym:failed") === true;
+        }
+      );
+      expect(failedLabelAdds).toHaveLength(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("routes a state advance through the provider declared on the next agent state", async () => {
     const root = await makeTempRoot();
     await writePerStateProviderRawFsmProject(root);
@@ -3131,6 +3257,76 @@ async function writeTransitionOnlyMultiStateRawFsmProject(
   await writeFile(
     path.join(root, "implement-prompt.md"),
     "Implement the plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
+// Workflow with a non-terminal fallback transition: planning's only
+// fallback is `to: error_handler` (an agent state), so signals from an
+// `input_required` outcome (which carry `provider_success: false`) match
+// the fallback and `applyWorkflowOutcome` sets `advancedToState =
+// "error_handler"`. Used to exercise the orphan-label edge case where
+// `fsmContinuing` would be true but `scheduleNext` bails on input_required.
+async function writeInputRequiredFallbackRawFsmProject(
+  root: string
+): Promise<void> {
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: input_required_fallback",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      transitions:",
+      "        - to: implementing",
+      "          when:",
+      "            provider_success: true",
+      "            branch_ahead_of_base: true",
+      "        - to: error_handler",
+      "    implementing:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: implement-prompt.md",
+      "      transitions:",
+      "        - to: done",
+      "          when:",
+      "            provider_success: true",
+      "            branch_ahead_of_base: true",
+      "        - to: failed",
+      "    error_handler:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: error-prompt.md",
+      "      transitions:",
+      "        - to: done",
+      "          when:",
+      "            provider_success: true",
+      "        - to: failed",
+      "    done:",
+      "      terminal: success",
+      "    failed:",
+      "      terminal: blocked",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "plan-prompt.md"),
+    "Draft a plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+  await writeFile(
+    path.join(root, "implement-prompt.md"),
+    "Implement the plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+  await writeFile(
+    path.join(root, "error-prompt.md"),
+    "Recover #{{issue.number}}: {{issue.title}}.\n"
   );
 }
 

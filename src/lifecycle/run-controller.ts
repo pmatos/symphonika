@@ -2698,16 +2698,30 @@ export class RunController {
       }
     );
 
-    // Skip `sym:failed` when the raw-FSM walk advanced or parked: the
-    // per-state outcome is failed (e.g. no_workspace_changes on a planning
-    // step that exited provider_success=true) but the workflow as a whole
-    // is continuing, and a later successful state would otherwise leave
-    // `sym:failed` on the issue because the success path here only removes
-    // `sym:running`.
+    // Skip `sym:failed` only for `failed && !willRetry` outcomes when the
+    // raw-FSM walk advanced or parked: the per-state outcome is failed
+    // (e.g. no_workspace_changes on a planning step that exited
+    // provider_success=true) but the workflow as a whole is continuing,
+    // and a later successful state would otherwise leave `sym:failed` on
+    // the issue because the success path here only removes `sym:running`.
+    //
+    // `input_required` is always terminal regardless of `fsmContinuing`:
+    // `scheduleNext` returns immediately for input_required at the top of
+    // its method, so no FSM continuation is actually scheduled even when
+    // applyWorkflowOutcome's signals matched a non-terminal transition.
+    // Suppressing `sym:failed` there would orphan the issue with neither
+    // `sym:running` nor `sym:failed` nor a continuation.
+    if (input.outcome.kind === "input_required") {
+      await this.markIssueFailed({
+        issueNumber: input.issueNumber,
+        repository: input.repository
+      });
+      return;
+    }
     if (
-      !input.fsmContinuing &&
-      (input.outcome.kind === "input_required" ||
-        (input.outcome.kind === "failed" && !input.willRetry))
+      input.outcome.kind === "failed" &&
+      !input.willRetry &&
+      !input.fsmContinuing
     ) {
       await this.markIssueFailed({
         issueNumber: input.issueNumber,

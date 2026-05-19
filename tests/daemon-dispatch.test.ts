@@ -1668,6 +1668,122 @@ describe("daemon dispatch", () => {
     }
   });
 
+  // Regression: when a transient per-state failure has retry budget
+  // (`willRetry === true`), `applyTerminalLabels` does NOT add `sym:failed`
+  // — the retry path is supposed to handle the run. If the `stateAdvance`
+  // branch then bails on `refreshIssue`, the rollback must NOT add
+  // `sym:failed` (no suppression happened to undo) and must let control
+  // fall through so the failed-transient branch can schedule the retry.
+  // Without this distinction the bail-out path would over-mark the issue
+  // failed AND swallow the retry, breaking the transient-failure contract.
+  it("does not add sym:failed and lets the retry fire when state-advance bails on willRetry=true", async () => {
+    const root = await makeTempRoot();
+    // Reuse the input_required-fallback workflow: planning's only fallback
+    // is `to: error_handler` (no `when:`), so a transient failure with
+    // `provider_success: false` signals matches it and sets
+    // `workflowOutcome.advancedToState = "error_handler"`.
+    await writeInputRequiredFallbackRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    let attempts = 0;
+    const transientFailingProvider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        attempts += 1;
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { code: 1, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      // Throw on every getIssue so refreshIssue returns undefined and the
+      // stateAdvance branch always bails.
+      getIssue: vi.fn().mockRejectedValue(new Error("transient API hiccup")),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAtBase(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: transientFailingProvider },
+      createRunId: () => `run-fsm-advance-willretry-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        // cap: 1 means the first attempt has willRetry=true; after the
+        // retry runs and also fails, willRetry becomes false.
+        retry: { cap: 1, delaysMs: [10], maxBackoffMs: 50 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      // Wait until the planning attempt has finished.
+      const deadline = Date.now() + 15_000;
+      const databaseFile = path.join(root, ".symphonika", "symphonika.db");
+      while (Date.now() < deadline) {
+        try {
+          const database = new Database(databaseFile, { readonly: true });
+          try {
+            const row = database
+              .prepare("select count(*) as c from runs where state = 'failed'")
+              .get() as { c: number };
+            if (row.c >= 1) {
+              break;
+            }
+          } finally {
+            database.close();
+          }
+        } catch {
+          // database may not be readable yet during startup
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      // Give the bail-path's markIssueFailed (if any) and the
+      // scheduleNext fall-through to the failed branch (which schedules
+      // a retry) time to settle.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // The attempt ran exactly once because executeRetry's refreshIssue
+      // also throws (same mock), so the retry was scheduled but dropped.
+      // The fact that a retry was scheduled at all is what this test
+      // verifies indirectly: with willRetry=true, the stateAdvance bail
+      // path must NOT add `sym:failed` (applyTerminalLabels already
+      // skipped it on the same `!willRetry` short-circuit) and must let
+      // control fall through to the failed-transient branch. Without the
+      // gate this assertion would be `1` (the bail-out wrongly added
+      // sym:failed even though the run is supposed to retry).
+      expect(attempts).toBeGreaterThanOrEqual(1);
+      const failedLabelAdds = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+        (call: unknown[]) => {
+          const args = call[0] as { labels?: string[] } | undefined;
+          return args?.labels?.includes("sym:failed") === true;
+        }
+      );
+      expect(failedLabelAdds).toHaveLength(0);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   // Regression: when an agent emits `input_required` from a state whose
   // fallback transition advances to another non-terminal state, the FSM's
   // `advancedToState` is non-null and `fsmContinuing` would be true. But

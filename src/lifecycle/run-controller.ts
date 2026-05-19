@@ -2261,6 +2261,7 @@ export class RunController {
           respectsIssueLabels,
           runId: input.runId,
           runtimeAttemptNumber: input.attemptNumber,
+          willRetry,
           stateAdvance:
             isRawFsm &&
             workflowOutcome.advancedToState !== null &&
@@ -2744,6 +2745,12 @@ export class RunController {
     stateAdvance?: { toStateId: string } | null;
     suppressContinuation?: boolean;
     waitPark?: { waitingRunId: string } | null;
+    // Same boolean computed at the call site for applyTerminalLabels. Used
+    // by the stateAdvance bail-out path to decide between restoring
+    // `sym:failed` (failed && !willRetry — applyTerminalLabels suppressed it
+    // because fsmContinuing was true) and falling through to the failed
+    // branch so the retry can fire (failed && willRetry).
+    willRetry: boolean;
   }): Promise<void> {
     if (input.outcome.kind === "cancelled" || input.outcome.kind === "input_required") {
       return;
@@ -2766,60 +2773,61 @@ export class RunController {
         issueNumber: input.issue.number,
         repository: input.repository
       });
-      // `applyTerminalLabels` was called before `scheduleNext` with
-      // `fsmContinuing=true` (any stateAdvance != null implies it), which
-      // suppresses `sym:failed` for `failed && !willRetry` outcomes on the
-      // assumption that the FSM will actually continue. If `refreshIssue`
-      // bails here — either due to a transient API error (undefined) or the
-      // issue being closed/missing (null or non-open state) — no continuation
-      // is enqueued, so the suppression promise is broken. Restore
-      // `sym:failed` for per-state failed outcomes so the issue is not
-      // orphaned with only `sym:claimed`. For success outcomes that advance
-      // into a non-terminal state, no restoration is needed because
-      // `applyTerminalLabels` never added `sym:failed` for them.
-      if (refreshedForAdvance === undefined) {
-        if (input.outcome.kind === "failed") {
-          await this.markIssueFailed({
-            issueNumber: input.issue.number,
-            repository: input.repository
-          });
-        }
-        return;
-      }
-      if (refreshedForAdvance === null || refreshedForAdvance.state !== "open") {
-        if (input.outcome.kind === "failed") {
-          await this.markIssueFailed({
-            issueNumber: input.issue.number,
-            repository: input.repository
-          });
-        }
-        return;
-      }
-      this.logger?.info(
-        {
-          delayMs: this.lifecyclePolicy.continuation.delayMs,
-          issueNumber: refreshedForAdvance.number,
-          parentRunId: input.runId,
-          project: input.project.name,
-          toStateId: stateAdvance.toStateId
-        },
-        "symphonika scheduling state advance"
-      );
-      this.schedule({
-        delayMs: this.lifecyclePolicy.continuation.delayMs,
-        fire: () =>
-          this.executeStateAdvance({
-            issue: refreshedForAdvance,
+      const canScheduleAdvance =
+        refreshedForAdvance !== undefined &&
+        refreshedForAdvance !== null &&
+        refreshedForAdvance.state === "open";
+      if (canScheduleAdvance) {
+        this.logger?.info(
+          {
+            delayMs: this.lifecyclePolicy.continuation.delayMs,
+            issueNumber: refreshedForAdvance.number,
             parentRunId: input.runId,
-            projectName: input.project.name,
+            project: input.project.name,
             toStateId: stateAdvance.toStateId
-          }),
-        issueNumber: refreshedForAdvance.number,
-        kind: "state_advance",
-        projectName: input.project.name,
-        runId: input.runId
-      });
-      return;
+          },
+          "symphonika scheduling state advance"
+        );
+        this.schedule({
+          delayMs: this.lifecyclePolicy.continuation.delayMs,
+          fire: () =>
+            this.executeStateAdvance({
+              issue: refreshedForAdvance,
+              parentRunId: input.runId,
+              projectName: input.project.name,
+              toStateId: stateAdvance.toStateId
+            }),
+          issueNumber: refreshedForAdvance.number,
+          kind: "state_advance",
+          projectName: input.project.name,
+          runId: input.runId
+        });
+        return;
+      }
+      // Bail-out: `refreshIssue` returned `undefined` (transient API error)
+      // or the issue is closed/missing (null or non-open). `applyTerminalLabels`
+      // was called before `scheduleNext` with `fsmContinuing=true` (any
+      // stateAdvance != null implies it). What it did depends on the outcome:
+      //
+      // - `failed && !willRetry`: applyTerminalLabels suppressed `sym:failed`
+      //   on the assumption that the FSM would continue. The suppression
+      //   promise is now broken; restore `sym:failed` so the issue is not
+      //   orphaned with only `sym:claimed`. Then return — there is no retry
+      //   to fire and no continuation to schedule.
+      // - `failed && willRetry`: applyTerminalLabels did not add `sym:failed`
+      //   (it short-circuited on `willRetry`). The transient-retry branch
+      //   below is the right path; fall through so it fires.
+      // - `success`: applyTerminalLabels did not add `sym:failed`, and no
+      //   retry applies. Fall through; `suppressContinuation` (always true
+      //   when `stateAdvance != null`) ends the call.
+      if (input.outcome.kind === "failed" && !input.willRetry) {
+        await this.markIssueFailed({
+          issueNumber: input.issue.number,
+          repository: input.repository
+        });
+        return;
+      }
+      // For all other outcomes, fall through to the subsequent branches.
     }
 
     // Raw FSM advanced into a wait state: the waiting row was already created

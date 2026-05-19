@@ -49,6 +49,17 @@ first re-evaluation firing only costs one tick of latency rather than losing the
 single-daemon v1 (ADR 0012) keeps scheduler callbacks in memory, so durability has to live in the
 run-store row itself.
 
+`createWaitingRun` writes both `state = "waiting"` and `current_state_id` inside a single SQLite
+transaction. Either both fields are set or the row does not exist; a crash mid-create cannot
+leave a half-written wait row that `listWaitingRuns` would silently skip (its `current_state_id is
+not null` predicate exists precisely because the FSM cannot resume without that id). Daemon
+startup enforces the same invariant by sweeping the residual `state = "waiting" and current_state_id
+is null` rows to `stale` alongside the active-run sweep; the predicate is provably safe because
+the transaction makes a NULL `current_state_id` impossible for any wait row created from this
+ADR's implementation onward. Valid waits with `current_state_id` set are not touched by the
+startup sweep — `reconcileWaitingRuns` re-evaluates them on the next tick after restart, and that
+is the only termination path the wait lifecycle recognises.
+
 Label immunity carries over from ADR 0046. A waiting run skips the `labels_all` / `labels_none`
 re-check because the FSM, not the issue label set, decides when the wait advances; the
 `sym:claimed` label remains set across the wait, which keeps the existing fresh-dispatch guard

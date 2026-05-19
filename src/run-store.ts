@@ -387,17 +387,25 @@ export class RunStore {
     parentRunId: string;
     projectName: string;
   }): void {
-    this.insertRunRow({
-      id: input.id,
-      isContinuation: true,
-      issue: input.issue,
-      parentRunId: input.parentRunId,
-      projectName: input.projectName,
-      providerCommand: null,
-      providerName: null,
-      state: "waiting"
+    // ADR 0047 depends on the waiting row being durable — `listWaitingRuns`
+    // filters out rows whose `current_state_id` is null, so a crash between
+    // these two writes would silently orphan the row forever. Wrap them in a
+    // single SQLite transaction so the row either exists with both fields set
+    // or not at all.
+    const apply = this.database.transaction(() => {
+      this.insertRunRow({
+        id: input.id,
+        isContinuation: true,
+        issue: input.issue,
+        parentRunId: input.parentRunId,
+        projectName: input.projectName,
+        providerCommand: null,
+        providerName: null,
+        state: "waiting"
+      });
+      this.setRunCurrentState(input.id, input.currentStateId);
     });
-    this.setRunCurrentState(input.id, input.currentStateId);
+    apply();
   }
 
   // Includes cancel-requested rows on purpose: a waiting run cancelled via
@@ -1472,14 +1480,38 @@ export class RunStore {
 
   markLeakedRunsAsStale(
     reason = "leaked_active_run"
-  ): { runId: string; projectName: string; issueNumber: number }[] {
+  ): {
+    runId: string;
+    projectName: string;
+    issueNumber: number;
+    previousState: RunState;
+  }[] {
+    // Sweeps three classes of orphaned rows:
+    // - queued / preparing_workspace / running: their in-memory scheduler
+    //   callback and provider stream are gone after a crash; they cannot
+    //   resume.
+    // - waiting with current_state_id IS NULL: pre-atomicity crash artifact
+    //   from createWaitingRun's two-write window (now closed by the
+    //   transaction wrapper); listWaitingRuns filters these out so
+    //   reconcileWaitingRuns can never re-evaluate them. Valid durable waits
+    //   (current_state_id set) are intentionally preserved per ADR 0047.
     const rows = this.database
       .prepare(
-        "select id, project_name, issue_number from runs where state in ('queued','preparing_workspace','running')"
+        [
+          "select id, project_name, issue_number, state from runs",
+          "where state in ('queued','preparing_workspace','running')",
+          "or (state = 'waiting' and current_state_id is null)"
+        ].join(" ")
       )
-      .all() as { id: string; project_name: string; issue_number: number }[];
+      .all() as {
+        id: string;
+        project_name: string;
+        issue_number: number;
+        state: RunState;
+      }[];
     const swept = rows.map((row) => ({
       issueNumber: row.issue_number,
+      previousState: row.state,
       projectName: row.project_name,
       runId: row.id
     }));

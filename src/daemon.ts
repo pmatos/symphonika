@@ -136,10 +136,31 @@ export async function startDaemon(
     legacyRecheckTimer.unref?.();
   }
   const sweptOnStartup = runStore.markLeakedRunsAsStale();
-  if (sweptOnStartup.length > 0) {
+  for (const entry of sweptOnStartup) {
+    logger.warn(
+      {
+        issueNumber: entry.issueNumber,
+        previousState: entry.previousState,
+        project: entry.projectName,
+        runId: entry.runId,
+        terminalReason: "leaked_active_run"
+      },
+      "symphonika startup: marked orphaned run as stale"
+    );
+  }
+  if (sweptOnStartup.length === 0) {
     logger.info(
-      { swept: sweptOnStartup },
-      "symphonika startup: marked leaked runs as stale"
+      { count: 0 },
+      "symphonika startup: no orphaned runs found"
+    );
+  } else {
+    const byState: Partial<Record<RunState, number>> = {};
+    for (const entry of sweptOnStartup) {
+      byState[entry.previousState] = (byState[entry.previousState] ?? 0) + 1;
+    }
+    logger.info(
+      { byState, count: sweptOnStartup.length },
+      "symphonika startup: orphan sweep complete"
     );
   }
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;

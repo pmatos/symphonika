@@ -2,11 +2,12 @@ import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { Writable } from "node:stream";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resolveLogLevel, startDaemon } from "../src/daemon.js";
-import { RunStore } from "../src/run-store.js";
+import { openRunStore, RunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -101,6 +102,217 @@ describe("startDaemon", () => {
   });
 });
 
+describe("startDaemon orphan sweep logging", () => {
+  it("emits an info line confirming a clean run store at startup", async () => {
+    const cwd = await makeTempRoot();
+
+    const { logger, lines } = createCapturingLogger();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger,
+      port: 0
+    });
+    try {
+      const cleanLines = lines.filter(
+        (line) => line.msg === "symphonika startup: no orphaned runs found"
+      );
+
+      expect(cleanLines).toHaveLength(1);
+      expect(cleanLines[0]?.level).toBe(pino.levels.values.info);
+      expect(cleanLines[0]?.count).toBe(0);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("emits an info summary line aggregating count and byState", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    seedOrphans(stateRoot, [
+      { id: "leaked-running", issueNumber: 101, state: "running" },
+      { id: "leaked-preparing", issueNumber: 202, state: "preparing_workspace" }
+    ]);
+
+    const { logger, lines } = createCapturingLogger();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger,
+      port: 0
+    });
+    try {
+      const summaries = lines.filter(
+        (line) => line.msg === "symphonika startup: orphan sweep complete"
+      );
+
+      expect(summaries).toHaveLength(1);
+      const [summary] = summaries;
+      expect(summary?.level).toBe(pino.levels.values.info);
+      expect(summary?.count).toBe(2);
+      expect(summary?.byState).toEqual({ preparing_workspace: 1, running: 1 });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("emits one warn line per orphaned non-terminal run", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    seedOrphans(stateRoot, [
+      { id: "leaked-running", issueNumber: 101, state: "running" },
+      { id: "leaked-preparing", issueNumber: 202, state: "preparing_workspace" }
+    ]);
+
+    const { logger, lines } = createCapturingLogger();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger,
+      port: 0
+    });
+    try {
+      const orphanLines = lines.filter(
+        (line) => line.msg === "symphonika startup: marked orphaned run as stale"
+      );
+
+      expect(orphanLines).toHaveLength(2);
+      for (const line of orphanLines) {
+        expect(line.level).toBe(pino.levels.values.warn);
+        expect(line.terminalReason).toBe("leaked_active_run");
+        expect(line.project).toBe("symphonika");
+      }
+
+      const byRunId = new Map(
+        orphanLines.map((line) => [line.runId as string, line])
+      );
+      expect(byRunId.get("leaked-running")).toMatchObject({
+        previousState: "running",
+        issueNumber: 101
+      });
+      expect(byRunId.get("leaked-preparing")).toMatchObject({
+        previousState: "preparing_workspace",
+        issueNumber: 202
+      });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // ADR 0047 guarantees valid waiting rows (current_state_id set) survive
+  // daemon restart so the next tick can re-evaluate them; the startup sweep
+  // must leave them alone.
+  it("preserves valid waiting rows across daemon startup", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    seedOrphans(stateRoot, [
+      {
+        id: "wait-survivor",
+        issueNumber: 303,
+        state: "waiting",
+        currentStateId: "pr_review"
+      }
+    ]);
+
+    const { logger, lines } = createCapturingLogger();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger,
+      port: 0
+    });
+    let stopped = false;
+    try {
+      const orphanLines = lines.filter(
+        (line) => line.msg === "symphonika startup: marked orphaned run as stale"
+      );
+      expect(orphanLines).toHaveLength(0);
+
+      const cleanLines = lines.filter(
+        (line) => line.msg === "symphonika startup: no orphaned runs found"
+      );
+      expect(cleanLines).toHaveLength(1);
+
+      await daemon.stop();
+      stopped = true;
+
+      const survivorStore = openRunStore({ stateRoot });
+      try {
+        expect(survivorStore.getRun("wait-survivor")?.state).toBe("waiting");
+      } finally {
+        survivorStore.close();
+      }
+    } finally {
+      if (!stopped) {
+        await daemon.stop();
+      }
+    }
+  });
+
+  // A pre-fix crash inside the old non-atomic createWaitingRun could leave a
+  // row at state='waiting' with current_state_id=NULL. listWaitingRuns hides
+  // those rows, so reconcileWaitingRuns can never see them — they need a
+  // surgical sweep on startup.
+  it("sweeps waiting rows with NULL current_state_id (pre-atomicity orphans)", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    seedOrphans(stateRoot, [
+      // valid durable wait — must survive
+      {
+        id: "wait-valid",
+        issueNumber: 401,
+        state: "waiting",
+        currentStateId: "pr_review"
+      },
+      // pre-atomicity crash artifact — must be swept
+      { id: "wait-orphan", issueNumber: 402, state: "waiting" }
+    ]);
+
+    const { logger, lines } = createCapturingLogger();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger,
+      port: 0
+    });
+    let stopped = false;
+    try {
+      const orphanLines = lines.filter(
+        (line) => line.msg === "symphonika startup: marked orphaned run as stale"
+      );
+      expect(orphanLines).toHaveLength(1);
+      expect(orphanLines[0]).toMatchObject({
+        runId: "wait-orphan",
+        previousState: "waiting",
+        issueNumber: 402,
+        terminalReason: "leaked_active_run"
+      });
+
+      await daemon.stop();
+      stopped = true;
+
+      const verifyStore = openRunStore({ stateRoot });
+      try {
+        expect(verifyStore.getRun("wait-valid")?.state).toBe("waiting");
+        expect(verifyStore.getRun("wait-orphan")?.state).toBe("stale");
+        expect(verifyStore.getRun("wait-orphan")?.terminalReason).toBe(
+          "leaked_active_run"
+        );
+      } finally {
+        verifyStore.close();
+      }
+    } finally {
+      if (!stopped) {
+        await daemon.stop();
+      }
+    }
+  });
+});
+
 describe("resolveLogLevel", () => {
   it("defaults to info when no env var is set", () => {
     expect(resolveLogLevel({})).toBe("info");
@@ -123,6 +335,70 @@ describe("resolveLogLevel", () => {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+type CapturedLine = Record<string, unknown>;
+
+function createCapturingLogger(): {
+  logger: pino.Logger;
+  lines: CapturedLine[];
+} {
+  const lines: CapturedLine[] = [];
+  const stream = new Writable({
+    write(chunk: Buffer, _enc, callback): void {
+      const text = chunk.toString("utf8").trim();
+      if (text.length > 0) {
+        for (const part of text.split("\n")) {
+          if (part.length > 0) {
+            lines.push(JSON.parse(part) as CapturedLine);
+          }
+        }
+      }
+      callback();
+    }
+  });
+  return { lines, logger: pino({ level: "debug" }, stream) };
+}
+
+type OrphanSeed = {
+  id: string;
+  issueNumber: number;
+  state: "queued" | "preparing_workspace" | "running" | "waiting";
+  currentStateId?: string;
+};
+
+function seedOrphans(stateRoot: string, seeds: OrphanSeed[]): void {
+  const store = openRunStore({ stateRoot });
+  try {
+    for (const seed of seeds) {
+      store.createRun({
+        id: seed.id,
+        issue: {
+          body: "",
+          created_at: "2025-01-01T00:00:00Z",
+          id: seed.issueNumber + 1_000_000,
+          labels: ["agent-ready"],
+          number: seed.issueNumber,
+          priority: 1,
+          state: "open",
+          title: `fixture-${seed.id}`,
+          updated_at: "2025-01-01T00:00:00Z",
+          url: `https://example/${seed.issueNumber}`
+        },
+        projectName: "symphonika",
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      if (seed.state !== "queued") {
+        store.updateRunState(seed.id, seed.state);
+      }
+      if (seed.currentStateId !== undefined) {
+        store.setRunCurrentState(seed.id, seed.currentStateId);
+      }
+    }
+  } finally {
+    store.close();
+  }
 }
 
 function getFreePort(): Promise<number> {

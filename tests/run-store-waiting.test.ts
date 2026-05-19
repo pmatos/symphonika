@@ -1,10 +1,10 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { IssueSnapshot } from "../src/issue-polling.js";
-import { openRunStore } from "../src/run-store.js";
+import { openRunStore, RunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -114,6 +114,42 @@ describe("RunStore waiting-run helpers", () => {
         runId: "wait-B"
       });
     } finally {
+      store.close();
+    }
+  });
+
+  // Without atomicity, a crash after insertRunRow but before setRunCurrentState
+  // leaves a row in state='waiting' with current_state_id=NULL. listWaitingRuns
+  // filters those out, so reconcileWaitingRuns can never see them — a true
+  // orphan that survives any number of daemon restarts.
+  it("createWaitingRun rolls back the inserted row if setRunCurrentState throws", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const spy = vi
+      .spyOn(RunStore.prototype, "setRunCurrentState")
+      .mockImplementation(() => {
+        throw new Error("simulated crash between writes");
+      });
+
+    try {
+      seedParent(store, "parent-atomic");
+
+      expect(() =>
+        store.createWaitingRun({
+          currentStateId: "holding",
+          id: "wait-atomic",
+          issue: sampleIssue(),
+          parentRunId: "parent-atomic",
+          projectName: "symphonika"
+        })
+      ).toThrow("simulated crash between writes");
+
+      expect(store.getRun("wait-atomic")).toBeUndefined();
+      expect(
+        store.listRuns().find((entry) => entry.id === "wait-atomic")
+      ).toBeUndefined();
+    } finally {
+      spy.mockRestore();
       store.close();
     }
   });

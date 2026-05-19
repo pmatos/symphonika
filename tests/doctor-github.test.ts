@@ -544,7 +544,7 @@ async function writeValidProject(root: string): Promise<void> {
       "  codex:",
       `    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"`,
       "  claude:",
-      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      '    command: "claude -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json"',
       "projects:",
       "  - name: symphonika",
       "    disabled: false",

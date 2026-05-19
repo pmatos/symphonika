@@ -68,7 +68,7 @@ describe("doctor", () => {
         "  codex:",
         `    command: "${DEFAULT_CODEX_COMMAND}"`,
         "  claude:",
-        '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+        '    command: "claude -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json"',
         ""
       ].join("\n")
     );
@@ -246,7 +246,7 @@ describe("doctor", () => {
     await writeFakeClaudeHelp(fakeClaudePath);
     await writeValidConfig(configPath, {
       agentProvider: "claude",
-      claudeCommand: `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json`
+      claudeCommand: `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`
     });
     await writeFile(
       path.join(root, "WORKFLOW.md"),
@@ -442,7 +442,7 @@ async function writeValidConfig(
       "  codex:",
       `    command: "${overrides.codexCommand ?? DEFAULT_CODEX_COMMAND}"`,
       "  claude:",
-      `    command: "${overrides.claudeCommand ?? "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"}"`,
+      `    command: "${overrides.claudeCommand ?? "claude -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json"}"`,
       "projects:",
       "  - name: symphonika",
       "    disabled: false",

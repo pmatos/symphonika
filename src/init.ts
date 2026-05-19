@@ -42,7 +42,7 @@ const execFile = promisify(execFileCallback);
 const DEFAULT_CODEX_COMMAND =
   "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server";
 const DEFAULT_CLAUDE_COMMAND =
-  "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json";
+  "claude -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json";
 
 export async function runInit(options: InitOptions = {}): Promise<InitReport> {
   const cwd = options.cwd ?? process.cwd();

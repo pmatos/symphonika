@@ -662,6 +662,12 @@ function validateClaudeProtocolFlags(args: string[]): void {
     );
   }
 
+  if (!args.includes("--verbose")) {
+    throw new Error(
+      "Claude provider command must include --verbose (required by claude CLI when --print is combined with --output-format stream-json)"
+    );
+  }
+
   if (
     !args.includes("--dangerously-skip-permissions") &&
     !hasOptionValue(args, "--permission-mode", "bypassPermissions")

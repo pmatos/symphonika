@@ -52,7 +52,7 @@ describe("Claude stream-json provider", () => {
       provider.runAttempt({
         ...providerInputFixture(),
         provider: {
-          command: `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json`,
+          command: `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
           name: "claude"
         },
         workspacePath
@@ -194,7 +194,7 @@ describe("Claude stream-json provider", () => {
       provider.runAttempt({
         ...providerInputFixture(),
         provider: {
-          command: `${process.execPath} ${fakeClaudePath} --scenario=input-required -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json`,
+          command: `${process.execPath} ${fakeClaudePath} --scenario=input-required -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
           name: "claude"
         },
         workspacePath
@@ -252,7 +252,7 @@ describe("Claude stream-json provider", () => {
       provider.runAttempt({
         ...providerInputFixture(),
         provider: {
-          command: `${process.execPath} ${fakeClaudePath} --scenario=malformed -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json`,
+          command: `${process.execPath} ${fakeClaudePath} --scenario=malformed -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
           name: "claude"
         },
         workspacePath
@@ -295,7 +295,7 @@ describe("Claude stream-json provider", () => {
       provider.runAttempt({
         ...providerInputFixture(),
         provider: {
-          command: `${process.execPath} ${fakeClaudePath} --scenario=error -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json`,
+          command: `${process.execPath} ${fakeClaudePath} --scenario=error -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
           name: "claude"
         },
         workspacePath
@@ -338,7 +338,7 @@ describe("Claude stream-json provider", () => {
     const iterable = provider.runAttempt({
       ...providerInputFixture(),
       provider: {
-        command: `${process.execPath} ${fakeClaudePath} --scenario=wait -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json`,
+        command: `${process.execPath} ${fakeClaudePath} --scenario=wait -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
         name: "claude"
       },
       workspacePath
@@ -376,7 +376,7 @@ describe("Claude stream-json provider", () => {
 
     await expect(
       provider.validate(
-        `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json`
+        `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`
       )
     ).resolves.toBeUndefined();
   });
@@ -391,7 +391,7 @@ describe("Claude stream-json provider", () => {
 
     await expect(
       provider.validate(
-        `"${fakeClaudePath}" -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json`
+        `"${fakeClaudePath}" -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`
       )
     ).resolves.toBeUndefined();
   });
@@ -406,7 +406,7 @@ describe("Claude stream-json provider", () => {
 
     await expect(
       provider.validate(
-        `${fakeClaudePath} -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json`
+        `${fakeClaudePath} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`
       )
     ).resolves.toBeUndefined();
   });
@@ -420,7 +420,7 @@ describe("Claude stream-json provider", () => {
 
     await expect(
       provider.validate(
-        `${process.execPath} ${fakeClaudePath} --settings "${settingsJson.replaceAll('"', '\\"')}" -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json`
+        `${process.execPath} ${fakeClaudePath} --settings "${settingsJson.replaceAll('"', '\\"')}" -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`
       )
     ).resolves.toBeUndefined();
   });
@@ -431,6 +431,16 @@ describe("Claude stream-json provider", () => {
     await expect(
       provider.validate("claude -p --dangerously-skip-permissions")
     ).rejects.toThrow("--input-format stream-json");
+  });
+
+  it("rejects Claude commands missing --verbose", async () => {
+    const provider = createClaudeProvider();
+
+    await expect(
+      provider.validate(
+        "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"
+      )
+    ).rejects.toThrow("--verbose");
   });
 });
 
@@ -488,7 +498,7 @@ function providerInputFixture(): ProviderRunInput {
     promptPath: "/tmp/prompt.md",
     provider: {
       command:
-        "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json",
+        "claude -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json",
       name: "claude"
     },
     run: {

@@ -436,7 +436,7 @@ function defaultProvidersConfig(): RunControllerProvidersConfig {
   return {
     claude: {
       command:
-        "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"
+        "claude -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json"
     },
     codex: {
       command:

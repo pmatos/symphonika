@@ -24,7 +24,10 @@ import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
 } from "../src/workspace.js";
-import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
+import {
+  createGitWorkspaceAhead,
+  createGitWorkspaceAtBase
+} from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
@@ -1396,6 +1399,134 @@ describe("daemon dispatch", () => {
       );
       expect(implementingPrompt).toContain("Implement the plan");
       expect(implementingPrompt).not.toContain("Draft a plan");
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Regression: a planning agent that exits 0 without committing yields a
+  // deterministic `no_workspace_changes` per-state outcome, but the FSM
+  // transition `to: implementing when: provider_success: true` still matches.
+  // scheduleNext used to bail on failed-deterministic outcomes before the
+  // state-advance branch was reached, leaving the planning stage as the last
+  // run and never spawning the implementer. Verify the FSM advance fires.
+  it("schedules state advance after a planning step with no commits", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "symphonika",
+      "issues",
+      "8-dispatch-an-end-to-end-run-through-a-test-provider"
+    );
+    await writeTransitionOnlyMultiStateRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = successfulCodexProvider();
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    // Base commit only — provider exits 0 without committing, so
+    // branch_ahead_of_base = false and classifyFailure returns
+    // {kind: failed, classification: deterministic, reason: no_workspace_changes}.
+    await createGitWorkspaceAtBase(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => `run-fsm-advance-noop-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      // Wait until two run rows exist — the planning row plus the
+      // implementing continuation that the state advance must spawn.
+      const deadline = Date.now() + 15_000;
+      const databaseFile = path.join(root, ".symphonika", "symphonika.db");
+      while (Date.now() < deadline) {
+        try {
+          const database = new Database(databaseFile, { readonly: true });
+          try {
+            const row = database
+              .prepare("select count(*) as c from runs")
+              .get() as { c: number };
+            if (row.c >= 2) {
+              break;
+            }
+          } finally {
+            database.close();
+          }
+        } catch {
+          // database may not be readable yet during startup
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+
+      const database = new Database(databaseFile, { readonly: true });
+      try {
+        const rows = database
+          .prepare(
+            [
+              "select id, state, is_continuation, current_state_id,",
+              "terminal_state_id, state_transition_reason, terminal_reason,",
+              "workspace_path, continuation_parent_run_id",
+              "from runs order by created_at"
+            ].join(" ")
+          )
+          .all() as Array<Record<string, unknown>>;
+        expect(rows).toHaveLength(2);
+
+        const planningRun = rows[0]!;
+        const implementingRun = rows[1]!;
+
+        // The planning row classifies as failed (no commits → no_workspace_changes)
+        // but the workflow predicate engine still advanced the FSM. Both pieces
+        // of state must be present on the row.
+        expect(planningRun).toMatchObject({
+          id: "run-fsm-advance-noop-1",
+          state: "failed",
+          is_continuation: 0,
+          current_state_id: "implementing",
+          terminal_state_id: null,
+          terminal_reason: "no_workspace_changes"
+        });
+        expect(stringColumn(planningRun, "state_transition_reason")).toContain(
+          "planning advanced to implementing"
+        );
+
+        // The implementing run was spawned by the state advance, sharing the
+        // workspace with planning.
+        expect(implementingRun).toMatchObject({
+          id: "run-fsm-advance-noop-2",
+          is_continuation: 1,
+          continuation_parent_run_id: "run-fsm-advance-noop-1"
+        });
+        expect(planningRun["workspace_path"]).toBe(workspacePath);
+        expect(implementingRun["workspace_path"]).toBe(workspacePath);
+      } finally {
+        database.close();
+      }
     } finally {
       await daemon.stop();
     }
@@ -2912,6 +3043,60 @@ async function writeMultiStateRawFsmProject(root: string): Promise<void> {
       "        - to: done",
       "    done:",
       "      terminal: success",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "plan-prompt.md"),
+    "Draft a plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+  await writeFile(
+    path.join(root, "implement-prompt.md"),
+    "Implement the plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
+// Mirrors the shape of `builtin:plan-tdd-pr`: planning advances on
+// `provider_success: true` alone (no `complete_when` gate, no
+// `branch_ahead_of_base` requirement on the transition). Implementing still
+// gates on `branch_ahead_of_base: true` so an uncommitted impl pass falls
+// through to the fallback `to: failed` terminal.
+async function writeTransitionOnlyMultiStateRawFsmProject(
+  root: string
+): Promise<void> {
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: plan_then_implement_transition_only",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      transitions:",
+      "        - to: implementing",
+      "          when:",
+      "            provider_success: true",
+      "        - to: failed",
+      "    implementing:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: implement-prompt.md",
+      "      transitions:",
+      "        - to: done",
+      "          when:",
+      "            provider_success: true",
+      "            branch_ahead_of_base: true",
+      "        - to: failed",
+      "    done:",
+      "      terminal: success",
+      "    failed:",
+      "      terminal: blocked",
       ""
     ].join("\n")
   );

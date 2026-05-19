@@ -2702,49 +2702,15 @@ export class RunController {
       return;
     }
 
-    if (input.outcome.kind === "failed") {
-      if (input.outcome.classification !== "transient") {
-        return;
-      }
-      const currentRetries = this.runStore.runRetryCount(input.runId);
-      if (currentRetries >= this.lifecyclePolicy.retry.cap) {
-        return;
-      }
-      const next = this.runStore.incrementRetryCount(input.runId);
-      const delayMs = computeRetryDelayMs(next, this.lifecyclePolicy);
-      this.schedule({
-        delayMs,
-        fire: () =>
-          this.executeRetry({
-            attemptNumber: input.runtimeAttemptNumber + 1,
-            ...(input.extraInstructions === undefined
-              ? {}
-              : { extraInstructions: input.extraInstructions }),
-            issue: input.issue,
-            projectName: input.project.name,
-            providerCommand: input.providerCommand,
-            providerName: input.providerName,
-            // Carry the FSM mid-walk label-immunity bit into the retry. Without
-            // this a transient provider failure during a raw FSM walk would be
-            // cancelled with ELIGIBILITY_LOSS the moment labels drift, even
-            // though the in-flight attempt and the success-to-next-state path
-            // are both label-immune. See ADR 0046.
-            ...(input.respectsIssueLabels === false
-              ? { respectsIssueLabels: false }
-              : {}),
-            runId: input.runId
-          }),
-        issueNumber: input.issue.number,
-        kind: "retry",
-        projectName: input.project.name,
-        runId: input.runId
-      });
-      return;
-    }
-
-    // Raw FSM mid-walk: the state machine — not the issue label set — decides
-    // what runs next. Dispatch a state advance that skips the continuation cap
-    // and skips the labels_all / labels_none re-check; only require that the
+    // Raw FSM mid-walk: the workflow predicate engine — not the per-state
+    // ClassifiedTerminal — decides what runs next. A step that exits
+    // provider_success=true without committing yields a deterministic
+    // `no_workspace_changes` outcome, but applyWorkflowOutcome may still have
+    // advanced the FSM (e.g. plan -> implement gated only on
+    // provider_success). Fire the FSM continuation before the failed branch
+    // so the next state runs even when the source state's per-state result
+    // classifies as failed. State advance also skips the continuation cap
+    // and the labels_all / labels_none re-check; only require that the
     // issue is still open. See ADR 0046.
     if (input.stateAdvance != null) {
       const stateAdvance = input.stateAdvance;
@@ -2789,7 +2755,9 @@ export class RunController {
     // Raw FSM advanced into a wait state: the waiting row was already created
     // synchronously by applyWorkflowOutcome (so a daemon restart can recover
     // it). Schedule a one-shot re-evaluation; subsequent re-evaluations come
-    // from the daemon tick's reconcileWaitingRuns pass.
+    // from the daemon tick's reconcileWaitingRuns pass. Sits above the failed
+    // branch for the same reason as state advance: the FSM may legitimately
+    // park even when the source state's per-state result classifies as failed.
     if (input.waitPark != null) {
       this.logger?.info(
         {
@@ -2807,6 +2775,46 @@ export class RunController {
         fire: () => this.executeWaitPark({ waitingRunId }),
         issueNumber: input.issue.number,
         kind: "wait_park",
+        projectName: input.project.name,
+        runId: input.runId
+      });
+      return;
+    }
+
+    if (input.outcome.kind === "failed") {
+      if (input.outcome.classification !== "transient") {
+        return;
+      }
+      const currentRetries = this.runStore.runRetryCount(input.runId);
+      if (currentRetries >= this.lifecyclePolicy.retry.cap) {
+        return;
+      }
+      const next = this.runStore.incrementRetryCount(input.runId);
+      const delayMs = computeRetryDelayMs(next, this.lifecyclePolicy);
+      this.schedule({
+        delayMs,
+        fire: () =>
+          this.executeRetry({
+            attemptNumber: input.runtimeAttemptNumber + 1,
+            ...(input.extraInstructions === undefined
+              ? {}
+              : { extraInstructions: input.extraInstructions }),
+            issue: input.issue,
+            projectName: input.project.name,
+            providerCommand: input.providerCommand,
+            providerName: input.providerName,
+            // Carry the FSM mid-walk label-immunity bit into the retry. Without
+            // this a transient provider failure during a raw FSM walk would be
+            // cancelled with ELIGIBILITY_LOSS the moment labels drift, even
+            // though the in-flight attempt and the success-to-next-state path
+            // are both label-immune. See ADR 0046.
+            ...(input.respectsIssueLabels === false
+              ? { respectsIssueLabels: false }
+              : {}),
+            runId: input.runId
+          }),
+        issueNumber: input.issue.number,
+        kind: "retry",
         projectName: input.project.name,
         runId: input.runId
       });

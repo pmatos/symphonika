@@ -1515,10 +1515,23 @@ export class RunStore {
       projectName: row.project_name,
       runId: row.id
     }));
-    for (const entry of swept) {
-      this.recordTerminalReason(entry.runId, reason);
-      this.updateRunState(entry.runId, "stale");
-    }
+    const update = this.database.prepare(
+      [
+        "update runs set",
+        "state = 'stale',",
+        "terminal_reason = ?,",
+        "updated_at = ?",
+        "where id = ?"
+      ].join(" ")
+    );
+    const apply = this.database.transaction(() => {
+      for (const entry of swept) {
+        const updatedAt = timestamp();
+        update.run(reason, updatedAt, entry.runId);
+        this.recordRunTransition(entry.runId, "stale", updatedAt);
+      }
+    });
+    apply();
     return swept;
   }
 

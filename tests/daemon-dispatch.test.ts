@@ -1460,8 +1460,12 @@ describe("daemon dispatch", () => {
     });
 
     try {
-      // Wait until two run rows exist — the planning row plus the
-      // implementing continuation that the state advance must spawn.
+      // Wait until both the planning and implementing rows have finished and
+      // had their workspace evidence written. Counting `state in ('failed',
+      // 'succeeded')` avoids a race where the implementing continuation row
+      // exists (insert is synchronous) but startAttempt has not yet populated
+      // `workspace_path`; the implementer also classifies as failed because
+      // the test provider exits clean without committing.
       const deadline = Date.now() + 15_000;
       const databaseFile = path.join(root, ".symphonika", "symphonika.db");
       while (Date.now() < deadline) {
@@ -1469,7 +1473,9 @@ describe("daemon dispatch", () => {
           const database = new Database(databaseFile, { readonly: true });
           try {
             const row = database
-              .prepare("select count(*) as c from runs")
+              .prepare(
+                "select count(*) as c from runs where state in ('failed','succeeded')"
+              )
               .get() as { c: number };
             if (row.c >= 2) {
               break;

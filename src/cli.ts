@@ -421,14 +421,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       }) => {
         const printOnce = async (
           dashboard: boolean,
-          cachedReport?: DoctorReport,
           redrawState?: { previousLineCount: number }
         ): Promise<void> => {
           const stateRoot = resolveStateRoot(withConfigPath(options.config)).stateRoot;
           const store = openRunStore({ stateRoot });
           try {
-            const report =
-              cachedReport ?? (await doctor(withConfigPath(options.config)));
+            const report = await doctor(withConfigPath(options.config));
             const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
             const daemonStatus =
               daemonUrl === undefined
@@ -539,10 +537,9 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         };
 
         if (options.watch === true) {
-          const report = await doctor(withConfigPath(options.config));
           const redrawState = { previousLineCount: 0 };
           for (;;) {
-            await printOnce(true, report, redrawState);
+            await printOnce(true, redrawState);
             await sleep(options.intervalMs);
           }
         }

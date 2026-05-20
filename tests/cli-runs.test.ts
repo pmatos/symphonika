@@ -395,7 +395,7 @@ describe("CLI run commands", () => {
     expect(output.stdout).not.toContain("approval prompt");
   });
 
-  it("status --watch re-runs doctor on each refresh tick", async () => {
+  it("status --watch reuses doctor checks while refreshing daemon status", async () => {
     const stateRoot = await makeTempRoot();
     const resolvedStateRoot = path.join(stateRoot, ".symphonika");
     let doctorCalls = 0;
@@ -458,10 +458,74 @@ describe("CLI run commands", () => {
 
     expect(statusRequests).toBeGreaterThan(1);
     expect(openStoreCalls).toBeGreaterThan(2);
-    expect(doctorCalls).toBeGreaterThan(1);
+    expect(doctorCalls).toBe(1);
     expect(output.stdout).not.toContain("\x1b[2J");
     expect(output.stdout).toContain("\x1b[H");
     expect(output.stdout).toContain("\x1b[K");
+  });
+
+  it("status --watch can disable doctor caching with a zero TTL", async () => {
+    const stateRoot = await makeTempRoot();
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    let doctorCalls = 0;
+    let openStoreCalls = 0;
+    const { program } = captureProgram(stateRoot, {
+      fetch: () =>
+        Promise.resolve(
+          Response.json({
+            issuePolling: {
+              errors: [],
+              projects: [{ fetchedIssues: 1, name: "alpha", ok: true }]
+            },
+            state: "idle",
+            stateRoot: resolvedStateRoot
+          })
+        ),
+      openRunStore: () => {
+        openStoreCalls += 1;
+        if (openStoreCalls > 2) {
+          throw new Error("stop watch");
+        }
+        return openRunStore({ stateRoot });
+      },
+      runDoctor: () => {
+        doctorCalls += 1;
+        return Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          errors: [],
+          ok: true,
+          projects: [
+            {
+              missingOperationalLabels: [],
+              name: "alpha",
+              staleIssues: [],
+              validForDispatch: true,
+              workflowPath: "/tmp/WORKFLOW.md"
+            }
+          ]
+        } satisfies DoctorReport);
+      }
+    });
+
+    await expect(
+      program.parseAsync([
+        "node",
+        "symphonika",
+        "status",
+        "--config",
+        path.join(stateRoot, "symphonika.yml"),
+        "--daemon-url",
+        "http://127.0.0.1:3030",
+        "--watch",
+        "--interval-ms",
+        "1",
+        "--doctor-ttl-ms",
+        "0"
+      ])
+    ).rejects.toThrow("stop watch");
+
+    expect(openStoreCalls).toBeGreaterThan(2);
+    expect(doctorCalls).toBeGreaterThan(1);
   });
 
   it("status discovers the local daemon endpoint descriptor", async () => {

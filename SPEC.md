@@ -698,6 +698,14 @@ Default continuation cap: `3`.
 
 Retry only transient infrastructure or provider failures.
 
+For raw FSM workflows, retryable transient failures consume the retry budget before non-terminal
+FSM transitions matching the failure signals are allowed to advance or park the workflow. The retry
+re-enters the same FSM state and preserves the state-advance label-immunity bit when the failed run
+was already mid-walk. Terminal `failure` / `blocked` transitions remain workflow-authored
+deterministic verdicts and pre-empt retry. After the retry budget is exhausted, the final attempt's
+signals are evaluated normally by the FSM; if no workflow transition handles them, the run follows
+the exhausted-retry failure path below.
+
 Default retry policy:
 
 - retry cap: `3`

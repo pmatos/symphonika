@@ -2162,12 +2162,21 @@ export class RunController {
         advancedToTerminal: false,
         blocked: false
       };
+      // Retryable transient failures get first claim on the failed state. We
+      // still evaluate terminal workflow transitions below, because a raw FSM
+      // may intentionally map provider_success=false to terminal blocked/failure,
+      // but non-terminal advances are deferred until the retry budget is spent.
+      const deferRetryableTransientAdvance =
+        terminal.kind === "failed" &&
+        terminal.classification === "transient" &&
+        this.runStore.runRetryCount(input.runId) < this.lifecyclePolicy.retry.cap;
       // loadedWorkflow can be undefined if this.loadWorkflow itself threw
       // before currentState was set; in that case we run the bare
       // classifyFailure outcome without an FSM-driven overlay.
       if (currentState !== undefined && loadedWorkflow !== undefined) {
         workflowOutcome = this.applyWorkflowOutcome({
           currentState,
+          deferRetryableTransientAdvance,
           issue: input.issue,
           project: input.project,
           runId: input.runId,
@@ -2394,6 +2403,7 @@ export class RunController {
 
   private applyWorkflowOutcome(input: {
     currentState: ExpandedWorkflowState;
+    deferRetryableTransientAdvance?: boolean;
     issue: IssueSnapshot;
     project: RunControllerProjectConfig;
     runId: string;
@@ -2420,6 +2430,13 @@ export class RunController {
           advancedToTerminal: true,
           blocked: false,
           ...(terminalLabel === undefined ? {} : { terminalLabel })
+        };
+      }
+      if (input.deferRetryableTransientAdvance === true) {
+        return {
+          advancedToState: null,
+          advancedToTerminal: false,
+          blocked: false
         };
       }
       this.runStore.recordWorkflowStateAdvance(input.runId, {
@@ -2757,15 +2774,16 @@ export class RunController {
     }
 
     // Raw FSM mid-walk: the workflow predicate engine — not the per-state
-    // ClassifiedTerminal — decides what runs next. A step that exits
-    // provider_success=true without committing yields a deterministic
-    // `no_workspace_changes` outcome, but applyWorkflowOutcome may still have
-    // advanced the FSM (e.g. plan -> implement gated only on
-    // provider_success). Fire the FSM continuation before the failed branch
-    // so the next state runs even when the source state's per-state result
-    // classifies as failed. State advance also skips the continuation cap
-    // and the labels_all / labels_none re-check; only require that the
-    // issue is still open. See ADR 0046.
+    // ClassifiedTerminal — decides what runs next, except that retryable
+    // transient failures defer non-terminal advances before this method ever
+    // receives stateAdvance. A step that exits provider_success=true without
+    // committing still yields a deterministic `no_workspace_changes` outcome,
+    // but applyWorkflowOutcome may have advanced the FSM (e.g. plan ->
+    // implement gated only on provider_success). Fire the FSM continuation
+    // before the failed branch so the next state runs even when the source
+    // state's per-state result classifies as failed. State advance also skips
+    // the continuation cap and the labels_all / labels_none re-check; only
+    // require that the issue is still open. See ADR 0046.
     if (input.stateAdvance != null) {
       const stateAdvance = input.stateAdvance;
       const refreshedForAdvance = await this.refreshIssue({
@@ -2836,6 +2854,7 @@ export class RunController {
     // from the daemon tick's reconcileWaitingRuns pass. Sits above the failed
     // branch for the same reason as state advance: the FSM may legitimately
     // park even when the source state's per-state result classifies as failed.
+    // Retryable transient failures defer this park before waitPark is created.
     if (input.waitPark != null) {
       this.logger?.info(
         {

@@ -1668,15 +1668,123 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("retries a transient failure before taking a non-terminal failure transition", async () => {
+    const root = await makeTempRoot();
+    await writeTransientFailureFallbackRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const renderedPrompts: string[] = [];
+    let providerAttempts = 0;
+    const codexProvider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        providerAttempts += 1;
+        renderedPrompts.push(await readFile(input.promptPath, "utf8"));
+        yield {
+          normalized: {
+            exitCode: providerAttempts === 1 ? 1 : 0,
+            type: "process_exit"
+          },
+          raw: {
+            code: providerAttempts === 1 ? 1 : 0,
+            kind: "exit"
+          }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => `run-fsm-transient-retry-first-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 1, delaysMs: [5], maxBackoffMs: 10 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForSettledAttemptCount(root, 2);
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const rows = database
+          .prepare(
+            [
+              "select id, state, is_continuation, current_state_id,",
+              "terminal_state_id, retry_count from runs order by created_at"
+            ].join(" ")
+          )
+          .all() as Array<Record<string, unknown>>;
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          id: "run-fsm-transient-retry-first-1",
+          state: "succeeded",
+          is_continuation: 0,
+          current_state_id: null,
+          terminal_state_id: "done",
+          retry_count: 1
+        });
+
+        const attempts = database
+          .prepare(
+            "select run_id, attempt_number from attempts order by created_at"
+          )
+          .all() as Array<Record<string, unknown>>;
+        expect(attempts).toMatchObject([
+          { run_id: "run-fsm-transient-retry-first-1", attempt_number: 1 },
+          { run_id: "run-fsm-transient-retry-first-1", attempt_number: 2 }
+        ]);
+      } finally {
+        database.close();
+      }
+
+      expect(renderedPrompts).toHaveLength(2);
+      expect(renderedPrompts[0]).toContain("Draft a plan");
+      expect(renderedPrompts[1]).toContain("Draft a plan");
+      expect(renderedPrompts[0]).not.toContain("Recover");
+      expect(renderedPrompts[1]).not.toContain("Recover");
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   // Regression: when a transient per-state failure has retry budget
   // (`willRetry === true`), `applyTerminalLabels` does NOT add `sym:failed`
-  // — the retry path is supposed to handle the run. If the `stateAdvance`
-  // branch then bails on `refreshIssue`, the rollback must NOT add
-  // `sym:failed` (no suppression happened to undo) and must let control
-  // fall through so the failed-transient branch can schedule the retry.
-  // Without this distinction the bail-out path would over-mark the issue
-  // failed AND swallow the retry, breaking the transient-failure contract.
-  it("does not add sym:failed and lets the retry fire when state-advance bails on willRetry=true", async () => {
+  // — the retry path is supposed to handle the run. Even if the failure's
+  // signals match a non-terminal fallback transition, that advance is deferred
+  // until the retry budget is spent, so the issue must not be marked failed
+  // while the retry is still pending.
+  it("does not add sym:failed while a retryable transient fallback waits for retry", async () => {
     const root = await makeTempRoot();
     // Reuse the input_required-fallback workflow: planning's only fallback
     // is `to: error_handler` (no `when:`), so a transient failure with
@@ -1757,20 +1865,13 @@ describe("daemon dispatch", () => {
         }
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      // Give the bail-path's markIssueFailed (if any) and the
-      // scheduleNext fall-through to the failed branch (which schedules
-      // a retry) time to settle.
+      // Give the deferred-advance path and retry scheduling time to settle.
       await new Promise((resolve) => setTimeout(resolve, 100));
 
       // The attempt ran exactly once because executeRetry's refreshIssue
       // also throws (same mock), so the retry was scheduled but dropped.
-      // The fact that a retry was scheduled at all is what this test
-      // verifies indirectly: with willRetry=true, the stateAdvance bail
-      // path must NOT add `sym:failed` (applyTerminalLabels already
-      // skipped it on the same `!willRetry` short-circuit) and must let
-      // control fall through to the failed-transient branch. Without the
-      // gate this assertion would be `1` (the bail-out wrongly added
-      // sym:failed even though the run is supposed to retry).
+      // The lack of `sym:failed` verifies that the non-terminal fallback did
+      // not convert the retryable transient into a visible issue failure.
       expect(attempts).toBeGreaterThanOrEqual(1);
       const failedLabelAdds = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
         (call: unknown[]) => {
@@ -3558,6 +3659,58 @@ async function writeInputRequiredFallbackRawFsmProject(
   );
 }
 
+async function writeTransientFailureFallbackRawFsmProject(
+  root: string
+): Promise<void> {
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: transient_failure_fallback",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      transitions:",
+      "        - to: done",
+      "          when:",
+      "            provider_success: true",
+      "        - to: error_handler",
+      "          when:",
+      "            provider_success: false",
+      "    error_handler:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: error-prompt.md",
+      "      transitions:",
+      "        - to: recovered",
+      "          when:",
+      "            provider_success: true",
+      "        - to: failed",
+      "    done:",
+      "      terminal: success",
+      "    recovered:",
+      "      terminal: success",
+      "    failed:",
+      "      terminal: blocked",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "plan-prompt.md"),
+    "Draft a plan for #{{issue.number}}: {{issue.title}}.\n"
+  );
+  await writeFile(
+    path.join(root, "error-prompt.md"),
+    "Recover #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
 async function writePerStateProviderRawFsmProject(root: string): Promise<void> {
   await writeRawFsmProjectConfig(root);
   await writeProviderRoutingWorkflow(root, "claude");
@@ -3878,6 +4031,48 @@ async function waitForStoredRunState(
   }
 
   throw new Error(`run did not reach state ${state}`);
+}
+
+async function waitForSettledAttemptCount(
+  root: string,
+  expectedAttempts: number,
+  options: { intervalMs?: number; timeoutMs?: number } = {}
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const intervalMs = options.intervalMs ?? 20;
+  const deadline = Date.now() + timeoutMs;
+  const databaseFile = path.join(root, ".symphonika", "symphonika.db");
+
+  while (Date.now() < deadline) {
+    try {
+      const database = new Database(databaseFile, { readonly: true });
+      try {
+        const row = database
+          .prepare(
+            [
+              "select count(*) as attempts,",
+              "sum(case when state = 'running' then 1 else 0 end) as running",
+              "from attempts"
+            ].join(" ")
+          )
+          .get() as { attempts: number; running: number | null };
+        if (
+          row.attempts >= expectedAttempts &&
+          (row.running === null || row.running === 0)
+        ) {
+          return;
+        }
+      } finally {
+        database.close();
+      }
+    } catch {
+      // The daemon may still be starting and creating its SQLite store.
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(`expected ${expectedAttempts} settled attempts before timeout`);
 }
 
 async function waitForStatusError(

@@ -12,11 +12,20 @@ workflow rather than the length of a single workflow walk.
 Symphonika models state advancement as a distinct dispatch kind, `state_advance`, scheduled by
 `RunController.executeStateAdvance` whenever the FSM predicate engine advanced the workflow to a
 non-terminal next state for a `workflow.source.kind=raw_fsm` run. The per-state
-`ClassifiedTerminal` does **not** gate the advance: a step that exits `provider_success: true`
+`ClassifiedTerminal` does **not** gate ordinary advances: a step that exits `provider_success: true`
 without committing (a deterministic `no_workspace_changes` outcome) still advances when a
 transition matches on `provider_success: true` alone, because the state machine — not the
-classification of the per-state result — owns the "what runs next" decision. The same rule
-applies to `wait_park`. Two concrete consequences:
+classification of the per-state result — owns the "what runs next" decision.
+
+Transient provider/infrastructure failures are the narrow exception while retry budget remains. If
+a `failed` / `transient` outcome still has retry budget, Symphonika defers non-terminal FSM effects
+that match the failure signals (`state_advance` and `wait_park`) and retries the same state first.
+Terminal `failure` / `blocked` transitions still take effect immediately and synthesize a
+deterministic `workflow_terminal_*` outcome, because the workflow author has explicitly declared a
+terminal verdict. Once the retry budget is exhausted, the final attempt's signals are evaluated by
+the FSM normally, so a matching non-terminal fallback may advance the walk.
+
+The same rule applies to `wait_park`. Two concrete consequences:
 
 - `scheduleNext` evaluates the `stateAdvance` / `waitPark` branches before the failed-deterministic
   early-return. Otherwise a planning step that legitimately advances on `provider_success: true`
@@ -30,6 +39,9 @@ applies to `wait_park`. Two concrete consequences:
 State advance:
 
 - skips the continuation cap entirely (the FSM bounds the walk via terminal states);
+- yields to transient retry only while retry budget remains; the retry re-enters the same FSM state
+  and carries the same mid-walk label-immunity bit when the failed state was itself reached via
+  state advance;
 - skips the `labels_all` / `labels_none` re-check (the FSM, not the issue label set, decides the
   next state). Only the issue's open/closed state is re-verified to avoid acting on a closed issue.
   `reconcileActiveRuns` honors the same rule for in-flight state-advance runs, and `executeRetry`

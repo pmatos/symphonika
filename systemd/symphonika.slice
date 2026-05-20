@@ -1,0 +1,12 @@
+[Unit]
+Description=Symphonika slice (daemon + spawned providers and verifiers)
+
+[Slice]
+# Cap the whole daemon tree. Tune to match the host you run on; these
+# defaults assume a workstation with >= 64 GB of RAM. A runaway tool
+# (e.g. an ESBMC verification) will be killed inside this slice
+# instead of triggering a global OOM that tears down terminals or
+# other unrelated cgroups.
+MemoryHigh=24G
+MemoryMax=32G
+TasksMax=4096

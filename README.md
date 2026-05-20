@@ -60,6 +60,30 @@ npm run dev -- status --config symphonika.example.yml --watch
 
 The `symphony/` directory in the tree is a git submodule of an unrelated upstream project (`openai/symphony`) used as a reference — it is not a launcher for Symphonika.
 
+### Running as a systemd user service (Linux)
+
+For long-lived installations, run the daemon under `systemd --user` so it doesn't share a cgroup with your terminal. Otherwise an OOM-kill of a spawned tool (compiler, verifier, etc.) can mark the whole terminal scope as failed and `systemd` will tear down the terminal — and the daemon — along with it.
+
+Template units live in [`systemd/`](systemd/):
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp systemd/symphonika.service systemd/symphonika.slice ~/.config/systemd/user/
+# Adjust ExecStart (if you didn't install via `npm install -g`) and the
+# memory caps in the slice to match your host.
+systemctl --user daemon-reload
+systemctl --user enable --now symphonika.service
+journalctl --user -u symphonika -f
+```
+
+What the template gives you:
+
+- **`symphonika.slice`** owns the daemon and every process it spawns. `MemoryHigh=` / `MemoryMax=` cap the whole tree so a runaway tool is killed *inside* the slice instead of triggering a global OOM.
+- **`GITHUB_TOKEN`** is populated from `gh auth token` at each (re)start, so the daemon picks up rotated tokens automatically. The service fails closed (won't start) if `gh` is logged out.
+- `Restart=on-failure` brings the daemon back, and `After=graphical-session.target` keeps the ordering right so `gh` can read your keyring.
+
+If you need the daemon to keep running after logout, `loginctl enable-linger $USER`.
+
 ### Built-in workflow templates
 
 Raw-FSM workflows can reference built-in templates by prefix without authoring local YAML, for example:

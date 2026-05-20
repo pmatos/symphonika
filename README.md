@@ -79,7 +79,7 @@ journalctl --user -u symphonika -f
 What the template gives you:
 
 - **`symphonika.slice`** owns the daemon and every process it spawns. `MemoryHigh=` / `MemoryMax=` cap the whole tree so a runaway tool is killed *inside* the slice instead of triggering a global OOM.
-- **`GITHUB_TOKEN`** is populated from `gh auth token` at each (re)start, so the daemon picks up rotated tokens automatically. The service fails closed (won't start) if `gh` is logged out.
+- The daemon's **GitHub auth token** is populated from `gh auth token` at each (re)start, so it picks up rotated tokens automatically. The service fails closed (won't start) if `gh` is logged out.
 - `Restart=on-failure` brings the daemon back, and `After=graphical-session.target` keeps the ordering right so `gh` can read your keyring.
 
 If you need the daemon to keep running after logout, `loginctl enable-linger $USER`.

@@ -846,7 +846,7 @@ Bootstrap CLI commands:
 - `symphonika doctor [--config <path>]`
 - `symphonika init-project [--config <path>] --yes`
 - `symphonika daemon [--config <path>] [--port <port>]`
-- `symphonika status [--config <path>] [--dashboard] [--watch] [--interval-ms <ms>]`
+- `symphonika status [--config <path>] [--dashboard] [--watch] [--interval-ms <ms>] [--doctor-ttl-ms <ms>]`
 - `symphonika poll-now [--config <path>]`
 - `symphonika runs [--config <path>]`
 - `symphonika show-run <run-id> [--config <path>]`
@@ -873,7 +873,10 @@ labels only after explicit confirmation.
 
 `status --dashboard` renders a compact terminal status dashboard from the run store and daemon
 `/api/status` endpoint. `status --watch` refreshes that read-only dashboard in place; it must not
-dispatch work or mutate GitHub state.
+dispatch work or mutate GitHub state. Watch mode refreshes daemon status and run-store data every
+frame, but caches the full `doctor` validation path for 5000 ms by default so passive dashboards do
+not continuously re-run provider probes or GitHub validation reads. `--doctor-ttl-ms 0` disables that
+cache when an operator explicitly wants every frame to perform full validation.
 
 `clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
 

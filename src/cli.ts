@@ -98,6 +98,8 @@ type PollNowResponse = {
   state: "dispatching" | "idle";
 };
 
+const DEFAULT_STATUS_WATCH_DOCTOR_TTL_MS = 5000;
+
 export function buildCli(dependencies: CliDependencies = {}): Command {
   const doctor = dependencies.runDoctor ?? runDoctor;
   const init = dependencies.runInit ?? runInit;
@@ -411,14 +413,45 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .option("--dashboard", "render a compact terminal status dashboard")
     .option("--watch", "refresh the terminal dashboard until interrupted")
     .option("--interval-ms <n>", "watch refresh interval in milliseconds", parsePositiveInt, 1000)
+    .option(
+      "--doctor-ttl-ms <n>",
+      "minimum milliseconds between full doctor checks in watch mode; 0 checks every frame",
+      parseNonNegativeInt,
+      DEFAULT_STATUS_WATCH_DOCTOR_TTL_MS
+    )
     .action(
       async (options: {
         config?: string;
         daemonUrl?: string;
         dashboard?: boolean;
+        doctorTtlMs: number;
         intervalMs: number;
         watch?: boolean;
       }) => {
+        let watchDoctorCache:
+          | { expiresAtMs: number; report: DoctorReport }
+          | undefined;
+
+        const refreshDoctorReport = async (): Promise<DoctorReport> => {
+          if (options.watch !== true) {
+            return doctor(withConfigPath(options.config));
+          }
+          const now = Date.now();
+          if (
+            options.doctorTtlMs > 0 &&
+            watchDoctorCache !== undefined &&
+            now < watchDoctorCache.expiresAtMs
+          ) {
+            return watchDoctorCache.report;
+          }
+          const report = await doctor(withConfigPath(options.config));
+          watchDoctorCache = {
+            expiresAtMs: Date.now() + options.doctorTtlMs,
+            report
+          };
+          return report;
+        };
+
         const printOnce = async (
           dashboard: boolean,
           redrawState?: { previousLineCount: number }
@@ -426,7 +459,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           const stateRoot = resolveStateRoot(withConfigPath(options.config)).stateRoot;
           const store = openRunStore({ stateRoot });
           try {
-            const report = await doctor(withConfigPath(options.config));
+            const report = await refreshDoctorReport();
             const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
             const daemonStatus =
               daemonUrl === undefined
@@ -1318,6 +1351,14 @@ function parsePositiveInt(value: string): number {
   const n = Number(value);
   if (!Number.isInteger(n) || n <= 0) {
     throw new InvalidArgumentError("must be a positive integer");
+  }
+  return n;
+}
+
+function parseNonNegativeInt(value: string): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new InvalidArgumentError("must be a non-negative integer");
   }
   return n;
 }

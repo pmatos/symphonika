@@ -1959,6 +1959,7 @@ export class RunController {
     let projectForAttempt = input.project;
     let respectsIssueLabels = true;
     let parkedAsWaiting = false;
+    let preservedWatchdogTerminal = false;
 
     this.runStore.updateRunState(input.runId, "preparing_workspace");
 
@@ -2013,7 +2014,7 @@ export class RunController {
       // (which has no `stay_waiting` branch) leaving the workflow with no
       // waiting row and no merge attempt scheduled. Returning here keeps the
       // run row durable (state="waiting", current_state_id set) so a daemon
-      // restart can resume the reconciliation. See SPEC §12.5 / §12.6.
+      // restart can resume the reconciliation. See SPEC §12.6 / §12.7.
       if (
         loadedWorkflow.errors.length === 0 &&
         loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm" &&
@@ -2137,13 +2138,46 @@ export class RunController {
         cancelRequested = removed.cancelRequested;
         cancelReason = removed.cancelReason;
       }
+      const preservedRun = this.runStore.getRun(input.runId);
+      if (
+        preservedRun?.state === "stale" &&
+        preservedRun.terminalReason === "no_progress"
+      ) {
+        if (attemptCreated) {
+          this.runStore.updateAttemptState(attemptId, "stale");
+        }
+        await this.applyTerminalLabels({
+          cancelReason: CANCEL_REASONS.NO_PROGRESS,
+          fsmContinuing: false,
+          issueNumber: input.issue.number,
+          outcome: {
+            kind: "cancelled",
+            reason: "no_progress"
+          },
+          repository: input.repository,
+          willRetry: false
+        });
+        this.logger?.info(
+          {
+            attemptNumber: input.attemptNumber,
+            cancelReason,
+            issueNumber: input.issue.number,
+            project: input.project.name,
+            runId: input.runId,
+            state: "stale",
+            terminalReason: "no_progress"
+          },
+          "symphonika run termination preserved watchdog verdict"
+        );
+        preservedWatchdogTerminal = true;
+      }
       // Parked-as-waiting runs have already committed their "waiting" state
       // and scheduled the wait_park callback that will own re-evaluation.
       // The failure-classification + scheduleNext pipeline below would
       // overwrite the waiting state and double-schedule, so it's gated on
       // !parkedAsWaiting. The unconditional unregister above already
       // released the in-flight slot. See ADR 0052 — slot-leak fix.
-      if (!parkedAsWaiting) {
+      if (!parkedAsWaiting && !preservedWatchdogTerminal) {
       const terminal = await classifyFailure({
         cancelRequested,
         ...(caughtError === undefined ? {} : { error: caughtError }),
@@ -2296,7 +2330,7 @@ export class RunController {
       } // end if (!parkedAsWaiting)
     }
 
-    if (caughtError !== undefined) {
+    if (caughtError !== undefined && !preservedWatchdogTerminal) {
       throw caughtError instanceof Error
         ? caughtError
         : new Error(typeof caughtError === "string" ? caughtError : "unknown error");

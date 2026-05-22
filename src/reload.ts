@@ -42,6 +42,7 @@ export type RuntimeConfigSnapshot = {
   projects: RunControllerProjectConfig[];
   providers: RunControllerProvidersConfig;
   pullRequestPolicy: PullRequestFollowupPolicy;
+  watchdog: WatchdogConfig;
 };
 
 export type RuntimeReloadStatus = {
@@ -57,10 +58,36 @@ export type RuntimeConfigReloaderOptions = {
   logger?: Logger;
 };
 
+export type WatchdogConfig = {
+  enabled: boolean;
+  graceMinutes: number;
+  sampleIntervalSeconds: number;
+};
+
+export const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
+  enabled: true,
+  graceMinutes: 30,
+  sampleIntervalSeconds: 60
+};
+
 const providerNameSchema = z.enum(["codex", "claude"]);
 const providerCommandSchema = z
   .object({
     command: z.string().trim().min(1)
+  })
+  .passthrough();
+
+const watchdogConfigSchema = z
+  .object({
+    enabled: z.boolean().default(DEFAULT_WATCHDOG_CONFIG.enabled),
+    grace_minutes: z
+      .number()
+      .positive()
+      .default(DEFAULT_WATCHDOG_CONFIG.graceMinutes),
+    sample_interval_seconds: z
+      .number()
+      .positive()
+      .default(DEFAULT_WATCHDOG_CONFIG.sampleIntervalSeconds)
   })
   .passthrough();
 
@@ -124,6 +151,7 @@ const serviceConfigSchema = z
       })
       .passthrough()
       .optional(),
+    watchdog: watchdogConfigSchema.optional(),
     providers: z
       .object({
         codex: providerCommandSchema,
@@ -188,6 +216,10 @@ export class RuntimeConfigReloader {
     return (
       this.snapshot?.globalConcurrency ?? { maxInFlight: undefined }
     );
+  }
+
+  watchdogConfig(): WatchdogConfig {
+    return this.snapshot?.watchdog ?? DEFAULT_WATCHDOG_CONFIG;
   }
 
   async reload(): Promise<RuntimeConfigSnapshot | undefined> {
@@ -335,9 +367,22 @@ async function loadRuntimeConfigSnapshot(input: {
         codex: { command: parsed.data.providers.codex.command }
       },
       pullRequestPolicy:
-        pullRequestFollowupPolicyFromRaw(raw) ?? DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY
+        pullRequestFollowupPolicyFromRaw(raw) ?? DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY,
+      watchdog: normalizeWatchdogConfig(parsed.data.watchdog)
     },
     usingLastKnownGood: false
+  };
+}
+
+function normalizeWatchdogConfig(
+  raw: z.infer<typeof watchdogConfigSchema> | undefined
+): WatchdogConfig {
+  return {
+    enabled: raw?.enabled ?? DEFAULT_WATCHDOG_CONFIG.enabled,
+    graceMinutes: raw?.grace_minutes ?? DEFAULT_WATCHDOG_CONFIG.graceMinutes,
+    sampleIntervalSeconds:
+      raw?.sample_interval_seconds ??
+      DEFAULT_WATCHDOG_CONFIG.sampleIntervalSeconds
   };
 }
 

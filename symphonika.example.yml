@@ -4,6 +4,11 @@ state:
 polling:
   interval_ms: 30000
 
+watchdog:
+  enabled: true
+  grace_minutes: 30
+  sample_interval_seconds: 60
+
 # Optional global cap on the total number of concurrent provider runs across
 # all projects. Omit (or comment out) for unbounded. See ADR 0053.
 # global:

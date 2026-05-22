@@ -200,6 +200,11 @@ state:
 polling:
   interval_ms: 30000
 
+watchdog:
+  enabled: true
+  grace_minutes: 30
+  sample_interval_seconds: 60
+
 pull_requests:
   enabled: true
   review_followup:
@@ -348,6 +353,7 @@ SQLite stores durable orchestration state:
 - provider/session IDs
 - workspace paths
 - normalized event metadata
+- Watchdog samples for no-progress detection
 - raw log file paths
 
 The run store is not a replacement for GitHub as the canonical tracker. It is durable runtime
@@ -448,6 +454,10 @@ Manual poll-now triggers may exist in CLI or UI/API. They run the same daemon re
 and dispatch gates as interval ticks, and may queue or coalesce when another manual poll is already
 pending. Validation and status commands must not dispatch work.
 
+The daemon also runs the Watchdog during reconciliation according to
+`watchdog.sample_interval_seconds`. The default Watchdog policy is enabled with a 30 minute
+no-progress grace window and 60 second sampling interval.
+
 ### 8.3 Multi-Project Dispatch
 
 The orchestrator is the single authority for dispatch.
@@ -522,6 +532,14 @@ On eligibility loss while running:
 
 - cancel active run
 - remove `sym:running`
+- preserve workspace and logs
+
+On Watchdog no-progress termination:
+
+- transition the Run to `state = "stale"`
+- record `terminal_reason = "no_progress"` with deterministic classification
+- request provider cancellation
+- remove `sym:running` best-effort when the provider stream unwinds
 - preserve workspace and logs
 
 On stale startup state:
@@ -741,7 +759,36 @@ Cancel active provider process when:
 
 Cancellation preserves workspace and logs.
 
-### 12.4 PR Follow-up
+### 12.4 Watchdog
+
+The Watchdog detects active provider runs that have stopped doing observable work. It samples rows
+in `queued`, `preparing_workspace`, and `running`; rows in `state = "waiting"` are reconciled by
+the wait-state path and are not sampled.
+
+For each sampled Run, Symphonika records one durable `watchdog_samples` row keyed by `run_id`:
+`sampled_at`, `last_tool_call_at`, `workspace_mtime_max`, `turn_id_set_size`,
+`output_tokens_total`, `normalized_log_offset`, and `idle_since`. `idle_since` survives daemon
+restart, so a Run that was already observed idle resumes its grace window from the first idle
+observation rather than from process boot.
+
+Sampling reads the Normalized Event Log only forward of the stored byte offset and walks the
+Workspace tree once. The hard-coded v1 exclude set is `.git/`, `target/`, and `node_modules/`;
+these are skipped at the directory entry level and are not descended.
+
+A sampled Run is making progress when any one signal advances since the previous sample:
+
+- `last_tool_call_at` increases
+- `workspace_mtime_max` advances by at least one second
+- `turn_id_set_size` increases
+- `output_tokens_total` increases
+
+`usage_updated` and `rate_limit_updated` events alone do not count unless output tokens grow or
+another signal advances. When no progress is observed, the Watchdog persists `idle_since` on first
+observation. Once `now - idle_since >= watchdog.grace_minutes`, it transitions the Run to
+`stale` with `terminal_reason = "no_progress"` and requests provider cancellation. `no_progress`
+is a deterministic terminal verdict for that attempt, not a transient retry reason.
+
+### 12.5 PR Follow-up
 
 On each daemon tick, Symphonika discovers open PRs for succeeded runs whose Issue Branch is not yet
 tracked. For each tracked open PR:
@@ -759,7 +806,7 @@ Default PR follow-up policy: poll enabled, at most `3` review dispatches per PR,
 require successful status checks, and do not require an explicit approval unless repository rules
 surface `REVIEW_REQUIRED`.
 
-### 12.5 Wait States
+### 12.6 Wait States
 
 Raw FSM workflows may declare `action.kind: "wait"` states that pause the workflow walk until
 observable pull-request conditions change. A wait state does not launch a provider; instead the
@@ -805,7 +852,7 @@ The `none` value covers GitHub `null`. Unresolved review feedback is projected b
 `has_unresolved_reviews: <boolean>` for strict-equality workflows that only need to detect whether
 any unresolved threads exist.
 
-### 12.6 Merge States
+### 12.7 Merge States
 
 Raw FSM workflows may declare `action.kind: "merge_pr"` states that merge the workflow instance's
 Symphonika-owned pull request when the configured policy is satisfied. A merge state does not
@@ -841,10 +888,10 @@ Lifecycle:
    and never delete the workspace, matching §10 (workspaces are never auto-deleted).
 
 The merge state is intentionally scoped to Symphonika-tracked PRs — arbitrary cross-issue or
-external PRs are out of scope. PR follow-up policy (`§12.4`) and merge-state evaluation share
+external PRs are out of scope. PR follow-up policy (`§12.5`) and merge-state evaluation share
 the same `pullRequestReadyToMerge` helper so the two paths cannot drift on what counts as
 mergeable. Cancellation, issue-close, and label-immunity semantics are inherited from wait
-states (§12.5).
+states (§12.6).
 
 ## 13. CLI
 

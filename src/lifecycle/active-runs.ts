@@ -36,6 +36,7 @@ export type {
 export const CANCEL_REASONS = {
   CLOSED_ISSUE: "closed_issue",
   ELIGIBILITY_LOSS: "eligibility_loss",
+  NO_PROGRESS: "no_progress",
   OPERATOR: "operator"
 } as const satisfies Record<string, CancelReason>;
 

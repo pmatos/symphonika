@@ -22,7 +22,11 @@ export type RunState =
 
 export type FailureClassification = "transient" | "deterministic" | "input_required";
 
-export type CancelReason = "closed_issue" | "eligibility_loss" | "operator";
+export type CancelReason =
+  | "closed_issue"
+  | "eligibility_loss"
+  | "no_progress"
+  | "operator";
 
 export type RunStatus = {
   branchName: string;
@@ -174,6 +178,26 @@ export type ProviderEventRecord = {
   type: string;
 };
 
+export type WatchdogSample = {
+  idleSince: string | null;
+  lastToolCallAt: string | null;
+  normalizedLogOffset: number;
+  outputTokensTotal: number;
+  runId: string;
+  sampledAt: string;
+  turnIdSetSize: number;
+  workspaceMtimeMax: number;
+};
+
+export type WatchdogCandidateRun = {
+  issueNumber: number;
+  normalizedLogPath: string;
+  projectName: string;
+  runId: string;
+  state: Extract<RunState, "queued" | "preparing_workspace" | "running">;
+  workspacePath: string;
+};
+
 export type ListProviderEventsOptions = {
   afterSequence?: number;
   limit?: number;
@@ -298,6 +322,26 @@ type ProviderEventRow = {
   run_id: string;
   sequence: number;
   type: string;
+};
+
+type WatchdogCandidateRunRow = {
+  id: string;
+  issue_number: number;
+  normalized_log_path: string | null;
+  project_name: string;
+  state: WatchdogCandidateRun["state"];
+  workspace_path: string | null;
+};
+
+type WatchdogSampleRow = {
+  idle_since: string | null;
+  last_tool_call_at: string | null;
+  normalized_log_offset: number;
+  output_tokens_total: number;
+  run_id: string;
+  sampled_at: string;
+  turn_id_set_size: number;
+  workspace_mtime_max: number;
 };
 
 type PullRequestDiscoveryRunRow = {
@@ -607,6 +651,111 @@ export class RunStore {
       projectName: row.project_name,
       runId: row.id
     }));
+  }
+
+  listWatchdogCandidateRuns(): WatchdogCandidateRun[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, issue_number, state,",
+          "workspace_path, normalized_log_path",
+          "from runs",
+          "where state in ('queued','preparing_workspace','running')",
+          "order by created_at asc, id asc"
+        ].join(" ")
+      )
+      .all() as WatchdogCandidateRunRow[];
+    return rows.map((row) => ({
+      issueNumber: row.issue_number,
+      normalizedLogPath: row.normalized_log_path ?? "",
+      projectName: row.project_name,
+      runId: row.id,
+      state: row.state,
+      workspacePath: row.workspace_path ?? ""
+    }));
+  }
+
+  getWatchdogSample(runId: string): WatchdogSample | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select run_id, sampled_at, last_tool_call_at, workspace_mtime_max,",
+          "turn_id_set_size, output_tokens_total, normalized_log_offset, idle_since",
+          "from watchdog_samples where run_id = ?"
+        ].join(" ")
+      )
+      .get(runId) as WatchdogSampleRow | undefined;
+    return row === undefined ? undefined : mapWatchdogSampleRow(row);
+  }
+
+  upsertWatchdogSample(sample: WatchdogSample): void {
+    this.database
+      .prepare(
+        [
+          "insert into watchdog_samples (",
+          "run_id, sampled_at, last_tool_call_at, workspace_mtime_max,",
+          "turn_id_set_size, output_tokens_total, normalized_log_offset, idle_since",
+          ") values (",
+          "@run_id, @sampled_at, @last_tool_call_at, @workspace_mtime_max,",
+          "@turn_id_set_size, @output_tokens_total, @normalized_log_offset, @idle_since",
+          ")",
+          "on conflict(run_id) do update set",
+          "sampled_at = excluded.sampled_at,",
+          "last_tool_call_at = excluded.last_tool_call_at,",
+          "workspace_mtime_max = excluded.workspace_mtime_max,",
+          "turn_id_set_size = excluded.turn_id_set_size,",
+          "output_tokens_total = excluded.output_tokens_total,",
+          "normalized_log_offset = excluded.normalized_log_offset,",
+          "idle_since = excluded.idle_since"
+        ].join(" ")
+      )
+      .run({
+        idle_since: sample.idleSince,
+        last_tool_call_at: sample.lastToolCallAt,
+        normalized_log_offset: sample.normalizedLogOffset,
+        output_tokens_total: sample.outputTokensTotal,
+        run_id: sample.runId,
+        sampled_at: sample.sampledAt,
+        turn_id_set_size: sample.turnIdSetSize,
+        workspace_mtime_max: sample.workspaceMtimeMax
+      });
+  }
+
+  rememberWatchdogTurnIds(runId: string, turnIds: Iterable<string>): number {
+    const insert = this.database.prepare(
+      "insert or ignore into watchdog_turn_ids (run_id, turn_id) values (?, ?)"
+    );
+    const count = this.database.prepare(
+      "select count(*) as count from watchdog_turn_ids where run_id = ?"
+    );
+    const apply = this.database.transaction(() => {
+      for (const turnId of turnIds) {
+        insert.run(runId, turnId);
+      }
+      return count.get(runId) as { count: number };
+    });
+    return apply().count;
+  }
+
+  markRunNoProgressStale(runId: string, updatedAt = timestamp()): boolean {
+    const result = this.database
+      .prepare(
+        [
+          "update runs set",
+          "state = 'stale',",
+          "terminal_reason = 'no_progress',",
+          "failure_classification = 'deterministic',",
+          "updated_at = ?",
+          "where id = ?",
+          "and state in ('queued','preparing_workspace','running')"
+        ].join(" ")
+      )
+      .run(updatedAt, runId);
+    if (result.changes === 0) {
+      return false;
+    }
+    this.recordRunTransition(runId, "stale", updatedAt);
+    return true;
   }
 
   // Stale-claim liveness needs waiting rows too: a parked wait still wears
@@ -1686,6 +1835,25 @@ export class RunStore {
         created_at text not null,
         updated_at text not null
       );
+
+      create table if not exists watchdog_samples (
+        run_id text primary key,
+        sampled_at text not null,
+        last_tool_call_at text,
+        workspace_mtime_max real not null,
+        turn_id_set_size integer not null,
+        output_tokens_total integer not null,
+        normalized_log_offset integer not null,
+        idle_since text,
+        foreign key (run_id) references runs(id)
+      );
+
+      create table if not exists watchdog_turn_ids (
+        run_id text not null,
+        turn_id text not null,
+        primary key (run_id, turn_id),
+        foreign key (run_id) references runs(id)
+      );
     `);
 
     const additions: Array<[string, string, string]> = [
@@ -1927,6 +2095,19 @@ function mapRunRow(row: RunRow): RunStatus {
     terminalStateId: row.terminal_state_id ?? null,
     updatedAt: row.updated_at,
     workspacePath: row.workspace_path ?? ""
+  };
+}
+
+function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
+  return {
+    idleSince: row.idle_since,
+    lastToolCallAt: row.last_tool_call_at,
+    normalizedLogOffset: row.normalized_log_offset,
+    outputTokensTotal: row.output_tokens_total,
+    runId: row.run_id,
+    sampledAt: row.sampled_at,
+    turnIdSetSize: row.turn_id_set_size,
+    workspaceMtimeMax: row.workspace_mtime_max
   };
 }
 

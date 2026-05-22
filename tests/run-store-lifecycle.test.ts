@@ -356,6 +356,102 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("migrates watchdog sample tables idempotently", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    store.close();
+
+    const database = new Database(databasePath(root), { readonly: true });
+    try {
+      expect(columnNames(database, "watchdog_samples")).toEqual([
+        "run_id",
+        "sampled_at",
+        "last_tool_call_at",
+        "workspace_mtime_max",
+        "turn_id_set_size",
+        "output_tokens_total",
+        "normalized_log_offset",
+        "idle_since"
+      ]);
+      expect(columnNames(database, "watchdog_turn_ids")).toEqual([
+        "run_id",
+        "turn_id"
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("persists watchdog samples across store reopen", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      seedRun(store, { id: "run-watchdog", issueNumber: 77 });
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T12:10:00.000Z",
+        lastToolCallAt: "2026-05-22T12:00:00.000Z",
+        normalizedLogOffset: 42,
+        outputTokensTotal: 9,
+        runId: "run-watchdog",
+        sampledAt: "2026-05-22T12:15:00.000Z",
+        turnIdSetSize: 2,
+        workspaceMtimeMax: 1_769_000_000_123
+      });
+    } finally {
+      store.close();
+    }
+
+    const reopened = openRunStore({ stateRoot: root });
+    try {
+      expect(reopened.getWatchdogSample("run-watchdog")).toEqual({
+        idleSince: "2026-05-22T12:10:00.000Z",
+        lastToolCallAt: "2026-05-22T12:00:00.000Z",
+        normalizedLogOffset: 42,
+        outputTokensTotal: 9,
+        runId: "run-watchdog",
+        sampledAt: "2026-05-22T12:15:00.000Z",
+        turnIdSetSize: 2,
+        workspaceMtimeMax: 1_769_000_000_123
+      });
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it("lists watchdog candidates from active run states and excludes waiting rows", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      seedRun(store, { id: "queued", issueNumber: 1 });
+      seedRun(store, { id: "running", issueNumber: 2 });
+      store.updateRunState("running", "running");
+      store.updateRunEvidence("running", evidence("branch-running"));
+      seedRun(store, { id: "preparing", issueNumber: 3 });
+      store.updateRunState("preparing", "preparing_workspace");
+      seedRun(store, { id: "waiting", issueNumber: 4 });
+      store.updateRunState("waiting", "waiting");
+      store.setRunCurrentState("waiting", "pr_review");
+
+      expect(
+        store
+          .listWatchdogCandidateRuns()
+          .slice()
+          .sort((left, right) => left.runId.localeCompare(right.runId))
+      ).toEqual([
+        expect.objectContaining({ runId: "preparing", state: "preparing_workspace" }),
+        expect.objectContaining({ runId: "queued", state: "queued" }),
+        expect.objectContaining({
+          normalizedLogPath: "/tmp/provider.normalized.jsonl",
+          runId: "running",
+          state: "running",
+          workspacePath: "/tmp/workspace"
+        })
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("markLeakedRunsAsStale transitions non-terminal runs to stale", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

@@ -23,7 +23,7 @@ afterEach(async () => {
 async function writeProjectConfig(
   root: string,
   workflowFileName: string,
-  options: { workspaceHookLines?: string[] } = {}
+  options: { serviceLines?: string[]; workspaceHookLines?: string[] } = {}
 ): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(
@@ -33,6 +33,7 @@ async function writeProjectConfig(
       "  root: ./.symphonika",
       "polling:",
       "  interval_ms: 1000",
+      ...(options.serviceLines ?? []),
       "providers:",
       "  codex:",
       '    command: "codex -p symphonika"',
@@ -598,5 +599,78 @@ describe("RuntimeConfigReloader concurrency caps", () => {
     const status = reloader.getStatus();
     expect(status.ok).toBe(false);
     expect(status.errors.join("\n")).toMatch(/max_in_flight/);
+  });
+});
+
+describe("RuntimeConfigReloader watchdog config", () => {
+  it("defaults the daemon-scope watchdog settings", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()?.watchdog).toEqual({
+      enabled: true,
+      graceMinutes: 30,
+      sampleIntervalSeconds: 60
+    });
+  });
+
+  it("parses explicit daemon-scope watchdog settings", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "watchdog:",
+        "  enabled: false",
+        "  grace_minutes: 0.5",
+        "  sample_interval_seconds: 2"
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()?.watchdog).toEqual({
+      enabled: false,
+      graceMinutes: 0.5,
+      sampleIntervalSeconds: 2
+    });
+  });
+
+  it("rejects invalid watchdog values and keeps the last-known-good snapshot", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const firstSnapshot = reloader.getSnapshot();
+    expect(firstSnapshot?.watchdog.enabled).toBe(true);
+
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "watchdog:",
+        "  enabled: true",
+        "  grace_minutes: 0",
+        "  sample_interval_seconds: -1"
+      ]
+    });
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()).toBe(firstSnapshot);
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: true
+    });
+    expect(reloader.getStatus().errors.join("\n")).toMatch(/watchdog/);
   });
 });

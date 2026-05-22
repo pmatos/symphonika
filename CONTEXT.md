@@ -122,6 +122,11 @@ The stateful progression of one Run from dispatch selection through provider exe
 waiting, cancellation, or terminal labels.
 _Avoid_: daemon loop when referring to Run-local progression
 
+**Watchdog**:
+A daemon reconciliation component that samples active Runs for observable progress and marks wedged
+Runs `stale` with `terminal_reason = "no_progress"` after the configured grace window.
+_Avoid_: retry, timeout when referring to no-progress termination
+
 **Lifecycle Event**:
 A value that asks the Run Lifecycle to decide what should happen next, such as a fresh dispatch
 request, retry timer firing, provider attempt completion, or waiting-row recheck.
@@ -190,6 +195,8 @@ _Avoid_: chat session
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
+- A **Watchdog** samples active **Runs** during daemon reconciliation and preserves
+  **Workspace** contents when it marks no-progress work stale
 - A **Continuation** is capped so an eligible issue cannot loop forever
 - A **State Advance** is not capped by the continuation cap; the FSM bounds the walk via terminal states
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete

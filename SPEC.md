@@ -292,16 +292,6 @@ Agent Provider. If an agent state omits `action.provider`, Symphonika uses the P
 
 The daemon must not dispatch a Project when its workflow contract is missing or invalid.
 
-### 5.4 Routine Declarations
-
-Projects may define `routines: string[]` in `symphonika.yml`. Paths are resolved relative to the
-service config directory and are re-read on every daemon tick with the rest of the runtime snapshot.
-Invalid routine declarations are reported through the same reload-error surface as invalid workflow
-contracts, and the daemon keeps using the last known good snapshot.
-
-Slice 1 supports only one-shot `schedule.at` routines. Cron and any second schedule field are
-invalid in this slice.
-
 ### 5.3 Templating
 
 Workflow prompt rendering uses simple strict Mustache-style variables. Unknown variables fail prompt
@@ -340,6 +330,16 @@ The preamble tells the agent:
 - it should preserve evidence when blocked
 - it should use the prepared workspace and issue branch
 - it should operate on the assigned issue unless the workflow says otherwise
+
+### 5.4 Routine Declarations
+
+Projects may define `routines: string[]` in `symphonika.yml`. Paths are resolved relative to the
+service config directory and are re-read on every daemon tick with the rest of the runtime snapshot.
+Invalid routine declarations are reported through the same reload-error surface as invalid workflow
+contracts, and the daemon keeps using the last known good snapshot.
+
+Slice 1 supports only one-shot `schedule.at` routines. Cron and any second schedule field are
+invalid in this slice.
 
 ## 6. Credentials
 

@@ -115,6 +115,19 @@ describe("RoutineDeclarationLoader", () => {
     );
   });
 
+  it("rejects YAML front matter that parses as a list", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "list-front-matter.md");
+    await writeFile(routinePath, ["---", "- foo", "- bar", "---", "Body", ""].join("\n"));
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.routine).toBeNull();
+    expect(result.errors).toContain(
+      `routine front matter at ${routinePath} must be a mapping`
+    );
+  });
+
   it("reports invalid schedule.at dates without throwing", async () => {
     const root = await makeTempRoot();
     const routinePath = path.join(root, "invalid-date.md");

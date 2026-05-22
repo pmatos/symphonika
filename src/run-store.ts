@@ -990,18 +990,19 @@ export class RunStore {
     firedAt: string;
     name: string;
     projectName: string;
-  }): void {
-    this.database
+  }): boolean {
+    const result = this.database
       .prepare(
         [
           "update routines set",
           "state = 'expired',",
           "last_fired_at = ?,",
           "updated_at = ?",
-          "where project_name = ? and name = ?"
+          "where project_name = ? and name = ? and state = 'active'"
         ].join(" ")
       )
       .run(input.firedAt, timestamp(), input.projectName, input.name);
+    return result.changes > 0;
   }
 
   createRoutineFiring(input: {

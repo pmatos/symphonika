@@ -118,6 +118,35 @@ export async function dispatchDueRoutines(
         continue;
       }
 
+      const reEvaluation = evaluateRoutineSchedule({
+        lastFiredAt: routineDetail.lastFiredAt,
+        now,
+        schedule: { at: routineDetail.scheduleAt },
+        state: routineDetail.state
+      });
+      if (reEvaluation.kind !== "fire_now") {
+        skipped.push({
+          projectName: project.name,
+          reason: "routine no longer eligible after re-read",
+          routineName: routine.name
+        });
+        continue;
+      }
+
+      const claimed = input.runStore.markRoutineExpired({
+        firedAt: now.toISOString(),
+        name: routine.name,
+        projectName: project.name
+      });
+      if (!claimed) {
+        skipped.push({
+          projectName: project.name,
+          reason: "routine already claimed by another worker",
+          routineName: routine.name
+        });
+        continue;
+      }
+
       const firingId = createFiringId();
       input.activeRuns.reserveSlot({
         issueNumber: syntheticRoutineIssueNumber(firingId),
@@ -131,11 +160,6 @@ export async function dispatchDueRoutines(
         providerCommand,
         providerName,
         routineName: routine.name
-      });
-      input.runStore.markRoutineExpired({
-        firedAt: now.toISOString(),
-        name: routine.name,
-        projectName: project.name
       });
       fired.push(firingId);
 

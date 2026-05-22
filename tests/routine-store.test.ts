@@ -159,4 +159,38 @@ describe("RunStore routines", () => {
       store.close();
     }
   });
+
+  it("markRoutineExpired claims active routines exactly once", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+
+      const firstClaim = store.markRoutineExpired({
+        firedAt: "2026-05-22T10:00:02.000Z",
+        name: "daily-report",
+        projectName: "alpha"
+      });
+      const secondClaim = store.markRoutineExpired({
+        firedAt: "2026-05-22T10:00:03.000Z",
+        name: "daily-report",
+        projectName: "alpha"
+      });
+
+      expect(firstClaim).toBe(true);
+      expect(secondClaim).toBe(false);
+      expect(store.listRoutines()[0]?.lastFiredAt).toBe("2026-05-22T10:00:02.000Z");
+    } finally {
+      store.close();
+    }
+  });
 });

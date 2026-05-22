@@ -132,6 +132,19 @@ The next effect chosen by the Run Lifecycle, such as start a label-eligible run,
 run, schedule retry, re-evaluate a waiting row, cancel, or mark failed.
 _Avoid_: callback when referring to lifecycle policy
 
+**Watchdog**:
+The orchestrator subsystem that samples a Progress Signal for each active Run on the reconciliation
+tick and transitions the Run to `stale` with terminal reason `no_progress` when no progress signal
+advances within the configured grace window.
+_Avoid_: heartbeat checker, liveness probe
+
+**Progress Signal**:
+The tuple of observed Run-progress evidence the Watchdog samples — most recent tool-call timestamp,
+workspace mtime maximum, distinct turn-id count, and rolling output-token growth. Advance of any
+one signal counts as progress.
+_Avoid_: heartbeat when describing observable side-effects, since heartbeats include
+provider-internal usage and rate-limit events that the Progress Signal explicitly excludes
+
 **Continuation**:
 A follow-up run for the same issue after a provider completed successfully but the issue remains eligible.
 _Avoid_: retry when the prior run succeeded
@@ -190,6 +203,7 @@ _Avoid_: chat session
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
+- A **Watchdog** samples a **Progress Signal** for each active **Run** and may stop it as `stale`
 - A **Continuation** is capped so an eligible issue cannot loop forever
 - A **State Advance** is not capped by the continuation cap; the FSM bounds the walk via terminal states
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete

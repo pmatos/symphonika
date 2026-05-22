@@ -404,6 +404,13 @@ export const INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS = 60_000;
 export const INPUT_REQUIRED_LEGACY_TERMINAL_REASON =
   "provider requested input (legacy)";
 
+class RoutineAlreadyClaimedError extends Error {
+  constructor() {
+    super("routine already claimed");
+    this.name = "RoutineAlreadyClaimedError";
+  }
+}
+
 export class RunStore {
   private readonly database: SqliteDatabase;
   private readonly stateRoot: string;
@@ -1033,6 +1040,48 @@ export class RunStore {
         updated_at: now
       });
     this.recordRoutineFiringTransition(input.id, "queued", now);
+  }
+
+  claimRoutineFiring(input: {
+    firedAt: string;
+    firingId: string;
+    projectName: string;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    routineName: string;
+  }): boolean {
+    const claim = this.database.transaction(() => {
+      this.createRoutineFiring({
+        id: input.firingId,
+        projectName: input.projectName,
+        providerCommand: input.providerCommand,
+        providerName: input.providerName,
+        routineName: input.routineName
+      });
+      const result = this.database
+        .prepare(
+          [
+            "update routines set",
+            "state = 'expired',",
+            "last_fired_at = ?,",
+            "updated_at = ?",
+            "where project_name = ? and name = ? and state = 'active'"
+          ].join(" ")
+        )
+        .run(input.firedAt, timestamp(), input.projectName, input.routineName);
+      if (result.changes === 0) {
+        throw new RoutineAlreadyClaimedError();
+      }
+    });
+    try {
+      claim();
+      return true;
+    } catch (error) {
+      if (error instanceof RoutineAlreadyClaimedError) {
+        return false;
+      }
+      throw error;
+    }
   }
 
   updateRoutineFiringState(id: string, state: RoutineFiringState): void {

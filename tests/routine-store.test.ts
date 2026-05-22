@@ -160,6 +160,54 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("claimRoutineFiring inserts the firing only when the claim wins", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+
+      const first = store.claimRoutineFiring({
+        firedAt: "2026-05-22T10:00:02.000Z",
+        firingId: "fire-1",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      const second = store.claimRoutineFiring({
+        firedAt: "2026-05-22T10:00:03.000Z",
+        firingId: "fire-2",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+
+      expect(first).toBe(true);
+      expect(second).toBe(false);
+      expect(store.listRoutineFirings().map((firing) => firing.id)).toEqual([
+        "fire-1"
+      ]);
+      expect(store.listRoutines()[0]).toEqual(
+        expect.objectContaining({
+          lastFiredAt: "2026-05-22T10:00:02.000Z",
+          state: "expired"
+        })
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("markRoutineExpired claims active routines exactly once", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

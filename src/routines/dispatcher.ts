@@ -133,10 +133,14 @@ export async function dispatchDueRoutines(
         continue;
       }
 
-      const claimed = input.runStore.markRoutineExpired({
+      const firingId = createFiringId();
+      const claimed = input.runStore.claimRoutineFiring({
         firedAt: now.toISOString(),
-        name: routine.name,
-        projectName: project.name
+        firingId,
+        projectName: project.name,
+        providerCommand,
+        providerName,
+        routineName: routine.name
       });
       if (!claimed) {
         skipped.push({
@@ -147,23 +151,14 @@ export async function dispatchDueRoutines(
         continue;
       }
 
-      const firingId = createFiringId();
-      input.activeRuns.reserveSlot({
-        issueNumber: syntheticRoutineIssueNumber(firingId),
-        projectName: project.name,
-        respectsIssueLabels: false,
-        runId: firingId
-      });
-      input.runStore.createRoutineFiring({
-        id: firingId,
-        projectName: project.name,
-        providerCommand,
-        providerName,
-        routineName: routine.name
-      });
-      fired.push(firingId);
-
       try {
+        input.activeRuns.reserveSlot({
+          issueNumber: syntheticRoutineIssueNumber(firingId),
+          projectName: project.name,
+          respectsIssueLabels: false,
+          runId: firingId
+        });
+        fired.push(firingId);
         await runRoutineFiring({
           firingId,
           prepareRoutineWorkspace,

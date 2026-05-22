@@ -66,10 +66,10 @@ export async function dispatchDueRoutines(
   const createFiringId = input.createFiringId ?? (() => createUlid());
 
   for (const project of input.projects.values()) {
-    input.runStore.syncRoutines(project.name, project.routines ?? []);
     if (project.disabled === true) {
       continue;
     }
+    input.runStore.syncRoutines(project.name, project.routines ?? []);
     for (const routine of input.runStore.listRoutines({ project: project.name })) {
       const evaluation = evaluateRoutineSchedule({
         lastFiredAt: routine.lastFiredAt,

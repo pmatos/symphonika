@@ -287,6 +287,16 @@ async function loadRuntimeConfigSnapshot(input: {
       continue;
     }
 
+    if (pollingProject.data.disabled === true) {
+      dispatchProjects.push({
+        ...pollingProject.data,
+        routines: [],
+        workflow: detail.data.workflow,
+        workspace: detail.data.workspace
+      });
+      continue;
+    }
+
     const routines = await readRoutineDeclarations(
       (detail.data.routines ?? []).map((routinePath) =>
         path.resolve(input.configDir, routinePath)
@@ -295,16 +305,6 @@ async function loadRuntimeConfigSnapshot(input: {
     );
     if (routines === undefined) {
       return lastKnownGoodOrNothing(input.previous, errors);
-    }
-
-    if (pollingProject.data.disabled === true) {
-      dispatchProjects.push({
-        ...pollingProject.data,
-        routines,
-        workflow: detail.data.workflow,
-        workspace: detail.data.workspace
-      });
-      continue;
     }
 
     const workflow = await readWorkflowSnapshot(
@@ -439,12 +439,21 @@ async function readRoutineDeclarations(
 ): Promise<RoutineDeclaration[] | undefined> {
   const routines: RoutineDeclaration[] = [];
   const startingErrorCount = errors.length;
+  const seenNames = new Map<string, string>();
   for (const routinePath of routinePaths) {
     const result = await loadRoutineDeclaration(routinePath);
     if (result.routine === null) {
       errors.push(...result.errors);
       continue;
     }
+    const existing = seenNames.get(result.routine.name);
+    if (existing !== undefined) {
+      errors.push(
+        `duplicate routine name "${result.routine.name}" declared by ${existing} and ${result.routine.sourcePath}`
+      );
+      continue;
+    }
+    seenNames.set(result.routine.name, result.routine.sourcePath);
     routines.push(result.routine);
   }
   return errors.length > startingErrorCount ? undefined : routines;

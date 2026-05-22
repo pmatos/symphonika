@@ -3,7 +3,7 @@ import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import type { WorkspaceProject } from "../workspace.js";
+import { ensureRepositoryCache, type WorkspaceProject } from "../workspace.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -61,23 +61,6 @@ export async function prepareRoutineWorkspace(
     reused: false,
     workspacePath
   };
-}
-
-async function ensureRepositoryCache(
-  project: WorkspaceProject,
-  cachePath: string
-): Promise<void> {
-  if (!(await exists(cachePath))) {
-    await mkdir(path.dirname(cachePath), { recursive: true });
-    await git(["clone", "--bare", project.workspace.git.remote, cachePath]);
-  }
-  await git([
-    "-C",
-    cachePath,
-    "fetch",
-    "origin",
-    `${project.workspace.git.base_branch}:refs/remotes/origin/${project.workspace.git.base_branch}`
-  ]);
 }
 
 async function exists(filePath: string): Promise<boolean> {

@@ -516,6 +516,10 @@ Invalid Projects are disabled. Valid Projects may continue running.
 Existing runs continue by default. Removing a Project from service config marks it inactive rather
 than killing active full-permission agents. Operators can explicitly cancel runs.
 
+Routine rows for Projects omitted from the current valid service-config snapshot are marked
+inactive and pruned from operator routine listings on reload. Historical `routine_firings` rows
+remain durable run-store evidence.
+
 ### 8.5 Routines
 
 On each daemon tick, Symphonika evaluates loaded active Routines. Slice 1's `ScheduleEvaluator`

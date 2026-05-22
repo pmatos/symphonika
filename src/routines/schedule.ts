@@ -19,7 +19,7 @@ export type EvaluateRoutineScheduleInput = {
 export function evaluateRoutineSchedule(
   input: EvaluateRoutineScheduleInput
 ): RoutineScheduleEvaluation {
-  if (input.state === "expired" || input.lastFiredAt !== null) {
+  if (input.state !== "active" || input.lastFiredAt !== null) {
     return { kind: "expired" };
   }
 

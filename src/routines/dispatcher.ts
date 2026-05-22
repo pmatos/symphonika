@@ -64,12 +64,22 @@ export async function dispatchDueRoutines(
   const prepareRoutineWorkspace =
     input.prepareRoutineWorkspace ?? defaultPrepareRoutineWorkspace;
   const createFiringId = input.createFiringId ?? (() => createUlid());
+  const projects = [...input.projects.values()];
 
-  for (const project of input.projects.values()) {
+  for (const project of projects) {
     if (project.disabled === true) {
       continue;
     }
     input.runStore.syncRoutines(project.name, project.routines ?? []);
+  }
+  input.runStore.pruneRoutinesForUnknownProjects(
+    projects.map((project) => project.name)
+  );
+
+  for (const project of projects) {
+    if (project.disabled === true) {
+      continue;
+    }
     for (const routine of input.runStore.listRoutines({ project: project.name })) {
       const evaluation = evaluateRoutineSchedule({
         lastFiredAt: routine.lastFiredAt,

@@ -947,8 +947,25 @@ export class RunStore {
     apply();
   }
 
+  pruneRoutinesForUnknownProjects(projectNames: Iterable<string>): void {
+    const now = timestamp();
+    const names = [...new Set(projectNames)];
+    if (names.length === 0) {
+      this.database
+        .prepare("update routines set state = 'inactive', updated_at = ?")
+        .run(now);
+      return;
+    }
+    const placeholders = names.map(() => "?").join(", ");
+    this.database
+      .prepare(
+        `update routines set state = 'inactive', updated_at = ? where project_name not in (${placeholders})`
+      )
+      .run(now, ...names);
+  }
+
   listRoutines(filter: { project?: string } = {}): RoutineStatus[] {
-    const conditions: string[] = [];
+    const conditions: string[] = ["state != 'inactive'"];
     const params: Record<string, unknown> = {};
     if (filter.project !== undefined) {
       conditions.push("project_name = @project");
@@ -978,7 +995,7 @@ export class RunStore {
       .prepare(
         [
           "select project_name, name, source_path, kind, provider_name, schedule_at, state, last_fired_at, created_at, updated_at, prompt_body",
-          "from routines where project_name = ? and name = ?"
+          "from routines where project_name = ? and name = ? and state != 'inactive'"
         ].join(" ")
       )
       .get(input.projectName, input.name) as

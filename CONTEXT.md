@@ -117,6 +117,15 @@ _Avoid_: event log when referring to scheduler state
 One orchestrator-managed execution lifecycle for one issue in one workspace.
 _Avoid_: issue when referring to execution status
 
+**Routine**:
+A project-owned scheduled prompt declaration that can launch a Coding Agent without a GitHub Issue.
+_Avoid_: workflow contract when referring to recurring or one-shot scheduled work
+
+**Routine Firing**:
+One durable execution attempt of a Routine, with its own workspace, provider logs, prompt evidence,
+and lifecycle state.
+_Avoid_: run when specifically referring to non-issue scheduled execution
+
 **Run Lifecycle**:
 The stateful progression of one Run from dispatch selection through provider execution, scheduling,
 waiting, cancellation, or terminal labels.
@@ -189,6 +198,8 @@ _Avoid_: chat session
 - A **Normalized Event Log** is derived from a **Provider Event Log**
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
+- A **Routine** belongs to one **Project** and may create zero or more **Routine Firings**
+- A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
 - A **Continuation** is capped so an eligible issue cannot loop forever
 - A **State Advance** is not capped by the continuation cap; the FSM bounds the walk via terminal states

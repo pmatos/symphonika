@@ -599,4 +599,93 @@ describe("RuntimeConfigReloader concurrency caps", () => {
     expect(status.ok).toBe(false);
     expect(status.errors.join("\n")).toMatch(/max_in_flight/);
   });
+
+  it("loads configured project routines into the runtime snapshot", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    await writeFile(
+      path.join(root, "daily-report.md"),
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        "  at: 2026-05-22T10:00:00.000Z",
+        "kind: report",
+        "---",
+        "Report on {{project.name}}.",
+        ""
+      ].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original.replace(
+        "    workflow: ./WORKFLOW.md",
+        ["    workflow: ./WORKFLOW.md", "    routines:", "      - ./daily-report.md"].join("\n")
+      )
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+
+    expect(reloader.getStatus().ok).toBe(true);
+    expect(project?.routines).toEqual([
+      expect.objectContaining({
+        kind: "report",
+        name: "daily-report",
+        provider: null,
+        schedule: { at: "2026-05-22T10:00:00.000Z" }
+      })
+    ]);
+  });
+
+  it("keeps the last-known-good snapshot when a routine declaration becomes invalid", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    const routinePath = path.join(root, "daily-report.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        "  at: 2026-05-22T10:00:00.000Z",
+        "kind: report",
+        "---",
+        "Report on {{project.name}}.",
+        ""
+      ].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original.replace(
+        "    workflow: ./WORKFLOW.md",
+        ["    workflow: ./WORKFLOW.md", "    routines:", "      - ./daily-report.md"].join("\n")
+      )
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+    const firstSnapshot = reloader.getSnapshot();
+    await writeFile(
+      routinePath,
+      ["---", "name: ../bad", "kind: report", "---", "Body", ""].join("\n")
+    );
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()).toBe(firstSnapshot);
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: true
+    });
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      "name \"../bad\" is not path-safe"
+    );
+  });
 });

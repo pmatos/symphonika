@@ -1,6 +1,11 @@
 import type { DoctorProjectReport } from "./doctor.js";
 import type { NormalizedProviderEvent } from "./provider.js";
-import type { ProviderEventRecord, RunState, RunStatus } from "./run-store.js";
+import type {
+  ProviderEventRecord,
+  RunState,
+  RunStatus
+} from "./run-store.js";
+import type { RoutineStatus } from "./routines/types.js";
 
 export type DashboardIssueCounts = {
   candidate: number;
@@ -23,6 +28,7 @@ export type StatusDashboardInput = {
   latestEvents: ReadonlyMap<string, DashboardEventSummary>;
   projects: DoctorProjectReport[];
   reload: string;
+  routines?: RoutineStatus[];
   runs: RunStatus[];
   stateRoot: string;
 };
@@ -100,12 +106,38 @@ export function renderStatusDashboard(input: StatusDashboardInput): string {
     ...formatActiveRuns(activeRuns, input.latestEvents),
     "├─ Attention",
     ...formatAttention(input.projects, attentionRuns),
+    "├─ Routines",
+    ...formatRoutines(input.routines ?? []),
     "├─ Recent runs",
     ...formatRecentRuns(recentRuns),
     "╰─"
   ];
 
   return `${lines.join("\n")}\n`;
+}
+
+function formatRoutines(routines: RoutineStatus[]): string[] {
+  if (routines.length === 0) {
+    return ["│   No routines configured"];
+  }
+  return [
+    "│   PROJECT      ROUTINE              STATE     NEXT_FIRE_AT              LAST_FIRED_AT",
+    "│   --------------------------------------------------------------------------------",
+    ...routines.map((routine) =>
+      [
+        "│  ",
+        pad(truncate(routine.projectName, 12), 12),
+        " ",
+        pad(truncate(routine.name, 20), 20),
+        " ",
+        pad(routine.state, 9),
+        " ",
+        pad(truncate(routine.nextFireAt ?? "-", 25), 25),
+        " ",
+        truncate(routine.lastFiredAt ?? "-", 25)
+      ].join("")
+    )
+  ];
 }
 
 export function summarizeDashboardEvent(

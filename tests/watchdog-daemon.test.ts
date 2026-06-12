@@ -101,6 +101,58 @@ describe("daemon watchdog", () => {
       await daemon.stop();
     }
   });
+
+  it("preserves the watchdog no_progress verdict when a stale preparing run is overwritten to running", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const prepared = preparedWorkspaceFixture(root);
+    await mkdir(prepared.workspacePath, { recursive: true });
+    const provider = naturalCompletionProvider();
+
+    let releasePrep: () => void = () => {};
+    const prepGate = new Promise<void>((resolve) => {
+      releasePrep = resolve;
+    });
+    const prepareIssueWorkspace = async (
+      input: PrepareIssueWorkspaceInput
+    ): Promise<PreparedIssueWorkspace> => {
+      void input;
+      await prepGate;
+      return prepared;
+    };
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => "run-watchdog-race",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: githubIssuesApiFixture(),
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      // The watchdog stales the run while it is parked in preparing_workspace,
+      // before the provider is attached.
+      await waitForRunState(daemon.url, "stale");
+      // Releasing prep lets the lifecycle overwrite state back to "running"
+      // (updateRunState leaves terminal_reason = "no_progress"), then run the
+      // provider to natural completion and unwind through the finally block.
+      releasePrep();
+      // Resolves once the provider stream starts, i.e. after the clobbering
+      // updateRunState(..., "running"); the pre-clobber stale is now gone.
+      await provider.started;
+      const settled = await waitForSettledRun(daemon.url, "run-watchdog-race");
+      expect(settled).toMatchObject({
+        state: "stale",
+        terminalReason: "no_progress"
+      });
+    } finally {
+      provider.stopAll();
+      await daemon.stop();
+    }
+  });
 });
 
 type ControllableProvider = AgentProvider & {
@@ -207,6 +259,46 @@ function controllableProvider(
     },
     validate: vi.fn().mockResolvedValue(undefined)
   };
+}
+
+// A provider that runs to natural (non-cancelled) completion. It exposes a
+// `started` promise that resolves once its stream begins — which only happens
+// after runAttemptLifecycle has attached the provider and called
+// updateRunState(..., "running"), so the test can observe the post-clobber
+// state deterministically. It ignores `stopped` because, in the pre-attach
+// cancel race, the cancel hand-off fires before the stream registers a stopper.
+function naturalCompletionProvider(): ControllableProvider & {
+  started: Promise<void>;
+} {
+  let markStarted: () => void = () => {};
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const base = controllableProvider(async function* (
+    input: ProviderRunInput,
+    stopped: Promise<void>
+  ): AsyncGenerator<ProviderEvent> {
+    void stopped;
+    markStarted();
+    await Promise.resolve();
+    yield {
+      normalized: {
+        tokenUsage: { inputTokens: 5, outputTokens: 0, totalTokens: 5 },
+        type: "usage_updated"
+      },
+      raw: { kind: "usage" }
+    };
+    yield {
+      normalized: {
+        cancelled: false,
+        exitCode: 0,
+        signal: null,
+        type: "process_exit"
+      },
+      raw: { kind: "exit", runId: input.run.id }
+    };
+  });
+  return Object.assign(base, { started });
 }
 
 function githubIssuesApiFixture() {
@@ -328,6 +420,27 @@ async function waitForRunState(
   }
 
   throw new Error(`run did not reach ${state} before timeout`);
+}
+
+async function waitForSettledRun(
+  url: string,
+  id: string,
+  options: { intervalMs?: number; timeoutMs?: number } = {}
+): Promise<StatusRun> {
+  const intervalMs = options.intervalMs ?? 10;
+  const timeoutMs = options.timeoutMs ?? 4_000;
+  const deadline = Date.now() + timeoutMs;
+  const settledStates = new Set(["stale", "cancelled", "failed", "succeeded"]);
+
+  while (Date.now() < deadline) {
+    const run = await getRun(url, id);
+    if (run !== undefined && settledStates.has(run.state)) {
+      return run;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(`run ${id} did not settle before timeout`);
 }
 
 async function getRun(url: string, id: string): Promise<StatusRun | undefined> {

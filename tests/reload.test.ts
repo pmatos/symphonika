@@ -799,6 +799,7 @@ describe("RuntimeConfigReloader watchdog config", () => {
     expect(reloader.getSnapshot()?.watchdog).toEqual({
       enabled: true,
       graceMinutes: 30,
+      mtimeIgnore: [],
       sampleIntervalSeconds: 60
     });
   });
@@ -810,7 +811,10 @@ describe("RuntimeConfigReloader watchdog config", () => {
         "watchdog:",
         "  enabled: false",
         "  grace_minutes: 0.5",
-        "  sample_interval_seconds: 2"
+        "  sample_interval_seconds: 2",
+        "  mtime_ignore:",
+        '    - "*.log"',
+        '    - "dist/**"'
       ]
     });
     await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
@@ -823,6 +827,7 @@ describe("RuntimeConfigReloader watchdog config", () => {
     expect(reloader.getSnapshot()?.watchdog).toEqual({
       enabled: false,
       graceMinutes: 0.5,
+      mtimeIgnore: ["*.log", "dist/**"],
       sampleIntervalSeconds: 2
     });
   });

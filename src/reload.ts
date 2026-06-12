@@ -64,12 +64,14 @@ export type RuntimeConfigReloaderOptions = {
 export type WatchdogConfig = {
   enabled: boolean;
   graceMinutes: number;
+  mtimeIgnore: string[];
   sampleIntervalSeconds: number;
 };
 
 export const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
   enabled: true,
   graceMinutes: 30,
+  mtimeIgnore: [],
   sampleIntervalSeconds: 60
 };
 
@@ -90,7 +92,10 @@ const watchdogConfigSchema = z
     sample_interval_seconds: z
       .number()
       .positive()
-      .default(DEFAULT_WATCHDOG_CONFIG.sampleIntervalSeconds)
+      .default(DEFAULT_WATCHDOG_CONFIG.sampleIntervalSeconds),
+    // Extra workspace-relative globs whose files are dropped from the mtime
+    // walk so build-output churn cannot keep a wedged Run alive (ADR 0054).
+    mtime_ignore: z.array(z.string().trim().min(1)).default([])
   })
   .passthrough();
 
@@ -396,6 +401,7 @@ function normalizeWatchdogConfig(
   return {
     enabled: raw?.enabled ?? DEFAULT_WATCHDOG_CONFIG.enabled,
     graceMinutes: raw?.grace_minutes ?? DEFAULT_WATCHDOG_CONFIG.graceMinutes,
+    mtimeIgnore: raw?.mtime_ignore ?? DEFAULT_WATCHDOG_CONFIG.mtimeIgnore,
     sampleIntervalSeconds:
       raw?.sample_interval_seconds ??
       DEFAULT_WATCHDOG_CONFIG.sampleIntervalSeconds

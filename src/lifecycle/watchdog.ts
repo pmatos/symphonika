@@ -64,6 +64,7 @@ export async function reconcileWatchdog(
   for (const run of input.runStore.listWatchdogCandidateRuns()) {
     const previous = input.runStore.getWatchdogSample(run.runId);
     const next = await sampleRun({
+      mtimeIgnore: input.config.mtimeIgnore,
       previous,
       run,
       runStore: input.runStore,
@@ -120,7 +121,8 @@ export async function reconcileWatchdog(
 }
 
 export async function sampleWorkspaceMtimeMax(
-  workspacePath: string
+  workspacePath: string,
+  mtimeIgnore: readonly string[] = []
 ): Promise<number> {
   if (workspacePath.length === 0) {
     return 0;
@@ -131,13 +133,20 @@ export async function sampleWorkspaceMtimeMax(
     if (!root.isDirectory()) {
       return Math.floor(root.mtimeMs);
     }
-    return await walkWorkspaceMtimeMax(workspacePath, Math.floor(root.mtimeMs));
+    const ignore = mtimeIgnore.map(globToRegExp);
+    return await walkWorkspaceMtimeMax(
+      workspacePath,
+      workspacePath,
+      ignore,
+      Math.floor(root.mtimeMs)
+    );
   } catch {
     return 0;
   }
 }
 
 async function sampleRun(input: {
+  mtimeIgnore: readonly string[];
   previous: WatchdogSample | undefined;
   run: WatchdogCandidateRun;
   runStore: RunStore;
@@ -223,6 +232,8 @@ async function readNormalizedEventsSince(
 
 async function walkWorkspaceMtimeMax(
   directory: string,
+  workspaceRoot: string,
+  ignore: readonly RegExp[],
   currentMax: number
 ): Promise<number> {
   let max = currentMax;
@@ -250,12 +261,65 @@ async function walkWorkspaceMtimeMax(
     } catch {
       continue;
     }
-    max = Math.max(max, Math.floor(stats.mtimeMs));
     if (stats.isDirectory()) {
-      max = Math.max(max, await walkWorkspaceMtimeMax(entryPath, max));
+      max = Math.max(max, Math.floor(stats.mtimeMs));
+      max = Math.max(
+        max,
+        await walkWorkspaceMtimeMax(entryPath, workspaceRoot, ignore, max)
+      );
+    } else if (!isMtimeIgnored(workspaceRoot, entryPath, ignore)) {
+      // ADR 0054: drop files whose workspace-relative path matches an
+      // mtime_ignore glob so build-output churn (e.g. *.log) cannot keep a
+      // wedged Run alive through the workspace-mtime signal.
+      max = Math.max(max, Math.floor(stats.mtimeMs));
     }
   }
   return max;
+}
+
+function isMtimeIgnored(
+  workspaceRoot: string,
+  entryPath: string,
+  ignore: readonly RegExp[]
+): boolean {
+  if (ignore.length === 0) {
+    return false;
+  }
+  const relative = path
+    .relative(workspaceRoot, entryPath)
+    .split(path.sep)
+    .join("/");
+  return ignore.some((pattern) => pattern.test(relative));
+}
+
+// Compile a workspace-relative glob to an anchored RegExp. `*` matches within a
+// path segment, `**` matches across separators, `?` matches one non-separator
+// character; everything else is matched literally.
+function globToRegExp(glob: string): RegExp {
+  let source = "";
+  let i = 0;
+  while (i < glob.length) {
+    const char = glob.charAt(i);
+    if (char === "*") {
+      if (glob.charAt(i + 1) === "*") {
+        source += ".*";
+        i += 2;
+        if (glob.charAt(i) === "/") {
+          i += 1;
+        }
+      } else {
+        source += "[^/]*";
+        i += 1;
+      }
+    } else if (char === "?") {
+      source += "[^/]";
+      i += 1;
+    } else {
+      source += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+      i += 1;
+    }
+  }
+  return new RegExp(`^${source}$`);
 }
 
 function parseJsonlEvents(contents: string): NormalizedProviderEvent[] {

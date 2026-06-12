@@ -147,6 +147,29 @@ describe("sampleWorkspaceMtimeMax", () => {
 
     expect(await sampleWorkspaceMtimeMax(workspace)).toBe(baseTime.getTime());
   });
+
+  it("drops files matching an mtime_ignore glob", async () => {
+    const root = await makeTempRoot();
+    await mkdir(path.join(root, "dist"), { recursive: true });
+    await writeFile(path.join(root, "src.ts"), "included\n");
+    await writeFile(path.join(root, "build.log"), "log\n");
+    await writeFile(path.join(root, "dist", "out.log"), "log\n");
+
+    const baseTime = new Date("2026-05-22T10:00:00.000Z");
+    const newerTime = new Date("2026-05-22T12:00:00.000Z");
+    await utimes(path.join(root, "src.ts"), baseTime, baseTime);
+    await utimes(path.join(root, "build.log"), newerTime, newerTime);
+    await utimes(path.join(root, "dist", "out.log"), newerTime, newerTime);
+    await utimes(path.join(root, "dist"), baseTime, baseTime);
+    await utimes(root, baseTime, baseTime);
+
+    // Without the ignore set, a newer .log file wins.
+    expect(await sampleWorkspaceMtimeMax(root)).toBe(newerTime.getTime());
+    // The glob drops .log files at any depth, so src.ts's 10:00 wins.
+    expect(await sampleWorkspaceMtimeMax(root, ["**/*.log"])).toBe(
+      baseTime.getTime()
+    );
+  });
 });
 
 describe("reconcileWatchdog", () => {
@@ -159,6 +182,7 @@ describe("reconcileWatchdog", () => {
         activeRuns: new ActiveRunRegistry(),
         config: {
           enabled: false,
+          mtimeIgnore: [],
           graceMinutes: 30,
           sampleIntervalSeconds: 60
         },
@@ -186,6 +210,7 @@ describe("reconcileWatchdog", () => {
         activeRuns: new ActiveRunRegistry(),
         config: {
           enabled: true,
+          mtimeIgnore: [],
           graceMinutes: 30,
           sampleIntervalSeconds: 60
         },
@@ -246,6 +271,7 @@ describe("reconcileWatchdog", () => {
         activeRuns,
         config: {
           enabled: true,
+          mtimeIgnore: [],
           graceMinutes: 30,
           sampleIntervalSeconds: 60
         },
@@ -314,6 +340,7 @@ describe("reconcileWatchdog", () => {
         activeRuns,
         config: {
           enabled: true,
+          mtimeIgnore: [],
           graceMinutes: 30,
           sampleIntervalSeconds: 60
         },
@@ -385,6 +412,7 @@ describe("reconcileWatchdog", () => {
         activeRuns,
         config: {
           enabled: true,
+          mtimeIgnore: [],
           graceMinutes: 30,
           sampleIntervalSeconds: 60
         },
@@ -430,6 +458,7 @@ describe("reconcileWatchdog", () => {
     });
     const config = {
       enabled: true,
+      mtimeIgnore: [],
       graceMinutes: 30,
       sampleIntervalSeconds: 60
     };
@@ -526,7 +555,7 @@ describe("reconcileWatchdog", () => {
 
       await reconcileWatchdog({
         activeRuns,
-        config: { enabled: true, graceMinutes: 30, sampleIntervalSeconds: 60 },
+        config: { enabled: true, graceMinutes: 30, mtimeIgnore: [], sampleIntervalSeconds: 60 },
         logger,
         now: () => new Date("2026-05-22T10:00:00.000Z"),
         runStore: store
@@ -587,7 +616,7 @@ describe("reconcileWatchdog", () => {
 
       await reconcileWatchdog({
         activeRuns,
-        config: { enabled: true, graceMinutes: 30, sampleIntervalSeconds: 60 },
+        config: { enabled: true, graceMinutes: 30, mtimeIgnore: [], sampleIntervalSeconds: 60 },
         logger,
         now: () => new Date("2026-05-22T10:00:00.000Z"),
         runStore: store
@@ -653,7 +682,7 @@ describe("reconcileWatchdog", () => {
 
       await reconcileWatchdog({
         activeRuns,
-        config: { enabled: true, graceMinutes: 30, sampleIntervalSeconds: 60 },
+        config: { enabled: true, graceMinutes: 30, mtimeIgnore: [], sampleIntervalSeconds: 60 },
         logger,
         now: () => new Date("2026-05-22T10:00:00.000Z"),
         runStore: store

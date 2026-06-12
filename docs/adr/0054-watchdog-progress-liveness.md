@@ -33,8 +33,11 @@ A Progress Signal is the tuple:
   set excluded so build-output churn neither masks real stalls nor forces them.
 - `turn_id_set_size` — distinct `turnId` values observed across `usage_updated` and
   `turn_completed` events.
-- `output_token_growth_5m` — cumulative `usage_updated.tokenUsage.total.outputTokens` added in
-  the most recent rolling 5-minute window.
+- `output_token_growth_since_last_sample` — cumulative
+  `usage_updated.tokenUsage.total.outputTokens` added since the previous Watchdog sample, over
+  the events read forward from that sample's stored offset (a one-`sample_interval_seconds`
+  window, 60 s by default). The progress rule only asks whether this grew, so the short default
+  interval keeps stall detection responsive without maintaining a longer rolling window.
 
 A Run is making progress on tick *t* iff **any** of the following advanced since the previous
 Watchdog sample:
@@ -42,7 +45,7 @@ Watchdog sample:
 1. `last_tool_call_at` increased, or
 2. `workspace_mtime_max` advanced by at least one second, or
 3. `turn_id_set_size` increased, or
-4. `output_token_growth_5m` is non-zero.
+4. `output_token_growth_since_last_sample` is non-zero.
 
 The rule is deliberately permissive. A long ESBMC `make verify` emits no `tool_call` and no
 `usage_updated`, but its child processes write to the workspace; the mtime check keeps it alive.
@@ -102,7 +105,7 @@ known build-output directories at the top of the descent rather than per file.
 persisted `idle_since` so operators can see Runs approaching the threshold before they are
 stopped. `show-run` exposes the most recent Progress Signal so an operator can verify why the
 Watchdog fired (e.g. "last tool_call 4h12m ago, workspace mtime 4h08m ago, single turnId,
-0 output tokens in last 5m").
+0 output tokens since last sample").
 
 ## Interaction with existing lifecycle decisions
 

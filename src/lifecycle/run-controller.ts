@@ -2150,36 +2150,45 @@ export class RunController {
       // than state === "stale" so the clobber cannot defeat the verdict, and
       // re-assert the stale state when it was overwritten. See ADR 0054.
       if (preservedRun?.terminalReason === "no_progress") {
-        if (preservedRun.state !== "stale") {
+        // Re-assert the stale verdict if a clobbering updateRunState(.., "running")
+        // overwrote the state. markRunNoProgressStale refuses rows with
+        // cancel_requested=1, so if a concurrent operator/closed-issue cancel won
+        // the race the re-assert returns false; in that case we must NOT preserve
+        // the watchdog verdict — fall through to classifyFailure so the
+        // cancellation terminates the run. Otherwise the row would be left stuck
+        // in "running" with no provider (a state-machine leak).
+        const reasserted =
+          preservedRun.state === "stale" ||
           this.runStore.markRunNoProgressStale(input.runId);
-        }
-        if (attemptCreated) {
-          this.runStore.updateAttemptState(attemptId, "stale");
-        }
-        await this.applyTerminalLabels({
-          cancelReason: CANCEL_REASONS.NO_PROGRESS,
-          fsmContinuing: false,
-          issueNumber: input.issue.number,
-          outcome: {
-            kind: "cancelled",
-            reason: "no_progress"
-          },
-          repository: input.repository,
-          willRetry: false
-        });
-        this.logger?.info(
-          {
-            attemptNumber: input.attemptNumber,
-            cancelReason,
+        if (reasserted) {
+          if (attemptCreated) {
+            this.runStore.updateAttemptState(attemptId, "stale");
+          }
+          await this.applyTerminalLabels({
+            cancelReason: CANCEL_REASONS.NO_PROGRESS,
+            fsmContinuing: false,
             issueNumber: input.issue.number,
-            project: input.project.name,
-            runId: input.runId,
-            state: "stale",
-            terminalReason: "no_progress"
-          },
-          "symphonika run termination preserved watchdog verdict"
-        );
-        preservedWatchdogTerminal = true;
+            outcome: {
+              kind: "cancelled",
+              reason: "no_progress"
+            },
+            repository: input.repository,
+            willRetry: false
+          });
+          this.logger?.info(
+            {
+              attemptNumber: input.attemptNumber,
+              cancelReason,
+              issueNumber: input.issue.number,
+              project: input.project.name,
+              runId: input.runId,
+              state: "stale",
+              terminalReason: "no_progress"
+            },
+            "symphonika run termination preserved watchdog verdict"
+          );
+          preservedWatchdogTerminal = true;
+        }
       }
       // Parked-as-waiting runs have already committed their "waiting" state
       // and scheduled the wait_park callback that will own re-evaluation.

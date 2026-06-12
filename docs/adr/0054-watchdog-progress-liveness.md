@@ -29,8 +29,11 @@ A Progress Signal is the tuple:
 - `last_tool_call_at` — timestamp of the most recent `NormalizedProviderEventType = "tool_call"`
   event.
 - `workspace_mtime_max` — maximum file mtime under the Run's `workspacePath`, with `.git/`,
-  `target/`, `node_modules/`, and any path listed in the Workflow Contract's `evidence.ignore`
-  set excluded so build-output churn neither masks real stalls nor forces them.
+  `target/`, `node_modules/`, and any workspace-relative glob listed in the watchdog config's
+  `mtime_ignore` set excluded so build-output churn neither masks real stalls nor forces them. The
+  exclude set lives in the `watchdog` service config (below), which the reload pipeline already
+  validates and persists — not in the Workflow Contract, whose parsed front matter the contract
+  loader discards.
 - `turn_id_set_size` — distinct `turnId` values observed across `usage_updated` and
   `turn_completed` events. Only the Codex provider tags these events with a `turnId`; the Claude
   provider emits `sessionId` instead, so this signal advances for Codex Runs only. Claude Runs
@@ -75,6 +78,7 @@ watchdog:
   enabled: true
   grace_minutes: 30
   sample_interval_seconds: 60
+  mtime_ignore: []         # extra workspace-relative globs excluded from the mtime walk
 projects:
   - name: vow
     watchdog:

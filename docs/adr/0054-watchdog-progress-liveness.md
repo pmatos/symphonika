@@ -70,7 +70,7 @@ watchdog:
   grace_minutes: 30
   sample_interval_seconds: 60
 projects:
-  vow:
+  - name: vow
     watchdog:
       grace_minutes: 180   # ESBMC verification can legitimately silence tools for hours
 ```

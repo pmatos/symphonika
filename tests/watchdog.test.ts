@@ -527,6 +527,69 @@ describe("reconcileWatchdog", () => {
       store.close();
     }
   });
+
+  it("resets the idle grace window when a retry switches the normalized log path", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const attempt1 = path.join(root, "provider.normalized.jsonl");
+    const attempt2 = path.join(root, "provider.normalized.attempt-2.jsonl");
+    await writeFile(attempt2, "");
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      seedRun(store, "run-retry-idle");
+      store.updateRunEvidence("run-retry-idle", {
+        branchName: "sym/symphonika/198-watchdog",
+        branchRef: "refs/heads/sym/symphonika/198-watchdog",
+        issueSnapshotPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-idle", "issue.json"),
+        metadataPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-idle", "metadata.json"),
+        normalizedLogPath: attempt2,
+        promptPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-idle", "prompt.md"),
+        rawLogPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-idle", "raw.jsonl"),
+        workflowGraphPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-idle", "workflow.json"),
+        workspacePath
+      });
+      store.updateRunState("run-retry-idle", "running");
+      // Prior attempt was idle for over an hour under the OLD log path.
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T09:00:00.000Z",
+        lastToolCallAt: null,
+        normalizedLogOffset: 50,
+        normalizedLogPath: attempt1,
+        outputTokensTotal: 0,
+        runId: "run-retry-idle",
+        sampledAt: "2026-05-22T09:00:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
+      });
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel,
+        issueNumber: 198,
+        projectName: "symphonika",
+        runId: "run-retry-idle"
+      });
+
+      await reconcileWatchdog({
+        activeRuns,
+        config: { enabled: true, graceMinutes: 30, sampleIntervalSeconds: 60 },
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore: store
+      });
+
+      // The attempt change restarts the grace clock, so the run is NOT staled
+      // even though the prior attempt's idle_since is over an hour old.
+      expect(store.getRun("run-retry-idle")?.state).toBe("running");
+      expect(store.getWatchdogSample("run-retry-idle")?.idleSince).toBe(
+        "2026-05-22T10:00:00.000Z"
+      );
+      expect(cancel).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
 });
 
 function seedRun(store: RunStore, id: string): void {

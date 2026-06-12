@@ -70,7 +70,20 @@ export async function reconcileWatchdog(
     });
     const progress =
       previous === undefined ? false : watchdogProgressObserved(previous, next);
-    const idleSince = progress ? null : previous?.idleSince ?? sampledAt;
+    // ADR 0054: a transient retry starts a new attempt (a new normalized log
+    // path) and must restart the grace clock. Drop the previous attempt's
+    // idle_since on an attempt change so the retry gets a fresh grace window
+    // rather than inheriting pre-retry idle time. (A retry re-enters a running
+    // agent state per ADR 0020, not waiting, so the waiting-entry hook does not
+    // fire and idle_since must be reset here.)
+    const attemptChanged =
+      previous !== undefined &&
+      previous.normalizedLogPath !== run.normalizedLogPath;
+    const idleSince = progress
+      ? null
+      : attemptChanged
+        ? sampledAt
+        : previous?.idleSince ?? sampledAt;
     const persisted = {
       ...next,
       idleSince

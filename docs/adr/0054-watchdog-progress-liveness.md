@@ -41,9 +41,13 @@ A Progress Signal is the tuple:
   normalized `usage_updated.tokenUsage` object, whose shape is provider-specific —
   `tokenUsage.output_tokens` for Claude and `tokenUsage.outputTokens` for Codex — so the Watchdog
   uses a provider-neutral accessor over those keys rather than a fixed `tokenUsage.total.outputTokens`
-  path, which exists for neither provider. The progress rule only asks whether this grew, so the
-  short default interval keeps stall detection responsive without maintaining a longer rolling
-  window.
+  path, which exists for neither provider. Both providers report `tokenUsage` as a cumulative
+  running total, not a per-event increment, so the Watchdog persists the last observed cumulative
+  output-token total in the `WatchdogSample` and treats this signal as advancing only when the
+  latest cumulative total strictly exceeds the stored one — a wedged provider re-emitting an
+  unchanged total is correctly read as zero growth. The progress rule only asks whether the total
+  strictly increased, so the short default interval keeps stall detection responsive without
+  maintaining a longer rolling window.
 
 A Run is making progress on tick *t* iff **any** of the following advanced since the previous
 Watchdog sample:

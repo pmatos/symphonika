@@ -33,11 +33,15 @@ A Progress Signal is the tuple:
   set excluded so build-output churn neither masks real stalls nor forces them.
 - `turn_id_set_size` — distinct `turnId` values observed across `usage_updated` and
   `turn_completed` events.
-- `output_token_growth_since_last_sample` — cumulative
-  `usage_updated.tokenUsage.total.outputTokens` added since the previous Watchdog sample, over
-  the events read forward from that sample's stored offset (a one-`sample_interval_seconds`
-  window, 60 s by default). The progress rule only asks whether this grew, so the short default
-  interval keeps stall detection responsive without maintaining a longer rolling window.
+- `output_token_growth_since_last_sample` — cumulative output tokens from `usage_updated` events
+  added since the previous Watchdog sample, over the events read forward from that sample's stored
+  offset (a one-`sample_interval_seconds` window, 60 s by default). Output tokens are read from the
+  normalized `usage_updated.tokenUsage` object, whose shape is provider-specific —
+  `tokenUsage.output_tokens` for Claude and `tokenUsage.outputTokens` for Codex — so the Watchdog
+  uses a provider-neutral accessor over those keys rather than a fixed `tokenUsage.total.outputTokens`
+  path, which exists for neither provider. The progress rule only asks whether this grew, so the
+  short default interval keeps stall detection responsive without maintaining a longer rolling
+  window.
 
 A Run is making progress on tick *t* iff **any** of the following advanced since the previous
 Watchdog sample:

@@ -46,13 +46,16 @@ A Progress Signal is the tuple:
   normalized `usage_updated.tokenUsage` object, whose shape is provider-specific —
   `tokenUsage.output_tokens` for Claude and `tokenUsage.outputTokens` for Codex — so the Watchdog
   uses a provider-neutral accessor over those keys rather than a fixed `tokenUsage.total.outputTokens`
-  path, which exists for neither provider. Both providers report `tokenUsage` as a cumulative
-  running total, not a per-event increment, so the Watchdog persists the last observed cumulative
-  output-token total in the `WatchdogSample` and treats this signal as advancing only when the
-  latest cumulative total strictly exceeds the stored one — a wedged provider re-emitting an
-  unchanged total is correctly read as zero growth. The progress rule only asks whether the total
-  strictly increased, so the short default interval keeps stall detection responsive without
-  maintaining a longer rolling window.
+  path, which exists for neither provider. The two providers report `tokenUsage` differently, so the
+  Watchdog computes growth per provider. Codex's `thread/tokenUsage/updated` carries a cumulative
+  running total, so growth is the delta between the latest cumulative total and the one stored in
+  the previous `WatchdogSample` (an unchanged total reads as zero growth). Claude forwards the raw
+  Anthropic per-turn `usage`, whose `output_tokens` counts a single completed assistant turn, so
+  growth is the sum of `output_tokens` across the `usage_updated` events read since the previous
+  sample. Both reduce to output tokens produced since the last sample — non-zero only when the
+  provider actually emitted new output, so a wedged provider (an unchanged Codex total, or no
+  newly-completed Claude turns) reads as zero growth. The short default interval keeps stall
+  detection responsive without maintaining a longer rolling window.
 
 A Run is making progress on tick *t* iff **any** of the following advanced since the previous
 Watchdog sample:
@@ -111,8 +114,9 @@ must not overwrite it with `no_progress` — this mirrors the existing `reconcil
 1. Reads the previous `WatchdogSample` from the run-store. A sample is scoped to the Run's active
    attempt: it stores the `attempt_id` it was taken under, the per-attempt event offset (provider
    `sequence` restarts at 1 on each attempt and the event log is keyed by `(run_id, attempt_id,
-   sequence)`), the last cumulative output-token total, and the `idle_since` timestamp. The Run's
-   `created_at` is the implicit zero before the first sample.
+   sequence)`), the last cumulative output-token total (the Codex delta baseline; Claude sums
+   per-turn `output_tokens` and does not need it — see signal 4), and the `idle_since` timestamp.
+   The Run's `created_at` is the implicit zero before the first sample.
 2. Computes a fresh Progress Signal. The Normalized Event Log is read forward from the previous
    sample's stored offset within the active `attempt_id`; the workspace stat walk uses a single
    `fs.readdir` per directory with the exclude set applied at the directory level so an excluded

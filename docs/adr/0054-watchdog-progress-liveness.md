@@ -1,0 +1,218 @@
+# Watchdog: progress-based liveness for active runs
+
+Symphonika treats a Run as alive whenever its Agent Provider keeps emitting events. In practice
+that is a heartbeat, not a progress signal. A real incident exposed the gap: a provider streamed
+`usage_updated` and `rate_limit_updated` for over five hours while looping on a `write_stdin`
+poll against a process from a different workspace, with zero `tool_call` events, no workspace
+writes after the first thirty minutes, and a single `turnId` whose cumulative input crossed 20M
+tokens (mostly cached). The Run stayed in `state = "running"` because no terminal event reached
+the FSM, and `reconcileActiveRuns` only re-checks GitHub issue eligibility — it has no view on
+whether the provider is doing useful work.
+
+## Decision
+
+Symphonika gains a per-Run **Watchdog** that runs on the daemon's reconciliation tick, samples
+a **Progress Signal** for each `running` Run, and transitions the Run to the existing `stale` state
+with `terminal_reason = "no_progress"` when no observed signal advances within a configured grace
+window. Provider cancellation runs through the existing `activeRuns.requestCancel` path, and the
+Workspace is left intact for operator inspection.
+
+`stale` is preserved as an operator-actionable, non-auto-retried verdict (ADR 0020, ADR 0038).
+`no_progress` is not a transient failure classification; the retry path defined in ADR 0020 must
+not re-launch the attempt automatically. Operators clear `no_progress` Runs the same way they
+clear other `stale` Runs today.
+
+## What counts as progress
+
+A Progress Signal is the tuple:
+
+- `last_tool_call_at` — timestamp of the most recent `NormalizedProviderEventType = "tool_call"`
+  event.
+- `workspace_mtime_max` — maximum file mtime under the Run's `workspacePath`, with `.git/`,
+  `target/`, `node_modules/`, and any workspace-relative glob listed in the watchdog config's
+  `mtime_ignore` set excluded so build-output churn neither masks real stalls nor forces them. The
+  exclude set lives in the `watchdog` service config (below) — not in the Workflow Contract, whose
+  parsed front matter the contract loader discards. Carrying it requires the service-config reload
+  schema and the `RuntimeConfigSnapshot` to gain an explicit, validated `watchdog` field as part of
+  this work; today the schema only passes unknown top-level keys through and the snapshot is built
+  from known fields, so a `watchdog` block would otherwise be dropped before the daemon reads it.
+- `turn_id_set_size` — distinct `turnId` values observed across `usage_updated` and
+  `turn_completed` events. Only the Codex provider tags these events with a `turnId`; the Claude
+  provider emits `sessionId` instead, so this signal advances for Codex Runs only. Claude Runs
+  stay covered by the permissive any-of rule below via signals 1, 2, 4, and 5.
+- `output_token_growth_since_last_sample` — cumulative output tokens from `usage_updated` events
+  added since the previous Watchdog sample, over the events read forward from that sample's stored
+  offset (a one-`sample_interval_seconds` window, 60 s by default). Output tokens are read from the
+  normalized `usage_updated.tokenUsage` object, whose shape is provider-specific —
+  `tokenUsage.output_tokens` for Claude and `tokenUsage.outputTokens` for Codex — so the Watchdog
+  uses a provider-neutral accessor over those keys rather than a fixed `tokenUsage.total.outputTokens`
+  path, which exists for neither provider. The two providers report `tokenUsage` differently, so the
+  Watchdog computes growth per provider. Codex's `thread/tokenUsage/updated` carries a cumulative
+  running total, so growth is the delta between the latest cumulative total and the one stored in
+  the previous `WatchdogSample` (an unchanged total reads as zero growth). Claude forwards the raw
+  Anthropic per-turn `usage`, whose `output_tokens` counts a single completed assistant turn, so
+  growth is the sum of `output_tokens` across the `usage_updated` events read since the previous
+  sample. Both reduce to output tokens produced since the last sample — non-zero only when the
+  provider actually emitted new output, so a wedged provider (an unchanged Codex total, or no
+  newly-completed Claude turns) reads as zero growth. The short default interval keeps stall
+  detection responsive without maintaining a longer rolling window.
+- `last_message_at` — timestamp of the most recent streamed assistant `message` event (Claude
+  `content_block_delta`/`text_delta` and Codex `item/agentMessage/delta`). This catches a provider
+  streaming user-visible output for longer than a sample interval without tool calls, workspace
+  writes, or a completed turn — e.g. a single long Claude turn whose `usage_updated` does not
+  arrive until completion, which signal 4 alone would miss. Streamed messages are genuine output,
+  unlike the `usage_updated`/`rate_limit_updated` heartbeats the rule excludes.
+
+A Run is making progress on tick *t* iff **any** of the following advanced since the previous
+Watchdog sample:
+
+1. `last_tool_call_at` increased, or
+2. `workspace_mtime_max` advanced by at least one second, or
+3. `turn_id_set_size` increased, or
+4. `output_token_growth_since_last_sample` is non-zero, or
+5. `last_message_at` increased (a new streamed assistant message arrived).
+
+The rule is deliberately permissive. A long ESBMC `make verify` emits no `tool_call` and no
+`usage_updated`, but its child processes write to the workspace; the mtime check keeps it alive.
+A model loop that emits `usage_updated` and `rate_limit_updated` forever without tools, writes,
+new turns, or output tokens fails the rule and is stopped.
+
+`(usage_updated + rate_limit_updated)` events alone do **not** satisfy the progress rule. That is
+the entire point of the ADR: a wedged provider can emit those forever without observable
+side-effects.
+
+## Configuration
+
+Service config grows a `watchdog` block under the daemon, with per-Project overrides:
+
+```yaml
+watchdog:
+  enabled: true
+  grace_minutes: 30
+  sample_interval_seconds: 60
+  mtime_ignore: []         # extra workspace-relative globs excluded from the mtime walk
+projects:
+  - name: vow
+    watchdog:
+      grace_minutes: 180   # ESBMC verification can legitimately silence tools for hours
+```
+
+Defaults are safe-by-default: 30 minutes of no observable progress is well above any realistic
+agent latency for normal tool-using work and below the threshold at which operators have
+historically intervened manually. `enabled: false` reproduces today's behavior exactly. The `watchdog`
+block (top-level and per-Project) is added to the service-config reload schema and the
+`RuntimeConfigSnapshot` as part of this work — it is not carried today — so that once added it is
+merged via the same defensive reload pipeline as the rest of the Service Config, and a bad override
+falls back to the last known-good snapshot rather than disabling the Watchdog silently.
+
+## Sampling and persistence
+
+The Watchdog runs alongside `reconcileActiveRuns` and `reconcileWaitingRuns` in the
+reconciliation phase. It samples only Runs in `state = "running"` — the only active state with a
+live Agent Provider that can wedge. The other `ACTIVE_STATES` are skipped: `queued` and
+`preparing_workspace` rows (a Run is persisted as `queued` before its provider starts) have no
+provider executing yet, so they have no liveness signal to advance and must not accrue idle time;
+`waiting` rows are parked by design (see the ADR 0047 interaction below). A `running` Run that
+already has `cancel_requested` set is also skipped: a cancellation with a more specific
+`cancel_reason` (e.g. `closed_issue` or `eligibility_loss`) is already in flight, so the Watchdog
+must not overwrite it with `no_progress` — this mirrors the existing `reconcileActiveRuns` guard
+(`if (entry.cancelRequested) continue`). For each sampled `running` Run, it:
+
+1. Reads the previous `WatchdogSample` from the run-store. A sample is scoped to the Run's active
+   attempt: it stores the `attempt_id` it was taken under, the per-attempt event offset (provider
+   `sequence` restarts at 1 on each attempt and the event log is keyed by `(run_id, attempt_id,
+   sequence)`), the last cumulative output-token total (the Codex delta baseline; Claude sums
+   per-turn `output_tokens` and does not need it — see signal 4), and the `idle_since` timestamp.
+   The Run's `created_at` is the implicit zero before the first sample.
+2. Computes a fresh Progress Signal. The Normalized Event Log is read forward from the previous
+   sample's stored offset within the active `attempt_id`; the workspace stat walk uses a single
+   `fs.readdir` per directory and applies the exclude set at two levels: an excluded directory tree
+   (e.g. `target/`) is never descended, and any individual file whose workspace-relative path
+   matches an `mtime_ignore` glob is dropped from the mtime computation so it cannot advance
+   `workspace_mtime_max` — otherwise a wedged Run repeatedly touching an ignored file glob (e.g.
+   `*.log`) would keep the mtime signal alive forever. When the active attempt has changed since the previous
+   sample — a transient retry starts a new attempt that restarts `sequence` at 1 and reports
+   attempt-local token totals — the stored offset, the cumulative output-token baseline, and
+   `idle_since` are reset to the new attempt's zero, so a stale run-level offset/total can neither
+   hide the retry's events (via `sequence > lastOffset`) nor suppress its output-token growth until
+   it surpasses the prior attempt's total, and the grace clock starts fresh for the retry. (A
+   transient retry re-enters a `running` agent state per ADR 0020, not `waiting`, so the
+   `waiting`-entry hook does not fire and `idle_since` must be reset here.)
+3. If progress was observed, writes the new sample and clears any persisted `idle_since`.
+4. If no progress was observed, `idle_since` is already set, and `now - idle_since >= grace_minutes`,
+   transitions the Run to `stale` with `terminal_reason = "no_progress"` and calls
+   `activeRuns.requestCancel`. Because `requestCancel` only sets `cancel_requested`, the provider's
+   later exit would otherwise be classified `cancelled` and the run-controller's unconditional
+   terminal write would clobber the row, erasing the `no_progress` verdict — so the watchdog cancel
+   must preserve it: `no_progress` is routed through the final classification (the terminal write
+   records `stale`/`no_progress`, not `cancelled`), or equivalently the terminal write is guarded
+   from overwriting an already-set watchdog `stale`/`no_progress`. The `idle_since`-is-set guard
+   matters: on the first idle tick
+   `idle_since` is still unset (step 3 clears it on progress), so this branch is skipped and the
+   clock is started in step 5 rather than tripping the threshold immediately.
+5. Otherwise persists the still-idle sample, setting `idle_since` on the first idle observation
+   (when it is still unset) so the grace clock starts on first idle and survives restarts.
+
+Separately from the per-tick steps above, `idle_since` is cleared as a transition-time hook
+whenever a Run leaves `running` for `waiting`. This cannot be a step of the sampling loop, which
+never runs on `waiting` Runs; but because `idle_since` is a persisted wall-clock timestamp and
+step 5 only sets it when unset, clearing it on `waiting` entry is what stops step 4's
+`now - idle_since` from absorbing an unsampled wait excursion as idle time (see the ADR 0047
+interaction below).
+
+Sampling is bounded work: the event log is never re-scanned in full, and the workspace walk skips
+known build-output directories at the top of the descent rather than per file.
+
+## Operator surface
+
+`no_progress` joins the terminal-reason vocabulary. `show-run` already renders `terminal_reason`;
+the `runs` listing does not today, so it gains a `terminal_reason` column (and the `status`/local-UI
+and HTTP surfaces gain an equivalent field) as part of this work, so operators can see `no_progress`
+from the run listing and not only from `show-run`. `status` and the local UI gain a "watchdog idle" badge derived from the
+persisted `idle_since` so operators can see Runs approaching the threshold before they are
+stopped. `show-run` exposes the most recent Progress Signal so an operator can verify why the
+Watchdog fired (e.g. "last tool_call 4h12m ago, workspace mtime 4h08m ago, single turnId,
+0 output tokens since last sample").
+
+## Interaction with existing lifecycle decisions
+
+- **ADR 0020 (retry transient only):** `no_progress` is not classified as transient. The
+  Watchdog-stopped attempt is the terminal verdict for that Run.
+- **ADR 0038 (explicit stale clearing):** `stale` Runs stopped by the Watchdog follow the same
+  operator-clearing path as other `stale` Runs; there is no auto-clear TTL.
+- **ADR 0046 (state advance vs continuation):** State Advance walks are subject to the same
+  Watchdog rule. The FSM does not need to know about Watchdog termination; `state = stale` with
+  `terminal_reason = no_progress` is observable like any other terminal state.
+- **ADR 0047 (poll-driven wait states):** Waiting rows are *not* sampled. A waiting Run is parked
+  by design and has no provider to wedge; `reconcileWaitingRuns` already handles its lifecycle.
+  Because `idle_since` is a persisted wall-clock timestamp and no sample runs while a Run is
+  `waiting`, `idle_since` is cleared on entry to `waiting` so the grace window cannot accrue across
+  an unsampled wait excursion — a Run returning to an active state starts its idle clock fresh on
+  its next idle tick rather than inheriting pre-wait idle time.
+- **ADR 0015 (full-permission agent execution):** The Watchdog observes, it does not constrain.
+  It does not require sandbox isolation to function and does not change the full-permission
+  posture.
+
+## Scope of this ADR
+
+This ADR records the decision to introduce progress-based liveness as a first-class lifecycle
+concern. Two adjacent improvements identified during the same incident are intentionally **out
+of scope** here and will land as separate ADRs once this slice has shipped and the operational
+data it produces is in hand:
+
+- **Per-turn token budget guard** — a different signal class that watches
+  `(turnId, cumulative_input_tokens, output_token_total)` and terminates a Run when a single
+  turn crosses a configured input-token ceiling. Different failure mode (degenerate within-turn
+  context saturation, not absence of side-effects) and deserves its own threshold discussion.
+- **Provider PID/process isolation** — running each Agent Provider in its own PID namespace so
+  one Run's agent cannot observe or bind to processes belonging to another Run's workspace.
+  This is a sandbox-shape decision adjacent to ADR 0015 and is independent of the Watchdog; the
+  Watchdog detects the symptom regardless of whether isolation lands.
+
+The Watchdog is the load-bearing first slice because it converts a class of currently-silent
+failures (model loops, wedged shell tools, runaway polls, dead provider sessions still emitting
+heartbeats) into terminal `stale` Runs that the existing operator surfaces already render.
+
+## Numbering
+
+ADR `0053` is the most recent number in tree; this ADR is `0054`.

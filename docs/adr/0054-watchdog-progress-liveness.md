@@ -102,8 +102,11 @@ reconciliation phase. It samples only Runs in `state = "running"` — the only a
 live Agent Provider that can wedge. The other `ACTIVE_STATES` are skipped: `queued` and
 `preparing_workspace` rows (a Run is persisted as `queued` before its provider starts) have no
 provider executing yet, so they have no liveness signal to advance and must not accrue idle time;
-`waiting` rows are parked by design (see the ADR 0047 interaction below). For each sampled
-`running` Run, it:
+`waiting` rows are parked by design (see the ADR 0047 interaction below). A `running` Run that
+already has `cancel_requested` set is also skipped: a cancellation with a more specific
+`cancel_reason` (e.g. `closed_issue` or `eligibility_loss`) is already in flight, so the Watchdog
+must not overwrite it with `no_progress` — this mirrors the existing `reconcileActiveRuns` guard
+(`if (entry.cancelRequested) continue`). For each sampled `running` Run, it:
 
 1. Reads the previous `WatchdogSample` from the run-store (the Run's `created_at` is the implicit
    zero before the first sample).

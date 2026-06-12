@@ -1361,6 +1361,16 @@ export class RunStore {
       .prepare("update runs set state = ?, updated_at = ? where id = ?")
       .run(state, now, runId);
     this.recordRunTransition(runId, state, now);
+    if (state === "waiting") {
+      // ADR 0054: idle_since is a persisted wall-clock timestamp and the
+      // watchdog never samples waiting Runs, so clear it on entry to waiting so
+      // the grace window cannot absorb an unsampled wait excursion as idle time.
+      // A Run returning to running starts its idle clock fresh on its next idle
+      // tick rather than inheriting pre-wait idle time (see ADR 0047).
+      this.database
+        .prepare("update watchdog_samples set idle_since = null where run_id = ?")
+        .run(runId);
+    }
   }
 
   updateRunEvidence(runId: string, evidence: RunEvidenceInput): void {

@@ -222,6 +222,33 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("clears the watchdog idle_since when a run enters waiting", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const id = seedRun(store);
+      store.updateRunState(id, "running");
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T09:30:00.000Z",
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath: "logs/runs/run-1/provider.normalized.jsonl",
+        outputTokensTotal: 0,
+        runId: id,
+        sampledAt: "2026-05-22T09:30:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: 0
+      });
+      expect(store.getWatchdogSample(id)?.idleSince).toBe("2026-05-22T09:30:00.000Z");
+
+      store.updateRunState(id, "waiting");
+
+      expect(store.getWatchdogSample(id)?.idleSince).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
   it("recordTerminalReason persists reason and classification", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

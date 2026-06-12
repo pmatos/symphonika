@@ -39,7 +39,7 @@ A Progress Signal is the tuple:
 - `turn_id_set_size` — distinct `turnId` values observed across `usage_updated` and
   `turn_completed` events. Only the Codex provider tags these events with a `turnId`; the Claude
   provider emits `sessionId` instead, so this signal advances for Codex Runs only. Claude Runs
-  stay covered by the permissive any-of rule below via signals 1, 2, and 4.
+  stay covered by the permissive any-of rule below via signals 1, 2, 4, and 5.
 - `output_token_growth_since_last_sample` — cumulative output tokens from `usage_updated` events
   added since the previous Watchdog sample, over the events read forward from that sample's stored
   offset (a one-`sample_interval_seconds` window, 60 s by default). Output tokens are read from the
@@ -56,6 +56,12 @@ A Progress Signal is the tuple:
   provider actually emitted new output, so a wedged provider (an unchanged Codex total, or no
   newly-completed Claude turns) reads as zero growth. The short default interval keeps stall
   detection responsive without maintaining a longer rolling window.
+- `last_message_at` — timestamp of the most recent streamed assistant `message` event (Claude
+  `content_block_delta`/`text_delta` and Codex `item/agentMessage/delta`). This catches a provider
+  streaming user-visible output for longer than a sample interval without tool calls, workspace
+  writes, or a completed turn — e.g. a single long Claude turn whose `usage_updated` does not
+  arrive until completion, which signal 4 alone would miss. Streamed messages are genuine output,
+  unlike the `usage_updated`/`rate_limit_updated` heartbeats the rule excludes.
 
 A Run is making progress on tick *t* iff **any** of the following advanced since the previous
 Watchdog sample:
@@ -63,7 +69,8 @@ Watchdog sample:
 1. `last_tool_call_at` increased, or
 2. `workspace_mtime_max` advanced by at least one second, or
 3. `turn_id_set_size` increased, or
-4. `output_token_growth_since_last_sample` is non-zero.
+4. `output_token_growth_since_last_sample` is non-zero, or
+5. `last_message_at` increased (a new streamed assistant message arrived).
 
 The rule is deliberately permissive. A long ESBMC `make verify` emits no `tool_call` and no
 `usage_updated`, but its child processes write to the workspace; the mtime check keeps it alive.

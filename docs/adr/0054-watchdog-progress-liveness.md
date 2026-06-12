@@ -98,10 +98,13 @@ see the ADR 0047 interaction below), it:
    the exclude set applied at the directory level so an excluded `target/` tree is never
    descended.
 3. If progress was observed, writes the new sample and clears any persisted `idle_since`.
-4. If no progress was observed and `now - idle_since >= grace_minutes`, transitions the Run to
-   `stale` with `terminal_reason = "no_progress"` and calls `activeRuns.requestCancel`.
+4. If no progress was observed, `idle_since` is already set, and `now - idle_since >= grace_minutes`,
+   transitions the Run to `stale` with `terminal_reason = "no_progress"` and calls
+   `activeRuns.requestCancel`. The `idle_since`-is-set guard matters: on the first idle tick
+   `idle_since` is still unset (step 3 clears it on progress), so this branch is skipped and the
+   clock is started in step 5 rather than tripping the threshold immediately.
 5. Otherwise persists the still-idle sample, setting `idle_since` on the first idle observation
-   so the grace window survives restarts.
+   (when it is still unset) so the grace clock starts on first idle and survives restarts.
 
 Sampling is bounded work: the event log is never re-scanned in full, and the workspace walk skips
 known build-output directories at the top of the descent rather than per file.

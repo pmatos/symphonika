@@ -221,7 +221,7 @@ export type WatchdogCandidateRun = {
   normalizedLogPath: string;
   projectName: string;
   runId: string;
-  state: Extract<RunState, "queued" | "preparing_workspace" | "running">;
+  state: Extract<RunState, "running">;
   workspacePath: string;
 };
 
@@ -721,7 +721,10 @@ export class RunStore {
           "select id, project_name, issue_number, state,",
           "workspace_path, normalized_log_path",
           "from runs",
-          "where state in ('queued','preparing_workspace','running')",
+          // ADR 0054: only `running` Runs have a live provider that can wedge.
+          // queued/preparing_workspace have no provider yet (no liveness signal
+          // to advance, must not accrue idle time); waiting is parked by design.
+          "where state = 'running'",
           "order by created_at asc, id asc"
         ].join(" ")
       )
@@ -813,7 +816,7 @@ export class RunStore {
           "failure_classification = 'deterministic',",
           "updated_at = ?",
           "where id = ?",
-          "and state in ('queued','preparing_workspace','running')",
+          "and state = 'running'",
           "and cancel_requested = 0"
         ].join(" ")
       )

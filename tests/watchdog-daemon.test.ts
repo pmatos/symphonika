@@ -123,7 +123,7 @@ describe("daemon watchdog", () => {
 
     const daemon = await startDaemon({
       agentProviders: { codex: provider },
-      createRunId: () => "run-watchdog-noattach",
+      createRunId: () => "run-cancel-during-prep",
       cwd: root,
       env: { GITHUB_TOKEN: "secret-token" },
       githubIssuesApi: githubIssuesApiFixture(),
@@ -133,19 +133,21 @@ describe("daemon watchdog", () => {
     });
 
     try {
-      // The watchdog stales the run while it is still in preparing_workspace,
-      // before the provider is attached.
-      await waitForRunState(daemon.url, "stale");
-      // Releasing prep lets the lifecycle finish attaching. Since the cancel was
-      // already requested, the provider must NOT be launched (its cancel would be
-      // a no-op against an unstarted provider and never retried), and the run must
-      // settle on the preserved stale/no_progress verdict.
-      releasePrep();
-      const settled = await waitForSettledRun(daemon.url, "run-watchdog-noattach");
-      expect(settled).toMatchObject({
-        state: "stale",
-        terminalReason: "no_progress"
+      // The run parks in preparing_workspace while prep is gated. Cancel it there
+      // (operator path) — before the provider is attached. (The watchdog samples
+      // running rows only, so a pre-attach cancel comes from operator/closed-issue
+      // paths, which the re-check must still honor.)
+      await waitForRunState(daemon.url, "preparing_workspace");
+      await fetch(`${daemon.url}/api/runs/run-cancel-during-prep/cancel`, {
+        method: "POST"
       });
+      // Releasing prep lets the lifecycle finish attaching. Because the cancel was
+      // recorded before attach, the provider must NOT be launched (its cancel would
+      // be a no-op against an unstarted provider and never retried), and the run
+      // must settle as cancelled rather than hanging.
+      releasePrep();
+      const settled = await waitForSettledRun(daemon.url, "run-cancel-during-prep");
+      expect(settled.state).toBe("cancelled");
       expect(provider.runAttemptCalls()).toBe(0);
     } finally {
       provider.stopAll();

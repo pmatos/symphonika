@@ -443,7 +443,7 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
-  it("lists watchdog candidates from active run states and excludes waiting rows", async () => {
+  it("lists only running runs as watchdog candidates", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });
     try {
@@ -457,14 +457,9 @@ describe("run-store lifecycle CRUD", () => {
       store.updateRunState("waiting", "waiting");
       store.setRunCurrentState("waiting", "pr_review");
 
-      expect(
-        store
-          .listWatchdogCandidateRuns()
-          .slice()
-          .sort((left, right) => left.runId.localeCompare(right.runId))
-      ).toEqual([
-        expect.objectContaining({ runId: "preparing", state: "preparing_workspace" }),
-        expect.objectContaining({ runId: "queued", state: "queued" }),
+      // ADR 0054: only `running` Runs are candidates; queued, preparing_workspace,
+      // and waiting are all excluded.
+      expect(store.listWatchdogCandidateRuns()).toEqual([
         expect.objectContaining({
           normalizedLogPath: "/tmp/provider.normalized.jsonl",
           runId: "running",

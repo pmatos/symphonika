@@ -134,7 +134,13 @@ must not overwrite it with `no_progress` — this mirrors the existing `reconcil
 3. If progress was observed, writes the new sample and clears any persisted `idle_since`.
 4. If no progress was observed, `idle_since` is already set, and `now - idle_since >= grace_minutes`,
    transitions the Run to `stale` with `terminal_reason = "no_progress"` and calls
-   `activeRuns.requestCancel`. The `idle_since`-is-set guard matters: on the first idle tick
+   `activeRuns.requestCancel`. Because `requestCancel` only sets `cancel_requested`, the provider's
+   later exit would otherwise be classified `cancelled` and the run-controller's unconditional
+   terminal write would clobber the row, erasing the `no_progress` verdict — so the watchdog cancel
+   must preserve it: `no_progress` is routed through the final classification (the terminal write
+   records `stale`/`no_progress`, not `cancelled`), or equivalently the terminal write is guarded
+   from overwriting an already-set watchdog `stale`/`no_progress`. The `idle_since`-is-set guard
+   matters: on the first idle tick
    `idle_since` is still unset (step 3 clears it on progress), so this branch is skipped and the
    clock is started in step 5 rather than tripping the threshold immediately.
 5. Otherwise persists the still-idle sample, setting `idle_since` on the first idle observation

@@ -31,9 +31,11 @@ A Progress Signal is the tuple:
 - `workspace_mtime_max` — maximum file mtime under the Run's `workspacePath`, with `.git/`,
   `target/`, `node_modules/`, and any workspace-relative glob listed in the watchdog config's
   `mtime_ignore` set excluded so build-output churn neither masks real stalls nor forces them. The
-  exclude set lives in the `watchdog` service config (below), which the reload pipeline already
-  validates and persists — not in the Workflow Contract, whose parsed front matter the contract
-  loader discards.
+  exclude set lives in the `watchdog` service config (below) — not in the Workflow Contract, whose
+  parsed front matter the contract loader discards. Carrying it requires the service-config reload
+  schema and the `RuntimeConfigSnapshot` to gain an explicit, validated `watchdog` field as part of
+  this work; today the schema only passes unknown top-level keys through and the snapshot is built
+  from known fields, so a `watchdog` block would otherwise be dropped before the daemon reads it.
 - `turn_id_set_size` — distinct `turnId` values observed across `usage_updated` and
   `turn_completed` events. Only the Codex provider tags these events with a `turnId`; the Claude
   provider emits `sessionId` instead, so this signal advances for Codex Runs only. Claude Runs
@@ -87,10 +89,11 @@ projects:
 
 Defaults are safe-by-default: 30 minutes of no observable progress is well above any realistic
 agent latency for normal tool-using work and below the threshold at which operators have
-historically intervened manually. `enabled: false` reproduces today's behavior exactly. Project
-overrides are merged via the same defensive reload pipeline as the rest of the Service Config,
-so a bad override falls back to the last known-good snapshot rather than disabling the Watchdog
-silently.
+historically intervened manually. `enabled: false` reproduces today's behavior exactly. The `watchdog`
+block (top-level and per-Project) is added to the service-config reload schema and the
+`RuntimeConfigSnapshot` as part of this work — it is not carried today — so that once added it is
+merged via the same defensive reload pipeline as the rest of the Service Config, and a bad override
+falls back to the last known-good snapshot rather than disabling the Watchdog silently.
 
 ## Sampling and persistence
 

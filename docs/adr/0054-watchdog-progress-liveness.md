@@ -111,17 +111,19 @@ must not overwrite it with `no_progress` — this mirrors the existing `reconcil
 1. Reads the previous `WatchdogSample` from the run-store. A sample is scoped to the Run's active
    attempt: it stores the `attempt_id` it was taken under, the per-attempt event offset (provider
    `sequence` restarts at 1 on each attempt and the event log is keyed by `(run_id, attempt_id,
-   sequence)`), and the last cumulative output-token total. The Run's `created_at` is the implicit
-   zero before the first sample.
+   sequence)`), the last cumulative output-token total, and the `idle_since` timestamp. The Run's
+   `created_at` is the implicit zero before the first sample.
 2. Computes a fresh Progress Signal. The Normalized Event Log is read forward from the previous
    sample's stored offset within the active `attempt_id`; the workspace stat walk uses a single
    `fs.readdir` per directory with the exclude set applied at the directory level so an excluded
    `target/` tree is never descended. When the active attempt has changed since the previous
    sample — a transient retry starts a new attempt that restarts `sequence` at 1 and reports
-   attempt-local token totals — the stored offset and the cumulative output-token baseline are
-   reset to the new attempt's zero, so a stale run-level offset/total can neither hide the retry's
-   events (via `sequence > lastOffset`) nor suppress its output-token growth until it surpasses the
-   prior attempt's total.
+   attempt-local token totals — the stored offset, the cumulative output-token baseline, and
+   `idle_since` are reset to the new attempt's zero, so a stale run-level offset/total can neither
+   hide the retry's events (via `sequence > lastOffset`) nor suppress its output-token growth until
+   it surpasses the prior attempt's total, and the grace clock starts fresh for the retry. (A
+   transient retry re-enters a `running` agent state per ADR 0020, not `waiting`, so the
+   `waiting`-entry hook does not fire and `idle_since` must be reset here.)
 3. If progress was observed, writes the new sample and clears any persisted `idle_since`.
 4. If no progress was observed, `idle_since` is already set, and `now - idle_since >= grace_minutes`,
    transitions the Run to `stale` with `terminal_reason = "no_progress"` and calls

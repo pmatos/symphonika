@@ -200,6 +200,28 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("does not mark cancel-requested runs stale for no progress", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const id = seedRun(store);
+      store.updateRunState(id, "running");
+      store.markCancelRequested(id, "closed_issue");
+
+      expect(
+        store.markRunNoProgressStale(id, "2026-05-22T10:00:00.000Z")
+      ).toBe(false);
+      expect(store.getRun(id)).toMatchObject({
+        cancelReason: "closed_issue",
+        cancelRequested: true,
+        state: "running",
+        terminalReason: null
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("recordTerminalReason persists reason and classification", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

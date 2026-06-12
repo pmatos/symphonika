@@ -747,7 +747,8 @@ export class RunStore {
           "failure_classification = 'deterministic',",
           "updated_at = ?",
           "where id = ?",
-          "and state in ('queued','preparing_workspace','running')"
+          "and state in ('queued','preparing_workspace','running')",
+          "and cancel_requested = 0"
         ].join(" ")
       )
       .run(updatedAt, runId);

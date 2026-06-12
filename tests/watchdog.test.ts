@@ -463,6 +463,70 @@ describe("reconcileWatchdog", () => {
       store.close();
     }
   });
+
+  it("restarts the output-token baseline when a retry switches the normalized log path", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const attempt1 = path.join(root, "provider.normalized.jsonl");
+    const attempt2 = path.join(root, "provider.normalized.attempt-2.jsonl");
+    // The retry's usage event reports fewer output tokens than attempt 1's
+    // high-water mark; without a baseline reset, Math.max keeps the old total.
+    await writeFile(
+      attempt2,
+      JSON.stringify({ tokenUsage: { outputTokens: 800 }, type: "usage_updated" }) + "\n"
+    );
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      seedRun(store, "run-retry-tokens");
+      store.updateRunEvidence("run-retry-tokens", {
+        branchName: "sym/symphonika/198-watchdog",
+        branchRef: "refs/heads/sym/symphonika/198-watchdog",
+        issueSnapshotPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-tokens", "issue.json"),
+        metadataPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-tokens", "metadata.json"),
+        normalizedLogPath: attempt2,
+        promptPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-tokens", "prompt.md"),
+        rawLogPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-tokens", "raw.jsonl"),
+        workflowGraphPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-tokens", "workflow.json"),
+        workspacePath
+      });
+      store.updateRunState("run-retry-tokens", "running");
+      // Prior attempt's persisted sample: high token total, OLD log path.
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T09:59:30.000Z",
+        lastToolCallAt: null,
+        normalizedLogOffset: 9_999,
+        normalizedLogPath: attempt1,
+        outputTokensTotal: 5_000,
+        runId: "run-retry-tokens",
+        sampledAt: "2026-05-22T09:59:30.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
+      });
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel: vi.fn().mockResolvedValue(undefined),
+        issueNumber: 198,
+        projectName: "symphonika",
+        runId: "run-retry-tokens"
+      });
+
+      await reconcileWatchdog({
+        activeRuns,
+        config: { enabled: true, graceMinutes: 30, sampleIntervalSeconds: 60 },
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore: store
+      });
+
+      const after = store.getWatchdogSample("run-retry-tokens");
+      expect(after?.normalizedLogPath).toBe(attempt2);
+      // Reset to the new attempt's value, not Math.max(5000, 800).
+      expect(after?.outputTokensTotal).toBe(800);
+    } finally {
+      store.close();
+    }
+  });
 });
 
 function seedRun(store: RunStore, id: string): void {

@@ -130,17 +130,21 @@ async function sampleRun(input: {
   sampledAt: string;
 }): Promise<WatchdogSample> {
   // A retry attempt writes a fresh normalized log path
-  // (provider.normalized.attempt-N.jsonl). The persisted offset belongs to the
-  // previous attempt's file, so reuse it only when the path is unchanged;
-  // otherwise restart at 0 so the new attempt's early events are not skipped.
-  const previousOffset =
+  // (provider.normalized.attempt-N.jsonl). Per-attempt baselines (the byte
+  // offset and the output-token high-water mark) belong to the previous
+  // attempt's file, so carry them over only when the path is unchanged. On a
+  // path change we restart the offset at 0 (so the new attempt's early events
+  // are not skipped) and the token baseline at 0 (so a new process whose output
+  // token counter restarts below the failed attempt's total still registers as
+  // progress instead of being suppressed by Math.max).
+  const carryOver =
     input.previous !== undefined &&
     input.previous.normalizedLogPath === input.run.normalizedLogPath
-      ? input.previous.normalizedLogOffset
-      : 0;
+      ? input.previous
+      : undefined;
   const log = await readNormalizedEventsSince(
     input.run.normalizedLogPath,
-    previousOffset
+    carryOver?.normalizedLogOffset ?? 0
   );
   const turnIds = collectTurnIds(log.events);
   const turnIdSetSize = input.runStore.rememberWatchdogTurnIds(
@@ -157,7 +161,7 @@ async function sampleRun(input: {
     normalizedLogOffset: log.offset,
     normalizedLogPath: input.run.normalizedLogPath,
     outputTokensTotal: outputTokensTotal(
-      input.previous?.outputTokensTotal ?? 0,
+      carryOver?.outputTokensTotal ?? 0,
       log.events
     ),
     runId: input.run.runId,

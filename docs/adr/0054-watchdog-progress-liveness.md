@@ -137,6 +137,10 @@ Watchdog fired (e.g. "last tool_call 4h12m ago, workspace mtime 4h08m ago, singl
   `terminal_reason = no_progress` is observable like any other terminal state.
 - **ADR 0047 (poll-driven wait states):** Waiting rows are *not* sampled. A waiting Run is parked
   by design and has no provider to wedge; `reconcileWaitingRuns` already handles its lifecycle.
+  Because `idle_since` is a persisted wall-clock timestamp and no sample runs while a Run is
+  `waiting`, `idle_since` is cleared on entry to `waiting` so the grace window cannot accrue across
+  an unsampled wait excursion — a Run returning to an active state starts its idle clock fresh on
+  its next idle tick rather than inheriting pre-wait idle time.
 - **ADR 0015 (full-permission agent execution):** The Watchdog observes, it does not constrain.
   It does not require sandbox isolation to function and does not change the full-permission
   posture.

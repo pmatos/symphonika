@@ -2110,6 +2110,21 @@ export class RunController {
         respectsIssueLabels
       });
 
+      // A cancel (watchdog no_progress, operator, closed_issue, eligibility_loss)
+      // can land DURING the potentially long workspace prep above — after the
+      // one-shot cancelBeforeAttach check. The attachProvider hand-off just fired
+      // provider.cancel against a provider that runAttempt has not started yet, so
+      // it was a no-op, and the latched cancelRequested suppresses any later
+      // cancel. Re-check here and skip launching a provider we could no longer
+      // stop; the finally block preserves the stale/no_progress verdict (or
+      // classifies the cancellation). See ADR 0052 / ADR 0054.
+      const cancelDuringPrepare = this.activeRuns.getInFlight(input.runId);
+      if (cancelDuringPrepare?.cancelRequested === true) {
+        throw new Error(
+          `run ${input.runId} was cancelled before provider start`
+        );
+      }
+
       await this.iterateAttempt({
         attemptId,
         attemptNumber: input.attemptNumber,

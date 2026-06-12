@@ -102,12 +102,12 @@ describe("daemon watchdog", () => {
     }
   });
 
-  it("preserves the watchdog no_progress verdict when a stale preparing run is overwritten to running", async () => {
+  it("does not start the provider when a cancel lands during workspace prep", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
     const prepared = preparedWorkspaceFixture(root);
     await mkdir(prepared.workspacePath, { recursive: true });
-    const provider = naturalCompletionProvider();
+    const provider = neverStartingProvider();
 
     let releasePrep: () => void = () => {};
     const prepGate = new Promise<void>((resolve) => {
@@ -123,7 +123,7 @@ describe("daemon watchdog", () => {
 
     const daemon = await startDaemon({
       agentProviders: { codex: provider },
-      createRunId: () => "run-watchdog-race",
+      createRunId: () => "run-watchdog-noattach",
       cwd: root,
       env: { GITHUB_TOKEN: "secret-token" },
       githubIssuesApi: githubIssuesApiFixture(),
@@ -133,72 +133,20 @@ describe("daemon watchdog", () => {
     });
 
     try {
-      // The watchdog stales the run while it is parked in preparing_workspace,
+      // The watchdog stales the run while it is still in preparing_workspace,
       // before the provider is attached.
       await waitForRunState(daemon.url, "stale");
-      // Releasing prep lets the lifecycle overwrite state back to "running"
-      // (updateRunState leaves terminal_reason = "no_progress"), then run the
-      // provider to natural completion and unwind through the finally block.
+      // Releasing prep lets the lifecycle finish attaching. Since the cancel was
+      // already requested, the provider must NOT be launched (its cancel would be
+      // a no-op against an unstarted provider and never retried), and the run must
+      // settle on the preserved stale/no_progress verdict.
       releasePrep();
-      // Resolves once the provider stream starts, i.e. after the clobbering
-      // updateRunState(..., "running"); the pre-clobber stale is now gone.
-      await provider.started;
-      const settled = await waitForSettledRun(daemon.url, "run-watchdog-race");
+      const settled = await waitForSettledRun(daemon.url, "run-watchdog-noattach");
       expect(settled).toMatchObject({
         state: "stale",
         terminalReason: "no_progress"
       });
-    } finally {
-      provider.stopAll();
-      await daemon.stop();
-    }
-  });
-
-  it("falls back to cancellation when a concurrent cancel beats the watchdog re-assert", async () => {
-    const root = await makeTempRoot();
-    await writeProject(root);
-    const prepared = preparedWorkspaceFixture(root);
-    await mkdir(prepared.workspacePath, { recursive: true });
-
-    let cancelUrl = "";
-    const provider = cancelTriggeringProvider(() => cancelUrl);
-
-    let releasePrep: () => void = () => {};
-    const prepGate = new Promise<void>((resolve) => {
-      releasePrep = resolve;
-    });
-    const prepareIssueWorkspace = async (
-      input: PrepareIssueWorkspaceInput
-    ): Promise<PreparedIssueWorkspace> => {
-      void input;
-      await prepGate;
-      return prepared;
-    };
-
-    const daemon = await startDaemon({
-      agentProviders: { codex: provider },
-      createRunId: () => "run-watchdog-cancel-race",
-      cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubIssuesApi: githubIssuesApiFixture(),
-      logger: pino({ enabled: false }),
-      port: 0,
-      prepareIssueWorkspace
-    });
-    cancelUrl = `${daemon.url}/api/runs/run-watchdog-cancel-race/cancel`;
-
-    try {
-      // The watchdog stales the run while it is parked in preparing_workspace.
-      await waitForRunState(daemon.url, "stale");
-      // Release prep so the lifecycle clobbers state back to "running"; the
-      // provider then issues an operator cancel (cancel_requested = 1) before it
-      // completes. The finally re-assert (markRunNoProgressStale) is now guarded
-      // out, so the watchdog verdict must NOT be preserved — the run has to fall
-      // through to cancellation rather than getting stuck in "running".
-      releasePrep();
-      await provider.started;
-      const settled = await waitForSettledRun(daemon.url, "run-watchdog-cancel-race");
-      expect(settled.state).toBe("cancelled");
+      expect(provider.runAttemptCalls()).toBe(0);
     } finally {
       provider.stopAll();
       await daemon.stop();
@@ -312,83 +260,31 @@ function controllableProvider(
   };
 }
 
-// A provider that runs to natural (non-cancelled) completion. It exposes a
-// `started` promise that resolves once its stream begins — which only happens
-// after runAttemptLifecycle has attached the provider and called
-// updateRunState(..., "running"), so the test can observe the post-clobber
-// state deterministically. It ignores `stopped` because, in the pre-attach
-// cancel race, the cancel hand-off fires before the stream registers a stopper.
-function naturalCompletionProvider(): ControllableProvider & {
-  started: Promise<void>;
+// Records whether its stream was ever entered. If launched it would hang on
+// `stopped` (the pre-attach cancel hand-off is a no-op against an unstarted
+// provider), so a passing test relies on the run never reaching runAttempt.
+function neverStartingProvider(): ControllableProvider & {
+  runAttemptCalls: () => number;
 } {
-  let markStarted: () => void = () => {};
-  const started = new Promise<void>((resolve) => {
-    markStarted = resolve;
-  });
+  let calls = 0;
   const base = controllableProvider(async function* (
     input: ProviderRunInput,
     stopped: Promise<void>
   ): AsyncGenerator<ProviderEvent> {
-    void stopped;
-    markStarted();
-    await Promise.resolve();
+    void input;
+    calls += 1;
+    await stopped;
     yield {
       normalized: {
-        tokenUsage: { inputTokens: 5, outputTokens: 0, totalTokens: 5 },
-        type: "usage_updated"
-      },
-      raw: { kind: "usage" }
-    };
-    yield {
-      normalized: {
-        cancelled: false,
-        exitCode: 0,
-        signal: null,
+        cancelled: true,
+        exitCode: null,
+        signal: "SIGTERM",
         type: "process_exit"
       },
-      raw: { kind: "exit", runId: input.run.id }
+      raw: { kind: "exit" }
     };
   });
-  return Object.assign(base, { started });
-}
-
-// Like naturalCompletionProvider, but once its stream starts (i.e. after the
-// run has been clobbered to "running") it POSTs an operator cancel to the daemon
-// before completing. This reproduces the race where a cancel sets
-// cancel_requested=1 between the watchdog stale transition and the finally-block
-// re-assert.
-function cancelTriggeringProvider(
-  cancelUrl: () => string
-): ControllableProvider & { started: Promise<void> } {
-  let markStarted: () => void = () => {};
-  const started = new Promise<void>((resolve) => {
-    markStarted = resolve;
-  });
-  const base = controllableProvider(async function* (
-    input: ProviderRunInput,
-    stopped: Promise<void>
-  ): AsyncGenerator<ProviderEvent> {
-    void stopped;
-    markStarted();
-    await fetch(cancelUrl(), { method: "POST" });
-    yield {
-      normalized: {
-        tokenUsage: { inputTokens: 5, outputTokens: 0, totalTokens: 5 },
-        type: "usage_updated"
-      },
-      raw: { kind: "usage" }
-    };
-    yield {
-      normalized: {
-        cancelled: false,
-        exitCode: 0,
-        signal: null,
-        type: "process_exit"
-      },
-      raw: { kind: "exit", runId: input.run.id }
-    };
-  });
-  return Object.assign(base, { started });
+  return Object.assign(base, { runAttemptCalls: () => calls });
 }
 
 function githubIssuesApiFixture() {

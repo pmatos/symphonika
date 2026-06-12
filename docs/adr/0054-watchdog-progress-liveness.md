@@ -12,7 +12,7 @@ whether the provider is doing useful work.
 ## Decision
 
 Symphonika gains a per-Run **Watchdog** that runs on the daemon's reconciliation tick, samples
-a **Progress Signal** for each active Run, and transitions the Run to the existing `stale` state
+a **Progress Signal** for each `running` Run, and transitions the Run to the existing `stale` state
 with `terminal_reason = "no_progress"` when no observed signal advances within a configured grace
 window. Provider cancellation runs through the existing `activeRuns.requestCancel` path, and the
 Workspace is left intact for operator inspection.

@@ -133,7 +133,7 @@ run, schedule retry, re-evaluate a waiting row, cancel, or mark failed.
 _Avoid_: callback when referring to lifecycle policy
 
 **Watchdog**:
-The orchestrator subsystem that samples a Progress Signal for each active Run on the reconciliation
+The orchestrator subsystem that samples a Progress Signal for each `running` Run on the reconciliation
 tick and transitions the Run to `stale` with terminal reason `no_progress` when no progress signal
 advances within the configured grace window.
 _Avoid_: heartbeat checker, liveness probe
@@ -203,7 +203,7 @@ _Avoid_: chat session
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
-- A **Watchdog** samples a **Progress Signal** for each active **Run** and may stop it as `stale`
+- A **Watchdog** samples a **Progress Signal** for each `running` **Run** and may stop it as `stale`
 - A **Continuation** is capped so an eligible issue cannot loop forever
 - A **State Advance** is not capped by the continuation cap; the FSM bounds the walk via terminal states
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete

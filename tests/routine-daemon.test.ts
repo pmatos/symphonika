@@ -4,7 +4,9 @@ import path from "node:path";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { buildCli } from "../src/cli.js";
 import { startDaemon } from "../src/daemon.js";
+import { openRunStore } from "../src/run-store.js";
 import type { AgentProvider, ProviderEvent, ProviderRunInput } from "../src/provider.js";
 import type { PreparedRoutineWorkspace } from "../src/routines/workspace.js";
 
@@ -115,7 +117,78 @@ describe("daemon routine firing", () => {
       await daemon.stop();
     }
   });
+
+  it("prunes routine rows for projects removed from the service config", async () => {
+    const root = await makeTempRoot();
+    await writeRoutineProject(root, "2030-05-22T10:00:00.000Z");
+    const provider = quietProvider();
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareRoutineWorkspace: vi.fn()
+    });
+
+    try {
+      await waitForRoutine(daemon.url, "active");
+
+      await writeProjectWithoutRoutines(root, "beta");
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      expect(await waitForNoRoutines(daemon.url)).toEqual([]);
+
+      const output = { stderr: "", stdout: "" };
+      const program = buildCli({
+        openRunStore: () =>
+          openRunStore({ stateRoot: path.join(root, ".symphonika") }),
+        registerSignalHandlers: false
+      });
+      program.configureOutput({
+        writeErr: (message) => {
+          output.stderr += message;
+        },
+        writeOut: (message) => {
+          output.stdout += message;
+        }
+      });
+      program.exitOverride();
+
+      await program.parseAsync([
+        "node",
+        "symphonika",
+        "routines",
+        "--config",
+        path.join(root, "symphonika.yml")
+      ]);
+
+      expect(output.stdout).toBe("(no routines)\n");
+    } finally {
+      await daemon.stop();
+    }
+  });
 });
+
+function quietProvider(): AgentProvider {
+  return {
+    cancel: vi.fn().mockResolvedValue(undefined),
+    name: "codex",
+    runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+      await Promise.resolve();
+      yield {
+        normalized: { exitCode: 0, type: "process_exit" },
+        raw: { code: 0, kind: "exit" }
+      };
+    }),
+    validate: vi.fn().mockResolvedValue(undefined)
+  };
+}
 
 async function writeRoutineProject(root: string, fireAt: string): Promise<void> {
   await mkdir(root, { recursive: true });
@@ -133,6 +206,21 @@ async function writeRoutineProject(root: string, fireAt: string): Promise<void> 
       ""
     ].join("\n")
   );
+  await writeProjectConfig(root, "alpha", ["./daily-report.md"]);
+}
+
+async function writeProjectWithoutRoutines(
+  root: string,
+  projectName: string
+): Promise<void> {
+  await writeProjectConfig(root, projectName, []);
+}
+
+async function writeProjectConfig(
+  root: string,
+  projectName: string,
+  routines: string[]
+): Promise<void> {
   await writeFile(
     path.join(root, "symphonika.yml"),
     [
@@ -146,12 +234,12 @@ async function writeRoutineProject(root: string, fireAt: string): Promise<void> 
       "  claude:",
       '    command: "claude fake"',
       "projects:",
-      "  - name: alpha",
+      `  - name: ${projectName}`,
       "    disabled: false",
       "    tracker:",
       "      kind: github",
       "      owner: pmatos",
-      "      repo: alpha",
+      `      repo: ${projectName}`,
       '      token: "$GITHUB_TOKEN"',
       "    issue_filters:",
       '      states: ["open"]',
@@ -161,18 +249,24 @@ async function writeRoutineProject(root: string, fireAt: string): Promise<void> 
       "      labels: {}",
       "      default: 99",
       "    workspace:",
-      "      root: ./.symphonika/workspaces/alpha",
+      `      root: ./.symphonika/workspaces/${projectName}`,
       "      git:",
-      "        remote: git@github.com:pmatos/alpha.git",
+      `        remote: git@github.com:pmatos/${projectName}.git`,
       "        base_branch: main",
       "    agent:",
       "      provider: codex",
       "    workflow: ./WORKFLOW.md",
-      "    routines:",
-      "      - ./daily-report.md",
+      ...routineLines(routines),
       ""
     ].join("\n")
   );
+}
+
+function routineLines(routines: string[]): string[] {
+  if (routines.length === 0) {
+    return [];
+  }
+  return ["    routines:", ...routines.map((routine) => `      - ${routine}`)];
 }
 
 async function waitForProviderInputs(
@@ -193,7 +287,7 @@ async function waitForRoutine(
   baseUrl: string,
   state: string
 ): Promise<RoutineApiRow[]> {
-  const deadline = Date.now() + 2_000;
+  const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     const body = (await fetch(`${baseUrl}/api/routines`).then((response) =>
       response.json()
@@ -204,4 +298,18 @@ async function waitForRoutine(
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`routine did not reach ${state}`);
+}
+
+async function waitForNoRoutines(baseUrl: string): Promise<RoutineApiRow[]> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const body = (await fetch(`${baseUrl}/api/routines`).then((response) =>
+      response.json()
+    )) as { routines: RoutineApiRow[] };
+    if (body.routines.length === 0) {
+      return body.routines;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("routines were not pruned");
 }

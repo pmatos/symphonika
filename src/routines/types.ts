@@ -2,7 +2,7 @@ import type { AgentProviderName } from "../provider.js";
 
 export type RoutineKind = "report";
 
-export type RoutineState = "active" | "expired";
+export type RoutineState = "active" | "expired" | "inactive";
 
 export type RoutineFiringState =
   | "queued"

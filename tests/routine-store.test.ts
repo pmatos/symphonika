@@ -97,6 +97,43 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("prunes routines for removed projects while preserving firing evidence", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-1",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+
+      store.pruneRoutinesForUnknownProjects(["beta"]);
+
+      expect(store.listRoutines()).toEqual([]);
+      expect(store.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-1",
+          projectName: "alpha",
+          routineName: "daily-report"
+        })
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("records a firing and expires the one-shot routine", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

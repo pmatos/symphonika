@@ -119,8 +119,11 @@ must not overwrite it with `no_progress` — this mirrors the existing `reconcil
    The Run's `created_at` is the implicit zero before the first sample.
 2. Computes a fresh Progress Signal. The Normalized Event Log is read forward from the previous
    sample's stored offset within the active `attempt_id`; the workspace stat walk uses a single
-   `fs.readdir` per directory with the exclude set applied at the directory level so an excluded
-   `target/` tree is never descended. When the active attempt has changed since the previous
+   `fs.readdir` per directory and applies the exclude set at two levels: an excluded directory tree
+   (e.g. `target/`) is never descended, and any individual file whose workspace-relative path
+   matches an `mtime_ignore` glob is dropped from the mtime computation so it cannot advance
+   `workspace_mtime_max` — otherwise a wedged Run repeatedly touching an ignored file glob (e.g.
+   `*.log`) would keep the mtime signal alive forever. When the active attempt has changed since the previous
    sample — a transient retry starts a new attempt that restarts `sequence` at 1 and reports
    attempt-local token totals — the stored offset, the cumulative output-token baseline, and
    `idle_since` are reset to the new attempt's zero, so a stale run-level offset/total can neither

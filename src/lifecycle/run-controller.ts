@@ -42,6 +42,7 @@ import { prepareIssueWorkspace as defaultPrepareIssueWorkspace } from "../worksp
 import { readFile } from "node:fs/promises";
 
 import type { WorkflowReference } from "../config-schemas.js";
+import type { RoutineDeclaration } from "../routines/types.js";
 import {
   expandWorkflowDefinition,
   parseWorkflowContract,
@@ -89,6 +90,7 @@ type LoadedWorkflow = {
 };
 
 export type RunControllerProjectConfig = PollingProjectConfig & {
+  routines?: RoutineDeclaration[];
   workflow: WorkflowReference | WorkflowSnapshot;
   workspace: {
     git: {

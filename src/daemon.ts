@@ -48,6 +48,11 @@ import {
   type RunState,
   type SyncProjectStateInput
 } from "./run-store.js";
+import { dispatchDueRoutines } from "./routines/dispatcher.js";
+import type {
+  PreparedRoutineWorkspace,
+  PrepareRoutineWorkspaceInput
+} from "./routines/workspace.js";
 import { resolveStateRoot } from "./state.js";
 import { buildStatusSnapshot } from "./status.js";
 import { VERSION } from "./version.js";
@@ -71,6 +76,10 @@ export type StartDaemonOptions = {
   prepareIssueWorkspace?: (
     input: PrepareIssueWorkspaceInput
   ) => Promise<PreparedIssueWorkspace>;
+  createRoutineFiringId?: () => string;
+  prepareRoutineWorkspace?: (
+    input: PrepareRoutineWorkspaceInput
+  ) => Promise<PreparedRoutineWorkspace>;
 };
 
 export type DaemonHandle = {
@@ -415,6 +424,30 @@ export async function startDaemon(
         }
         if (prResult.action === "review_dispatch" || prResult.action === "merged") {
           logger.info(prResult, "symphonika PR follow-up action completed");
+          return;
+        }
+        const routineResult = await dispatchDueRoutines({
+          activeRuns,
+          agentProviders,
+          configDir: state.configDir,
+          ...(options.createRoutineFiringId === undefined
+            ? {}
+            : { createFiringId: options.createRoutineFiringId }),
+          globalConcurrency: runtimeConfig.globalConcurrency(),
+          logger,
+          ...(options.prepareRoutineWorkspace === undefined
+            ? {}
+            : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),
+          projects: runtimeConfig.projectsByName(),
+          providersConfig: runtimeConfig.providersConfig(),
+          runStore,
+          stateRoot: state.stateRoot
+        });
+        if (routineResult.fired.length > 0) {
+          logger.info(
+            { fired: routineResult.fired.length },
+            "symphonika routine firing action completed"
+          );
           return;
         }
         const result = await runController.dispatchOneFresh(issuePollStatus);
@@ -819,4 +852,3 @@ const PR_FOLLOWUP_MIN_INTERVAL_MS = 1_000;
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-

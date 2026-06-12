@@ -487,6 +487,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
                 latestEvents: collectLatestDashboardEvents(store, all),
                 projects: report.projects,
                 reload: formatReloadOutcome(daemonStatus),
+                routines: store.listRoutines(),
                 runs: all,
                 stateRoot
               });
@@ -664,6 +665,40 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         }
       }
     );
+
+  program
+    .command("routines")
+    .description("list routines from the run store")
+    .option("--config <path>", "service config path")
+    .option("--project <project>", "filter by project name")
+    .action((options: { config?: string; project?: string }) => {
+      const stateRoot = resolveStateRoot(withConfigPath(options.config)).stateRoot;
+      const store = openRunStore({ stateRoot });
+      try {
+        const routines = store.listRoutines(
+          options.project === undefined ? {} : { project: options.project }
+        );
+        if (routines.length === 0) {
+          writeOut(program, "(no routines)\n");
+          return;
+        }
+        writeOut(program, "project  routine  state  next_fire_at  last_fired_at\n");
+        for (const routine of routines) {
+          writeOut(
+            program,
+            [
+              routine.projectName,
+              routine.name,
+              routine.state,
+              routine.nextFireAt ?? "-",
+              routine.lastFiredAt ?? "-"
+            ].join("  ") + "\n"
+          );
+        }
+      } finally {
+        store.close();
+      }
+    });
 
   program
     .command("show-run")

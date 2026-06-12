@@ -7,6 +7,13 @@ import type { Database as SqliteDatabase } from "better-sqlite3";
 import type { IssueSnapshot } from "./issue-polling.js";
 import { isPathInside } from "./path-safety.js";
 import type { AgentProviderName, NormalizedProviderEvent } from "./provider.js";
+import type {
+  RoutineDeclaration,
+  RoutineFiringState,
+  RoutineKind,
+  RoutineState,
+  RoutineStatus
+} from "./routines/types.js";
 import type { ExpandedWorkflow } from "./workflow.js";
 
 export type RunState =
@@ -110,6 +117,25 @@ export type ProjectState = {
   validationMessage: string | null;
   validationState: ProjectValidationState;
   weight: number;
+};
+
+export type RoutineFiringStatus = {
+  createdAt: string;
+  id: string;
+  projectName: string;
+  provider: AgentProviderName;
+  providerCommand: string;
+  routineName: string;
+  state: RoutineFiringState;
+  terminalReason: string | null;
+  updatedAt: string;
+  workspacePath: string;
+};
+
+export type RoutineFiringStateTransition = {
+  createdAt: string;
+  sequence: number;
+  state: RoutineFiringState;
 };
 
 export type SyncProjectStateInput = {
@@ -346,11 +372,44 @@ type ProjectStateRow = {
   weight: number;
 };
 
+type RoutineRow = {
+  created_at: string;
+  kind: RoutineKind;
+  last_fired_at: string | null;
+  name: string;
+  project_name: string;
+  provider_name: AgentProviderName | null;
+  schedule_at: string;
+  source_path: string;
+  state: RoutineState;
+  updated_at: string;
+};
+
+type RoutineFiringRow = {
+  created_at: string;
+  id: string;
+  project_name: string;
+  provider_command: string;
+  provider_name: AgentProviderName;
+  routine_name: string;
+  state: RoutineFiringState;
+  terminal_reason: string | null;
+  updated_at: string;
+  workspace_path: string | null;
+};
+
 export const PULL_REQUEST_DISCOVERY_LIMIT = 25;
 export const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
 export const INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS = 60_000;
 export const INPUT_REQUIRED_LEGACY_TERMINAL_REASON =
   "provider requested input (legacy)";
+
+class RoutineAlreadyClaimedError extends Error {
+  constructor() {
+    super("routine already claimed");
+    this.name = "RoutineAlreadyClaimedError";
+  }
+}
 
 export class RunStore {
   private readonly database: SqliteDatabase;
@@ -835,6 +894,299 @@ export class RunStore {
       )
       .all() as ProjectStateRow[];
     return rows.map((row) => mapProjectStateRow(row));
+  }
+
+  syncRoutines(projectName: string, routines: RoutineDeclaration[]): void {
+    const now = timestamp();
+    const upsert = this.database.prepare(
+      [
+        "insert into routines (",
+        "project_name, name, source_path, kind, provider_name, schedule_at, prompt_body, state, created_at, updated_at",
+        ") values (",
+        "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @prompt_body, 'active', @created_at, @updated_at",
+        ")",
+        "on conflict(project_name, name) do update set",
+        "source_path = excluded.source_path,",
+        "kind = excluded.kind,",
+        "provider_name = excluded.provider_name,",
+        "schedule_at = excluded.schedule_at,",
+        "prompt_body = excluded.prompt_body,",
+        // Preserve expired one-shots across daemon restarts and reloads.
+        "state = case when routines.state = 'expired' then routines.state else 'active' end,",
+        "updated_at = excluded.updated_at"
+      ].join(" ")
+    );
+    const apply = this.database.transaction(() => {
+      if (routines.length === 0) {
+        this.database
+          .prepare("delete from routines where project_name = ?")
+          .run(projectName);
+      } else {
+        const names = routines.map((routine) => routine.name);
+        const placeholders = names.map(() => "?").join(", ");
+        this.database
+          .prepare(
+            `delete from routines where project_name = ? and name not in (${placeholders})`
+          )
+          .run(projectName, ...names);
+      }
+      for (const routine of routines) {
+        upsert.run({
+          created_at: now,
+          kind: routine.kind,
+          name: routine.name,
+          project_name: projectName,
+          prompt_body: routine.prompt,
+          provider_name: routine.provider,
+          schedule_at: routine.schedule.at,
+          source_path: routine.sourcePath,
+          updated_at: now
+        });
+      }
+    });
+    apply();
+  }
+
+  listRoutines(filter: { project?: string } = {}): RoutineStatus[] {
+    const conditions: string[] = [];
+    const params: Record<string, unknown> = {};
+    if (filter.project !== undefined) {
+      conditions.push("project_name = @project");
+      params.project = filter.project;
+    }
+    const where = conditions.length === 0 ? "" : `where ${conditions.join(" and ")}`;
+    const rows = this.database
+      .prepare(
+        [
+          "select project_name, name, source_path, kind, provider_name, schedule_at, state, last_fired_at, created_at, updated_at",
+          "from routines",
+          where,
+          "order by project_name asc, name asc"
+        ]
+          .filter((part) => part.length > 0)
+          .join(" ")
+      )
+      .all(params) as RoutineRow[];
+    return rows.map((row) => mapRoutineRow(row));
+  }
+
+  getRoutine(input: {
+    name: string;
+    projectName: string;
+  }): (RoutineStatus & { prompt: string }) | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select project_name, name, source_path, kind, provider_name, schedule_at, state, last_fired_at, created_at, updated_at, prompt_body",
+          "from routines where project_name = ? and name = ?"
+        ].join(" ")
+      )
+      .get(input.projectName, input.name) as
+      | (RoutineRow & { prompt_body: string })
+      | undefined;
+    if (row === undefined) {
+      return undefined;
+    }
+    return {
+      ...mapRoutineRow(row),
+      prompt: row.prompt_body
+    };
+  }
+
+  markRoutineExpired(input: {
+    firedAt: string;
+    name: string;
+    projectName: string;
+  }): boolean {
+    const result = this.database
+      .prepare(
+        [
+          "update routines set",
+          "state = 'expired',",
+          "last_fired_at = ?,",
+          "updated_at = ?",
+          "where project_name = ? and name = ? and state = 'active'"
+        ].join(" ")
+      )
+      .run(input.firedAt, timestamp(), input.projectName, input.name);
+    return result.changes > 0;
+  }
+
+  createRoutineFiring(input: {
+    id: string;
+    projectName: string;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    routineName: string;
+  }): void {
+    const now = timestamp();
+    this.database
+      .prepare(
+        [
+          "insert into routine_firings (",
+          "id, project_name, routine_name, state, provider_name, provider_command, created_at, updated_at",
+          ") values (",
+          "@id, @project_name, @routine_name, 'queued', @provider_name, @provider_command, @created_at, @updated_at",
+          ")"
+        ].join(" ")
+      )
+      .run({
+        created_at: now,
+        id: input.id,
+        project_name: input.projectName,
+        provider_command: input.providerCommand,
+        provider_name: input.providerName,
+        routine_name: input.routineName,
+        updated_at: now
+      });
+    this.recordRoutineFiringTransition(input.id, "queued", now);
+  }
+
+  claimRoutineFiring(input: {
+    firedAt: string;
+    firingId: string;
+    projectName: string;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    routineName: string;
+  }): boolean {
+    const claim = this.database.transaction(() => {
+      this.createRoutineFiring({
+        id: input.firingId,
+        projectName: input.projectName,
+        providerCommand: input.providerCommand,
+        providerName: input.providerName,
+        routineName: input.routineName
+      });
+      const result = this.database
+        .prepare(
+          [
+            "update routines set",
+            "state = 'expired',",
+            "last_fired_at = ?,",
+            "updated_at = ?",
+            "where project_name = ? and name = ? and state = 'active'"
+          ].join(" ")
+        )
+        .run(input.firedAt, timestamp(), input.projectName, input.routineName);
+      if (result.changes === 0) {
+        throw new RoutineAlreadyClaimedError();
+      }
+    });
+    try {
+      claim();
+      return true;
+    } catch (error) {
+      if (error instanceof RoutineAlreadyClaimedError) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  updateRoutineFiringState(id: string, state: RoutineFiringState): void {
+    const now = timestamp();
+    this.database
+      .prepare("update routine_firings set state = ?, updated_at = ? where id = ?")
+      .run(state, now, id);
+    this.recordRoutineFiringTransition(id, state, now);
+  }
+
+  completeRoutineFiring(input: {
+    id: string;
+    state: Extract<RoutineFiringState, "succeeded" | "failed" | "cancelled">;
+    terminalReason?: string | null;
+    workspacePath?: string;
+  }): void {
+    const now = timestamp();
+    this.database
+      .prepare(
+        [
+          "update routine_firings set",
+          "state = @state,",
+          "terminal_reason = @terminal_reason,",
+          "workspace_path = coalesce(@workspace_path, workspace_path),",
+          "updated_at = @updated_at",
+          "where id = @id"
+        ].join(" ")
+      )
+      .run({
+        id: input.id,
+        state: input.state,
+        terminal_reason: input.terminalReason ?? null,
+        updated_at: now,
+        workspace_path: input.workspacePath ?? null
+      });
+    this.recordRoutineFiringTransition(input.id, input.state, now);
+  }
+
+  updateRoutineFiringWorkspace(input: {
+    id: string;
+    normalizedLogPath?: string;
+    promptPath?: string;
+    rawLogPath?: string;
+    workspacePath: string;
+  }): void {
+    this.database
+      .prepare(
+        [
+          "update routine_firings set",
+          "workspace_path = @workspace_path,",
+          "prompt_path = coalesce(@prompt_path, prompt_path),",
+          "raw_log_path = coalesce(@raw_log_path, raw_log_path),",
+          "normalized_log_path = coalesce(@normalized_log_path, normalized_log_path),",
+          "updated_at = @updated_at",
+          "where id = @id"
+        ].join(" ")
+      )
+      .run({
+        id: input.id,
+        normalized_log_path: input.normalizedLogPath ?? null,
+        prompt_path: input.promptPath ?? null,
+        raw_log_path: input.rawLogPath ?? null,
+        updated_at: timestamp(),
+        workspace_path: input.workspacePath
+      });
+  }
+
+  listRoutineFirings(filter: { project?: string } = {}): RoutineFiringStatus[] {
+    const conditions: string[] = [];
+    const params: Record<string, unknown> = {};
+    if (filter.project !== undefined) {
+      conditions.push("project_name = @project");
+      params.project = filter.project;
+    }
+    const where = conditions.length === 0 ? "" : `where ${conditions.join(" and ")}`;
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, created_at, updated_at",
+          "from routine_firings",
+          where,
+          "order by created_at desc, id desc"
+        ]
+          .filter((part) => part.length > 0)
+          .join(" ")
+      )
+      .all(params) as RoutineFiringRow[];
+    return rows.map((row) => mapRoutineFiringRow(row));
+  }
+
+  listRoutineFiringTransitions(id: string): RoutineFiringStateTransition[] {
+    const rows = this.database
+      .prepare(
+        "select sequence, state, created_at from routine_firing_state_transitions where firing_id = ? order by sequence asc"
+      )
+      .all(id) as Array<{
+      created_at: string;
+      sequence: number;
+      state: RoutineFiringState;
+    }>;
+    return rows.map((row) => ({
+      createdAt: row.created_at,
+      sequence: row.sequence,
+      state: row.state
+    }));
   }
 
   getProjectStatesByName(): Map<string, ProjectState> {
@@ -1686,6 +2038,47 @@ export class RunStore {
         created_at text not null,
         updated_at text not null
       );
+
+      create table if not exists routines (
+        project_name text not null,
+        name text not null,
+        source_path text not null,
+        kind text not null,
+        provider_name text,
+        schedule_at text not null,
+        prompt_body text not null,
+        state text not null,
+        last_fired_at text,
+        created_at text not null,
+        updated_at text not null,
+        primary key (project_name, name)
+      );
+
+      create table if not exists routine_firings (
+        id text primary key,
+        project_name text not null,
+        routine_name text not null,
+        state text not null,
+        provider_name text not null,
+        provider_command text not null,
+        workspace_path text,
+        prompt_path text,
+        raw_log_path text,
+        normalized_log_path text,
+        terminal_reason text,
+        created_at text not null,
+        updated_at text not null,
+        foreign key (project_name, routine_name) references routines(project_name, name)
+      );
+
+      create table if not exists routine_firing_state_transitions (
+        id integer primary key autoincrement,
+        firing_id text not null,
+        sequence integer not null,
+        state text not null,
+        created_at text not null,
+        foreign key (firing_id) references routine_firings(id)
+      );
     `);
 
     const additions: Array<[string, string, string]> = [
@@ -1703,7 +2096,10 @@ export class RunStore {
       ["runs", "state_transition_reason", "text"],
       ["attempts", "failure_classification", "text"],
       ["attempts", "metadata_path", "text"],
-      ["attempts", "workflow_graph_path", "text"]
+      ["attempts", "workflow_graph_path", "text"],
+      ["routine_firings", "prompt_path", "text"],
+      ["routine_firings", "raw_log_path", "text"],
+      ["routine_firings", "normalized_log_path", "text"]
     ];
 
     const apply = this.database.transaction(() => {
@@ -1774,6 +2170,22 @@ export class RunStore {
         "insert into run_state_transitions (run_id, sequence, state, created_at) values (?, ?, ?, ?)"
       )
       .run(runId, sequence, state, createdAt);
+  }
+
+  private recordRoutineFiringTransition(
+    firingId: string,
+    state: RoutineFiringState,
+    createdAt: string
+  ): void {
+    const sequence = nextRoutineFiringTransitionSequence(
+      this.database,
+      firingId
+    );
+    this.database
+      .prepare(
+        "insert into routine_firing_state_transitions (firing_id, sequence, state, created_at) values (?, ?, ?, ?)"
+      )
+      .run(firingId, sequence, state, createdAt);
   }
 
   private getRunArtifactRow(runId: string): RunArtifactRow | undefined {
@@ -1896,6 +2308,19 @@ function nextTransitionSequence(database: SqliteDatabase, runId: string): number
       "select coalesce(max(sequence), 0) + 1 as next_sequence from run_state_transitions where run_id = ?"
     )
     .get(runId) as { next_sequence?: number } | undefined;
+
+  return row?.next_sequence ?? 1;
+}
+
+function nextRoutineFiringTransitionSequence(
+  database: SqliteDatabase,
+  firingId: string
+): number {
+  const row = database
+    .prepare(
+      "select coalesce(max(sequence), 0) + 1 as next_sequence from routine_firing_state_transitions where firing_id = ?"
+    )
+    .get(firingId) as { next_sequence?: number } | undefined;
 
   return row?.next_sequence ?? 1;
 }
@@ -2048,6 +2473,38 @@ function mapProjectStateRow(row: ProjectStateRow): ProjectState {
     validationMessage: row.validation_message ?? null,
     validationState: row.validation_state,
     weight: row.weight
+  };
+}
+
+function mapRoutineRow(row: RoutineRow): RoutineStatus {
+  return {
+    kind: row.kind,
+    lastFiredAt: row.last_fired_at ?? null,
+    name: row.name,
+    nextFireAt:
+      row.state === "active" && row.last_fired_at === null
+        ? row.schedule_at
+        : null,
+    projectName: row.project_name,
+    provider: row.provider_name ?? null,
+    scheduleAt: row.schedule_at,
+    sourcePath: row.source_path,
+    state: row.state
+  };
+}
+
+function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
+  return {
+    createdAt: row.created_at,
+    id: row.id,
+    projectName: row.project_name,
+    provider: row.provider_name,
+    providerCommand: row.provider_command,
+    routineName: row.routine_name,
+    state: row.state,
+    terminalReason: row.terminal_reason ?? null,
+    updatedAt: row.updated_at,
+    workspacePath: row.workspace_path ?? ""
   };
 }
 

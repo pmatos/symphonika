@@ -8,6 +8,7 @@ import { z } from "zod";
 import type { WorkflowFormat } from "./config-schemas.js";
 import {
   projectWorkspaceSchema,
+  pathStringSchema,
   workflowReferenceSchema
 } from "./config-schemas.js";
 import type {
@@ -30,6 +31,8 @@ import {
   parseWorkflowContract,
   validateExpandedWorkflowReferences
 } from "./workflow.js";
+import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
+import type { RoutineDeclaration } from "./routines/types.js";
 
 export type RuntimeConfigSnapshot = {
   configPath: string;
@@ -104,6 +107,7 @@ const pollingProjectSchema = z
 const runtimeProjectDetailSchema = z
   .object({
     name: z.string().trim().min(1),
+    routines: z.array(pathStringSchema).optional(),
     workspace: projectWorkspaceSchema,
     workflow: workflowReferenceSchema
   })
@@ -286,10 +290,21 @@ async function loadRuntimeConfigSnapshot(input: {
     if (pollingProject.data.disabled === true) {
       dispatchProjects.push({
         ...pollingProject.data,
+        routines: [],
         workflow: detail.data.workflow,
         workspace: detail.data.workspace
       });
       continue;
+    }
+
+    const routines = await readRoutineDeclarations(
+      (detail.data.routines ?? []).map((routinePath) =>
+        path.resolve(input.configDir, routinePath)
+      ),
+      errors
+    );
+    if (routines === undefined) {
+      return lastKnownGoodOrNothing(input.previous, errors);
     }
 
     const workflow = await readWorkflowSnapshot(
@@ -302,6 +317,7 @@ async function loadRuntimeConfigSnapshot(input: {
     }
     dispatchProjects.push({
       ...pollingProject.data,
+      routines,
       workflow,
       workspace: detail.data.workspace
     });
@@ -415,6 +431,32 @@ async function readWorkflowSnapshot(
     format,
     path: workflow.path
   };
+}
+
+async function readRoutineDeclarations(
+  routinePaths: string[],
+  errors: string[]
+): Promise<RoutineDeclaration[] | undefined> {
+  const routines: RoutineDeclaration[] = [];
+  const startingErrorCount = errors.length;
+  const seenNames = new Map<string, string>();
+  for (const routinePath of routinePaths) {
+    const result = await loadRoutineDeclaration(routinePath);
+    if (result.routine === null) {
+      errors.push(...result.errors);
+      continue;
+    }
+    const existing = seenNames.get(result.routine.name);
+    if (existing !== undefined) {
+      errors.push(
+        `duplicate routine name "${result.routine.name}" declared by ${existing} and ${result.routine.sourcePath}`
+      );
+      continue;
+    }
+    seenNames.set(result.routine.name, result.routine.sourcePath);
+    routines.push(result.routine);
+  }
+  return errors.length > startingErrorCount ? undefined : routines;
 }
 
 function lastKnownGoodOrNothing(

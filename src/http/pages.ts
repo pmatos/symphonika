@@ -16,6 +16,7 @@ import type {
   RunStatus,
   RunStore
 } from "../run-store.js";
+import type { RoutineStatus } from "../routines/types.js";
 import type { StatusSnapshot } from "../status.js";
 import type { ExpandedWorkflow } from "../workflow.js";
 
@@ -55,6 +56,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       [
         renderHeader(options.version, snapshot),
         renderProjectsCard(snapshot, options.issuePollStatus),
+        renderRoutinesTable(options.runStore.listRoutines()),
         renderStaleIssuesCard(options.issuePollStatus?.filteredIssues ?? []),
         renderRunsTable("Recent runs", recentRuns)
       ].join("")
@@ -265,6 +267,21 @@ function renderStaleIssuesCard(
     .join("");
   return `<section><h2>Stale issues</h2>
 <table><thead><tr><th>Project</th><th>Issue</th><th>Reason</th></tr></thead>
+<tbody>${rows}</tbody></table></section>`;
+}
+
+function renderRoutinesTable(routines: RoutineStatus[]): string {
+  if (routines.length === 0) {
+    return "";
+  }
+  const rows = routines
+    .map(
+      (routine) =>
+        `<tr><td>${escapeHtml(routine.projectName)}</td><td>${escapeHtml(routine.name)}</td><td>${escapeHtml(routine.state)}</td><td>${escapeHtml(routine.nextFireAt ?? "-")}</td><td>${escapeHtml(routine.lastFiredAt ?? "-")}</td></tr>`
+    )
+    .join("");
+  return `<section><h2>Routines</h2>
+<table><thead><tr><th>Project</th><th>Routine</th><th>State</th><th>next_fire_at</th><th>last_fired_at</th></tr></thead>
 <tbody>${rows}</tbody></table></section>`;
 }
 

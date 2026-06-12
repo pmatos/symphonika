@@ -599,4 +599,187 @@ describe("RuntimeConfigReloader concurrency caps", () => {
     expect(status.ok).toBe(false);
     expect(status.errors.join("\n")).toMatch(/max_in_flight/);
   });
+
+  it("loads configured project routines into the runtime snapshot", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    await writeFile(
+      path.join(root, "daily-report.md"),
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        "  at: 2026-05-22T10:00:00.000Z",
+        "kind: report",
+        "---",
+        "Report on {{project.name}}.",
+        ""
+      ].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original.replace(
+        "    workflow: ./WORKFLOW.md",
+        ["    workflow: ./WORKFLOW.md", "    routines:", "      - ./daily-report.md"].join("\n")
+      )
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+
+    expect(reloader.getStatus().ok).toBe(true);
+    expect(project?.routines).toEqual([
+      expect.objectContaining({
+        kind: "report",
+        name: "daily-report",
+        provider: null,
+        schedule: { at: "2026-05-22T10:00:00.000Z" }
+      })
+    ]);
+  });
+
+  it("keeps the last-known-good snapshot when a routine declaration becomes invalid", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    const routinePath = path.join(root, "daily-report.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        "  at: 2026-05-22T10:00:00.000Z",
+        "kind: report",
+        "---",
+        "Report on {{project.name}}.",
+        ""
+      ].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original.replace(
+        "    workflow: ./WORKFLOW.md",
+        ["    workflow: ./WORKFLOW.md", "    routines:", "      - ./daily-report.md"].join("\n")
+      )
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+    const firstSnapshot = reloader.getSnapshot();
+    await writeFile(
+      routinePath,
+      ["---", "name: ../bad", "kind: report", "---", "Body", ""].join("\n")
+    );
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()).toBe(firstSnapshot);
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: true
+    });
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      "name \"../bad\" is not path-safe"
+    );
+  });
+
+  it("rejects duplicate routine names within a project", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    const routineBody = [
+      "---",
+      "name: daily-report",
+      "schedule:",
+      "  at: 2026-05-22T10:00:00.000Z",
+      "kind: report",
+      "---",
+      "Report on {{project.name}}.",
+      ""
+    ].join("\n");
+    await writeFile(path.join(root, "daily-report.md"), routineBody);
+    await writeFile(path.join(root, "daily-report-2.md"), routineBody);
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original.replace(
+        "    workflow: ./WORKFLOW.md",
+        [
+          "    workflow: ./WORKFLOW.md",
+          "    routines:",
+          "      - ./daily-report.md",
+          "      - ./daily-report-2.md"
+        ].join("\n")
+      )
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    expect(reloader.getStatus().ok).toBe(false);
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      'duplicate routine name "daily-report"'
+    );
+  });
+
+  it("does not block reload of active projects on a broken routine file in a disabled project", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    await writeFile(
+      path.join(root, "broken-routine.md"),
+      ["---", "name: ../bad", "kind: report", "---", "Body", ""].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original.replace(
+        "  - name: symphonika",
+        [
+          "  - name: disabled-project",
+          "    disabled: true",
+          "    weight: 1",
+          "    tracker:",
+          "      kind: github",
+          "      owner: pmatos",
+          "      repo: symphonika",
+          '      token: "$GITHUB_TOKEN"',
+          "    issue_filters:",
+          '      states: ["open"]',
+          '      labels_all: ["agent-ready"]',
+          '      labels_none: ["blocked"]',
+          "    priority:",
+          "      labels: {}",
+          "      default: 99",
+          "    workspace:",
+          "      root: ./.symphonika/workspaces/disabled-project",
+          "      git:",
+          "        remote: git@github.com:pmatos/disabled-project.git",
+          "        base_branch: main",
+          "    agent:",
+          "      provider: codex",
+          "    workflow: ./WORKFLOW.md",
+          "    routines:",
+          "      - ./broken-routine.md",
+          "  - name: symphonika"
+        ].join("\n")
+      )
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    expect(reloader.getStatus().ok).toBe(true);
+    expect(reloader.projectsByName().has("symphonika")).toBe(true);
+    expect(reloader.projectsByName().get("disabled-project")?.disabled).toBe(true);
+    expect(reloader.projectsByName().get("disabled-project")?.routines).toEqual([]);
+  });
 });

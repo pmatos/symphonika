@@ -114,6 +114,7 @@ describe("HTTP app", () => {
         ok: true,
         usingLastKnownGood: false
       },
+      routines: [],
       runs: [],
       scheduled: [],
       service: "symphonika",

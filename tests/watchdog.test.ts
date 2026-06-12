@@ -38,6 +38,7 @@ afterEach(async () => {
 describe("watchdogProgressObserved", () => {
   const previous: WatchdogSample = {
     idleSince: null,
+    lastMessageAt: null,
     lastToolCallAt: "2026-05-22T10:00:00.000Z",
     normalizedLogOffset: 10,
     normalizedLogPath: "run-a.normalized.jsonl",
@@ -52,6 +53,7 @@ describe("watchdogProgressObserved", () => {
     expect(
       watchdogProgressObserved(previous, {
         ...previous,
+        lastMessageAt: null,
         lastToolCallAt: "2026-05-22T10:01:00.000Z"
       })
     ).toBe(true);
@@ -73,12 +75,19 @@ describe("watchdogProgressObserved", () => {
         outputTokensTotal: previous.outputTokensTotal + 1
       })
     ).toBe(true);
+    expect(
+      watchdogProgressObserved(previous, {
+        ...previous,
+        lastMessageAt: "2026-05-22T10:01:00.000Z"
+      })
+    ).toBe(true);
   });
 
   it("ignores sub-second workspace mtime drift and unchanged event counters", () => {
     expect(
       watchdogProgressObserved(previous, {
         ...previous,
+        lastMessageAt: null,
         lastToolCallAt: previous.lastToolCallAt,
         outputTokensTotal: previous.outputTokensTotal,
         turnIdSetSize: previous.turnIdSetSize,
@@ -214,6 +223,7 @@ describe("reconcileWatchdog", () => {
       const workspaceMtimeMax = await sampleWorkspaceMtimeMax(workspacePath);
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:30:00.000Z",
+        lastMessageAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 0,
         normalizedLogPath: path.join(root, "provider.normalized.jsonl"),
@@ -281,6 +291,7 @@ describe("reconcileWatchdog", () => {
       store.updateRunState("run-forward", "running");
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:30:00.000Z",
+        lastMessageAt: null,
         lastToolCallAt: "2026-05-22T09:00:00.000Z",
         normalizedLogOffset: Buffer.byteLength(oldToolCall),
         normalizedLogPath,
@@ -345,6 +356,7 @@ describe("reconcileWatchdog", () => {
       first.updateRunState("run-restarted", "running");
       first.upsertWatchdogSample({
         idleSince: "2026-05-22T09:40:00.000Z",
+        lastMessageAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 0,
         normalizedLogPath: path.join(root, "provider.normalized.jsonl"),
@@ -494,6 +506,7 @@ describe("reconcileWatchdog", () => {
       // Prior attempt's persisted sample: high token total, OLD log path.
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:59:30.000Z",
+        lastMessageAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 9_999,
         normalizedLogPath: attempt1,
@@ -553,6 +566,7 @@ describe("reconcileWatchdog", () => {
       // Prior attempt was idle for over an hour under the OLD log path.
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:00:00.000Z",
+        lastMessageAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 50,
         normalizedLogPath: attempt1,
@@ -585,6 +599,73 @@ describe("reconcileWatchdog", () => {
       expect(store.getWatchdogSample("run-retry-idle")?.idleSince).toBe(
         "2026-05-22T10:00:00.000Z"
       );
+      expect(cancel).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a run alive when only a streamed assistant message advances", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const normalizedLogPath = path.join(root, "provider.normalized.jsonl");
+    await writeFile(
+      normalizedLogPath,
+      JSON.stringify({ text: "still thinking", type: "message" }) + "\n"
+    );
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      seedRun(store, "run-streaming");
+      store.updateRunEvidence("run-streaming", {
+        branchName: "sym/symphonika/198-watchdog",
+        branchRef: "refs/heads/sym/symphonika/198-watchdog",
+        issueSnapshotPath: path.join(root, ".symphonika", "logs", "runs", "run-streaming", "issue.json"),
+        metadataPath: path.join(root, ".symphonika", "logs", "runs", "run-streaming", "metadata.json"),
+        normalizedLogPath,
+        promptPath: path.join(root, ".symphonika", "logs", "runs", "run-streaming", "prompt.md"),
+        rawLogPath: path.join(root, ".symphonika", "logs", "runs", "run-streaming", "raw.jsonl"),
+        workflowGraphPath: path.join(root, ".symphonika", "logs", "runs", "run-streaming", "workflow.json"),
+        workspacePath
+      });
+      store.updateRunState("run-streaming", "running");
+      // Idle for over an hour by every other signal; only a streamed message is new.
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T09:00:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath,
+        outputTokensTotal: 0,
+        runId: "run-streaming",
+        sampledAt: "2026-05-22T09:00:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
+      });
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel,
+        issueNumber: 198,
+        projectName: "symphonika",
+        runId: "run-streaming"
+      });
+
+      await reconcileWatchdog({
+        activeRuns,
+        config: { enabled: true, graceMinutes: 30, sampleIntervalSeconds: 60 },
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore: store
+      });
+
+      // A streamed assistant message is genuine output (ADR 0054 signal 5), so
+      // the run is kept alive despite the hour-old idle_since.
+      expect(store.getRun("run-streaming")?.state).toBe("running");
+      expect(store.getWatchdogSample("run-streaming")?.lastMessageAt).toBe(
+        "2026-05-22T10:00:00.000Z"
+      );
+      expect(store.getWatchdogSample("run-streaming")?.idleSince).toBeNull();
       expect(cancel).not.toHaveBeenCalled();
     } finally {
       store.close();

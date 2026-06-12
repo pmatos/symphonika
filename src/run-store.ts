@@ -206,6 +206,7 @@ export type ProviderEventRecord = {
 
 export type WatchdogSample = {
   idleSince: string | null;
+  lastMessageAt: string | null;
   lastToolCallAt: string | null;
   normalizedLogOffset: number;
   normalizedLogPath: string;
@@ -362,6 +363,7 @@ type WatchdogCandidateRunRow = {
 
 type WatchdogSampleRow = {
   idle_since: string | null;
+  last_message_at: string | null;
   last_tool_call_at: string | null;
   normalized_log_offset: number;
   normalized_log_path: string;
@@ -743,9 +745,9 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select run_id, sampled_at, last_tool_call_at, workspace_mtime_max,",
-          "turn_id_set_size, output_tokens_total, normalized_log_offset,",
-          "normalized_log_path, idle_since",
+          "select run_id, sampled_at, last_tool_call_at, last_message_at,",
+          "workspace_mtime_max, turn_id_set_size, output_tokens_total,",
+          "normalized_log_offset, normalized_log_path, idle_since",
           "from watchdog_samples where run_id = ?"
         ].join(" ")
       )
@@ -758,17 +760,18 @@ export class RunStore {
       .prepare(
         [
           "insert into watchdog_samples (",
-          "run_id, sampled_at, last_tool_call_at, workspace_mtime_max,",
-          "turn_id_set_size, output_tokens_total, normalized_log_offset,",
-          "normalized_log_path, idle_since",
+          "run_id, sampled_at, last_tool_call_at, last_message_at,",
+          "workspace_mtime_max, turn_id_set_size, output_tokens_total,",
+          "normalized_log_offset, normalized_log_path, idle_since",
           ") values (",
-          "@run_id, @sampled_at, @last_tool_call_at, @workspace_mtime_max,",
-          "@turn_id_set_size, @output_tokens_total, @normalized_log_offset,",
-          "@normalized_log_path, @idle_since",
+          "@run_id, @sampled_at, @last_tool_call_at, @last_message_at,",
+          "@workspace_mtime_max, @turn_id_set_size, @output_tokens_total,",
+          "@normalized_log_offset, @normalized_log_path, @idle_since",
           ")",
           "on conflict(run_id) do update set",
           "sampled_at = excluded.sampled_at,",
           "last_tool_call_at = excluded.last_tool_call_at,",
+          "last_message_at = excluded.last_message_at,",
           "workspace_mtime_max = excluded.workspace_mtime_max,",
           "turn_id_set_size = excluded.turn_id_set_size,",
           "output_tokens_total = excluded.output_tokens_total,",
@@ -779,6 +782,7 @@ export class RunStore {
       )
       .run({
         idle_since: sample.idleSince,
+        last_message_at: sample.lastMessageAt,
         last_tool_call_at: sample.lastToolCallAt,
         normalized_log_offset: sample.normalizedLogOffset,
         normalized_log_path: sample.normalizedLogPath,
@@ -2219,6 +2223,7 @@ export class RunStore {
         normalized_log_offset integer not null,
         idle_since text,
         normalized_log_path text not null default '',
+        last_message_at text,
         foreign key (run_id) references runs(id)
       );
 
@@ -2288,6 +2293,7 @@ export class RunStore {
       ["attempts", "metadata_path", "text"],
       ["attempts", "workflow_graph_path", "text"],
       ["watchdog_samples", "normalized_log_path", "text not null default ''"],
+      ["watchdog_samples", "last_message_at", "text"],
       ["routine_firings", "prompt_path", "text"],
       ["routine_firings", "raw_log_path", "text"],
       ["routine_firings", "normalized_log_path", "text"]
@@ -2549,6 +2555,7 @@ function mapRunRow(row: RunRow): RunStatus {
 function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
   return {
     idleSince: row.idle_since,
+    lastMessageAt: row.last_message_at,
     lastToolCallAt: row.last_tool_call_at,
     normalizedLogOffset: row.normalized_log_offset,
     normalizedLogPath: row.normalized_log_path,

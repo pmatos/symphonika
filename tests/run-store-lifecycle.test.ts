@@ -230,6 +230,7 @@ describe("run-store lifecycle CRUD", () => {
       store.updateRunState(id, "running");
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:30:00.000Z",
+        lastMessageAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 0,
         normalizedLogPath: "logs/runs/run-1/provider.normalized.jsonl",
@@ -421,7 +422,8 @@ describe("run-store lifecycle CRUD", () => {
         "output_tokens_total",
         "normalized_log_offset",
         "idle_since",
-        "normalized_log_path"
+        "normalized_log_path",
+        "last_message_at"
       ]);
       expect(columnNames(database, "watchdog_turn_ids")).toEqual([
         "run_id",
@@ -439,6 +441,7 @@ describe("run-store lifecycle CRUD", () => {
       seedRun(store, { id: "run-watchdog", issueNumber: 77 });
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T12:10:00.000Z",
+        lastMessageAt: null,
         lastToolCallAt: "2026-05-22T12:00:00.000Z",
         normalizedLogOffset: 42,
         normalizedLogPath: "logs/runs/run-watchdog/provider.normalized.jsonl",
@@ -456,6 +459,7 @@ describe("run-store lifecycle CRUD", () => {
     try {
       expect(reopened.getWatchdogSample("run-watchdog")).toEqual({
         idleSince: "2026-05-22T12:10:00.000Z",
+        lastMessageAt: null,
         lastToolCallAt: "2026-05-22T12:00:00.000Z",
         normalizedLogOffset: 42,
         normalizedLogPath: "logs/runs/run-watchdog/provider.normalized.jsonl",

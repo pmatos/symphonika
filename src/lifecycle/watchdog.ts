@@ -44,7 +44,8 @@ export function watchdogProgressObserved(
     next.workspaceMtimeMax - previous.workspaceMtimeMax >=
       WORKSPACE_PROGRESS_THRESHOLD_MS ||
     next.turnIdSetSize > previous.turnIdSetSize ||
-    next.outputTokensTotal > previous.outputTokensTotal
+    next.outputTokensTotal > previous.outputTokensTotal ||
+    messageAdvanced(previous, next)
   );
 }
 
@@ -166,6 +167,11 @@ async function sampleRun(input: {
   );
   return {
     idleSince: null,
+    lastMessageAt: latestMessageAt(
+      input.previous?.lastMessageAt ?? null,
+      log.events,
+      input.sampledAt
+    ),
     lastToolCallAt: latestToolCallAt(
       input.previous?.lastToolCallAt ?? null,
       log.events,
@@ -293,6 +299,17 @@ function latestToolCallAt(
   return events.some((event) => event.type === "tool_call") ? sampledAt : previous;
 }
 
+function latestMessageAt(
+  previous: string | null,
+  events: NormalizedProviderEvent[],
+  sampledAt: string
+): string | null {
+  // Both providers normalize streamed assistant deltas (Claude text_delta,
+  // Codex item/agentMessage/delta) to a `message` event, so a fresh `message`
+  // since the last sample is genuine user-visible output — ADR 0054 signal 5.
+  return events.some((event) => event.type === "message") ? sampledAt : previous;
+}
+
 function outputTokensTotal(
   previousTotal: number,
   events: NormalizedProviderEvent[]
@@ -330,6 +347,19 @@ function toolCallAdvanced(
     return true;
   }
   return Date.parse(next.lastToolCallAt) > Date.parse(previous.lastToolCallAt);
+}
+
+function messageAdvanced(
+  previous: WatchdogSample,
+  next: WatchdogSample
+): boolean {
+  if (next.lastMessageAt === null) {
+    return false;
+  }
+  if (previous.lastMessageAt === null) {
+    return true;
+  }
+  return Date.parse(next.lastMessageAt) > Date.parse(previous.lastMessageAt);
 }
 
 function objectField(

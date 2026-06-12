@@ -142,8 +142,9 @@ _Avoid_: heartbeat checker, liveness probe
 The tuple of observed Run-progress evidence the Watchdog samples — most recent tool-call timestamp,
 workspace mtime maximum, distinct turn-id count, and output-token growth since the last sample.
 Advance of any one signal counts as progress.
-_Avoid_: heartbeat when describing observable side-effects, since heartbeats include
-provider-internal usage and rate-limit events that the Progress Signal explicitly excludes
+_Avoid_: heartbeat when describing observable side-effects — rate-limit events are excluded from
+the Progress Signal outright, and the bare presence of usage events is not progress, though the
+Progress Signal still reads output-token growth from `usage_updated` events (signal 4)
 
 **Continuation**:
 A follow-up run for the same issue after a provider completed successfully but the issue remains eligible.

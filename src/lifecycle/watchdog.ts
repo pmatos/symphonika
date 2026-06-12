@@ -195,7 +195,10 @@ async function sampleRun(input: {
     runId: input.run.runId,
     sampledAt: input.sampledAt,
     turnIdSetSize,
-    workspaceMtimeMax: await sampleWorkspaceMtimeMax(input.run.workspacePath)
+    workspaceMtimeMax: await sampleWorkspaceMtimeMax(
+      input.run.workspacePath,
+      input.mtimeIgnore
+    )
   };
 }
 

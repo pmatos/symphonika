@@ -700,6 +700,81 @@ describe("reconcileWatchdog", () => {
       store.close();
     }
   });
+
+  it("applies configured mtime_ignore globs during reconciliation", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const normalizedLogPath = path.join(root, "provider.normalized.jsonl");
+    await writeFile(normalizedLogPath, "");
+    const buildLog = path.join(workspacePath, "build.log");
+    await writeFile(buildLog, "log\n");
+    const rootTime = new Date("2026-05-22T09:00:00.000Z");
+    const logTime = new Date("2026-05-22T09:50:00.000Z");
+    await utimes(buildLog, logTime, logTime);
+    await utimes(workspacePath, rootTime, rootTime);
+
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      seedRun(store, "run-ignored-log");
+      store.updateRunEvidence("run-ignored-log", {
+        branchName: "sym/symphonika/198-watchdog",
+        branchRef: "refs/heads/sym/symphonika/198-watchdog",
+        issueSnapshotPath: path.join(root, ".symphonika", "logs", "runs", "run-ignored-log", "issue.json"),
+        metadataPath: path.join(root, ".symphonika", "logs", "runs", "run-ignored-log", "metadata.json"),
+        normalizedLogPath,
+        promptPath: path.join(root, ".symphonika", "logs", "runs", "run-ignored-log", "prompt.md"),
+        rawLogPath: path.join(root, ".symphonika", "logs", "runs", "run-ignored-log", "raw.jsonl"),
+        workflowGraphPath: path.join(root, ".symphonika", "logs", "runs", "run-ignored-log", "workflow.json"),
+        workspacePath
+      });
+      store.updateRunState("run-ignored-log", "running");
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T09:00:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath,
+        outputTokensTotal: 0,
+        runId: "run-ignored-log",
+        sampledAt: "2026-05-22T09:00:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: rootTime.getTime()
+      });
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel,
+        issueNumber: 198,
+        projectName: "symphonika",
+        runId: "run-ignored-log"
+      });
+
+      await reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          mtimeIgnore: ["build.log"],
+          sampleIntervalSeconds: 60
+        },
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore: store
+      });
+
+      // The only workspace change is an ignored *.log file, so reconciliation
+      // observes no progress and stales the run — proving config.mtimeIgnore is
+      // actually threaded into the sampler.
+      expect(store.getRun("run-ignored-log")).toMatchObject({
+        state: "stale",
+        terminalReason: "no_progress"
+      });
+      expect(cancel).toHaveBeenCalledOnce();
+    } finally {
+      store.close();
+    }
+  });
 });
 
 function seedRun(store: RunStore, id: string): void {

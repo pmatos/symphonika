@@ -32,7 +32,9 @@ A Progress Signal is the tuple:
   `target/`, `node_modules/`, and any path listed in the Workflow Contract's `evidence.ignore`
   set excluded so build-output churn neither masks real stalls nor forces them.
 - `turn_id_set_size` — distinct `turnId` values observed across `usage_updated` and
-  `turn_completed` events.
+  `turn_completed` events. Only the Codex provider tags these events with a `turnId`; the Claude
+  provider emits `sessionId` instead, so this signal advances for Codex Runs only. Claude Runs
+  stay covered by the permissive any-of rule below via signals 1, 2, and 4.
 - `output_token_growth_since_last_sample` — cumulative output tokens from `usage_updated` events
   added since the previous Watchdog sample, over the events read forward from that sample's stored
   offset (a one-`sample_interval_seconds` window, 60 s by default). Output tokens are read from the

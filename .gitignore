@@ -11,4 +11,5 @@ crash-*
 
 .claude/settings.local.json
 .claude/worktrees/
+.codex
 .ultraplan/

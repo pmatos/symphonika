@@ -99,7 +99,7 @@ const allowedTemplateFields: Record<keyof PromptContext, ReadonlySet<string>> = 
 
 const tagPattern = /{{\s*([^{}]+?)\s*}}/g;
 
-const AUTONOMY_PREAMBLE = [
+export const AUTONOMY_PREAMBLE = [
   "# Autonomous run instructions",
   "",
   "You are running as an autonomous full-permission coding worker. No operator will respond to prompts, approve tool calls, or read intermediate output during this run; behaviour that depends on a human answering mid-run is a failure mode.",

@@ -201,7 +201,7 @@ async function worktreePathForBranch(
 // See ADR 0053.
 const fetchLocks = new Map<string, Promise<unknown>>();
 
-async function ensureRepositoryCache(
+export async function ensureRepositoryCache(
   project: WorkspaceProject,
   cachePath: string
 ): Promise<void> {

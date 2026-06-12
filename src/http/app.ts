@@ -157,6 +157,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       },
       projectStates: runStore?.listProjectStates() ?? [],
       reload: options.getReloadStatus?.() ?? emptyReloadStatus(),
+      routines: runStore?.listRoutines() ?? [],
       runs: getRuns(),
       scheduled: getScheduled(),
       service: "symphonika",
@@ -205,6 +206,15 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         filter.limit = limit;
       }
       return context.json({ runs: runStore.listRuns(filter) });
+    });
+
+    app.get("/api/routines", (context) => {
+      const project = context.req.query("project");
+      return context.json({
+        routines: runStore.listRoutines(
+          project === undefined ? {} : { project }
+        )
+      });
     });
 
     app.get("/api/runs/:id", (context) => {

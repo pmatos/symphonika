@@ -95,9 +95,12 @@ silently.
 ## Sampling and persistence
 
 The Watchdog runs alongside `reconcileActiveRuns` and `reconcileWaitingRuns` in the
-reconciliation phase. For each Run in `ACTIVE_STATES` whose `state` is not `waiting` (`waiting`
-Runs are in `ACTIVE_STATES` per ADR 0047 but are parked by design and excluded from sampling —
-see the ADR 0047 interaction below), it:
+reconciliation phase. It samples only Runs in `state = "running"` — the only active state with a
+live Agent Provider that can wedge. The other `ACTIVE_STATES` are skipped: `queued` and
+`preparing_workspace` rows (a Run is persisted as `queued` before its provider starts) have no
+provider executing yet, so they have no liveness signal to advance and must not accrue idle time;
+`waiting` rows are parked by design (see the ADR 0047 interaction below). For each sampled
+`running` Run, it:
 
 1. Reads the previous `WatchdogSample` from the run-store (the Run's `created_at` is the implicit
    zero before the first sample).
@@ -119,8 +122,10 @@ known build-output directories at the top of the descent rather than per file.
 
 ## Operator surface
 
-`no_progress` joins the terminal-reason vocabulary. `runs` and `show-run` already render
-`terminal_reason`. `status` and the local UI gain a "watchdog idle" badge derived from the
+`no_progress` joins the terminal-reason vocabulary. `show-run` already renders `terminal_reason`;
+the `runs` listing does not today, so it gains a `terminal_reason` column (and the `status`/local-UI
+and HTTP surfaces gain an equivalent field) as part of this work, so operators can see `no_progress`
+from the run listing and not only from `show-run`. `status` and the local UI gain a "watchdog idle" badge derived from the
 persisted `idle_since` so operators can see Runs approaching the threshold before they are
 stopped. `show-run` exposes the most recent Progress Signal so an operator can verify why the
 Watchdog fired (e.g. "last tool_call 4h12m ago, workspace mtime 4h08m ago, single turnId,

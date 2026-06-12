@@ -81,7 +81,9 @@ silently.
 ## Sampling and persistence
 
 The Watchdog runs alongside `reconcileActiveRuns` and `reconcileWaitingRuns` in the
-reconciliation phase. For each Run in `ACTIVE_STATES`, it:
+reconciliation phase. For each Run in `ACTIVE_STATES` whose `state` is not `waiting` (`waiting`
+Runs are in `ACTIVE_STATES` per ADR 0047 but are parked by design and excluded from sampling —
+see the ADR 0047 interaction below), it:
 
 1. Reads the previous `WatchdogSample` from the run-store (the Run's `created_at` is the implicit
    zero before the first sample).

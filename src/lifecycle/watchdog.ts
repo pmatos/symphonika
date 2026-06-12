@@ -129,7 +129,15 @@ async function sampleRun(input: {
   runStore: RunStore;
   sampledAt: string;
 }): Promise<WatchdogSample> {
-  const previousOffset = input.previous?.normalizedLogOffset ?? 0;
+  // A retry attempt writes a fresh normalized log path
+  // (provider.normalized.attempt-N.jsonl). The persisted offset belongs to the
+  // previous attempt's file, so reuse it only when the path is unchanged;
+  // otherwise restart at 0 so the new attempt's early events are not skipped.
+  const previousOffset =
+    input.previous !== undefined &&
+    input.previous.normalizedLogPath === input.run.normalizedLogPath
+      ? input.previous.normalizedLogOffset
+      : 0;
   const log = await readNormalizedEventsSince(
     input.run.normalizedLogPath,
     previousOffset
@@ -147,6 +155,7 @@ async function sampleRun(input: {
       input.sampledAt
     ),
     normalizedLogOffset: log.offset,
+    normalizedLogPath: input.run.normalizedLogPath,
     outputTokensTotal: outputTokensTotal(
       input.previous?.outputTokensTotal ?? 0,
       log.events

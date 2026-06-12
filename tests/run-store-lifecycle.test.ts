@@ -393,7 +393,8 @@ describe("run-store lifecycle CRUD", () => {
         "turn_id_set_size",
         "output_tokens_total",
         "normalized_log_offset",
-        "idle_since"
+        "idle_since",
+        "normalized_log_path"
       ]);
       expect(columnNames(database, "watchdog_turn_ids")).toEqual([
         "run_id",
@@ -413,6 +414,7 @@ describe("run-store lifecycle CRUD", () => {
         idleSince: "2026-05-22T12:10:00.000Z",
         lastToolCallAt: "2026-05-22T12:00:00.000Z",
         normalizedLogOffset: 42,
+        normalizedLogPath: "logs/runs/run-watchdog/provider.normalized.jsonl",
         outputTokensTotal: 9,
         runId: "run-watchdog",
         sampledAt: "2026-05-22T12:15:00.000Z",
@@ -429,6 +431,7 @@ describe("run-store lifecycle CRUD", () => {
         idleSince: "2026-05-22T12:10:00.000Z",
         lastToolCallAt: "2026-05-22T12:00:00.000Z",
         normalizedLogOffset: 42,
+        normalizedLogPath: "logs/runs/run-watchdog/provider.normalized.jsonl",
         outputTokensTotal: 9,
         runId: "run-watchdog",
         sampledAt: "2026-05-22T12:15:00.000Z",

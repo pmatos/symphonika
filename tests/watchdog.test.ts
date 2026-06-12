@@ -40,6 +40,7 @@ describe("watchdogProgressObserved", () => {
     idleSince: null,
     lastToolCallAt: "2026-05-22T10:00:00.000Z",
     normalizedLogOffset: 10,
+    normalizedLogPath: "run-a.normalized.jsonl",
     outputTokensTotal: 5,
     runId: "run-a",
     sampledAt: "2026-05-22T10:00:00.000Z",
@@ -215,6 +216,7 @@ describe("reconcileWatchdog", () => {
         idleSince: "2026-05-22T09:30:00.000Z",
         lastToolCallAt: null,
         normalizedLogOffset: 0,
+        normalizedLogPath: path.join(root, "provider.normalized.jsonl"),
         outputTokensTotal: 0,
         runId: "run-idle",
         sampledAt: "2026-05-22T09:30:00.000Z",
@@ -281,6 +283,7 @@ describe("reconcileWatchdog", () => {
         idleSince: "2026-05-22T09:30:00.000Z",
         lastToolCallAt: "2026-05-22T09:00:00.000Z",
         normalizedLogOffset: Buffer.byteLength(oldToolCall),
+        normalizedLogPath,
         outputTokensTotal: 0,
         runId: "run-forward",
         sampledAt: "2026-05-22T09:30:00.000Z",
@@ -344,6 +347,7 @@ describe("reconcileWatchdog", () => {
         idleSince: "2026-05-22T09:40:00.000Z",
         lastToolCallAt: null,
         normalizedLogOffset: 0,
+        normalizedLogPath: path.join(root, "provider.normalized.jsonl"),
         outputTokensTotal: 0,
         runId: "run-restarted",
         sampledAt: "2026-05-22T09:40:00.000Z",
@@ -384,6 +388,79 @@ describe("reconcileWatchdog", () => {
       expect(cancel).toHaveBeenCalledOnce();
     } finally {
       reopened.close();
+    }
+  });
+
+  it("resets the log offset when a retry switches the normalized log path", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const attempt1 = path.join(root, "provider.normalized.jsonl");
+    const attempt2 = path.join(root, "provider.normalized.attempt-2.jsonl");
+    await writeFile(attempt1, JSON.stringify({ type: "usage_updated" }) + "\n");
+    // A longer file whose early bytes carry a tool_call: reusing the previous
+    // attempt's offset would start mid-line and skip this event entirely.
+    await writeFile(
+      attempt2,
+      JSON.stringify({ toolName: "bash", turnId: "t1", type: "tool_call" }) + "\n"
+    );
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    const evidence = (normalizedLogPath: string) => ({
+      branchName: "sym/symphonika/198-watchdog",
+      branchRef: "refs/heads/sym/symphonika/198-watchdog",
+      issueSnapshotPath: path.join(root, ".symphonika", "logs", "runs", "run-retry", "issue.json"),
+      metadataPath: path.join(root, ".symphonika", "logs", "runs", "run-retry", "metadata.json"),
+      normalizedLogPath,
+      promptPath: path.join(root, ".symphonika", "logs", "runs", "run-retry", "prompt.md"),
+      rawLogPath: path.join(root, ".symphonika", "logs", "runs", "run-retry", "raw.jsonl"),
+      workflowGraphPath: path.join(root, ".symphonika", "logs", "runs", "run-retry", "workflow.json"),
+      workspacePath
+    });
+    const config = {
+      enabled: true,
+      graceMinutes: 30,
+      sampleIntervalSeconds: 60
+    };
+    try {
+      seedRun(store, "run-retry");
+      store.updateRunEvidence("run-retry", evidence(attempt1));
+      store.updateRunState("run-retry", "running");
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel: vi.fn().mockResolvedValue(undefined),
+        issueNumber: 198,
+        projectName: "symphonika",
+        runId: "run-retry"
+      });
+
+      await reconcileWatchdog({
+        activeRuns,
+        config,
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore: store
+      });
+      const afterFirst = store.getWatchdogSample("run-retry");
+      expect(afterFirst?.lastToolCallAt).toBeNull();
+      expect(afterFirst?.normalizedLogOffset).toBeGreaterThan(0);
+
+      // The retry attempt switches to a new log path for the same run.
+      store.updateRunEvidence("run-retry", evidence(attempt2));
+
+      await reconcileWatchdog({
+        activeRuns,
+        config,
+        logger,
+        now: () => new Date("2026-05-22T10:01:00.000Z"),
+        runStore: store
+      });
+      const afterSecond = store.getWatchdogSample("run-retry");
+      expect(afterSecond?.normalizedLogPath).toBe(attempt2);
+      expect(afterSecond?.lastToolCallAt).toBe("2026-05-22T10:01:00.000Z");
+      expect(afterSecond?.turnIdSetSize).toBe(1);
+      expect(store.getRun("run-retry")?.state).toBe("running");
+    } finally {
+      store.close();
     }
   });
 });

@@ -182,6 +182,7 @@ export type WatchdogSample = {
   idleSince: string | null;
   lastToolCallAt: string | null;
   normalizedLogOffset: number;
+  normalizedLogPath: string;
   outputTokensTotal: number;
   runId: string;
   sampledAt: string;
@@ -337,6 +338,7 @@ type WatchdogSampleRow = {
   idle_since: string | null;
   last_tool_call_at: string | null;
   normalized_log_offset: number;
+  normalized_log_path: string;
   output_tokens_total: number;
   run_id: string;
   sampled_at: string;
@@ -680,7 +682,8 @@ export class RunStore {
       .prepare(
         [
           "select run_id, sampled_at, last_tool_call_at, workspace_mtime_max,",
-          "turn_id_set_size, output_tokens_total, normalized_log_offset, idle_since",
+          "turn_id_set_size, output_tokens_total, normalized_log_offset,",
+          "normalized_log_path, idle_since",
           "from watchdog_samples where run_id = ?"
         ].join(" ")
       )
@@ -694,10 +697,12 @@ export class RunStore {
         [
           "insert into watchdog_samples (",
           "run_id, sampled_at, last_tool_call_at, workspace_mtime_max,",
-          "turn_id_set_size, output_tokens_total, normalized_log_offset, idle_since",
+          "turn_id_set_size, output_tokens_total, normalized_log_offset,",
+          "normalized_log_path, idle_since",
           ") values (",
           "@run_id, @sampled_at, @last_tool_call_at, @workspace_mtime_max,",
-          "@turn_id_set_size, @output_tokens_total, @normalized_log_offset, @idle_since",
+          "@turn_id_set_size, @output_tokens_total, @normalized_log_offset,",
+          "@normalized_log_path, @idle_since",
           ")",
           "on conflict(run_id) do update set",
           "sampled_at = excluded.sampled_at,",
@@ -706,6 +711,7 @@ export class RunStore {
           "turn_id_set_size = excluded.turn_id_set_size,",
           "output_tokens_total = excluded.output_tokens_total,",
           "normalized_log_offset = excluded.normalized_log_offset,",
+          "normalized_log_path = excluded.normalized_log_path,",
           "idle_since = excluded.idle_since"
         ].join(" ")
       )
@@ -713,6 +719,7 @@ export class RunStore {
         idle_since: sample.idleSince,
         last_tool_call_at: sample.lastToolCallAt,
         normalized_log_offset: sample.normalizedLogOffset,
+        normalized_log_path: sample.normalizedLogPath,
         output_tokens_total: sample.outputTokensTotal,
         run_id: sample.runId,
         sampled_at: sample.sampledAt,
@@ -1846,6 +1853,7 @@ export class RunStore {
         output_tokens_total integer not null,
         normalized_log_offset integer not null,
         idle_since text,
+        normalized_log_path text not null default '',
         foreign key (run_id) references runs(id)
       );
 
@@ -1872,7 +1880,8 @@ export class RunStore {
       ["runs", "state_transition_reason", "text"],
       ["attempts", "failure_classification", "text"],
       ["attempts", "metadata_path", "text"],
-      ["attempts", "workflow_graph_path", "text"]
+      ["attempts", "workflow_graph_path", "text"],
+      ["watchdog_samples", "normalized_log_path", "text not null default ''"]
     ];
 
     const apply = this.database.transaction(() => {
@@ -2104,6 +2113,7 @@ function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
     idleSince: row.idle_since,
     lastToolCallAt: row.last_tool_call_at,
     normalizedLogOffset: row.normalized_log_offset,
+    normalizedLogPath: row.normalized_log_path,
     outputTokensTotal: row.output_tokens_total,
     runId: row.run_id,
     sampledAt: row.sampled_at,

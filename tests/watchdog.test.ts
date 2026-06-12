@@ -1,4 +1,12 @@
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import {
+  lutimes,
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  utimes,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -97,6 +105,37 @@ describe("sampleWorkspaceMtimeMax", () => {
     await utimes(root, includedTime, includedTime);
 
     expect(await sampleWorkspaceMtimeMax(root)).toBe(includedTime.getTime());
+  });
+
+  it("does not follow symlinked directories out of the workspace", async () => {
+    const root = await makeTempRoot();
+    const external = await makeTempRoot();
+    const workspace = path.join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+
+    const included = path.join(workspace, "src.ts");
+    await writeFile(included, "included\n");
+    const externalFile = path.join(external, "newer.txt");
+    await writeFile(externalFile, "external\n");
+
+    const baseTime = new Date("2026-05-22T10:00:00.000Z");
+    const externalTime = new Date("2026-05-22T11:00:00.000Z");
+    await utimes(included, baseTime, baseTime);
+    await utimes(externalFile, externalTime, externalTime);
+
+    // A symlink named like an excluded dir and a plain symlink both point at an
+    // external tree whose file is newer. Neither may be descended into, and the
+    // external file's 11:00 mtime must not win — only the links' own (10:00)
+    // mtimes count.
+    const linkedExcluded = path.join(workspace, "node_modules");
+    await symlink(external, linkedExcluded, "dir");
+    const linkedPlain = path.join(workspace, "linked");
+    await symlink(external, linkedPlain, "dir");
+    await lutimes(linkedExcluded, baseTime, baseTime);
+    await lutimes(linkedPlain, baseTime, baseTime);
+    await utimes(workspace, baseTime, baseTime);
+
+    expect(await sampleWorkspaceMtimeMax(workspace)).toBe(baseTime.getTime());
   });
 });
 

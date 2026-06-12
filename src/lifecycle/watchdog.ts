@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { opendir, stat } from "node:fs/promises";
+import { lstat, opendir, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { Logger } from "pino";
@@ -208,7 +208,13 @@ async function walkWorkspaceMtimeMax(
     const entryPath = path.join(directory, entry.name);
     let stats;
     try {
-      stats = await stat(entryPath);
+      // lstat (not stat) so symlinks are never followed: a symlinked directory
+      // reports isDirectory() === false here, so it is not descended into. This
+      // keeps the excluded-dir check (entry.isDirectory(), also symlink-blind)
+      // consistent with the recursion decision and prevents symlink cycles or
+      // links to external trees from stalling the tick or injecting foreign
+      // mtimes as false progress.
+      stats = await lstat(entryPath);
     } catch {
       continue;
     }

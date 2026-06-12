@@ -123,6 +123,13 @@ must not overwrite it with `no_progress` — this mirrors the existing `reconcil
 5. Otherwise persists the still-idle sample, setting `idle_since` on the first idle observation
    (when it is still unset) so the grace clock starts on first idle and survives restarts.
 
+Separately from the per-tick steps above, `idle_since` is cleared as a transition-time hook
+whenever a Run leaves `running` for `waiting`. This cannot be a step of the sampling loop, which
+never runs on `waiting` Runs; but because `idle_since` is a persisted wall-clock timestamp and
+step 5 only sets it when unset, clearing it on `waiting` entry is what stops step 4's
+`now - idle_since` from absorbing an unsampled wait excursion as idle time (see the ADR 0047
+interaction below).
+
 Sampling is bounded work: the event log is never re-scanned in full, and the workspace walk skips
 known build-output directories at the top of the descent rather than per file.
 

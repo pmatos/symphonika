@@ -224,6 +224,7 @@ watchdog:
   enabled: true
   grace_minutes: 30
   sample_interval_seconds: 60
+  mtime_ignore: []
 
 pull_requests:
   enabled: true
@@ -831,25 +832,37 @@ Cancellation preserves workspace and logs.
 ### 12.4 Watchdog
 
 The Watchdog detects active provider runs that have stopped doing observable work. It samples rows
-in `queued`, `preparing_workspace`, and `running`; rows in `state = "waiting"` are reconciled by
-the wait-state path and are not sampled.
+in `state = "running"` only — the one active state with a live Agent Provider that can wedge. Rows
+in `queued` and `preparing_workspace` have no provider executing yet, so they have no liveness
+signal to advance and must not accrue idle time; rows in `state = "waiting"` are reconciled by the
+wait-state path. A `running` Run that already carries `cancel_requested` is also skipped, so the
+Watchdog does not overwrite a more specific in-flight cancellation with `no_progress`.
 
 For each sampled Run, Symphonika records one durable `watchdog_samples` row keyed by `run_id`:
-`sampled_at`, `last_tool_call_at`, `workspace_mtime_max`, `turn_id_set_size`,
-`output_tokens_total`, `normalized_log_offset`, and `idle_since`. `idle_since` survives daemon
-restart, so a Run that was already observed idle resumes its grace window from the first idle
-observation rather than from process boot.
+`sampled_at`, `last_tool_call_at`, `last_message_at`, `workspace_mtime_max`, `turn_id_set_size`,
+`output_tokens_total`, `normalized_log_offset`, `normalized_log_path`, and `idle_since`. `idle_since`
+survives daemon restart, so a Run that was already observed idle resumes its grace window from the
+first idle observation rather than from process boot. It is cleared on entry to `waiting` (so an
+unsampled wait excursion does not accrue idle time) and reset on attempt change (so a transient
+retry, which re-enters a running agent state, starts a fresh grace window).
 
 Sampling reads the Normalized Event Log only forward of the stored byte offset and walks the
-Workspace tree once. The hard-coded v1 exclude set is `.git/`, `target/`, and `node_modules/`;
-these are skipped at the directory entry level and are not descended.
+Workspace tree once. A transient retry writes a new per-attempt log path, so the byte offset and the
+output-token baseline are reset whenever `normalized_log_path` changes and the new attempt's events
+are read from the start. The hard-coded v1 exclude set is `.git/`, `target/`, and `node_modules/`,
+skipped at the directory-entry level and not descended; `watchdog.mtime_ignore` adds
+workspace-relative globs whose matching files are dropped from the mtime walk at the individual-file
+level, so build-output churn (e.g. `*.log`) cannot keep a wedged Run alive.
 
 A sampled Run is making progress when any one signal advances since the previous sample:
 
 - `last_tool_call_at` increases
 - `workspace_mtime_max` advances by at least one second
-- `turn_id_set_size` increases
+- `turn_id_set_size` increases (only the Codex provider tags events with a `turnId`; Claude emits
+  `sessionId`, so this signal advances for Codex Runs)
 - `output_tokens_total` increases
+- `last_message_at` increases (a new streamed assistant `message` event arrived — both providers
+  normalize their streamed deltas to a `message` event)
 
 `usage_updated` and `rate_limit_updated` events alone do not count unless output tokens grow or
 another signal advances. When no progress is observed, the Watchdog persists `idle_since` on first

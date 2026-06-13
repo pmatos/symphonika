@@ -151,13 +151,16 @@ describe("dispatch project disable", () => {
     await writeProject(root);
 
     let runAttemptCount = 0;
+    let releaseProvider: () => void = () => {};
+    const providerCanFinish = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
     const provider: AgentProvider = {
       cancel: vi.fn().mockResolvedValue(undefined),
       name: "codex",
       async *runAttempt(): AsyncGenerator<ProviderEvent> {
         runAttemptCount += 1;
-        // brief pause so the test can rewrite config mid-run
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await providerCanFinish;
         yield {
           normalized: { exitCode: 0, type: "process_exit" },
           raw: { code: 0, kind: "exit" }
@@ -201,6 +204,8 @@ describe("dispatch project disable", () => {
 
       // Disable project mid-flight
       await writeProject(root, { disabled: true });
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      releaseProvider();
 
       // Wait for first run to succeed
       await waitForCondition(daemon.url, ({ runs }) =>

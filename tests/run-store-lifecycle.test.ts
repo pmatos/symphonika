@@ -200,6 +200,56 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("does not mark cancel-requested runs stale for no progress", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const id = seedRun(store);
+      store.updateRunState(id, "running");
+      store.markCancelRequested(id, "closed_issue");
+
+      expect(
+        store.markRunNoProgressStale(id, "2026-05-22T10:00:00.000Z")
+      ).toBe(false);
+      expect(store.getRun(id)).toMatchObject({
+        cancelReason: "closed_issue",
+        cancelRequested: true,
+        state: "running",
+        terminalReason: null
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("clears the watchdog idle_since when a run enters waiting", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const id = seedRun(store);
+      store.updateRunState(id, "running");
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T09:30:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath: "logs/runs/run-1/provider.normalized.jsonl",
+        outputTokensTotal: 0,
+        runId: id,
+        sampledAt: "2026-05-22T09:30:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: 0
+      });
+      expect(store.getWatchdogSample(id)?.idleSince).toBe("2026-05-22T09:30:00.000Z");
+
+      store.updateRunState(id, "waiting");
+
+      expect(store.getWatchdogSample(id)?.idleSince).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
   it("recordTerminalReason persists reason and classification", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });
@@ -351,6 +401,103 @@ describe("run-store lifecycle CRUD", () => {
 
       const ids = store.listActiveRunIds().map((entry) => entry.runId).sort();
       expect(ids).toEqual(["queued", "running"]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("migrates watchdog sample tables idempotently", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    store.close();
+
+    const database = new Database(databasePath(root), { readonly: true });
+    try {
+      expect(columnNames(database, "watchdog_samples")).toEqual([
+        "run_id",
+        "sampled_at",
+        "last_tool_call_at",
+        "workspace_mtime_max",
+        "turn_id_set_size",
+        "output_tokens_total",
+        "normalized_log_offset",
+        "idle_since",
+        "normalized_log_path",
+        "last_message_at"
+      ]);
+      expect(columnNames(database, "watchdog_turn_ids")).toEqual([
+        "run_id",
+        "turn_id"
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("persists watchdog samples across store reopen", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      seedRun(store, { id: "run-watchdog", issueNumber: 77 });
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T12:10:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: "2026-05-22T12:00:00.000Z",
+        normalizedLogOffset: 42,
+        normalizedLogPath: "logs/runs/run-watchdog/provider.normalized.jsonl",
+        outputTokensTotal: 9,
+        runId: "run-watchdog",
+        sampledAt: "2026-05-22T12:15:00.000Z",
+        turnIdSetSize: 2,
+        workspaceMtimeMax: 1_769_000_000_123
+      });
+    } finally {
+      store.close();
+    }
+
+    const reopened = openRunStore({ stateRoot: root });
+    try {
+      expect(reopened.getWatchdogSample("run-watchdog")).toEqual({
+        idleSince: "2026-05-22T12:10:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: "2026-05-22T12:00:00.000Z",
+        normalizedLogOffset: 42,
+        normalizedLogPath: "logs/runs/run-watchdog/provider.normalized.jsonl",
+        outputTokensTotal: 9,
+        runId: "run-watchdog",
+        sampledAt: "2026-05-22T12:15:00.000Z",
+        turnIdSetSize: 2,
+        workspaceMtimeMax: 1_769_000_000_123
+      });
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it("lists only running runs as watchdog candidates", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      seedRun(store, { id: "queued", issueNumber: 1 });
+      seedRun(store, { id: "running", issueNumber: 2 });
+      store.updateRunState("running", "running");
+      store.updateRunEvidence("running", evidence("branch-running"));
+      seedRun(store, { id: "preparing", issueNumber: 3 });
+      store.updateRunState("preparing", "preparing_workspace");
+      seedRun(store, { id: "waiting", issueNumber: 4 });
+      store.updateRunState("waiting", "waiting");
+      store.setRunCurrentState("waiting", "pr_review");
+
+      // ADR 0054: only `running` Runs are candidates; queued, preparing_workspace,
+      // and waiting are all excluded.
+      expect(store.listWatchdogCandidateRuns()).toEqual([
+        expect.objectContaining({
+          normalizedLogPath: "/tmp/provider.normalized.jsonl",
+          runId: "running",
+          state: "running",
+          workspacePath: "/tmp/workspace"
+        })
+      ]);
     } finally {
       store.close();
     }

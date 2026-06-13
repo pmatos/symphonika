@@ -29,7 +29,11 @@ export type RunState =
 
 export type FailureClassification = "transient" | "deterministic" | "input_required";
 
-export type CancelReason = "closed_issue" | "eligibility_loss" | "operator";
+export type CancelReason =
+  | "closed_issue"
+  | "eligibility_loss"
+  | "no_progress"
+  | "operator";
 
 export type RunStatus = {
   branchName: string;
@@ -200,6 +204,28 @@ export type ProviderEventRecord = {
   type: string;
 };
 
+export type WatchdogSample = {
+  idleSince: string | null;
+  lastMessageAt: string | null;
+  lastToolCallAt: string | null;
+  normalizedLogOffset: number;
+  normalizedLogPath: string;
+  outputTokensTotal: number;
+  runId: string;
+  sampledAt: string;
+  turnIdSetSize: number;
+  workspaceMtimeMax: number;
+};
+
+export type WatchdogCandidateRun = {
+  issueNumber: number;
+  normalizedLogPath: string;
+  projectName: string;
+  runId: string;
+  state: Extract<RunState, "running">;
+  workspacePath: string;
+};
+
 export type ListProviderEventsOptions = {
   afterSequence?: number;
   limit?: number;
@@ -324,6 +350,28 @@ type ProviderEventRow = {
   run_id: string;
   sequence: number;
   type: string;
+};
+
+type WatchdogCandidateRunRow = {
+  id: string;
+  issue_number: number;
+  normalized_log_path: string | null;
+  project_name: string;
+  state: WatchdogCandidateRun["state"];
+  workspace_path: string | null;
+};
+
+type WatchdogSampleRow = {
+  idle_since: string | null;
+  last_message_at: string | null;
+  last_tool_call_at: string | null;
+  normalized_log_offset: number;
+  normalized_log_path: string;
+  output_tokens_total: number;
+  run_id: string;
+  sampled_at: string;
+  turn_id_set_size: number;
+  workspace_mtime_max: number;
 };
 
 type PullRequestDiscoveryRunRow = {
@@ -666,6 +714,122 @@ export class RunStore {
       projectName: row.project_name,
       runId: row.id
     }));
+  }
+
+  listWatchdogCandidateRuns(): WatchdogCandidateRun[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, issue_number, state,",
+          "workspace_path, normalized_log_path",
+          "from runs",
+          // ADR 0054: only `running` Runs have a live provider that can wedge.
+          // queued/preparing_workspace have no provider yet (no liveness signal
+          // to advance, must not accrue idle time); waiting is parked by design.
+          "where state = 'running'",
+          "order by created_at asc, id asc"
+        ].join(" ")
+      )
+      .all() as WatchdogCandidateRunRow[];
+    return rows.map((row) => ({
+      issueNumber: row.issue_number,
+      normalizedLogPath: row.normalized_log_path ?? "",
+      projectName: row.project_name,
+      runId: row.id,
+      state: row.state,
+      workspacePath: row.workspace_path ?? ""
+    }));
+  }
+
+  getWatchdogSample(runId: string): WatchdogSample | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select run_id, sampled_at, last_tool_call_at, last_message_at,",
+          "workspace_mtime_max, turn_id_set_size, output_tokens_total,",
+          "normalized_log_offset, normalized_log_path, idle_since",
+          "from watchdog_samples where run_id = ?"
+        ].join(" ")
+      )
+      .get(runId) as WatchdogSampleRow | undefined;
+    return row === undefined ? undefined : mapWatchdogSampleRow(row);
+  }
+
+  upsertWatchdogSample(sample: WatchdogSample): void {
+    this.database
+      .prepare(
+        [
+          "insert into watchdog_samples (",
+          "run_id, sampled_at, last_tool_call_at, last_message_at,",
+          "workspace_mtime_max, turn_id_set_size, output_tokens_total,",
+          "normalized_log_offset, normalized_log_path, idle_since",
+          ") values (",
+          "@run_id, @sampled_at, @last_tool_call_at, @last_message_at,",
+          "@workspace_mtime_max, @turn_id_set_size, @output_tokens_total,",
+          "@normalized_log_offset, @normalized_log_path, @idle_since",
+          ")",
+          "on conflict(run_id) do update set",
+          "sampled_at = excluded.sampled_at,",
+          "last_tool_call_at = excluded.last_tool_call_at,",
+          "last_message_at = excluded.last_message_at,",
+          "workspace_mtime_max = excluded.workspace_mtime_max,",
+          "turn_id_set_size = excluded.turn_id_set_size,",
+          "output_tokens_total = excluded.output_tokens_total,",
+          "normalized_log_offset = excluded.normalized_log_offset,",
+          "normalized_log_path = excluded.normalized_log_path,",
+          "idle_since = excluded.idle_since"
+        ].join(" ")
+      )
+      .run({
+        idle_since: sample.idleSince,
+        last_message_at: sample.lastMessageAt,
+        last_tool_call_at: sample.lastToolCallAt,
+        normalized_log_offset: sample.normalizedLogOffset,
+        normalized_log_path: sample.normalizedLogPath,
+        output_tokens_total: sample.outputTokensTotal,
+        run_id: sample.runId,
+        sampled_at: sample.sampledAt,
+        turn_id_set_size: sample.turnIdSetSize,
+        workspace_mtime_max: sample.workspaceMtimeMax
+      });
+  }
+
+  rememberWatchdogTurnIds(runId: string, turnIds: Iterable<string>): number {
+    const insert = this.database.prepare(
+      "insert or ignore into watchdog_turn_ids (run_id, turn_id) values (?, ?)"
+    );
+    const count = this.database.prepare(
+      "select count(*) as count from watchdog_turn_ids where run_id = ?"
+    );
+    const apply = this.database.transaction(() => {
+      for (const turnId of turnIds) {
+        insert.run(runId, turnId);
+      }
+      return count.get(runId) as { count: number };
+    });
+    return apply().count;
+  }
+
+  markRunNoProgressStale(runId: string, updatedAt = timestamp()): boolean {
+    const result = this.database
+      .prepare(
+        [
+          "update runs set",
+          "state = 'stale',",
+          "terminal_reason = 'no_progress',",
+          "failure_classification = 'deterministic',",
+          "updated_at = ?",
+          "where id = ?",
+          "and state = 'running'",
+          "and cancel_requested = 0"
+        ].join(" ")
+      )
+      .run(updatedAt, runId);
+    if (result.changes === 0) {
+      return false;
+    }
+    this.recordRunTransition(runId, "stale", updatedAt);
+    return true;
   }
 
   // Stale-claim liveness needs waiting rows too: a parked wait still wears
@@ -1218,6 +1382,16 @@ export class RunStore {
       .prepare("update runs set state = ?, updated_at = ? where id = ?")
       .run(state, now, runId);
     this.recordRunTransition(runId, state, now);
+    if (state === "waiting") {
+      // ADR 0054: idle_since is a persisted wall-clock timestamp and the
+      // watchdog never samples waiting Runs, so clear it on entry to waiting so
+      // the grace window cannot absorb an unsampled wait excursion as idle time.
+      // A Run returning to running starts its idle clock fresh on its next idle
+      // tick rather than inheriting pre-wait idle time (see ADR 0047).
+      this.database
+        .prepare("update watchdog_samples set idle_since = null where run_id = ?")
+        .run(runId);
+    }
   }
 
   updateRunEvidence(runId: string, evidence: RunEvidenceInput): void {
@@ -2056,6 +2230,27 @@ export class RunStore {
         updated_at text not null
       );
 
+      create table if not exists watchdog_samples (
+        run_id text primary key,
+        sampled_at text not null,
+        last_tool_call_at text,
+        workspace_mtime_max real not null,
+        turn_id_set_size integer not null,
+        output_tokens_total integer not null,
+        normalized_log_offset integer not null,
+        idle_since text,
+        normalized_log_path text not null default '',
+        last_message_at text,
+        foreign key (run_id) references runs(id)
+      );
+
+      create table if not exists watchdog_turn_ids (
+        run_id text not null,
+        turn_id text not null,
+        primary key (run_id, turn_id),
+        foreign key (run_id) references runs(id)
+      );
+
       create table if not exists routines (
         project_name text not null,
         name text not null,
@@ -2114,6 +2309,8 @@ export class RunStore {
       ["attempts", "failure_classification", "text"],
       ["attempts", "metadata_path", "text"],
       ["attempts", "workflow_graph_path", "text"],
+      ["watchdog_samples", "normalized_log_path", "text not null default ''"],
+      ["watchdog_samples", "last_message_at", "text"],
       ["routine_firings", "prompt_path", "text"],
       ["routine_firings", "raw_log_path", "text"],
       ["routine_firings", "normalized_log_path", "text"]
@@ -2369,6 +2566,21 @@ function mapRunRow(row: RunRow): RunStatus {
     terminalStateId: row.terminal_state_id ?? null,
     updatedAt: row.updated_at,
     workspacePath: row.workspace_path ?? ""
+  };
+}
+
+function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
+  return {
+    idleSince: row.idle_since,
+    lastMessageAt: row.last_message_at,
+    lastToolCallAt: row.last_tool_call_at,
+    normalizedLogOffset: row.normalized_log_offset,
+    normalizedLogPath: row.normalized_log_path,
+    outputTokensTotal: row.output_tokens_total,
+    runId: row.run_id,
+    sampledAt: row.sampled_at,
+    turnIdSetSize: row.turn_id_set_size,
+    workspaceMtimeMax: row.workspace_mtime_max
   };
 }
 

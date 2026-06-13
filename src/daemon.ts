@@ -29,6 +29,7 @@ import {
   reconcileActiveRuns,
   reconcileWaitingRuns
 } from "./lifecycle/reconcile.js";
+import { reconcileWatchdog } from "./lifecycle/watchdog.js";
 import {
   RunController,
   type RunControllerProjectConfig,
@@ -198,6 +199,7 @@ export async function startDaemon(
   let scheduledWork = Promise.resolve();
   let lastPollErrorsKey = "";
   let lastPullRequestFollowupAt = Date.now();
+  let lastWatchdogSampleAt = Date.now();
   let pendingPollNow: Promise<PollNowResult> | undefined;
   const inflightDispatches = new Set<Promise<void>>();
   const projectsLoader = (): Promise<
@@ -365,6 +367,26 @@ export async function startDaemon(
       } finally {
         dispatchMutex.release();
       }
+    }
+
+    try {
+      const watchdog = runtimeConfig.watchdogConfig();
+      const nowMs = Date.now();
+      if (
+        watchdog.enabled &&
+        nowMs - lastWatchdogSampleAt >= watchdog.sampleIntervalSeconds * 1_000
+      ) {
+        lastWatchdogSampleAt = nowMs;
+        await reconcileWatchdog({
+          activeRuns,
+          config: watchdog,
+          logger,
+          now: () => new Date(nowMs),
+          runStore
+        });
+      }
+    } catch (error) {
+      logger.error({ err: error }, "symphonika watchdog reconcile failed");
     }
 
     if (dispatchMutex.held) {

@@ -2,7 +2,7 @@
 
 Symphonika's raw FSM workflow contract permits `action.kind: "merge_pr"` states so a workflow can
 gate the merge of a Symphonika-owned pull request on workflow-defined predicates rather than the
-opaque policy loop in `runPullRequestFollowup` (§12.4). Merge states are observation-driven, must
+opaque policy loop in `runPullRequestFollowup` (§12.5). Merge states are observation-driven, must
 not launch a provider, and must respect the same `pull_requests.merge` policy that operators
 configure for the orchestrator-wide merge loop.
 

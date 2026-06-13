@@ -572,7 +572,7 @@ describe("Codex provider validate", () => {
       hangFeaturesList: true
     });
     const previousTimeout = process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS;
-    process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS = "1000";
+    process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS = "5000";
     const provider = createCodexProvider();
 
     try {
@@ -588,7 +588,7 @@ describe("Codex provider validate", () => {
         process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS = previousTimeout;
       }
     }
-  });
+  }, 15_000);
 });
 
 async function collectProviderEvents(

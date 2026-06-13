@@ -152,6 +152,11 @@ function buildServiceConfig(input: {
     polling: {
       interval_ms: 30000
     },
+    watchdog: {
+      enabled: true,
+      grace_minutes: 30,
+      sample_interval_seconds: 60
+    },
     pull_requests: {
       enabled: true,
       review_followup: {

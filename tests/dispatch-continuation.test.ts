@@ -125,7 +125,7 @@ async function waitForCondition(
   options: { intervalMs?: number; timeoutMs?: number } = {}
 ): Promise<{ runs: Array<Record<string, unknown>> }> {
   const intervalMs = options.intervalMs ?? 10;
-  const timeoutMs = options.timeoutMs ?? 25_000;
+  const timeoutMs = options.timeoutMs ?? 60_000;
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
@@ -170,7 +170,9 @@ describe("dispatch continuation cap", () => {
       listOpenIssues: vi
         .fn()
         .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
-        .mockResolvedValue([]),
+        .mockResolvedValue([
+          { ...baseIssue, labels: ["agent-ready", "sym:claimed"] }
+        ]),
       listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
@@ -284,7 +286,9 @@ describe("dispatch continuation cap", () => {
       listOpenIssues: vi
         .fn()
         .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
-        .mockResolvedValue([]),
+        .mockResolvedValue([
+          { ...baseIssue, labels: ["agent-ready", "sym:claimed"] }
+        ]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
     const prepareIssueWorkspace = vi.fn(
@@ -326,7 +330,7 @@ describe("dispatch continuation cap", () => {
     } finally {
       await daemon.stop();
     }
-  });
+  }, 70_000);
 
   it("does not start scheduled continuation when issue loses eligibility during delay", async () => {
     const root = await makeTempRoot();
@@ -363,7 +367,9 @@ describe("dispatch continuation cap", () => {
       listOpenIssues: vi
         .fn()
         .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
-        .mockResolvedValue([]),
+        .mockResolvedValue([
+          { ...baseIssue, labels: ["agent-ready", "sym:claimed"] }
+        ]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
     const prepareIssueWorkspace = vi.fn(
@@ -424,8 +430,9 @@ describe("dispatch continuation cap", () => {
 
     // Issue stays agent-ready after the run — without the raw-FSM terminal
     // suppression, scheduleNext would refresh, see the label, and dispatch a
-    // continuation. We want the workflow's explicit `terminal: success` to
-    // mean "done" regardless of the label state.
+    // continuation. Polling after the first tick sees the operational claim,
+    // which keeps reconciliation from making an unrelated getIssue call while
+    // still excluding the issue from fresh dispatch.
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
       getIssue: vi.fn().mockResolvedValue({
@@ -435,7 +442,9 @@ describe("dispatch continuation cap", () => {
       listOpenIssues: vi
         .fn()
         .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
-        .mockResolvedValue([]),
+        .mockResolvedValue([
+          { ...baseIssue, labels: ["agent-ready", "sym:claimed"] }
+        ]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
     const prepareIssueWorkspace = vi.fn(

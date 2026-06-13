@@ -1961,6 +1961,7 @@ export class RunController {
     let projectForAttempt = input.project;
     let respectsIssueLabels = true;
     let parkedAsWaiting = false;
+    let preservedWatchdogTerminal = false;
 
     this.runStore.updateRunState(input.runId, "preparing_workspace");
 
@@ -2015,7 +2016,7 @@ export class RunController {
       // (which has no `stay_waiting` branch) leaving the workflow with no
       // waiting row and no merge attempt scheduled. Returning here keeps the
       // run row durable (state="waiting", current_state_id set) so a daemon
-      // restart can resume the reconciliation. See SPEC §12.5 / §12.6.
+      // restart can resume the reconciliation. See SPEC §12.6 / §12.7.
       if (
         loadedWorkflow.errors.length === 0 &&
         loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm" &&
@@ -2111,6 +2112,21 @@ export class RunController {
         respectsIssueLabels
       });
 
+      // A cancel (watchdog no_progress, operator, closed_issue, eligibility_loss)
+      // can land DURING the potentially long workspace prep above — after the
+      // one-shot cancelBeforeAttach check. The attachProvider hand-off just fired
+      // provider.cancel against a provider that runAttempt has not started yet, so
+      // it was a no-op, and the latched cancelRequested suppresses any later
+      // cancel. Re-check here and skip launching a provider we could no longer
+      // stop; the finally block preserves the stale/no_progress verdict (or
+      // classifies the cancellation). See ADR 0052 / ADR 0054.
+      const cancelDuringPrepare = this.activeRuns.getInFlight(input.runId);
+      if (cancelDuringPrepare?.cancelRequested === true) {
+        throw new Error(
+          `run ${input.runId} was cancelled before provider start`
+        );
+      }
+
       await this.iterateAttempt({
         attemptId,
         attemptNumber: input.attemptNumber,
@@ -2139,13 +2155,65 @@ export class RunController {
         cancelRequested = removed.cancelRequested;
         cancelReason = removed.cancelReason;
       }
+      const preservedRun = this.runStore.getRun(input.runId);
+      // terminal_reason "no_progress" is set exclusively by the watchdog
+      // (markRunNoProgressStale), so it is a reliable signal that the watchdog
+      // staled this run — even when a concurrent updateRunState(..., "running")
+      // earlier in this same lifecycle clobbered the row back to a non-stale
+      // state after the watchdog fired (updateRunState rewrites state but
+      // leaves terminal_reason intact). The watchdog samples queued /
+      // preparing_workspace / running rows, so that race is reachable whenever
+      // a run is staled before provider attach. Gate on terminal_reason rather
+      // than state === "stale" so the clobber cannot defeat the verdict, and
+      // re-assert the stale state when it was overwritten. See ADR 0054.
+      if (preservedRun?.terminalReason === "no_progress") {
+        // Re-assert the stale verdict if a clobbering updateRunState(.., "running")
+        // overwrote the state. markRunNoProgressStale refuses rows with
+        // cancel_requested=1, so if a concurrent operator/closed-issue cancel won
+        // the race the re-assert returns false; in that case we must NOT preserve
+        // the watchdog verdict — fall through to classifyFailure so the
+        // cancellation terminates the run. Otherwise the row would be left stuck
+        // in "running" with no provider (a state-machine leak).
+        const reasserted =
+          preservedRun.state === "stale" ||
+          this.runStore.markRunNoProgressStale(input.runId);
+        if (reasserted) {
+          if (attemptCreated) {
+            this.runStore.updateAttemptState(attemptId, "stale");
+          }
+          await this.applyTerminalLabels({
+            cancelReason: CANCEL_REASONS.NO_PROGRESS,
+            fsmContinuing: false,
+            issueNumber: input.issue.number,
+            outcome: {
+              kind: "cancelled",
+              reason: "no_progress"
+            },
+            repository: input.repository,
+            willRetry: false
+          });
+          this.logger?.info(
+            {
+              attemptNumber: input.attemptNumber,
+              cancelReason,
+              issueNumber: input.issue.number,
+              project: input.project.name,
+              runId: input.runId,
+              state: "stale",
+              terminalReason: "no_progress"
+            },
+            "symphonika run termination preserved watchdog verdict"
+          );
+          preservedWatchdogTerminal = true;
+        }
+      }
       // Parked-as-waiting runs have already committed their "waiting" state
       // and scheduled the wait_park callback that will own re-evaluation.
       // The failure-classification + scheduleNext pipeline below would
       // overwrite the waiting state and double-schedule, so it's gated on
       // !parkedAsWaiting. The unconditional unregister above already
       // released the in-flight slot. See ADR 0052 — slot-leak fix.
-      if (!parkedAsWaiting) {
+      if (!parkedAsWaiting && !preservedWatchdogTerminal) {
       const terminal = await classifyFailure({
         cancelRequested,
         ...(caughtError === undefined ? {} : { error: caughtError }),
@@ -2298,7 +2366,7 @@ export class RunController {
       } // end if (!parkedAsWaiting)
     }
 
-    if (caughtError !== undefined) {
+    if (caughtError !== undefined && !preservedWatchdogTerminal) {
       throw caughtError instanceof Error
         ? caughtError
         : new Error(typeof caughtError === "string" ? caughtError : "unknown error");

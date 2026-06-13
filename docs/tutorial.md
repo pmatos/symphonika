@@ -528,10 +528,10 @@ from whichever provider started the attempt.
 - **Pull-request follow-up.** Once your team is comfortable, set
   `pull_requests.merge.enabled: true` and let Symphonika merge PRs whose
   policy gates are clear. The behaviour is specified in
-  [SPEC.md §12.4](../SPEC.md#124-pr-follow-up).
+  [SPEC.md §12.5](../SPEC.md#125-pr-follow-up).
 - **Wait and merge states.** Raw FSM workflows can declare `wait` and
   `merge_pr` states to model multi-step shipping pipelines without launching
-  a provider for the wait. See [SPEC.md §12.5–§12.6](../SPEC.md#125-wait-states).
+  a provider for the wait. See [SPEC.md §12.6–§12.7](../SPEC.md#126-wait-states).
 - **Multiple Projects.** Add more entries under `projects:` to track several
   repositories from one daemon. Dispatch is weighted round-robin across them.
 - **ADRs.** [docs/adr/](./adr/) records the architecture decisions behind

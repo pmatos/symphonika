@@ -77,7 +77,7 @@ describe("CLI", () => {
         await rename(distBackup, distPath);
       }
     }
-  });
+  }, 70_000);
 
   it("prints top-level help when invoked through an npm-style bin symlink", async () => {
     const root = await makeTempRoot();

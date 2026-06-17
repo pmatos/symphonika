@@ -30,7 +30,7 @@
     "@octokit/rest": "^22.0.1",
     "@types/better-sqlite3": "^7.6.13",
     "better-sqlite3": "^12.10.1",
-    "commander": "^14.0.3",
+    "commander": "^15.0.0",
     "hono": "^4.12.25",
     "pino": "^10.3.1",
     "yaml": "^2.9.0",

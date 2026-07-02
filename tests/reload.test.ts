@@ -16,7 +16,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -124,7 +126,10 @@ describe("RuntimeConfigReloader workflow validation", () => {
         '          command: "npm ci"'
       ]
     });
-    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}}.\n"
+    );
 
     const reloader = new RuntimeConfigReloader({
       configPath: path.join(root, "symphonika.yml")
@@ -170,9 +175,9 @@ describe("RuntimeConfigReloader workflow validation", () => {
     const status = reloader.getStatus();
 
     expect(status.ok).toBe(false);
-    expect(status.errors.some((message) => message.includes("missing_state"))).toBe(
-      true
-    );
+    expect(
+      status.errors.some((message) => message.includes("missing_state"))
+    ).toBe(true);
     expect(reloader.projectsByName().has("symphonika")).toBe(false);
   });
 
@@ -212,9 +217,9 @@ describe("RuntimeConfigReloader workflow validation", () => {
     expect(
       status.errors.some((message) => message.includes("prompt not found"))
     ).toBe(true);
-    expect(
-      status.errors.some((message) => message.includes("planning"))
-    ).toBe(true);
+    expect(status.errors.some((message) => message.includes("planning"))).toBe(
+      true
+    );
     expect(reloader.projectsByName().has("symphonika")).toBe(false);
   });
 
@@ -222,7 +227,11 @@ describe("RuntimeConfigReloader workflow validation", () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "workflow.yml");
     await mkdir(path.join(root, "prompts"), { recursive: true });
-    await writeFile(path.join(root, "prompts/plan.md"), "Plan the work.\n", "utf8");
+    await writeFile(
+      path.join(root, "prompts/plan.md"),
+      "Plan the work.\n",
+      "utf8"
+    );
     await writeFile(
       path.join(root, "workflow.yml"),
       [
@@ -295,7 +304,10 @@ describe("RuntimeConfigReloader workflow validation", () => {
   it("keeps the last-known-good snapshot when project detail validation fails on reload", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "WORKFLOW.md");
-    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}}.\n"
+    );
 
     const reloader = new RuntimeConfigReloader({
       configPath: path.join(root, "symphonika.yml")
@@ -327,7 +339,11 @@ describe("RuntimeConfigReloader workflow validation", () => {
     await mkdir(templateDir, { recursive: true });
     await mkdir(path.join(root, "prompts"), { recursive: true });
     await writeFile(path.join(root, "prompts/plan.md"), "Plan.\n", "utf8");
-    await writeFile(path.join(root, "prompts/revised-plan.md"), "Revised plan.\n", "utf8");
+    await writeFile(
+      path.join(root, "prompts/revised-plan.md"),
+      "Revised plan.\n",
+      "utf8"
+    );
     const workflowPath = path.join(root, "workflow.yml");
     const templatePath = path.join(templateDir, "plan-tdd-pr.yml");
     await writeFile(
@@ -380,11 +396,12 @@ describe("RuntimeConfigReloader workflow validation", () => {
     }
     const firstHash = firstWorkflow.expandedWorkflow.contentHash;
 
-    expect(firstWorkflow.expandedWorkflow.templateFiles).toEqual([templatePath]);
-    expect(firstWorkflow.expandedWorkflow.states.map((state) => state.id)).toEqual([
-      "done",
-      "build_pr.planning"
+    expect(firstWorkflow.expandedWorkflow.templateFiles).toEqual([
+      templatePath
     ]);
+    expect(
+      firstWorkflow.expandedWorkflow.states.map((state) => state.id)
+    ).toEqual(["done", "build_pr.planning"]);
 
     await writeFile(
       templatePath,
@@ -408,8 +425,13 @@ describe("RuntimeConfigReloader workflow validation", () => {
       "utf8"
     );
     await reloader.reload();
-    const secondWorkflow = reloader.projectsByName().get("symphonika")?.workflow;
-    if (secondWorkflow === undefined || !("expandedWorkflow" in secondWorkflow)) {
+    const secondWorkflow = reloader
+      .projectsByName()
+      .get("symphonika")?.workflow;
+    if (
+      secondWorkflow === undefined ||
+      !("expandedWorkflow" in secondWorkflow)
+    ) {
       throw new Error("expected workflow snapshot to be an object");
     }
 
@@ -455,7 +477,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         "    issue_filters:",
         '      states: ["open"]',
         '      labels_all: ["agent-ready"]',
-        '      labels_none: []',
+        "      labels_none: []",
         "    priority:",
         "      labels: {}",
         "      default: 99",
@@ -509,7 +531,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         "    issue_filters:",
         '      states: ["open"]',
         '      labels_all: ["agent-ready"]',
-        '      labels_none: []',
+        "      labels_none: []",
         "    priority:",
         "      labels: {}",
         "      default: 99",
@@ -574,7 +596,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         "    issue_filters:",
         '      states: ["open"]',
         '      labels_all: ["agent-ready"]',
-        '      labels_none: []',
+        "      labels_none: []",
         "    priority:",
         "      labels: {}",
         "      default: 99",
@@ -604,7 +626,10 @@ describe("RuntimeConfigReloader concurrency caps", () => {
   it("loads configured project routines into the runtime snapshot", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "WORKFLOW.md");
-    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}}.\n"
+    );
     await writeFile(
       path.join(root, "daily-report.md"),
       [
@@ -624,7 +649,11 @@ describe("RuntimeConfigReloader concurrency caps", () => {
       configPath,
       original.replace(
         "    workflow: ./WORKFLOW.md",
-        ["    workflow: ./WORKFLOW.md", "    routines:", "      - ./daily-report.md"].join("\n")
+        [
+          "    workflow: ./WORKFLOW.md",
+          "    routines:",
+          "      - ./daily-report.md"
+        ].join("\n")
       )
     );
 
@@ -646,7 +675,10 @@ describe("RuntimeConfigReloader concurrency caps", () => {
   it("keeps the last-known-good snapshot when a routine declaration becomes invalid", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "WORKFLOW.md");
-    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}}.\n"
+    );
     const routinePath = path.join(root, "daily-report.md");
     await writeFile(
       routinePath,
@@ -667,7 +699,11 @@ describe("RuntimeConfigReloader concurrency caps", () => {
       configPath,
       original.replace(
         "    workflow: ./WORKFLOW.md",
-        ["    workflow: ./WORKFLOW.md", "    routines:", "      - ./daily-report.md"].join("\n")
+        [
+          "    workflow: ./WORKFLOW.md",
+          "    routines:",
+          "      - ./daily-report.md"
+        ].join("\n")
       )
     );
 
@@ -686,14 +722,17 @@ describe("RuntimeConfigReloader concurrency caps", () => {
       usingLastKnownGood: true
     });
     expect(reloader.getStatus().errors.join("\n")).toContain(
-      "name \"../bad\" is not path-safe"
+      'name "../bad" is not path-safe'
     );
   });
 
   it("rejects duplicate routine names within a project", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "WORKFLOW.md");
-    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}}.\n"
+    );
     const routineBody = [
       "---",
       "name: daily-report",
@@ -733,7 +772,10 @@ describe("RuntimeConfigReloader concurrency caps", () => {
   it("does not block reload of active projects on a broken routine file in a disabled project", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "WORKFLOW.md");
-    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}}.\n"
+    );
     await writeFile(
       path.join(root, "broken-routine.md"),
       ["---", "name: ../bad", "kind: report", "---", "Body", ""].join("\n")
@@ -780,8 +822,12 @@ describe("RuntimeConfigReloader concurrency caps", () => {
 
     expect(reloader.getStatus().ok).toBe(true);
     expect(reloader.projectsByName().has("symphonika")).toBe(true);
-    expect(reloader.projectsByName().get("disabled-project")?.disabled).toBe(true);
-    expect(reloader.projectsByName().get("disabled-project")?.routines).toEqual([]);
+    expect(reloader.projectsByName().get("disabled-project")?.disabled).toBe(
+      true
+    );
+    expect(reloader.projectsByName().get("disabled-project")?.routines).toEqual(
+      []
+    );
   });
 });
 

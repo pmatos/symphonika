@@ -17,9 +17,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -72,10 +72,18 @@ describe("RunStore detail queries", () => {
           `${JSON.stringify({ run: { id: "run-artifacts" } })}\n`,
           "utf8"
         ),
-        writeFile(normalizedLogPath, '{"type":"message","message":"hi"}\n', "utf8"),
+        writeFile(
+          normalizedLogPath,
+          '{"type":"message","message":"hi"}\n',
+          "utf8"
+        ),
         writeFile(promptPath, "Rendered prompt\n", "utf8"),
         writeFile(rawLogPath, '{"raw":"event"}\n', "utf8"),
-        writeFile(workflowGraphPath, `${JSON.stringify(workflowGraph)}\n`, "utf8")
+        writeFile(
+          workflowGraphPath,
+          `${JSON.stringify(workflowGraph)}\n`,
+          "utf8"
+        )
       ]);
 
       store.createRun({
@@ -118,32 +126,42 @@ describe("RunStore detail queries", () => {
       for (const artifact of artifacts) {
         expect(typeof artifact.sizeBytes).toBe("number");
       }
-      await expect(store.getIssueSnapshot("run-artifacts")).resolves.toMatchObject({
+      await expect(
+        store.getIssueSnapshot("run-artifacts")
+      ).resolves.toMatchObject({
         number: 99,
         title: "Artifact run"
       });
       await expect(store.getRenderedPrompt("run-artifacts")).resolves.toBe(
         "Rendered prompt\n"
       );
-      await expect(store.getPromptMetadata("run-artifacts")).resolves.toMatchObject({
+      await expect(
+        store.getPromptMetadata("run-artifacts")
+      ).resolves.toMatchObject({
         run: { id: "run-artifacts" }
       });
-      await expect(store.getWorkflowGraph("run-artifacts")).resolves.toMatchObject({
+      await expect(
+        store.getWorkflowGraph("run-artifacts")
+      ).resolves.toMatchObject({
         name: "single_agent_workflow"
       });
-      await expect(store.getNormalizedEventLog("run-artifacts")).resolves.toEqual([
-        { message: "hi", type: "message" }
-      ]);
+      await expect(
+        store.getNormalizedEventLog("run-artifacts")
+      ).resolves.toEqual([{ message: "hi", type: "message" }]);
 
       const rawProviderLog = await store.getRawProviderLog("run-artifacts");
       expect(rawProviderLog).toBeDefined();
-      await expect(streamText(rawProviderLog)).resolves.toBe('{"raw":"event"}\n');
+      await expect(streamText(rawProviderLog)).resolves.toBe(
+        '{"raw":"event"}\n'
+      );
 
       const artifactStream = await store.openArtifactStream(
         "run-artifacts",
         "provider_raw"
       );
-      await expect(streamText(artifactStream)).resolves.toBe('{"raw":"event"}\n');
+      await expect(streamText(artifactStream)).resolves.toBe(
+        '{"raw":"event"}\n'
+      );
     } finally {
       store.close();
     }
@@ -186,12 +204,8 @@ describe("RunStore detail queries", () => {
       expect(detail?.issueTitle).toBe("Sample issue");
       expect(detail?.attempts).toHaveLength(1);
       expect(detail?.attempts[0]?.id).toBe("run-A-attempt-1");
-      expect(detail?.attempts[0]?.createdAt).toMatch(
-        /^\d{4}-\d{2}-\d{2}T/
-      );
-      expect(detail?.attempts[0]?.updatedAt).toMatch(
-        /^\d{4}-\d{2}-\d{2}T/
-      );
+      expect(detail?.attempts[0]?.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(detail?.attempts[0]?.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
       expect(detail?.transitions.map((t) => t.state)).toEqual([
         "queued",
         "preparing_workspace",
@@ -465,9 +479,7 @@ describe("RunStore detail queries", () => {
       ]);
       expect(descriptors1.every((descriptor) => descriptor.present)).toBe(true);
       expect(
-        descriptors1.every(
-          (descriptor) => (descriptor.sizeBytes ?? 0) > 0
-        )
+        descriptors1.every((descriptor) => (descriptor.sizeBytes ?? 0) > 0)
       ).toBe(true);
 
       const stream1 = await store.openAttemptArtifactStream(
@@ -506,7 +518,10 @@ describe("RunStore detail queries", () => {
       expect(JSON.parse(contents2)).toMatchObject({ name: "attempt-2" });
 
       expect(
-        await store.openAttemptArtifactStream("missing-attempt", "workflow_graph")
+        await store.openAttemptArtifactStream(
+          "missing-attempt",
+          "workflow_graph"
+        )
       ).toBeUndefined();
     } finally {
       store.close();
@@ -531,7 +546,9 @@ describe("RunStore detail queries", () => {
         present: false,
         sizeBytes: undefined
       });
-      await expect(store.getWorkflowGraph("run-legacy")).resolves.toBeUndefined();
+      await expect(
+        store.getWorkflowGraph("run-legacy")
+      ).resolves.toBeUndefined();
     } finally {
       store.close();
     }
@@ -655,9 +672,9 @@ describe("RunStore detail queries", () => {
         sequence: 1
       });
 
-      expect(store.listProviderEvents("r-events").map((e) => e.sequence)).toEqual([
-        1, 1, 2, 3, 4, 5
-      ]);
+      expect(
+        store.listProviderEvents("r-events").map((e) => e.sequence)
+      ).toEqual([1, 1, 2, 3, 4, 5]);
       expect(
         store
           .listProviderEvents("r-events", { limit: 2 })

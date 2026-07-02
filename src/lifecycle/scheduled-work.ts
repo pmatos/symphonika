@@ -1,8 +1,5 @@
 export type ScheduledWorkKind =
-  | "retry"
-  | "continuation"
-  | "state_advance"
-  | "wait_park";
+  "retry" | "continuation" | "state_advance" | "wait_park";
 
 export type ScheduledWorkInput = {
   delayMs: number;

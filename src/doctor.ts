@@ -90,7 +90,9 @@ export type GitHubRepositoryAccess = {
 };
 
 export type GitHubApi = {
-  createLabel: (input: GitHubRepositoryInput & { name: string }) => Promise<void>;
+  createLabel: (
+    input: GitHubRepositoryInput & { name: string }
+  ) => Promise<void>;
   listLabels: (input: GitHubRepositoryInput) => Promise<string[]>;
   removeIssueLabel?: (
     input: GitHubRepositoryInput & { issueNumber: number; name: string }
@@ -264,17 +266,16 @@ export async function runDoctor(
       errors,
       githubApi
     );
-    const workflowPath = path.resolve(path.dirname(configPath), project.workflow.path);
+    const workflowPath = path.resolve(
+      path.dirname(configPath),
+      project.workflow.path
+    );
     const workflowErrors = await collectWorkflowErrors(
       workflowPath,
       project.workflow.format
     );
     errors.push(...workflowErrors);
-    const staleIssues = await fetchStaleIssues(
-      project,
-      env,
-      githubIssuesApi
-    );
+    const staleIssues = await fetchStaleIssues(project, env, githubIssuesApi);
     projects.push({
       ...validation,
       name: project.name,
@@ -489,10 +490,7 @@ export async function runClearStale(
   const errors: string[] = [];
   const warnings: string[] = [];
   const removedLabels: string[] = [];
-  const result = (
-    repository: string,
-    ok = false
-  ): ClearStaleReport => ({
+  const result = (repository: string, ok = false): ClearStaleReport => ({
     configPath,
     errors,
     issueNumber: options.issueNumber,
@@ -619,11 +617,14 @@ class OctokitGitHubApi implements GitHubApi {
 
   async listLabels(input: GitHubRepositoryInput): Promise<string[]> {
     const octokit = this.octokit(input.token);
-    const labels = await octokit.paginate(octokit.rest.issues.listLabelsForRepo, {
-      owner: input.owner,
-      per_page: 100,
-      repo: input.repo
-    });
+    const labels = await octokit.paginate(
+      octokit.rest.issues.listLabelsForRepo,
+      {
+        owner: input.owner,
+        per_page: 100,
+        repo: input.repo
+      }
+    );
 
     return labels.map((label) => label.name);
   }
@@ -674,7 +675,9 @@ async function readConfig(
   try {
     contents = await readFile(configPath, "utf8");
   } catch (error) {
-    errors.push(`service config not found at ${configPath}: ${errorMessage(error)}`);
+    errors.push(
+      `service config not found at ${configPath}: ${errorMessage(error)}`
+    );
     return undefined;
   }
 
@@ -700,7 +703,9 @@ function parseServiceConfig(
   return parsed.data;
 }
 
-function withConfigPath(configPath: string | undefined): { configPath?: string } {
+function withConfigPath(configPath: string | undefined): {
+  configPath?: string;
+} {
   return configPath === undefined ? {} : { configPath };
 }
 
@@ -854,7 +859,8 @@ function initProjectReport(
 }
 
 function formatZodIssue(issue: z.ZodIssue): string {
-  const location = issue.path.length === 0 ? "service config" : issue.path.join(".");
+  const location =
+    issue.path.length === 0 ? "service config" : issue.path.join(".");
   return `${location}: ${issue.message}`;
 }
 

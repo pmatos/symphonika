@@ -17,7 +17,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -56,12 +58,20 @@ describe("HTTP app", () => {
       url: "https://example/1"
     };
     const stale = {
-      issue: { ...baseIssue, labels: ["agent-ready", "sym:claimed", "sym:stale"], number: 9 },
+      issue: {
+        ...baseIssue,
+        labels: ["agent-ready", "sym:claimed", "sym:stale"],
+        number: 9
+      },
       project: "p",
       reasons: ["has operational label sym:stale"]
     };
     const claimed = {
-      issue: { ...baseIssue, labels: ["agent-ready", "sym:claimed"], number: 10 },
+      issue: {
+        ...baseIssue,
+        labels: ["agent-ready", "sym:claimed"],
+        number: 10
+      },
       project: "p",
       reasons: ["has operational label sym:claimed"]
     };
@@ -80,7 +90,7 @@ describe("HTTP app", () => {
     });
 
     const response = await app.request("/api/status");
-    const body = (await response.json()) as { staleIssues: typeof claimed[] };
+    const body = (await response.json()) as { staleIssues: (typeof claimed)[] };
     expect(body.staleIssues).toEqual([stale]);
   });
 

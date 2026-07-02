@@ -174,8 +174,9 @@ async function readDispatchConfig(
   if (!parsed.success) {
     throw new Error(
       parsed.error.issues
-        .map((issue) =>
-          `${issue.path.length === 0 ? "service config" : issue.path.join(".")}: ${issue.message}`
+        .map(
+          (issue) =>
+            `${issue.path.length === 0 ? "service config" : issue.path.join(".")}: ${issue.message}`
         )
         .join("\n")
     );

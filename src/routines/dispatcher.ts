@@ -80,7 +80,9 @@ export async function dispatchDueRoutines(
     if (project.disabled === true) {
       continue;
     }
-    for (const routine of input.runStore.listRoutines({ project: project.name })) {
+    for (const routine of input.runStore.listRoutines({
+      project: project.name
+    })) {
       const evaluation = evaluateRoutineSchedule({
         lastFiredAt: routine.lastFiredAt,
         now,
@@ -101,7 +103,11 @@ export async function dispatchDueRoutines(
         });
         continue;
       }
-      const capReason = capSkipReason(input.activeRuns, input.globalConcurrency, project);
+      const capReason = capSkipReason(
+        input.activeRuns,
+        input.globalConcurrency,
+        project
+      );
       if (capReason !== null) {
         input.logger?.info(
           { project: project.name, reason: capReason, routine: routine.name },
@@ -211,7 +217,10 @@ async function runRoutineFiring(input: {
   let rawLogPath: string | undefined;
   let normalizedLogPath: string | undefined;
   try {
-    input.runStore.updateRoutineFiringState(input.firingId, "preparing_workspace");
+    input.runStore.updateRoutineFiringState(
+      input.firingId,
+      "preparing_workspace"
+    );
     prepared = await input.prepareRoutineWorkspace({
       configDir: input.configDir,
       firingId: input.firingId,
@@ -285,7 +294,9 @@ async function runRoutineFiring(input: {
       id: input.firingId,
       state: "failed",
       terminalReason: reason,
-      ...(prepared === undefined ? {} : { workspacePath: prepared.workspacePath })
+      ...(prepared === undefined
+        ? {}
+        : { workspacePath: prepared.workspacePath })
     });
   }
 }
@@ -343,7 +354,10 @@ async function prepareRoutineEvidence(input: {
           autonomy_preamble_version: rendered.preambleVersion,
           firing: { id: input.firingId },
           project: { name: input.project.name },
-          provider: { command: input.providerCommand, name: input.providerName },
+          provider: {
+            command: input.providerCommand,
+            name: input.providerName
+          },
           routine: {
             kind: routine.kind,
             name: routine.name,
@@ -392,7 +406,8 @@ function classifyRoutineOutcome(
   if (inputRequired !== undefined) {
     return {
       kind: "failed",
-      reason: stringField(inputRequired, "message") ?? "provider requested input"
+      reason:
+        stringField(inputRequired, "message") ?? "provider requested input"
     };
   }
   if (events.some((event) => event.type === "malformed_event")) {
@@ -487,7 +502,9 @@ function numberField(value: unknown, key: string): number | undefined {
 }
 
 function safePathSegment(input: string): string {
-  const segment = input.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  const segment = input
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
   return segment.length === 0 ? "firing" : segment;
 }
 

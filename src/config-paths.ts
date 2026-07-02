@@ -42,7 +42,11 @@ export function resolveServiceConfigPath(
 export function defaultUserConfigPath(
   options: Pick<ResolveServiceConfigPathOptions, "env" | "homeDir"> = {}
 ): string {
-  return path.join(userConfigHome(options), XDG_CONFIG_SUBDIR, DEFAULT_SERVICE_CONFIG_FILE);
+  return path.join(
+    userConfigHome(options),
+    XDG_CONFIG_SUBDIR,
+    DEFAULT_SERVICE_CONFIG_FILE
+  );
 }
 
 export function defaultUserStateRoot(

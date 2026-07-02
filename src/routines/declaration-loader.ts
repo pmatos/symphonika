@@ -23,7 +23,9 @@ export async function loadRoutineDeclaration(
     contents = await readFile(absolutePath, "utf8");
   } catch (error) {
     return {
-      errors: [`routine declaration not found at ${absolutePath}: ${errorMessage(error)}`],
+      errors: [
+        `routine declaration not found at ${absolutePath}: ${errorMessage(error)}`
+      ],
       routine: null
     };
   }
@@ -50,7 +52,9 @@ export function parseRoutineDeclaration(
   );
   if (closingLine === -1) {
     return {
-      errors: [`routine front matter at ${routinePath} is missing a closing ---`],
+      errors: [
+        `routine front matter at ${routinePath} is missing a closing ---`
+      ],
       routine: null
     };
   }
@@ -91,11 +95,14 @@ export function parseRoutineDeclaration(
   }
 
   const schedule = recordField(frontMatter, "schedule");
-  const at = schedule === undefined ? undefined : dateStringField(schedule, "at");
+  const at =
+    schedule === undefined ? undefined : dateStringField(schedule, "at");
   if (schedule === undefined || at === undefined) {
     errors.push(`routine at ${routinePath} schedule.at is required`);
   } else if (Number.isNaN(new Date(at).getTime())) {
-    errors.push(`routine at ${routinePath} schedule.at must be a valid ISO 8601 date`);
+    errors.push(
+      `routine at ${routinePath} schedule.at must be a valid ISO 8601 date`
+    );
   }
   if (schedule !== undefined) {
     const scheduleKeys = Object.keys(schedule);

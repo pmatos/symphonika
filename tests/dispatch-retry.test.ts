@@ -8,9 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { startDaemon } from "../src/daemon.js";
 import type { LifecyclePolicy } from "../src/lifecycle/active-runs.js";
 import type { AgentProvider, ProviderEvent } from "../src/provider.js";
-import type {
-  PreparedIssueWorkspace
-} from "../src/workspace.js";
+import type { PreparedIssueWorkspace } from "../src/workspace.js";
 import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
@@ -23,7 +21,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -199,7 +199,10 @@ async function writeMultiStateRawFsmProject(root: string): Promise<void> {
 
 async function waitForCondition(
   url: string,
-  predicate: (body: { runs: Array<Record<string, unknown>>; active?: unknown[] }) => boolean,
+  predicate: (body: {
+    runs: Array<Record<string, unknown>>;
+    active?: unknown[];
+  }) => boolean,
   options: { intervalMs?: number; timeoutMs?: number } = {}
 ): Promise<{ runs: Array<Record<string, unknown>> }> {
   const intervalMs = options.intervalMs ?? 10;
@@ -212,7 +215,10 @@ async function waitForCondition(
       active?: unknown[];
       runs?: Array<Record<string, unknown>>;
     };
-    if (body.runs !== undefined && predicate({ runs: body.runs, active: body.active ?? [] })) {
+    if (
+      body.runs !== undefined &&
+      predicate({ runs: body.runs, active: body.active ?? [] })
+    ) {
       return { runs: body.runs };
     }
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
@@ -274,9 +280,8 @@ describe("dispatch retry policy", () => {
       }),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     const daemon = await startDaemon({
@@ -305,12 +310,17 @@ describe("dispatch retry policy", () => {
         .filter((call) => call.labels[0] === "sym:failed");
       expect(failedAddCalls).toHaveLength(0);
 
-      const database = new Database(path.join(root, ".symphonika", "symphonika.db"), {
-        readonly: true
-      });
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        {
+          readonly: true
+        }
+      );
       try {
         const attemptRows = database
-          .prepare("select attempt_number, state from attempts order by attempt_number")
+          .prepare(
+            "select attempt_number, state from attempts order by attempt_number"
+          )
           .all() as { attempt_number: number; state: string }[];
         expect(attemptRows.map((r) => r.attempt_number)).toEqual([1, 2, 3]);
         expect(attemptRows[2]?.state).toBe("succeeded");
@@ -357,9 +367,8 @@ describe("dispatch retry policy", () => {
       }),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     const daemon = await startDaemon({
@@ -383,7 +392,9 @@ describe("dispatch retry policy", () => {
       await new Promise((resolve) => setTimeout(resolve, 80));
       expect(attempts).toBe(1);
 
-      const status = (await fetch(`${daemon.url}/api/status`).then((r) => r.json())) as {
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as {
         runs: Array<Record<string, unknown>>;
       };
       const run = status.runs.find((entry) => entry["state"] === "cancelled");
@@ -393,7 +404,9 @@ describe("dispatch retry policy", () => {
       const removeCalls = githubIssuesApi.removeLabelsFromIssue.mock.calls.map(
         ([call]) => call as { labels: string[] }
       );
-      expect(removeCalls.some((call) => call.labels[0] === "sym:claimed")).toBe(true);
+      expect(removeCalls.some((call) => call.labels[0] === "sym:claimed")).toBe(
+        true
+      );
     } finally {
       await daemon.stop();
     }
@@ -451,8 +464,8 @@ describe("dispatch retry policy", () => {
       }),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> => Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     let runCounter = 0;
@@ -572,9 +585,8 @@ describe("dispatch retry policy", () => {
       }),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     const daemon = await startDaemon({
@@ -597,13 +609,19 @@ describe("dispatch retry policy", () => {
       await new Promise((resolve) => setTimeout(resolve, 80));
       expect(attempts).toBe(1);
 
-      const database = new Database(path.join(root, ".symphonika", "symphonika.db"), {
-        readonly: true
-      });
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        {
+          readonly: true
+        }
+      );
       try {
         const stored = database
           .prepare("select state, cancel_reason from runs where id = ?")
-          .get("run-retry-eligibility") as { state: string; cancel_reason: string };
+          .get("run-retry-eligibility") as {
+          state: string;
+          cancel_reason: string;
+        };
         expect(stored.state).toBe("cancelled");
         expect(stored.cancel_reason).toBe("eligibility_loss");
       } finally {
@@ -628,7 +646,11 @@ describe("dispatch retry policy", () => {
       async *runAttempt(): AsyncGenerator<ProviderEvent> {
         attempts += 1;
         yield {
-          normalized: { line: "{", message: "bad json", type: "malformed_event" },
+          normalized: {
+            line: "{",
+            message: "bad json",
+            type: "malformed_event"
+          },
           raw: { kind: "malformed_json" }
         };
         yield {
@@ -656,9 +678,8 @@ describe("dispatch retry policy", () => {
       }),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     const daemon = await startDaemon({
@@ -682,7 +703,9 @@ describe("dispatch retry policy", () => {
       await new Promise((resolve) => setTimeout(resolve, 80));
       expect(attempts).toBe(1);
 
-      const status = await fetch(`${daemon.url}/api/status`).then((r) => r.json()) as {
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as {
         runs: Array<Record<string, unknown>>;
       };
       const run = status.runs[0];
@@ -693,9 +716,10 @@ describe("dispatch retry policy", () => {
         .filter((call) => call.labels[0] === "sym:failed");
       expect(failedAddCalls.length).toBeGreaterThan(0);
 
-      const claimedRemoveCalls = githubIssuesApi.removeLabelsFromIssue.mock.calls
-        .map(([call]) => call as { labels: string[] })
-        .filter((call) => call.labels[0] === "sym:claimed");
+      const claimedRemoveCalls =
+        githubIssuesApi.removeLabelsFromIssue.mock.calls
+          .map(([call]) => call as { labels: string[] })
+          .filter((call) => call.labels[0] === "sym:claimed");
       expect(claimedRemoveCalls).toHaveLength(0);
     } finally {
       await daemon.stop();
@@ -714,7 +738,11 @@ describe("dispatch retry policy", () => {
       // eslint-disable-next-line @typescript-eslint/require-await
       async *runAttempt(): AsyncGenerator<ProviderEvent> {
         yield {
-          normalized: { line: "{", message: "bad json", type: "malformed_event" },
+          normalized: {
+            line: "{",
+            message: "bad json",
+            type: "malformed_event"
+          },
           raw: { kind: "malformed_json" }
         };
         yield {
@@ -733,12 +761,14 @@ describe("dispatch retry policy", () => {
     const githubIssuesApi = {
       // Reject the sym:failed add to simulate transient GitHub 5xx; succeed for
       // the initial sym:claimed and sym:running adds.
-      addLabelsToIssue: vi.fn().mockImplementation((input: { labels: string[] }) => {
-        if (input.labels[0] === "sym:failed") {
-          return Promise.reject(new Error("transient github 5xx"));
-        }
-        return Promise.resolve();
-      }),
+      addLabelsToIssue: vi
+        .fn()
+        .mockImplementation((input: { labels: string[] }) => {
+          if (input.labels[0] === "sym:failed") {
+            return Promise.reject(new Error("transient github 5xx"));
+          }
+          return Promise.resolve();
+        }),
       getIssue: vi.fn().mockResolvedValue(claimedIssue),
       listOpenIssues: vi.fn(() => {
         listCalls += 1;
@@ -749,9 +779,8 @@ describe("dispatch retry policy", () => {
       }),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     const daemon = await startDaemon({
@@ -775,9 +804,10 @@ describe("dispatch retry policy", () => {
       // PR #62 review feedback: when the sym:failed add fails, sym:claimed
       // must NOT be removed — otherwise the issue ends up with neither
       // operational label and is re-eligible for dispatch.
-      const claimedRemoveCalls = githubIssuesApi.removeLabelsFromIssue.mock.calls
-        .map(([call]) => call as { labels: string[] })
-        .filter((call) => call.labels[0] === "sym:claimed");
+      const claimedRemoveCalls =
+        githubIssuesApi.removeLabelsFromIssue.mock.calls
+          .map(([call]) => call as { labels: string[] })
+          .filter((call) => call.labels[0] === "sym:claimed");
       expect(claimedRemoveCalls).toHaveLength(0);
     } finally {
       await daemon.stop();

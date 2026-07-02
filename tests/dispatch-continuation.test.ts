@@ -8,9 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { startDaemon } from "../src/daemon.js";
 import type { LifecyclePolicy } from "../src/lifecycle/active-runs.js";
 import type { AgentProvider, ProviderEvent } from "../src/provider.js";
-import type {
-  PreparedIssueWorkspace
-} from "../src/workspace.js";
+import type { PreparedIssueWorkspace } from "../src/workspace.js";
 import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
@@ -23,7 +21,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -38,7 +38,10 @@ const baseIssue = {
   updated_at: "2026-04-21T11:00:00Z"
 };
 
-function preparedWorkspaceFixture(root: string, reused = false): PreparedIssueWorkspace {
+function preparedWorkspaceFixture(
+  root: string,
+  reused = false
+): PreparedIssueWorkspace {
   const workspacePath = path.join(
     root,
     ".symphonika",
@@ -121,7 +124,10 @@ const fastContinuationPolicy: LifecyclePolicy = {
 
 async function waitForCondition(
   url: string,
-  predicate: (body: { runs: Array<Record<string, unknown>>; active?: unknown[] }) => boolean,
+  predicate: (body: {
+    runs: Array<Record<string, unknown>>;
+    active?: unknown[];
+  }) => boolean,
   options: { intervalMs?: number; timeoutMs?: number } = {}
 ): Promise<{ runs: Array<Record<string, unknown>> }> {
   const intervalMs = options.intervalMs ?? 10;
@@ -134,7 +140,10 @@ async function waitForCondition(
       active?: unknown[];
       runs?: Array<Record<string, unknown>>;
     };
-    if (body.runs !== undefined && predicate({ runs: body.runs, active: body.active ?? [] })) {
+    if (
+      body.runs !== undefined &&
+      predicate({ runs: body.runs, active: body.active ?? [] })
+    ) {
       return { runs: body.runs };
     }
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
@@ -165,7 +174,9 @@ describe("dispatch continuation cap", () => {
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
       // every refresh returns the issue still eligible
-      getIssue: vi.fn().mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
+      getIssue: vi
+        .fn()
+        .mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
       listBranchCommits: vi.fn().mockResolvedValue([]),
       listOpenIssues: vi
         .fn()
@@ -177,12 +188,10 @@ describe("dispatch continuation cap", () => {
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
     let createCount = 0;
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> => {
-        createCount += 1;
-        return Promise.resolve({ ...prepared, reused: createCount > 1 });
-      }
-    );
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> => {
+      createCount += 1;
+      return Promise.resolve({ ...prepared, reused: createCount > 1 });
+    });
     let runCounter = 0;
     const createRunId = (): string => {
       runCounter += 1;
@@ -211,7 +220,9 @@ describe("dispatch continuation cap", () => {
         )
       );
 
-      const status = (await fetch(`${daemon.url}/api/status`).then((r) => r.json())) as {
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as {
         runs: Array<Record<string, unknown>>;
       };
 
@@ -245,9 +256,12 @@ describe("dispatch continuation cap", () => {
         .filter((call) => call.labels[0] === "sym:failed");
       expect(failedAdds.length).toBeGreaterThanOrEqual(1);
 
-      const database = new Database(path.join(root, ".symphonika", "symphonika.db"), {
-        readonly: true
-      });
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        {
+          readonly: true
+        }
+      );
       try {
         const totalSucceeded = database
           .prepare("select count(*) as c from runs where state = 'succeeded'")
@@ -291,9 +305,8 @@ describe("dispatch continuation cap", () => {
         ]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     const daemon = await startDaemon({
@@ -316,7 +329,9 @@ describe("dispatch continuation cap", () => {
       // wait beyond continuation delay to confirm no extra scheduling
       await new Promise((resolve) => setTimeout(resolve, 80));
 
-      const status = (await fetch(`${daemon.url}/api/status`).then((r) => r.json())) as {
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as {
         runs: Array<Record<string, unknown>>;
       };
       const continuations = status.runs.filter(
@@ -372,9 +387,8 @@ describe("dispatch continuation cap", () => {
         ]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     let runCounter = 0;
@@ -397,7 +411,9 @@ describe("dispatch continuation cap", () => {
 
       await new Promise((resolve) => setTimeout(resolve, 80));
 
-      const status = (await fetch(`${daemon.url}/api/status`).then((r) => r.json())) as {
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as {
         runs: Array<Record<string, unknown>>;
       };
       expect(status.runs).toHaveLength(1);
@@ -447,8 +463,8 @@ describe("dispatch continuation cap", () => {
         ]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> => Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     const daemon = await startDaemon({
@@ -472,7 +488,9 @@ describe("dispatch continuation cap", () => {
       // confirm no continuation gets dispatched.
       await new Promise((resolve) => setTimeout(resolve, 80));
 
-      const status = (await fetch(`${daemon.url}/api/status`).then((r) => r.json())) as {
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as {
         runs: Array<Record<string, unknown>>;
       };
       expect(status.runs).toHaveLength(1);

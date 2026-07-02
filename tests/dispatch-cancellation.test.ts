@@ -11,9 +11,7 @@ import type {
   ProviderEvent,
   ProviderRunInput
 } from "../src/provider.js";
-import type {
-  PreparedIssueWorkspace
-} from "../src/workspace.js";
+import type { PreparedIssueWorkspace } from "../src/workspace.js";
 
 const tempRoots: string[] = [];
 
@@ -25,7 +23,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -229,9 +229,8 @@ describe("dispatch cancellation", () => {
       }),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     const daemon = await startDaemon({
@@ -269,7 +268,9 @@ describe("dispatch cancellation", () => {
       const addCalls = githubIssuesApi.addLabelsToIssue.mock.calls.map(
         ([call]) => call as { labels: string[] }
       );
-      expect(addCalls.some((call) => call.labels[0] === "sym:failed")).toBe(false);
+      expect(addCalls.some((call) => call.labels[0] === "sym:failed")).toBe(
+        false
+      );
 
       // Workspace preserved.
       await expect(stat(prepared.workspacePath)).resolves.toBeDefined();
@@ -304,9 +305,8 @@ describe("dispatch cancellation", () => {
       }),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     const daemon = await startDaemon({
@@ -331,21 +331,33 @@ describe("dispatch cancellation", () => {
       const removeCalls = githubIssuesApi.removeLabelsFromIssue.mock.calls.map(
         ([call]) => call as { labels: string[] }
       );
-      expect(removeCalls.some((call) => call.labels[0] === "sym:running")).toBe(true);
-      expect(removeCalls.some((call) => call.labels[0] === "sym:claimed")).toBe(false);
+      expect(removeCalls.some((call) => call.labels[0] === "sym:running")).toBe(
+        true
+      );
+      expect(removeCalls.some((call) => call.labels[0] === "sym:claimed")).toBe(
+        false
+      );
 
       const addCalls = githubIssuesApi.addLabelsToIssue.mock.calls.map(
         ([call]) => call as { labels: string[] }
       );
-      expect(addCalls.some((call) => call.labels[0] === "sym:failed")).toBe(false);
+      expect(addCalls.some((call) => call.labels[0] === "sym:failed")).toBe(
+        false
+      );
 
-      const database = new Database(path.join(root, ".symphonika", "symphonika.db"), {
-        readonly: true
-      });
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        {
+          readonly: true
+        }
+      );
       try {
         const stored = database
           .prepare("select state, cancel_reason from runs where id = ?")
-          .get("run-cancel-eligibility") as { state: string; cancel_reason: string };
+          .get("run-cancel-eligibility") as {
+          state: string;
+          cancel_reason: string;
+        };
         expect(stored.state).toBe("cancelled");
         expect(stored.cancel_reason).toBe("eligibility_loss");
       } finally {

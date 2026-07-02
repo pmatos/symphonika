@@ -67,7 +67,10 @@ export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/runs", (context) => {
     const filter: ListRunsFilter = {};
     const stateParam = context.req.query("state");
-    if (stateParam !== undefined && KNOWN_RUN_STATES.has(stateParam as RunState)) {
+    if (
+      stateParam !== undefined &&
+      KNOWN_RUN_STATES.has(stateParam as RunState)
+    ) {
       filter.state = stateParam as RunState;
     }
     const project = context.req.query("project");
@@ -75,7 +78,8 @@ export function registerPages(options: RegisterPagesOptions): void {
       filter.project = project;
     }
     const runs = options.runStore.listRuns(filter);
-    const title = filter.state === undefined ? "All runs" : `Runs (${filter.state})`;
+    const title =
+      filter.state === undefined ? "All runs" : `Runs (${filter.state})`;
     const html = layout(title, renderRunsTable(title, runs));
     return context.html(html);
   });
@@ -145,7 +149,10 @@ ${body}
 </html>`;
 }
 
-function renderHeader(version: string, snapshot: StatusSnapshot | undefined): string {
+function renderHeader(
+  version: string,
+  snapshot: StatusSnapshot | undefined
+): string {
   const stateRoot = snapshot?.stateRoot ?? "";
   const issuePolling = snapshot?.issuePolling;
   const candidateCount = issuePolling?.candidateIssues.length ?? 0;
@@ -213,7 +220,7 @@ function renderProjectsCard(
       const status = project.ok ? "poll ok" : "poll failed";
       const detail = project.ok
         ? `${project.fetchedIssues} fetched`
-        : project.error ?? "unknown error";
+        : (project.error ?? "unknown error");
       return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(status)}</td><td>${escapeHtml(detail)}</td></tr>`;
     })
     .join("");
@@ -306,7 +313,10 @@ type CapContext = {
   kind: ReturnType<typeof parseCapReachedReason>;
 };
 
-function renderRunSummary(detail: RunStatus, capContext: CapContext | null): string {
+function renderRunSummary(
+  detail: RunStatus,
+  capContext: CapContext | null
+): string {
   const capContextLine =
     capContext !== null && capContext.kind !== null
       ? `<p><strong>Cap context:</strong> ${escapeHtml(formatCapReachedReason(capContext.kind, capContext.count))}</p>`
@@ -414,7 +424,9 @@ function renderRunFileLinks(
   return `<section><h2>Files</h2><ul>${items.join("")}</ul></section>`;
 }
 
-function renderWorkflowGraphSummary(graph: ExpandedWorkflow | undefined): string {
+function renderWorkflowGraphSummary(
+  graph: ExpandedWorkflow | undefined
+): string {
   if (graph === undefined) {
     return "";
   }

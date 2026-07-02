@@ -20,7 +20,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -136,9 +138,7 @@ async function writeConfig(
   await writeFile(path.join(root, "WORKFLOW.md"), "Work {{issue.number}}\n");
 }
 
-function fakeGithub(
-  fixtures: ProjectFixture[]
-): {
+function fakeGithub(fixtures: ProjectFixture[]): {
   addLabelsToIssue: ReturnType<typeof vi.fn>;
   getIssue: ReturnType<typeof vi.fn>;
   listBranchCommits: ReturnType<typeof vi.fn>;
@@ -215,8 +215,12 @@ describe("dispatch concurrency caps (slice 2)", () => {
     const provider: AgentProvider = {
       cancel: vi.fn().mockResolvedValue(undefined),
       name: "codex",
-      async *runAttempt(input: { issue: { number: number } }): AsyncGenerator<ProviderEvent> {
-        observedProjects.push(input.issue.number === 11 ? "project-a" : "project-b");
+      async *runAttempt(input: {
+        issue: { number: number };
+      }): AsyncGenerator<ProviderEvent> {
+        observedProjects.push(
+          input.issue.number === 11 ? "project-a" : "project-b"
+        );
         if (observedProjects.length >= 2) {
           allEntered.resolve();
         }
@@ -231,7 +235,11 @@ describe("dispatch concurrency caps (slice 2)", () => {
 
     const githubIssuesApi = fakeGithub(fixtures);
     const prepareIssueWorkspace = vi.fn(
-      ({ issue }: { issue: { number: number } }): Promise<PreparedIssueWorkspace> =>
+      ({
+        issue
+      }: {
+        issue: { number: number };
+      }): Promise<PreparedIssueWorkspace> =>
         Promise.resolve(preparedByIssue.get(issue.number)!)
     );
 
@@ -259,7 +267,9 @@ describe("dispatch concurrency caps (slice 2)", () => {
       await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
 
       const timeoutId = setTimeout(() => {
-        allEntered.reject(new Error("expected both projects to dispatch concurrently"));
+        allEntered.reject(
+          new Error("expected both projects to dispatch concurrently")
+        );
       }, 5_000);
       await allEntered.promise.finally(() => clearTimeout(timeoutId));
 
@@ -311,7 +321,9 @@ describe("dispatch concurrency caps (slice 2)", () => {
     const provider: AgentProvider = {
       cancel: vi.fn().mockResolvedValue(undefined),
       name: "codex",
-      async *runAttempt(input: { issue: { number: number } }): AsyncGenerator<ProviderEvent> {
+      async *runAttempt(input: {
+        issue: { number: number };
+      }): AsyncGenerator<ProviderEvent> {
         observedIssues.push(input.issue.number);
         if (observedIssues.length >= 2) {
           twoEntered.resolve();
@@ -327,7 +339,11 @@ describe("dispatch concurrency caps (slice 2)", () => {
 
     const githubIssuesApi = fakeGithub(fixtures);
     const prepareIssueWorkspace = vi.fn(
-      ({ issue }: { issue: { number: number } }): Promise<PreparedIssueWorkspace> =>
+      ({
+        issue
+      }: {
+        issue: { number: number };
+      }): Promise<PreparedIssueWorkspace> =>
         Promise.resolve(preparedByIssue.get(issue.number)!)
     );
 

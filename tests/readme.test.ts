@@ -22,7 +22,9 @@ describe("README", () => {
 
       const target = href.split("#")[0] ?? "";
       expect(target).not.toBe("");
-      await expect(access(path.join(repoRoot, target))).resolves.toBeUndefined();
+      await expect(
+        access(path.join(repoRoot, target))
+      ).resolves.toBeUndefined();
     }
   });
 
@@ -36,7 +38,9 @@ describe("README", () => {
     expect(readme).toContain("npm run build");
     expect(readme).toContain("[docs/smoke.md](docs/smoke.md)");
     expect(readme).toContain("[WORKFLOW.md](WORKFLOW.md)");
-    expect(readme).toContain("[symphonika.example.yml](symphonika.example.yml)");
+    expect(readme).toContain(
+      "[symphonika.example.yml](symphonika.example.yml)"
+    );
     expect(readme).toContain("private and experimental");
     expect(readme).toContain("single-operator workflow");
     expect(readme).toContain("Autonomy contract");
@@ -48,7 +52,7 @@ describe("README", () => {
     expect(readme).toContain(`approval_policy = "never"`);
 
     expect(readme).not.toMatch(
-      /\/home\/|\/Users\/|GITHUB_TOKEN|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+/,
+      /\/home\/|\/Users\/|GITHUB_TOKEN|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+/
     );
   });
 });

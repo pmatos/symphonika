@@ -114,15 +114,22 @@ describe("property-based quality invariants", () => {
     );
 
     fc.assert(
-      fc.property(fc.array(segment, { maxLength: 4, minLength: 1 }), (segments) => {
-        const parent = path.join("/tmp/symphonika-property", ...segments);
-        const child = path.join(parent, "child");
-        const sibling = path.join(parent, "..", `${segments.at(-1) ?? "root"}-sibling`);
+      fc.property(
+        fc.array(segment, { maxLength: 4, minLength: 1 }),
+        (segments) => {
+          const parent = path.join("/tmp/symphonika-property", ...segments);
+          const child = path.join(parent, "child");
+          const sibling = path.join(
+            parent,
+            "..",
+            `${segments.at(-1) ?? "root"}-sibling`
+          );
 
-        expect(isPathInside(parent, parent)).toBe(true);
-        expect(isPathInside(child, parent)).toBe(true);
-        expect(isPathInside(sibling, parent)).toBe(false);
-      })
+          expect(isPathInside(parent, parent)).toBe(true);
+          expect(isPathInside(child, parent)).toBe(true);
+          expect(isPathInside(sibling, parent)).toBe(false);
+        }
+      )
     );
   });
 });

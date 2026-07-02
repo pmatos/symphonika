@@ -159,10 +159,7 @@ export async function startDaemon(
     );
   }
   if (sweptOnStartup.length === 0) {
-    logger.info(
-      { count: 0 },
-      "symphonika startup: no orphaned runs found"
-    );
+    logger.info({ count: 0 }, "symphonika startup: no orphaned runs found");
   } else {
     const byState: Partial<Record<RunState, number>> = {};
     for (const entry of sweptOnStartup) {
@@ -444,7 +441,10 @@ export async function startDaemon(
             reason: "pull request follow-up throttled"
           };
         }
-        if (prResult.action === "review_dispatch" || prResult.action === "merged") {
+        if (
+          prResult.action === "review_dispatch" ||
+          prResult.action === "merged"
+        ) {
           logger.info(prResult, "symphonika PR follow-up action completed");
           return;
         }
@@ -807,7 +807,10 @@ function waitForListening(server: ServerType): Promise<void> {
   });
 }
 
-function resolveListeningPort(server: ServerType, fallbackPort: number): number {
+function resolveListeningPort(
+  server: ServerType,
+  fallbackPort: number
+): number {
   const address = server.address();
 
   if (typeof address === "object" && address !== null) {

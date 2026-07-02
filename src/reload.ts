@@ -222,9 +222,7 @@ export class RuntimeConfigReloader {
   }
 
   globalConcurrency(): { maxInFlight: number | undefined } {
-    return (
-      this.snapshot?.globalConcurrency ?? { maxInFlight: undefined }
-    );
+    return this.snapshot?.globalConcurrency ?? { maxInFlight: undefined };
   }
 
   watchdogConfig(): WatchdogConfig {
@@ -388,7 +386,8 @@ async function loadRuntimeConfigSnapshot(input: {
         codex: { command: parsed.data.providers.codex.command }
       },
       pullRequestPolicy:
-        pullRequestFollowupPolicyFromRaw(raw) ?? DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY,
+        pullRequestFollowupPolicyFromRaw(raw) ??
+        DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY,
       watchdog: normalizeWatchdogConfig(parsed.data.watchdog)
     },
     usingLastKnownGood: false
@@ -416,7 +415,9 @@ async function readRawServiceConfig(
   try {
     contents = await readFile(configPath, "utf8");
   } catch (error) {
-    errors.push(`service config not found at ${configPath}: ${errorMessage(error)}`);
+    errors.push(
+      `service config not found at ${configPath}: ${errorMessage(error)}`
+    );
     return undefined;
   }
 
@@ -437,11 +438,17 @@ async function readWorkflowSnapshot(
   try {
     contents = await readFile(workflowPath, "utf8");
   } catch (error) {
-    errors.push(`workflow contract not found at ${workflowPath}: ${errorMessage(error)}`);
+    errors.push(
+      `workflow contract not found at ${workflowPath}: ${errorMessage(error)}`
+    );
     return undefined;
   }
 
-  const expanded = await expandWorkflowDefinition(contents, workflowPath, format);
+  const expanded = await expandWorkflowDefinition(
+    contents,
+    workflowPath,
+    format
+  );
   // Raw FSM YAML files can open with `---` (the YAML document marker); the
   // markdown contract parser would mistake that for unterminated front matter,
   // so skip it. The expanded workflow's contentHash is sufficient for snapshot
@@ -539,14 +546,12 @@ function defaultProvidersConfig(): RunControllerProvidersConfig {
 }
 
 function formatZodIssue(issue: z.ZodIssue): string {
-  const location = issue.path.length === 0 ? "service config" : issue.path.join(".");
+  const location =
+    issue.path.length === 0 ? "service config" : issue.path.join(".");
   return `${location}: ${issue.message}`;
 }
 
-function formatZodIssueWithPrefix(
-  issue: z.ZodIssue,
-  prefix: string[]
-): string {
+function formatZodIssueWithPrefix(issue: z.ZodIssue, prefix: string[]): string {
   const location = [...prefix, ...issue.path].join(".");
   return `${location}: ${issue.message}`;
 }

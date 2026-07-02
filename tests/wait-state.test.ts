@@ -36,7 +36,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -94,7 +96,9 @@ function preparedWorkspaceFixture(root: string): PreparedIssueWorkspace {
   };
 }
 
-function recordingCodexProvider(providerInputs: ProviderRunInput[]): AgentProvider {
+function recordingCodexProvider(
+  providerInputs: ProviderRunInput[]
+): AgentProvider {
   return {
     cancel: vi.fn().mockResolvedValue(undefined),
     name: "codex",
@@ -543,9 +547,9 @@ describe("wait state lifecycle", () => {
           ...issue,
           labels: issue.labels.map((name) => ({ name }))
         }),
-        getPullRequestFollowupState: vi.fn().mockResolvedValue(
-          prState({ state: "MERGED", merged: true })
-        ),
+        getPullRequestFollowupState: vi
+          .fn()
+          .mockResolvedValue(prState({ state: "MERGED", merged: true })),
         listOpenIssues: vi.fn().mockResolvedValue([])
       };
       const controller = buildController({
@@ -560,7 +564,9 @@ describe("wait state lifecycle", () => {
       const after = store.getRun("waiting-run");
       expect(after?.state).toBe("succeeded");
       expect(after?.terminalStateId).toBe("merged");
-      expect(githubIssuesApi.getPullRequestFollowupState).toHaveBeenCalledTimes(1);
+      expect(githubIssuesApi.getPullRequestFollowupState).toHaveBeenCalledTimes(
+        1
+      );
     } finally {
       store.close();
     }
@@ -665,7 +671,9 @@ describe("wait state lifecycle", () => {
 
       const after = store.getRun("waiting-run");
       expect(after?.state).toBe("waiting");
-      expect(githubIssuesApi.getPullRequestFollowupState).not.toHaveBeenCalled();
+      expect(
+        githubIssuesApi.getPullRequestFollowupState
+      ).not.toHaveBeenCalled();
     } finally {
       store.close();
     }
@@ -765,12 +773,9 @@ describe("wait state lifecycle", () => {
         const database = new Database(databasePath, { readonly: true });
         try {
           const row = database
-            .prepare(
-              "select state, terminal_state_id from runs where id = ?"
-            )
+            .prepare("select state, terminal_state_id from runs where id = ?")
             .get(waitingRow.id) as
-            | { state: string; terminal_state_id: string | null }
-            | undefined;
+            { state: string; terminal_state_id: string | null } | undefined;
           if (row?.state === "succeeded" && row.terminal_state_id === "done") {
             advanced = true;
             break;

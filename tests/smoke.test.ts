@@ -3,10 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import {
-  REQUIRED_OPERATIONAL_LABELS,
-  type GitHubApi
-} from "../src/doctor.js";
+import { REQUIRED_OPERATIONAL_LABELS, type GitHubApi } from "../src/doctor.js";
 import type { GitHubIssuesApi } from "../src/issue-polling.js";
 import type {
   AgentProvider,
@@ -34,9 +31,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -106,7 +103,9 @@ describe("runSmoke", () => {
         "issue #77 carries sym:claimed without a live local run"
       )
     ]);
-    expect(report.warnings[0]).toContain("symphonika clear-stale symphonika 77");
+    expect(report.warnings[0]).toContain(
+      "symphonika clear-stale symphonika 77"
+    );
     expect(codex.runAttempt).not.toHaveBeenCalled();
   });
 
@@ -136,9 +135,9 @@ describe("runSmoke", () => {
 
     expect(report.ok).toBe(false);
     expect(report.dispatched).toBe(false);
-    expect(report.errors.some((e) => e.includes("missing operational labels"))).toBe(
-      true
-    );
+    expect(
+      report.errors.some((e) => e.includes("missing operational labels"))
+    ).toBe(true);
     // Smoke must never auto-create labels (AC#7).
     expect(githubApi.createLabel).not.toHaveBeenCalled();
     // No provider attempt should be launched on doctor failure.
@@ -247,13 +246,17 @@ describe("runSmoke", () => {
 
     expect(report.runDetail).toBeDefined();
     const detail = report.runDetail!;
-    expect(detail.artifacts.map((artifact) => artifact.kind)).toContain("prompt");
+    expect(detail.artifacts.map((artifact) => artifact.kind)).toContain(
+      "prompt"
+    );
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     try {
       await expect(store.getRenderedPrompt(detail.id)).resolves.toContain(
         "Autonomous run instructions"
       );
-      await expect(store.getRenderedPrompt(detail.id)).resolves.toContain(issueTitle);
+      await expect(store.getRenderedPrompt(detail.id)).resolves.toContain(
+        issueTitle
+      );
     } finally {
       store.close();
     }
@@ -307,23 +310,22 @@ describe("runSmoke", () => {
       }),
       validate: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve({
-          branchName,
-          branchRef: `refs/heads/${branchName}`,
-          cachePath: path.join(
-            root,
-            ".symphonika",
-            "workspaces",
-            "symphonika",
-            ".cache",
-            "repo.git"
-          ),
-          issueDirectoryName: issueDirectory,
-          reused: false,
-          workspacePath
-        })
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve({
+        branchName,
+        branchRef: `refs/heads/${branchName}`,
+        cachePath: path.join(
+          root,
+          ".symphonika",
+          "workspaces",
+          "symphonika",
+          ".cache",
+          "repo.git"
+        ),
+        issueDirectoryName: issueDirectory,
+        reused: false,
+        workspacePath
+      })
     );
 
     const report = await runSmoke({
@@ -404,23 +406,22 @@ describe("runSmoke", () => {
       }),
       validate: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve({
-          branchName: `sym/symphonika/${issueDirectory}`,
-          branchRef: `refs/heads/sym/symphonika/${issueDirectory}`,
-          cachePath: path.join(
-            root,
-            ".symphonika",
-            "workspaces",
-            "symphonika",
-            ".cache",
-            "repo.git"
-          ),
-          issueDirectoryName: issueDirectory,
-          reused: false,
-          workspacePath
-        })
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve({
+        branchName: `sym/symphonika/${issueDirectory}`,
+        branchRef: `refs/heads/sym/symphonika/${issueDirectory}`,
+        cachePath: path.join(
+          root,
+          ".symphonika",
+          "workspaces",
+          "symphonika",
+          ".cache",
+          "repo.git"
+        ),
+        issueDirectoryName: issueDirectory,
+        reused: false,
+        workspacePath
+      })
     );
 
     const report = await runSmoke({

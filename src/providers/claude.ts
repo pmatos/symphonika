@@ -204,7 +204,8 @@ function mapClaudeStreamJsonMessage(
     return [
       {
         normalized: {
-          rateLimits: objectField(raw, "rate_limits") ?? objectField(raw, "rateLimits"),
+          rateLimits:
+            objectField(raw, "rate_limits") ?? objectField(raw, "rateLimits"),
           type: "rate_limit_updated"
         },
         raw
@@ -452,7 +453,9 @@ function isTerminalFailure(type: string | undefined): boolean {
   );
 }
 
-function createProcessQueue(child: ChildProcessWithoutNullStreams): ProcessQueue {
+function createProcessQueue(
+  child: ChildProcessWithoutNullStreams
+): ProcessQueue {
   const pending: ProcessQueueItem[] = [];
   let waiting: ((item: ProcessQueueItem) => void) | undefined;
   let stdoutBuffer = "";
@@ -513,10 +516,7 @@ function createProcessQueue(child: ChildProcessWithoutNullStreams): ProcessQueue
   };
 }
 
-function pushLine(
-  line: string,
-  push: (item: ProcessQueueItem) => void
-): void {
+function pushLine(line: string, push: (item: ProcessQueueItem) => void): void {
   if (line.trim().length === 0) {
     return;
   }

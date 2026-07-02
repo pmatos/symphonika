@@ -18,9 +18,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -122,8 +122,14 @@ describe("CLI run commands", () => {
           Response.json({
             candidateIssues: [{ issue: { number: 1 }, project: "alpha" }],
             filteredIssues: [
-              { issue: { labels: ["sym:running"], number: 2 }, project: "alpha" },
-              { issue: { labels: ["sym:failed"], number: 3 }, project: "alpha" },
+              {
+                issue: { labels: ["sym:running"], number: 2 },
+                project: "alpha"
+              },
+              {
+                issue: { labels: ["sym:failed"], number: 3 },
+                project: "alpha"
+              },
               { issue: { labels: ["sym:stale"], number: 4 }, project: "alpha" }
             ],
             issuePolling: {
@@ -244,7 +250,10 @@ describe("CLI run commands", () => {
           Response.json({
             candidateIssues: [{ issue: { number: 17 }, project: "alpha" }],
             filteredIssues: [
-              { issue: { labels: ["sym:running"], number: 17 }, project: "alpha" }
+              {
+                issue: { labels: ["sym:running"], number: 17 },
+                project: "alpha"
+              }
             ],
             issuePolling: {
               errors: [],
@@ -795,7 +804,9 @@ describe("CLI run commands", () => {
       cfg
     ]);
 
-    expect(present.output.stdout).toContain("branch:       sym/alpha/31-missing-evidence");
+    expect(present.output.stdout).toContain(
+      "branch:       sym/alpha/31-missing-evidence"
+    );
     expect(present.output.stdout).toContain(
       `workspace:    ${path.join(configDir, "workspaces", "alpha", "issues", "31-missing-evidence")}`
     );
@@ -816,7 +827,12 @@ describe("CLI run commands", () => {
           source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
           states: [
             { id: "run_agent", completeWhen: {}, transitions: [] },
-            { id: "done", completeWhen: {}, terminal: "success", transitions: [] }
+            {
+              id: "done",
+              completeWhen: {},
+              terminal: "success",
+              transitions: []
+            }
           ],
           templateFiles: []
         },
@@ -857,7 +873,9 @@ describe("CLI run commands", () => {
       cfg
     ]);
 
-    expect(present.output.stdout).toContain("workflow:     single_agent_workflow");
+    expect(present.output.stdout).toContain(
+      "workflow:     single_agent_workflow"
+    );
     expect(present.output.stdout).toContain("source kind:  markdown");
     expect(present.output.stdout).toContain("source path:  /repo/WORKFLOW.md");
     expect(present.output.stdout).toContain("initial:      run_agent");
@@ -1014,7 +1032,9 @@ describe("CLI run commands", () => {
     expect(output.stdout).toContain("candidate: 2");
     expect(output.stdout).toContain("filtered:  1");
     expect(output.stdout).toContain("errors:    0");
-    expect(output.stdout).toContain("alpha ok (3 fetched, 2 candidate, 1 filtered)");
+    expect(output.stdout).toContain(
+      "alpha ok (3 fetched, 2 candidate, 1 filtered)"
+    );
     expect(requests).toEqual([
       { method: "GET", url: "http://127.0.0.1:3030/api/status" },
       { method: "POST", url: "http://127.0.0.1:3030/api/poll-now" }
@@ -1072,7 +1092,9 @@ describe("CLI run commands", () => {
       ])
     ).rejects.toThrow();
 
-    expect(output.stderr).toContain("poll-now failed: daemon endpoint not found");
+    expect(output.stderr).toContain(
+      "poll-now failed: daemon endpoint not found"
+    );
   });
 
   it("cancel refuses a daemon endpoint for another state root", async () => {
@@ -1207,9 +1229,7 @@ describe("CLI run commands", () => {
       path.join(stateRoot, "symphonika.yml")
     ]);
 
-    expect(output.stdout).toContain(
-      "cap  alpha  #65  failed"
-    );
+    expect(output.stdout).toContain("cap  alpha  #65  failed");
     expect(output.stdout).toContain(
       "— continuation cap reached after 1 continuation: commits exist but no pull request"
     );
@@ -1221,7 +1241,10 @@ async function writeWorkspacePlanningConfig(
   stateRoot: string
 ): Promise<string> {
   await mkdir(configDir, { recursive: true });
-  await writeFile(path.join(configDir, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+  await writeFile(
+    path.join(configDir, "WORKFLOW.md"),
+    "Work on {{issue.title}}.\n"
+  );
   const configPath = path.join(configDir, "symphonika.yml");
   await writeFile(
     configPath,

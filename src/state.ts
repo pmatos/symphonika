@@ -84,5 +84,7 @@ function resolveConfiguredPath(
     return path.join(homeDir, input.slice(2));
   }
 
-  return path.isAbsolute(input) ? path.normalize(input) : path.resolve(baseDir, input);
+  return path.isAbsolute(input)
+    ? path.normalize(input)
+    : path.resolve(baseDir, input);
 }

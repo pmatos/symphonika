@@ -2,7 +2,6 @@ workflow:
   name: symphonika_self_driving
   initial: implement
   states:
-
     # Initial implementation. Codex reads WORKFLOW.md, runs TDD, opens the PR,
     # removes agent-ready, exits 0. Same behavior as the previous single-state
     # markdown workflow.

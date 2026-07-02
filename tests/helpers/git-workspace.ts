@@ -29,9 +29,26 @@ async function createGitWorkspace(
 ): Promise<void> {
   const baseBranch = fixture.baseBranch ?? "main";
   await mkdir(path.dirname(fixture.workspacePath), { recursive: true });
-  await git(["init", "--initial-branch", fixture.branchName, fixture.workspacePath]);
-  await git(["-C", fixture.workspacePath, "config", "user.email", "test@example.com"]);
-  await git(["-C", fixture.workspacePath, "config", "user.name", "Symphonika Test"]);
+  await git([
+    "init",
+    "--initial-branch",
+    fixture.branchName,
+    fixture.workspacePath
+  ]);
+  await git([
+    "-C",
+    fixture.workspacePath,
+    "config",
+    "user.email",
+    "test@example.com"
+  ]);
+  await git([
+    "-C",
+    fixture.workspacePath,
+    "config",
+    "user.name",
+    "Symphonika Test"
+  ]);
   await writeFile(path.join(fixture.workspacePath, "README.md"), "# Fixture\n");
   await git(["-C", fixture.workspacePath, "add", "README.md"]);
   await git(["-C", fixture.workspacePath, "commit", "-m", "Base"]);

@@ -23,7 +23,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -31,7 +33,9 @@ describe("dispatch fairness", () => {
   it("dispatches fresh issues with weighted project fairness", async () => {
     const root = await makeTempRoot();
     await writeWeightedConfig(root);
-    const runStore = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
     runStore.syncProjectStates([
       { name: "alpha", weight: 2 },
       { name: "beta", weight: 1 }
@@ -59,7 +63,9 @@ describe("dispatch fairness", () => {
       { issue: issue({ number: 2, title: "Beta issue" }), project: "beta" }
     ]);
     const prepareIssueWorkspace = vi.fn(
-      async (input: PrepareIssueWorkspaceInput): Promise<PreparedIssueWorkspace> => {
+      async (
+        input: PrepareIssueWorkspaceInput
+      ): Promise<PreparedIssueWorkspace> => {
         const workspacePath = path.join(
           root,
           "workspaces",
@@ -106,13 +112,11 @@ describe("dispatch fairness", () => {
 
       expect(dispatchedProjects).toEqual(["alpha", "beta", "alpha"]);
       expect(
-        runStore
-          .listProjectStates()
-          .map((state) => ({
-            currentWeight: state.schedulerCurrentWeight,
-            lastDispatchedIssueNumber: state.lastDispatchedIssueNumber,
-            projectName: state.projectName
-          }))
+        runStore.listProjectStates().map((state) => ({
+          currentWeight: state.schedulerCurrentWeight,
+          lastDispatchedIssueNumber: state.lastDispatchedIssueNumber,
+          projectName: state.projectName
+        }))
       ).toEqual([
         {
           currentWeight: 0,
@@ -133,7 +137,9 @@ describe("dispatch fairness", () => {
   it("chooses the highest-priority oldest issue inside the selected project", async () => {
     const root = await makeTempRoot();
     await writeWeightedConfig(root);
-    const runStore = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
     runStore.syncProjectStates([{ name: "alpha", weight: 1 }]);
     let runCounter = 0;
     const provider: AgentProvider = {
@@ -183,7 +189,9 @@ describe("dispatch fairness", () => {
       }
     ]);
     const prepareIssueWorkspace = vi.fn(
-      async (input: PrepareIssueWorkspaceInput): Promise<PreparedIssueWorkspace> => {
+      async (
+        input: PrepareIssueWorkspaceInput
+      ): Promise<PreparedIssueWorkspace> => {
         runCounter += 1;
         const workspacePath = path.join(
           root,
@@ -227,7 +235,9 @@ describe("dispatch fairness", () => {
   it("records configured project weights during one-shot dispatch before project sync", async () => {
     const root = await makeTempRoot();
     await writeWeightedConfig(root);
-    const runStore = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
     const provider: AgentProvider = {
       cancel: vi.fn().mockResolvedValue(undefined),
       name: "codex",
@@ -250,7 +260,9 @@ describe("dispatch fairness", () => {
       { issue: issue({ number: 2, title: "Beta issue" }), project: "beta" }
     ]);
     const prepareIssueWorkspace = vi.fn(
-      async (input: PrepareIssueWorkspaceInput): Promise<PreparedIssueWorkspace> => {
+      async (
+        input: PrepareIssueWorkspaceInput
+      ): Promise<PreparedIssueWorkspace> => {
         const prepared = {
           branchName: `sym/${input.project.name}/${input.issue.number}`,
           branchRef: `refs/heads/sym/${input.project.name}/${input.issue.number}`,
@@ -284,14 +296,12 @@ describe("dispatch fairness", () => {
 
       expect(result.dispatched).toBe(true);
       expect(
-        runStore
-          .listProjectStates()
-          .map((state) => ({
-            active: state.active,
-            projectName: state.projectName,
-            validationState: state.validationState,
-            weight: state.weight
-          }))
+        runStore.listProjectStates().map((state) => ({
+          active: state.active,
+          projectName: state.projectName,
+          validationState: state.validationState,
+          weight: state.weight
+        }))
       ).toEqual([
         {
           active: true,

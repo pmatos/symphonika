@@ -69,7 +69,8 @@ export type RawGitHubPullRequestFollowupState = {
   number: number;
   reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
   state: "CLOSED" | "MERGED" | "OPEN" | "UNKNOWN";
-  statusCheckRollupState: "ERROR" | "EXPECTED" | "FAILURE" | "PENDING" | "SUCCESS" | null;
+  statusCheckRollupState:
+    "ERROR" | "EXPECTED" | "FAILURE" | "PENDING" | "SUCCESS" | null;
   unresolvedReviewThreads: RawGitHubPullRequestReviewThread[];
   url: string;
 };
@@ -320,7 +321,9 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
       owner: input.owner,
       pull_number: input.pullNumber,
       repo: input.repo,
-      ...(input.expectedHeadSha === undefined ? {} : { sha: input.expectedHeadSha })
+      ...(input.expectedHeadSha === undefined
+        ? {}
+        : { sha: input.expectedHeadSha })
     });
   }
 
@@ -541,7 +544,9 @@ export async function fetchPullRequestFollowupState(
       .filter((thread) => thread.isResolved !== true)
       .map((thread) => ({
         comments: (thread.comments?.nodes ?? [])
-          .filter((comment): comment is GraphqlReviewComment => comment !== null)
+          .filter(
+            (comment): comment is GraphqlReviewComment => comment !== null
+          )
           .map((comment) => ({
             author: comment.author?.login ?? null,
             body: comment.body ?? null,
@@ -807,7 +812,9 @@ async function readPollingConfig(
   try {
     contents = await readFile(configPath, "utf8");
   } catch (error) {
-    errors.push(`service config not found at ${configPath}: ${errorMessage(error)}`);
+    errors.push(
+      `service config not found at ${configPath}: ${errorMessage(error)}`
+    );
     return undefined;
   }
 
@@ -896,7 +903,9 @@ function priorityForLabels(
     return priority === undefined ? [] : [priority];
   });
 
-  return priorities.length === 0 ? project.priority.default : Math.min(...priorities);
+  return priorities.length === 0
+    ? project.priority.default
+    : Math.min(...priorities);
 }
 
 function issueFilterReasons(
@@ -914,7 +923,10 @@ export function evaluateProjectEligibility(
   const reasons: string[] = [];
   const labels = new Set(issue.labels);
 
-  if (!project.issue_filters.states.includes("open") || issue.state !== "open") {
+  if (
+    !project.issue_filters.states.includes("open") ||
+    issue.state !== "open"
+  ) {
     reasons.push(`state ${issue.state} is not eligible`);
   }
 
@@ -1048,14 +1060,12 @@ function normalizePullRequestState(
 }
 
 function formatZodIssue(issue: z.ZodIssue): string {
-  const location = issue.path.length === 0 ? "service config" : issue.path.join(".");
+  const location =
+    issue.path.length === 0 ? "service config" : issue.path.join(".");
   return `${location}: ${issue.message}`;
 }
 
-function formatZodIssueWithPrefix(
-  issue: z.ZodIssue,
-  prefix: string[]
-): string {
+function formatZodIssueWithPrefix(issue: z.ZodIssue, prefix: string[]): string {
   const location = [...prefix, ...issue.path].join(".");
   return `${location}: ${issue.message}`;
 }

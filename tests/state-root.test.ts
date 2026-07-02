@@ -15,9 +15,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -43,7 +43,10 @@ describe("resolveStateRoot", () => {
       "symphonika.yml"
     );
     await mkdir(path.dirname(userConfigPath), { recursive: true });
-    await writeFile(userConfigPath, "providers:\n  codex:\n    command: codex\n");
+    await writeFile(
+      userConfigPath,
+      "providers:\n  codex:\n    command: codex\n"
+    );
 
     const resolved = resolveStateRoot({
       cwd,

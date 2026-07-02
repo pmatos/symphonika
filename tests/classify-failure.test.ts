@@ -20,7 +20,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -156,7 +158,9 @@ describe("classifyFailure", () => {
   });
 
   it("classifies ENOENT validate errors as deterministic", async () => {
-    const error = new Error("ENOENT: no such file") as Error & { code?: string };
+    const error = new Error("ENOENT: no such file") as Error & {
+      code?: string;
+    };
     error.code = "ENOENT";
     const result = await classifyFailure({
       cancelRequested: false,

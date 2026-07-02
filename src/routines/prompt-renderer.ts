@@ -76,7 +76,11 @@ export function renderRoutinePrompt(
   };
   const rendered = input.template.replace(tagPattern, (_tag, expression) =>
     stringifyTemplateValue(
-      resolveTemplateValue(String(expression).trim(), context, input.templatePath),
+      resolveTemplateValue(
+        String(expression).trim(),
+        context,
+        input.templatePath
+      ),
       input.templatePath
     )
   );

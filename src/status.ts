@@ -53,9 +53,7 @@ export function buildStatusSnapshot(
   const failed = allRuns.filter((run) => run.state === "failed");
   const stale = allRuns.filter((run) => run.state === "stale");
   const recent = allRuns
-    .filter(
-      (run) => run.state === "succeeded" || run.state === "cancelled"
-    )
+    .filter((run) => run.state === "succeeded" || run.state === "cancelled")
     .slice(0, 20);
 
   return {

@@ -1,0 +1,10 @@
+# Prettier also honours .gitignore, so generated dirs (dist, coverage,
+# node_modules, reports, .stryker-tmp) are already excluded. List here only the
+# tracked paths Prettier must not touch.
+symphony/
+package-lock.json
+.impeccable/
+
+# Prose docs are source-of-truth contracts (SPEC, ADRs, specs); keep them out of
+# Prettier's reach so it never churns hand-authored Markdown tables/prose.
+*.md

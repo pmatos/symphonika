@@ -32,7 +32,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -151,8 +153,16 @@ describe("daemon hot reload", () => {
       providerCommand: "codex old-command app-server",
       workflowBody: "First workflow for {{issue.title}}.\n"
     });
-    const firstWorkspace = preparedWorkspaceFixture(root, 81, "first-reload-run");
-    const secondWorkspace = preparedWorkspaceFixture(root, 82, "second-reload-run");
+    const firstWorkspace = preparedWorkspaceFixture(
+      root,
+      81,
+      "first-reload-run"
+    );
+    const secondWorkspace = preparedWorkspaceFixture(
+      root,
+      82,
+      "second-reload-run"
+    );
     await createGitWorkspaceAhead(firstWorkspace);
     await createGitWorkspaceAhead(secondWorkspace);
 
@@ -264,8 +274,16 @@ describe("daemon hot reload", () => {
       pollingIntervalMs: 1_000,
       workflowBody: "Stable workflow for {{issue.title}}.\n"
     });
-    const firstWorkspace = preparedWorkspaceFixture(root, 91, "first-workflow-run");
-    const secondWorkspace = preparedWorkspaceFixture(root, 92, "second-workflow-run");
+    const firstWorkspace = preparedWorkspaceFixture(
+      root,
+      91,
+      "first-workflow-run"
+    );
+    const secondWorkspace = preparedWorkspaceFixture(
+      root,
+      92,
+      "second-workflow-run"
+    );
     await createGitWorkspaceAhead(firstWorkspace);
     await createGitWorkspaceAhead(secondWorkspace);
 
@@ -390,7 +408,10 @@ async function expectCandidateNumbers(
   url: string,
   expected: number[]
 ): Promise<void> {
-  await waitFor(async () => candidateNumbers(await statusJson(url)).join(",") === expected.join(","));
+  await waitFor(
+    async () =>
+      candidateNumbers(await statusJson(url)).join(",") === expected.join(",")
+  );
 }
 
 async function statusJson(url: string): Promise<Record<string, unknown>> {

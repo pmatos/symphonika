@@ -2,11 +2,7 @@ import {
   dispatchOneEligibleIssue,
   type DispatchIssueOptions
 } from "./dispatch.js";
-import {
-  runDoctor,
-  type DoctorOptions,
-  type GitHubApi
-} from "./doctor.js";
+import { runDoctor, type DoctorOptions, type GitHubApi } from "./doctor.js";
 import {
   DEFAULT_GITHUB_ISSUES_API,
   pollConfiguredGitHubIssues,
@@ -68,7 +64,9 @@ export type SmokeReport = {
   warnings: string[];
 };
 
-export async function runSmoke(options: SmokeOptions = {}): Promise<SmokeReport> {
+export async function runSmoke(
+  options: SmokeOptions = {}
+): Promise<SmokeReport> {
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
   const configPath = resolveServiceConfigPath({
@@ -77,8 +75,7 @@ export async function runSmoke(options: SmokeOptions = {}): Promise<SmokeReport>
     env
   }).configPath;
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
-  const githubIssuesApi =
-    options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
+  const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const errors: string[] = [];
   const warnings: string[] = [];
 
@@ -166,7 +163,8 @@ export async function runSmoke(options: SmokeOptions = {}): Promise<SmokeReport>
     const detail = runStore.getRun(dispatchResult.runId);
     const runDetail =
       detail === undefined ? undefined : pickRunDetail(detail, runStore);
-    const ok = runDetail === undefined ? true : isTerminalSuccess(runDetail.state);
+    const ok =
+      runDetail === undefined ? true : isTerminalSuccess(runDetail.state);
     if (!ok && runDetail !== undefined) {
       errors.push(formatRunFailure(runDetail));
     }
@@ -250,7 +248,9 @@ function staleClaimWarnings(
   return warnings;
 }
 
-function withConfigPath(configPath: string | undefined): { configPath?: string } {
+function withConfigPath(configPath: string | undefined): {
+  configPath?: string;
+} {
   return configPath === undefined ? {} : { configPath };
 }
 

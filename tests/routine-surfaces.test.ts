@@ -10,14 +10,18 @@ import { openRunStore } from "../src/run-store.js";
 const tempRoots: string[] = [];
 
 async function makeTempRoot(): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), "symphonika-routine-surfaces-"));
+  const root = await mkdtemp(
+    path.join(tmpdir(), "symphonika-routine-surfaces-")
+  );
   tempRoots.push(root);
   return root;
 }
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -102,7 +106,9 @@ describe("routine operator surfaces", () => {
       path.join(stateRoot, "symphonika.yml")
     ]);
 
-    expect(output.stdout).toContain("project  routine  state  next_fire_at  last_fired_at");
+    expect(output.stdout).toContain(
+      "project  routine  state  next_fire_at  last_fired_at"
+    );
     expect(output.stdout).toContain(
       "alpha  daily-report  active  2026-05-22T10:00:00.000Z  -"
     );

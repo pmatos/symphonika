@@ -1,10 +1,6 @@
 import type { DoctorProjectReport } from "./doctor.js";
 import type { NormalizedProviderEvent } from "./provider.js";
-import type {
-  ProviderEventRecord,
-  RunState,
-  RunStatus
-} from "./run-store.js";
+import type { ProviderEventRecord, RunState, RunStatus } from "./run-store.js";
 import type { RoutineStatus } from "./routines/types.js";
 
 export type DashboardIssueCounts = {
@@ -45,10 +41,7 @@ const ACTIVE_RUN_STATES = new Set<RunState>([
   "waiting"
 ]);
 
-const ATTENTION_RUN_STATES = new Set<RunState>([
-  "failed",
-  "stale"
-]);
+const ATTENTION_RUN_STATES = new Set<RunState>(["failed", "stale"]);
 
 const RECENT_RUN_STATES = new Set<RunState>([
   "cancelled",
@@ -84,7 +77,9 @@ export function renderStatusDashboard(input: StatusDashboardInput): string {
     (project) => project.validForDispatch
   ).length;
   const invalidProjects = input.projects.length - validProjects;
-  const activeRuns = input.runs.filter((run) => ACTIVE_RUN_STATES.has(run.state));
+  const activeRuns = input.runs.filter((run) =>
+    ACTIVE_RUN_STATES.has(run.state)
+  );
   const attentionRuns = input.runs.filter((run) =>
     ATTENTION_RUN_STATES.has(run.state)
   );
@@ -153,7 +148,9 @@ export function summarizeDashboardEvent(
   };
 }
 
-function countRunsByState(runs: RunStatus[]): Partial<Record<RunState, number>> {
+function countRunsByState(
+  runs: RunStatus[]
+): Partial<Record<RunState, number>> {
   const counts: Partial<Record<RunState, number>> = {};
   for (const run of runs) {
     counts[run.state] = (counts[run.state] ?? 0) + 1;
@@ -249,7 +246,9 @@ function summarizeNormalizedEvent(event: NormalizedProviderEvent): string {
       numberField(event.tokenUsage, "total_tokens") ??
       numberField(event.tokenUsage, "totalTokens") ??
       numberField(event.tokenUsage, "total");
-    return total === undefined ? "usage updated" : `${total.toLocaleString()} tokens`;
+    return total === undefined
+      ? "usage updated"
+      : `${total.toLocaleString()} tokens`;
   }
   if (event.type === "turn_completed" && typeof event.status === "string") {
     return event.status;
@@ -268,7 +267,9 @@ function numberField(
   key: string
 ): number | undefined {
   const field = value[key];
-  return typeof field === "number" && Number.isFinite(field) ? field : undefined;
+  return typeof field === "number" && Number.isFinite(field)
+    ? field
+    : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

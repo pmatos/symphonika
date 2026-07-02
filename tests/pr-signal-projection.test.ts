@@ -30,12 +30,16 @@ function makePullRequestState(
 
 describe("projectPullRequestSignals", () => {
   it("emits pr_open: true for an open pull request", () => {
-    const signals = projectPullRequestSignals(makePullRequestState({ open: true }));
+    const signals = projectPullRequestSignals(
+      makePullRequestState({ open: true })
+    );
     expect(signals.pr_open).toBe(true);
   });
 
   it("emits pr_open: false for a closed pull request", () => {
-    const signals = projectPullRequestSignals(makePullRequestState({ open: false }));
+    const signals = projectPullRequestSignals(
+      makePullRequestState({ open: false })
+    );
     expect(signals.pr_open).toBe(false);
   });
 
@@ -48,22 +52,30 @@ describe("projectPullRequestSignals", () => {
   });
 
   it("does not emit pr_merged when the pull request is not merged", () => {
-    const signals = projectPullRequestSignals(makePullRequestState({ merged: false }));
+    const signals = projectPullRequestSignals(
+      makePullRequestState({ merged: false })
+    );
     expect(signals.pr_merged).toBeUndefined();
   });
 
   it("emits mergeable: true for MERGEABLE state", () => {
-    const signals = projectPullRequestSignals(makePullRequestState({ mergeable: "mergeable" }));
+    const signals = projectPullRequestSignals(
+      makePullRequestState({ mergeable: "mergeable" })
+    );
     expect(signals.mergeable).toBe(true);
   });
 
   it("emits mergeable: false for CONFLICTING state", () => {
-    const signals = projectPullRequestSignals(makePullRequestState({ mergeable: "conflicting" }));
+    const signals = projectPullRequestSignals(
+      makePullRequestState({ mergeable: "conflicting" })
+    );
     expect(signals.mergeable).toBe(false);
   });
 
   it("omits mergeable when state is unknown", () => {
-    const signals = projectPullRequestSignals(makePullRequestState({ mergeable: "unknown" }));
+    const signals = projectPullRequestSignals(
+      makePullRequestState({ mergeable: "unknown" })
+    );
     expect("mergeable" in signals).toBe(false);
   });
 
@@ -89,7 +101,9 @@ describe("projectPullRequestSignals", () => {
   });
 
   it("omits checks when checks are unknown", () => {
-    const signals = projectPullRequestSignals(makePullRequestState({ checks: "unknown" }));
+    const signals = projectPullRequestSignals(
+      makePullRequestState({ checks: "unknown" })
+    );
     expect("checks" in signals).toBe(false);
   });
 

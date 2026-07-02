@@ -15,7 +15,9 @@ export const WORKSPACE_HOOK_LIFECYCLES = [
   "before_remove"
 ] as const;
 
-const allowedWorkspaceHookLifecycles = new Set<string>(WORKSPACE_HOOK_LIFECYCLES);
+const allowedWorkspaceHookLifecycles = new Set<string>(
+  WORKSPACE_HOOK_LIFECYCLES
+);
 const workspaceHookLifecycleList = WORKSPACE_HOOK_LIFECYCLES.join(", ");
 
 export const workspaceHookSchema = z

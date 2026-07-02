@@ -34,9 +34,9 @@ afterEach(async () => {
   process.exitCode = originalExitCode;
 
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -296,9 +296,14 @@ describe("doctor", () => {
     await writeValidConfig(configPath);
     await writeFile(
       path.join(root, "WORKFLOW.md"),
-      ["---", "tracker:", "  kind: github", "---", "Work on {{issue.title}}.", ""].join(
-        "\n"
-      )
+      [
+        "---",
+        "tracker:",
+        "  kind: github",
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n")
     );
     process.env.GITHUB_TOKEN = "test-secret-token";
 

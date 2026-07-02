@@ -32,9 +32,9 @@ afterEach(async () => {
   }
 
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -352,15 +352,13 @@ describe("Claude stream-json provider", () => {
     const normalizedEvents = events
       .map((event) => event.normalized)
       .filter(Boolean);
-    expect(normalizedEvents[0]).toEqual(
-      {
-        cwd: workspacePath,
-        model: "claude-sonnet-4-6",
-        permissionMode: "bypassPermissions",
-        sessionId: "session-10",
-        type: "session_started"
-      }
-    );
+    expect(normalizedEvents[0]).toEqual({
+      cwd: workspacePath,
+      model: "claude-sonnet-4-6",
+      permissionMode: "bypassPermissions",
+      sessionId: "session-10",
+      type: "session_started"
+    });
     expect(normalizedEvents[1]).toMatchObject({
       cancelled: true,
       type: "process_exit"

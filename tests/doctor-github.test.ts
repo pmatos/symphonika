@@ -22,9 +22,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -34,13 +34,15 @@ describe("GitHub Project validation", () => {
     await writeValidProject(root);
     const githubApi: GitHubApi = {
       createLabel: vi.fn(),
-      listLabels: vi.fn().mockResolvedValue([
-        "agent-ready",
-        "sym:claimed",
-        "sym:running",
-        "sym:failed",
-        "sym:stale"
-      ]),
+      listLabels: vi
+        .fn()
+        .mockResolvedValue([
+          "agent-ready",
+          "sym:claimed",
+          "sym:running",
+          "sym:failed",
+          "sym:stale"
+        ]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -129,13 +131,15 @@ describe("GitHub Project validation", () => {
     await writeValidProject(root);
     const githubApi: GitHubApi = {
       createLabel: vi.fn(),
-      listLabels: vi.fn().mockResolvedValue([
-        "agent-ready",
-        "sym:claimed",
-        "sym:running",
-        "sym:failed",
-        "sym:stale"
-      ]),
+      listLabels: vi
+        .fn()
+        .mockResolvedValue([
+          "agent-ready",
+          "sym:claimed",
+          "sym:running",
+          "sym:failed",
+          "sym:stale"
+        ]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
     const githubIssuesApi: GitHubIssuesApi = {
@@ -143,7 +147,11 @@ describe("GitHub Project validation", () => {
         {
           html_url: "https://github.com/pmatos/symphonika/issues/77",
           id: 5077,
-          labels: [{ name: "agent-ready" }, { name: "sym:claimed" }, { name: "sym:stale" }],
+          labels: [
+            { name: "agent-ready" },
+            { name: "sym:claimed" },
+            { name: "sym:stale" }
+          ],
           number: 77,
           state: "open",
           title: "Orphan claimed issue"

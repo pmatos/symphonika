@@ -37,7 +37,9 @@ export async function classifyFailure(
     return classifyError(input.error);
   }
 
-  const inputRequired = input.events.find((event) => event.type === "input_required");
+  const inputRequired = input.events.find(
+    (event) => event.type === "input_required"
+  );
   if (inputRequired !== undefined) {
     return {
       classification: "input_required",
@@ -46,7 +48,9 @@ export async function classifyFailure(
     };
   }
 
-  const malformed = input.events.find((event) => event.type === "malformed_event");
+  const malformed = input.events.find(
+    (event) => event.type === "malformed_event"
+  );
   if (malformed !== undefined) {
     return {
       classification: "deterministic",

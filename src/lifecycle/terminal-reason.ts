@@ -1,8 +1,4 @@
-export type CapReachedKind =
-  | "no_commits"
-  | "no_pr"
-  | "work_landed"
-  | "unknown";
+export type CapReachedKind = "no_commits" | "no_pr" | "work_landed" | "unknown";
 
 export const CAP_REACHED_PREFIX = "cap_reached:";
 
@@ -17,7 +13,9 @@ export function buildCapReachedReason(kind: CapReachedKind): string {
   return `${CAP_REACHED_PREFIX}${kind}`;
 }
 
-export function parseCapReachedReason(reason: string | null): CapReachedKind | null {
+export function parseCapReachedReason(
+  reason: string | null
+): CapReachedKind | null {
   if (reason === null || !reason.startsWith(CAP_REACHED_PREFIX)) {
     return null;
   }

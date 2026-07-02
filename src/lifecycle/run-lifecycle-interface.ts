@@ -31,11 +31,7 @@ export type RunLifecycleState =
       runId: string;
       terminalReason?: string;
       terminalState:
-        | "cancelled"
-        | "failed"
-        | "input_required"
-        | "stale"
-        | "succeeded";
+        "cancelled" | "failed" | "input_required" | "stale" | "succeeded";
     };
 
 export type LifecycleEvent =
@@ -114,9 +110,7 @@ export type PlannedRunLifecycleStep =
       delayMs: number;
       issueNumber: number;
       kind:
-        | "schedule_retry"
-        | "schedule_continuation"
-        | "schedule_state_advance";
+        "schedule_retry" | "schedule_continuation" | "schedule_state_advance";
       parentRunId?: string;
       projectName: string;
       runId?: string;
@@ -169,50 +163,43 @@ export const RUN_LIFECYCLE_ENTRYPOINT_MAPPING = [
     eventKind: "fresh_dispatch_requested",
     legacyEntrypoint: "dispatchOneFresh",
     plannedStepKind: "start_label_eligible_run",
-    rule:
-      "Select one eligible issue, claim it, create the first run, and execute the first provider attempt."
+    rule: "Select one eligible issue, claim it, create the first run, and execute the first provider attempt."
   },
   {
     eventKind: "retry_due",
     legacyEntrypoint: "executeRetry",
     plannedStepKind: "start_retry_attempt",
-    rule:
-      "Retry only a transient failure; closed issues always cancel, while label checks depend on the retry scope."
+    rule: "Retry only a transient failure; closed issues always cancel, while label checks depend on the retry scope."
   },
   {
     eventKind: "continuation_due",
     legacyEntrypoint: "executeContinuation",
     plannedStepKind: "start_label_eligible_run",
-    rule:
-      "Start a capped follow-up run only if the issue is still open and still label eligible."
+    rule: "Start a capped follow-up run only if the issue is still open and still label eligible."
   },
   {
     eventKind: "state_advance_due",
     legacyEntrypoint: "executeStateAdvance",
     plannedStepKind: "start_fsm_owned_run",
-    rule:
-      "Start the next raw-FSM agent state after verifying only that the issue is still open."
+    rule: "Start the next raw-FSM agent state after verifying only that the issue is still open."
   },
   {
     eventKind: "wait_park_due",
     legacyEntrypoint: "executeWaitPark",
     plannedStepKind: "re_evaluate_waiting_run",
-    rule:
-      "Re-evaluate an already-persisted waiting row without launching a provider."
+    rule: "Re-evaluate an already-persisted waiting row without launching a provider."
   },
   {
     eventKind: "waiting_run_recheck_due",
     legacyEntrypoint: "reEvaluateWaitingRun",
     plannedStepKind: "re_evaluate_waiting_run",
-    rule:
-      "Poll GitHub PR signals for a waiting row, then advance, park again, terminate, or cancel."
+    rule: "Poll GitHub PR signals for a waiting row, then advance, park again, terminate, or cancel."
   },
   {
     eventKind: "review_followup_requested",
     legacyEntrypoint: "dispatchReviewFollowup",
     plannedStepKind: "start_review_followup_run",
-    rule:
-      "Start a same-branch PR follow-up run when tracked review feedback requires more work."
+    rule: "Start a same-branch PR follow-up run when tracked review feedback requires more work."
   }
 ] as const satisfies readonly RunLifecycleEntrypointMapping[];
 
@@ -241,14 +228,16 @@ export const RUN_LIFECYCLE_ADR_RULES = [
   {
     adr: "0022",
     plannedStepKinds: ["cancel_run"],
-    ruleLocation: "Refresh gates shared by retry, continuation, state advance, and waiting recheck",
+    ruleLocation:
+      "Refresh gates shared by retry, continuation, state advance, and waiting recheck",
     summary:
       "Closed issues plan cancellation and terminal label cleanup without deleting workspace evidence."
   },
   {
     adr: "0023",
     plannedStepKinds: ["cancel_run"],
-    ruleLocation: "Label-eligible active run and scheduled retry/continuation gates",
+    ruleLocation:
+      "Label-eligible active run and scheduled retry/continuation gates",
     summary:
       "Eligibility loss cancels only runs or scheduled work whose planned step is label eligible."
   },

@@ -137,7 +137,9 @@ describe("planWorkspacePaths", () => {
       }
     });
 
-    expect(unicode.branchName).toBe("sym/creme-brulee/42-deja-vu-workspace-prep");
+    expect(unicode.branchName).toBe(
+      "sym/creme-brulee/42-deja-vu-workspace-prep"
+    );
     expect(unicode.issueDirectoryName).toBe("42-deja-vu-workspace-prep");
     expect(punctuationOnly.branchName).toBe("sym/project/43-issue");
     expect(punctuationOnly.issueDirectoryName).toBe("43-issue");

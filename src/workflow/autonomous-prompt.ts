@@ -77,7 +77,10 @@ type PromptContext = {
   workspace: PromptWorkspace;
 };
 
-const allowedTemplateFields: Record<keyof PromptContext, ReadonlySet<string>> = {
+const allowedTemplateFields: Record<
+  keyof PromptContext,
+  ReadonlySet<string>
+> = {
   branch: new Set(["name", "ref"]),
   issue: new Set([
     "body",
@@ -108,7 +111,7 @@ export const AUTONOMY_PREAMBLE = [
   "## Operating contract",
   "",
   "1. **Make best-effort decisions and document them.** When information is missing or a judgement call is needed, choose the most defensible option, proceed, and leave a `gh issue comment` (or PR comment if a PR exists) explaining the choice and the alternatives considered. A future operator or reviewer can override.",
-  "2. **Never request approval at runtime.** Use the local gh CLI (`gh issue ...`, `gh pr ...`, `gh issue comment ...`, `gh issue edit ...`) for every GitHub mutation — issues, pull requests, comments, labels. Do not call the GitHub MCP connector tools (for example `add_issue_labels`, `create_pull_request`) — those tools elicit per-call operator approval through the provider transport, which Symphonika classifies as `input_required` and ends the run with `terminal_reason=\"provider requested input\"`.",
+  '2. **Never request approval at runtime.** Use the local gh CLI (`gh issue ...`, `gh pr ...`, `gh issue comment ...`, `gh issue edit ...`) for every GitHub mutation — issues, pull requests, comments, labels. Do not call the GitHub MCP connector tools (for example `add_issue_labels`, `create_pull_request`) — those tools elicit per-call operator approval through the provider transport, which Symphonika classifies as `input_required` and ends the run with `terminal_reason="provider requested input"`.',
   "3. **Do not self-apply `needs-human` as an exit strategy.** If you cannot proceed at all, post an explanatory comment with `gh issue comment` describing what blocked you and what would unblock it, then exit cleanly without applying handoff labels. The operator may still apply `needs-human` from outside the run; that is unchanged.",
   "4. **Branch and PR hygiene.** Commit, push, and open the PR via `gh pr create` with explicit non-interactive flags (`--base`, `--head`, `--title`, `--body`). Do not use `--web` or any other flag that opens a browser or waits for input.",
   ""
@@ -125,11 +128,17 @@ export function renderAutonomousPrompt(
     run: input.run,
     workspace: input.workspace
   };
-  const renderedWorkflow = input.template.replace(tagPattern, (_tag, expression) =>
-    stringifyTemplateValue(
-      resolveTemplateValue(String(expression).trim(), context, input.workflowPath),
-      input.workflowPath
-    )
+  const renderedWorkflow = input.template.replace(
+    tagPattern,
+    (_tag, expression) =>
+      stringifyTemplateValue(
+        resolveTemplateValue(
+          String(expression).trim(),
+          context,
+          input.workflowPath
+        ),
+        input.workflowPath
+      )
   );
 
   return {
@@ -142,7 +151,8 @@ export function renderAutonomousPrompt(
     ]
       .filter((section) => section.length > 0)
       .join("\n"),
-    workflowContentHash: input.workflowContentHash ?? contentHash(input.template)
+    workflowContentHash:
+      input.workflowContentHash ?? contentHash(input.template)
   };
 }
 
@@ -341,6 +351,8 @@ function contentHash(contents: string): string {
 }
 
 function safePathSegment(input: string): string {
-  const segment = input.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  const segment = input
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
   return segment.length === 0 ? "run" : segment;
 }

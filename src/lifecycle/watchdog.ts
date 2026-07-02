@@ -85,7 +85,7 @@ export async function reconcileWatchdog(
       ? null
       : attemptChanged
         ? sampledAt
-        : previous?.idleSince ?? sampledAt;
+        : (previous?.idleSince ?? sampledAt);
     const persisted = {
       ...next,
       idleSince
@@ -96,7 +96,10 @@ export async function reconcileWatchdog(
     if (progress || idleSince === null) {
       continue;
     }
-    if (now.getTime() - Date.parse(idleSince) < input.config.graceMinutes * 60_000) {
+    if (
+      now.getTime() - Date.parse(idleSince) <
+      input.config.graceMinutes * 60_000
+    ) {
       continue;
     }
 
@@ -363,7 +366,9 @@ function latestToolCallAt(
   events: NormalizedProviderEvent[],
   sampledAt: string
 ): string | null {
-  return events.some((event) => event.type === "tool_call") ? sampledAt : previous;
+  return events.some((event) => event.type === "tool_call")
+    ? sampledAt
+    : previous;
 }
 
 function latestMessageAt(
@@ -374,7 +379,9 @@ function latestMessageAt(
   // Both providers normalize streamed assistant deltas (Claude text_delta,
   // Codex item/agentMessage/delta) to a `message` event, so a fresh `message`
   // since the last sample is genuine user-visible output — ADR 0054 signal 5.
-  return events.some((event) => event.type === "message") ? sampledAt : previous;
+  return events.some((event) => event.type === "message")
+    ? sampledAt
+    : previous;
 }
 
 function outputTokensTotal(
@@ -447,7 +454,9 @@ function numberField(
     return undefined;
   }
   const inner = value[key];
-  return typeof inner === "number" && Number.isFinite(inner) ? inner : undefined;
+  return typeof inner === "number" && Number.isFinite(inner)
+    ? inner
+    : undefined;
 }
 
 function stringField(

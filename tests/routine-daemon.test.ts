@@ -7,7 +7,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildCli } from "../src/cli.js";
 import { startDaemon } from "../src/daemon.js";
 import { openRunStore } from "../src/run-store.js";
-import type { AgentProvider, ProviderEvent, ProviderRunInput } from "../src/provider.js";
+import type {
+  AgentProvider,
+  ProviderEvent,
+  ProviderRunInput
+} from "../src/provider.js";
 import type { PreparedRoutineWorkspace } from "../src/routines/workspace.js";
 
 const tempRoots: string[] = [];
@@ -28,7 +32,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -109,7 +115,9 @@ describe("daemon routine firing", () => {
       expect(status.routines).toEqual(routines);
       await waitForProviderInputs(providerInputs, 1);
       expect(providerInputs).toHaveLength(1);
-      expect(providerInputs[0]?.prompt).toContain("Routine daily-report for alpha.");
+      expect(providerInputs[0]?.prompt).toContain(
+        "Routine daily-report for alpha."
+      );
       await new Promise((resolve) => setTimeout(resolve, 120));
       await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
       expect(providerInputs).toHaveLength(1);
@@ -190,7 +198,10 @@ function quietProvider(): AgentProvider {
   };
 }
 
-async function writeRoutineProject(root: string, fireAt: string): Promise<void> {
+async function writeRoutineProject(
+  root: string,
+  fireAt: string
+): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
   await writeFile(

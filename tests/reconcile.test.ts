@@ -7,7 +7,10 @@ import {
   type IssueSnapshot,
   type PollingProjectConfig
 } from "../src/issue-polling.js";
-import { ActiveRunRegistry, CANCEL_REASONS } from "../src/lifecycle/active-runs.js";
+import {
+  ActiveRunRegistry,
+  CANCEL_REASONS
+} from "../src/lifecycle/active-runs.js";
 import { reconcileActiveRuns } from "../src/lifecycle/reconcile.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -49,8 +52,12 @@ function snapshot(overrides: Partial<IssueSnapshot> = {}): IssueSnapshot {
   };
 }
 
-async function withRunStore<T>(fn: (store: RunStore) => Promise<T>): Promise<T> {
-  const root = await mkdtemp(path.join(tmpdir(), "symphonika-reconcile-store-"));
+async function withRunStore<T>(
+  fn: (store: RunStore) => Promise<T>
+): Promise<T> {
+  const root = await mkdtemp(
+    path.join(tmpdir(), "symphonika-reconcile-store-")
+  );
   const store = openRunStore({ stateRoot: root });
   try {
     return await fn(store);
@@ -110,7 +117,9 @@ describe("reconcileActiveRuns", () => {
         repo: "symphonika",
         token: "secret"
       });
-      expect(registry.get("run-a")?.cancelReason).toBe(CANCEL_REASONS.CLOSED_ISSUE);
+      expect(registry.get("run-a")?.cancelReason).toBe(
+        CANCEL_REASONS.CLOSED_ISSUE
+      );
       expect(store.listRuns()[0]?.cancelReason).toBe("closed_issue");
     });
   });
@@ -134,7 +143,9 @@ describe("reconcileActiveRuns", () => {
       });
 
       const status = pollStatus([
-        snapshot({ labels: ["agent-ready", "needs-human", "sym:claimed", "sym:running"] })
+        snapshot({
+          labels: ["agent-ready", "needs-human", "sym:claimed", "sym:running"]
+        })
       ]);
 
       const githubIssuesApi = {
@@ -233,7 +244,9 @@ describe("reconcileActiveRuns", () => {
 
       // Label-immunity does not extend to closed issues — the run still cancels.
       expect(cancel).toHaveBeenCalledTimes(1);
-      expect(registry.get("run-a")?.cancelReason).toBe(CANCEL_REASONS.CLOSED_ISSUE);
+      expect(registry.get("run-a")?.cancelReason).toBe(
+        CANCEL_REASONS.CLOSED_ISSUE
+      );
     });
   });
 
@@ -354,7 +367,9 @@ describe("reconcileActiveRuns", () => {
 
       expect(api.calls).toEqual([{ issueNumber: 7 }]);
       expect(cancel).toHaveBeenCalledTimes(1);
-      expect(registry.get("run-a")?.cancelReason).toBe(CANCEL_REASONS.CLOSED_ISSUE);
+      expect(registry.get("run-a")?.cancelReason).toBe(
+        CANCEL_REASONS.CLOSED_ISSUE
+      );
     });
   });
 });

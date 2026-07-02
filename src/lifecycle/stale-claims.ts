@@ -120,7 +120,10 @@ function issueKey(projectName: string, issueNumber: number): string {
   return `${projectName}#${issueNumber}`;
 }
 
-function hasAnyLabel(labels: string[], targets: ReadonlyArray<string>): boolean {
+function hasAnyLabel(
+  labels: string[],
+  targets: ReadonlyArray<string>
+): boolean {
   for (const target of targets) {
     if (labels.includes(target)) {
       return true;

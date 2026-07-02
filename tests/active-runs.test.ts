@@ -7,7 +7,9 @@ import {
   LIFECYCLE_POLICY
 } from "../src/lifecycle/active-runs.js";
 
-function entry(overrides: Partial<{ runId: string; cancel: () => Promise<void> }> = {}) {
+function entry(
+  overrides: Partial<{ runId: string; cancel: () => Promise<void> }> = {}
+) {
   return {
     cancel: overrides.cancel ?? (() => Promise.resolve()),
     issueNumber: 7,

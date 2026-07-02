@@ -69,7 +69,9 @@ describe("tryGetIssue", () => {
   it("preserves `this` when invoking a class-based implementation", async () => {
     class Api {
       readonly received: Array<{ issueNumber: number }> = [];
-      getIssue(input: GitHubIssueRepositoryInput & { issueNumber: number }): Promise<RawGitHubIssue> {
+      getIssue(
+        input: GitHubIssueRepositoryInput & { issueNumber: number }
+      ): Promise<RawGitHubIssue> {
         this.received.push({ issueNumber: input.issueNumber });
         return Promise.resolve({ number: input.issueNumber, state: "open" });
       }
@@ -214,7 +216,8 @@ function buildContinuationPage(
 
 describe("fetchPullRequestFollowupState", () => {
   it("aggregates unresolved review threads across pagination boundaries", async () => {
-    const calls: Array<{ query: string; variables: Record<string, unknown> }> = [];
+    const calls: Array<{ query: string; variables: Record<string, unknown> }> =
+      [];
     const executor: GraphqlExecutor = (query, variables) => {
       calls.push({ query, variables });
       if (calls.length === 1) {
@@ -275,7 +278,9 @@ describe("fetchPullRequestFollowupState", () => {
     const state = await fetchPullRequestFollowupState(executor, followupInput);
 
     expect(callCount).toBe(1);
-    expect(state?.unresolvedReviewThreads.map((thread) => thread.id)).toEqual(["only"]);
+    expect(state?.unresolvedReviewThreads.map((thread) => thread.id)).toEqual([
+      "only"
+    ]);
   });
 
   it("filters resolved threads after pagination completes", async () => {
@@ -317,7 +322,9 @@ describe("fetchPullRequestFollowupState", () => {
         }
       });
     const state = await fetchPullRequestFollowupState(executor, followupInput);
-    expect(state?.unresolvedReviewThreads.map((thread) => thread.id)).toEqual(["open"]);
+    expect(state?.unresolvedReviewThreads.map((thread) => thread.id)).toEqual([
+      "open"
+    ]);
   });
 });
 
@@ -345,6 +352,8 @@ describe("tryListPullRequestsForBranch", () => {
     const api: GitHubIssuesApi = {
       listOpenIssues: () => Promise.resolve([])
     };
-    expect(await tryListPullRequestsForBranch(api, branchInput)).toBeUndefined();
+    expect(
+      await tryListPullRequestsForBranch(api, branchInput)
+    ).toBeUndefined();
   });
 });

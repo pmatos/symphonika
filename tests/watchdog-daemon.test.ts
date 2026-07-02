@@ -18,14 +18,18 @@ import type {
 const tempRoots: string[] = [];
 
 async function makeTempRoot(): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), "symphonika-watchdog-daemon-"));
+  const root = await mkdtemp(
+    path.join(tmpdir(), "symphonika-watchdog-daemon-")
+  );
   tempRoots.push(root);
   return root;
 }
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -146,7 +150,10 @@ describe("daemon watchdog", () => {
       // be a no-op against an unstarted provider and never retried), and the run
       // must settle as cancelled rather than hanging.
       releasePrep();
-      const settled = await waitForSettledRun(daemon.url, "run-cancel-during-prep");
+      const settled = await waitForSettledRun(
+        daemon.url,
+        "run-cancel-during-prep"
+      );
       expect(settled.state).toBe("cancelled");
       expect(provider.runAttemptCalls()).toBe(0);
     } finally {
@@ -321,7 +328,14 @@ function preparedWorkspaceFixture(root: string): PreparedIssueWorkspace {
   return {
     branchName: "sym/symphonika/198-watchdog-issue",
     branchRef: "refs/heads/sym/symphonika/198-watchdog-issue",
-    cachePath: path.join(root, ".symphonika", "workspaces", "symphonika", ".cache", "repo.git"),
+    cachePath: path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "symphonika",
+      ".cache",
+      "repo.git"
+    ),
     issueDirectoryName: "198-watchdog-issue",
     reused: false,
     workspacePath
@@ -329,7 +343,9 @@ function preparedWorkspaceFixture(root: string): PreparedIssueWorkspace {
 }
 
 function prepareWorkspace(prepared: PreparedIssueWorkspace) {
-  return (input: PrepareIssueWorkspaceInput): Promise<PreparedIssueWorkspace> => {
+  return (
+    input: PrepareIssueWorkspaceInput
+  ): Promise<PreparedIssueWorkspace> => {
     void input;
     return Promise.resolve(prepared);
   };
@@ -379,7 +395,10 @@ async function writeProject(root: string): Promise<void> {
       ""
     ].join("\n")
   );
-  await writeFile(path.join(root, "WORKFLOW.md"), "Work on #{{issue.number}}.\n");
+  await writeFile(
+    path.join(root, "WORKFLOW.md"),
+    "Work on #{{issue.number}}.\n"
+  );
 }
 
 type StatusRun = {

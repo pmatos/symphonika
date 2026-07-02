@@ -9,14 +9,18 @@ import { databasePath, openRunStore } from "../src/run-store.js";
 const tempRoots: string[] = [];
 
 async function makeTempRoot(): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), "symphonika-run-store-lifecycle-"));
+  const root = await mkdtemp(
+    path.join(tmpdir(), "symphonika-run-store-lifecycle-")
+  );
   tempRoots.push(root);
   return root;
 }
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -85,7 +89,8 @@ describe("run-store lifecycle CRUD", () => {
       });
       store.recordProjectPollOutcome({
         candidateIssues: 0,
-        error: "projects.beta.tracker.token references unset environment variable $BETA_TOKEN",
+        error:
+          "projects.beta.tracker.token references unset environment variable $BETA_TOKEN",
         fetchedIssues: 0,
         filteredIssues: 0,
         ok: false,
@@ -106,7 +111,10 @@ describe("run-store lifecycle CRUD", () => {
     const reopened = openRunStore({ stateRoot: root });
     try {
       const states = reopened.listProjectStates();
-      expect(states.map((state) => state.projectName)).toEqual(["alpha", "beta"]);
+      expect(states.map((state) => state.projectName)).toEqual([
+        "alpha",
+        "beta"
+      ]);
       expect(states[0]).toMatchObject({
         active: true,
         lastCandidateIssues: 2,
@@ -208,9 +216,9 @@ describe("run-store lifecycle CRUD", () => {
       store.updateRunState(id, "running");
       store.markCancelRequested(id, "closed_issue");
 
-      expect(
-        store.markRunNoProgressStale(id, "2026-05-22T10:00:00.000Z")
-      ).toBe(false);
+      expect(store.markRunNoProgressStale(id, "2026-05-22T10:00:00.000Z")).toBe(
+        false
+      );
       expect(store.getRun(id)).toMatchObject({
         cancelReason: "closed_issue",
         cancelRequested: true,
@@ -240,7 +248,9 @@ describe("run-store lifecycle CRUD", () => {
         turnIdSetSize: 0,
         workspaceMtimeMax: 0
       });
-      expect(store.getWatchdogSample(id)?.idleSince).toBe("2026-05-22T09:30:00.000Z");
+      expect(store.getWatchdogSample(id)?.idleSince).toBe(
+        "2026-05-22T09:30:00.000Z"
+      );
 
       store.updateRunState(id, "waiting");
 
@@ -255,7 +265,11 @@ describe("run-store lifecycle CRUD", () => {
     const store = openRunStore({ stateRoot: root });
     try {
       const id = seedRun(store);
-      store.recordTerminalReason(id, "workspace_branch_conflict", "deterministic");
+      store.recordTerminalReason(
+        id,
+        "workspace_branch_conflict",
+        "deterministic"
+      );
 
       const [run] = store.listRuns();
       expect(run).toMatchObject({
@@ -399,7 +413,10 @@ describe("run-store lifecycle CRUD", () => {
       seedRun(store, { id: "done", issueNumber: 3 });
       store.updateRunState("done", "succeeded");
 
-      const ids = store.listActiveRunIds().map((entry) => entry.runId).sort();
+      const ids = store
+        .listActiveRunIds()
+        .map((entry) => entry.runId)
+        .sort();
       expect(ids).toEqual(["queued", "running"]);
     } finally {
       store.close();
@@ -530,13 +547,27 @@ describe("run-store lifecycle CRUD", () => {
       ]);
       expect(swept).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ runId: "queued", projectName: "symphonika", issueNumber: 1 }),
-          expect.objectContaining({ runId: "running", projectName: "symphonika", issueNumber: 2 }),
-          expect.objectContaining({ runId: "preparing", projectName: "symphonika", issueNumber: 3 })
+          expect.objectContaining({
+            runId: "queued",
+            projectName: "symphonika",
+            issueNumber: 1
+          }),
+          expect.objectContaining({
+            runId: "running",
+            projectName: "symphonika",
+            issueNumber: 2
+          }),
+          expect.objectContaining({
+            runId: "preparing",
+            projectName: "symphonika",
+            issueNumber: 3
+          })
         ])
       );
 
-      const runsById = new Map(store.listRuns().map((entry) => [entry.id, entry]));
+      const runsById = new Map(
+        store.listRuns().map((entry) => [entry.id, entry])
+      );
       expect(runsById.get("queued")).toMatchObject({
         state: "stale",
         terminalReason: "leaked_active_run"
@@ -577,7 +608,9 @@ describe("run-store lifecycle CRUD", () => {
         issueNumber: 11
       });
 
-      const runsById = new Map(store.listRuns().map((entry) => [entry.id, entry]));
+      const runsById = new Map(
+        store.listRuns().map((entry) => [entry.id, entry])
+      );
       expect(runsById.get("wait-valid")?.state).toBe("waiting");
       expect(runsById.get("wait-orphan")).toMatchObject({
         state: "stale",
@@ -647,9 +680,7 @@ describe("run-store lifecycle CRUD", () => {
         reason: "cap_reached:no_commits"
       });
 
-      const cap = store
-        .listRuns()
-        .find((entry) => entry.id === "cap-1");
+      const cap = store.listRuns().find((entry) => entry.id === "cap-1");
       expect(cap).toMatchObject({
         state: "failed",
         isContinuation: true,
@@ -871,7 +902,11 @@ describe("run-store schema migration", () => {
       expect(columnNames(reader, "attempts")).toEqual(
         expect.arrayContaining(["metadata_path"])
       );
-      const row = reader.prepare("select id, retry_count, is_continuation from runs where id = ?").get("legacy-run") as
+      const row = reader
+        .prepare(
+          "select id, retry_count, is_continuation from runs where id = ?"
+        )
+        .get("legacy-run") as
         | { id: string; retry_count: number; is_continuation: number }
         | undefined;
       expect(row).toEqual({
@@ -883,7 +918,8 @@ describe("run-store schema migration", () => {
         .prepare("select metadata_path from attempts where id = ?")
         .get("legacy-attempt-2") as { metadata_path: string } | undefined;
       expect(attempt).toEqual({
-        metadata_path: "/state/logs/runs/legacy-run/prompt-metadata.attempt-2.json"
+        metadata_path:
+          "/state/logs/runs/legacy-run/prompt-metadata.attempt-2.json"
       });
     } finally {
       reader.close();

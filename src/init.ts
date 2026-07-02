@@ -5,10 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { stringify } from "yaml";
 
-import {
-  defaultUserConfigPath,
-  defaultUserStateRoot
-} from "./config-paths.js";
+import { defaultUserConfigPath, defaultUserStateRoot } from "./config-paths.js";
 
 export type InitProvider = "codex" | "claude";
 
@@ -55,9 +52,7 @@ export async function runInit(options: InitOptions = {}): Promise<InitReport> {
   const configPath = defaultUserConfigPath(userPathOptions);
   const stateRoot = defaultUserStateRoot(userPathOptions);
   const errors: string[] = [];
-  const baseReport = (
-    overrides: Partial<InitReport> = {}
-  ): InitReport => ({
+  const baseReport = (overrides: Partial<InitReport> = {}): InitReport => ({
     configPath,
     createdConfig: false,
     createdWorkflow: false,
@@ -225,7 +220,10 @@ async function detectBaseBranch(projectRoot: string): Promise<string> {
       projectRoot
     );
     const prefix = "origin/";
-    if (upstreamHead.startsWith(prefix) && upstreamHead.length > prefix.length) {
+    if (
+      upstreamHead.startsWith(prefix) &&
+      upstreamHead.length > prefix.length
+    ) {
       return upstreamHead.slice(prefix.length);
     }
   } catch {
@@ -233,7 +231,10 @@ async function detectBaseBranch(projectRoot: string): Promise<string> {
   }
 
   try {
-    const currentBranch = await gitOutput(["branch", "--show-current"], projectRoot);
+    const currentBranch = await gitOutput(
+      ["branch", "--show-current"],
+      projectRoot
+    );
     if (currentBranch.length > 0) {
       return currentBranch;
     }
@@ -277,7 +278,12 @@ function parseGitHubRemote(remote: string): GitHubRemote | null {
     const parts = parsed.pathname.replace(/^\/+/, "").split("/");
     const owner = parts[0];
     const repo = parts[1];
-    if (owner === undefined || repo === undefined || owner.length === 0 || repo.length === 0) {
+    if (
+      owner === undefined ||
+      repo === undefined ||
+      owner.length === 0 ||
+      repo.length === 0
+    ) {
       return null;
     }
     return {
@@ -290,7 +296,9 @@ function parseGitHubRemote(remote: string): GitHubRemote | null {
 }
 
 function sanitizeProjectName(repo: string): string {
-  const sanitized = repo.replace(/\.git$/, "").replace(/[^A-Za-z0-9._-]+/g, "-");
+  const sanitized = repo
+    .replace(/\.git$/, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-");
   return sanitized.replace(/^-+|-+$/g, "") || "project";
 }
 

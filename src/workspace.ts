@@ -35,9 +35,7 @@ export type PrepareIssueWorkspaceInput = {
 export type PreparedIssueWorkspace = WorkspacePathPlan & { reused: boolean };
 
 export type WorkspacePreparationErrorCode =
-  | "branch_conflict"
-  | "cache_conflict"
-  | "workspace_conflict";
+  "branch_conflict" | "cache_conflict" | "workspace_conflict";
 
 export class WorkspacePreparationError extends Error {
   readonly code: WorkspacePreparationErrorCode;
@@ -174,7 +172,13 @@ async function worktreePathForBranch(
   cachePath: string,
   branchName: string
 ): Promise<string | undefined> {
-  const output = await git(["-C", cachePath, "worktree", "list", "--porcelain"]);
+  const output = await git([
+    "-C",
+    cachePath,
+    "worktree",
+    "list",
+    "--porcelain"
+  ]);
   let currentWorktreePath: string | undefined;
   const expectedBranchLine = `branch refs/heads/${branchName}`;
 
@@ -240,7 +244,13 @@ async function ensureRepositoryCacheRemote(
 ): Promise<void> {
   let originUrl: string;
   try {
-    originUrl = await git(["-C", cachePath, "config", "--get", "remote.origin.url"]);
+    originUrl = await git([
+      "-C",
+      cachePath,
+      "config",
+      "--get",
+      "remote.origin.url"
+    ]);
   } catch (error) {
     throw new WorkspacePreparationError(
       "cache_conflict",
@@ -262,7 +272,15 @@ async function ensureIssueBranch(
   cachePath: string,
   branchName: string
 ): Promise<void> {
-  if (await gitSucceeds(["-C", cachePath, "show-ref", "--verify", `refs/heads/${branchName}`])) {
+  if (
+    await gitSucceeds([
+      "-C",
+      cachePath,
+      "show-ref",
+      "--verify",
+      `refs/heads/${branchName}`
+    ])
+  ) {
     return;
   }
 

@@ -8,7 +8,8 @@ import type { ProviderEvent, ProviderRunInput } from "../src/provider.js";
 
 const tempRoots: string[] = [];
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
-const originalFakeCodexTranscript = process.env.SYMPHONIKA_FAKE_CODEX_TRANSCRIPT;
+const originalFakeCodexTranscript =
+  process.env.SYMPHONIKA_FAKE_CODEX_TRANSCRIPT;
 const originalProbeTimeout = process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS;
 const originalRuntimeProbeTimeout =
   process.env.SYMPHONIKA_CODEX_RUNTIME_PROBE_TIMEOUT_MS;
@@ -38,9 +39,9 @@ afterEach(async () => {
   }
 
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -82,8 +83,12 @@ describe("Codex JSON-RPC provider", () => {
         sandbox: "danger-full-access"
       }
     });
-    expect(objectField(objectField(requests[2], "params"), "ephemeral")).toBeUndefined();
-    expect(objectField(objectField(requests[2], "params"), "permissionProfile")).toBeUndefined();
+    expect(
+      objectField(objectField(requests[2], "params"), "ephemeral")
+    ).toBeUndefined();
+    expect(
+      objectField(objectField(requests[2], "params"), "permissionProfile")
+    ).toBeUndefined();
     expect(requests[3]).toMatchObject({
       method: "turn/start",
       params: {
@@ -323,7 +328,9 @@ describe("Codex JSON-RPC provider", () => {
         type: "process_exit"
       }
     ]);
-    expect(String(objectField(normalizedEvents[1], "message"))).toContain("JSON");
+    expect(String(objectField(normalizedEvents[1], "message"))).toContain(
+      "JSON"
+    );
   });
 
   it("maps app-server error notifications to turn_failed and stops the process", async () => {
@@ -471,7 +478,9 @@ describe("Codex provider validate", () => {
     const command = objectField(objectField(requests[3], "params"), "command");
     expect(command).toEqual(["bash", "-lc", expect.any(String)]);
     const shellScript =
-      Array.isArray(command) && typeof command[2] === "string" ? command[2] : "";
+      Array.isArray(command) && typeof command[2] === "string"
+        ? command[2]
+        : "";
     expect(shellScript).toContain("https://api.github.com");
     expect(shellScript).toContain("node:https");
     expect(shellScript).not.toContain("curl");
@@ -503,7 +512,9 @@ describe("Codex provider validate", () => {
 
     await expect(
       provider.validate(`${process.execPath} ${fakePath} app-server`)
-    ).rejects.toThrow(/thread\/start sandbox is readOnly; expected dangerFullAccess/);
+    ).rejects.toThrow(
+      /thread\/start sandbox is readOnly; expected dangerFullAccess/
+    );
   });
 
   it.each([

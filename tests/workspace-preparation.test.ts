@@ -21,9 +21,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -51,11 +51,13 @@ describe("Git workspace preparation", () => {
     });
 
     expect(prepared).toEqual({
-      branchName: "sym/sym-project/6-prepare-deterministic-git-workspaces-and-issue-branches",
+      branchName:
+        "sym/sym-project/6-prepare-deterministic-git-workspaces-and-issue-branches",
       branchRef:
         "refs/heads/sym/sym-project/6-prepare-deterministic-git-workspaces-and-issue-branches",
       cachePath: path.join(workspaceRoot, ".cache", "repo.git"),
-      issueDirectoryName: "6-prepare-deterministic-git-workspaces-and-issue-branches",
+      issueDirectoryName:
+        "6-prepare-deterministic-git-workspaces-and-issue-branches",
       reused: false,
       workspacePath: path.join(
         workspaceRoot,
@@ -64,7 +66,13 @@ describe("Git workspace preparation", () => {
       )
     });
     await expect(
-      git(["-C", prepared.cachePath, "show-ref", "--verify", prepared.branchRef])
+      git([
+        "-C",
+        prepared.cachePath,
+        "show-ref",
+        "--verify",
+        prepared.branchRef
+      ])
     ).resolves.toContain(prepared.branchRef);
     await expect(
       git(["-C", prepared.workspacePath, "rev-parse", "--abbrev-ref", "HEAD"])
@@ -128,7 +136,10 @@ describe("Git workspace preparation", () => {
       }
     };
     const first = await prepareIssueWorkspace(input);
-    await writeFile(path.join(first.workspacePath, "agent-notes.txt"), "keep me\n");
+    await writeFile(
+      path.join(first.workspacePath, "agent-notes.txt"),
+      "keep me\n"
+    );
 
     const second = await prepareIssueWorkspace(input);
 
@@ -148,7 +159,10 @@ describe("Git workspace preparation", () => {
       "6-prepare-deterministic-git-workspaces-and-issue-branches"
     );
     await mkdir(occupiedPath, { recursive: true });
-    await writeFile(path.join(occupiedPath, "do-not-delete.txt"), "operator state\n");
+    await writeFile(
+      path.join(occupiedPath, "do-not-delete.txt"),
+      "operator state\n"
+    );
 
     const preparation = prepareIssueWorkspace({
       issue: {
@@ -190,7 +204,13 @@ describe("Git workspace preparation", () => {
       "6-prepare-deterministic-git-workspaces-and-issue-branches"
     );
     await git(["init", "--initial-branch", branchName, workspacePath]);
-    await git(["-C", workspacePath, "config", "user.email", "test@example.com"]);
+    await git([
+      "-C",
+      workspacePath,
+      "config",
+      "user.email",
+      "test@example.com"
+    ]);
     await git(["-C", workspacePath, "config", "user.name", "Symphonika Test"]);
     await writeFile(path.join(workspacePath, "README.md"), "# Wrong repo\n");
     await git(["-C", workspacePath, "add", "README.md"]);
@@ -275,9 +295,22 @@ describe("Git workspace preparation", () => {
     );
     await mkdir(path.dirname(cachePath), { recursive: true });
     await git(["clone", "--bare", remotePath, cachePath]);
-    await git(["-C", cachePath, "fetch", "origin", "main:refs/remotes/origin/main"]);
+    await git([
+      "-C",
+      cachePath,
+      "fetch",
+      "origin",
+      "main:refs/remotes/origin/main"
+    ]);
     await git(["-C", cachePath, "branch", branchName, "origin/main"]);
-    await git(["-C", cachePath, "worktree", "add", parentWorktreePath, branchName]);
+    await git([
+      "-C",
+      cachePath,
+      "worktree",
+      "add",
+      parentWorktreePath,
+      branchName
+    ]);
     await mkdir(nestedWorkspacePath);
 
     const preparation = prepareIssueWorkspace({
@@ -318,10 +351,23 @@ describe("Git workspace preparation", () => {
     const alternateWorktreePath = path.join(workspaceRoot, "manual", "issue-6");
     await mkdir(path.dirname(cachePath), { recursive: true });
     await git(["clone", "--bare", remotePath, cachePath]);
-    await git(["-C", cachePath, "fetch", "origin", "main:refs/remotes/origin/main"]);
+    await git([
+      "-C",
+      cachePath,
+      "fetch",
+      "origin",
+      "main:refs/remotes/origin/main"
+    ]);
     await git(["-C", cachePath, "branch", branchName, "origin/main"]);
     await mkdir(path.dirname(alternateWorktreePath), { recursive: true });
-    await git(["-C", cachePath, "worktree", "add", alternateWorktreePath, branchName]);
+    await git([
+      "-C",
+      cachePath,
+      "worktree",
+      "add",
+      alternateWorktreePath,
+      branchName
+    ]);
 
     const preparation = prepareIssueWorkspace({
       issue: {

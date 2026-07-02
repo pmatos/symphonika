@@ -14,7 +14,9 @@ const tempRoots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -77,7 +79,9 @@ describe("evaluateProjectEligibility", () => {
     );
 
     expect(result.eligible).toBe(false);
-    expect(result.reasons.some((reason) => reason.includes("agent-ready"))).toBe(true);
+    expect(
+      result.reasons.some((reason) => reason.includes("agent-ready"))
+    ).toBe(true);
   });
 
   it("flags sym:stale as ineligible by default (operational-label rule)", () => {
@@ -98,7 +102,9 @@ describe("evaluateProjectEligibility", () => {
     );
 
     expect(result.eligible).toBe(false);
-    expect(result.reasons.some((reason) => reason.includes("needs-human"))).toBe(true);
+    expect(
+      result.reasons.some((reason) => reason.includes("needs-human"))
+    ).toBe(true);
   });
 });
 

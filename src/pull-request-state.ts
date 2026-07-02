@@ -6,10 +6,7 @@ import type {
 } from "./issue-polling.js";
 
 export type PullRequestChecksState =
-  | "failure"
-  | "pending"
-  | "success"
-  | "unknown";
+  "failure" | "pending" | "success" | "unknown";
 
 export type PullRequestState = {
   headSha: string;

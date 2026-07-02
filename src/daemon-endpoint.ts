@@ -13,7 +13,9 @@ export function daemonEndpointPath(stateRoot: string): string {
   return path.join(stateRoot, "daemon.json");
 }
 
-export function readDaemonEndpoint(stateRoot: string): DaemonEndpoint | undefined {
+export function readDaemonEndpoint(
+  stateRoot: string
+): DaemonEndpoint | undefined {
   const descriptorPath = daemonEndpointPath(stateRoot);
   if (!existsSync(descriptorPath)) {
     return undefined;
@@ -25,7 +27,11 @@ export function readDaemonEndpoint(stateRoot: string): DaemonEndpoint | undefine
   } catch {
     return undefined;
   }
-  if (!isRecord(parsed) || typeof parsed.url !== "string" || parsed.url.length === 0) {
+  if (
+    !isRecord(parsed) ||
+    typeof parsed.url !== "string" ||
+    parsed.url.length === 0
+  ) {
     return undefined;
   }
 

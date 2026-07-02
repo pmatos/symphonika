@@ -47,4 +47,6 @@ export type AgentProvider = {
   validate: (command: string) => Promise<void>;
 };
 
-export type AgentProviderRegistry = Partial<Record<AgentProviderName, AgentProvider>>;
+export type AgentProviderRegistry = Partial<
+  Record<AgentProviderName, AgentProvider>
+>;

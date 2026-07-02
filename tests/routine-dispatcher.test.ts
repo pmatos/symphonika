@@ -5,7 +5,11 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
-import type { AgentProvider, ProviderEvent, ProviderRunInput } from "../src/provider.js";
+import type {
+  AgentProvider,
+  ProviderEvent,
+  ProviderRunInput
+} from "../src/provider.js";
 import { dispatchDueRoutines } from "../src/routines/dispatcher.js";
 import type {
   PreparedRoutineWorkspace,
@@ -16,14 +20,18 @@ import { openRunStore } from "../src/run-store.js";
 const tempRoots: string[] = [];
 
 async function makeTempRoot(): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), "symphonika-routine-dispatch-"));
+  const root = await mkdtemp(
+    path.join(tmpdir(), "symphonika-routine-dispatch-")
+  );
   tempRoots.push(root);
   return root;
 }
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -63,7 +71,9 @@ describe("RoutineFiringDispatcher", () => {
       validate: vi.fn().mockResolvedValue(undefined)
     } satisfies AgentProvider;
     const prepareRoutineWorkspace = vi.fn(
-      (input: PrepareRoutineWorkspaceInput): Promise<PreparedRoutineWorkspace> =>
+      (
+        input: PrepareRoutineWorkspaceInput
+      ): Promise<PreparedRoutineWorkspace> =>
         Promise.resolve({
           branchName: input.project.workspace.git.base_branch,
           branchRef: "refs/remotes/origin/main",
@@ -142,7 +152,9 @@ describe("RoutineFiringDispatcher", () => {
       expect(provider.validate).toHaveBeenCalledWith("codex fake");
       expect(providerInputs).toHaveLength(1);
       const providerInput = providerInputs[0];
-      expect(providerInput?.prompt).toContain("Routine daily-report for alpha.");
+      expect(providerInput?.prompt).toContain(
+        "Routine daily-report for alpha."
+      );
       expect(providerInput).toMatchObject({
         branchName: "main",
         provider: { command: "codex fake", name: "codex" },
@@ -158,12 +170,11 @@ describe("RoutineFiringDispatcher", () => {
           workspacePath
         })
       ]);
-      expect(runStore.listRoutineFiringTransitions("fire-1").map((entry) => entry.state)).toEqual([
-        "queued",
-        "preparing_workspace",
-        "running",
-        "succeeded"
-      ]);
+      expect(
+        runStore
+          .listRoutineFiringTransitions("fire-1")
+          .map((entry) => entry.state)
+      ).toEqual(["queued", "preparing_workspace", "running", "succeeded"]);
       const routineStatus = runStore.listRoutines()[0];
       expect(routineStatus?.lastFiredAt).toEqual(expect.any(String));
       expect(routineStatus).toMatchObject({

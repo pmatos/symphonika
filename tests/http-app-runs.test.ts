@@ -18,9 +18,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -91,7 +91,9 @@ describe("HTTP app — runs API and pages", () => {
         version: "0.1.0"
       });
 
-      const response = await app.request("/api/runs?state=failed&project=alpha");
+      const response = await app.request(
+        "/api/runs?state=failed&project=alpha"
+      );
       const body = (await response.json()) as { runs: { id: string }[] };
       expect(response.status).toBe(200);
       expect(body.runs.map((r) => r.id)).toEqual(["run-b"]);
@@ -137,7 +139,9 @@ describe("HTTP app — runs API and pages", () => {
       const response = await app.request("/runs/cap");
       expect(response.status).toBe(200);
       const html = await response.text();
-      expect(html).toContain("<strong>Terminal reason:</strong> cap_reached:no_commits");
+      expect(html).toContain(
+        "<strong>Terminal reason:</strong> cap_reached:no_commits"
+      );
       expect(html).toContain(
         "<strong>Cap context:</strong> continuation cap reached after 1 continuation: no commits on issue branch"
       );
@@ -182,7 +186,12 @@ describe("HTTP app — runs API and pages", () => {
   it("streams /api/runs/:id/files/provider_raw only for artifacts inside the run evidence dir", async () => {
     const test = await setup();
     try {
-      const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-files");
+      const evidenceDir = path.join(
+        test.stateRoot,
+        "logs",
+        "runs",
+        "run-files"
+      );
       await mkdir(evidenceDir, { recursive: true });
       const rawLogPath = path.join(evidenceDir, "provider.raw.jsonl");
       await writeFile(rawLogPath, '{"x":1}\n', "utf8");
@@ -313,7 +322,9 @@ describe("HTTP app — runs API and pages", () => {
       });
       expect(missing.status).toBe(404);
 
-      const done = await app.request("/api/runs/done/cancel", { method: "POST" });
+      const done = await app.request("/api/runs/done/cancel", {
+        method: "POST"
+      });
       expect(done.status).toBe(409);
       expect(await done.json()).toMatchObject({
         kind: "already-terminal",
@@ -465,7 +476,12 @@ describe("HTTP app — runs API and pages", () => {
   it("renders the workflow graph summary and link on the run-detail page", async () => {
     const test = await setup();
     try {
-      const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-graph");
+      const evidenceDir = path.join(
+        test.stateRoot,
+        "logs",
+        "runs",
+        "run-graph"
+      );
       await mkdir(evidenceDir, { recursive: true });
       const graphPath = path.join(evidenceDir, "workflow-graph.json");
       await writeFile(
@@ -478,7 +494,12 @@ describe("HTTP app — runs API and pages", () => {
             source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
             states: [
               { id: "run_agent", completeWhen: {}, transitions: [] },
-              { id: "done", completeWhen: {}, terminal: "success", transitions: [] }
+              {
+                id: "done",
+                completeWhen: {},
+                terminal: "success",
+                transitions: []
+              }
             ],
             templateFiles: []
           },
@@ -528,7 +549,12 @@ describe("HTTP app — runs API and pages", () => {
   it("serves the workflow-graph.json file for runs with graph evidence", async () => {
     const test = await setup();
     try {
-      const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-graph-serve");
+      const evidenceDir = path.join(
+        test.stateRoot,
+        "logs",
+        "runs",
+        "run-graph-serve"
+      );
       await mkdir(evidenceDir, { recursive: true });
       const graphPath = path.join(evidenceDir, "workflow-graph.json");
       const graphJson = JSON.stringify({
@@ -566,9 +592,13 @@ describe("HTTP app — runs API and pages", () => {
         version: "0.1.0"
       });
 
-      const response = await app.request("/logs/runs/run-graph-serve/workflow_graph");
+      const response = await app.request(
+        "/logs/runs/run-graph-serve/workflow_graph"
+      );
       expect(response.status).toBe(200);
-      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(response.headers.get("content-type")).toContain(
+        "application/json"
+      );
       const body = await response.text();
       expect(JSON.parse(body)).toMatchObject({ name: "single_agent_workflow" });
     } finally {
@@ -579,10 +609,18 @@ describe("HTTP app — runs API and pages", () => {
   it("serves the latest workflow graph artifact after a retry updates the run", async () => {
     const test = await setup();
     try {
-      const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-graph-retry");
+      const evidenceDir = path.join(
+        test.stateRoot,
+        "logs",
+        "runs",
+        "run-graph-retry"
+      );
       await mkdir(evidenceDir, { recursive: true });
       const attempt1Path = path.join(evidenceDir, "workflow-graph.json");
-      const attempt2Path = path.join(evidenceDir, "workflow-graph.attempt-2.json");
+      const attempt2Path = path.join(
+        evidenceDir,
+        "workflow-graph.attempt-2.json"
+      );
       const attempt1Prompt = path.join(evidenceDir, "prompt.md");
       const attempt2Prompt = path.join(evidenceDir, "prompt.attempt-2.md");
       const attempt1Metadata = path.join(evidenceDir, "prompt-metadata.json");
@@ -684,10 +722,14 @@ describe("HTTP app — runs API and pages", () => {
         version: "0.1.0"
       });
 
-      const latest = await app.request("/logs/runs/run-graph-retry/workflow_graph");
+      const latest = await app.request(
+        "/logs/runs/run-graph-retry/workflow_graph"
+      );
       expect(latest.status).toBe(200);
       const latestBody = await latest.text();
-      expect(JSON.parse(latestBody)).toMatchObject({ name: "single_agent_workflow_v2" });
+      expect(JSON.parse(latestBody)).toMatchObject({
+        name: "single_agent_workflow_v2"
+      });
 
       const attempt1Response = await app.request(
         "/logs/runs/run-graph-retry/attempts/run-graph-retry-attempt-1/workflow_graph"
@@ -746,9 +788,17 @@ describe("HTTP app — runs API and pages", () => {
   it("does not expose per-attempt workflow graph filenames as log assets", async () => {
     const test = await setup();
     try {
-      const evidenceDir = path.join(test.stateRoot, "logs", "runs", "run-graph-attempt");
+      const evidenceDir = path.join(
+        test.stateRoot,
+        "logs",
+        "runs",
+        "run-graph-attempt"
+      );
       await mkdir(evidenceDir, { recursive: true });
-      const attemptGraphPath = path.join(evidenceDir, "workflow-graph.attempt-2.json");
+      const attemptGraphPath = path.join(
+        evidenceDir,
+        "workflow-graph.attempt-2.json"
+      );
       await writeFile(
         attemptGraphPath,
         JSON.stringify({

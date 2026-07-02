@@ -24,7 +24,9 @@ export type ReconcileInput = {
   runStore: RunStore;
 };
 
-export async function reconcileActiveRuns(input: ReconcileInput): Promise<void> {
+export async function reconcileActiveRuns(
+  input: ReconcileInput
+): Promise<void> {
   for (const entry of input.activeRuns.list()) {
     if (entry.cancelRequested) {
       continue;
@@ -34,7 +36,11 @@ export async function reconcileActiveRuns(input: ReconcileInput): Promise<void> 
       continue;
     }
 
-    const snapshot = findIssueSnapshot(input.pollStatus, entry.projectName, entry.issueNumber);
+    const snapshot = findIssueSnapshot(
+      input.pollStatus,
+      entry.projectName,
+      entry.issueNumber
+    );
     if (snapshot === undefined) {
       await handleMissingFromPoll({
         ...input,
@@ -65,10 +71,12 @@ export async function reconcileActiveRuns(input: ReconcileInput): Promise<void> 
   }
 }
 
-async function handleMissingFromPoll(input: ReconcileInput & {
-  entry: ReturnType<ActiveRunRegistry["list"]>[number];
-  project: PollingProjectConfig;
-}): Promise<void> {
+async function handleMissingFromPoll(
+  input: ReconcileInput & {
+    entry: ReturnType<ActiveRunRegistry["list"]>[number];
+    project: PollingProjectConfig;
+  }
+): Promise<void> {
   const token = resolveToken(input.project.tracker.token, input.env);
   if (token === undefined) {
     input.logger.warn(
@@ -122,12 +130,18 @@ function findIssueSnapshot(
   issueNumber: number
 ): IssueSnapshot | undefined {
   for (const candidate of pollStatus.candidateIssues) {
-    if (candidate.project === projectName && candidate.issue.number === issueNumber) {
+    if (
+      candidate.project === projectName &&
+      candidate.issue.number === issueNumber
+    ) {
       return candidate.issue;
     }
   }
   for (const filtered of pollStatus.filteredIssues) {
-    if (filtered.project === projectName && filtered.issue.number === issueNumber) {
+    if (
+      filtered.project === projectName &&
+      filtered.issue.number === issueNumber
+    ) {
       return filtered.issue;
     }
   }
@@ -151,4 +165,3 @@ export async function reconcileWaitingRuns(input: {
     }
   }
 }
-

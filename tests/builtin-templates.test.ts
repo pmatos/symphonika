@@ -14,9 +14,9 @@ const TERMINAL_VALUES = new Set(["success", "blocked", "failure"]);
 
 describe("built-in workflow template registry", () => {
   it("exposes the four built-in templates expected by SPEC §Built-In Templates", () => {
-    expect(Object.keys(BUILTIN_WORKFLOW_TEMPLATES).sort()).toEqual(
-      [...EXPECTED_BUILTINS]
-    );
+    expect(Object.keys(BUILTIN_WORKFLOW_TEMPLATES).sort()).toEqual([
+      ...EXPECTED_BUILTINS
+    ]);
   });
 
   for (const name of EXPECTED_BUILTINS) {
@@ -59,8 +59,7 @@ describe("built-in workflow template registry", () => {
 
       it("declares a default for every input", () => {
         const inputs = parsed.inputs as
-          | Record<string, Record<string, unknown>>
-          | undefined;
+          Record<string, Record<string, unknown>> | undefined;
         if (inputs === undefined) {
           return;
         }
@@ -75,8 +74,7 @@ describe("built-in workflow template registry", () => {
 
       it("references only declared inputs from {{ tag }} interpolations", () => {
         const inputs = parsed.inputs as
-          | Record<string, Record<string, unknown>>
-          | undefined;
+          Record<string, Record<string, unknown>> | undefined;
         const declared = new Set(Object.keys(inputs ?? {}));
         const tagRe = /{{\s*([A-Za-z_][A-Za-z0-9_]*)\s*}}/g;
         let match: RegExpExecArray | null;

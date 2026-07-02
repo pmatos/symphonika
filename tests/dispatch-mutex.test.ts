@@ -21,7 +21,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -62,7 +64,10 @@ function preparedWorkspaceFixture(root: string): PreparedIssueWorkspace {
   };
 }
 
-async function writeProject(root: string, workflowTemplate: string): Promise<void> {
+async function writeProject(
+  root: string,
+  workflowTemplate: string
+): Promise<void> {
   await writeFile(
     path.join(root, "symphonika.yml"),
     [
@@ -166,7 +171,9 @@ describe("dispatch mutex", () => {
 
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
-      getIssue: vi.fn().mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
+      getIssue: vi
+        .fn()
+        .mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
       listBranchCommits: vi.fn().mockResolvedValue([]),
       listOpenIssues: vi
         .fn()
@@ -175,9 +182,8 @@ describe("dispatch mutex", () => {
       listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     let runCounter = 0;
@@ -233,7 +239,9 @@ describe("dispatch mutex", () => {
 
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
-      getIssue: vi.fn().mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
+      getIssue: vi
+        .fn()
+        .mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
       listBranchCommits: vi.fn().mockResolvedValue([]),
       listOpenIssues: vi
         .fn()
@@ -242,9 +250,8 @@ describe("dispatch mutex", () => {
       listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     let runCounter = 0;
@@ -254,7 +261,10 @@ describe("dispatch mutex", () => {
       cwd: root,
       env: { GITHUB_TOKEN: "secret-token" },
       githubIssuesApi,
-      lifecyclePolicy: { continuation: { cap: 1, delayMs: 5 }, retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 } },
+      lifecyclePolicy: {
+        continuation: { cap: 1, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
       logger: pino({ enabled: false }),
       port: 0,
       prepareIssueWorkspace
@@ -270,17 +280,17 @@ describe("dispatch mutex", () => {
         )
       );
 
-      const status = (await fetch(`${daemon.url}/api/status`).then((r) => r.json())) as {
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as {
         runs: Array<Record<string, unknown>>;
       };
 
       const fresh = status.runs.find(
-        (run) =>
-          run["state"] === "succeeded" && run["isContinuation"] === false
+        (run) => run["state"] === "succeeded" && run["isContinuation"] === false
       );
       const continuation = status.runs.find(
-        (run) =>
-          run["state"] === "succeeded" && run["isContinuation"] === true
+        (run) => run["state"] === "succeeded" && run["isContinuation"] === true
       );
       expect(fresh).toBeDefined();
       expect(continuation).toBeDefined();
@@ -355,8 +365,14 @@ describe("dispatch concurrency (slice 1 narrowing)", () => {
     };
 
     const preparedByIssue = new Map<number, PreparedIssueWorkspace>();
-    preparedByIssue.set(11, await preparedFor("project-a", 11, "project-a-issue"));
-    preparedByIssue.set(22, await preparedFor("project-b", 22, "project-b-issue"));
+    preparedByIssue.set(
+      11,
+      await preparedFor("project-a", 11, "project-a-issue")
+    );
+    preparedByIssue.set(
+      22,
+      await preparedFor("project-b", 22, "project-b-issue")
+    );
 
     await writeFile(
       path.join(root, "symphonika.yml"),
@@ -460,35 +476,49 @@ describe("dispatch concurrency (slice 1 narrowing)", () => {
 
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
-      getIssue: vi.fn().mockImplementation(({ issueNumber }: { issueNumber: number }) => {
-        const issue =
-          issueNumber === 11 ? issueA : issueNumber === 22 ? issueB : baseIssue;
-        return Promise.resolve({ ...issue, labels: ["agent-ready"] });
-      }),
+      getIssue: vi
+        .fn()
+        .mockImplementation(({ issueNumber }: { issueNumber: number }) => {
+          const issue =
+            issueNumber === 11
+              ? issueA
+              : issueNumber === 22
+                ? issueB
+                : baseIssue;
+          return Promise.resolve({ ...issue, labels: ["agent-ready"] });
+        }),
       listBranchCommits: vi.fn().mockResolvedValue([]),
       listOpenIssues: vi
         .fn()
-        .mockImplementation(({ owner, repo }: { owner: string; repo: string }) => {
-          const projectName =
-            owner === "acme" && repo === "project-a"
-              ? "project-a"
-              : owner === "acme" && repo === "project-b"
-                ? "project-b"
-                : undefined;
-          if (projectName === undefined) return Promise.resolve([]);
-          const issue = issuesByProject.get(projectName);
-          if (issue === undefined) return Promise.resolve([]);
-          return Promise.resolve([{ ...issue, labels: ["agent-ready"] }]);
-        }),
+        .mockImplementation(
+          ({ owner, repo }: { owner: string; repo: string }) => {
+            const projectName =
+              owner === "acme" && repo === "project-a"
+                ? "project-a"
+                : owner === "acme" && repo === "project-b"
+                  ? "project-b"
+                  : undefined;
+            if (projectName === undefined) return Promise.resolve([]);
+            const issue = issuesByProject.get(projectName);
+            if (issue === undefined) return Promise.resolve([]);
+            return Promise.resolve([{ ...issue, labels: ["agent-ready"] }]);
+          }
+        ),
       listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
 
     const prepareIssueWorkspace = vi.fn(
-      ({ issue }: { issue: { number: number } }): Promise<PreparedIssueWorkspace> => {
+      ({
+        issue
+      }: {
+        issue: { number: number };
+      }): Promise<PreparedIssueWorkspace> => {
         const prepared = preparedByIssue.get(issue.number);
         if (prepared === undefined) {
-          return Promise.reject(new Error(`no prepared workspace for issue ${issue.number}`));
+          return Promise.reject(
+            new Error(`no prepared workspace for issue ${issue.number}`)
+          );
         }
         return Promise.resolve(prepared);
       }
@@ -545,7 +575,9 @@ async function fetchRunArtifact(
     `${daemonUrl}/logs/runs/${encodeURIComponent(runId)}/${encodeURIComponent(kind)}`
   );
   if (!response.ok) {
-    throw new Error(`expected artifact ${kind} for ${runId}: HTTP ${response.status}`);
+    throw new Error(
+      `expected artifact ${kind} for ${runId}: HTTP ${response.status}`
+    );
   }
   return response.text();
 }

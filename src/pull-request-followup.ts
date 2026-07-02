@@ -143,7 +143,10 @@ export async function readPullRequestFollowupPolicy(
   if (!parsed.success) {
     return DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY;
   }
-  return pullRequestFollowupPolicyFromRaw(parsed.data) ?? DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY;
+  return (
+    pullRequestFollowupPolicyFromRaw(parsed.data) ??
+    DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY
+  );
 }
 
 export function pullRequestFollowupPolicyFromRaw(
@@ -164,7 +167,8 @@ export function pullRequestFollowupPolicyFromRaw(
         input?.merge?.enabled ??
         DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY.merge.enabled,
       method:
-        input?.merge?.method ?? DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY.merge.method,
+        input?.merge?.method ??
+        DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY.merge.method,
       requireReviewDecision:
         input?.merge?.require_review_decision ??
         DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY.merge.requireReviewDecision,
@@ -210,9 +214,7 @@ export function pullRequestReadyToMerge(
   );
 }
 
-export function reviewFeedbackFingerprint(
-  state: PullRequestState
-): string {
+export function reviewFeedbackFingerprint(state: PullRequestState): string {
   return state.reviewFollowup.feedbackFingerprint;
 }
 
@@ -383,8 +385,7 @@ async function dispatchReviewFollowupIfNeeded(input: {
   tracked: TrackedPullRequest;
 }): Promise<PullRequestFollowupResult | undefined> {
   if (
-    input.tracked.reviewDispatchCount >=
-    input.policy.maxReviewDispatchesPerPr
+    input.tracked.reviewDispatchCount >= input.policy.maxReviewDispatchesPerPr
   ) {
     return undefined;
   }
@@ -471,7 +472,9 @@ function selectOpenPullRequest(
   );
 }
 
-function trackedStateFor(state: PullRequestState): "closed" | "merged" | "open" {
+function trackedStateFor(
+  state: PullRequestState
+): "closed" | "merged" | "open" {
   return state.trackingState;
 }
 

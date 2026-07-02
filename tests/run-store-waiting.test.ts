@@ -9,14 +9,18 @@ import { openRunStore, RunStore } from "../src/run-store.js";
 const tempRoots: string[] = [];
 
 async function makeTempRoot(): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), "symphonika-run-store-waiting-"));
+  const root = await mkdtemp(
+    path.join(tmpdir(), "symphonika-run-store-waiting-")
+  );
   tempRoots.push(root);
   return root;
 }
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -103,9 +107,9 @@ describe("RunStore waiting-run helpers", () => {
       store.markCancelRequested("wait-B", "operator");
 
       const waiting = store.listWaitingRuns();
-      expect(
-        waiting.map((row: { runId: string }) => row.runId).sort()
-      ).toEqual(["wait-A", "wait-B"]);
+      expect(waiting.map((row: { runId: string }) => row.runId).sort()).toEqual(
+        ["wait-A", "wait-B"]
+      );
       const waitB = waiting.find((row) => row.runId === "wait-B");
       expect(waitB).toMatchObject({
         currentStateId: "merge_gate",

@@ -15,7 +15,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -179,12 +181,9 @@ describe("RunStore routines", () => {
           workspacePath: "/tmp/workspace"
         })
       ]);
-      expect(store.listRoutineFiringTransitions("fire-1").map((entry) => entry.state)).toEqual([
-        "queued",
-        "preparing_workspace",
-        "running",
-        "succeeded"
-      ]);
+      expect(
+        store.listRoutineFiringTransitions("fire-1").map((entry) => entry.state)
+      ).toEqual(["queued", "preparing_workspace", "running", "succeeded"]);
       expect(store.listRoutines()[0]).toEqual(
         expect.objectContaining({
           lastFiredAt: "2026-05-22T10:00:02.000Z",
@@ -273,7 +272,9 @@ describe("RunStore routines", () => {
 
       expect(firstClaim).toBe(true);
       expect(secondClaim).toBe(false);
-      expect(store.listRoutines()[0]?.lastFiredAt).toBe("2026-05-22T10:00:02.000Z");
+      expect(store.listRoutines()[0]?.lastFiredAt).toBe(
+        "2026-05-22T10:00:02.000Z"
+      );
     } finally {
       store.close();
     }

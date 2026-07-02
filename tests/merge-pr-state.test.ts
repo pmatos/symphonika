@@ -14,10 +14,7 @@ import {
   type RunControllerProjectConfig,
   type RunControllerProvidersConfig
 } from "../src/lifecycle/run-controller.js";
-import type {
-  AgentProvider,
-  ProviderEvent
-} from "../src/provider.js";
+import type { AgentProvider, ProviderEvent } from "../src/provider.js";
 import { DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY } from "../src/pull-request-followup.js";
 import { openRunStore } from "../src/run-store.js";
 import type { PreparedIssueWorkspace } from "../src/workspace.js";
@@ -33,7 +30,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -178,7 +177,9 @@ function buildController(input: {
         codex: { command: DEFAULT_CODEX_COMMAND }
       }),
     pullRequestPolicyLoader: () =>
-      Promise.resolve(input.pullRequestPolicy ?? DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY),
+      Promise.resolve(
+        input.pullRequestPolicy ?? DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY
+      ),
     runStore: input.runStore,
     schedule: () => undefined,
     stateRoot: path.join(input.root, ".symphonika")
@@ -363,7 +364,9 @@ describe("merge_pr state lifecycle", () => {
 
       await controller.reEvaluateWaitingRun("merge-pr-run");
 
-      expect(githubIssuesApi.getPullRequestFollowupState).not.toHaveBeenCalled();
+      expect(
+        githubIssuesApi.getPullRequestFollowupState
+      ).not.toHaveBeenCalled();
       expect(githubIssuesApi.mergePullRequest).not.toHaveBeenCalled();
       const after = store.getRun("merge-pr-run");
       expect(after?.state).toBe("waiting");
@@ -403,9 +406,7 @@ describe("merge_pr state lifecycle", () => {
         }),
         getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
         listOpenIssues: vi.fn().mockResolvedValue([]),
-        mergePullRequest: vi
-          .fn()
-          .mockRejectedValue(new Error("merge_conflict"))
+        mergePullRequest: vi.fn().mockRejectedValue(new Error("merge_conflict"))
       };
       const controller = buildController({
         githubIssuesApi,
@@ -496,13 +497,15 @@ describe("merge_pr state lifecycle", () => {
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     try {
       const issue = issueFixture();
-      const runAttempt = vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
-        await Promise.resolve();
-        yield {
-          normalized: { exitCode: 0, type: "process_exit" },
-          raw: { code: 0, kind: "exit" }
-        };
-      });
+      const runAttempt = vi.fn(
+        async function* (): AsyncGenerator<ProviderEvent> {
+          await Promise.resolve();
+          yield {
+            normalized: { exitCode: 0, type: "process_exit" },
+            raw: { code: 0, kind: "exit" }
+          };
+        }
+      );
       const provider: AgentProvider = {
         cancel: vi.fn().mockResolvedValue(undefined),
         name: "codex",
@@ -539,7 +542,8 @@ describe("merge_pr state lifecycle", () => {
         logger: pino({ enabled: false }),
         prepareIssueWorkspace: () =>
           Promise.resolve(preparedWorkspaceFixture(root)),
-        projectsLoader: () => Promise.resolve(new Map([[project.name, project]])),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
         providersLoader: (): Promise<RunControllerProvidersConfig> =>
           Promise.resolve({
             claude: { command: "claude" },
@@ -578,7 +582,9 @@ describe("merge_pr state lifecycle", () => {
       // state early-return path. If this assertion regresses, the issue
       // remains permanently locked and cap counters never decrement.
       expect(activeRuns.countInFlight()).toBe(0);
-      expect(activeRuns.isIssueInFlight(project.name, issue.number)).toBe(false);
+      expect(activeRuns.isIssueInFlight(project.name, issue.number)).toBe(
+        false
+      );
     } finally {
       store.close();
     }
@@ -615,7 +621,10 @@ describe("merge_pr state lifecycle", () => {
         project: projectFixture("./workflow.yml"),
         pullRequestPolicy: {
           ...DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY,
-          merge: { ...DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY.merge, enabled: false }
+          merge: {
+            ...DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY.merge,
+            enabled: false
+          }
         },
         root,
         runStore: store

@@ -40,9 +40,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -125,7 +125,8 @@ describe("daemon dispatch", () => {
         ".cache",
         "repo.git"
       ),
-      issueDirectoryName: "8-dispatch-an-end-to-end-run-through-a-test-provider",
+      issueDirectoryName:
+        "8-dispatch-an-end-to-end-run-through-a-test-provider",
       reused: false,
       workspacePath
     };
@@ -201,14 +202,18 @@ describe("daemon dispatch", () => {
         repo: "symphonika",
         token: "secret-token"
       });
-      const workspaceInput = firstPrepareIssueWorkspaceInput(prepareIssueWorkspace);
+      const workspaceInput = firstPrepareIssueWorkspaceInput(
+        prepareIssueWorkspace
+      );
       expect(workspaceInput.configDir).toBe(root);
       expect(workspaceInput.issue).toEqual({
         number: 8,
         title: "Dispatch an end-to-end run through a test provider"
       });
       expect(workspaceInput.project.name).toBe("symphonika");
-      expect(codexProvider.validate).toHaveBeenCalledWith(DEFAULT_CODEX_COMMAND);
+      expect(codexProvider.validate).toHaveBeenCalledWith(
+        DEFAULT_CODEX_COMMAND
+      );
       expect(providerInputs).toHaveLength(1);
       expect(providerInputs[0]).toMatchObject({
         issue: {
@@ -261,15 +266,23 @@ describe("daemon dispatch", () => {
       const promptMetadata = JSON.parse(
         await readFile(promptMetadataPath, "utf8")
       ) as { workflow: { content_hash: string } };
-      expect(graphContents.contentHash).toBe(promptMetadata.workflow.content_hash);
+      expect(graphContents.contentHash).toBe(
+        promptMetadata.workflow.content_hash
+      );
 
       expect(path.relative(workspacePath, expectedPromptPath)).toMatch(/^\.\./);
-      const promptContents = await fetchRunArtifact(daemon.url, run.id, "prompt");
+      const promptContents = await fetchRunArtifact(
+        daemon.url,
+        run.id,
+        "prompt"
+      );
       expect(promptContents).toContain("Autonomous run instructions");
       expect(promptContents).toContain(
         "Dispatch an end-to-end run through a test provider"
       );
-      expect(readJsonl(await fetchRunArtifact(daemon.url, run.id, "provider_raw"))).toEqual([
+      expect(
+        readJsonl(await fetchRunArtifact(daemon.url, run.id, "provider_raw"))
+      ).toEqual([
         {
           id: "fake-session-8",
           kind: "session"
@@ -284,7 +297,9 @@ describe("daemon dispatch", () => {
         }
       ]);
       expect(
-        readJsonl(await fetchRunArtifact(daemon.url, run.id, "provider_normalized"))
+        readJsonl(
+          await fetchRunArtifact(daemon.url, run.id, "provider_normalized")
+        )
       ).toEqual([
         {
           sessionId: "fake-session-8",
@@ -410,9 +425,9 @@ describe("daemon dispatch", () => {
       const status = await waitForRun(daemon.url, "succeeded");
       const run = firstRun(status);
 
-      expect(githubIssuesApi.listOpenIssues.mock.calls.length).toBeGreaterThanOrEqual(
-        2
-      );
+      expect(
+        githubIssuesApi.listOpenIssues.mock.calls.length
+      ).toBeGreaterThanOrEqual(2);
       expect(run).toMatchObject({
         id: "run-issue-8-polled",
         issueNumber: 8,
@@ -481,7 +496,8 @@ describe("daemon dispatch", () => {
         ".cache",
         "repo.git"
       ),
-      issueDirectoryName: "8-dispatch-an-end-to-end-run-through-a-test-provider",
+      issueDirectoryName:
+        "8-dispatch-an-end-to-end-run-through-a-test-provider",
       reused: false,
       workspacePath
     };
@@ -554,14 +570,18 @@ describe("daemon dispatch", () => {
         issueNumber: 8,
         state: "failed"
       });
-      expect(readJsonl(await fetchRunArtifact(daemon.url, run.id, "provider_raw"))).toEqual([
+      expect(
+        readJsonl(await fetchRunArtifact(daemon.url, run.id, "provider_raw"))
+      ).toEqual([
         {
           code: 1,
           kind: "exit"
         }
       ]);
       expect(
-        readJsonl(await fetchRunArtifact(daemon.url, run.id, "provider_normalized"))
+        readJsonl(
+          await fetchRunArtifact(daemon.url, run.id, "provider_normalized")
+        )
       ).toEqual([
         {
           exitCode: 1,
@@ -569,9 +589,12 @@ describe("daemon dispatch", () => {
         }
       ]);
 
-      const database = new Database(path.join(root, ".symphonika", "symphonika.db"), {
-        readonly: true
-      });
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        {
+          readonly: true
+        }
+      );
       try {
         const transitions = database
           .prepare("select state from run_state_transitions order by sequence")
@@ -911,9 +934,12 @@ describe("daemon dispatch", () => {
       expect(prepareIssueWorkspace).not.toHaveBeenCalled();
       expect(codexProvider.validate).not.toHaveBeenCalled();
 
-      const database = new Database(path.join(root, ".symphonika", "symphonika.db"), {
-        readonly: true
-      });
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        {
+          readonly: true
+        }
+      );
       try {
         expect(countRows(database, "runs")).toBe(0);
         expect(countRows(database, "attempts")).toBe(0);
@@ -1028,9 +1054,12 @@ describe("daemon dispatch", () => {
         workspacePath
       });
 
-      const database = new Database(path.join(root, ".symphonika", "symphonika.db"), {
-        readonly: true
-      });
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        {
+          readonly: true
+        }
+      );
       try {
         const attempts = database.prepare("select * from attempts").all();
         expect(attempts).toHaveLength(1);
@@ -1069,7 +1098,10 @@ describe("daemon dispatch", () => {
       ...snapshot,
       expandedWorkflow: {
         ...snapshot.expandedWorkflow,
-        templateFiles: [...snapshot.expandedWorkflow.templateFiles, sentinelTemplate]
+        templateFiles: [
+          ...snapshot.expandedWorkflow.templateFiles,
+          sentinelTemplate
+        ]
       }
     };
     const mutatedProject: RunControllerProjectConfig = {
@@ -1078,7 +1110,9 @@ describe("daemon dispatch", () => {
     };
 
     const codexProvider = successfulCodexProvider();
-    const runStore = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
     try {
       const controller = new RunController({
         activeRuns: new ActiveRunRegistry(),
@@ -1198,7 +1232,11 @@ describe("daemon dispatch", () => {
       // (prompt.md) rather than the YAML workflow body. The template
       // substitutes {{issue.title}} so the resulting prompt contains the
       // issue title verbatim and does NOT contain the raw YAML keywords.
-      const promptContents = await fetchRunArtifact(daemon.url, run.id, "prompt");
+      const promptContents = await fetchRunArtifact(
+        daemon.url,
+        run.id,
+        "prompt"
+      );
       expect(promptContents).toContain(
         "Dispatch an end-to-end run through a test provider"
       );
@@ -1544,12 +1582,13 @@ describe("daemon dispatch", () => {
       // without committing → no_workspace_changes → no transition matches
       // except the fallback `to: failed` terminal), so we expect exactly
       // one `sym:failed` label add (from implementing's terminal), not two.
-      const failedLabelAdds = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
-        (call: unknown[]) => {
-          const args = call[0] as { labels?: string[] } | undefined;
-          return args?.labels?.includes("sym:failed") === true;
-        }
-      );
+      const failedLabelAdds =
+        githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+          (call: unknown[]) => {
+            const args = call[0] as { labels?: string[] } | undefined;
+            return args?.labels?.includes("sym:failed") === true;
+          }
+        );
       expect(failedLabelAdds).toHaveLength(1);
     } finally {
       await daemon.stop();
@@ -1656,12 +1695,13 @@ describe("daemon dispatch", () => {
       }
 
       // The rollback restored `sym:failed` so the issue is not orphaned.
-      const failedLabelAdds = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
-        (call: unknown[]) => {
-          const args = call[0] as { labels?: string[] } | undefined;
-          return args?.labels?.includes("sym:failed") === true;
-        }
-      );
+      const failedLabelAdds =
+        githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+          (call: unknown[]) => {
+            const args = call[0] as { labels?: string[] } | undefined;
+            return args?.labels?.includes("sym:failed") === true;
+          }
+        );
       expect(failedLabelAdds).toHaveLength(1);
     } finally {
       await daemon.stop();
@@ -1873,12 +1913,13 @@ describe("daemon dispatch", () => {
       // The lack of `sym:failed` verifies that the non-terminal fallback did
       // not convert the retryable transient into a visible issue failure.
       expect(attempts).toBeGreaterThanOrEqual(1);
-      const failedLabelAdds = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
-        (call: unknown[]) => {
-          const args = call[0] as { labels?: string[] } | undefined;
-          return args?.labels?.includes("sym:failed") === true;
-        }
-      );
+      const failedLabelAdds =
+        githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+          (call: unknown[]) => {
+            const args = call[0] as { labels?: string[] } | undefined;
+            return args?.labels?.includes("sym:failed") === true;
+          }
+        );
       expect(failedLabelAdds).toHaveLength(0);
     } finally {
       await daemon.stop();
@@ -1958,9 +1999,7 @@ describe("daemon dispatch", () => {
           const database = new Database(databaseFile, { readonly: true });
           try {
             const row = database
-              .prepare(
-                "select count(*) as c from runs where state = 'failed'"
-              )
+              .prepare("select count(*) as c from runs where state = 'failed'")
               .get() as { c: number };
             if (row.c >= 1) {
               break;
@@ -1999,12 +2038,13 @@ describe("daemon dispatch", () => {
       // advanced the FSM to a non-terminal fallback (so `fsmContinuing` was
       // true). Without the narrowed suppression the issue would be orphaned
       // with no `sym:running`, no `sym:failed`, and no continuation.
-      const failedLabelAdds = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
-        (call: unknown[]) => {
-          const args = call[0] as { labels?: string[] } | undefined;
-          return args?.labels?.includes("sym:failed") === true;
-        }
-      );
+      const failedLabelAdds =
+        githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+          (call: unknown[]) => {
+            const args = call[0] as { labels?: string[] } | undefined;
+            return args?.labels?.includes("sym:failed") === true;
+          }
+        );
       expect(failedLabelAdds).toHaveLength(1);
     } finally {
       await daemon.stop();
@@ -2279,7 +2319,10 @@ describe("daemon dispatch", () => {
       // Simulate a mid-save / malformed edit during the continuation delay.
       // SPEC §5.2: the daemon must keep the last-known-good effective workflow
       // for future work and must not fail the mid-walk run.
-      await writeFile(path.join(root, "workflow.yml"), "workflow:\n  initial:\n    -\n");
+      await writeFile(
+        path.join(root, "workflow.yml"),
+        "workflow:\n  initial:\n    -\n"
+      );
       await waitForTerminalState(root, "done");
 
       // The state-advance must still complete the autofix state using the
@@ -2430,12 +2473,11 @@ describe("daemon dispatch", () => {
         database.close();
       }
 
-      const failedLabelCalls = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
-        (call) => {
+      const failedLabelCalls =
+        githubIssuesApi.addLabelsToIssue.mock.calls.filter((call) => {
           const arg = call[0] as { labels?: string[] } | undefined;
           return arg?.labels?.includes("sym:failed") ?? false;
-        }
-      );
+        });
       expect(failedLabelCalls.length).toBeGreaterThanOrEqual(1);
     } finally {
       await daemon.stop();
@@ -2695,12 +2737,11 @@ describe("daemon dispatch", () => {
         database.close();
       }
 
-      const failedLabelCalls = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
-        (call) => {
+      const failedLabelCalls =
+        githubIssuesApi.addLabelsToIssue.mock.calls.filter((call) => {
           const arg = call[0] as { labels?: string[] } | undefined;
           return arg?.labels?.includes("sym:failed") ?? false;
-        }
-      );
+        });
       expect(failedLabelCalls.length).toBeGreaterThanOrEqual(1);
     } finally {
       await daemon.stop();
@@ -3024,12 +3065,11 @@ describe("daemon dispatch", () => {
 
       // The workflow drove the failure (not a transient provider crash) so
       // the issue must end up with sym:failed applied.
-      const failedLabelCalls = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
-        (call) => {
+      const failedLabelCalls =
+        githubIssuesApi.addLabelsToIssue.mock.calls.filter((call) => {
           const arg = call[0] as { labels?: string[] } | undefined;
           return arg?.labels?.includes("sym:failed") ?? false;
-        }
-      );
+        });
       expect(failedLabelCalls.length).toBeGreaterThanOrEqual(1);
     } finally {
       await daemon.stop();
@@ -3118,12 +3158,11 @@ describe("daemon dispatch", () => {
         database.close();
       }
 
-      const failedLabelCalls = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
-        (call) => {
+      const failedLabelCalls =
+        githubIssuesApi.addLabelsToIssue.mock.calls.filter((call) => {
           const arg = call[0] as { labels?: string[] } | undefined;
           return arg?.labels?.includes("sym:failed") ?? false;
-        }
-      );
+        });
       expect(failedLabelCalls.length).toBeGreaterThanOrEqual(1);
     } finally {
       await daemon.stop();
@@ -3159,10 +3198,7 @@ function issueFixture(overrides: {
   };
 }
 
-function issueSnapshotFixture(overrides: {
-  number: number;
-  title: string;
-}): {
+function issueSnapshotFixture(overrides: { number: number; title: string }): {
   body: string;
   created_at: string;
   id: number;
@@ -3832,7 +3868,9 @@ async function writeFallbackProviderRawFsmProject(root: string): Promise<void> {
   );
 }
 
-async function writeInitialStateClaudeRawFsmProject(root: string): Promise<void> {
+async function writeInitialStateClaudeRawFsmProject(
+  root: string
+): Promise<void> {
   // Project default is codex; the initial raw-FSM state declares claude so a
   // fresh dispatch must honor the per-state override on attempt 1.
   await writeRawFsmProjectConfig(root);
@@ -4072,7 +4110,9 @@ async function waitForSettledAttemptCount(
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
 
-  throw new Error(`expected ${expectedAttempts} settled attempts before timeout`);
+  throw new Error(
+    `expected ${expectedAttempts} settled attempts before timeout`
+  );
 }
 
 async function waitForStatusError(
@@ -4118,7 +4158,9 @@ async function fetchRunArtifact(
     `${daemonUrl}/logs/runs/${encodeURIComponent(runId)}/${encodeURIComponent(kind)}`
   );
   if (!response.ok) {
-    throw new Error(`expected artifact ${kind} for ${runId}: HTTP ${response.status}`);
+    throw new Error(
+      `expected artifact ${kind} for ${runId}: HTTP ${response.status}`
+    );
   }
   return response.text();
 }

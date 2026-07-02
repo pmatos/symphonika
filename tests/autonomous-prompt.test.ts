@@ -20,9 +20,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -134,7 +134,9 @@ describe("autonomous prompt rendering", () => {
     expect(rendered.prompt).toContain(
       "Work on #7 Render autonomous prompts and persist run evidence for symphonika using codex."
     );
-    expect(rendered.prompt).toContain("Run run-7 attempt 1 continuation false.");
+    expect(rendered.prompt).toContain(
+      "Run run-7 attempt 1 continuation false."
+    );
     expect(rendered.prompt).toContain(
       "Workspace /state/workspaces/symphonika/issues/7-render-prompts rooted at /state/workspaces/symphonika previous false."
     );
@@ -221,7 +223,8 @@ describe("autonomous prompt rendering", () => {
         name: "symphonika"
       },
       provider: {
-        command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json",
+        command:
+          "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json",
         name: "claude"
       },
       run: {
@@ -239,7 +242,9 @@ describe("autonomous prompt rendering", () => {
     });
 
     expect(rendered.prompt).toContain("Previous-attempt workspace");
-    expect(rendered.prompt).toContain("inspect the existing work before editing");
+    expect(rendered.prompt).toContain(
+      "inspect the existing work before editing"
+    );
   });
 
   it("persists rendered prompt evidence outside the issue workspace", async () => {
@@ -299,7 +304,9 @@ describe("autonomous prompt rendering", () => {
     await expect(readFile(evidence.promptPath, "utf8")).resolves.toBe(
       rendered.prompt
     );
-    const metadata = parseJsonRecord(await readFile(evidence.metadataPath, "utf8"));
+    const metadata = parseJsonRecord(
+      await readFile(evidence.metadataPath, "utf8")
+    );
     expect(metadata).toMatchObject({
       autonomy_preamble_version: "autonomy-preamble-v2",
       branch: input.branch,
@@ -316,9 +323,9 @@ describe("autonomous prompt rendering", () => {
       throw new Error("expected workflow metadata record");
     }
     expect(workflowMetadata.content_hash).toMatch(/^sha256:[a-f0-9]{64}$/);
-    await expect(readFile(evidence.issueSnapshotPath, "utf8")).resolves.toContain(
-      "Render autonomous prompts and persist run evidence"
-    );
+    await expect(
+      readFile(evidence.issueSnapshotPath, "utf8")
+    ).resolves.toContain("Render autonomous prompts and persist run evidence");
   });
 
   it("persists the expanded workflow graph for a Markdown workflow with no attempt suffix on attempt 1", async () => {
@@ -394,7 +401,9 @@ describe("autonomous prompt rendering", () => {
     await expect(readFile(evidence.promptPath, "utf8")).resolves.toBe(
       rendered.prompt
     );
-    const metadata = parseJsonRecord(await readFile(evidence.metadataPath, "utf8"));
+    const metadata = parseJsonRecord(
+      await readFile(evidence.metadataPath, "utf8")
+    );
     expect(metadata).toMatchObject({
       workflow: {
         path: workflowPath
@@ -466,7 +475,9 @@ describe("autonomous prompt rendering", () => {
     await expect(readFile(evidence.promptPath, "utf8")).resolves.toBe(
       rendered.prompt
     );
-    const metadata = parseJsonRecord(await readFile(evidence.metadataPath, "utf8"));
+    const metadata = parseJsonRecord(
+      await readFile(evidence.metadataPath, "utf8")
+    );
     expect(metadata).toMatchObject({
       issue_snapshot_path: evidence.issueSnapshotPath,
       prompt_path: evidence.promptPath,
@@ -474,9 +485,9 @@ describe("autonomous prompt rendering", () => {
         graph_path: evidence.workflowGraphPath
       }
     });
-    await expect(readFile(evidence.issueSnapshotPath, "utf8")).resolves.toContain(
-      "Render autonomous prompts and persist run evidence"
-    );
+    await expect(
+      readFile(evidence.issueSnapshotPath, "utf8")
+    ).resolves.toContain("Render autonomous prompts and persist run evidence");
   });
 
   it("persists the expanded raw FSM workflow graph with an attempt suffix on retries", async () => {
@@ -581,9 +592,7 @@ describe("autonomous prompt rendering", () => {
       "done"
     ]);
     expect(states[2]?.terminal).toBe("success");
-    expect(states[0]?.transitions).toEqual([
-      { to: "implementing", when: {} }
-    ]);
+    expect(states[0]?.transitions).toEqual([{ to: "implementing", when: {} }]);
     expect(states[1]?.transitions).toEqual([{ to: "done", when: {} }]);
   });
 });

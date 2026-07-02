@@ -50,8 +50,12 @@ function snapshot(overrides: Partial<IssueSnapshot> = {}): IssueSnapshot {
   };
 }
 
-async function withRunStore<T>(fn: (store: RunStore) => Promise<T>): Promise<T> {
-  const root = await mkdtemp(path.join(tmpdir(), "symphonika-stale-claims-store-"));
+async function withRunStore<T>(
+  fn: (store: RunStore) => Promise<T>
+): Promise<T> {
+  const root = await mkdtemp(
+    path.join(tmpdir(), "symphonika-stale-claims-store-")
+  );
   const store = openRunStore({ stateRoot: root });
   try {
     return await fn(store);
@@ -77,7 +81,11 @@ describe("detectStaleClaims", () => {
       const projectB: PollingProjectConfig = {
         ...project,
         name: "other",
-        tracker: { ...project.tracker, owner: "other-owner", repo: "other-repo" }
+        tracker: {
+          ...project.tracker,
+          owner: "other-owner",
+          repo: "other-repo"
+        }
       };
       const issueLive = snapshot({
         labels: ["agent-ready", "sym:claimed"],
@@ -509,7 +517,10 @@ describe("detectStaleClaims", () => {
           repo: string;
           token: string;
         }): Promise<void> {
-          this.calls.push({ issueNumber: input.issueNumber, labels: input.labels });
+          this.calls.push({
+            issueNumber: input.issueNumber,
+            labels: input.labels
+          });
           return Promise.resolve();
         }
         listOpenIssues(): Promise<never[]> {

@@ -3,7 +3,7 @@ import type { NormalizedProviderEvent } from "./provider.js";
 import type { ProviderEventRecord, RunState, RunStatus } from "./run-store.js";
 import type { RoutineStatus } from "./routines/types.js";
 
-export type DashboardIssueCounts = {
+type DashboardIssueCounts = {
   candidate: number;
   failed: number;
   filtered: number;

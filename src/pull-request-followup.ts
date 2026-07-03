@@ -130,7 +130,7 @@ export async function runPullRequestFollowup(
   return action;
 }
 
-export async function readPullRequestFollowupPolicy(
+async function readPullRequestFollowupPolicy(
   configPath: string
 ): Promise<PullRequestFollowupPolicy> {
   let raw: unknown;
@@ -214,7 +214,7 @@ export function pullRequestReadyToMerge(
   );
 }
 
-export function reviewFeedbackFingerprint(state: PullRequestState): string {
+function reviewFeedbackFingerprint(state: PullRequestState): string {
   return state.reviewFollowup.feedbackFingerprint;
 }
 

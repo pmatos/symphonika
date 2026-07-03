@@ -21,7 +21,7 @@ export type WorkspaceProject = {
   };
 };
 
-export type WorkspaceIssue = {
+type WorkspaceIssue = {
   number: number;
   title: string;
 };

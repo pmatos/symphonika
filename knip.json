@@ -1,6 +1,11 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "entry": ["src/cli.ts", "fuzz/*.fuzz.mjs"],
+  "entry": [
+    "fuzz/*.fuzz.mjs",
+    "src/workflow.ts",
+    "src/lifecycle/eligibility-interface.ts",
+    "src/lifecycle/run-lifecycle-interface.ts"
+  ],
   "project": ["src/**/*.ts", "fuzz/**/*.mjs"],
   "ignoreBinaries": ["scripts/smoke.sh"]
 }

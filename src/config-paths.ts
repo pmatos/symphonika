@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
-export type ConfigPathSource = "explicit" | "local" | "user";
+type ConfigPathSource = "explicit" | "local" | "user";
 
 export type ServiceConfigPathResolution = {
   configDir: string;

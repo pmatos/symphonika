@@ -99,7 +99,7 @@ export type PromptMetadata = Record<string, unknown>;
 
 export type PullRequestTrackingState = "closed" | "merged" | "open";
 
-export type ProjectValidationState = "inactive" | "invalid" | "valid";
+type ProjectValidationState = "inactive" | "invalid" | "valid";
 
 export type ProjectState = {
   active: boolean;
@@ -444,10 +444,10 @@ type RoutineFiringRow = {
   workspace_path: string | null;
 };
 
-export const PULL_REQUEST_DISCOVERY_LIMIT = 25;
-export const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
+const PULL_REQUEST_DISCOVERY_LIMIT = 25;
+const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
 export const INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS = 60_000;
-export const INPUT_REQUIRED_LEGACY_TERMINAL_REASON =
+const INPUT_REQUIRED_LEGACY_TERMINAL_REASON =
   "provider requested input (legacy)";
 
 class RoutineAlreadyClaimedError extends Error {

@@ -36,7 +36,7 @@ export type SmokeOptions = {
   ) => Promise<PreparedIssueWorkspace>;
 };
 
-export type SmokeRunDetail = Pick<
+type SmokeRunDetail = Pick<
   RunDetail,
   | "branchName"
   | "createdAt"

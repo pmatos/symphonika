@@ -6,11 +6,7 @@ import {
   projectWorkspaceSchema,
   workflowReferenceSchema
 } from "./config-schemas.js";
-import type {
-  GitHubIssueLabelInput,
-  GitHubIssuesApi,
-  IssuePollStatus
-} from "./issue-polling.js";
+import type { GitHubIssuesApi, IssuePollStatus } from "./issue-polling.js";
 import {
   ActiveRunRegistry,
   type LifecyclePolicy
@@ -26,11 +22,6 @@ import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
 } from "./workspace.js";
-
-export type LabelWritingGitHubIssuesApi = GitHubIssuesApi & {
-  addLabelsToIssue: (input: GitHubIssueLabelInput) => Promise<void>;
-  removeLabelsFromIssue: (input: GitHubIssueLabelInput) => Promise<void>;
-};
 
 export type DispatchIssueOptions = {
   activeRuns?: ActiveRunRegistry;

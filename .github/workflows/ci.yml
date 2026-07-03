@@ -60,11 +60,9 @@ jobs:
       - uses: raven-actions/actionlint@v2
 
   knip:
-    name: Knip (non-blocking)
+    name: Knip
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Reports unused files/exports/deps as signal; not a merge gate yet.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
         with:

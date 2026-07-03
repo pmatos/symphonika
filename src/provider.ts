@@ -2,7 +2,7 @@ import type { IssueSnapshot } from "./issue-polling.js";
 
 export type AgentProviderName = "codex" | "claude";
 
-export type NormalizedProviderEventType =
+type NormalizedProviderEventType =
   | "session_started"
   | "message"
   | "tool_call"

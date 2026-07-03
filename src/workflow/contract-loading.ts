@@ -155,7 +155,7 @@ export function projectWorkflowReferences(
   return projects;
 }
 
-export function parseWorkflowReference(
+function parseWorkflowReference(
   rawWorkflow: unknown,
   fieldLabel: string,
   configPath: string,

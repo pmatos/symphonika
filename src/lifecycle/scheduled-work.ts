@@ -1,4 +1,4 @@
-export type ScheduledWorkKind =
+type ScheduledWorkKind =
   "retry" | "continuation" | "state_advance" | "wait_park";
 
 export type ScheduledWorkInput = {

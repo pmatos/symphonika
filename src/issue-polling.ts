@@ -43,7 +43,7 @@ export type RawGitHubPullRequest = {
   state?: string;
 };
 
-export type RawGitHubPullRequestReviewComment = {
+type RawGitHubPullRequestReviewComment = {
   author?: string | null;
   body?: string | null;
   createdAt?: string | null;
@@ -127,7 +127,7 @@ export type IssueSnapshot = {
   url: string;
 };
 
-export type ProjectIssueSnapshot = {
+type ProjectIssueSnapshot = {
   issue: IssueSnapshot;
   project: string;
 };

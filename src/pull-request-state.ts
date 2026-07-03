@@ -5,8 +5,7 @@ import type {
   RawGitHubPullRequestReviewThread
 } from "./issue-polling.js";
 
-export type PullRequestChecksState =
-  "failure" | "pending" | "success" | "unknown";
+type PullRequestChecksState = "failure" | "pending" | "success" | "unknown";
 
 export type PullRequestState = {
   headSha: string;

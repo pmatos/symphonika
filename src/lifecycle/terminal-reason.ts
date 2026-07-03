@@ -1,6 +1,6 @@
 export type CapReachedKind = "no_commits" | "no_pr" | "work_landed" | "unknown";
 
-export const CAP_REACHED_PREFIX = "cap_reached:";
+const CAP_REACHED_PREFIX = "cap_reached:";
 
 const CAP_REACHED_KINDS: ReadonlySet<CapReachedKind> = new Set([
   "no_commits",

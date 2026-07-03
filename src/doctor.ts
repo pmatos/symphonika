@@ -37,7 +37,7 @@ export type DoctorOptions = {
   githubIssuesApi?: GitHubIssuesApi;
 };
 
-export type StaleIssueSummary = {
+type StaleIssueSummary = {
   number: number;
   title: string;
   url: string;
@@ -63,7 +63,7 @@ export type InitProjectOptions = DoctorOptions & {
   yes?: boolean;
 };
 
-export type InitProjectProjectReport = {
+type InitProjectProjectReport = {
   createdOperationalLabels: string[];
   missingOperationalLabels: string[];
   name: string;
@@ -78,13 +78,13 @@ export type InitProjectReport = {
   warnings: string[];
 };
 
-export type GitHubRepositoryInput = {
+type GitHubRepositoryInput = {
   owner: string;
   repo: string;
   token: string;
 };
 
-export type GitHubRepositoryAccess = {
+type GitHubRepositoryAccess = {
   message?: string;
   ok: boolean;
 };

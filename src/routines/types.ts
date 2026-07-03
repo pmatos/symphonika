@@ -12,7 +12,7 @@ export type RoutineFiringState =
   | "failed"
   | "cancelled";
 
-export type RoutineSchedule = {
+type RoutineSchedule = {
   at: string;
 };
 

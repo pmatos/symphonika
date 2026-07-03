@@ -8,7 +8,7 @@ export const pathStringSchema = z
 
 const workflowPathSchema = pathStringSchema;
 
-export const WORKSPACE_HOOK_LIFECYCLES = [
+const WORKSPACE_HOOK_LIFECYCLES = [
   "after_create",
   "before_run",
   "after_run",
@@ -20,16 +20,14 @@ const allowedWorkspaceHookLifecycles = new Set<string>(
 );
 const workspaceHookLifecycleList = WORKSPACE_HOOK_LIFECYCLES.join(", ");
 
-export const workspaceHookSchema = z
+const workspaceHookSchema = z
   .object({
     command: z.string().trim().min(1, "command must be a non-empty string"),
     timeout_ms: z.number().int().min(1000).optional()
   })
   .strict();
 
-export type WorkspaceHook = z.infer<typeof workspaceHookSchema>;
-
-export const workspaceHooksSchema = z
+const workspaceHooksSchema = z
   .object({
     after_create: workspaceHookSchema.optional(),
     before_run: workspaceHookSchema.optional(),
@@ -51,8 +49,6 @@ export const workspaceHooksSchema = z
     }
   });
 
-export type WorkspaceHooks = z.infer<typeof workspaceHooksSchema>;
-
 export const projectWorkspaceSchema = z
   .object({
     root: pathStringSchema,
@@ -66,9 +62,7 @@ export const projectWorkspaceSchema = z
   })
   .passthrough();
 
-export type ProjectWorkspace = z.infer<typeof projectWorkspaceSchema>;
-
-export const workflowFormatSchema = z.enum(["markdown", "raw_fsm", "auto"]);
+const workflowFormatSchema = z.enum(["markdown", "raw_fsm", "auto"]);
 export type WorkflowFormat = z.infer<typeof workflowFormatSchema>;
 
 export const workflowReferenceSchema = z.union([

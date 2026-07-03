@@ -268,11 +268,11 @@ type WaitParkPayload = {
 // dispatch silently no-ops (next tick will pick again); scheduled paths
 // (continuation / state advance / retry / review followup) reschedule the
 // callback. See ADR 0053.
-export class CapBreachedError extends Error {
+class CapBreachedError extends Error {
   readonly name = "CapBreachedError";
 }
 
-export class IssueReservedError extends Error {
+class IssueReservedError extends Error {
   readonly name = "IssueReservedError";
 }
 

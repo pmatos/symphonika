@@ -68,7 +68,7 @@ export type WatchdogConfig = {
   sampleIntervalSeconds: number;
 };
 
-export const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
+const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
   enabled: true,
   graceMinutes: 30,
   mtimeIgnore: [],

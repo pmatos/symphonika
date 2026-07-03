@@ -20,8 +20,6 @@ import {
 export { InFlightRunRegistry } from "./in-flight-runs.js";
 export type {
   AttachProviderInput,
-  InFlightRunEntry,
-  RegisterRunInput,
   ReserveSlotInput
 } from "./in-flight-runs.js";
 export { IssueReservationRegistry } from "./issue-reservations.js";
@@ -29,7 +27,6 @@ export type { IssueReservationKey } from "./issue-reservations.js";
 export { ScheduledWorkRegistry } from "./scheduled-work.js";
 export type {
   ScheduledWorkInput,
-  ScheduledWorkKind,
   ScheduledWorkSnapshot
 } from "./scheduled-work.js";
 

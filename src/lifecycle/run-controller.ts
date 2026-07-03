@@ -65,11 +65,11 @@ import {
 } from "./active-runs.js";
 import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
 import { classifyCapReachedOutcome } from "./cap-reached-context.js";
-import { classifyFailure, type ClassifiedTerminal } from "./classify-failure.js";
 import {
-  decideNextStep,
-  findWorkflowState
-} from "./state-machine-dispatch.js";
+  classifyFailure,
+  type ClassifiedTerminal
+} from "./classify-failure.js";
+import { decideNextStep, findWorkflowState } from "./state-machine-dispatch.js";
 import { buildCapReachedReason } from "./terminal-reason.js";
 
 export type WorkflowSnapshot = {
@@ -146,8 +146,7 @@ export type RunControllerOptions = {
 };
 
 export type DispatchOneFreshResult =
-  | { dispatched: false; reason: string }
-  | { dispatched: true; runId: string };
+  { dispatched: false; reason: string } | { dispatched: true; runId: string };
 
 export type ReviewFollowupContext = {
   headSha: string;
@@ -269,11 +268,11 @@ type WaitParkPayload = {
 // dispatch silently no-ops (next tick will pick again); scheduled paths
 // (continuation / state advance / retry / review followup) reschedule the
 // callback. See ADR 0053.
-export class CapBreachedError extends Error {
+class CapBreachedError extends Error {
   readonly name = "CapBreachedError";
 }
 
-export class IssueReservedError extends Error {
+class IssueReservedError extends Error {
   readonly name = "IssueReservedError";
 }
 
@@ -959,7 +958,8 @@ export class RunController {
             return;
           }
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
           this.runStore.recordWaitingActivity(
             runId,
             `merge_pr attempt failed for PR #${tracked.prNumber}: ${message}`
@@ -1023,8 +1023,7 @@ export class RunController {
         });
         this.schedule({
           delayMs: this.lifecyclePolicy.continuation.delayMs,
-          fire: () =>
-            this.executeWaitPark({ waitingRunId: nextWaitingRunId }),
+          fire: () => this.executeWaitPark({ waitingRunId: nextWaitingRunId }),
           issueNumber: refreshed.number,
           kind: "wait_park",
           projectName: project.name,
@@ -1126,8 +1125,9 @@ export class RunController {
       if (fallback === undefined) {
         const providerName = project.agent.provider;
         const providerCommand =
-          (providersConfig as Partial<RunControllerProvidersConfig>)[providerName]
-            ?.command ?? "";
+          (providersConfig as Partial<RunControllerProvidersConfig>)[
+            providerName
+          ]?.command ?? "";
         await this.failStateAdvanceBeforeProvider({
           issue: refreshed,
           parentRunId: payload.parentRunId,
@@ -1161,8 +1161,9 @@ export class RunController {
       if (fallback === undefined) {
         const providerName = project.agent.provider;
         const providerCommand =
-          (providersConfig as Partial<RunControllerProvidersConfig>)[providerName]
-            ?.command ?? "";
+          (providersConfig as Partial<RunControllerProvidersConfig>)[
+            providerName
+          ]?.command ?? "";
         await this.failStateAdvanceBeforeProvider({
           issue: refreshed,
           parentRunId: payload.parentRunId,
@@ -1238,9 +1239,9 @@ export class RunController {
       targetState.action.provider !== undefined
         ? targetState.action.provider
         : project.agent.provider;
-    const providerConfig = (providersConfig as Partial<RunControllerProvidersConfig>)[
-      providerName
-    ];
+    const providerConfig = (
+      providersConfig as Partial<RunControllerProvidersConfig>
+    )[providerName];
     const providerCommand = providerConfig?.command;
 
     if (providerCommand === undefined || providerCommand.trim().length === 0) {
@@ -1837,9 +1838,7 @@ export class RunController {
       globalMax !== undefined &&
       this.activeRuns.countInFlight() >= globalMax
     ) {
-      throw new CapBreachedError(
-        `global max_in_flight (${globalMax}) reached`
-      );
+      throw new CapBreachedError(`global max_in_flight (${globalMax}) reached`);
     }
     const projectMax = input.project.max_in_flight ?? 1;
     if (
@@ -1867,7 +1866,9 @@ export class RunController {
     let claimed = false;
     let runCreated = false;
     try {
-      await (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
+      await (
+        this.githubIssuesApi as LabelWritingGitHubIssuesApi
+      ).addLabelsToIssue({
         ...input.repository,
         issueNumber: input.issue.number,
         labels: ["sym:claimed"]
@@ -1954,9 +1955,8 @@ export class RunController {
     // are safe defaults: respectsIssueLabels=true (matches reserveSlot's
     // default), parkedAsWaiting=false (default failure pipeline runs).
     // See ADR 0052 — slot-leak fix.
-    let loadedWorkflow: Awaited<
-      ReturnType<typeof this.loadWorkflow>
-    > | undefined;
+    let loadedWorkflow:
+      Awaited<ReturnType<typeof this.loadWorkflow>> | undefined;
     let currentState: ReturnType<typeof findWorkflowState> | undefined;
     let projectForAttempt = input.project;
     let respectsIssueLabels = true;
@@ -1987,7 +1987,9 @@ export class RunController {
       // until daemon restart). See ADR 0052.
       loadedWorkflow = await this.loadWorkflow(input.project.workflow);
       if (loadedWorkflow.errors.length === 0) {
-        const persistedStateId = this.runStore.getRun(input.runId)?.currentStateId;
+        const persistedStateId = this.runStore.getRun(
+          input.runId
+        )?.currentStateId;
         const startStateId =
           persistedStateId ?? loadedWorkflow.expandedWorkflow.initial;
         currentState = findWorkflowState(
@@ -2060,11 +2062,15 @@ export class RunController {
         currentState.action.prompt !== undefined
       ) {
         const workflowDir = path.dirname(loadedWorkflow.path);
-        const promptPath = path.resolve(workflowDir, currentState.action.prompt);
+        const promptPath = path.resolve(
+          workflowDir,
+          currentState.action.prompt
+        );
         try {
           promptTemplate = await readFile(promptPath, "utf8");
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
           throw new Error(
             `workflow state ${currentState.id} prompt not found at ${promptPath}: ${message}`,
             { cause: error }
@@ -2087,7 +2093,9 @@ export class RunController {
         runId: input.runId
       });
       await input.provider.validate(input.providerCommand);
-      await (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
+      await (
+        this.githubIssuesApi as LabelWritingGitHubIssuesApi
+      ).addLabelsToIssue({
         ...input.repository,
         issueNumber: input.issue.number,
         labels: ["sym:running"]
@@ -2214,162 +2222,166 @@ export class RunController {
       // !parkedAsWaiting. The unconditional unregister above already
       // released the in-flight slot. See ADR 0052 — slot-leak fix.
       if (!parkedAsWaiting && !preservedWatchdogTerminal) {
-      const terminal = await classifyFailure({
-        cancelRequested,
-        ...(caughtError === undefined ? {} : { error: caughtError }),
-        events: runtime.events,
-        ...(started === undefined
-          ? {}
-          : {
-              successWorkspace: {
-                baseBranch: input.project.workspace.git.base_branch,
-                workspacePath: started.evidence.workspacePath
-              }
-            })
-      });
-      let workflowOutcome: WorkflowOutcomeResult = {
-        advancedToState: null,
-        advancedToTerminal: false,
-        blocked: false
-      };
-      // Retryable transient failures get first claim on the failed state. We
-      // still evaluate terminal workflow transitions below, because a raw FSM
-      // may intentionally map provider_success=false to terminal blocked/failure,
-      // but non-terminal advances are deferred until the retry budget is spent.
-      const deferRetryableTransientAdvance =
-        terminal.kind === "failed" &&
-        terminal.classification === "transient" &&
-        this.runStore.runRetryCount(input.runId) < this.lifecyclePolicy.retry.cap;
-      // loadedWorkflow can be undefined if this.loadWorkflow itself threw
-      // before currentState was set; in that case we run the bare
-      // classifyFailure outcome without an FSM-driven overlay.
-      if (currentState !== undefined && loadedWorkflow !== undefined) {
-        workflowOutcome = this.applyWorkflowOutcome({
-          currentState,
-          deferRetryableTransientAdvance,
-          issue: input.issue,
-          project: input.project,
-          runId: input.runId,
-          terminal,
-          workflow: loadedWorkflow.expandedWorkflow
-        });
-      }
-      const effectiveOutcome = fuseWorkflowTerminal(
-        terminal,
-        workflowOutcome.terminalLabel
-      );
-      const outcomeState = mapOutcomeToRunState(effectiveOutcome);
-      if (attemptCreated) {
-        this.runStore.updateAttemptState(attemptId, outcomeState);
-      }
-      this.runStore.recordTerminalReason(
-        input.runId,
-        effectiveOutcome.reason,
-        effectiveOutcome.classification
-      );
-      const sourceKind = loadedWorkflow?.expandedWorkflow.source.kind;
-      const isRawFsm = sourceKind === "raw_fsm";
-      const suppressContinuation =
-        isRawFsm &&
-        (workflowOutcome.advancedToTerminal ||
-          workflowOutcome.blocked ||
-          workflowOutcome.advancedToState !== null);
-      this.runStore.updateRunState(input.runId, outcomeState);
-
-      const willRetry =
-        effectiveOutcome.kind === "failed" &&
-        effectiveOutcome.classification === "transient" &&
-        this.runStore.runRetryCount(input.runId) < this.lifecyclePolicy.retry.cap;
-
-      this.logger?.info(
-        {
-          attemptNumber: input.attemptNumber,
-          cancelReason,
+        const terminal = await classifyFailure({
           cancelRequested,
-          classification: effectiveOutcome.classification,
-          isContinuation: input.isContinuation,
-          issueNumber: input.issue.number,
-          kind: effectiveOutcome.kind,
-          project: input.project.name,
-          runId: input.runId,
-          state: outcomeState,
-          terminalReason: effectiveOutcome.reason,
-          willRetry,
-          workflowTerminalLabel: workflowOutcome.terminalLabel
-        },
-        "symphonika run terminated"
-      );
-
-      // The raw-FSM walk is "continuing" when applyWorkflowOutcome either
-      // advanced into a non-terminal next state or parked into a wait/merge_pr
-      // action. In both cases the per-state ClassifiedTerminal may legitimately
-      // be `failed` (e.g. a planning step that exited provider_success=true
-      // without committing → no_workspace_changes) while the workflow as a
-      // whole is not failing. applyTerminalLabels uses this to suppress
-      // `sym:failed`, which subsequent successful states would otherwise leave
-      // on the issue forever.
-      const fsmContinuing =
-        isRawFsm &&
-        (workflowOutcome.advancedToState !== null ||
-          workflowOutcome.parkAsWait === true);
-      const labelInput: ApplyLabelsInput = {
-        fsmContinuing,
-        issueNumber: input.issue.number,
-        outcome: effectiveOutcome,
-        repository: input.repository,
-        willRetry
-      };
-      if (cancelReason !== undefined) {
-        labelInput.cancelReason = cancelReason;
-      }
-      await this.applyTerminalLabels(labelInput);
-
-      // scheduleNext also handles transient throws (kind=failed/transient with retry budget).
-      // It is a no-op for cancelled, deterministic, and input_required outcomes.
-      try {
-        await this.scheduleNext({
-          ...(input.extraInstructions === undefined
+          ...(caughtError === undefined ? {} : { error: caughtError }),
+          events: runtime.events,
+          ...(started === undefined
             ? {}
-            : { extraInstructions: input.extraInstructions }),
-          issue: input.issue,
-          outcome: effectiveOutcome,
-          project: input.project,
-          providerCommand: input.providerCommand,
-          providerName: input.providerName,
-          repository: input.repository,
-          respectsIssueLabels,
-          runId: input.runId,
-          runtimeAttemptNumber: input.attemptNumber,
-          willRetry,
-          stateAdvance:
-            isRawFsm &&
-            workflowOutcome.advancedToState !== null &&
-            workflowOutcome.parkAsWait !== true
-              ? {
-                  toStateId: workflowOutcome.advancedToState
+            : {
+                successWorkspace: {
+                  baseBranch: input.project.workspace.git.base_branch,
+                  workspacePath: started.evidence.workspacePath
                 }
-              : null,
-          waitPark:
-            isRawFsm &&
-            workflowOutcome.parkAsWait === true &&
-            workflowOutcome.waitingRunId !== undefined
-              ? { waitingRunId: workflowOutcome.waitingRunId }
-              : null,
-          suppressContinuation
+              })
         });
-      } catch (scheduleError) {
-        this.logger?.error(
-          { err: scheduleError, runId: input.runId },
-          "symphonika scheduleNext failed"
+        let workflowOutcome: WorkflowOutcomeResult = {
+          advancedToState: null,
+          advancedToTerminal: false,
+          blocked: false
+        };
+        // Retryable transient failures get first claim on the failed state. We
+        // still evaluate terminal workflow transitions below, because a raw FSM
+        // may intentionally map provider_success=false to terminal blocked/failure,
+        // but non-terminal advances are deferred until the retry budget is spent.
+        const deferRetryableTransientAdvance =
+          terminal.kind === "failed" &&
+          terminal.classification === "transient" &&
+          this.runStore.runRetryCount(input.runId) <
+            this.lifecyclePolicy.retry.cap;
+        // loadedWorkflow can be undefined if this.loadWorkflow itself threw
+        // before currentState was set; in that case we run the bare
+        // classifyFailure outcome without an FSM-driven overlay.
+        if (currentState !== undefined && loadedWorkflow !== undefined) {
+          workflowOutcome = this.applyWorkflowOutcome({
+            currentState,
+            deferRetryableTransientAdvance,
+            issue: input.issue,
+            project: input.project,
+            runId: input.runId,
+            terminal,
+            workflow: loadedWorkflow.expandedWorkflow
+          });
+        }
+        const effectiveOutcome = fuseWorkflowTerminal(
+          terminal,
+          workflowOutcome.terminalLabel
         );
-      }
+        const outcomeState = mapOutcomeToRunState(effectiveOutcome);
+        if (attemptCreated) {
+          this.runStore.updateAttemptState(attemptId, outcomeState);
+        }
+        this.runStore.recordTerminalReason(
+          input.runId,
+          effectiveOutcome.reason,
+          effectiveOutcome.classification
+        );
+        const sourceKind = loadedWorkflow?.expandedWorkflow.source.kind;
+        const isRawFsm = sourceKind === "raw_fsm";
+        const suppressContinuation =
+          isRawFsm &&
+          (workflowOutcome.advancedToTerminal ||
+            workflowOutcome.blocked ||
+            workflowOutcome.advancedToState !== null);
+        this.runStore.updateRunState(input.runId, outcomeState);
+
+        const willRetry =
+          effectiveOutcome.kind === "failed" &&
+          effectiveOutcome.classification === "transient" &&
+          this.runStore.runRetryCount(input.runId) <
+            this.lifecyclePolicy.retry.cap;
+
+        this.logger?.info(
+          {
+            attemptNumber: input.attemptNumber,
+            cancelReason,
+            cancelRequested,
+            classification: effectiveOutcome.classification,
+            isContinuation: input.isContinuation,
+            issueNumber: input.issue.number,
+            kind: effectiveOutcome.kind,
+            project: input.project.name,
+            runId: input.runId,
+            state: outcomeState,
+            terminalReason: effectiveOutcome.reason,
+            willRetry,
+            workflowTerminalLabel: workflowOutcome.terminalLabel
+          },
+          "symphonika run terminated"
+        );
+
+        // The raw-FSM walk is "continuing" when applyWorkflowOutcome either
+        // advanced into a non-terminal next state or parked into a wait/merge_pr
+        // action. In both cases the per-state ClassifiedTerminal may legitimately
+        // be `failed` (e.g. a planning step that exited provider_success=true
+        // without committing → no_workspace_changes) while the workflow as a
+        // whole is not failing. applyTerminalLabels uses this to suppress
+        // `sym:failed`, which subsequent successful states would otherwise leave
+        // on the issue forever.
+        const fsmContinuing =
+          isRawFsm &&
+          (workflowOutcome.advancedToState !== null ||
+            workflowOutcome.parkAsWait === true);
+        const labelInput: ApplyLabelsInput = {
+          fsmContinuing,
+          issueNumber: input.issue.number,
+          outcome: effectiveOutcome,
+          repository: input.repository,
+          willRetry
+        };
+        if (cancelReason !== undefined) {
+          labelInput.cancelReason = cancelReason;
+        }
+        await this.applyTerminalLabels(labelInput);
+
+        // scheduleNext also handles transient throws (kind=failed/transient with retry budget).
+        // It is a no-op for cancelled, deterministic, and input_required outcomes.
+        try {
+          await this.scheduleNext({
+            ...(input.extraInstructions === undefined
+              ? {}
+              : { extraInstructions: input.extraInstructions }),
+            issue: input.issue,
+            outcome: effectiveOutcome,
+            project: input.project,
+            providerCommand: input.providerCommand,
+            providerName: input.providerName,
+            repository: input.repository,
+            respectsIssueLabels,
+            runId: input.runId,
+            runtimeAttemptNumber: input.attemptNumber,
+            willRetry,
+            stateAdvance:
+              isRawFsm &&
+              workflowOutcome.advancedToState !== null &&
+              workflowOutcome.parkAsWait !== true
+                ? {
+                    toStateId: workflowOutcome.advancedToState
+                  }
+                : null,
+            waitPark:
+              isRawFsm &&
+              workflowOutcome.parkAsWait === true &&
+              workflowOutcome.waitingRunId !== undefined
+                ? { waitingRunId: workflowOutcome.waitingRunId }
+                : null,
+            suppressContinuation
+          });
+        } catch (scheduleError) {
+          this.logger?.error(
+            { err: scheduleError, runId: input.runId },
+            "symphonika scheduleNext failed"
+          );
+        }
       } // end if (!parkedAsWaiting)
     }
 
     if (caughtError !== undefined && !preservedWatchdogTerminal) {
       throw caughtError instanceof Error
         ? caughtError
-        : new Error(typeof caughtError === "string" ? caughtError : "unknown error");
+        : new Error(
+            typeof caughtError === "string" ? caughtError : "unknown error"
+          );
     }
   }
 
@@ -2542,7 +2554,11 @@ export class RunController {
         stateId: input.currentState.id,
         transitionReason: decision.reason
       });
-      return { advancedToState: null, advancedToTerminal: false, blocked: true };
+      return {
+        advancedToState: null,
+        advancedToTerminal: false,
+        blocked: true
+      };
     }
 
     if (decision.kind === "terminate") {
@@ -2839,7 +2855,10 @@ export class RunController {
     // branch so the retry can fire (failed && willRetry).
     willRetry: boolean;
   }): Promise<void> {
-    if (input.outcome.kind === "cancelled" || input.outcome.kind === "input_required") {
+    if (
+      input.outcome.kind === "cancelled" ||
+      input.outcome.kind === "input_required"
+    ) {
       return;
     }
 
@@ -3149,7 +3168,9 @@ function renderReviewFollowupInstructions(
   ];
 
   if (review.unresolvedThreads.length === 0) {
-    lines.push("- GitHub reported requested changes but did not expose unresolved review threads.");
+    lines.push(
+      "- GitHub reported requested changes but did not expose unresolved review threads."
+    );
     return `${lines.join("\n")}\n`;
   }
 
@@ -3165,7 +3186,9 @@ function renderReviewFollowupInstructions(
       const author = comment.author ?? "unknown";
       const createdAt = comment.createdAt ?? "unknown time";
       const url = comment.url ?? "";
-      lines.push(`- ${author} at ${createdAt}${url.length === 0 ? "" : ` (${url})`}:`);
+      lines.push(
+        `- ${author} at ${createdAt}${url.length === 0 ? "" : ` (${url})`}:`
+      );
       lines.push(indentReviewBody(comment.body ?? ""));
     }
     lines.push("");
@@ -3306,7 +3329,9 @@ function priorityForLabels(
     const priority = project.priority.labels[label];
     return priority === undefined ? [] : [priority];
   });
-  return priorities.length === 0 ? project.priority.default : Math.min(...priorities);
+  return priorities.length === 0
+    ? project.priority.default
+    : Math.min(...priorities);
 }
 
 function compareCandidateIssues(
@@ -3333,7 +3358,10 @@ function signalsFromTerminal(
   if (terminal.kind === "success") {
     return { branch_ahead_of_base: true, provider_success: true };
   }
-  if (terminal.kind === "failed" && terminal.reason === "no_workspace_changes") {
+  if (
+    terminal.kind === "failed" &&
+    terminal.reason === "no_workspace_changes"
+  ) {
     return { branch_ahead_of_base: false, provider_success: true };
   }
   return { branch_ahead_of_base: false, provider_success: false };

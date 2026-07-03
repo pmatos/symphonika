@@ -23,12 +23,7 @@ import type {
 } from "./types.js";
 
 type WorkflowTemplateInputType =
-  | "boolean"
-  | "label"
-  | "number"
-  | "path"
-  | "provider"
-  | "string";
+  "boolean" | "label" | "number" | "path" | "provider" | "string";
 
 type WorkflowTemplateScalar = boolean | number | string;
 
@@ -64,8 +59,7 @@ type WorkflowTemplateUseExpansion = {
 };
 
 type ResolvedWorkflowFormat =
-  | { kind: "markdown" | "raw_fsm" }
-  | { error: string; kind: "error" };
+  { kind: "markdown" | "raw_fsm" } | { error: string; kind: "error" };
 
 export type ExpandedWorkflowLoadResult = {
   errors: string[];
@@ -155,7 +149,9 @@ export async function loadProjectWorkflow(input: {
     contents = await readFile(configPath, "utf8");
   } catch (error) {
     return {
-      errors: [`service config not found at ${configPath}: ${errorMessage(error)}`],
+      errors: [
+        `service config not found at ${configPath}: ${errorMessage(error)}`
+      ],
       projectName: input.projectName ?? null,
       workflow: null,
       workflowPath: null
@@ -183,8 +179,17 @@ export async function loadProjectWorkflow(input: {
     };
   }
 
-  const projects = projectWorkflowReferences(parsed.projects, configPath, errors);
-  const selected = selectProjectWorkflow(projects, input.projectName, configPath, errors);
+  const projects = projectWorkflowReferences(
+    parsed.projects,
+    configPath,
+    errors
+  );
+  const selected = selectProjectWorkflow(
+    projects,
+    input.projectName,
+    configPath,
+    errors
+  );
   if (selected === undefined) {
     return {
       errors,
@@ -194,7 +199,10 @@ export async function loadProjectWorkflow(input: {
     };
   }
 
-  const workflowPath = path.resolve(path.dirname(configPath), selected.workflowPath);
+  const workflowPath = path.resolve(
+    path.dirname(configPath),
+    selected.workflowPath
+  );
   let result: ExpandedWorkflowLoadResult;
   try {
     result = await loadExpandedWorkflow(workflowPath, selected.workflowFormat);
@@ -235,7 +243,9 @@ export function explainWorkflow(workflow: ExpandedWorkflow): string {
       lines.push(`    action: ${formatWorkflowAction(state.action)}`);
     }
     if (Object.keys(state.completeWhen).length > 0) {
-      lines.push(`    complete_when: ${formatPredicateMap(state.completeWhen)}`);
+      lines.push(
+        `    complete_when: ${formatPredicateMap(state.completeWhen)}`
+      );
     }
     if (state.transitions.length > 0) {
       lines.push("    transitions:");
@@ -270,7 +280,11 @@ export async function expandWorkflowDefinition(
 
   if (resolved.kind === "raw_fsm") {
     const errors: string[] = [];
-    const explicit = parseExplicitWorkflowDefinition(contents, workflowPath, errors);
+    const explicit = parseExplicitWorkflowDefinition(
+      contents,
+      workflowPath,
+      errors
+    );
     if (explicit === undefined) {
       return {
         errors,
@@ -346,19 +360,25 @@ async function expandRawStateMachineWorkflow(
 ): Promise<ExpandedWorkflowLoadResult> {
   const name = stringProperty(rawWorkflow, "name");
   if (name === undefined) {
-    errors.push(`workflow definition at ${workflowPath} must define workflow.name`);
+    errors.push(
+      `workflow definition at ${workflowPath} must define workflow.name`
+    );
   }
 
   const initial = stringProperty(rawWorkflow, "initial");
   if (initial === undefined) {
-    errors.push(`workflow definition at ${workflowPath} must define workflow.initial`);
+    errors.push(
+      `workflow definition at ${workflowPath} must define workflow.initial`
+    );
   }
 
   const rawStates = recordProperty(rawWorkflow, "states");
   const rawUse = rawWorkflow.use;
   const uses = parseWorkflowTemplateUses(rawUse, workflowPath, errors);
   if (rawStates === undefined && uses.length === 0) {
-    errors.push(`workflow definition at ${workflowPath} must define workflow.states`);
+    errors.push(
+      `workflow definition at ${workflowPath} must define workflow.states`
+    );
   }
 
   const states: ExpandedWorkflowState[] = [];
@@ -408,9 +428,13 @@ async function expandRawStateMachineWorkflow(
     }
   }
 
-  const templateFiles = uniqueStrings(loadedUses.map((loaded) => loaded.template.path));
+  const templateFiles = uniqueStrings(
+    loadedUses.map((loaded) => loaded.template.path)
+  );
   const expandedInitial =
-    initial === undefined ? undefined : templateEntryTargets.get(initial) ?? initial;
+    initial === undefined
+      ? undefined
+      : (templateEntryTargets.get(initial) ?? initial);
   if (expandedInitial !== undefined && !stateIds.has(expandedInitial)) {
     errors.push(
       `workflow definition at ${workflowPath} initial state ${initial} is not declared`
@@ -424,7 +448,10 @@ async function expandRawStateMachineWorkflow(
       }));
     }
     for (const transition of state.transitions) {
-      if (!stateIds.has(transition.to) && !unresolvedTemplateExitTargets.has(transition.to)) {
+      if (
+        !stateIds.has(transition.to) &&
+        !unresolvedTemplateExitTargets.has(transition.to)
+      ) {
         errors.push(
           `workflow state ${state.id} at ${workflowPath} transitions to unknown state ${transition.to}`
         );
@@ -487,7 +514,9 @@ function parseWorkflowTemplateUses(
     return [];
   }
   if (!isRecord(rawUse)) {
-    errors.push(`workflow definition at ${workflowPath} workflow.use must be a mapping`);
+    errors.push(
+      `workflow definition at ${workflowPath} workflow.use must be a mapping`
+    );
     return [];
   }
 
@@ -649,17 +678,23 @@ function parseWorkflowTemplateInputs(
     return {};
   }
   if (!isRecord(rawInputs)) {
-    errors.push(`workflow template at ${templatePath} inputs must be a mapping`);
+    errors.push(
+      `workflow template at ${templatePath} inputs must be a mapping`
+    );
     return {};
   }
   const inputs: Record<string, WorkflowTemplateInput> = {};
   for (const [name, rawInput] of Object.entries(rawInputs)) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
-      errors.push(`workflow template input ${name} at ${templatePath} must be an identifier`);
+      errors.push(
+        `workflow template input ${name} at ${templatePath} must be an identifier`
+      );
       continue;
     }
     if (!isRecord(rawInput)) {
-      errors.push(`workflow template input ${name} at ${templatePath} must be a mapping`);
+      errors.push(
+        `workflow template input ${name} at ${templatePath} must be a mapping`
+      );
       continue;
     }
     const type = stringProperty(rawInput, "type");
@@ -705,7 +740,9 @@ function expandWorkflowTemplateUse(
     }
   }
   if (!Object.hasOwn(template.states, template.entry)) {
-    errors.push(`workflow template at ${template.path} entry state ${template.entry} is not declared`);
+    errors.push(
+      `workflow template at ${template.path} entry state ${template.entry} is not declared`
+    );
   }
 
   for (const [stateId, rawState] of Object.entries(template.states)) {
@@ -724,7 +761,12 @@ function expandWorkflowTemplateUse(
       template.path,
       errors
     );
-    const state = parseWorkflowState(expandedStateId, interpolated, template.path, errors);
+    const state = parseWorkflowState(
+      expandedStateId,
+      interpolated,
+      template.path,
+      errors
+    );
     state.transitions = state.transitions.map((transition) => ({
       ...transition,
       to: rewriteTemplateTransitionTarget(
@@ -757,7 +799,9 @@ function templateExitStateMap(
     }
     const rawState = template.states[targetState];
     if (!isRecord(rawState)) {
-      errors.push(`workflow template state ${targetState} at ${template.path} must be a mapping`);
+      errors.push(
+        `workflow template state ${targetState} at ${template.path} must be a mapping`
+      );
       continue;
     }
     const existingExitName = exitStates.get(targetState);
@@ -847,7 +891,9 @@ function parseWorkflowState(
   }
 
   if (!isRecord(rawState)) {
-    errors.push(`workflow state ${stateId} at ${workflowPath} must be a mapping`);
+    errors.push(
+      `workflow state ${stateId} at ${workflowPath} must be a mapping`
+    );
     return {
       completeWhen: {},
       id: stateId,
@@ -855,7 +901,12 @@ function parseWorkflowState(
     };
   }
 
-  const action = parseWorkflowAction(stateId, rawState.action, workflowPath, errors);
+  const action = parseWorkflowAction(
+    stateId,
+    rawState.action,
+    workflowPath,
+    errors
+  );
   const completeWhen = parsePredicateMap(
     stateId,
     "complete_when",
@@ -921,12 +972,17 @@ function parseWorkflowAction(
     return undefined;
   }
   if (!isRecord(rawAction)) {
-    errors.push(`workflow state ${stateId} at ${workflowPath} action must be a mapping`);
+    errors.push(
+      `workflow state ${stateId} at ${workflowPath} action must be a mapping`
+    );
     return undefined;
   }
 
   const rawKind = stringProperty(rawAction, "kind");
-  if (rawKind === undefined || !actionKinds.has(rawKind as WorkflowActionKind)) {
+  if (
+    rawKind === undefined ||
+    !actionKinds.has(rawKind as WorkflowActionKind)
+  ) {
     errors.push(
       `workflow state ${stateId} at ${workflowPath} action.kind must be one of ${[...actionKinds].join(", ")}`
     );
@@ -1050,7 +1106,9 @@ function parsePredicateMap(
     return {};
   }
   if (!isRecord(rawValue)) {
-    errors.push(`workflow state ${stateId} at ${workflowPath} ${field} must be a mapping`);
+    errors.push(
+      `workflow state ${stateId} at ${workflowPath} ${field} must be a mapping`
+    );
     return {};
   }
 
@@ -1270,7 +1328,12 @@ function interpolateWorkflowTemplateValue(
   errors: string[]
 ): unknown {
   if (typeof value === "string") {
-    return interpolateWorkflowTemplateString(value, inputValues, templatePath, errors);
+    return interpolateWorkflowTemplateString(
+      value,
+      inputValues,
+      templatePath,
+      errors
+    );
   }
   if (Array.isArray(value)) {
     return value.map((item) =>
@@ -1301,7 +1364,12 @@ function interpolateWorkflowTemplateString(
   const exact = /^{{\s*([^{}]+?)\s*}}$/.exec(value);
   if (exact !== null) {
     const expression = exact[1]?.trim() ?? "";
-    const input = workflowTemplateInputValue(expression, inputValues, templatePath, errors);
+    const input = workflowTemplateInputValue(
+      expression,
+      inputValues,
+      templatePath,
+      errors
+    );
     return input ?? value;
   }
 
@@ -1323,7 +1391,9 @@ function workflowTemplateInputValue(
   errors: string[]
 ): WorkflowTemplateScalar | undefined {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(expression)) {
-    errors.push(`workflow template at ${templatePath} has unsupported tag {{${expression}}}`);
+    errors.push(
+      `workflow template at ${templatePath} has unsupported tag {{${expression}}}`
+    );
     return undefined;
   }
   if (!Object.hasOwn(inputValues, expression)) {

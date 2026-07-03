@@ -7,9 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { startDaemon } from "../src/daemon.js";
 import type { LifecyclePolicy } from "../src/lifecycle/active-runs.js";
 import type { AgentProvider, ProviderEvent } from "../src/provider.js";
-import type {
-  PreparedIssueWorkspace
-} from "../src/workspace.js";
+import type { PreparedIssueWorkspace } from "../src/workspace.js";
 import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
@@ -22,7 +20,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -172,16 +172,17 @@ describe("dispatch project disable", () => {
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
       // continuation refresh always says still eligible (so we know dispatch is the gate)
-      getIssue: vi.fn().mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
+      getIssue: vi
+        .fn()
+        .mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
       listOpenIssues: vi
         .fn()
         .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
         .mockResolvedValue([]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     const daemon = await startDaemon({
@@ -216,7 +217,9 @@ describe("dispatch project disable", () => {
       // Wait beyond continuation delay
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const status = (await fetch(`${daemon.url}/api/status`).then((r) => r.json())) as {
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as {
         runs: Array<Record<string, unknown>>;
       };
       // No continuation rows (project is disabled, so dequeue dropped them)
@@ -259,9 +262,8 @@ describe("dispatch project disable", () => {
         .mockResolvedValue([{ ...baseIssue, labels: ["agent-ready"] }]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(preparedWorkspaceFixture(root))
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(preparedWorkspaceFixture(root))
     );
 
     const daemon = await startDaemon({
@@ -278,7 +280,9 @@ describe("dispatch project disable", () => {
     try {
       await new Promise((resolve) => setTimeout(resolve, 200));
 
-      const status = (await fetch(`${daemon.url}/api/status`).then((r) => r.json())) as {
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as {
         runs: Array<Record<string, unknown>>;
       };
       expect(status.runs).toHaveLength(0);
@@ -311,16 +315,17 @@ describe("dispatch project disable", () => {
 
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
-      getIssue: vi.fn().mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
+      getIssue: vi
+        .fn()
+        .mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
       listOpenIssues: vi
         .fn()
         .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
         .mockResolvedValue([]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const prepareIssueWorkspace = vi.fn(
-      (): Promise<PreparedIssueWorkspace> =>
-        Promise.resolve(prepared)
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
     );
 
     const daemon = await startDaemon({
@@ -349,7 +354,9 @@ describe("dispatch project disable", () => {
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const status = (await fetch(`${daemon.url}/api/status`).then((r) => r.json())) as {
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as {
         runs: Array<Record<string, unknown>>;
       };
       const continuations = status.runs.filter(

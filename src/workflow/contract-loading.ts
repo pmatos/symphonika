@@ -45,7 +45,9 @@ export async function validateWorkflowContract(
   try {
     contents = await readFile(workflowPath, "utf8");
   } catch (error) {
-    return [`workflow contract not found at ${workflowPath}: ${errorMessage(error)}`];
+    return [
+      `workflow contract not found at ${workflowPath}: ${errorMessage(error)}`
+    ];
   }
 
   const workflow = parseWorkflowContract(contents, workflowPath);
@@ -81,7 +83,9 @@ export function parseWorkflowContract(
     return {
       body: "",
       contentHash: contentHash(contents),
-      errors: [`workflow front matter at ${workflowPath} is missing a closing ---`],
+      errors: [
+        `workflow front matter at ${workflowPath} is missing a closing ---`
+      ],
       path: workflowPath
     };
   }
@@ -128,7 +132,9 @@ export function projectWorkflowReferences(
     }
     const name = stringProperty(rawProject, "name");
     if (name === undefined) {
-      errors.push(`projects.${index}.name in ${configPath} must be a non-empty string`);
+      errors.push(
+        `projects.${index}.name in ${configPath} must be a non-empty string`
+      );
       continue;
     }
     const reference = parseWorkflowReference(
@@ -149,7 +155,7 @@ export function projectWorkflowReferences(
   return projects;
 }
 
-export function parseWorkflowReference(
+function parseWorkflowReference(
   rawWorkflow: unknown,
   fieldLabel: string,
   configPath: string,
@@ -166,7 +172,9 @@ export function parseWorkflowReference(
   if (isRecord(rawWorkflow)) {
     const pathValue = stringProperty(rawWorkflow, "path");
     if (pathValue === undefined) {
-      errors.push(`${fieldLabel}.path in ${configPath} must be a non-empty path`);
+      errors.push(
+        `${fieldLabel}.path in ${configPath} must be a non-empty path`
+      );
       return undefined;
     }
     const formatRaw = rawWorkflow.format;
@@ -187,7 +195,9 @@ export function parseWorkflowReference(
     }
     return { format, path: pathValue };
   }
-  errors.push(`${fieldLabel} in ${configPath} must be a non-empty path or mapping`);
+  errors.push(
+    `${fieldLabel} in ${configPath} must be a non-empty path or mapping`
+  );
   return undefined;
 }
 
@@ -198,7 +208,9 @@ export function selectProjectWorkflow(
   errors: string[]
 ): ProjectWorkflowReference | undefined {
   if (requestedProject !== undefined) {
-    const selected = projects.find((project) => project.name === requestedProject);
+    const selected = projects.find(
+      (project) => project.name === requestedProject
+    );
     if (selected === undefined) {
       errors.push(
         `project ${requestedProject} is not defined in service config ${configPath}`
@@ -212,7 +224,9 @@ export function selectProjectWorkflow(
   }
 
   if (projects.length === 0) {
-    errors.push(`service config ${configPath} does not contain a project workflow`);
+    errors.push(
+      `service config ${configPath} does not contain a project workflow`
+    );
   } else {
     errors.push(
       `service config ${configPath} has ${projects.length} projects; pass --project`

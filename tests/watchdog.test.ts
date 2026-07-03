@@ -18,7 +18,11 @@ import {
   sampleWorkspaceMtimeMax,
   watchdogProgressObserved
 } from "../src/lifecycle/watchdog.js";
-import { openRunStore, type RunStore, type WatchdogSample } from "../src/run-store.js";
+import {
+  openRunStore,
+  type RunStore,
+  type WatchdogSample
+} from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 const logger = pino({ enabled: false });
@@ -31,7 +35,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -236,12 +242,47 @@ describe("reconcileWatchdog", () => {
       store.updateRunEvidence("run-idle", {
         branchName: "sym/symphonika/198-watchdog",
         branchRef: "refs/heads/sym/symphonika/198-watchdog",
-        issueSnapshotPath: path.join(root, ".symphonika", "logs", "runs", "run-idle", "issue.json"),
-        metadataPath: path.join(root, ".symphonika", "logs", "runs", "run-idle", "metadata.json"),
+        issueSnapshotPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-idle",
+          "issue.json"
+        ),
+        metadataPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-idle",
+          "metadata.json"
+        ),
         normalizedLogPath: path.join(root, "provider.normalized.jsonl"),
-        promptPath: path.join(root, ".symphonika", "logs", "runs", "run-idle", "prompt.md"),
-        rawLogPath: path.join(root, ".symphonika", "logs", "runs", "run-idle", "raw.jsonl"),
-        workflowGraphPath: path.join(root, ".symphonika", "logs", "runs", "run-idle", "workflow.json"),
+        promptPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-idle",
+          "prompt.md"
+        ),
+        rawLogPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-idle",
+          "raw.jsonl"
+        ),
+        workflowGraphPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-idle",
+          "workflow.json"
+        ),
         workspacePath
       });
       store.updateRunState("run-idle", "running");
@@ -297,8 +338,10 @@ describe("reconcileWatchdog", () => {
     const workspacePath = path.join(root, "workspace");
     await mkdir(workspacePath, { recursive: true });
     const normalizedLogPath = path.join(root, "provider.normalized.jsonl");
-    const oldToolCall = JSON.stringify({ toolName: "bash", type: "tool_call" }) + "\n";
-    const newRateLimit = JSON.stringify({ rateLimits: {}, type: "rate_limit_updated" }) + "\n";
+    const oldToolCall =
+      JSON.stringify({ toolName: "bash", type: "tool_call" }) + "\n";
+    const newRateLimit =
+      JSON.stringify({ rateLimits: {}, type: "rate_limit_updated" }) + "\n";
     await writeFile(normalizedLogPath, oldToolCall + newRateLimit);
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     try {
@@ -306,12 +349,47 @@ describe("reconcileWatchdog", () => {
       store.updateRunEvidence("run-forward", {
         branchName: "sym/symphonika/198-watchdog",
         branchRef: "refs/heads/sym/symphonika/198-watchdog",
-        issueSnapshotPath: path.join(root, ".symphonika", "logs", "runs", "run-forward", "issue.json"),
-        metadataPath: path.join(root, ".symphonika", "logs", "runs", "run-forward", "metadata.json"),
+        issueSnapshotPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-forward",
+          "issue.json"
+        ),
+        metadataPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-forward",
+          "metadata.json"
+        ),
         normalizedLogPath,
-        promptPath: path.join(root, ".symphonika", "logs", "runs", "run-forward", "prompt.md"),
-        rawLogPath: path.join(root, ".symphonika", "logs", "runs", "run-forward", "raw.jsonl"),
-        workflowGraphPath: path.join(root, ".symphonika", "logs", "runs", "run-forward", "workflow.json"),
+        promptPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-forward",
+          "prompt.md"
+        ),
+        rawLogPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-forward",
+          "raw.jsonl"
+        ),
+        workflowGraphPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-forward",
+          "workflow.json"
+        ),
         workspacePath
       });
       store.updateRunState("run-forward", "running");
@@ -372,12 +450,47 @@ describe("reconcileWatchdog", () => {
       first.updateRunEvidence("run-restarted", {
         branchName: "sym/symphonika/198-watchdog",
         branchRef: "refs/heads/sym/symphonika/198-watchdog",
-        issueSnapshotPath: path.join(root, ".symphonika", "logs", "runs", "run-restarted", "issue.json"),
-        metadataPath: path.join(root, ".symphonika", "logs", "runs", "run-restarted", "metadata.json"),
+        issueSnapshotPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-restarted",
+          "issue.json"
+        ),
+        metadataPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-restarted",
+          "metadata.json"
+        ),
         normalizedLogPath: path.join(root, "provider.normalized.jsonl"),
-        promptPath: path.join(root, ".symphonika", "logs", "runs", "run-restarted", "prompt.md"),
-        rawLogPath: path.join(root, ".symphonika", "logs", "runs", "run-restarted", "raw.jsonl"),
-        workflowGraphPath: path.join(root, ".symphonika", "logs", "runs", "run-restarted", "workflow.json"),
+        promptPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-restarted",
+          "prompt.md"
+        ),
+        rawLogPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-restarted",
+          "raw.jsonl"
+        ),
+        workflowGraphPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-restarted",
+          "workflow.json"
+        ),
         workspacePath
       });
       first.updateRunState("run-restarted", "running");
@@ -442,18 +555,54 @@ describe("reconcileWatchdog", () => {
     // attempt's offset would start mid-line and skip this event entirely.
     await writeFile(
       attempt2,
-      JSON.stringify({ toolName: "bash", turnId: "t1", type: "tool_call" }) + "\n"
+      JSON.stringify({ toolName: "bash", turnId: "t1", type: "tool_call" }) +
+        "\n"
     );
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     const evidence = (normalizedLogPath: string) => ({
       branchName: "sym/symphonika/198-watchdog",
       branchRef: "refs/heads/sym/symphonika/198-watchdog",
-      issueSnapshotPath: path.join(root, ".symphonika", "logs", "runs", "run-retry", "issue.json"),
-      metadataPath: path.join(root, ".symphonika", "logs", "runs", "run-retry", "metadata.json"),
+      issueSnapshotPath: path.join(
+        root,
+        ".symphonika",
+        "logs",
+        "runs",
+        "run-retry",
+        "issue.json"
+      ),
+      metadataPath: path.join(
+        root,
+        ".symphonika",
+        "logs",
+        "runs",
+        "run-retry",
+        "metadata.json"
+      ),
       normalizedLogPath,
-      promptPath: path.join(root, ".symphonika", "logs", "runs", "run-retry", "prompt.md"),
-      rawLogPath: path.join(root, ".symphonika", "logs", "runs", "run-retry", "raw.jsonl"),
-      workflowGraphPath: path.join(root, ".symphonika", "logs", "runs", "run-retry", "workflow.json"),
+      promptPath: path.join(
+        root,
+        ".symphonika",
+        "logs",
+        "runs",
+        "run-retry",
+        "prompt.md"
+      ),
+      rawLogPath: path.join(
+        root,
+        ".symphonika",
+        "logs",
+        "runs",
+        "run-retry",
+        "raw.jsonl"
+      ),
+      workflowGraphPath: path.join(
+        root,
+        ".symphonika",
+        "logs",
+        "runs",
+        "run-retry",
+        "workflow.json"
+      ),
       workspacePath
     });
     const config = {
@@ -515,7 +664,10 @@ describe("reconcileWatchdog", () => {
     // high-water mark; without a baseline reset, Math.max keeps the old total.
     await writeFile(
       attempt2,
-      JSON.stringify({ tokenUsage: { outputTokens: 800 }, type: "usage_updated" }) + "\n"
+      JSON.stringify({
+        tokenUsage: { outputTokens: 800 },
+        type: "usage_updated"
+      }) + "\n"
     );
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     try {
@@ -523,12 +675,47 @@ describe("reconcileWatchdog", () => {
       store.updateRunEvidence("run-retry-tokens", {
         branchName: "sym/symphonika/198-watchdog",
         branchRef: "refs/heads/sym/symphonika/198-watchdog",
-        issueSnapshotPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-tokens", "issue.json"),
-        metadataPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-tokens", "metadata.json"),
+        issueSnapshotPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-retry-tokens",
+          "issue.json"
+        ),
+        metadataPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-retry-tokens",
+          "metadata.json"
+        ),
         normalizedLogPath: attempt2,
-        promptPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-tokens", "prompt.md"),
-        rawLogPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-tokens", "raw.jsonl"),
-        workflowGraphPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-tokens", "workflow.json"),
+        promptPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-retry-tokens",
+          "prompt.md"
+        ),
+        rawLogPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-retry-tokens",
+          "raw.jsonl"
+        ),
+        workflowGraphPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-retry-tokens",
+          "workflow.json"
+        ),
         workspacePath
       });
       store.updateRunState("run-retry-tokens", "running");
@@ -555,7 +742,12 @@ describe("reconcileWatchdog", () => {
 
       await reconcileWatchdog({
         activeRuns,
-        config: { enabled: true, graceMinutes: 30, mtimeIgnore: [], sampleIntervalSeconds: 60 },
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          mtimeIgnore: [],
+          sampleIntervalSeconds: 60
+        },
         logger,
         now: () => new Date("2026-05-22T10:00:00.000Z"),
         runStore: store
@@ -583,12 +775,47 @@ describe("reconcileWatchdog", () => {
       store.updateRunEvidence("run-retry-idle", {
         branchName: "sym/symphonika/198-watchdog",
         branchRef: "refs/heads/sym/symphonika/198-watchdog",
-        issueSnapshotPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-idle", "issue.json"),
-        metadataPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-idle", "metadata.json"),
+        issueSnapshotPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-retry-idle",
+          "issue.json"
+        ),
+        metadataPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-retry-idle",
+          "metadata.json"
+        ),
         normalizedLogPath: attempt2,
-        promptPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-idle", "prompt.md"),
-        rawLogPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-idle", "raw.jsonl"),
-        workflowGraphPath: path.join(root, ".symphonika", "logs", "runs", "run-retry-idle", "workflow.json"),
+        promptPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-retry-idle",
+          "prompt.md"
+        ),
+        rawLogPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-retry-idle",
+          "raw.jsonl"
+        ),
+        workflowGraphPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-retry-idle",
+          "workflow.json"
+        ),
         workspacePath
       });
       store.updateRunState("run-retry-idle", "running");
@@ -616,7 +843,12 @@ describe("reconcileWatchdog", () => {
 
       await reconcileWatchdog({
         activeRuns,
-        config: { enabled: true, graceMinutes: 30, mtimeIgnore: [], sampleIntervalSeconds: 60 },
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          mtimeIgnore: [],
+          sampleIntervalSeconds: 60
+        },
         logger,
         now: () => new Date("2026-05-22T10:00:00.000Z"),
         runStore: store
@@ -649,12 +881,47 @@ describe("reconcileWatchdog", () => {
       store.updateRunEvidence("run-streaming", {
         branchName: "sym/symphonika/198-watchdog",
         branchRef: "refs/heads/sym/symphonika/198-watchdog",
-        issueSnapshotPath: path.join(root, ".symphonika", "logs", "runs", "run-streaming", "issue.json"),
-        metadataPath: path.join(root, ".symphonika", "logs", "runs", "run-streaming", "metadata.json"),
+        issueSnapshotPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-streaming",
+          "issue.json"
+        ),
+        metadataPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-streaming",
+          "metadata.json"
+        ),
         normalizedLogPath,
-        promptPath: path.join(root, ".symphonika", "logs", "runs", "run-streaming", "prompt.md"),
-        rawLogPath: path.join(root, ".symphonika", "logs", "runs", "run-streaming", "raw.jsonl"),
-        workflowGraphPath: path.join(root, ".symphonika", "logs", "runs", "run-streaming", "workflow.json"),
+        promptPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-streaming",
+          "prompt.md"
+        ),
+        rawLogPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-streaming",
+          "raw.jsonl"
+        ),
+        workflowGraphPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-streaming",
+          "workflow.json"
+        ),
         workspacePath
       });
       store.updateRunState("run-streaming", "running");
@@ -682,7 +949,12 @@ describe("reconcileWatchdog", () => {
 
       await reconcileWatchdog({
         activeRuns,
-        config: { enabled: true, graceMinutes: 30, mtimeIgnore: [], sampleIntervalSeconds: 60 },
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          mtimeIgnore: [],
+          sampleIntervalSeconds: 60
+        },
         logger,
         now: () => new Date("2026-05-22T10:00:00.000Z"),
         runStore: store
@@ -720,12 +992,47 @@ describe("reconcileWatchdog", () => {
       store.updateRunEvidence("run-ignored-log", {
         branchName: "sym/symphonika/198-watchdog",
         branchRef: "refs/heads/sym/symphonika/198-watchdog",
-        issueSnapshotPath: path.join(root, ".symphonika", "logs", "runs", "run-ignored-log", "issue.json"),
-        metadataPath: path.join(root, ".symphonika", "logs", "runs", "run-ignored-log", "metadata.json"),
+        issueSnapshotPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-ignored-log",
+          "issue.json"
+        ),
+        metadataPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-ignored-log",
+          "metadata.json"
+        ),
         normalizedLogPath,
-        promptPath: path.join(root, ".symphonika", "logs", "runs", "run-ignored-log", "prompt.md"),
-        rawLogPath: path.join(root, ".symphonika", "logs", "runs", "run-ignored-log", "raw.jsonl"),
-        workflowGraphPath: path.join(root, ".symphonika", "logs", "runs", "run-ignored-log", "workflow.json"),
+        promptPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-ignored-log",
+          "prompt.md"
+        ),
+        rawLogPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-ignored-log",
+          "raw.jsonl"
+        ),
+        workflowGraphPath: path.join(
+          root,
+          ".symphonika",
+          "logs",
+          "runs",
+          "run-ignored-log",
+          "workflow.json"
+        ),
         workspacePath
       });
       store.updateRunState("run-ignored-log", "running");

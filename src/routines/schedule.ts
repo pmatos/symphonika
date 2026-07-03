@@ -1,6 +1,6 @@
 import type { RoutineState } from "./types.js";
 
-export type RoutineOneShotSchedule = {
+type RoutineOneShotSchedule = {
   at: string;
 };
 

@@ -1,5 +1,13 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,7 +24,10 @@ import type {
 import type { SmokeOptions, SmokeReport } from "../src/smoke.js";
 
 const tempRoots: string[] = [];
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  ".."
+);
 const execFile = promisify(execFileCallback);
 
 async function makeTempRoot(): Promise<string> {
@@ -35,9 +46,9 @@ function restoreEnv(name: string, value: string | undefined): void {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -377,7 +388,9 @@ describe("CLI", () => {
 
       expect(process.exitCode).toBe(1);
       expect(output.stderr).toContain("smoke failed");
-      expect(output.stderr).toContain("run run-failed terminated in state failed");
+      expect(output.stderr).toContain(
+        "run run-failed terminated in state failed"
+      );
       expect(output.stderr).toContain("terminalReason=turn_failed");
       expect(output.stderr).toContain("provider_normalized");
     } finally {
@@ -424,8 +437,7 @@ describe("CLI", () => {
   it("clear-stale rejects non-numeric issue arguments", async () => {
     const program = buildCli({
       registerSignalHandlers: false,
-      runClearStale: () =>
-        Promise.reject(new Error("should not be invoked"))
+      runClearStale: () => Promise.reject(new Error("should not be invoked"))
     });
     program.exitOverride();
     for (const command of program.commands) {
@@ -580,7 +592,9 @@ describe("CLI", () => {
       expect(config).toContain("owner: pmatos");
       expect(config).toContain("repo: s11");
       expect(config).toContain("remote: https://github.com/pmatos/s11.git");
-      expect(config).toContain(`root: ${path.join(stateRoot, "workspaces", "s11")}`);
+      expect(config).toContain(
+        `root: ${path.join(stateRoot, "workspaces", "s11")}`
+      );
       expect(config).toContain(`workflow: ${workflowPath}`);
       expect(workflow).toContain("# Implementing issue #{{issue.number}}");
       expect(output.stdout).toContain("init ok");
@@ -728,7 +742,9 @@ describe("CLI", () => {
 
     expect(output.stderr).toBe("");
     expect(output.stdout).toContain("workflow: issue_to_merge");
-    expect(output.stdout).toContain(`source: ${path.join(root, "workflow.yml")}`);
+    expect(output.stdout).toContain(
+      `source: ${path.join(root, "workflow.yml")}`
+    );
     expect(output.stdout).toContain(`template files: ${templatePath}`);
     expect(output.stdout).toContain("state: build_pr.planning");
     expect(output.stdout).toContain(
@@ -970,7 +986,9 @@ describe("CLI", () => {
     expect(output.stdout).toContain(
       "workflow validate ok: symphonika -> single_agent_workflow"
     );
-    expect(output.stdout).toContain(`source: ${path.join(root, "WORKFLOW.md")}`);
+    expect(output.stdout).toContain(
+      `source: ${path.join(root, "WORKFLOW.md")}`
+    );
     expect(output.stdout).toContain("states: 2");
   });
 
@@ -1050,7 +1068,9 @@ describe("CLI", () => {
     ]);
 
     expect(output.stderr).toBe("");
-    expect(output.stdout).toContain("workflow validate ok: symphonika -> issue_to_merge");
+    expect(output.stdout).toContain(
+      "workflow validate ok: symphonika -> issue_to_merge"
+    );
     expect(output.stdout).toContain(`template files: ${templatePath}`);
     expect(output.stdout).toContain("state: build_pr.planning");
     expect(output.stdout).not.toContain("state: pr_open");
@@ -1097,7 +1117,9 @@ describe("CLI", () => {
 
     expect(output.stderr).toBe("");
     expect(output.stdout).toContain("workflow: single_agent_workflow");
-    expect(output.stdout).toContain(`source: ${path.join(root, "WORKFLOW.md")}`);
+    expect(output.stdout).toContain(
+      `source: ${path.join(root, "WORKFLOW.md")}`
+    );
     expect(output.stdout).toContain("initial: run_agent");
     expect(output.stdout).toContain("state: run_agent");
     expect(output.stdout).toContain("state: done");

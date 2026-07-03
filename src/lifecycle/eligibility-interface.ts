@@ -6,9 +6,7 @@ export type IssueEligibilityQuestion =
     };
 
 export type IssueEligibilityFailure =
-  | "closed_issue"
-  | "label_mismatch"
-  | "operational_label_blocked";
+  "closed_issue" | "label_mismatch" | "operational_label_blocked";
 
 export type IssueEligibilityDecision =
   | { eligible: true; reasons: [] }
@@ -118,28 +116,32 @@ export const ISSUE_ELIGIBILITY_ADR_RULES = [
   {
     adr: "0022",
     question: { kind: "continue_run", scope: "fsm_owned" },
-    ruleLocation: "All continuation questions check issue open/closed state first.",
+    ruleLocation:
+      "All continuation questions check issue open/closed state first.",
     summary:
       "Closed issues cancel active, scheduled, state-advance, and waiting work regardless of label scope."
   },
   {
     adr: "0023",
     question: { kind: "continue_run", scope: "label_controlled" },
-    ruleLocation: "Label-controlled continuation eligibility evaluates labels_all and labels_none.",
+    ruleLocation:
+      "Label-controlled continuation eligibility evaluates labels_all and labels_none.",
     summary:
       "Eligibility loss remains the operator control surface for normal active runs and scheduled retries."
   },
   {
     adr: "0046",
     question: { kind: "continue_run", scope: "fsm_owned" },
-    ruleLocation: "Lifecycle state-advance work asks the FSM-owned continuation question.",
+    ruleLocation:
+      "Lifecycle state-advance work asks the FSM-owned continuation question.",
     summary:
       "State advances skip labels_all and labels_none re-checks while still cancelling on closed issues."
   },
   {
     adr: "0047",
     question: { kind: "continue_run", scope: "fsm_owned" },
-    ruleLocation: "Waiting-row reconciliation asks the same FSM-owned continuation question.",
+    ruleLocation:
+      "Waiting-row reconciliation asks the same FSM-owned continuation question.",
     summary:
       "Wait states inherit state-advance label immunity and remain poll-reconciled instead of dispatch-gated."
   }

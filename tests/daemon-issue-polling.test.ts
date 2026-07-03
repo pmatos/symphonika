@@ -16,9 +16,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -385,9 +385,9 @@ describe("daemon GitHub issue polling", () => {
       const status = (await statusResponse.json()) as {
         candidateIssues: Array<{ issue: { number: number } }>;
       };
-      expect(status.candidateIssues.map((entry) => entry.issue.number)).toEqual([
-        80
-      ]);
+      expect(status.candidateIssues.map((entry) => entry.issue.number)).toEqual(
+        [80]
+      );
     } finally {
       await daemon.stop();
     }
@@ -588,7 +588,9 @@ async function writeValidProject(
   await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
 }
 
-async function writeConfigWithInvalidAndValidProjects(root: string): Promise<void> {
+async function writeConfigWithInvalidAndValidProjects(
+  root: string
+): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(
     path.join(root, "symphonika.yml"),

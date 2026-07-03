@@ -61,9 +61,9 @@ describe("RoutinePromptRenderer", () => {
     expect(routinePrompt.prompt).toContain(
       "Report daily-report for symphonika in /tmp/workspace/routines/daily-report/fire-1 via codex firing fire-1."
     );
-    expect(routinePrompt.prompt.slice(0, routinePrompt.prompt.indexOf("Report"))).toBe(
-      issuePrompt.prompt.slice(0, issuePrompt.prompt.indexOf("Report"))
-    );
+    expect(
+      routinePrompt.prompt.slice(0, routinePrompt.prompt.indexOf("Report"))
+    ).toBe(issuePrompt.prompt.slice(0, issuePrompt.prompt.indexOf("Report")));
   });
 
   it("rejects issue, run, and branch variables with prompt_render_error", () => {

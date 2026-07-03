@@ -25,7 +25,10 @@ export type PreparedRoutineWorkspace = {
 export async function prepareRoutineWorkspace(
   input: PrepareRoutineWorkspaceInput
 ): Promise<PreparedRoutineWorkspace> {
-  const workspaceRoot = path.resolve(input.configDir, input.project.workspace.root);
+  const workspaceRoot = path.resolve(
+    input.configDir,
+    input.project.workspace.root
+  );
   const cachePath = path.join(workspaceRoot, ".cache", "repo.git");
   const workspacePath = path.join(
     workspaceRoot,

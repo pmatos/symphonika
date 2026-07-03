@@ -27,13 +27,11 @@ export type RunState =
   | "stale"
   | "waiting";
 
-export type FailureClassification = "transient" | "deterministic" | "input_required";
+export type FailureClassification =
+  "transient" | "deterministic" | "input_required";
 
 export type CancelReason =
-  | "closed_issue"
-  | "eligibility_loss"
-  | "no_progress"
-  | "operator";
+  "closed_issue" | "eligibility_loss" | "no_progress" | "operator";
 
 export type RunStatus = {
   branchName: string;
@@ -101,7 +99,7 @@ export type PromptMetadata = Record<string, unknown>;
 
 export type PullRequestTrackingState = "closed" | "merged" | "open";
 
-export type ProjectValidationState = "inactive" | "invalid" | "valid";
+type ProjectValidationState = "inactive" | "invalid" | "valid";
 
 export type ProjectState = {
   active: boolean;
@@ -446,10 +444,10 @@ type RoutineFiringRow = {
   workspace_path: string | null;
 };
 
-export const PULL_REQUEST_DISCOVERY_LIMIT = 25;
-export const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
+const PULL_REQUEST_DISCOVERY_LIMIT = 25;
+const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
 export const INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS = 60_000;
-export const INPUT_REQUIRED_LEGACY_TERMINAL_REASON =
+const INPUT_REQUIRED_LEGACY_TERMINAL_REASON =
   "provider requested input (legacy)";
 
 class RoutineAlreadyClaimedError extends Error {
@@ -463,10 +461,7 @@ export class RunStore {
   private readonly database: SqliteDatabase;
   private readonly stateRoot: string;
 
-  constructor(
-    database: SqliteDatabase,
-    options: { stateRoot?: string } = {}
-  ) {
+  constructor(database: SqliteDatabase, options: { stateRoot?: string } = {}) {
     this.database = database;
     this.stateRoot = path.resolve(options.stateRoot ?? process.cwd());
     this.migrate();
@@ -536,11 +531,11 @@ export class RunStore {
         ].join(" ")
       )
       .all() as Array<{
-        id: string;
-        project_name: string;
-        issue_number: number;
-        current_state_id: string;
-      }>;
+      id: string;
+      project_name: string;
+      issue_number: number;
+      current_state_id: string;
+    }>;
     return rows.map((row) => ({
       currentStateId: row.current_state_id,
       issueNumber: row.issue_number,
@@ -560,7 +555,8 @@ export class RunStore {
     });
     const parent = this.database
       .prepare("select current_state_id from runs where id = ?")
-      .get(input.parentRunId) as { current_state_id: string | null } | undefined;
+      .get(input.parentRunId) as
+      { current_state_id: string | null } | undefined;
     if (parent?.current_state_id != null) {
       this.setRunCurrentState(input.id, parent.current_state_id);
     }
@@ -598,7 +594,9 @@ export class RunStore {
   ): void {
     if (classification === undefined) {
       this.database
-        .prepare("update runs set terminal_reason = ?, updated_at = ? where id = ?")
+        .prepare(
+          "update runs set terminal_reason = ?, updated_at = ? where id = ?"
+        )
         .run(reason, timestamp(), runId);
       return;
     }
@@ -703,7 +701,11 @@ export class RunStore {
     return row?.is_continuation === 1;
   }
 
-  listActiveRunIds(): { runId: string; projectName: string; issueNumber: number }[] {
+  listActiveRunIds(): {
+    runId: string;
+    projectName: string;
+    issueNumber: number;
+  }[] {
     const rows = this.database
       .prepare(
         "select id, project_name, issue_number from runs where state in ('queued','preparing_workspace','running')"
@@ -838,7 +840,11 @@ export class RunStore {
   // requested rows stay included for the same reason `listWaitingRuns`
   // includes them — they are still live until `reEvaluateWaitingRun`
   // transitions them.
-  listWaitingRunIds(): { runId: string; projectName: string; issueNumber: number }[] {
+  listWaitingRunIds(): {
+    runId: string;
+    projectName: string;
+    issueNumber: number;
+  }[] {
     const rows = this.database
       .prepare(
         "select id, project_name, issue_number from runs where state = 'waiting'"
@@ -893,7 +899,10 @@ export class RunStore {
     this.recordRunTransition(input.id, input.state, now);
   }
 
-  countSucceededContinuations(projectName: string, issueNumber: number): number {
+  countSucceededContinuations(
+    projectName: string,
+    issueNumber: number
+  ): number {
     const row = this.database
       .prepare(
         "select count(*) as count from runs where project_name = ? and issue_number = ? and state = 'succeeded' and is_continuation = 1"
@@ -960,7 +969,9 @@ export class RunStore {
 
   recordProjectPollOutcome(input: ProjectPollOutcomeInput): void {
     const now = timestamp();
-    const validationState: ProjectValidationState = input.ok ? "valid" : "invalid";
+    const validationState: ProjectValidationState = input.ok
+      ? "valid"
+      : "invalid";
     const message = input.ok ? null : (input.error ?? "project poll failed");
     this.database
       .prepare(
@@ -1135,7 +1146,8 @@ export class RunStore {
       conditions.push("project_name = @project");
       params.project = filter.project;
     }
-    const where = conditions.length === 0 ? "" : `where ${conditions.join(" and ")}`;
+    const where =
+      conditions.length === 0 ? "" : `where ${conditions.join(" and ")}`;
     const rows = this.database
       .prepare(
         [
@@ -1163,8 +1175,7 @@ export class RunStore {
         ].join(" ")
       )
       .get(input.projectName, input.name) as
-      | (RoutineRow & { prompt_body: string })
-      | undefined;
+      (RoutineRow & { prompt_body: string }) | undefined;
     if (row === undefined) {
       return undefined;
     }
@@ -1268,7 +1279,9 @@ export class RunStore {
   updateRoutineFiringState(id: string, state: RoutineFiringState): void {
     const now = timestamp();
     this.database
-      .prepare("update routine_firings set state = ?, updated_at = ? where id = ?")
+      .prepare(
+        "update routine_firings set state = ?, updated_at = ? where id = ?"
+      )
       .run(state, now, id);
     this.recordRoutineFiringTransition(id, state, now);
   }
@@ -1337,7 +1350,8 @@ export class RunStore {
       conditions.push("project_name = @project");
       params.project = filter.project;
     }
-    const where = conditions.length === 0 ? "" : `where ${conditions.join(" and ")}`;
+    const where =
+      conditions.length === 0 ? "" : `where ${conditions.join(" and ")}`;
     const rows = this.database
       .prepare(
         [
@@ -1389,7 +1403,9 @@ export class RunStore {
       // A Run returning to running starts its idle clock fresh on its next idle
       // tick rather than inheriting pre-wait idle time (see ADR 0047).
       this.database
-        .prepare("update watchdog_samples set idle_since = null where run_id = ?")
+        .prepare(
+          "update watchdog_samples set idle_since = null where run_id = ?"
+        )
         .run(runId);
     }
   }
@@ -1508,7 +1524,8 @@ export class RunStore {
       conditions.push("issue_number = @issueNumber");
       params.issueNumber = filter.issueNumber;
     }
-    const where = conditions.length === 0 ? "" : `where ${conditions.join(" and ")}`;
+    const where =
+      conditions.length === 0 ? "" : `where ${conditions.join(" and ")}`;
     const limit =
       filter?.limit !== undefined
         ? `limit ${Math.max(0, Math.floor(filter.limit))}`
@@ -1619,7 +1636,11 @@ export class RunStore {
       .prepare(
         "select sequence, state, created_at from run_state_transitions where run_id = ? order by sequence asc"
       )
-      .all(runId) as { created_at: string; sequence: number; state: RunState }[];
+      .all(runId) as {
+      created_at: string;
+      sequence: number;
+      state: RunState;
+    }[];
 
     return rows.map((row) => ({
       createdAt: row.created_at,
@@ -1678,7 +1699,8 @@ export class RunStore {
     }
     return RUN_ARTIFACT_KINDS.map((kind) => {
       const filePath = this.safeArtifactPath(runId, artifactPath(row, kind));
-      const sizeBytes = filePath === undefined ? undefined : artifactSize(filePath);
+      const sizeBytes =
+        filePath === undefined ? undefined : artifactSize(filePath);
       return {
         kind,
         present: sizeBytes !== undefined,
@@ -1723,12 +1745,13 @@ export class RunStore {
     if (row === undefined) {
       return undefined;
     }
-    return this.readJsonArtifact<ExpandedWorkflow>(runId, row.workflow_graph_path);
+    return this.readJsonArtifact<ExpandedWorkflow>(
+      runId,
+      row.workflow_graph_path
+    );
   }
 
-  getRawProviderLog(
-    runId: string
-  ): Promise<NodeJS.ReadableStream | undefined> {
+  getRawProviderLog(runId: string): Promise<NodeJS.ReadableStream | undefined> {
     const row = this.getRunArtifactRow(runId);
     if (row === undefined) {
       return Promise.resolve(undefined);
@@ -1743,7 +1766,10 @@ export class RunStore {
     if (row === undefined) {
       return undefined;
     }
-    const contents = await this.readTextArtifact(runId, row.normalized_log_path);
+    const contents = await this.readTextArtifact(
+      runId,
+      row.normalized_log_path
+    );
     if (contents === undefined) {
       return undefined;
     }
@@ -1761,13 +1787,18 @@ export class RunStore {
     if (row === undefined) {
       return Promise.resolve(undefined);
     }
-    return Promise.resolve(this.openArtifactPath(runId, artifactPath(row, kind)));
+    return Promise.resolve(
+      this.openArtifactPath(runId, artifactPath(row, kind))
+    );
   }
 
   listRunsAwaitingPullRequestDiscovery(
     options: { limit?: number; maxAttempts?: number } = {}
   ): PullRequestDiscoveryRun[] {
-    const limit = Math.max(0, Math.floor(options.limit ?? PULL_REQUEST_DISCOVERY_LIMIT));
+    const limit = Math.max(
+      0,
+      Math.floor(options.limit ?? PULL_REQUEST_DISCOVERY_LIMIT)
+    );
     const maxAttempts = Math.max(
       1,
       Math.floor(options.maxAttempts ?? MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS)
@@ -1808,9 +1839,7 @@ export class RunStore {
       .run(timestamp(), runId);
   }
 
-  hasPullRequestFollowupWork(
-    options: { maxAttempts?: number } = {}
-  ): boolean {
+  hasPullRequestFollowupWork(options: { maxAttempts?: number } = {}): boolean {
     const maxAttempts = Math.max(
       1,
       Math.floor(options.maxAttempts ?? MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS)
@@ -1905,8 +1934,7 @@ export class RunStore {
         ].join(" ")
       )
       .get(input.projectName, input.issueNumber) as
-      | { current_state_id: string | null; id: string }
-      | undefined;
+      { current_state_id: string | null; id: string } | undefined;
     if (row === undefined) {
       return undefined;
     }
@@ -1934,8 +1962,7 @@ export class RunStore {
         ].join(" ")
       )
       .get(input.projectName, input.issueNumber) as
-      | TrackedPullRequestRow
-      | undefined;
+      TrackedPullRequestRow | undefined;
     return row === undefined ? undefined : mapTrackedPullRequestRow(row);
   }
 
@@ -2021,9 +2048,7 @@ export class RunStore {
       .run(reason, timestamp(), runId);
   }
 
-  markLeakedRunsAsStale(
-    reason = "leaked_active_run"
-  ): {
+  markLeakedRunsAsStale(reason = "leaked_active_run"): {
     runId: string;
     projectName: string;
     issueNumber: number;
@@ -2047,11 +2072,11 @@ export class RunStore {
         ].join(" ")
       )
       .all() as {
-        id: string;
-        project_name: string;
-        issue_number: number;
-        state: RunState;
-      }[];
+      id: string;
+      project_name: string;
+      issue_number: number;
+      state: RunState;
+    }[];
     const swept = rows.map((row) => ({
       issueNumber: row.issue_number,
       previousState: row.state,
@@ -2094,7 +2119,11 @@ export class RunStore {
           "order by updated_at asc, id asc"
         ].join(" ")
       )
-      .all(cutoff) as { id: string; project_name: string; issue_number: number }[];
+      .all(cutoff) as {
+      id: string;
+      project_name: string;
+      issue_number: number;
+    }[];
     const migrated = rows.map((row) => ({
       issueNumber: row.issue_number,
       projectName: row.project_name,
@@ -2336,12 +2365,12 @@ export class RunStore {
         ].join(" ")
       )
       .all() as Array<{
-        attempt_number: number;
-        id: string;
-        metadata_path: string | null;
-        prompt_path: string | null;
-        run_metadata_path: string | null;
-      }>;
+      attempt_number: number;
+      id: string;
+      metadata_path: string | null;
+      prompt_path: string | null;
+      run_metadata_path: string | null;
+    }>;
     if (rows.length === 0) {
       return;
     }
@@ -2507,16 +2536,22 @@ export class RunStore {
 
 export function openRunStore(options: OpenRunStoreOptions): RunStore {
   mkdirSync(options.stateRoot, { recursive: true });
-  return new RunStore(new DatabaseConstructor(databasePath(options.stateRoot)), {
-    stateRoot: options.stateRoot
-  });
+  return new RunStore(
+    new DatabaseConstructor(databasePath(options.stateRoot)),
+    {
+      stateRoot: options.stateRoot
+    }
+  );
 }
 
 export function databasePath(stateRoot: string): string {
   return path.join(stateRoot, "symphonika.db");
 }
 
-function nextTransitionSequence(database: SqliteDatabase, runId: string): number {
+function nextTransitionSequence(
+  database: SqliteDatabase,
+  runId: string
+): number {
   const row = database
     .prepare(
       "select coalesce(max(sequence), 0) + 1 as next_sequence from run_state_transitions where run_id = ?"
@@ -2666,7 +2701,10 @@ function inferAttemptMetadataPath(
     );
   }
   if (attemptNumber > 1) {
-    return path.join(directory, `prompt-metadata.attempt-${attemptNumber}.json`);
+    return path.join(
+      directory,
+      `prompt-metadata.attempt-${attemptNumber}.json`
+    );
   }
   return null;
 }
@@ -2755,8 +2793,7 @@ function mapTrackedPullRequestRow(
     issueNumber: row.issue_number,
     lastFollowupRunId: row.last_followup_run_id ?? null,
     lastObservedAt: row.last_observed_at,
-    lastReviewDispatchFingerprint:
-      row.last_review_dispatch_fingerprint ?? null,
+    lastReviewDispatchFingerprint: row.last_review_dispatch_fingerprint ?? null,
     lastSeenHeadSha: row.last_seen_head_sha,
     projectName: row.project_name,
     prNumber: row.pr_number,

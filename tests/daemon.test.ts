@@ -19,9 +19,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -39,7 +39,9 @@ describe("startDaemon", () => {
     try {
       const response = await fetch(`${daemon.url}/health`);
       const body: unknown = await response.json();
-      const endpoint = JSON.parse(await readFile(endpointPath, "utf8")) as unknown;
+      const endpoint = JSON.parse(
+        await readFile(endpointPath, "utf8")
+      ) as unknown;
 
       expect(response.status).toBe(200);
       expect(body).toMatchObject({
@@ -175,7 +177,8 @@ describe("startDaemon orphan sweep logging", () => {
     });
     try {
       const orphanLines = lines.filter(
-        (line) => line.msg === "symphonika startup: marked orphaned run as stale"
+        (line) =>
+          line.msg === "symphonika startup: marked orphaned run as stale"
       );
 
       expect(orphanLines).toHaveLength(2);
@@ -227,7 +230,8 @@ describe("startDaemon orphan sweep logging", () => {
     let stopped = false;
     try {
       const orphanLines = lines.filter(
-        (line) => line.msg === "symphonika startup: marked orphaned run as stale"
+        (line) =>
+          line.msg === "symphonika startup: marked orphaned run as stale"
       );
       expect(orphanLines).toHaveLength(0);
 
@@ -282,7 +286,8 @@ describe("startDaemon orphan sweep logging", () => {
     let stopped = false;
     try {
       const orphanLines = lines.filter(
-        (line) => line.msg === "symphonika startup: marked orphaned run as stale"
+        (line) =>
+          line.msg === "symphonika startup: marked orphaned run as stale"
       );
       expect(orphanLines).toHaveLength(1);
       expect(orphanLines[0]).toMatchObject({
@@ -328,7 +333,7 @@ describe("resolveLogLevel", () => {
 
   it("prefers PINO_LOG_LEVEL over LOG_LEVEL when both are set", () => {
     expect(
-      resolveLogLevel({ PINO_LOG_LEVEL: "trace", LOG_LEVEL: "warn" }),
+      resolveLogLevel({ PINO_LOG_LEVEL: "trace", LOG_LEVEL: "warn" })
     ).toBe("trace");
   });
 });

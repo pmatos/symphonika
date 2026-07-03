@@ -29,9 +29,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -111,8 +111,8 @@ describe("state machine workflow definitions", () => {
         "  planning:",
         "    action:",
         "      kind: agent",
-        "      provider: \"{{ planner }}\"",
-        "      prompt: \"{{ plan_prompt }}\"",
+        '      provider: "{{ planner }}"',
+        '      prompt: "{{ plan_prompt }}"',
         "    complete_when:",
         "      artifact_exists: PLAN.md",
         "    transitions:",
@@ -518,7 +518,7 @@ describe("state machine workflow definitions", () => {
         "    action:",
         "      kind: agent",
         "      provider: codex",
-        "      prompt: \"{{ missing_prompt }}\"",
+        '      prompt: "{{ missing_prompt }}"',
         ""
       ].join("\n")
     );
@@ -953,7 +953,9 @@ describe("state machine workflow definitions", () => {
     const result = await loadExpandedWorkflow(workflowPath);
 
     expect(result.errors).toEqual([]);
-    const holding = result.workflow.states.find((state) => state.id === "holding");
+    const holding = result.workflow.states.find(
+      (state) => state.id === "holding"
+    );
     expect(holding?.action?.kind).toBe("wait");
   });
 
@@ -1064,7 +1066,9 @@ describe("state machine workflow definitions", () => {
     );
 
     const result = await loadExpandedWorkflow(workflowPath);
-    const merging = result.workflow.states.find((state) => state.id === "merging");
+    const merging = result.workflow.states.find(
+      (state) => state.id === "merging"
+    );
 
     expect(result.errors).toEqual([]);
     expect(merging?.action?.kind).toBe("merge_pr");
@@ -1527,23 +1531,33 @@ describe("built-in workflow templates", () => {
     const advance = (signals: Record<string, string | number>) =>
       decideNextStep({ actionExecuted: true, signals, state: waiting });
 
-    expect(advance({ checks: "success", unresolved_review_threads: 0 })).toMatchObject({
+    expect(
+      advance({ checks: "success", unresolved_review_threads: 0 })
+    ).toMatchObject({
       kind: "advance",
       to: "shipped"
     });
-    expect(advance({ checks: "success", unresolved_review_threads: 1 })).toMatchObject({
+    expect(
+      advance({ checks: "success", unresolved_review_threads: 1 })
+    ).toMatchObject({
       kind: "advance",
       to: "review.autofix"
     });
-    expect(advance({ checks: "success", unresolved_review_threads: 2 })).toMatchObject({
+    expect(
+      advance({ checks: "success", unresolved_review_threads: 2 })
+    ).toMatchObject({
       kind: "advance",
       to: "review.autofix"
     });
-    expect(advance({ checks: "success", unresolved_review_threads: 7 })).toMatchObject({
+    expect(
+      advance({ checks: "success", unresolved_review_threads: 7 })
+    ).toMatchObject({
       kind: "advance",
       to: "review.autofix"
     });
-    expect(advance({ checks: "failure", unresolved_review_threads: 3 })).toMatchObject({
+    expect(
+      advance({ checks: "failure", unresolved_review_threads: 3 })
+    ).toMatchObject({
       kind: "advance",
       to: "needs_human"
     });
@@ -1610,7 +1624,9 @@ describe("built-in workflow templates", () => {
     const result = await loadExpandedWorkflow(workflowPath);
     expect(result.errors).toEqual([]);
     expect(result.workflow.initial).toBe("gate.merging");
-    expect(result.workflow.states.find((s) => s.id === "gate.waiting")).toBeUndefined();
+    expect(
+      result.workflow.states.find((s) => s.id === "gate.waiting")
+    ).toBeUndefined();
     const merging = result.workflow.states.find((s) => s.id === "gate.merging");
     expect(merging).toBeDefined();
     if (merging === undefined) {
@@ -1633,18 +1649,22 @@ describe("built-in workflow templates", () => {
       kind: "advance",
       to: "needs_human"
     });
-    expect(advance({ checks: "pending" })).toMatchObject({ kind: "stay_waiting" });
+    expect(advance({ checks: "pending" })).toMatchObject({
+      kind: "stay_waiting"
+    });
     expect(advance({})).toMatchObject({ kind: "stay_waiting" });
     // Closed-unmerged PR: pr_open=false, pr_merged absent, mergeable likely
     // omitted (UNKNOWN). The merge_pr action can't merge a non-OPEN PR, so
     // the template's blocked exit must take over.
-    expect(
-      advance({ pr_open: false, checks: "success" })
-    ).toMatchObject({ kind: "advance", to: "needs_human" });
+    expect(advance({ pr_open: false, checks: "success" })).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
     // And a merged PR still wins done despite also having pr_open: false.
-    expect(
-      advance({ pr_merged: true, pr_open: false })
-    ).toMatchObject({ kind: "advance", to: "shipped" });
+    expect(advance({ pr_merged: true, pr_open: false })).toMatchObject({
+      kind: "advance",
+      to: "shipped"
+    });
   });
 
   it("respects an explicit method input on builtin:merge-when-green", async () => {
@@ -1766,7 +1786,10 @@ describe("validateExpandedWorkflowReferences", () => {
       templateFiles: []
     };
 
-    const errors = await validateExpandedWorkflowReferences(workflow, workflowPath);
+    const errors = await validateExpandedWorkflowReferences(
+      workflow,
+      workflowPath
+    );
     expect(errors).toEqual([]);
   });
 
@@ -1792,7 +1815,10 @@ describe("validateExpandedWorkflowReferences", () => {
       templateFiles: []
     };
 
-    const errors = await validateExpandedWorkflowReferences(workflow, workflowPath);
+    const errors = await validateExpandedWorkflowReferences(
+      workflow,
+      workflowPath
+    );
     expect(errors).toHaveLength(1);
     const expectedPath = path.resolve(root, promptRelPath);
     expect(errors[0]).toContain("planning");
@@ -1811,13 +1837,21 @@ describe("validateExpandedWorkflowReferences", () => {
       source: { kind: "raw_fsm", path: workflowPath },
       states: [
         {
-          action: { kind: "agent", provider: "codex", prompt: "prompts/plan.md" },
+          action: {
+            kind: "agent",
+            provider: "codex",
+            prompt: "prompts/plan.md"
+          },
           completeWhen: {},
           id: "plan",
           transitions: [{ to: "build", when: {} }]
         },
         {
-          action: { kind: "agent", provider: "codex", prompt: "prompts/build.md" },
+          action: {
+            kind: "agent",
+            provider: "codex",
+            prompt: "prompts/build.md"
+          },
           completeWhen: {},
           id: "build",
           transitions: [{ to: "done", when: {} }]
@@ -1827,7 +1861,10 @@ describe("validateExpandedWorkflowReferences", () => {
       templateFiles: []
     };
 
-    const errors = await validateExpandedWorkflowReferences(workflow, workflowPath);
+    const errors = await validateExpandedWorkflowReferences(
+      workflow,
+      workflowPath
+    );
     expect(errors).toHaveLength(2);
     expect(errors.some((message) => message.includes("plan"))).toBe(true);
     expect(errors.some((message) => message.includes("build"))).toBe(true);
@@ -1856,7 +1893,10 @@ describe("validateExpandedWorkflowReferences", () => {
       templateFiles: []
     };
 
-    const errors = await validateExpandedWorkflowReferences(workflow, workflowPath);
+    const errors = await validateExpandedWorkflowReferences(
+      workflow,
+      workflowPath
+    );
     expect(errors).toHaveLength(1);
     const expectedPath = path.resolve(root, promptRelPath);
     expect(errors[0]).toContain("planning");
@@ -1875,7 +1915,11 @@ describe("validateExpandedWorkflowReferences", () => {
       source: { kind: "markdown", path: workflowPath },
       states: [
         {
-          action: { kind: "agent", provider: "codex", prompt: "prompts/never.md" },
+          action: {
+            kind: "agent",
+            provider: "codex",
+            prompt: "prompts/never.md"
+          },
           completeWhen: {},
           id: "run_agent",
           transitions: [{ to: "done", when: {} }]
@@ -1885,7 +1929,10 @@ describe("validateExpandedWorkflowReferences", () => {
       templateFiles: []
     };
 
-    const errors = await validateExpandedWorkflowReferences(workflow, workflowPath);
+    const errors = await validateExpandedWorkflowReferences(
+      workflow,
+      workflowPath
+    );
     expect(errors).toEqual([]);
   });
 });

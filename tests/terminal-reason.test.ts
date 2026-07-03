@@ -13,7 +13,9 @@ describe("buildCapReachedReason", () => {
 
   it("encodes every kind with the cap_reached: prefix", () => {
     expect(buildCapReachedReason("no_pr")).toBe("cap_reached:no_pr");
-    expect(buildCapReachedReason("work_landed")).toBe("cap_reached:work_landed");
+    expect(buildCapReachedReason("work_landed")).toBe(
+      "cap_reached:work_landed"
+    );
     expect(buildCapReachedReason("unknown")).toBe("cap_reached:unknown");
   });
 });
@@ -22,7 +24,9 @@ describe("parseCapReachedReason", () => {
   it("returns the kind for a recognized cap_reached:* string", () => {
     expect(parseCapReachedReason("cap_reached:no_commits")).toBe("no_commits");
     expect(parseCapReachedReason("cap_reached:no_pr")).toBe("no_pr");
-    expect(parseCapReachedReason("cap_reached:work_landed")).toBe("work_landed");
+    expect(parseCapReachedReason("cap_reached:work_landed")).toBe(
+      "work_landed"
+    );
     expect(parseCapReachedReason("cap_reached:unknown")).toBe("unknown");
   });
 

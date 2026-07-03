@@ -6,11 +6,7 @@ import {
   projectWorkspaceSchema,
   workflowReferenceSchema
 } from "./config-schemas.js";
-import type {
-  GitHubIssueLabelInput,
-  GitHubIssuesApi,
-  IssuePollStatus
-} from "./issue-polling.js";
+import type { GitHubIssuesApi, IssuePollStatus } from "./issue-polling.js";
 import {
   ActiveRunRegistry,
   type LifecyclePolicy
@@ -26,11 +22,6 @@ import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
 } from "./workspace.js";
-
-export type LabelWritingGitHubIssuesApi = GitHubIssuesApi & {
-  addLabelsToIssue: (input: GitHubIssueLabelInput) => Promise<void>;
-  removeLabelsFromIssue: (input: GitHubIssueLabelInput) => Promise<void>;
-};
 
 export type DispatchIssueOptions = {
   activeRuns?: ActiveRunRegistry;
@@ -174,8 +165,9 @@ async function readDispatchConfig(
   if (!parsed.success) {
     throw new Error(
       parsed.error.issues
-        .map((issue) =>
-          `${issue.path.length === 0 ? "service config" : issue.path.join(".")}: ${issue.message}`
+        .map(
+          (issue) =>
+            `${issue.path.length === 0 ? "service config" : issue.path.join(".")}: ${issue.message}`
         )
         .join("\n")
     );

@@ -39,9 +39,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) =>
-      rm(root, { force: true, recursive: true })
-    )
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -61,7 +61,11 @@ describe("pull request follow-up", () => {
         "54-review-followup"
       );
       await createGitWorkspaceAhead({ branchName, workspacePath });
-      seedSucceededRun(store, { branchName, runId: "parent-run", workspacePath });
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath
+      });
 
       const providerInputs: ProviderRunInput[] = [];
       const provider = fakeProvider(providerInputs);
@@ -118,7 +122,8 @@ describe("pull request follow-up", () => {
         env: { GITHUB_TOKEN: "secret-token" },
         githubIssuesApi,
         logger: pino({ enabled: false }),
-        projectsLoader: () => Promise.resolve(new Map([[project.name, project]])),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
         runController: controller,
         runStore: store
       });
@@ -130,11 +135,15 @@ describe("pull request follow-up", () => {
       });
       expect(providerInputs).toHaveLength(1);
       expect(providerInputs[0]!.branchName).toBe(branchName);
-      expect(providerInputs[0]!.prompt).toContain("Pull request review follow-up");
+      expect(providerInputs[0]!.prompt).toContain(
+        "Pull request review follow-up"
+      );
       expect(providerInputs[0]!.prompt).toContain(
         "Please wire this into the daemon poll loop."
       );
-      expect(providerInputs[0]!.prompt).toContain("Do not open a second pull request");
+      expect(providerInputs[0]!.prompt).toContain(
+        "Do not open a second pull request"
+      );
 
       const reviewRun = store.getRun("review-run-1");
       expect(reviewRun).toMatchObject({
@@ -260,7 +269,8 @@ describe("pull request follow-up", () => {
         configPath: path.join(root, "symphonika.yml"),
         env: { GITHUB_TOKEN: "secret-token" },
         githubIssuesApi,
-        projectsLoader: () => Promise.resolve(new Map([[project.name, project]])),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
         runController: controller,
         runStore: store
       });
@@ -292,7 +302,11 @@ describe("pull request follow-up", () => {
     try {
       const branchName = "sym/symphonika/54-review-followup-race";
       const workspacePath = path.join(root, "workspace");
-      seedSucceededRun(store, { branchName, runId: "parent-run", workspacePath });
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath
+      });
 
       const providerInputs: ProviderRunInput[] = [];
       const provider = fakeProvider(providerInputs);
@@ -384,7 +398,8 @@ describe("pull request follow-up", () => {
         configPath: path.join(root, "symphonika.yml"),
         env: { GITHUB_TOKEN: "secret-token" },
         githubIssuesApi,
-        projectsLoader: () => Promise.resolve(new Map([[project.name, project]])),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
         runController: controller,
         runStore: store
       });
@@ -475,7 +490,8 @@ function runController(input: {
         reused: true,
         workspacePath: input.workspacePath
       }),
-    projectsLoader: () => Promise.resolve(new Map([[input.project.name, input.project]])),
+    projectsLoader: () =>
+      Promise.resolve(new Map([[input.project.name, input.project]])),
     providersLoader: () => Promise.resolve(providersConfig()),
     runStore: input.runStore,
     schedule: () => undefined,

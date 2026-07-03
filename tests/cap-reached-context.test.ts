@@ -110,12 +110,10 @@ describe("classifyCapReachedOutcome", () => {
     const api: GitHubIssuesApi = {
       ...baseApi,
       listBranchCommits: vi.fn().mockResolvedValue([{ sha: "abc" }]),
-      listPullRequestsForBranch: vi
-        .fn()
-        .mockResolvedValue([
-          { merged_at: null, number: 7, state: "open" },
-          { merged_at: null, number: 8, state: "closed" }
-        ])
+      listPullRequestsForBranch: vi.fn().mockResolvedValue([
+        { merged_at: null, number: 7, state: "open" },
+        { merged_at: null, number: 8, state: "closed" }
+      ])
     };
     const kind = await classifyCapReachedOutcome({
       api,
@@ -149,12 +147,10 @@ describe("classifyCapReachedOutcome", () => {
     const api: GitHubIssuesApi = {
       ...baseApi,
       listBranchCommits: vi.fn().mockResolvedValue([{ sha: "abc" }]),
-      listPullRequestsForBranch: vi
-        .fn()
-        .mockResolvedValue([
-          { merged_at: null, number: 7, state: "closed" },
-          { merged_at: "2026-05-04T00:00:00Z", number: 8, state: "closed" }
-        ])
+      listPullRequestsForBranch: vi.fn().mockResolvedValue([
+        { merged_at: null, number: 7, state: "closed" },
+        { merged_at: "2026-05-04T00:00:00Z", number: 8, state: "closed" }
+      ])
     };
     const kind = await classifyCapReachedOutcome({
       api,

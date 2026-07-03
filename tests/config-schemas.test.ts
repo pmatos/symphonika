@@ -190,7 +190,10 @@ describe("projectWorkspaceSchema", () => {
           remote: "git@github.com:pmatos/symphonika.git"
         },
         hooks: {
-          before_run: { command: "./scripts/bootstrap.sh", timeout_ms: timeoutMs }
+          before_run: {
+            command: "./scripts/bootstrap.sh",
+            timeout_ms: timeoutMs
+          }
         },
         root: "./.symphonika/workspaces/symphonika"
       })

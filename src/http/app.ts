@@ -18,7 +18,7 @@ import type {
 } from "../run-store.js";
 import { registerPages } from "./pages.js";
 
-export type CancelRunFn = (
+type CancelRunFn = (
   runId: string,
   source: "ui"
 ) =>
@@ -44,7 +44,7 @@ export type PollNowResult = {
   state: "dispatching" | "idle";
 };
 
-export type PollNowFn = () => PollNowResult | Promise<PollNowResult>;
+type PollNowFn = () => PollNowResult | Promise<PollNowResult>;
 
 export type HttpAppOptions = {
   cancelRun?: CancelRunFn;

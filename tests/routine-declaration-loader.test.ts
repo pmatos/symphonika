@@ -15,7 +15,9 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
 
@@ -54,7 +56,10 @@ describe("RoutineDeclarationLoader", () => {
   it("reports missing required front matter fields", async () => {
     const root = await makeTempRoot();
     const routinePath = path.join(root, "missing.md");
-    await writeFile(routinePath, ["---", "name: missing", "---", "Body", ""].join("\n"));
+    await writeFile(
+      routinePath,
+      ["---", "name: missing", "---", "Body", ""].join("\n")
+    );
 
     const result = await loadRoutineDeclaration(routinePath);
 
@@ -118,7 +123,10 @@ describe("RoutineDeclarationLoader", () => {
   it("rejects YAML front matter that parses as a list", async () => {
     const root = await makeTempRoot();
     const routinePath = path.join(root, "list-front-matter.md");
-    await writeFile(routinePath, ["---", "- foo", "- bar", "---", "Body", ""].join("\n"));
+    await writeFile(
+      routinePath,
+      ["---", "- foo", "- bar", "---", "Body", ""].join("\n")
+    );
 
     const result = await loadRoutineDeclaration(routinePath);
 

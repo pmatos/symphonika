@@ -112,9 +112,14 @@ export function createCodexProvider(): AgentProvider {
             }
           }
         });
-        const initialized = await readUntilResponse(queue, 1, activeRun, (raw) => ({
-          raw
-        }));
+        const initialized = await readUntilResponse(
+          queue,
+          1,
+          activeRun,
+          (raw) => ({
+            raw
+          })
+        );
         yield* initialized.events;
         if (initialized.stopped) {
           return;
@@ -164,7 +169,9 @@ export function createCodexProvider(): AgentProvider {
 
         const threadId = activeRun.threadId;
         if (threadId === undefined) {
-          yield protocolFailure("thread/start response did not include thread.id");
+          yield protocolFailure(
+            "thread/start response did not include thread.id"
+          );
           shutdownProcess(child);
           yield* await drainUntilExit(queue, activeRun);
           return;
@@ -184,25 +191,33 @@ export function createCodexProvider(): AgentProvider {
             threadId
           }
         });
-        const turnStarted = await readUntilResponse(queue, 3, activeRun, (raw) => {
-          const result = objectField(raw, "result");
-          const turn = objectField(result, "turn");
-          const turnId = stringField(turn, "id");
-          if (turnId !== undefined) {
-            activeRun.turnId = turnId;
-          }
+        const turnStarted = await readUntilResponse(
+          queue,
+          3,
+          activeRun,
+          (raw) => {
+            const result = objectField(raw, "result");
+            const turn = objectField(result, "turn");
+            const turnId = stringField(turn, "id");
+            if (turnId !== undefined) {
+              activeRun.turnId = turnId;
+            }
 
-          return {
-            raw
-          };
-        });
+            return {
+              raw
+            };
+          }
+        );
         yield* turnStarted.events;
         if (turnStarted.stopped) {
           return;
         }
 
         while (true) {
-          const event = providerEventFromQueueItem(await queue.next(), activeRun);
+          const event = providerEventFromQueueItem(
+            await queue.next(),
+            activeRun
+          );
           yield event;
           const type = event.normalized?.type;
 
@@ -499,7 +514,9 @@ function isTerminalFailure(type: string | undefined): boolean {
   );
 }
 
-function createProcessQueue(child: ChildProcessWithoutNullStreams): ProcessQueue {
+function createProcessQueue(
+  child: ChildProcessWithoutNullStreams
+): ProcessQueue {
   const pending: ProcessQueueItem[] = [];
   let waiting: ((item: ProcessQueueItem) => void) | undefined;
   let stdoutBuffer = "";
@@ -560,10 +577,7 @@ function createProcessQueue(child: ChildProcessWithoutNullStreams): ProcessQueue
   };
 }
 
-function pushLine(
-  line: string,
-  push: (item: ProcessQueueItem) => void
-): void {
+function pushLine(line: string, push: (item: ProcessQueueItem) => void): void {
   if (line.trim().length === 0) {
     return;
   }
@@ -878,11 +892,21 @@ function validateCommandExecProbeResponse(raw: unknown): void {
   if (exitCode === 11 || output.includes("SYMPHONIKA_PROBE_WRITE_FAILED")) {
     throw new Error("Codex app-server sandbox blocks in-cwd writes");
   }
-  if (exitCode === 12 || output.includes("SYMPHONIKA_PROBE_GIT_NETWORK_FAILED")) {
-    throw new Error("Codex app-server sandbox blocks public git network access");
+  if (
+    exitCode === 12 ||
+    output.includes("SYMPHONIKA_PROBE_GIT_NETWORK_FAILED")
+  ) {
+    throw new Error(
+      "Codex app-server sandbox blocks public git network access"
+    );
   }
-  if (exitCode === 13 || output.includes("SYMPHONIKA_PROBE_GITHUB_API_FAILED")) {
-    throw new Error("Codex app-server sandbox blocks api.github.com reachability");
+  if (
+    exitCode === 13 ||
+    output.includes("SYMPHONIKA_PROBE_GITHUB_API_FAILED")
+  ) {
+    throw new Error(
+      "Codex app-server sandbox blocks api.github.com reachability"
+    );
   }
   throw new Error(
     `Codex app-server command/exec sandbox probe failed with exit code ${exitCode ?? "unknown"}${formatProbeStderr(output)}`
@@ -965,7 +989,9 @@ function codexProbeTimeoutMs(): number {
 }
 
 function codexRuntimeProbeTimeoutMs(): number {
-  const envTimeout = Number(process.env.SYMPHONIKA_CODEX_RUNTIME_PROBE_TIMEOUT_MS);
+  const envTimeout = Number(
+    process.env.SYMPHONIKA_CODEX_RUNTIME_PROBE_TIMEOUT_MS
+  );
   return Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 30_000;
 }
 

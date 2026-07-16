@@ -694,6 +694,71 @@ describe("RunStore detail queries", () => {
       store.close();
     }
   });
+
+  it("getLastFailureEvent is scoped to the requested attempt", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.createRun({
+        id: "r-fail",
+        issue: sampleIssue(),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      for (const attemptNumber of [1, 2]) {
+        store.createAttempt({
+          attemptNumber,
+          branchName: "branch",
+          branchRef: "refs/heads/branch",
+          id: `r-fail-attempt-${attemptNumber}`,
+          issueSnapshotPath: "/tmp/snap.json",
+          metadataPath: "/tmp/meta.json",
+          normalizedLogPath: "/tmp/normalized.jsonl",
+          promptPath: "/tmp/prompt.md",
+          providerCommand: "x",
+          providerName: "codex",
+          rawLogPath: "/tmp/raw.jsonl",
+          runId: "r-fail",
+          state: "running",
+          workflowGraphPath: "",
+          workspacePath: "/tmp/work"
+        });
+      }
+      // sequence resets per attempt: attempt-1 fails late (seq 5), attempt-2
+      // fails early (seq 1). An unscoped `order by sequence desc` would wrongly
+      // pick attempt-1's message for a run whose terminal attempt is attempt-2.
+      store.recordProviderEvent({
+        attemptId: "r-fail-attempt-1",
+        normalized: { type: "turn_failed", message: "attempt-1 refusal" },
+        raw: { kind: "turn_failed" },
+        runId: "r-fail",
+        sequence: 5
+      });
+      store.recordProviderEvent({
+        attemptId: "r-fail-attempt-2",
+        normalized: { type: "turn_failed", message: "attempt-2 crash" },
+        raw: { kind: "turn_failed" },
+        runId: "r-fail",
+        sequence: 1
+      });
+
+      expect(
+        store.getLastFailureEvent("r-fail", "r-fail-attempt-2")?.normalized
+          .message
+      ).toBe("attempt-2 crash");
+      expect(
+        store.getLastFailureEvent("r-fail", "r-fail-attempt-1")?.normalized
+          .message
+      ).toBe("attempt-1 refusal");
+      // A terminal attempt with no failure event must not inherit a prior one.
+      expect(
+        store.getLastFailureEvent("r-fail", "r-fail-attempt-missing")
+      ).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
 });
 
 async function streamText(

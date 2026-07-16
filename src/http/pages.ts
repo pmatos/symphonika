@@ -11,6 +11,7 @@ import {
 import type {
   ListRunsFilter,
   ProjectState,
+  ProviderEventRecord,
   RunArtifactDescriptor,
   RunState,
   RunStatus,
@@ -46,6 +47,12 @@ const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
   "cancelled",
   "stale"
 ]);
+
+const FAILURE_STATES: ReadonlySet<RunState> = new Set(["failed", "stale"]);
+
+// A single run's detail view is cheap to render; coalescing streamed message
+// tokens collapses hundreds of rows into a handful, so fetch a generous tail.
+const EVENT_TAIL_LIMIT = 500;
 
 export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/", (context) => {
@@ -94,7 +101,21 @@ export function registerPages(options: RegisterPagesOptions): void {
       );
     }
 
-    const events = options.runStore.listProviderEvents(id, { limit: 100 });
+    const tailDesc = options.runStore.listProviderEvents(id, {
+      limit: EVENT_TAIL_LIMIT,
+      order: "desc"
+    });
+    const events = tailDesc.slice().reverse();
+    const eventsTruncated = tailDesc.length >= EVENT_TAIL_LIMIT;
+    const isFailure = FAILURE_STATES.has(detail.state);
+    const terminalAttempt = detail.attempts[detail.attempts.length - 1];
+    const failureEvent = isFailure
+      ? options.runStore.getLastFailureEvent(id, terminalAttempt?.id)
+      : undefined;
+    const exitEvent = findLast(
+      events,
+      (event) => event.normalized.type === "process_exit"
+    );
     const artifacts = options.runStore.listRunArtifacts(id);
     const workflowGraph = await options.runStore.getWorkflowGraph(id);
     const capKind = parseCapReachedReason(detail.terminalReason);
@@ -110,12 +131,13 @@ export function registerPages(options: RegisterPagesOptions): void {
           };
     const sections = [
       `<h1>Run ${escapeHtml(detail.id)}</h1>`,
+      renderOutcomeBanner(detail, failureEvent, exitEvent),
       renderRunSummary(detail, capContext),
       renderWorkflowGraphSummary(workflowGraph),
       renderCancelForm(detail),
       renderAttemptsTable(detail.attempts),
       renderTransitionsTable(detail.transitions),
-      renderEventsTable(events),
+      renderEventsTable(events, eventsTruncated),
       renderRunFileLinks(detail.id, artifacts)
     ].join("");
     return context.html(layout(`Run ${detail.id}`, sections));
@@ -140,6 +162,15 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .state-failed, .state-cancelled, .state-stale { color: #b00020; }
 .state-succeeded { color: #007a3d; }
 nav a { margin-right: 1rem; }
+.banner { border-radius: 6px; padding: 0.75rem 1rem; margin: 0.8rem 0 1.2rem; }
+.banner-failed { background: #fdecef; border: 1px solid #f2b8c2; }
+.banner-title { font-weight: 700; margin: 0 0 0.35rem; }
+.banner-failed .banner-title { color: #b00020; }
+.banner-reason { margin: 0 0 0.4rem; white-space: pre-wrap; font-size: 0.95rem; }
+.banner-context { margin: 0; font-size: 0.82rem; color: #555; }
+.banner-context code { background: rgba(0,0,0,0.05); padding: 0 0.2rem; border-radius: 3px; }
+.msg { white-space: pre-wrap; font-family: inherit; max-height: 22rem; overflow: auto; margin: 0; }
+.hint { color: #555; font-size: 0.82rem; margin: 0.2rem 0 0.6rem; }
 </style>
 </head>
 <body>
@@ -382,27 +413,155 @@ function renderTransitionsTable(
   return `<section><h2>State transitions</h2><table><thead><tr><th>Seq</th><th>State</th><th>At</th></tr></thead><tbody>${rows}</tbody></table></section>`;
 }
 
+function renderOutcomeBanner(
+  detail: RunStatus,
+  failureEvent: ProviderEventRecord | undefined,
+  exitEvent: ProviderEventRecord | undefined
+): string {
+  // Only failure-state runs get a banner. A prior attempt's failure event must
+  // never surface on a run that ultimately succeeded or is still running.
+  if (!FAILURE_STATES.has(detail.state)) {
+    return "";
+  }
+  const providerMessage =
+    failureEvent !== undefined &&
+    typeof failureEvent.normalized.message === "string"
+      ? failureEvent.normalized.message
+      : undefined;
+
+  const reason =
+    providerMessage !== undefined
+      ? `<p class="banner-reason">${escapeHtml(providerMessage)}</p>`
+      : `<p class="banner-reason">No provider failure message was recorded. See the transcript and logs below.</p>`;
+
+  const context: string[] = [];
+  if (detail.terminalReason !== null) {
+    context.push(
+      `terminal reason <code>${escapeHtml(detail.terminalReason)}</code>`
+    );
+  }
+  const abnormalExit = formatAbnormalExit(exitEvent);
+  if (abnormalExit !== undefined) {
+    context.push(abnormalExit);
+  }
+  context.push(`provider <code>${escapeHtml(detail.provider)}</code>`);
+  if (failureEvent !== undefined) {
+    context.push(`event #${failureEvent.sequence}`);
+  }
+
+  return `<section class="banner banner-failed"><p class="banner-title">Run ${escapeHtml(detail.state)}</p>${reason}<p class="banner-context">${context.join(" &middot; ")}</p></section>`;
+}
+
+// Exit code is reported only when abnormal: codex exits 0 even after refusing a
+// task, so a "process exited 0" line next to a failure would mislead.
+function formatAbnormalExit(
+  exitEvent: ProviderEventRecord | undefined
+): string | undefined {
+  if (exitEvent === undefined) {
+    return undefined;
+  }
+  const normalized = exitEvent.normalized;
+  const exitCode =
+    typeof normalized.exitCode === "number" ? normalized.exitCode : undefined;
+  const signal =
+    typeof normalized.signal === "string" ? normalized.signal : undefined;
+  const bits: string[] = [];
+  if (exitCode !== undefined && exitCode !== 0) {
+    bits.push(`exit code ${exitCode}`);
+  }
+  if (signal !== undefined) {
+    bits.push(`signal ${signal}`);
+  }
+  return bits.length === 0 ? undefined : `process ${bits.join(", ")}`;
+}
+
+type EventDisplayRow =
+  | {
+      kind: "message";
+      firstSequence: number;
+      lastSequence: number;
+      text: string;
+      createdAt: string;
+    }
+  | {
+      kind: "event";
+      sequence: number;
+      type: string;
+      detail: string;
+      createdAt: string;
+    };
+
+// Codex streams assistant text one token per event; merge runs of adjacent
+// message events into a single readable block, breaking on any other event.
+function coalesceEvents(events: ProviderEventRecord[]): EventDisplayRow[] {
+  const rows: EventDisplayRow[] = [];
+  let buffer: Extract<EventDisplayRow, { kind: "message" }> | undefined;
+  const flush = (): void => {
+    if (buffer !== undefined) {
+      rows.push(buffer);
+      buffer = undefined;
+    }
+  };
+
+  for (const event of events) {
+    const message = event.normalized.message;
+    if (event.type === "message" && typeof message === "string") {
+      if (buffer === undefined) {
+        buffer = {
+          createdAt: event.createdAt,
+          firstSequence: event.sequence,
+          kind: "message",
+          lastSequence: event.sequence,
+          text: message
+        };
+      } else {
+        buffer.text += message;
+        buffer.lastSequence = event.sequence;
+        buffer.createdAt = event.createdAt;
+      }
+      continue;
+    }
+
+    flush();
+    rows.push({
+      createdAt: event.createdAt,
+      detail:
+        typeof message === "string"
+          ? message
+          : JSON.stringify(event.normalized),
+      kind: "event",
+      sequence: event.sequence,
+      type: event.type
+    });
+  }
+
+  flush();
+  return rows;
+}
+
 function renderEventsTable(
-  events: {
-    sequence: number;
-    type: string;
-    createdAt: string;
-    normalized: { type: string; [key: string]: unknown };
-  }[]
+  events: ProviderEventRecord[],
+  truncated: boolean
 ): string {
   if (events.length === 0) {
-    return `<section><h2>Recent events</h2><p><em>No events recorded yet.</em></p></section>`;
+    return `<section><h2>Transcript &amp; events</h2><p><em>No events recorded yet.</em></p></section>`;
   }
-  const rows = events
-    .map((event) => {
-      const message =
-        typeof event.normalized.message === "string"
-          ? event.normalized.message
-          : JSON.stringify(event.normalized);
-      return `<tr><td>${event.sequence}</td><td>${escapeHtml(event.type)}</td><td><code>${escapeHtml(message)}</code></td><td>${escapeHtml(event.createdAt)}</td></tr>`;
+  const rows = coalesceEvents(events)
+    .map((row) => {
+      if (row.kind === "message") {
+        const seq =
+          row.firstSequence === row.lastSequence
+            ? `${row.firstSequence}`
+            : `${row.firstSequence}–${row.lastSequence}`;
+        return `<tr><td>${seq}</td><td>message</td><td><div class="msg">${escapeHtml(row.text)}</div></td><td>${escapeHtml(row.createdAt)}</td></tr>`;
+      }
+      return `<tr><td>${row.sequence}</td><td>${escapeHtml(row.type)}</td><td><code>${escapeHtml(row.detail)}</code></td><td>${escapeHtml(row.createdAt)}</td></tr>`;
     })
     .join("");
-  return `<section><h2>Recent events (last ${events.length})</h2><table><thead><tr><th>Seq</th><th>Type</th><th>Detail</th><th>At</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+  const scope = truncated
+    ? `most recent ${events.length}`
+    : `all ${events.length}`;
+  return `<section><h2>Transcript &amp; events</h2><p class="hint">Showing ${scope} events, oldest first. Streamed message tokens are merged into blocks; full logs are under Files below.</p><table><thead><tr><th>Seq</th><th>Type</th><th>Detail</th><th>At</th></tr></thead><tbody>${rows}</tbody></table></section>`;
 }
 
 function renderRunFileLinks(
@@ -465,6 +624,19 @@ function formatArtifactKind(kind: RunArtifactDescriptor["kind"]): string {
     case "provider_normalized":
       return "Normalized event log";
   }
+}
+
+function findLast<T>(
+  items: readonly T[],
+  predicate: (item: T) => boolean
+): T | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item !== undefined && predicate(item)) {
+      return item;
+    }
+  }
+  return undefined;
 }
 
 function escapeHtml(value: string): string {

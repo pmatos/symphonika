@@ -112,10 +112,18 @@ export function registerPages(options: RegisterPagesOptions): void {
     const failureEvent = isFailure
       ? options.runStore.getLastFailureEvent(id, terminalAttempt?.id)
       : undefined;
-    const exitEvent = findLast(
-      events,
-      (event) => event.normalized.type === "process_exit"
-    );
+    // Scope to the terminal attempt for the same reason failureEvent is: an
+    // earlier attempt's abnormal process_exit must not be attributed to the
+    // terminal failure (e.g. a stale run whose terminal attempt was killed via
+    // the watchdog DB update and never emitted its own process_exit).
+    const exitEvent = isFailure
+      ? findLast(
+          events,
+          (event) =>
+            event.normalized.type === "process_exit" &&
+            event.attemptId === terminalAttempt?.id
+        )
+      : undefined;
     const artifacts = options.runStore.listRunArtifacts(id);
     const workflowGraph = await options.runStore.getWorkflowGraph(id);
     const capKind = parseCapReachedReason(detail.terminalReason);

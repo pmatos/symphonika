@@ -79,8 +79,9 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
     "# ...) must resolve here. The directory holding this node runtime is",
     "# prepended so `node` resolves regardless of version manager (nvm,",
     "# npm-global, pnpm, ...). Re-run `symphonika service install` after a",
-    "# node upgrade to refresh a version-pinned path.",
-    `Environment=PATH=${input.path}`,
+    "# node upgrade to refresh a version-pinned path. The whole assignment is",
+    "# quoted so a PATH entry containing a space is not split off and dropped.",
+    `Environment=${systemdEnvAssignment("PATH", input.path)}`,
     "",
     "# Resolve GITHUB_TOKEN from `gh auth token` at each (re)start so this",
     "# survives token rotation. Fails closed if gh returns empty so the",
@@ -235,6 +236,18 @@ function systemdArg(value: string): string {
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')
     .replace(/\$/g, "$$$$")
+    .replace(/%/g, "%%");
+  return `"${escaped}"`;
+}
+
+// Quote a `NAME=value` pair for an `Environment=` directive. systemd splits the
+// value on whitespace unless the whole assignment is double-quoted, and expands
+// `%` specifiers inside it — but, unlike a command line, does not expand `$`, so
+// `$` is left untouched here (doubling it would leak a literal `$$`).
+function systemdEnvAssignment(name: string, value: string): string {
+  const escaped = `${name}=${value}`
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
     .replace(/%/g, "%%");
   return `"${escaped}"`;
 }

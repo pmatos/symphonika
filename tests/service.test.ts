@@ -60,7 +60,7 @@ describe("renderServiceUnit", () => {
     expect(unit).toContain(`exec "$1" "$2" daemon`);
     expect(unit).toContain(`"${NODE}"`);
     expect(unit).toContain(`"${CLI}"`);
-    expect(unit).toContain(`Environment=PATH=${DAEMON_PATH}`);
+    expect(unit).toContain(`Environment="PATH=${DAEMON_PATH}"`);
     expect(unit).toContain("t=$(gh auth token)");
     expect(unit).toContain("Slice=symphonika.slice");
     expect(unit).toContain("WantedBy=default.target");
@@ -86,6 +86,18 @@ describe("renderServiceUnit", () => {
     expect(unit).toContain(`exec "$1" "$2" daemon`);
     expect(unit).toContain(`"/home/John Doe/.nvm/node"`);
     expect(unit).toContain(`"/opt/my app/dist/cli.js"`);
+  });
+
+  it("quotes the Environment=PATH assignment so a spaced PATH entry survives", () => {
+    const unit = renderServiceUnit({
+      execPath: NODE,
+      path: "/home/John Doe/.nvm/bin:/usr/bin",
+      scriptPath: CLI
+    });
+
+    expect(unit).toContain(
+      `Environment="PATH=/home/John Doe/.nvm/bin:/usr/bin"`
+    );
   });
 });
 

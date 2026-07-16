@@ -541,6 +541,119 @@ describe("HTTP app — runs API and pages", () => {
       expect(body).toContain("markdown");
       expect(body).toContain("run_agent");
       expect(body).toContain(`href="/logs/runs/run-graph/workflow_graph"`);
+      expect(body).toContain(`href="/runs/run-graph/graph"`);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("renders the interactive workflow-graph page", async () => {
+    const test = await setup();
+    try {
+      const evidenceDir = path.join(
+        test.stateRoot,
+        "logs",
+        "runs",
+        "run-graph-page"
+      );
+      await mkdir(evidenceDir, { recursive: true });
+      const graphPath = path.join(evidenceDir, "workflow-graph.json");
+      await writeFile(
+        graphPath,
+        JSON.stringify({
+          contentHash: "sha256:" + "d".repeat(64),
+          initial: "implement",
+          name: "self_driving",
+          source: { kind: "raw_fsm", path: "/repo/workflow.yml" },
+          states: [
+            {
+              id: "implement",
+              completeWhen: {},
+              action: {
+                kind: "agent",
+                provider: "codex",
+                prompt: "WORKFLOW.md<x>"
+              },
+              transitions: [
+                {
+                  to: "wait_for_pr",
+                  when: { provider_success: true, branch_ahead_of_base: true }
+                },
+                { to: "failed", when: {} }
+              ]
+            },
+            {
+              id: "wait_for_pr",
+              completeWhen: {},
+              action: { kind: "wait" },
+              transitions: [{ to: "implement", when: { checks: "failure" } }]
+            },
+            {
+              id: "failed",
+              completeWhen: {},
+              terminal: "blocked",
+              transitions: []
+            }
+          ],
+          templateFiles: []
+        })
+      );
+
+      test.runStore.createRun({
+        id: "run-graph-page",
+        issue: sampleIssue({ number: 91, title: "Graph page" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunEvidence("run-graph-page", {
+        branchName: "sym/run-graph-page",
+        branchRef: "refs/heads/sym/run-graph-page",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        rawLogPath: "",
+        workflowGraphPath: graphPath,
+        workspacePath: test.stateRoot
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const page = await app.request("/runs/run-graph-page/graph");
+      expect(page.status).toBe(200);
+      const body = await page.text();
+      // Interactive renderer wiring.
+      expect(body).toContain("window.__WORKFLOW_GRAPH__");
+      expect(body).toContain("cytoscape.min.js");
+      expect(body).toContain("integrity=");
+      // Inlined graph data and navigation.
+      expect(body).toContain("self_driving");
+      expect(body).toContain("wait_for_pr");
+      expect(body).toContain("Legend");
+      expect(body).toContain(`href="/logs/runs/run-graph-page/workflow_graph"`);
+      // Angle brackets in inlined JSON values are unicode-escaped so a
+      // value cannot break out of the <script> block.
+      expect(body).not.toContain("WORKFLOW.md<x>");
+      expect(body).toContain("WORKFLOW.md\\u003cx\\u003e");
+
+      // Unknown run and runs without graph evidence 404.
+      expect((await app.request("/runs/missing/graph")).status).toBe(404);
+
+      test.runStore.createRun({
+        id: "run-no-graph",
+        issue: sampleIssue({ number: 92 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      const noGraph = await app.request("/runs/run-no-graph/graph");
+      expect(noGraph.status).toBe(404);
+      expect(await noGraph.text()).toContain("No workflow graph");
     } finally {
       test.cleanup();
     }

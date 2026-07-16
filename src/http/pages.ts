@@ -19,6 +19,7 @@ import type {
 import type { RoutineStatus } from "../routines/types.js";
 import type { StatusSnapshot } from "../status.js";
 import type { ExpandedWorkflow } from "../workflow.js";
+import { BUNDLED_FONT_WEIGHTS, getBundledFont } from "./fonts.js";
 
 export type RegisterPagesOptions = {
   app: Hono;
@@ -48,12 +49,29 @@ const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
 ]);
 
 export function registerPages(options: RegisterPagesOptions): void {
+  options.app.get("/assets/fonts/:file", (context) => {
+    const match = /^ibm-plex-mono-(\d+)\.woff2$/.exec(context.req.param("file"));
+    const weight = match?.[1];
+    const bytes = weight === undefined ? undefined : getBundledFont(weight);
+    if (bytes === undefined) {
+      return context.notFound();
+    }
+    return new Response(bytes, {
+      headers: {
+        "cache-control": "public, max-age=31536000, immutable",
+        "content-type": "font/woff2"
+      },
+      status: 200
+    });
+  });
+
   options.app.get("/", (context) => {
     const snapshot = options.getStatusSnapshot?.();
     const recentRuns = options.runStore.listRuns({ limit: 25 });
     const html = layout(
       "Symphonika",
       [
+        `<h1 class="page-title">Dashboard</h1>`,
         renderHeader(options.version, snapshot),
         renderProjectsCard(snapshot, options.issuePollStatus),
         renderRoutinesTable(options.runStore.listRoutines()),
@@ -80,7 +98,10 @@ export function registerPages(options: RegisterPagesOptions): void {
     const runs = options.runStore.listRuns(filter);
     const title =
       filter.state === undefined ? "All runs" : `Runs (${filter.state})`;
-    const html = layout(title, renderRunsTable(title, runs));
+    const html = layout(
+      title,
+      `<h1 class="page-title">Runs</h1>${renderRunsTable(title, runs)}`
+    );
     return context.html(html);
   });
 
@@ -89,7 +110,10 @@ export function registerPages(options: RegisterPagesOptions): void {
     const detail = options.runStore.getRun(id);
     if (detail === undefined) {
       return context.html(
-        layout("Run not found", `<p>Run ${escapeHtml(id)} not found.</p>`),
+        layout(
+          "Run not found",
+          `<h1 class="page-title">Run not found</h1><p class="lede">Run <code>${escapeHtml(id)}</code> was not found in the run store.</p>`
+        ),
         404
       );
     }
@@ -109,7 +133,7 @@ export function registerPages(options: RegisterPagesOptions): void {
             kind: capKind
           };
     const sections = [
-      `<h1>Run ${escapeHtml(detail.id)}</h1>`,
+      `<h1 class="page-title">Run <code>${escapeHtml(detail.id)}</code></h1>`,
       renderRunSummary(detail, capContext),
       renderWorkflowGraphSummary(workflowGraph),
       renderCancelForm(detail),
@@ -122,31 +146,371 @@ export function registerPages(options: RegisterPagesOptions): void {
   });
 }
 
+const FONT_FACES = BUNDLED_FONT_WEIGHTS.map(
+  (weight) =>
+    `@font-face{font-family:"IBM Plex Mono";font-style:normal;font-weight:${weight};font-display:swap;src:url("/assets/fonts/ibm-plex-mono-${weight}.woff2") format("woff2");}`
+).join("");
+
+const DARK_TOKENS = `
+  --bg: oklch(0.205 0.012 255);
+  --surface: oklch(0.232 0.014 255);
+  --surface-2: oklch(0.27 0.015 255);
+  --raised: oklch(0.246 0.015 255);
+  --border: oklch(0.33 0.015 255);
+  --border-strong: oklch(0.44 0.017 255);
+  --ink: oklch(0.93 0.008 250);
+  --ink-2: oklch(0.8 0.011 250);
+  --ink-muted: oklch(0.68 0.012 250);
+  --accent: oklch(0.72 0.13 255);
+  --accent-ink: oklch(0.8 0.12 255);
+  --accent-quiet: oklch(0.32 0.06 255);
+  --focus: oklch(0.78 0.14 255);
+  --progress-ink: oklch(0.84 0.11 82);
+  --progress-bg: oklch(0.32 0.055 78);
+  --fail-ink: oklch(0.77 0.15 28);
+  --fail-bg: oklch(0.31 0.075 28);
+  --ok-ink: oklch(0.8 0.13 152);
+  --ok-bg: oklch(0.3 0.06 152);`;
+
+const STYLES = `${FONT_FACES}
+:root {
+  color-scheme: light dark;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --fs-display: 1.3125rem;
+  --fs-h2: 0.9375rem;
+  --fs-body: 0.8125rem;
+  --fs-meta: 0.75rem;
+  --fs-label: 0.6875rem;
+  --lh-body: 1.55;
+  --sp-1: 0.25rem; --sp-2: 0.5rem; --sp-3: 0.75rem; --sp-4: 1rem;
+  --sp-5: 1.5rem; --sp-6: 2rem; --sp-7: 3rem;
+  --radius: 6px; --radius-sm: 4px;
+  --maxw: 1200px;
+  --z-sticky: 100;
+
+  --bg: oklch(0.985 0.004 255);
+  --surface: oklch(0.977 0.005 255);
+  --surface-2: oklch(0.954 0.007 255);
+  --raised: oklch(0.968 0.006 255);
+  --border: oklch(0.9 0.007 255);
+  --border-strong: oklch(0.82 0.009 255);
+  --ink: oklch(0.29 0.013 255);
+  --ink-2: oklch(0.42 0.013 255);
+  --ink-muted: oklch(0.51 0.012 255);
+  --accent: oklch(0.58 0.16 255);
+  --accent-ink: oklch(0.51 0.17 258);
+  --accent-quiet: oklch(0.94 0.03 255);
+  --focus: oklch(0.6 0.18 258);
+  --progress-ink: oklch(0.47 0.1 72);
+  --progress-bg: oklch(0.94 0.045 82);
+  --fail-ink: oklch(0.5 0.19 28);
+  --fail-bg: oklch(0.945 0.04 28);
+  --ok-ink: oklch(0.45 0.12 152);
+  --ok-bg: oklch(0.94 0.05 152);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {${DARK_TOKENS}
+  }
+}
+:root[data-theme="dark"] {${DARK_TOKENS}
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { font-size: 100%; -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  font-variant-ligatures: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+a { color: var(--accent-ink); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 0.2em; }
+code { font-family: var(--font-mono); }
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--raised);
+  border-bottom: 1px solid var(--border);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--ink);
+}
+.brand a { color: inherit; }
+.brand a:hover { text-decoration: none; }
+.beacon {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+.nav { display: flex; gap: var(--sp-1); }
+.nav a {
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-sm);
+  color: var(--ink-2);
+  font-size: var(--fs-meta);
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.nav a:hover { background: var(--surface-2); color: var(--ink); text-decoration: none; }
+
+main { max-width: var(--maxw); margin: 0 auto; padding: var(--sp-6) var(--sp-5) var(--sp-7); }
+
+.page-title {
+  font-size: var(--fs-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 var(--sp-5);
+}
+.page-title code { font-size: 0.85em; color: var(--ink-2); }
+.lede { color: var(--ink-muted); }
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3) var(--sp-6);
+  align-items: baseline;
+  padding: 0 0 var(--sp-5);
+  margin: 0 0 var(--sp-6);
+  border-bottom: 1px solid var(--border);
+}
+.kv { display: flex; flex-direction: column; gap: 0.15rem; }
+.kv .k {
+  color: var(--ink-muted);
+  font-size: var(--fs-label);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.kv .v { color: var(--ink); font-size: var(--fs-meta); }
+.kv .v code { color: var(--ink-2); }
+.kv .v.num { font-size: var(--fs-h2); font-weight: 600; letter-spacing: -0.01em; }
+
+section { margin: 0 0 var(--sp-6); }
+.section-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin: 0 0 var(--sp-3);
+}
+.section-head h2 {
+  font-size: var(--fs-h2);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  margin: 0;
+}
+.count {
+  font-size: var(--fs-label);
+  color: var(--ink-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.05rem 0.45rem;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+table { border-collapse: collapse; width: 100%; font-size: var(--fs-body); }
+th, td {
+  text-align: left;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  white-space: nowrap;
+}
+thead th {
+  background: var(--surface-2);
+  color: var(--ink-muted);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+tbody tr { transition: background-color 110ms ease; }
+tbody tr:hover { background: var(--surface-2); }
+tbody tr:last-child td { border-bottom: 0; }
+td code { color: var(--ink-2); }
+.c-title { white-space: normal; min-width: 22ch; }
+.c-detail { white-space: normal; min-width: 26ch; color: var(--ink-2); }
+.muted { color: var(--ink-muted); }
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42em;
+  padding: 0.14rem 0.5rem;
+  border-radius: 999px;
+  font-size: var(--fs-label);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.pill-dot { width: 0.5em; height: 0.5em; border-radius: 50%; background: currentColor; flex: none; }
+.pill--progress { color: var(--progress-ink); background: var(--progress-bg); border-color: color-mix(in oklch, var(--progress-ink) 22%, transparent); }
+.pill--fail { color: var(--fail-ink); background: var(--fail-bg); border-color: color-mix(in oklch, var(--fail-ink) 22%, transparent); }
+.pill--ok { color: var(--ok-ink); background: var(--ok-bg); border-color: color-mix(in oklch, var(--ok-ink) 22%, transparent); }
+.pill--neutral { color: var(--ink-muted); background: var(--surface-2); border-color: var(--border); }
+
+.fields {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--sp-2) var(--sp-4);
+  align-items: baseline;
+  margin: 0;
+  padding: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.fields dt {
+  color: var(--ink-muted);
+  font-size: var(--fs-label);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.fields dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.fields dd code { color: var(--ink-2); }
+.field-note { grid-column: 1 / -1; color: var(--ink-2); font-size: var(--fs-meta); }
+
+.files { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.files a {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4em;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--accent-ink);
+  font-size: var(--fs-meta);
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+.files a:hover { border-color: var(--border-strong); background: var(--surface-2); text-decoration: none; }
+.files small { color: var(--ink-muted); }
+
+.btn {
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2) var(--sp-4);
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.btn:hover { background: var(--surface-2); border-color: var(--ink-muted); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.alert {
+  border: 1px solid var(--fail-ink);
+  background: var(--fail-bg);
+  color: var(--fail-ink);
+  border-radius: var(--radius);
+  padding: var(--sp-3) var(--sp-4);
+  margin: 0 0 var(--sp-5);
+  font-size: var(--fs-meta);
+}
+.alert strong { display: block; margin-bottom: var(--sp-1); }
+.alert ul { margin: 0; padding-left: 1.2em; }
+
+.empty {
+  padding: var(--sp-5);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink-muted);
+}
+.empty strong { display: block; margin-bottom: var(--sp-1); color: var(--ink-2); }
+
+.note { color: var(--ink-2); font-size: var(--fs-meta); margin: var(--sp-2) 0 0; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .beacon { animation: pulse 2.4s ease-in-out infinite; }
+  .pill--progress.is-running .pill-dot { animation: pulse 1.8s ease-in-out infinite; }
+}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+@media (max-width: 640px) {
+  .topbar { padding: var(--sp-3) var(--sp-4); }
+  main { padding: var(--sp-5) var(--sp-4) var(--sp-6); }
+  .meta { gap: var(--sp-3) var(--sp-4); }
+  .fields { grid-template-columns: 1fr; gap: var(--sp-1) 0; }
+  .fields dt { margin-top: var(--sp-2); }
+}`;
+
 function layout(title: string, body: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%234a6ff0' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 6l5 6-5 6'/%3E%3Cpath d='M13 18h7'/%3E%3C/svg%3E">
 <title>${escapeHtml(title)}</title>
-<style>
-body { font-family: system-ui, -apple-system, Helvetica, Arial, sans-serif; margin: 1.5rem; color: #1a1a1a; }
-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 1rem; }
-h1, h2, h3 { margin: 0.6rem 0; }
-table { border-collapse: collapse; width: 100%; margin: 0.6rem 0 1.2rem; }
-th, td { padding: 0.35rem 0.6rem; border-bottom: 1px solid #ddd; text-align: left; vertical-align: top; font-size: 0.9rem; }
-th { background: #f5f5f5; }
-code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
-.state-running, .state-queued, .state-preparing_workspace, .state-input_required { color: #b06c00; }
-.state-failed, .state-cancelled, .state-stale { color: #b00020; }
-.state-succeeded { color: #007a3d; }
-nav a { margin-right: 1rem; }
-</style>
+<style>${STYLES}</style>
 </head>
 <body>
-<header><h1><a href="/">Symphonika</a></h1><nav><a href="/">Dashboard</a><a href="/runs">Runs</a></nav></header>
+<header class="topbar">
+  <div class="brand"><span class="beacon" aria-hidden="true"></span><a href="/">Symphonika</a></div>
+  <nav class="nav" aria-label="Primary"><a href="/">Dashboard</a><a href="/runs">Runs</a></nav>
+</header>
+<main>
 ${body}
+</main>
 </body>
 </html>`;
+}
+
+function stateFamily(state: RunState): "ok" | "fail" | "progress" | "neutral" {
+  switch (state) {
+    case "succeeded":
+      return "ok";
+    case "failed":
+    case "cancelled":
+    case "stale":
+      return "fail";
+    case "queued":
+    case "preparing_workspace":
+    case "running":
+    case "waiting":
+    case "input_required":
+      return "progress";
+    default:
+      return "neutral";
+  }
+}
+
+function statePill(state: RunState): string {
+  const family = stateFamily(state);
+  const running = state === "running" ? " is-running" : "";
+  return `<span class="pill pill--${family}${running}"><span class="pill-dot" aria-hidden="true"></span>${escapeHtml(state)}</span>`;
 }
 
 function renderHeader(
@@ -161,13 +525,31 @@ function renderHeader(
   const errorList =
     errors.length === 0
       ? ""
-      : `<ul>${errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul>`;
-  return `<section>
-  <p><strong>Version:</strong> <code>${escapeHtml(version)}</code></p>
-  <p><strong>State root:</strong> <code>${escapeHtml(stateRoot)}</code></p>
-  <p><strong>Eligible issues:</strong> ${candidateCount} &middot; <strong>Filtered:</strong> ${filteredCount}</p>
-  ${errorList}
-</section>`;
+      : `<div class="alert" role="alert"><strong>Issue polling errors</strong><ul>${errors
+          .map((error) => `<li>${escapeHtml(error)}</li>`)
+          .join("")}</ul></div>`;
+  return `<section class="meta">
+  <div class="kv"><span class="k">Version</span><span class="v"><code>${escapeHtml(version)}</code></span></div>
+  <div class="kv"><span class="k">State root</span><span class="v"><code>${escapeHtml(stateRoot)}</code></span></div>
+  <div class="kv"><span class="k">Eligible issues</span><span class="v num">${candidateCount}</span></div>
+  <div class="kv"><span class="k">Filtered</span><span class="v num">${filteredCount}</span></div>
+</section>
+${errorList}`;
+}
+
+function sectionHead(title: string, count?: number): string {
+  const badge =
+    count === undefined ? "" : `<span class="count">${count}</span>`;
+  return `<div class="section-head"><h2>${escapeHtml(title)}</h2>${badge}</div>`;
+}
+
+function tableSection(
+  title: string,
+  count: number,
+  head: string,
+  rows: string
+): string {
+  return `<section>${sectionHead(title, count)}<div class="table-wrap"><table><thead>${head}</thead><tbody>${rows}</tbody></table></div></section>`;
 }
 
 function renderProjectsCard(
@@ -177,21 +559,17 @@ function renderProjectsCard(
   const projectStates = snapshot?.projectStates ?? [];
   if (projectStates.length > 0) {
     const rows = projectStates
-      .map((project) => {
-        return [
-          "<tr>",
-          `<td>${escapeHtml(project.projectName)}</td>`,
-          `<td>${project.weight}</td>`,
-          `<td>${escapeHtml(formatProjectValidation(project))}</td>`,
-          `<td>${escapeHtml(formatProjectPoll(project))}</td>`,
-          `<td>${escapeHtml(formatProjectDispatch(project))}</td>`,
-          "</tr>"
-        ].join("");
-      })
+      .map(
+        (project) =>
+          `<tr><td>${escapeHtml(project.projectName)}</td><td>${project.weight}</td><td class="c-detail">${escapeHtml(formatProjectValidation(project))}</td><td class="c-detail">${escapeHtml(formatProjectPoll(project))}</td><td class="c-detail">${escapeHtml(formatProjectDispatch(project))}</td></tr>`
+      )
       .join("");
-    return `<section><h2>Projects</h2>
-<table><thead><tr><th>Name</th><th>Weight</th><th>Validation</th><th>Last poll</th><th>Last dispatch</th></tr></thead>
-<tbody>${rows}</tbody></table></section>`;
+    return tableSection(
+      "Projects",
+      projectStates.length,
+      "<tr><th>Name</th><th>Weight</th><th>Validation</th><th>Last poll</th><th>Last dispatch</th></tr>",
+      rows
+    );
   }
 
   if (snapshot !== undefined && snapshot.projects.length > 0) {
@@ -202,12 +580,15 @@ function renderProjectsCard(
             ? "&mdash;"
             : escapeHtml(project.missingOperationalLabels.join(", "));
         const valid = project.validForDispatch ? "valid" : "invalid";
-        return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(valid)}</td><td><code>${escapeHtml(project.workflowPath)}</code></td><td>${missing}</td></tr>`;
+        return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(valid)}</td><td><code>${escapeHtml(project.workflowPath)}</code></td><td class="c-detail">${missing}</td></tr>`;
       })
       .join("");
-    return `<section><h2>Projects</h2>
-<table><thead><tr><th>Name</th><th>Validation</th><th>Workflow</th><th>Missing operational labels</th></tr></thead>
-<tbody>${rows}</tbody></table></section>`;
+    return tableSection(
+      "Projects",
+      snapshot.projects.length,
+      "<tr><th>Name</th><th>Validation</th><th>Workflow</th><th>Missing operational labels</th></tr>",
+      rows
+    );
   }
 
   const pollProjects = issuePollStatus?.projects ?? [];
@@ -221,12 +602,15 @@ function renderProjectsCard(
       const detail = project.ok
         ? `${project.fetchedIssues} fetched`
         : (project.error ?? "unknown error");
-      return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(status)}</td><td>${escapeHtml(detail)}</td></tr>`;
+      return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(status)}</td><td class="c-detail">${escapeHtml(detail)}</td></tr>`;
     })
     .join("");
-  return `<section><h2>Projects</h2>
-<table><thead><tr><th>Name</th><th>Issue polling</th><th>Last poll</th></tr></thead>
-<tbody>${rows}</tbody></table></section>`;
+  return tableSection(
+    "Projects",
+    pollProjects.length,
+    "<tr><th>Name</th><th>Issue polling</th><th>Last poll</th></tr>",
+    rows
+  );
 }
 
 function formatProjectValidation(project: ProjectState): string {
@@ -269,12 +653,15 @@ function renderStaleIssuesCard(
   const rows = staleIssues
     .map(
       (entry) =>
-        `<tr><td>${escapeHtml(entry.project)}</td><td><a href="${escapeHtml(entry.issue.url)}">#${entry.issue.number}</a> ${escapeHtml(entry.issue.title)}</td><td>${escapeHtml(entry.reasons.join(", "))}</td></tr>`
+        `<tr><td>${escapeHtml(entry.project)}</td><td class="c-title"><a href="${escapeHtml(entry.issue.url)}">#${entry.issue.number}</a> ${escapeHtml(entry.issue.title)}</td><td class="c-detail">${escapeHtml(entry.reasons.join(", "))}</td></tr>`
     )
     .join("");
-  return `<section><h2>Stale issues</h2>
-<table><thead><tr><th>Project</th><th>Issue</th><th>Reason</th></tr></thead>
-<tbody>${rows}</tbody></table></section>`;
+  return tableSection(
+    "Stale issues",
+    staleIssues.length,
+    "<tr><th>Project</th><th>Issue</th><th>Reason</th></tr>",
+    rows
+  );
 }
 
 function renderRoutinesTable(routines: RoutineStatus[]): string {
@@ -284,28 +671,37 @@ function renderRoutinesTable(routines: RoutineStatus[]): string {
   const rows = routines
     .map(
       (routine) =>
-        `<tr><td>${escapeHtml(routine.projectName)}</td><td>${escapeHtml(routine.name)}</td><td>${escapeHtml(routine.state)}</td><td>${escapeHtml(routine.nextFireAt ?? "-")}</td><td>${escapeHtml(routine.lastFiredAt ?? "-")}</td></tr>`
+        `<tr><td>${escapeHtml(routine.projectName)}</td><td>${escapeHtml(routine.name)}</td><td>${escapeHtml(routine.state)}</td><td><code>${escapeHtml(routine.nextFireAt ?? "-")}</code></td><td><code>${escapeHtml(routine.lastFiredAt ?? "-")}</code></td></tr>`
     )
     .join("");
-  return `<section><h2>Routines</h2>
-<table><thead><tr><th>Project</th><th>Routine</th><th>State</th><th>next_fire_at</th><th>last_fired_at</th></tr></thead>
-<tbody>${rows}</tbody></table></section>`;
+  return tableSection(
+    "Routines",
+    routines.length,
+    "<tr><th>Project</th><th>Routine</th><th>State</th><th>next_fire_at</th><th>last_fired_at</th></tr>",
+    rows
+  );
 }
 
 function renderRunsTable(title: string, runs: RunStatus[]): string {
   if (runs.length === 0) {
-    return `<section><h2>${escapeHtml(title)}</h2><p><em>No runs yet.</em></p></section>`;
+    const message = title.startsWith("Runs (")
+      ? "No runs in this state yet."
+      : "No runs yet. A Run appears here once the daemon claims an eligible issue and dispatches a coding agent; its state and evidence stay recorded for review.";
+    return `<section>${sectionHead(title, 0)}<div class="empty"><strong>Nothing to show</strong>${escapeHtml(message)}</div></section>`;
   }
 
   const rows = runs
     .map(
       (run) =>
-        `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td>#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td><span class="state-${escapeHtml(run.state)}">${escapeHtml(run.state)}</span></td><td>${escapeHtml(run.provider)}</td><td>${escapeHtml(run.createdAt)}</td><td>${escapeHtml(run.updatedAt)}</td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`
+        `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td class="c-title">#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td>${statePill(run.state)}</td><td>${escapeHtml(run.provider)}</td><td><code>${escapeHtml(run.createdAt)}</code></td><td><code>${escapeHtml(run.updatedAt)}</code></td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`
     )
     .join("");
-  return `<section><h2>${escapeHtml(title)}</h2>
-<table><thead><tr><th>Run id</th><th>Project</th><th>Issue</th><th>State</th><th>Provider</th><th>Started</th><th>Updated</th><th>Branch</th></tr></thead>
-<tbody>${rows}</tbody></table></section>`;
+  return tableSection(
+    title,
+    runs.length,
+    "<tr><th>Run id</th><th>Project</th><th>Issue</th><th>State</th><th>Provider</th><th>Started</th><th>Updated</th><th>Branch</th></tr>",
+    rows
+  );
 }
 
 type CapContext = {
@@ -319,29 +715,36 @@ function renderRunSummary(
 ): string {
   const capContextLine =
     capContext !== null && capContext.kind !== null
-      ? `<p><strong>Cap context:</strong> ${escapeHtml(formatCapReachedReason(capContext.kind, capContext.count))}</p>`
+      ? `<div class="field-note"><strong>Cap context:</strong> ${escapeHtml(formatCapReachedReason(capContext.kind, capContext.count))}</div>`
       : "";
-  return `<section>
-  <p><strong>Project:</strong> ${escapeHtml(detail.project)}</p>
-  <p><strong>Issue:</strong> #${detail.issueNumber} ${escapeHtml(detail.issueTitle)}</p>
-  <p><strong>State:</strong> <span class="state-${escapeHtml(detail.state)}">${escapeHtml(detail.state)}</span></p>
-  <p><strong>Provider:</strong> ${escapeHtml(detail.provider)}</p>
-  <p><strong>Started:</strong> ${escapeHtml(detail.createdAt)}</p>
-  <p><strong>Updated:</strong> ${escapeHtml(detail.updatedAt)}</p>
-  <p><strong>Branch:</strong> <code>${escapeHtml(detail.branchName)}</code></p>
-  <p><strong>Workspace:</strong> <code>${escapeHtml(detail.workspacePath)}</code></p>
-  <p><strong>Retries:</strong> ${detail.retryCount}${detail.isContinuation ? " (continuation)" : ""}</p>
-  ${detail.terminalReason !== null ? `<p><strong>Terminal reason:</strong> ${escapeHtml(detail.terminalReason)}</p>` : ""}
+  const cancelLine = detail.cancelRequested
+    ? `<div class="field-note"><strong>Cancel requested</strong> (reason: ${escapeHtml(detail.cancelReason ?? "unknown")})</div>`
+    : "";
+  const terminalRow =
+    detail.terminalReason !== null
+      ? `<dt>Terminal reason</dt><dd><code>${escapeHtml(detail.terminalReason)}</code></dd>`
+      : "";
+  return `<section><dl class="fields">
+  <dt>Project</dt><dd>${escapeHtml(detail.project)}</dd>
+  <dt>Issue</dt><dd>#${detail.issueNumber} ${escapeHtml(detail.issueTitle)}</dd>
+  <dt>State</dt><dd>${statePill(detail.state)}</dd>
+  <dt>Provider</dt><dd>${escapeHtml(detail.provider)}</dd>
+  <dt>Started</dt><dd><code>${escapeHtml(detail.createdAt)}</code></dd>
+  <dt>Updated</dt><dd><code>${escapeHtml(detail.updatedAt)}</code></dd>
+  <dt>Branch</dt><dd><code>${escapeHtml(detail.branchName)}</code></dd>
+  <dt>Workspace</dt><dd><code>${escapeHtml(detail.workspacePath)}</code></dd>
+  <dt>Retries</dt><dd>${detail.retryCount}${detail.isContinuation ? " (continuation)" : ""}</dd>
+  ${terminalRow}
   ${capContextLine}
-  ${detail.cancelRequested ? `<p><strong>Cancel requested</strong> (reason: ${escapeHtml(detail.cancelReason ?? "unknown")})</p>` : ""}
-</section>`;
+  ${cancelLine}
+</dl></section>`;
 }
 
 function renderCancelForm(detail: { id: string; state: RunState }): string {
   if (TERMINAL_STATES.has(detail.state)) {
     return "";
   }
-  return `<section><form method="post" action="/api/runs/${encodeURIComponent(detail.id)}/cancel"><button type="submit">Cancel run</button></form></section>`;
+  return `<section><form method="post" action="/api/runs/${encodeURIComponent(detail.id)}/cancel"><button class="btn" type="submit">Cancel run</button></form></section>`;
 }
 
 function renderAttemptsTable(
@@ -356,15 +759,20 @@ function renderAttemptsTable(
   }[]
 ): string {
   if (attempts.length === 0) {
-    return `<section><h2>Attempts</h2><p><em>No attempts recorded.</em></p></section>`;
+    return `<section>${sectionHead("Attempts", 0)}<div class="empty"><strong>No attempts recorded</strong>This run has not produced a provider attempt yet.</div></section>`;
   }
   const rows = attempts
     .map(
       (attempt) =>
-        `<tr><td>${attempt.attemptNumber}</td><td><code>${escapeHtml(attempt.id)}</code></td><td><span class="state-${escapeHtml(attempt.state)}">${escapeHtml(attempt.state)}</span></td><td>${escapeHtml(attempt.providerName)}</td><td>${escapeHtml(attempt.createdAt)}</td><td>${escapeHtml(attempt.updatedAt)}</td><td><code>${escapeHtml(attempt.branchName)}</code></td></tr>`
+        `<tr><td>${attempt.attemptNumber}</td><td><code>${escapeHtml(attempt.id)}</code></td><td>${statePill(attempt.state)}</td><td>${escapeHtml(attempt.providerName)}</td><td><code>${escapeHtml(attempt.createdAt)}</code></td><td><code>${escapeHtml(attempt.updatedAt)}</code></td><td><code>${escapeHtml(attempt.branchName)}</code></td></tr>`
     )
     .join("");
-  return `<section><h2>Attempts</h2><table><thead><tr><th>#</th><th>Attempt id</th><th>State</th><th>Provider</th><th>Attempt started</th><th>Attempt updated</th><th>Branch</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+  return tableSection(
+    "Attempts",
+    attempts.length,
+    "<tr><th>#</th><th>Attempt id</th><th>State</th><th>Provider</th><th>Attempt started</th><th>Attempt updated</th><th>Branch</th></tr>",
+    rows
+  );
 }
 
 function renderTransitionsTable(
@@ -376,10 +784,15 @@ function renderTransitionsTable(
   const rows = transitions
     .map(
       (transition) =>
-        `<tr><td>${transition.sequence}</td><td><span class="state-${escapeHtml(transition.state)}">${escapeHtml(transition.state)}</span></td><td>${escapeHtml(transition.createdAt)}</td></tr>`
+        `<tr><td>${transition.sequence}</td><td>${statePill(transition.state)}</td><td><code>${escapeHtml(transition.createdAt)}</code></td></tr>`
     )
     .join("");
-  return `<section><h2>State transitions</h2><table><thead><tr><th>Seq</th><th>State</th><th>At</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+  return tableSection(
+    "State transitions",
+    transitions.length,
+    "<tr><th>Seq</th><th>State</th><th>At</th></tr>",
+    rows
+  );
 }
 
 function renderEventsTable(
@@ -391,7 +804,7 @@ function renderEventsTable(
   }[]
 ): string {
   if (events.length === 0) {
-    return `<section><h2>Recent events</h2><p><em>No events recorded yet.</em></p></section>`;
+    return `<section>${sectionHead("Recent events", 0)}<div class="empty"><strong>No events recorded yet</strong>Provider events stream in here once the run starts producing output.</div></section>`;
   }
   const rows = events
     .map((event) => {
@@ -399,10 +812,15 @@ function renderEventsTable(
         typeof event.normalized.message === "string"
           ? event.normalized.message
           : JSON.stringify(event.normalized);
-      return `<tr><td>${event.sequence}</td><td>${escapeHtml(event.type)}</td><td><code>${escapeHtml(message)}</code></td><td>${escapeHtml(event.createdAt)}</td></tr>`;
+      return `<tr><td>${event.sequence}</td><td>${escapeHtml(event.type)}</td><td class="c-detail"><code>${escapeHtml(message)}</code></td><td><code>${escapeHtml(event.createdAt)}</code></td></tr>`;
     })
     .join("");
-  return `<section><h2>Recent events (last ${events.length})</h2><table><thead><tr><th>Seq</th><th>Type</th><th>Detail</th><th>At</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+  return tableSection(
+    `Recent events (last ${events.length})`,
+    events.length,
+    "<tr><th>Seq</th><th>Type</th><th>Detail</th><th>At</th></tr>",
+    rows
+  );
 }
 
 function renderRunFileLinks(
@@ -421,7 +839,7 @@ function renderRunFileLinks(
   if (items.length === 0) {
     return "";
   }
-  return `<section><h2>Files</h2><ul>${items.join("")}</ul></section>`;
+  return `<section>${sectionHead("Files", items.length)}<ul class="files">${items.join("")}</ul></section>`;
 }
 
 function renderWorkflowGraphSummary(
@@ -440,14 +858,14 @@ function renderWorkflowGraphSummary(
   const stateCount = Array.isArray(graph.states) ? graph.states.length : 0;
   const contentHash =
     typeof graph.contentHash === "string" ? graph.contentHash : "(unknown)";
-  return `<section><h2>Workflow graph</h2>
-<p><strong>Name:</strong> <code>${escapeHtml(name)}</code></p>
-<p><strong>Source kind:</strong> ${escapeHtml(sourceKind)}</p>
-<p><strong>Source path:</strong> <code>${escapeHtml(sourcePath)}</code></p>
-<p><strong>Initial state:</strong> <code>${escapeHtml(initial)}</code></p>
-<p><strong>States:</strong> ${stateCount}</p>
-<p><strong>Content hash:</strong> <code>${escapeHtml(contentHash)}</code></p>
-</section>`;
+  return `<section>${sectionHead("Workflow graph")}<dl class="fields">
+  <dt>Name</dt><dd><code>${escapeHtml(name)}</code></dd>
+  <dt>Source kind</dt><dd>${escapeHtml(sourceKind)}</dd>
+  <dt>Source path</dt><dd><code>${escapeHtml(sourcePath)}</code></dd>
+  <dt>Initial state</dt><dd><code>${escapeHtml(initial)}</code></dd>
+  <dt>States</dt><dd>${stateCount}</dd>
+  <dt>Content hash</dt><dd><code>${escapeHtml(contentHash)}</code></dd>
+</dl></section>`;
 }
 
 function formatArtifactKind(kind: RunArtifactDescriptor["kind"]): string {

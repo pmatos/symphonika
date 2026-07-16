@@ -5,6 +5,9 @@ symphony/
 package-lock.json
 .impeccable/
 
+# Generated asset module: base64-embedded font bytes; never reflow by hand.
+src/http/fonts.ts
+
 # Prose docs are source-of-truth contracts (SPEC, ADRs, specs); keep them out of
 # Prettier's reach so it never churns hand-authored Markdown tables/prose.
 *.md

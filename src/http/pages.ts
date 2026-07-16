@@ -101,12 +101,15 @@ export function registerPages(options: RegisterPagesOptions): void {
       );
     }
 
+    // Fetch one extra row so we can distinguish "exactly EVENT_TAIL_LIMIT
+    // events, nothing cut" from "more than EVENT_TAIL_LIMIT, truncated" — the
+    // count label must not claim truncation when none happened.
     const tailDesc = options.runStore.listProviderEvents(id, {
-      limit: EVENT_TAIL_LIMIT,
+      limit: EVENT_TAIL_LIMIT + 1,
       order: "desc"
     });
-    const events = tailDesc.slice().reverse();
-    const eventsTruncated = tailDesc.length >= EVENT_TAIL_LIMIT;
+    const eventsTruncated = tailDesc.length > EVENT_TAIL_LIMIT;
+    const events = tailDesc.slice(0, EVENT_TAIL_LIMIT).reverse();
     const isFailure = FAILURE_STATES.has(detail.state);
     const terminalAttempt = detail.attempts[detail.attempts.length - 1];
     const failureEvent = isFailure

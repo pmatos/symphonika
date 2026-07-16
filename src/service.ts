@@ -183,6 +183,18 @@ export async function runServiceInstall(
     return baseReport({ ok: true, printed: true });
   }
 
+  // When scriptPath was resolved from the running module (not injected), refuse
+  // to write a unit whose ExecStart points at a nonexistent entrypoint. This
+  // happens when `service install` is run from TS sources (`npm run dev` / tsx),
+  // where the default resolves to a `src/cli.js` that is never built — fail fast
+  // instead of installing a unit that dies at runtime with MODULE_NOT_FOUND.
+  if (options.scriptPath === undefined && !(await fileExists(scriptPath))) {
+    errors.push(
+      `resolved CLI entrypoint ${scriptPath} does not exist; run \`symphonika service install\` from the built CLI (\`node dist/cli.js\` or the installed \`symphonika\` bin), not from TS sources (\`npm run dev\`)`
+    );
+    return baseReport();
+  }
+
   if (options.force !== true) {
     const existing: string[] = [];
     for (const file of files) {

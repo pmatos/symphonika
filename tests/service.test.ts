@@ -209,6 +209,24 @@ describe("runServiceInstall", () => {
     expect(report.unitDir).toBe(path.join(home, ".config", "systemd", "user"));
   });
 
+  it("refuses to install when the resolved CLI entrypoint does not exist", async () => {
+    const home = await makeTempHome();
+
+    // No scriptPath injected → defaultScriptPath() resolves cli.js beside the
+    // running module, which under vitest/tsx is a nonexistent src/cli.js.
+    const report = await runServiceInstall({
+      env: { PATH: "/opt/node/bin:/usr/bin" },
+      execPath: "/opt/node/bin/node",
+      homeDir: home,
+      reload: false
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors.join("\n")).toContain("does not exist");
+    expect(report.errors.join("\n")).toContain("node dist/cli.js");
+    await expect(access(path.join(home, ".config"))).rejects.toThrow();
+  });
+
   it("refuses to overwrite existing units without force", async () => {
     const home = await makeTempHome();
     const unitDir = userUnitDir(home);

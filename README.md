@@ -64,21 +64,20 @@ The `symphony/` directory in the tree is a git submodule of an unrelated upstrea
 
 For long-lived installations, run the daemon under `systemd --user` so it doesn't share a cgroup with your terminal. Otherwise an OOM-kill of a spawned tool (compiler, verifier, etc.) can mark the whole terminal scope as failed and `systemd` will tear down the terminal — and the daemon — along with it.
 
-Template units live in [`systemd/`](systemd/):
+Generate and install the unit files for your install with:
 
 ```sh
-mkdir -p ~/.config/systemd/user
-cp systemd/symphonika.service systemd/symphonika.slice ~/.config/systemd/user/
-# Adjust ExecStart (if you didn't install via `npm install -g`) and the
-# memory caps in the slice to match your host.
-systemctl --user daemon-reload
+symphonika service install
 systemctl --user enable --now symphonika.service
 journalctl --user -u symphonika -f
 ```
 
-What the template gives you:
+`service install` writes `symphonika.service` and `symphonika.slice` into `~/.config/systemd/user/` and runs `systemctl --user daemon-reload` for you. It derives the unit from the running process — the `node` runtime executing the resolved `dist/cli.js` — so the unit matches your install (npm global, nvm, pnpm, or a source checkout) instead of a hardcoded bin path. Re-run it after a `node` upgrade to refresh a version-pinned path; pass `--force` to overwrite existing units or `--print` to review the generated units without writing them.
 
-- **`symphonika.slice`** owns the daemon and every process it spawns. `MemoryHigh=` / `MemoryMax=` cap the whole tree so a runaway tool is killed *inside* the slice instead of triggering a global OOM.
+What the generated units give you:
+
+- **`symphonika.slice`** owns the daemon and every process it spawns. `MemoryHigh=` / `MemoryMax=` cap the whole tree so a runaway tool is killed *inside* the slice instead of triggering a global OOM. The generated caps assume a large workstation (see [`systemd/symphonika.slice`](systemd/symphonika.slice)); edit the installed `~/.config/systemd/user/symphonika.slice` to match your host (re-running `service install --force` overwrites it).
+- The daemon's `PATH` is captured from the shell that ran `service install`, with the `node` runtime's directory prepended, so `gh` and the spawned providers (`claude`, `codex`) resolve under `systemd --user` — which does not inherit your interactive `PATH`. Run `service install` from a clean login shell so only real bin directories are baked in.
 - The daemon's **GitHub auth token** is populated from `gh auth token` at each (re)start, so it picks up rotated tokens automatically. The service fails closed (won't start) if `gh` is logged out.
 - `Restart=on-failure` brings the daemon back, and `After=graphical-session.target` keeps the ordering right so `gh` can read your keyring.
 

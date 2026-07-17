@@ -33,6 +33,8 @@ import type {
   RunStore
 } from "./run-store.js";
 import { openRunStore as openRunStoreReal } from "./run-store.js";
+import type { ServiceInstallOptions, ServiceInstallReport } from "./service.js";
+import { runServiceInstall as runServiceInstallReal } from "./service.js";
 import type { SmokeOptions, SmokeReport } from "./smoke.js";
 import { runSmoke } from "./smoke.js";
 import {
@@ -65,6 +67,9 @@ export type CliDependencies = {
   runDoctor?: (options: DoctorOptions) => Promise<DoctorReport>;
   runInit?: (options: InitOptions) => Promise<InitReport>;
   runInitProject?: (options: InitProjectOptions) => Promise<InitProjectReport>;
+  runServiceInstall?: (
+    options: ServiceInstallOptions
+  ) => Promise<ServiceInstallReport>;
   runSmoke?: (options: SmokeOptions) => Promise<SmokeReport>;
   startDaemon?: (options: StartDaemonOptions) => Promise<DaemonHandle>;
 };
@@ -108,6 +113,8 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   const init = dependencies.runInit ?? runInit;
   const initProject = dependencies.runInitProject ?? runInitProject;
   const clearStale = dependencies.runClearStale ?? runClearStale;
+  const serviceInstall =
+    dependencies.runServiceInstall ?? runServiceInstallReal;
   const smoke = dependencies.runSmoke ?? runSmoke;
   const start = dependencies.startDaemon ?? startDaemon;
   const openRunStore = dependencies.openRunStore ?? openRunStoreReal;
@@ -375,6 +382,75 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         }
       }
     });
+
+  const serviceCommand = program
+    .command("service")
+    .description("manage the systemd --user service unit for this install");
+
+  serviceCommand
+    .command("install")
+    .description(
+      "generate systemd --user unit files matching the current runtime and daemon-reload"
+    )
+    .option("--force", "overwrite existing unit files")
+    .option(
+      "--print",
+      "print the generated units to stdout without writing or reloading"
+    )
+    .option("--no-reload", "skip systemctl --user daemon-reload after writing")
+    .action(
+      async (options: {
+        force?: boolean;
+        print?: boolean;
+        reload?: boolean;
+      }) => {
+        const report = await serviceInstall({
+          force: options.force === true,
+          print: options.print === true,
+          reload: options.reload !== false
+        });
+
+        if (report.printed) {
+          for (const file of report.files) {
+            writeOut(program, `# ${file.path}\n`);
+            writeOut(program, file.content);
+            writeOut(program, "\n");
+          }
+          return;
+        }
+
+        if (!report.ok) {
+          writeErr(program, "service install failed:\n");
+          for (const error of report.errors) {
+            writeErr(program, `- ${error}\n`);
+          }
+          process.exitCode = 1;
+          return;
+        }
+
+        writeOut(program, "service install ok\n");
+        for (const file of report.files) {
+          writeOut(program, `wrote:  ${file.path}\n`);
+        }
+        if (report.reloadError !== null) {
+          writeErr(
+            program,
+            `warning: systemctl --user daemon-reload failed: ${report.reloadError}\n`
+          );
+          writeErr(
+            program,
+            "run systemctl --user daemon-reload yourself once systemd --user is available\n"
+          );
+        } else if (report.reloaded) {
+          writeOut(program, "ran:    systemctl --user daemon-reload\n");
+        }
+        writeOut(
+          program,
+          "next:   systemctl --user enable --now symphonika.service\n"
+        );
+        writeOut(program, "then:   journalctl --user -u symphonika -f\n");
+      }
+    );
 
   const workflowCommand = program
     .command("workflow")

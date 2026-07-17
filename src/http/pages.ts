@@ -646,17 +646,19 @@ const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
     });
   });
 
-  if (typeof window.cytoscape === "undefined" || typeof window.dagre === "undefined") {
+  if (typeof window.cytoscape === "undefined" || typeof window.dagre === "undefined" || typeof window.cytoscapeDagre === "undefined") {
     renderFallback();
     return;
   }
-  try { if (window.cytoscapeDagre) window.cytoscape.use(window.cytoscapeDagre); } catch (e) {}
+  try { window.cytoscape.use(window.cytoscapeDagre); } catch (e) {}
 
   function layoutOpts() {
     return { name: "dagre", rankDir: "TB", nodeSep: 80, rankSep: 140, edgeSep: 28, ranker: "network-simplex", padding: 30 };
   }
 
-  var cy = window.cytoscape({
+  var cy;
+  try {
+  cy = window.cytoscape({
     container: cyEl,
     elements: elements,
     wheelSensitivity: 0.2,
@@ -695,6 +697,10 @@ const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
     ],
     layout: layoutOpts()
   });
+  } catch (initErr) {
+    renderFallback();
+    return;
+  }
 
   cy.on("tap", "node", function (evt) { showDetail(evt.target); });
   cy.on("tap", function (evt) { if (evt.target === cy) clearDetail(); });

@@ -3,20 +3,25 @@
 //
 // Usage: node scripts/gen-fonts.mjs   (or: npm run gen:fonts)
 //
-// Fetches the woff2 straight from the Fontsource CDN so the daemon ships no
-// binary assets and the file is fully reproducible. The per-weight hash is what
-// the dashboard puts in each font URL (/assets/fonts/ibm-plex-mono-<w>.<hash>.woff2)
-// so the immutable one-year cache is safe: regenerating the font changes the hash,
-// which changes the URL, which busts every client cache.
+// Fetches the woff2 from a pinned Fontsource release so the daemon ships no
+// binary assets and regeneration is reproducible (bump FONT_VERSION to update).
+// The per-weight hash is what the dashboard puts in each font URL
+// (/assets/fonts/ibm-plex-mono-<w>.<hash>.woff2) so the immutable one-year cache
+// is safe: regenerating the font changes the hash, which changes the URL, which
+// busts every client cache.
 //
-// IBM Plex Mono is licensed under the SIL Open Font License 1.1 (https://github.com/IBM/plex).
+// IBM Plex Mono is licensed under the SIL Open Font License 1.1; the full license
+// and copyright notice ship in licenses/IBM-Plex-Mono-OFL.txt (source:
+// https://github.com/IBM/plex).
 
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const WEIGHTS = ["400", "500", "600"];
-const CDN = "https://cdn.jsdelivr.net/fontsource/fonts/ibm-plex-mono@latest";
+// Pinned so regeneration is reproducible; bump to adopt a newer Fontsource build.
+const FONT_VERSION = "5.2.7";
+const CDN = `https://cdn.jsdelivr.net/fontsource/fonts/ibm-plex-mono@${FONT_VERSION}`;
 const OUT = fileURLToPath(new URL("../src/http/fonts.ts", import.meta.url));
 
 async function fetchWoff2(weight) {
@@ -57,7 +62,10 @@ L.push(
   "// 400/500/600, embedded as base64 so the daemon dashboard is self-contained and"
 );
 L.push(
-  "// works offline. Source: https://github.com/IBM/plex (via the Fontsource CDN)."
+  "// works offline. Full license + copyright: licenses/IBM-Plex-Mono-OFL.txt."
+);
+L.push(
+  `// Source: https://github.com/IBM/plex via Fontsource ibm-plex-mono@${FONT_VERSION}.`
 );
 L.push("");
 L.push('type BundledFontWeight = "400" | "500" | "600";');

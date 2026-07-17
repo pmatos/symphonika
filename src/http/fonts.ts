@@ -2,7 +2,8 @@
 // Run `npm run gen:fonts` (or `node scripts/gen-fonts.mjs`) to regenerate.
 // Bundled IBM Plex Mono (SIL Open Font License 1.1), Latin subset, weights
 // 400/500/600, embedded as base64 so the daemon dashboard is self-contained and
-// works offline. Source: https://github.com/IBM/plex (via the Fontsource CDN).
+// works offline. Full license + copyright: licenses/IBM-Plex-Mono-OFL.txt.
+// Source: https://github.com/IBM/plex via Fontsource ibm-plex-mono@5.2.7.
 
 type BundledFontWeight = "400" | "500" | "600";
 

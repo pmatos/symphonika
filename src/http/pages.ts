@@ -1161,14 +1161,14 @@ ${WORKFLOW_GRAPH_SCRIPTS}
 const WORKFLOW_GRAPH_STYLES = `
 .wf-sub { color:#555; font-size:0.9rem; margin:0 0 0.8rem; }
 .wf-toolbar { display:flex; gap:.5rem; align-items:center; margin-bottom:.6rem; flex-wrap:wrap; }
-.wf-toolbar button { font:inherit; font-size:.85rem; padding:.3rem .7rem; border:1px solid #cbd5e1; background:#fff; border-radius:6px; cursor:pointer; }
+.wf-toolbar button { font:inherit; font-size:.85rem; padding:.3rem .7rem; border:1px solid #cbd5e1; background:#fff; color:#0f172a; border-radius:6px; cursor:pointer; }
 .wf-toolbar button:hover { background:#f1f5f9; }
 .wf-hint { color:#64748b; font-size:.8rem; }
 .wf-wrap { display:flex; gap:1rem; align-items:stretch; }
 #wf-cy { flex:1 1 auto; height:80vh; min-height:520px; border:1px solid #e2e8f0; border-radius:10px;
   background:#fbfcfe radial-gradient(circle at 1px 1px, #e6eaf1 1px, transparent 0) 0 0 / 22px 22px; }
 .wf-side { flex:0 0 320px; display:flex; flex-direction:column; gap:1rem; }
-.wf-card { border:1px solid #e2e8f0; border-radius:10px; padding:.8rem .9rem; background:#fff; }
+.wf-card { border:1px solid #e2e8f0; border-radius:10px; padding:.8rem .9rem; background:#fff; color:#0f172a; }
 .wf-card h2 { margin:0 0 .5rem; font-size:.95rem; }
 .wf-legend-row { display:flex; align-items:center; gap:.5rem; font-size:.82rem; margin:.28rem 0; }
 .wf-swatch { width:16px; height:16px; border-radius:4px; border:1px solid #94a3b8; flex:0 0 auto; }

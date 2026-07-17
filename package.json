@@ -11,6 +11,7 @@
     "dev": "tsx src/cli.ts",
     "format": "prettier . --write",
     "format:check": "prettier . --check",
+    "gen:fonts": "node scripts/gen-fonts.mjs",
     "fuzz:workflow": "npm run build && jazzer --sync fuzz/workflow-parse.fuzz.mjs -- -max_total_time=30",
     "fuzz:workflow:dry": "npm run build && jazzer --sync --dryRun fuzz/workflow-parse.fuzz.mjs -- -runs=1",
     "knip": "knip",

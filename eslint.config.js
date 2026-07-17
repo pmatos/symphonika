@@ -10,6 +10,7 @@ export default tseslint.config(
       "node_modules/**",
       ".stryker-tmp/**",
       "symphony/**",
+      "scripts/**",
       "eslint.config.js"
     ]
   },

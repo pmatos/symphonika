@@ -139,9 +139,8 @@ describe("HTTP app — runs API and pages", () => {
       const response = await app.request("/runs/cap");
       expect(response.status).toBe(200);
       const html = await response.text();
-      expect(html).toContain(
-        "<strong>Terminal reason:</strong> cap_reached:no_commits"
-      );
+      expect(html).toContain("<dt>Terminal reason</dt>");
+      expect(html).toContain("cap_reached:no_commits");
       expect(html).toContain(
         "<strong>Cap context:</strong> continuation cap reached after 1 continuation: no commits on issue branch"
       );

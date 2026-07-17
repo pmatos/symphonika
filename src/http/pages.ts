@@ -11,6 +11,7 @@ import {
 import type {
   ListRunsFilter,
   ProjectState,
+  ProviderEventRecord,
   RunArtifactDescriptor,
   RunState,
   RunStatus,
@@ -48,9 +49,17 @@ const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
   "stale"
 ]);
 
+const FAILURE_STATES: ReadonlySet<RunState> = new Set(["failed", "stale"]);
+
+// A single run's detail view is cheap to render; coalescing streamed message
+// tokens collapses hundreds of rows into a handful, so fetch a generous tail.
+const EVENT_TAIL_LIMIT = 500;
+
 export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/assets/fonts/:file", (context) => {
-    const match = /^ibm-plex-mono-(\d+)\.woff2$/.exec(context.req.param("file"));
+    const match = /^ibm-plex-mono-(\d+)\.woff2$/.exec(
+      context.req.param("file")
+    );
     const weight = match?.[1];
     const bytes = weight === undefined ? undefined : getBundledFont(weight);
     if (bytes === undefined) {
@@ -118,7 +127,32 @@ export function registerPages(options: RegisterPagesOptions): void {
       );
     }
 
-    const events = options.runStore.listProviderEvents(id, { limit: 100 });
+    // Fetch one extra row so we can distinguish "exactly EVENT_TAIL_LIMIT
+    // events, nothing cut" from "more than EVENT_TAIL_LIMIT, truncated" — the
+    // count label must not claim truncation when none happened.
+    const tailDesc = options.runStore.listProviderEvents(id, {
+      limit: EVENT_TAIL_LIMIT + 1,
+      order: "desc"
+    });
+    const eventsTruncated = tailDesc.length > EVENT_TAIL_LIMIT;
+    const events = tailDesc.slice(0, EVENT_TAIL_LIMIT).reverse();
+    const isFailure = FAILURE_STATES.has(detail.state);
+    const terminalAttempt = detail.attempts[detail.attempts.length - 1];
+    const failureEvent = isFailure
+      ? options.runStore.getLastFailureEvent(id, terminalAttempt?.id)
+      : undefined;
+    // Scope to the terminal attempt for the same reason failureEvent is: an
+    // earlier attempt's abnormal process_exit must not be attributed to the
+    // terminal failure (e.g. a stale run whose terminal attempt was killed via
+    // the watchdog DB update and never emitted its own process_exit).
+    const exitEvent = isFailure
+      ? findLast(
+          events,
+          (event) =>
+            event.normalized.type === "process_exit" &&
+            event.attemptId === terminalAttempt?.id
+        )
+      : undefined;
     const artifacts = options.runStore.listRunArtifacts(id);
     const workflowGraph = await options.runStore.getWorkflowGraph(id);
     const capKind = parseCapReachedReason(detail.terminalReason);
@@ -134,12 +168,13 @@ export function registerPages(options: RegisterPagesOptions): void {
           };
     const sections = [
       `<h1 class="page-title">Run <code>${escapeHtml(detail.id)}</code></h1>`,
+      renderOutcomeBanner(detail, failureEvent, exitEvent),
       renderRunSummary(detail, capContext),
       renderWorkflowGraphSummary(workflowGraph),
       renderCancelForm(detail),
       renderAttemptsTable(detail.attempts),
       renderTransitionsTable(detail.transitions),
-      renderEventsTable(events),
+      renderEventsTable(events, eventsTruncated),
       renderRunFileLinks(detail.id, artifacts)
     ].join("");
     return context.html(layout(`Run ${detail.id}`, sections));
@@ -451,6 +486,32 @@ td code { color: var(--ink-2); }
 .empty strong { display: block; margin-bottom: var(--sp-1); color: var(--ink-2); }
 
 .note { color: var(--ink-2); font-size: var(--fs-meta); margin: var(--sp-2) 0 0; }
+
+.banner {
+  border: 1px solid var(--fail-ink);
+  background: var(--fail-bg);
+  border-radius: var(--radius);
+  padding: var(--sp-3) var(--sp-4);
+  margin: 0 0 var(--sp-5);
+}
+.banner-title {
+  margin: 0 0 var(--sp-1);
+  font-weight: 600;
+  text-transform: capitalize;
+  color: var(--fail-ink);
+}
+.banner-reason { margin: 0 0 var(--sp-2); white-space: pre-wrap; color: var(--ink); }
+.banner-context { margin: 0; font-size: var(--fs-meta); color: var(--ink-muted); }
+.banner-context code { color: var(--ink-2); }
+.msg {
+  margin: 0;
+  max-height: 22rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  color: var(--ink);
+}
+.hint { color: var(--ink-muted); font-size: var(--fs-meta); margin: 0 0 var(--sp-3); }
 
 @media (prefers-reduced-motion: no-preference) {
   .beacon { animation: pulse 2.4s ease-in-out infinite; }
@@ -796,31 +857,28 @@ function renderTransitionsTable(
 }
 
 function renderEventsTable(
-  events: {
-    sequence: number;
-    type: string;
-    createdAt: string;
-    normalized: { type: string; [key: string]: unknown };
-  }[]
+  events: ProviderEventRecord[],
+  truncated: boolean
 ): string {
   if (events.length === 0) {
-    return `<section>${sectionHead("Recent events", 0)}<div class="empty"><strong>No events recorded yet</strong>Provider events stream in here once the run starts producing output.</div></section>`;
+    return `<section>${sectionHead("Transcript & events", 0)}<div class="empty"><strong>No events recorded yet</strong>Provider events stream in here once the run starts producing output.</div></section>`;
   }
-  const rows = events
-    .map((event) => {
-      const message =
-        typeof event.normalized.message === "string"
-          ? event.normalized.message
-          : JSON.stringify(event.normalized);
-      return `<tr><td>${event.sequence}</td><td>${escapeHtml(event.type)}</td><td class="c-detail"><code>${escapeHtml(message)}</code></td><td><code>${escapeHtml(event.createdAt)}</code></td></tr>`;
+  const rows = coalesceEvents(events)
+    .map((row) => {
+      if (row.kind === "message") {
+        const seq =
+          row.firstSequence === row.lastSequence
+            ? `${row.firstSequence}`
+            : `${row.firstSequence}–${row.lastSequence}`;
+        return `<tr><td>${seq}</td><td>message</td><td class="c-detail"><div class="msg">${escapeHtml(row.text)}</div></td><td><code>${escapeHtml(row.createdAt)}</code></td></tr>`;
+      }
+      return `<tr><td>${row.sequence}</td><td>${escapeHtml(row.type)}</td><td class="c-detail"><code>${escapeHtml(row.detail)}</code></td><td><code>${escapeHtml(row.createdAt)}</code></td></tr>`;
     })
     .join("");
-  return tableSection(
-    `Recent events (last ${events.length})`,
-    events.length,
-    "<tr><th>Seq</th><th>Type</th><th>Detail</th><th>At</th></tr>",
-    rows
-  );
+  const scope = truncated
+    ? `most recent ${events.length}`
+    : `all ${events.length}`;
+  return `<section>${sectionHead("Transcript & events", events.length)}<p class="hint">Showing ${scope} events, oldest first. Streamed message tokens are merged into blocks; full logs are under Files below.</p><div class="table-wrap"><table><thead><tr><th>Seq</th><th>Type</th><th>Detail</th><th>At</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
 }
 
 function renderRunFileLinks(
@@ -883,6 +941,145 @@ function formatArtifactKind(kind: RunArtifactDescriptor["kind"]): string {
     case "provider_normalized":
       return "Normalized event log";
   }
+}
+
+function renderOutcomeBanner(
+  detail: RunStatus,
+  failureEvent: ProviderEventRecord | undefined,
+  exitEvent: ProviderEventRecord | undefined
+): string {
+  // Only failure-state runs get a banner. A prior attempt's failure event must
+  // never surface on a run that ultimately succeeded or is still running.
+  if (!FAILURE_STATES.has(detail.state)) {
+    return "";
+  }
+  const providerMessage =
+    failureEvent !== undefined &&
+    typeof failureEvent.normalized.message === "string"
+      ? failureEvent.normalized.message
+      : undefined;
+
+  const reason =
+    providerMessage !== undefined
+      ? `<p class="banner-reason">${escapeHtml(providerMessage)}</p>`
+      : `<p class="banner-reason">No provider failure message was recorded. See the transcript and logs below.</p>`;
+
+  const context: string[] = [];
+  if (detail.terminalReason !== null) {
+    context.push(
+      `terminal reason <code>${escapeHtml(detail.terminalReason)}</code>`
+    );
+  }
+  const abnormalExit = formatAbnormalExit(exitEvent);
+  if (abnormalExit !== undefined) {
+    context.push(abnormalExit);
+  }
+  context.push(`provider <code>${escapeHtml(detail.provider)}</code>`);
+  if (failureEvent !== undefined) {
+    context.push(`event #${failureEvent.sequence}`);
+  }
+
+  return `<section class="banner"><p class="banner-title">Run ${escapeHtml(detail.state)}</p>${reason}<p class="banner-context">${context.join(" &middot; ")}</p></section>`;
+}
+
+// Exit code is reported only when abnormal: codex exits 0 even after refusing a
+// task, so a "process exited 0" line next to a failure would mislead.
+function formatAbnormalExit(
+  exitEvent: ProviderEventRecord | undefined
+): string | undefined {
+  if (exitEvent === undefined) {
+    return undefined;
+  }
+  const normalized = exitEvent.normalized;
+  const exitCode =
+    typeof normalized.exitCode === "number" ? normalized.exitCode : undefined;
+  const signal =
+    typeof normalized.signal === "string" ? normalized.signal : undefined;
+  const bits: string[] = [];
+  if (exitCode !== undefined && exitCode !== 0) {
+    bits.push(`exit code ${exitCode}`);
+  }
+  if (signal !== undefined) {
+    bits.push(`signal ${signal}`);
+  }
+  return bits.length === 0 ? undefined : `process ${bits.join(", ")}`;
+}
+
+type EventDisplayRow =
+  | {
+      kind: "message";
+      firstSequence: number;
+      lastSequence: number;
+      text: string;
+      createdAt: string;
+    }
+  | {
+      kind: "event";
+      sequence: number;
+      type: string;
+      detail: string;
+      createdAt: string;
+    };
+
+// Codex streams assistant text one token per event; merge runs of adjacent
+// message events into a single readable block, breaking on any other event.
+function coalesceEvents(events: ProviderEventRecord[]): EventDisplayRow[] {
+  const rows: EventDisplayRow[] = [];
+  let buffer: Extract<EventDisplayRow, { kind: "message" }> | undefined;
+  const flush = (): void => {
+    if (buffer !== undefined) {
+      rows.push(buffer);
+      buffer = undefined;
+    }
+  };
+
+  for (const event of events) {
+    const message = event.normalized.message;
+    if (event.type === "message" && typeof message === "string") {
+      if (buffer === undefined) {
+        buffer = {
+          createdAt: event.createdAt,
+          firstSequence: event.sequence,
+          kind: "message",
+          lastSequence: event.sequence,
+          text: message
+        };
+      } else {
+        buffer.text += message;
+        buffer.lastSequence = event.sequence;
+        buffer.createdAt = event.createdAt;
+      }
+      continue;
+    }
+
+    flush();
+    rows.push({
+      createdAt: event.createdAt,
+      detail:
+        typeof message === "string"
+          ? message
+          : JSON.stringify(event.normalized),
+      kind: "event",
+      sequence: event.sequence,
+      type: event.type
+    });
+  }
+
+  flush();
+  return rows;
+}
+
+function findLast<T>(
+  items: readonly T[],
+  predicate: (item: T) => boolean
+): T | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item !== undefined && predicate(item)) {
+      return item;
+    }
+  }
+  return undefined;
 }
 
 function escapeHtml(value: string): string {

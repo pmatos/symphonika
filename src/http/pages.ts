@@ -1186,7 +1186,7 @@ const WORKFLOW_GRAPH_STYLES = `
 .wf-cond { color:#475569; }
 .wf-muted { color:#94a3b8; font-style:italic; }
 .wf-fallback { padding:1rem; }
-.wf-fallback pre { background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:.8rem; overflow:auto; }
+.wf-fallback pre { background:#f8fafc; color:#0f172a; border:1px solid #e2e8f0; border-radius:8px; padding:.8rem; overflow:auto; }
 `;
 
 const WORKFLOW_GRAPH_SCRIPTS = `<script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.4/dist/cytoscape.min.js" integrity="sha384-H3uzGzTfGHUAumB8+s4GEdfFwzAceN9wCCndN8AXubWKFIPuBSWKKtWDx7RhSf/z" crossorigin="anonymous" referrerpolicy="no-referrer"></script>

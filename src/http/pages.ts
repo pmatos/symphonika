@@ -304,13 +304,6 @@ code { font-family: var(--font-mono); }
 }
 .brand a { color: inherit; }
 .brand a:hover { text-decoration: none; }
-.beacon {
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 50%;
-  background: var(--accent);
-  flex: none;
-}
 .nav { display: flex; gap: var(--sp-1); }
 .nav a {
   padding: var(--sp-1) var(--sp-3);
@@ -463,15 +456,15 @@ td code { color: var(--ink-2); }
   font-family: var(--font-mono);
   font-size: var(--fs-meta);
   font-weight: 600;
-  color: var(--ink);
+  color: var(--accent-ink);
   background: var(--surface);
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--accent);
   border-radius: var(--radius-sm);
   padding: var(--sp-2) var(--sp-4);
   cursor: pointer;
   transition: background-color 120ms ease, border-color 120ms ease;
 }
-.btn:hover { background: var(--surface-2); border-color: var(--ink-muted); }
+.btn:hover { background: var(--accent-quiet); border-color: var(--accent-ink); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .alert {
@@ -524,7 +517,6 @@ td code { color: var(--ink-2); }
 .hint { color: var(--ink-muted); font-size: var(--fs-meta); margin: 0 0 var(--sp-3); }
 
 @media (prefers-reduced-motion: no-preference) {
-  .beacon { animation: pulse 2.4s ease-in-out infinite; }
   .pill--progress.is-running .pill-dot { animation: pulse 1.8s ease-in-out infinite; }
 }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
@@ -549,7 +541,7 @@ function layout(title: string, body: string): string {
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><span class="beacon" aria-hidden="true"></span><a href="/">Symphonika</a></div>
+  <div class="brand"><a href="/">Symphonika</a></div>
   <nav class="nav" aria-label="Primary"><a href="/">Dashboard</a><a href="/runs">Runs</a></nav>
 </header>
 <main>

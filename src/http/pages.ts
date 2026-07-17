@@ -20,7 +20,7 @@ import type {
 import type { RoutineStatus } from "../routines/types.js";
 import type { StatusSnapshot } from "../status.js";
 import type { ExpandedWorkflow } from "../workflow.js";
-import { BUNDLED_FONT_WEIGHTS, getBundledFont } from "./fonts.js";
+import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 
 export type RegisterPagesOptions = {
   app: Hono;
@@ -57,11 +57,21 @@ const EVENT_TAIL_LIMIT = 500;
 
 export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/assets/fonts/:file", (context) => {
-    const match = /^ibm-plex-mono-(\d+)\.woff2$/.exec(
+    // The URL carries a per-weight content hash so the immutable one-year cache
+    // is safe: regenerating the font changes the hash, which changes the URL.
+    const match = /^ibm-plex-mono-(\d+)\.([0-9a-f]+)\.woff2$/.exec(
       context.req.param("file")
     );
     const weight = match?.[1];
-    const bytes = weight === undefined ? undefined : getBundledFont(weight);
+    const hash = match?.[2];
+    if (
+      weight === undefined ||
+      hash === undefined ||
+      getFontHash(weight) !== hash
+    ) {
+      return context.notFound();
+    }
+    const bytes = getBundledFont(weight);
     if (bytes === undefined) {
       return context.notFound();
     }
@@ -181,9 +191,9 @@ export function registerPages(options: RegisterPagesOptions): void {
   });
 }
 
-const FONT_FACES = BUNDLED_FONT_WEIGHTS.map(
-  (weight) =>
-    `@font-face{font-family:"IBM Plex Mono";font-style:normal;font-weight:${weight};font-display:swap;src:url("/assets/fonts/ibm-plex-mono-${weight}.woff2") format("woff2");}`
+const FONT_FACES = BUNDLED_FONTS.map(
+  ({ weight, hash }) =>
+    `@font-face{font-family:"IBM Plex Mono";font-style:normal;font-weight:${weight};font-display:swap;src:url("/assets/fonts/ibm-plex-mono-${weight}.${hash}.woff2") format("woff2");}`
 ).join("");
 
 const DARK_TOKENS = `

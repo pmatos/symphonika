@@ -180,7 +180,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       `<h1 class="page-title">Run <code>${escapeHtml(detail.id)}</code></h1>`,
       renderOutcomeBanner(detail, failureEvent, exitEvent),
       renderRunSummary(detail, capContext),
-      renderWorkflowGraphSummary(workflowGraph),
+      renderWorkflowGraphSummary(detail.id, workflowGraph),
       renderCancelForm(detail),
       renderAttemptsTable(detail.attempts),
       renderTransitionsTable(detail.transitions),
@@ -188,6 +188,33 @@ export function registerPages(options: RegisterPagesOptions): void {
       renderRunFileLinks(detail.id, artifacts)
     ].join("");
     return context.html(layout(`Run ${detail.id}`, sections));
+  });
+
+  options.app.get("/runs/:id/graph", async (context) => {
+    const id = context.req.param("id");
+    const detail = options.runStore.getRun(id);
+    if (detail === undefined) {
+      return context.html(
+        layout("Run not found", `<p>Run ${escapeHtml(id)} not found.</p>`),
+        404
+      );
+    }
+    const graph = await options.runStore.getWorkflowGraph(id);
+    if (graph === undefined) {
+      return context.html(
+        layout(
+          "No workflow graph",
+          `<h1>Workflow graph</h1><p>No workflow graph was recorded for run <a href="/runs/${encodeURIComponent(id)}"><code>${escapeHtml(id)}</code></a>.</p>`
+        ),
+        404
+      );
+    }
+    return context.html(
+      layout(
+        `Workflow graph ${detail.id}`,
+        renderWorkflowGraphPage(detail.id, graph)
+      )
+    );
   });
 }
 
@@ -903,6 +930,7 @@ function renderRunFileLinks(
 }
 
 function renderWorkflowGraphSummary(
+  runId: string,
   graph: ExpandedWorkflow | undefined
 ): string {
   if (graph === undefined) {
@@ -925,7 +953,7 @@ function renderWorkflowGraphSummary(
   <dt>Initial state</dt><dd><code>${escapeHtml(initial)}</code></dd>
   <dt>States</dt><dd>${stateCount}</dd>
   <dt>Content hash</dt><dd><code>${escapeHtml(contentHash)}</code></dd>
-</dl></section>`;
+</dl><p class="note"><a href="/runs/${encodeURIComponent(runId)}/graph">View interactive graph &rarr;</a></p></section>`;
 }
 
 function formatArtifactKind(kind: RunArtifactDescriptor["kind"]): string {
@@ -1083,6 +1111,302 @@ function findLast<T>(
   }
   return undefined;
 }
+
+function serializeGraphForScript(graph: ExpandedWorkflow): string {
+  return JSON.stringify(graph).replace(
+    /[<>&\u2028\u2029]/g,
+    (ch) => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0")
+  );
+}
+
+function renderWorkflowGraphPage(
+  runId: string,
+  graph: ExpandedWorkflow
+): string {
+  const encodedId = encodeURIComponent(runId);
+  const name = typeof graph.name === "string" ? graph.name : "(unknown)";
+  return `<style>${WORKFLOW_GRAPH_STYLES}</style>
+<h1>Workflow graph</h1>
+<p class="wf-sub">Run <a href="/runs/${encodedId}"><code>${escapeHtml(runId)}</code></a> &middot; <code>${escapeHtml(name)}</code> &middot; <a href="/logs/runs/${encodedId}/workflow_graph">raw JSON</a></p>
+<div class="wf-toolbar">
+  <button id="wf-fit" type="button">Fit</button>
+  <button id="wf-relayout" type="button">Re-layout</button>
+  <span class="wf-hint">Scroll to zoom &middot; drag background to pan &middot; drag a node to move it &middot; click a node for details</span>
+</div>
+<div class="wf-wrap">
+  <div id="wf-cy"></div>
+  <aside class="wf-side">
+    <div class="wf-card">
+      <h2>Legend</h2>
+      <div class="wf-legend-row"><span class="wf-swatch" style="background:#dbeafe;border-color:#3b82f6;border-width:2px"></span> initial state</div>
+      <div class="wf-legend-row"><span class="wf-swatch" style="background:#eff6ff;border-color:#60a5fa"></span> agent action</div>
+      <div class="wf-legend-row"><span class="wf-swatch" style="background:#f1f5f9;border-style:dashed"></span> wait</div>
+      <div class="wf-legend-row"><span class="wf-swatch" style="background:#f5f3ff;border-color:#8b5cf6"></span> merge PR</div>
+      <div class="wf-legend-row"><span class="wf-swatch" style="background:#dcfce7;border-color:#22c55e"></span> terminal &middot; success</div>
+      <div class="wf-legend-row"><span class="wf-swatch" style="background:#fee2e2;border-color:#ef4444"></span> terminal &middot; blocked</div>
+      <div class="wf-legend-row"><span class="wf-swatch wf-swatch-line" style="border-top-color:#f59e0b"></span> retry / loop edge</div>
+      <div class="wf-legend-row"><span class="wf-swatch wf-swatch-line" style="border-top-color:#cbd5e1"></span> default (&ldquo;otherwise&rdquo;)</div>
+    </div>
+    <div class="wf-card wf-detail" id="wf-detail">
+      <h2>Details</h2>
+      <p class="wf-muted">Click a state node to inspect its action and transitions.</p>
+    </div>
+  </aside>
+</div>
+<script>window.__WORKFLOW_GRAPH__ = ${serializeGraphForScript(graph)};</script>
+${WORKFLOW_GRAPH_SCRIPTS}
+<script>${WORKFLOW_GRAPH_CLIENT_JS}</script>`;
+}
+
+const WORKFLOW_GRAPH_STYLES = `
+.wf-sub { color:#555; font-size:0.9rem; margin:0 0 0.8rem; }
+.wf-toolbar { display:flex; gap:.5rem; align-items:center; margin-bottom:.6rem; flex-wrap:wrap; }
+.wf-toolbar button { font:inherit; font-size:.85rem; padding:.3rem .7rem; border:1px solid #cbd5e1; background:#fff; border-radius:6px; cursor:pointer; }
+.wf-toolbar button:hover { background:#f1f5f9; }
+.wf-hint { color:#64748b; font-size:.8rem; }
+.wf-wrap { display:flex; gap:1rem; align-items:stretch; }
+#wf-cy { flex:1 1 auto; height:80vh; min-height:520px; border:1px solid #e2e8f0; border-radius:10px;
+  background:#fbfcfe radial-gradient(circle at 1px 1px, #e6eaf1 1px, transparent 0) 0 0 / 22px 22px; }
+.wf-side { flex:0 0 320px; display:flex; flex-direction:column; gap:1rem; }
+.wf-card { border:1px solid #e2e8f0; border-radius:10px; padding:.8rem .9rem; background:#fff; }
+.wf-card h2 { margin:0 0 .5rem; font-size:.95rem; }
+.wf-legend-row { display:flex; align-items:center; gap:.5rem; font-size:.82rem; margin:.28rem 0; }
+.wf-swatch { width:16px; height:16px; border-radius:4px; border:1px solid #94a3b8; flex:0 0 auto; }
+.wf-swatch-line { height:0; border:none; border-top:2px dashed #cbd5e1; border-radius:0; }
+.wf-badges { display:flex; flex-wrap:wrap; gap:.3rem; margin:.2rem 0 .6rem; }
+.wf-badge { font-size:.72rem; padding:.12rem .5rem; border-radius:999px; background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; }
+.wf-badge.init { background:#dbeafe; color:#1e40af; border-color:#93c5fd; }
+.wf-badge.term-ok { background:#dcfce7; color:#166534; border-color:#86efac; }
+.wf-badge.term-block { background:#fee2e2; color:#991b1b; border-color:#fca5a5; }
+.wf-dl dt { font-size:.72rem; text-transform:uppercase; letter-spacing:.03em; color:#64748b; margin-top:.5rem; }
+.wf-dl dd { margin:.15rem 0 0; font-size:.86rem; }
+.wf-dl pre { background:#f8fafc; border:1px solid #eef2f7; border-radius:6px; padding:.4rem .5rem; overflow:auto; margin:.2rem 0 0; font-size:.8rem; }
+.wf-trans { list-style:none; margin:.2rem 0 0; padding:0; }
+.wf-trans li { font-size:.82rem; margin:.3rem 0; padding-left:.9rem; border-left:2px solid #cbd5e1; }
+.wf-cond { color:#475569; }
+.wf-muted { color:#94a3b8; font-style:italic; }
+.wf-fallback { padding:1rem; }
+.wf-fallback pre { background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:.8rem; overflow:auto; }
+`;
+
+const WORKFLOW_GRAPH_SCRIPTS = `<script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.4/dist/cytoscape.min.js" integrity="sha384-H3uzGzTfGHUAumB8+s4GEdfFwzAceN9wCCndN8AXubWKFIPuBSWKKtWDx7RhSf/z" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js" integrity="sha384-2IH3T69EIKYC4c+RXZifZRvaH5SRUdacJW7j6HtE5rQbvLhKKdawxq6vpIzJ7j9M" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js" integrity="sha384-EHCdyFVbhtbpgI+4x7ETlZUvJwOkxJublmhTpH114NSk3fqfiUgcLl6pQm8JQwg9" crossorigin="anonymous" referrerpolicy="no-referrer"></script>`;
+
+const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
+  var graph = window.__WORKFLOW_GRAPH__;
+  var cyEl = document.getElementById("wf-cy");
+  var detailEl = document.getElementById("wf-detail");
+  if (!graph || !cyEl) return;
+  var states = Array.isArray(graph.states) ? graph.states : [];
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) {
+    return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
+  function fmtVal(v) { return typeof v === "string" ? '"' + v + '"' : String(v); }
+  function condLines(when) {
+    var keys = when ? Object.keys(when) : [];
+    return keys.map(function (k) { return k + " = " + fmtVal(when[k]); });
+  }
+  function edgeLabel(when) {
+    var lines = condLines(when);
+    return lines.length === 0 ? "otherwise" : lines.join("\\n");
+  }
+  function nodeClasses(st) {
+    var cls = [];
+    if (st.id === graph.initial) cls.push("initial");
+    if (st.terminal === "success") cls.push("term-ok");
+    else if (st.terminal) cls.push("term-block");
+    else if (st.action && st.action.kind) cls.push("act-" + st.action.kind);
+    else cls.push("act-default");
+    return cls.join(" ");
+  }
+  function stateById(id) {
+    for (var i = 0; i < states.length; i++) { if (states[i].id === id) return states[i]; }
+    return undefined;
+  }
+
+  var realIds = {};
+  states.forEach(function (s) { realIds[s.id] = true; });
+
+  var rank = {};
+  if (realIds[graph.initial]) {
+    var queue = [graph.initial];
+    rank[graph.initial] = 0;
+    while (queue.length) {
+      var cur = queue.shift();
+      var cst = stateById(cur);
+      if (!cst) continue;
+      (cst.transitions || []).forEach(function (tr) {
+        if (realIds[tr.to] && rank[tr.to] === undefined) {
+          rank[tr.to] = rank[cur] + 1;
+          queue.push(tr.to);
+        }
+      });
+    }
+  }
+
+  var elements = [];
+  var missing = {};
+  states.forEach(function (st) {
+    elements.push({ data: { id: st.id, label: st.id, state: st }, classes: nodeClasses(st) });
+  });
+  states.forEach(function (st) {
+    (st.transitions || []).forEach(function (tr, i) {
+      var target = tr.to;
+      var targetId;
+      if (realIds[target]) {
+        targetId = target;
+      } else {
+        targetId = "__missing__" + target;
+        if (!missing[target]) {
+          missing[target] = true;
+          elements.push({ data: { id: targetId, label: target }, classes: "missing" });
+        }
+      }
+      // A retry/loop edge returns to an earlier, non-terminal state. Edges
+      // into a terminal state are exits, never loops, even when the terminal
+      // sits at a shallow BFS rank (e.g. reached by an early "otherwise").
+      var targetState = stateById(target);
+      var targetTerminal = !!(targetState && targetState.terminal);
+      var isLoop = !targetTerminal && rank[target] !== undefined && rank[st.id] !== undefined && rank[target] < rank[st.id];
+      elements.push({ data: {
+        id: st.id + "->" + target + "#" + i,
+        source: st.id,
+        target: targetId,
+        label: edgeLabel(tr.when),
+        isDefault: condLines(tr.when).length === 0
+      }, classes: isLoop ? "loop" : "" });
+    });
+  });
+
+  if (typeof window.cytoscape === "undefined" || typeof window.dagre === "undefined" || typeof window.cytoscapeDagre === "undefined") {
+    renderFallback();
+    return;
+  }
+  try { window.cytoscape.use(window.cytoscapeDagre); } catch (e) {}
+
+  function layoutOpts() {
+    return { name: "dagre", rankDir: "TB", nodeSep: 80, rankSep: 140, edgeSep: 28, ranker: "network-simplex", padding: 30 };
+  }
+
+  var cy;
+  try {
+  cy = window.cytoscape({
+    container: cyEl,
+    elements: elements,
+    wheelSensitivity: 0.2,
+    style: [
+      { selector: "node", style: {
+        "label": "data(label)", "text-valign": "center", "text-halign": "center",
+        "font-size": 13, "font-weight": 600, "color": "#0f172a",
+        "shape": "round-rectangle", "width": "label", "height": "label",
+        "padding": "12px", "border-width": 1.5, "border-color": "#94a3b8",
+        "background-color": "#ffffff", "text-max-width": 200, "text-wrap": "wrap" } },
+      { selector: "node.act-agent", style: { "background-color": "#eff6ff", "border-color": "#60a5fa" } },
+      { selector: "node.act-wait", style: { "background-color": "#f1f5f9", "border-color": "#94a3b8", "border-style": "dashed" } },
+      { selector: "node.act-merge_pr", style: { "background-color": "#f5f3ff", "border-color": "#8b5cf6" } },
+      { selector: "node.act-default", style: { "background-color": "#ffffff", "border-color": "#94a3b8" } },
+      { selector: "node.term-ok", style: { "background-color": "#dcfce7", "border-color": "#22c55e", "border-width": 2, "color": "#14532d" } },
+      { selector: "node.term-block", style: { "background-color": "#fee2e2", "border-color": "#ef4444", "border-width": 2, "color": "#7f1d1d" } },
+      { selector: "node.initial", style: { "border-width": 3, "border-color": "#2563eb" } },
+      { selector: "node.missing", style: { "background-color": "#fff7ed", "border-color": "#fb923c", "border-style": "dotted", "color": "#9a3412" } },
+      { selector: "node:selected", style: { "border-color": "#1d4ed8", "border-width": 3 } },
+      { selector: "edge", style: {
+        "width": 1.6, "line-color": "#9aa6b8", "target-arrow-color": "#9aa6b8",
+        "target-arrow-shape": "triangle", "curve-style": "bezier", "arrow-scale": 1.0,
+        "label": "data(label)", "font-size": 10, "color": "#334155",
+        "text-wrap": "wrap", "text-max-width": 150,
+        "text-background-color": "#ffffff", "text-background-opacity": 1, "text-background-shape": "roundrectangle",
+        "text-border-color": "#e2e8f0", "text-border-width": 1, "text-border-opacity": 1,
+        "text-background-padding": 3, "text-rotation": "none", "z-index": 30 } },
+      { selector: "edge[?isDefault]", style: { "line-style": "dashed", "line-color": "#cbd5e1", "target-arrow-color": "#cbd5e1", "color": "#94a3b8" } },
+      { selector: "edge.loop", style: {
+        "curve-style": "unbundled-bezier", "control-point-distances": "90", "control-point-weights": "0.5",
+        "line-color": "#f59e0b", "target-arrow-color": "#f59e0b", "line-style": "dashed",
+        "color": "#b45309", "text-border-color": "#fde68a" } },
+      { selector: "edge.hl", style: { "line-color": "#2563eb", "target-arrow-color": "#2563eb", "width": 2.4, "color": "#1e3a8a", "z-index": 40 } },
+      { selector: "node.dim", style: { "opacity": 0.35 } },
+      { selector: "edge.dim", style: { "opacity": 0.15 } }
+    ],
+    layout: layoutOpts()
+  });
+  } catch (initErr) {
+    renderFallback();
+    return;
+  }
+
+  cy.on("tap", "node", function (evt) { showDetail(evt.target); });
+  cy.on("tap", function (evt) { if (evt.target === cy) clearDetail(); });
+  var fitBtn = document.getElementById("wf-fit");
+  var reBtn = document.getElementById("wf-relayout");
+  if (fitBtn) fitBtn.addEventListener("click", function () { cy.fit(undefined, 30); });
+  if (reBtn) reBtn.addEventListener("click", function () { cy.layout(layoutOpts()).run(); });
+  cy.ready(function () { cy.fit(undefined, 30); });
+
+  function highlight(node) {
+    cy.elements().addClass("dim").removeClass("hl");
+    node.closedNeighborhood().removeClass("dim");
+    node.connectedEdges().removeClass("dim").addClass("hl");
+    node.removeClass("dim");
+  }
+  function clearHighlight() { cy.elements().removeClass("dim hl"); }
+
+  function showDetail(node) {
+    highlight(node);
+    var st = node.data("state");
+    if (!st) {
+      detailEl.innerHTML = "<h2>Details</h2><p class='wf-muted'>Unknown target <code>" + esc(node.data("label")) + "</code> (no matching state).</p>";
+      return;
+    }
+    var badges = [];
+    if (st.id === graph.initial) badges.push('<span class="wf-badge init">initial</span>');
+    if (st.terminal === "success") badges.push('<span class="wf-badge term-ok">terminal &middot; success</span>');
+    else if (st.terminal) badges.push('<span class="wf-badge term-block">terminal &middot; ' + esc(st.terminal) + '</span>');
+    if (st.action && st.action.kind) badges.push('<span class="wf-badge">' + esc(st.action.kind) + '</span>');
+    if (st.action && st.action.provider) badges.push('<span class="wf-badge">' + esc(st.action.provider) + '</span>');
+
+    var html = "<h2>" + esc(st.id) + "</h2>";
+    html += '<div class="wf-badges">' + (badges.join("") || '<span class="wf-muted">no attributes</span>') + "</div>";
+    html += '<dl class="wf-dl">';
+    if (st.action && st.action.prompt) html += "<dt>Prompt</dt><dd><code>" + esc(st.action.prompt) + "</code></dd>";
+    if (st.action && st.action.method) html += "<dt>Method</dt><dd><code>" + esc(st.action.method) + "</code></dd>";
+    var cw = condLines(st.completeWhen);
+    if (cw.length) html += "<dt>Complete when</dt><dd><pre>" + esc(cw.join("\\n")) + "</pre></dd>";
+    html += "<dt>Transitions</dt><dd>";
+    if (!st.transitions || st.transitions.length === 0) {
+      html += "<span class='wf-muted'>none (terminal)</span>";
+    } else {
+      html += "<ul class='wf-trans'>";
+      st.transitions.forEach(function (tr) {
+        var c = condLines(tr.when);
+        html += "<li>&rarr; <code>" + esc(tr.to) + "</code><br><span class='wf-cond'>" +
+                (c.length ? esc(c.join(", ")) : "otherwise") + "</span></li>";
+      });
+      html += "</ul>";
+    }
+    html += "</dd></dl>";
+    detailEl.innerHTML = html;
+  }
+
+  function clearDetail() {
+    clearHighlight();
+    detailEl.innerHTML = "<h2>Details</h2><p class='wf-muted'>Click a state node to inspect its action and transitions.</p>";
+  }
+
+  function renderFallback() {
+    var lines = ["Workflow: " + (graph.name || "(unknown)"), "Initial: " + (graph.initial || "(unknown)"), ""];
+    states.forEach(function (st) {
+      var tag = st.terminal ? " [terminal:" + st.terminal + "]" : (st.action ? " [" + st.action.kind + "]" : "");
+      lines.push("- " + st.id + tag);
+      (st.transitions || []).forEach(function (tr) {
+        var c = condLines(tr.when);
+        lines.push("    -> " + tr.to + (c.length ? "  when " + c.join(", ") : "  (otherwise)"));
+      });
+    });
+    cyEl.innerHTML = '<div class="wf-fallback"><p class="wf-muted">Interactive renderer failed to load (offline?). Text view:</p><pre>' +
+      esc(lines.join("\\n")) + "</pre></div>";
+  }
+})();`;
 
 function escapeHtml(value: string): string {
   return value

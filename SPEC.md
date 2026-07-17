@@ -23,7 +23,7 @@ repository as one real Project well enough to help implement later Symphonika is
 - Cross-repository pull request handling.
 - A separate/standalone rich frontend application (SPA). Self-contained, read-only
   interactive visualizations embedded in a server-rendered operator page (e.g. the
-  workflow-graph view) are permitted — see §14 and ADR-0055.
+  workflow-graph view) are permitted — see §14 and ADR-0056.
 - Automatic workspace deletion.
 - GitHub Projects board integration.
 - Parsing issue-body dependency syntax.
@@ -1049,10 +1049,12 @@ Operator pages stay server-rendered and primarily read-only, but a page may embe
 self-contained, client-side interactive visualization to make evidence explorable — for
 example the workflow-graph view at `GET /runs/:id/graph`, which renders a run's expanded FSM
 (ADR-0045) with pan/zoom and click-to-inspect. Such a visualization must be self-contained
-(no build step, no bundled single-page application), must degrade gracefully to a
-server-rendered/text view when its scripts are unavailable, and must not introduce mutating
-actions beyond the ones listed below. This narrows — it does not remove — the §2 non-goal:
-Symphonika still does not ship a separate frontend application. See ADR-0055.
+(no build step, no bundled single-page application), must degrade gracefully when its external
+visualization dependencies are unavailable — if the CDN/vendored viz libraries are blocked or
+fail Subresource Integrity, the page's own inline script renders a text listing of the evidence
+instead of a blank canvas — and must not introduce mutating actions beyond the ones listed
+below. This narrows — it does not remove — the §2 non-goal: Symphonika still does not ship a
+separate frontend application. See ADR-0056.
 
 The v1 mutating web actions are explicit active-run cancellation and a manual poll-now trigger that
 uses the normal daemon scheduler path.

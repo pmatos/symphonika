@@ -327,6 +327,10 @@ export async function startDaemon(
     if (!state.configExists) {
       return;
     }
+    const serviceConfig = runtimeConfig.getSnapshot();
+    if (serviceConfig === undefined) {
+      return;
+    }
     const projects = runtimeConfig.projectsByName();
     if (projects.size === 0) {
       return;
@@ -367,7 +371,7 @@ export async function startDaemon(
     }
 
     try {
-      const watchdog = runtimeConfig.watchdogConfig();
+      const watchdog = serviceConfig.watchdog;
       const nowMs = Date.now();
       if (
         watchdog.enabled &&
@@ -379,6 +383,7 @@ export async function startDaemon(
           config: watchdog,
           logger,
           now: () => new Date(nowMs),
+          projects: serviceConfig.projects,
           runStore
         });
       }

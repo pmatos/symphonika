@@ -20,6 +20,12 @@ units from the running process instead of shipping a fixed template:
   binary the operator is already running, so it is correct for every install layout and sidesteps the
   version-manager bin directory that the old `%h/.npm-global/bin` path got wrong. `node dist/cli.js
   daemon` is equivalent to the `symphonika` bin, which is `dist/cli.js` plus a shebang.
+- Operators using a non-default Service Config can pass `service install --config <path>`. The CLI
+  resolves the path to an absolute path and adds `--config <absolute-path>` to the generated daemon
+  command. The config is passed as a separately quoted shell positional argument so paths containing
+  whitespace survive both systemd and shell parsing. Omitting the option preserves the daemon's
+  normal project-local/user-config discovery instead of freezing the discovered default into the
+  unit.
 - `Environment=PATH` is captured from the environment that ran `service install`, with the `node`
   runtime's directory prepended and empty/relative entries dropped, so `node` and the spawned
   providers resolve under `systemd --user` regardless of version manager.

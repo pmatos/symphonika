@@ -294,6 +294,21 @@ describe("runServiceInstall", () => {
     await expect(access(path.join(home, ".config"))).rejects.toThrow();
   });
 
+  it("prints an explicit daemon config as a quoted ExecStart argument", async () => {
+    const configPath = "/opt/Symphonika Config/daemon.yml";
+
+    const report = await runServiceInstall({
+      ...baseOptions,
+      configPath,
+      print: true
+    });
+
+    expect(report.files[0]?.content).toContain(
+      `exec "$1" "$2" daemon --config "$3"`
+    );
+    expect(report.files[0]?.content).toContain(`"${configPath}"`);
+  });
+
   it("skips daemon-reload when reload is false but still writes units", async () => {
     const home = await makeTempHome();
     let reloadCalls = 0;
@@ -412,6 +427,37 @@ describe("CLI service install", () => {
     expect(received?.force).toBe(true);
     expect(received?.print).toBe(false);
     expect(received?.reload).toBe(false);
+  });
+
+  it("prints --config as an absolute daemon config path", async () => {
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({
+      registerSignalHandlers: false
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "service",
+      "install",
+      "--print",
+      "--config",
+      "configs/daemon.yml"
+    ]);
+
+    expect(output.stderr).toBe("");
+    expect(output.stdout).toContain(`exec "$1" "$2" daemon --config "$3"`);
+    expect(output.stdout).toContain(
+      `"${path.resolve("configs", "daemon.yml")}"`
+    );
   });
 
   it("streams unit contents to stdout when --print is passed", async () => {

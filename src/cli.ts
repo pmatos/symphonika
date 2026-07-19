@@ -392,6 +392,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .description(
       "generate systemd --user unit files matching the current runtime and daemon-reload"
     )
+    .option("--config <path>", "service config path for the daemon")
     .option("--force", "overwrite existing unit files")
     .option(
       "--print",
@@ -400,11 +401,19 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .option("--no-reload", "skip systemctl --user daemon-reload after writing")
     .action(
       async (options: {
+        config?: string;
         force?: boolean;
         print?: boolean;
         reload?: boolean;
       }) => {
         const report = await serviceInstall({
+          ...(options.config === undefined
+            ? {}
+            : {
+                configPath: resolveServiceConfigPath({
+                  configPath: options.config
+                }).configPath
+              }),
           force: options.force === true,
           print: options.print === true,
           reload: options.reload !== false

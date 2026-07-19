@@ -12,6 +12,25 @@ import path from "node:path";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+const normalizedLogRemoval = vi.hoisted(() => ({
+  filePath: null as string | null
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    stat: async (filePath: string) => {
+      const result = await actual.stat(filePath);
+      if (filePath === normalizedLogRemoval.filePath) {
+        normalizedLogRemoval.filePath = null;
+        await actual.unlink(filePath);
+      }
+      return result;
+    }
+  };
+});
+
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
 import {
   reconcileWatchdog,
@@ -34,6 +53,7 @@ async function makeTempRoot(): Promise<string> {
 }
 
 afterEach(async () => {
+  normalizedLogRemoval.filePath = null;
   await Promise.all(
     tempRoots
       .splice(0)
@@ -227,6 +247,78 @@ describe("reconcileWatchdog", () => {
 
       expect(store.getWatchdogSample("run-waiting")).toBeUndefined();
       expect(store.getRun("run-waiting")?.state).toBe("waiting");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("continues sampling when a normalized log disappears after stat", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const removedLogPath = path.join(root, "a.normalized.jsonl");
+    const laterLogPath = path.join(root, "b.normalized.jsonl");
+    await writeFile(
+      removedLogPath,
+      JSON.stringify({ type: "rate_limit_updated" }) + "\n"
+    );
+    await writeFile(laterLogPath, "");
+
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      seedRun(store, "run-a-removed-log");
+      seedRun(store, "run-b-later");
+      for (const [runId, normalizedLogPath] of [
+        ["run-a-removed-log", removedLogPath],
+        ["run-b-later", laterLogPath]
+      ] as const) {
+        store.updateRunEvidence(runId, {
+          branchName: `sym/symphonika/${runId}`,
+          branchRef: `refs/heads/sym/symphonika/${runId}`,
+          issueSnapshotPath: path.join(root, `${runId}-issue.json`),
+          metadataPath: path.join(root, `${runId}-metadata.json`),
+          normalizedLogPath,
+          promptPath: path.join(root, `${runId}-prompt.md`),
+          rawLogPath: path.join(root, `${runId}-raw.jsonl`),
+          workflowGraphPath: path.join(root, `${runId}-workflow.json`),
+          workspacePath
+        });
+        store.updateRunState(runId, "running");
+      }
+      const priorOffset = 1;
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T09:59:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: priorOffset,
+        normalizedLogPath: removedLogPath,
+        outputTokensTotal: 0,
+        runId: "run-a-removed-log",
+        sampledAt: "2026-05-22T09:59:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
+      });
+      normalizedLogRemoval.filePath = removedLogPath;
+
+      await expect(
+        reconcileWatchdog({
+          activeRuns: new ActiveRunRegistry(),
+          config: {
+            enabled: true,
+            graceMinutes: 30,
+            mtimeIgnore: [],
+            sampleIntervalSeconds: 60
+          },
+          logger,
+          now: () => new Date("2026-05-22T10:00:00.000Z"),
+          runStore: store
+        })
+      ).resolves.toEqual({ sampled: 2, terminated: 0 });
+
+      expect(
+        store.getWatchdogSample("run-a-removed-log")?.normalizedLogOffset
+      ).toBe(priorOffset);
+      expect(store.getWatchdogSample("run-b-later")).toBeDefined();
     } finally {
       store.close();
     }

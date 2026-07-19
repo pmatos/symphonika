@@ -226,11 +226,15 @@ async function readNormalizedEventsSince(
   }
 
   let contents = "";
-  for await (const chunk of createReadStream(filePath, {
-    encoding: "utf8",
-    start
-  })) {
-    contents += chunk;
+  try {
+    for await (const chunk of createReadStream(filePath, {
+      encoding: "utf8",
+      start
+    })) {
+      contents += chunk;
+    }
+  } catch {
+    return { events: [], offset };
   }
   const events = parseJsonlEvents(contents);
   return { events, offset: size };

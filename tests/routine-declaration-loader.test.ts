@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -51,6 +51,144 @@ describe("RoutineDeclarationLoader", () => {
       schedule: { at: "2026-05-22T10:00:00.000Z" },
       sourcePath: routinePath
     });
+  });
+
+  it.each([
+    ["hourly", "0 * * * *"],
+    ["@hourly", "0 * * * *"],
+    ["daily", "0 0 * * *"],
+    ["@daily", "0 0 * * *"],
+    ["weekly", "0 0 * * 0"],
+    ["@weekly", "0 0 * * 0"],
+    ["monthly", "0 0 1 * *"],
+    ["@monthly", "0 0 1 * *"],
+    ["yearly", "0 0 1 1 *"],
+    ["@yearly", "0 0 1 1 *"]
+  ])("expands the %s recurring schedule alias", async (alias, cron) => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "recurring-report.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: recurring-report",
+        "schedule:",
+        `  cron: '${alias}'`,
+        "kind: report",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.routine?.schedule).toEqual({ cron, tz: "Etc/UTC" });
+    expect(await readFile(routinePath, "utf8")).toContain(`cron: '${alias}'`);
+  });
+
+  it("accepts a valid five-field cron expression in an IANA timezone", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "weekday-report.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: weekday-report",
+        "schedule:",
+        "  cron: '15 9 * * 1-5'",
+        "  tz: Europe/Lisbon",
+        "kind: report",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.routine?.schedule).toEqual({
+      cron: "15 9 * * 1-5",
+      tz: "Europe/Lisbon"
+    });
+  });
+
+  it.each(["61 * * * *", "0 0 * *", "fortnightly"])(
+    "rejects invalid recurring expression %s",
+    async (cron) => {
+      const root = await makeTempRoot();
+      const routinePath = path.join(root, "invalid-cron.md");
+      await writeFile(
+        routinePath,
+        [
+          "---",
+          "name: invalid-cron",
+          "schedule:",
+          `  cron: '${cron}'`,
+          "kind: report",
+          "---",
+          "Report.",
+          ""
+        ].join("\n")
+      );
+
+      const result = await loadRoutineDeclaration(routinePath);
+
+      expect(result.routine).toBeNull();
+      expect(result.errors.join("\n")).toContain("schedule.cron is invalid");
+    }
+  );
+
+  it("rejects a recurring schedule with an invalid IANA timezone", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "invalid-timezone.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: invalid-timezone",
+        "schedule:",
+        "  cron: daily",
+        "  tz: Atlantic/Atlantis",
+        "kind: report",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.routine).toBeNull();
+    expect(result.errors).toContain(
+      `routine at ${routinePath} schedule.tz "Atlantic/Atlantis" is not a valid IANA timezone`
+    );
+  });
+
+  it("rejects an explicitly empty recurring timezone", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "empty-timezone.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: empty-timezone",
+        "schedule:",
+        "  cron: daily",
+        "  tz: ''",
+        "kind: report",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.routine).toBeNull();
+    expect(result.errors.join("\n")).toContain("schedule.tz");
   });
 
   it("reports missing required front matter fields", async () => {
@@ -116,7 +254,7 @@ describe("RoutineDeclarationLoader", () => {
 
     expect(result.routine).toBeNull();
     expect(result.errors).toContain(
-      `routine at ${routinePath} schedule must define only one schedule field; supported in this slice: at`
+      `routine at ${routinePath} schedule must define exactly one of schedule.at or schedule.cron`
     );
   });
 

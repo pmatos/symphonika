@@ -197,6 +197,7 @@ export async function startDaemon(
   let lastPollErrorsKey = "";
   let lastPullRequestFollowupAt = Date.now();
   let lastWatchdogSampleAt = Date.now();
+  let recomputeRoutineSchedulesFromNow = true;
   let pendingPollNow: Promise<PollNowResult> | undefined;
   const inflightDispatches = new Set<Promise<void>>();
   const projectsLoader = (): Promise<
@@ -448,6 +449,8 @@ export async function startDaemon(
           logger.info(prResult, "symphonika PR follow-up action completed");
           return;
         }
+        const recomputeSchedulesFromNow = recomputeRoutineSchedulesFromNow;
+        recomputeRoutineSchedulesFromNow = false;
         const routineResult = await dispatchDueRoutines({
           activeRuns,
           agentProviders,
@@ -462,6 +465,7 @@ export async function startDaemon(
             : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),
           projects: runtimeConfig.projectsByName(),
           providersConfig: runtimeConfig.providersConfig(),
+          recomputeSchedulesFromNow,
           runStore,
           stateRoot: state.stateRoot
         });

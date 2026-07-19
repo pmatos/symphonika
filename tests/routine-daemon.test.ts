@@ -181,6 +181,61 @@ describe("daemon routine firing", () => {
       await daemon.stop();
     }
   });
+
+  it("recomputes a recurring next_fire_at on restart without catch-up", async () => {
+    const root = await makeTempRoot();
+    const routine = {
+      kind: "report" as const,
+      name: "yearly-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { cron: "0 0 1 1 *", tz: "Etc/UTC" },
+      sourcePath: path.join(root, "yearly-report.md")
+    };
+    await writeRecurringRoutineProject(root);
+    const seededStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    seededStore.syncRoutines("alpha", [routine], {
+      now: new Date("2020-06-01T00:00:00.000Z")
+    });
+    expect(seededStore.listRoutines()[0]?.nextFireAt).toBe(
+      "2021-01-01T00:00:00.000Z"
+    );
+    seededStore.close();
+
+    const provider = quietProvider();
+    const startedAt = Date.now();
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareRoutineWorkspace: vi.fn()
+    });
+
+    try {
+      await waitForRoutine(daemon.url, "active");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const routines = await fetch(`${daemon.url}/api/routines`)
+        .then((response) => response.json())
+        .then((body) => (body as { routines: RoutineApiRow[] }).routines);
+
+      expect(routines[0]?.lastFiredAt).toBeNull();
+      expect(new Date(routines[0]?.nextFireAt ?? 0).getTime()).toBeGreaterThan(
+        startedAt
+      );
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+    } finally {
+      await daemon.stop();
+    }
+  });
 });
 
 function quietProvider(): AgentProvider {
@@ -218,6 +273,25 @@ async function writeRoutineProject(
     ].join("\n")
   );
   await writeProjectConfig(root, "alpha", ["./daily-report.md"]);
+}
+
+async function writeRecurringRoutineProject(root: string): Promise<void> {
+  await mkdir(root, { recursive: true });
+  await writeFile(path.join(root, "WORKFLOW.md"), "Work.");
+  await writeFile(
+    path.join(root, "yearly-report.md"),
+    [
+      "---",
+      "name: yearly-report",
+      "schedule:",
+      "  cron: yearly",
+      "kind: report",
+      "---",
+      "Report.",
+      ""
+    ].join("\n")
+  );
+  await writeProjectConfig(root, "alpha", ["./yearly-report.md"]);
 }
 
 async function writeProjectWithoutRoutines(

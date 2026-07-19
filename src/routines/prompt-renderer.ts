@@ -20,7 +20,9 @@ export type RoutinePromptInput = {
   routine: {
     kind: RoutineKind;
     name: string;
-    schedule_at: string;
+    schedule_at: string | null;
+    schedule_cron?: string | null;
+    schedule_tz?: string | null;
     source_path: string;
   };
   template: string;
@@ -49,7 +51,14 @@ const allowedTemplateFields: Record<
   firing: new Set(["id"]),
   project: new Set(["name"]),
   provider: new Set(["command", "name"]),
-  routine: new Set(["kind", "name", "schedule_at", "source_path"]),
+  routine: new Set([
+    "kind",
+    "name",
+    "schedule_at",
+    "schedule_cron",
+    "schedule_tz",
+    "source_path"
+  ]),
   workspace: new Set(["path", "root"])
 };
 

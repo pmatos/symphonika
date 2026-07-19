@@ -178,6 +178,135 @@ describe("HTTP app", () => {
     }
   });
 
+  it("exposes watchdog idle timing on active runs in status", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    try {
+      runStore.createRun({
+        id: "idle-run",
+        issue: {
+          body: "",
+          created_at: "",
+          id: 202,
+          labels: [],
+          number: 202,
+          priority: 99,
+          state: "open",
+          title: "Watchdog surface",
+          updated_at: "",
+          url: ""
+        },
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      runStore.updateRunState("idle-run", "running");
+      runStore.upsertWatchdogSample({
+        idleSince: "2026-05-22T11:45:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath: "",
+        outputTokensTotal: 0,
+        runId: "idle-run",
+        sampledAt: "2026-05-22T11:59:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: 0
+      });
+
+      const app = createHttpApp({
+        getActiveRuns: () => [
+          {
+            cancelReason: null,
+            cancelRequested: false,
+            issueNumber: 202,
+            projectName: "alpha",
+            runId: "idle-run"
+          }
+        ],
+        now: () => Date.parse("2026-05-22T12:00:00.000Z"),
+        runStore,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/api/status");
+      const body = (await response.json()) as {
+        active: Array<{ watchdog?: unknown }>;
+      };
+
+      expect(body.active[0]?.watchdog).toEqual({
+        enabled: true,
+        graceRemainingMs: 900_000,
+        idleSince: "2026-05-22T11:45:00.000Z"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("reports only enabled false for active runs when the watchdog is disabled", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    try {
+      runStore.createRun({
+        id: "disabled-run",
+        issue: {
+          body: "",
+          created_at: "",
+          id: 202,
+          labels: [],
+          number: 202,
+          priority: 99,
+          state: "open",
+          title: "Watchdog surface",
+          updated_at: "",
+          url: ""
+        },
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      runStore.updateRunState("disabled-run", "running");
+      runStore.upsertWatchdogSample({
+        idleSince: "2026-05-22T11:45:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath: "",
+        outputTokensTotal: 0,
+        runId: "disabled-run",
+        sampledAt: "2026-05-22T11:59:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: 0
+      });
+
+      const app = createHttpApp({
+        getActiveRuns: () => [
+          {
+            cancelReason: null,
+            cancelRequested: false,
+            issueNumber: 202,
+            projectName: "alpha",
+            runId: "disabled-run"
+          }
+        ],
+        getWatchdogConfig: () => ({ enabled: false, graceMinutes: 30 }),
+        runStore,
+        stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/api/status");
+      const body = (await response.json()) as {
+        active: Array<{ watchdog?: unknown }>;
+      };
+
+      expect(body.active[0]?.watchdog).toEqual({ enabled: false });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("POST /api/poll-now invokes the daemon trigger and returns a poll summary", async () => {
     let calls = 0;
     const app = createHttpApp({

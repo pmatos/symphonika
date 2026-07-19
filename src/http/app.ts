@@ -7,7 +7,11 @@ import type {
   ProjectIssuePollReport
 } from "../issue-polling.js";
 import { emptyIssuePollStatus } from "../issue-polling.js";
-import type { RuntimeReloadStatus } from "../reload.js";
+import {
+  DEFAULT_WATCHDOG_CONFIG,
+  type RuntimeReloadStatus,
+  type WatchdogConfig
+} from "../reload.js";
 import type { StatusSnapshot } from "../status.js";
 import type {
   ListRunsFilter,
@@ -16,6 +20,10 @@ import type {
   RunStatus,
   RunStore
 } from "../run-store.js";
+import {
+  buildWatchdogIdleStatus,
+  buildWatchdogStatus
+} from "../watchdog-status.js";
 import { registerPages } from "./pages.js";
 
 type CancelRunFn = (
@@ -76,6 +84,9 @@ export type HttpAppOptions = {
     runId: string;
   }>;
   getStatusSnapshot?: () => StatusSnapshot;
+  getWatchdogConfig?: (
+    projectName: string
+  ) => Pick<WatchdogConfig, "enabled" | "graceMinutes">;
   issuePollStatus?: IssuePollStatus;
   now?: () => number;
   pollNow?: PollNowFn;
@@ -148,7 +159,21 @@ export function createHttpApp(options: HttpAppOptions): Hono {
 
   app.get("/api/status", (context) =>
     context.json({
-      active: getActiveRuns(),
+      active: getActiveRuns().map((run) =>
+        runStore === undefined
+          ? run
+          : {
+              ...run,
+              watchdog: buildWatchdogIdleStatus({
+                config:
+                  options.getWatchdogConfig?.(run.projectName) ??
+                  DEFAULT_WATCHDOG_CONFIG,
+                nowMs: now(),
+                runId: run.runId,
+                runStore
+              })
+            }
+      ),
       candidateIssues: issuePollStatus.candidateIssues,
       filteredIssues: issuePollStatus.filteredIssues,
       issuePolling: {
@@ -228,7 +253,14 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         attempts,
         events,
         run,
-        transitions
+        transitions,
+        watchdog: buildWatchdogStatus({
+          config:
+            options.getWatchdogConfig?.(run.project) ?? DEFAULT_WATCHDOG_CONFIG,
+          nowMs: now(),
+          runId: run.id,
+          runStore
+        })
       });
     });
 

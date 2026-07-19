@@ -635,6 +635,7 @@ export async function startDaemon(
       };
     },
     getRuns: () => runStore.listRuns(),
+    getWatchdogConfig: () => runtimeConfig.watchdogConfig(),
     getScheduled: () => activeRuns.peekDelayed(),
     getStatusSnapshot: () =>
       buildStatusSnapshot({

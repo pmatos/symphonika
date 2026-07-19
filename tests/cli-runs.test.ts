@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildCli } from "../src/cli.js";
 import type { DoctorReport } from "../src/doctor.js";
@@ -65,6 +65,15 @@ function captureProgram(
   return { output, program };
 }
 
+function progressSignalBlock(output: string): string {
+  const start = output.indexOf("Progress Signal:");
+  if (start < 0) {
+    return "(missing)";
+  }
+  const end = output.indexOf("\nnormalized events", start);
+  return output.slice(start, end < 0 ? undefined : end).trimEnd();
+}
+
 describe("CLI run commands", () => {
   it("status prints state-root and counts grouped by lifecycle", async () => {
     const stateRoot = await makeTempRoot();
@@ -101,6 +110,69 @@ describe("CLI run commands", () => {
     expect(output.stdout).toContain("failed: 1");
     expect(output.stdout).toContain("r-running");
     expect(output.stdout).toContain("r-failed");
+  });
+
+  it("status identifies only active runs inside the watchdog grace window", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    for (const [id, issueNumber] of [
+      ["idle-active", 202],
+      ["progressing-active", 203]
+    ] as const) {
+      store.createRun({
+        id,
+        issue: sampleIssue({ number: issueNumber }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      store.updateRunState(id, "running");
+    }
+    store.upsertWatchdogSample({
+      idleSince: "2026-05-22T11:45:00.000Z",
+      lastMessageAt: null,
+      lastToolCallAt: null,
+      normalizedLogOffset: 0,
+      normalizedLogPath: "",
+      outputTokensTotal: 0,
+      runId: "idle-active",
+      sampledAt: "2026-05-22T11:59:00.000Z",
+      turnIdSetSize: 0,
+      workspaceMtimeMax: 0
+    });
+    store.upsertWatchdogSample({
+      idleSince: null,
+      lastMessageAt: "2026-05-22T11:59:00.000Z",
+      lastToolCallAt: "2026-05-22T11:59:00.000Z",
+      normalizedLogOffset: 0,
+      normalizedLogPath: "",
+      outputTokensTotal: 10,
+      runId: "progressing-active",
+      sampledAt: "2026-05-22T11:59:00.000Z",
+      turnIdSetSize: 1,
+      workspaceMtimeMax: 0
+    });
+    store.close();
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-22T12:00:00.000Z"));
+    try {
+      const { output, program } = captureProgram(stateRoot);
+      await program.parseAsync([
+        "node",
+        "symphonika",
+        "status",
+        "--config",
+        path.join(stateRoot, "symphonika.yml")
+      ]);
+
+      expect(output.stdout).toContain(
+        "watchdog idle since 2026-05-22T11:45:00.000Z (grace remaining 15m)"
+      );
+      expect(output.stdout.match(/watchdog idle since/g)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("status prints project validation, issue counts, and last poll outcome", async () => {
@@ -242,6 +314,18 @@ describe("CLI run commands", () => {
       runId: "dash-run",
       sequence: 1
     });
+    store.upsertWatchdogSample({
+      idleSince: "2026-05-13T08:45:00.000Z",
+      lastMessageAt: null,
+      lastToolCallAt: null,
+      normalizedLogOffset: 0,
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      outputTokensTotal: 0,
+      runId: "dash-run",
+      sampledAt: "2026-05-13T08:59:00.000Z",
+      turnIdSetSize: 0,
+      workspaceMtimeMax: 0
+    });
     store.close();
 
     const { output, program } = captureProgram(stateRoot, {
@@ -308,6 +392,9 @@ describe("CLI run commands", () => {
     expect(output.stdout).toContain("dash-run");
     expect(output.stdout).toContain("#17");
     expect(output.stdout).toContain("hello from dashboard");
+    expect(output.stdout).toContain(
+      "watchdog idle since 2026-05-13T08:45:00.000Z"
+    );
     expect(output.stdout).toContain("No failed, input-required, or stale work");
   });
 
@@ -778,6 +865,183 @@ describe("CLI run commands", () => {
     expect(present.output.stdout).toContain("normalized events");
     expect(present.output.stdout).toContain("hello from provider");
     expect(present.output.stdout).toContain("<not yet recorded>");
+  });
+
+  it("show-run renders a not-yet-idle Progress Signal from persisted samples", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "progress-active",
+      issue: sampleIssue({ number: 202, title: "Watchdog surface" }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("progress-active", "running");
+    for (const sample of [
+      { at: "2026-05-22T11:54:00.000Z", outputTokensTotal: 100 },
+      { at: "2026-05-22T11:56:00.000Z", outputTokensTotal: 130 },
+      { at: "2026-05-22T11:59:00.000Z", outputTokensTotal: 175 }
+    ]) {
+      store.upsertWatchdogSample({
+        idleSince: null,
+        lastMessageAt: "2026-05-22T11:58:45.000Z",
+        lastToolCallAt: "2026-05-22T11:58:00.000Z",
+        normalizedLogOffset: 0,
+        normalizedLogPath: "/tmp/provider.normalized.jsonl",
+        outputTokensTotal: sample.outputTokensTotal,
+        runId: "progress-active",
+        sampledAt: sample.at,
+        turnIdSetSize: 2,
+        workspaceMtimeMax: Date.parse("2026-05-22T11:58:30.000Z")
+      });
+    }
+    store.close();
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-22T12:00:00.000Z"));
+    try {
+      const present = captureProgram(stateRoot);
+      await present.program.parseAsync([
+        "node",
+        "symphonika",
+        "show-run",
+        "progress-active",
+        "--config",
+        path.join(stateRoot, "symphonika.yml")
+      ]);
+
+      expect(progressSignalBlock(present.output.stdout)).toMatchInlineSnapshot(`
+        "Progress Signal:
+          last tool_call: 2m ago
+          workspace mtime: 1m 30s ago
+          turn_ids observed: 2
+          output tokens / 5m: +75"
+      `);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("show-run renders an idle Progress Signal within its grace window", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "progress-idle",
+      issue: sampleIssue({ number: 202, title: "Watchdog surface" }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("progress-idle", "running");
+    for (const sample of [
+      { at: "2026-05-22T11:54:00.000Z", outputTokensTotal: 50 },
+      { at: "2026-05-22T11:59:00.000Z", outputTokensTotal: 70 }
+    ]) {
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T11:45:00.000Z",
+        lastMessageAt: "2026-05-22T11:41:00.000Z",
+        lastToolCallAt: "2026-05-22T11:40:00.000Z",
+        normalizedLogOffset: 0,
+        normalizedLogPath: "/tmp/provider.normalized.jsonl",
+        outputTokensTotal: sample.outputTokensTotal,
+        runId: "progress-idle",
+        sampledAt: sample.at,
+        turnIdSetSize: 1,
+        workspaceMtimeMax: Date.parse("2026-05-22T11:41:00.000Z")
+      });
+    }
+    store.close();
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-22T12:00:00.000Z"));
+    try {
+      const present = captureProgram(stateRoot);
+      await present.program.parseAsync([
+        "node",
+        "symphonika",
+        "show-run",
+        "progress-idle",
+        "--config",
+        path.join(stateRoot, "symphonika.yml")
+      ]);
+
+      expect(progressSignalBlock(present.output.stdout)).toMatchInlineSnapshot(`
+        "Progress Signal:
+          last tool_call: 20m ago
+          workspace mtime: 19m ago
+          turn_ids observed: 1
+          output tokens / 5m: +20
+          idle_since: 2026-05-22T11:45:00.000Z
+          grace remaining: 15m"
+      `);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("show-run preserves the final Progress Signal after watchdog termination", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "progress-terminated",
+      issue: sampleIssue({ number: 202, title: "Watchdog surface" }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("progress-terminated", "running");
+    for (const sampledAt of [
+      "2026-05-22T13:56:00.000Z",
+      "2026-05-22T14:01:00.000Z"
+    ]) {
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T11:25:30.000Z",
+        lastMessageAt: "2026-05-22T11:25:15.000Z",
+        lastToolCallAt: "2026-05-22T11:25:00.000Z",
+        normalizedLogOffset: 123,
+        normalizedLogPath: "/tmp/provider.normalized.jsonl",
+        outputTokensTotal: 36_365,
+        runId: "progress-terminated",
+        sampledAt,
+        turnIdSetSize: 1,
+        workspaceMtimeMax: Date.parse("2026-05-22T11:25:30.000Z")
+      });
+    }
+    expect(
+      store.markRunNoProgressStale(
+        "progress-terminated",
+        "2026-05-22T14:01:00.000Z"
+      )
+    ).toBe(true);
+    store.close();
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-22T14:01:00.000Z"));
+    try {
+      const present = captureProgram(stateRoot);
+      await present.program.parseAsync([
+        "node",
+        "symphonika",
+        "show-run",
+        "progress-terminated",
+        "--config",
+        path.join(stateRoot, "symphonika.yml")
+      ]);
+
+      expect(present.output.stdout).toContain("terminal:     no_progress");
+      expect(progressSignalBlock(present.output.stdout)).toMatchInlineSnapshot(`
+        "Progress Signal:
+          last tool_call: 2h 36m ago
+          workspace mtime: 2h 35m ago
+          turn_ids observed: 1
+          output tokens / 5m: 0
+          idle_since: 2026-05-22T11:25:30.000Z
+          grace remaining: -2h 5m"
+      `);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("show-run fills missing branch and workspace fields from the deterministic path plan", async () => {

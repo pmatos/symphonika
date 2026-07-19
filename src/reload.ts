@@ -470,6 +470,7 @@ async function readWorkflowSnapshot(
     return {
       body: "",
       contentHash: expanded.workflow.contentHash,
+      evidence: { ignore: [] },
       expandedWorkflow: expanded.workflow,
       format,
       path: workflowPath
@@ -485,6 +486,7 @@ async function readWorkflowSnapshot(
   return {
     body: workflow.body,
     contentHash: workflow.contentHash,
+    evidence: workflow.evidence,
     expandedWorkflow: expanded.workflow,
     format,
     path: workflow.path

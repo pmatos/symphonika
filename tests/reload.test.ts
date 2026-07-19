@@ -301,6 +301,83 @@ describe("RuntimeConfigReloader workflow validation", () => {
     ]);
   });
 
+  it("retains Workflow Contract evidence.ignore in the Project snapshot", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["vendor/", "out/"]',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    const workflow = reloader.projectsByName().get("symphonika")?.workflow;
+    if (workflow === undefined || !("expandedWorkflow" in workflow)) {
+      throw new Error("expected workflow snapshot to be an object");
+    }
+    expect(workflow.evidence.ignore).toEqual(["vendor/", "out/"]);
+  });
+
+  it("keeps the last-known-good Workflow Contract when evidence.ignore becomes invalid", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    const workflowPath = path.join(root, "WORKFLOW.md");
+    await writeFile(
+      workflowPath,
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["vendor/"]',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const firstSnapshot = reloader.getSnapshot();
+
+    await writeFile(
+      workflowPath,
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["../escape"]',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n")
+    );
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()).toBe(firstSnapshot);
+    const workflow = reloader.projectsByName().get("symphonika")?.workflow;
+    if (workflow === undefined || !("expandedWorkflow" in workflow)) {
+      throw new Error("expected the last-known-good workflow snapshot");
+    }
+    expect(workflow.evidence.ignore).toEqual(["vendor/"]);
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: true
+    });
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      "evidence.ignore[0] must not contain .."
+    );
+  });
+
   it("keeps the last-known-good snapshot when project detail validation fails on reload", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "WORKFLOW.md");

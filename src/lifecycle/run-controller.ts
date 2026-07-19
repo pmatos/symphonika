@@ -53,6 +53,7 @@ import type {
   ExpandedWorkflow,
   ExpandedWorkflowState,
   WorkflowAction,
+  WorkflowEvidence,
   WorkflowPredicateMap
 } from "../workflow.js";
 
@@ -75,6 +76,7 @@ import { buildCapReachedReason } from "./terminal-reason.js";
 export type WorkflowSnapshot = {
   body: string;
   contentHash: string;
+  evidence: WorkflowEvidence;
   expandedWorkflow: ExpandedWorkflow;
   format: WorkflowReference["format"];
   path: string;
@@ -83,6 +85,7 @@ export type WorkflowSnapshot = {
 type LoadedWorkflow = {
   body: string;
   contentHash: string;
+  evidence: WorkflowEvidence;
   errors: string[];
   expandedWorkflow: ExpandedWorkflow;
   format: WorkflowReference["format"];
@@ -2587,6 +2590,7 @@ export class RunController {
     return {
       body: workflow.body,
       contentHash: workflow.contentHash,
+      evidence: workflow.evidence,
       errors: [],
       expandedWorkflow: workflow.expandedWorkflow,
       format: workflow.format,
@@ -2615,6 +2619,7 @@ export class RunController {
         return {
           body: "",
           contentHash: expanded.workflow.contentHash,
+          evidence: { ignore: [] },
           errors: expanded.errors,
           expandedWorkflow: expanded.workflow,
           format,
@@ -2625,6 +2630,7 @@ export class RunController {
       return {
         body: contract.body,
         contentHash: contract.contentHash,
+        evidence: contract.evidence,
         errors: [...contract.errors, ...expanded.errors],
         expandedWorkflow: expanded.workflow,
         format,
@@ -2635,6 +2641,7 @@ export class RunController {
     return {
       body: workflow.body,
       contentHash: workflow.contentHash,
+      evidence: workflow.evidence,
       errors: [],
       expandedWorkflow: workflow.expandedWorkflow,
       format: workflow.format,

@@ -65,6 +65,107 @@ describe("workflow contract loading", () => {
     });
     expect(workflow.contentHash).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
+
+  it("parses evidence.ignore directories from Workflow Contract front matter", () => {
+    const workflowPath = "/repo/WORKFLOW.md";
+
+    const workflow = parseWorkflowContract(
+      [
+        "---",
+        "evidence:",
+        "  ignore:",
+        '    - "vendor/"',
+        '    - "out"',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n"),
+      workflowPath
+    );
+
+    expect(workflow.errors).toEqual([]);
+    expect(workflow.evidence.ignore).toEqual(["vendor/", "out"]);
+  });
+
+  it("rejects evidence.ignore entries containing parent traversal", () => {
+    const workflowPath = "/repo/WORKFLOW.md";
+
+    const workflow = parseWorkflowContract(
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["../escape"]',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n"),
+      workflowPath
+    );
+
+    expect(workflow.errors).toContain(
+      `workflow front matter at ${workflowPath} evidence.ignore[0] must not contain ..`
+    );
+  });
+
+  it("rejects absolute evidence.ignore entries", () => {
+    const workflowPath = "/repo/WORKFLOW.md";
+
+    const workflow = parseWorkflowContract(
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["/tmp/output"]',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n"),
+      workflowPath
+    );
+
+    expect(workflow.errors).toContain(
+      `workflow front matter at ${workflowPath} evidence.ignore[0] must be workspace-relative`
+    );
+  });
+
+  it("rejects non-string evidence.ignore entries", () => {
+    const workflowPath = "/repo/WORKFLOW.md";
+
+    const workflow = parseWorkflowContract(
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["vendor/", 42]',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n"),
+      workflowPath
+    );
+
+    expect(workflow.errors).toContain(
+      `workflow front matter at ${workflowPath} evidence.ignore[1] must be a non-empty string`
+    );
+  });
+
+  it("rejects evidence.ignore when it is not a list", () => {
+    const workflowPath = "/repo/WORKFLOW.md";
+
+    const workflow = parseWorkflowContract(
+      [
+        "---",
+        "evidence:",
+        "  ignore: vendor/",
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n"),
+      workflowPath
+    );
+
+    expect(workflow.errors).toContain(
+      `workflow front matter at ${workflowPath} evidence.ignore must be a list`
+    );
+  });
 });
 
 describe("workflow format routing", () => {

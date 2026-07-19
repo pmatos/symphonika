@@ -3014,6 +3014,14 @@ export class RunController {
     // `agent-ready`. Markdown compatibility-graph workflows keep the legacy
     // "loop on agent-ready" behavior.
     if (input.suppressContinuation === true) {
+      this.logger?.info(
+        {
+          issueNumber: input.issue.number,
+          project: input.project.name,
+          runId: input.runId
+        },
+        "symphonika workflow suppressed label-driven continuation"
+      );
       return;
     }
 

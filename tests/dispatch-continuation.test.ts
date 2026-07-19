@@ -446,9 +446,8 @@ describe("dispatch continuation cap", () => {
 
     // Issue stays agent-ready after the run — without the raw-FSM terminal
     // suppression, scheduleNext would refresh, see the label, and dispatch a
-    // continuation. Polling after the first tick sees the operational claim,
-    // which keeps reconciliation from making an unrelated getIssue call while
-    // still excluding the issue from fresh dispatch.
+    // continuation. Later polls include the operational claim so the issue is
+    // still excluded from a second fresh dispatch.
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
       getIssue: vi.fn().mockResolvedValue({
@@ -466,6 +465,8 @@ describe("dispatch continuation cap", () => {
     const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
       Promise.resolve(prepared)
     );
+    const logger = pino({ enabled: false });
+    const logInfo = vi.spyOn(logger, "info");
 
     const daemon = await startDaemon({
       agentProviders: { codex: provider },
@@ -474,7 +475,7 @@ describe("dispatch continuation cap", () => {
       env: { GITHUB_TOKEN: "secret-token" },
       githubIssuesApi,
       lifecyclePolicy: fastContinuationPolicy,
-      logger: pino({ enabled: false }),
+      logger,
       port: 0,
       prepareIssueWorkspace
     });
@@ -484,10 +485,6 @@ describe("dispatch continuation cap", () => {
         runs.some((run) => run["state"] === "succeeded")
       );
 
-      // Wait beyond the continuation delay (5ms in fastContinuationPolicy) to
-      // confirm no continuation gets dispatched.
-      await new Promise((resolve) => setTimeout(resolve, 80));
-
       const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
         r.json()
       )) as {
@@ -496,12 +493,20 @@ describe("dispatch continuation cap", () => {
       expect(status.runs).toHaveLength(1);
       expect(status.runs[0]?.["isContinuation"]).toBe(false);
       expect(status.runs[0]?.["state"]).toBe("succeeded");
-      // getIssue should not have been called — suppression short-circuits
-      // scheduleNext before the refresh.
-      expect(githubIssuesApi.getIssue).not.toHaveBeenCalled();
     } finally {
+      // stop() drains the dispatch lifecycle, so the assertion below observes
+      // scheduleNext's decision without racing a wall-clock delay.
       await daemon.stop();
     }
+
+    expect(logInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        issueNumber: baseIssue.number,
+        project: "symphonika",
+        runId: "run-fsm-terminal"
+      }),
+      "symphonika workflow suppressed label-driven continuation"
+    );
   });
 });
 

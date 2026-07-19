@@ -7,6 +7,10 @@ import {
 import type { RoutineKind } from "./types.js";
 
 export type RoutinePromptInput = {
+  branch?: {
+    name: string;
+    ref: string;
+  };
   firing: {
     id: string;
   };
@@ -39,13 +43,14 @@ export type RenderedRoutinePrompt = {
 
 type RoutinePromptContext = Pick<
   RoutinePromptInput,
-  "firing" | "project" | "provider" | "routine" | "workspace"
+  "branch" | "firing" | "project" | "provider" | "routine" | "workspace"
 >;
 
 const allowedTemplateFields: Record<
   keyof RoutinePromptContext,
   ReadonlySet<string>
 > = {
+  branch: new Set(["name", "ref"]),
   firing: new Set(["id"]),
   project: new Set(["name"]),
   provider: new Set(["command", "name"]),
@@ -68,6 +73,7 @@ export function renderRoutinePrompt(
   input: RoutinePromptInput
 ): RenderedRoutinePrompt {
   const context: RoutinePromptContext = {
+    ...(input.branch === undefined ? {} : { branch: input.branch }),
     firing: input.firing,
     project: input.project,
     provider: input.provider,
@@ -79,7 +85,8 @@ export function renderRoutinePrompt(
       resolveTemplateValue(
         String(expression).trim(),
         context,
-        input.templatePath
+        input.templatePath,
+        input.routine.kind
       ),
       input.templatePath
     )
@@ -95,9 +102,10 @@ export function renderRoutinePrompt(
 function resolveTemplateValue(
   expression: string,
   context: RoutinePromptContext,
-  templatePath: string
+  templatePath: string,
+  routineKind: RoutineKind
 ): unknown {
-  const error = templateExpressionError(expression, templatePath);
+  const error = templateExpressionError(expression, templatePath, routineKind);
   if (error !== undefined) {
     throw new RoutinePromptRenderError(error);
   }
@@ -113,7 +121,10 @@ function resolveTemplateValue(
     return context[topLevel];
   }
 
-  return context[topLevel][field as keyof (typeof context)[typeof topLevel]];
+  const object = context[topLevel];
+  return object === undefined
+    ? undefined
+    : (object as Record<string, unknown>)[field];
 }
 
 function stringifyTemplateValue(value: unknown, templatePath: string): string {
@@ -136,7 +147,8 @@ function stringifyTemplateValue(value: unknown, templatePath: string): string {
 
 function templateExpressionError(
   expression: string,
-  templatePath: string
+  templatePath: string,
+  routineKind: RoutineKind
 ): string | undefined {
   const parts = expression.split(".");
   const topLevel = parts[0];
@@ -146,6 +158,10 @@ function templateExpressionError(
   }
 
   if (topLevel === undefined || !isRoutinePromptObjectName(topLevel)) {
+    return `routine template at ${templatePath} references unknown variable {{${expression}}}`;
+  }
+
+  if (topLevel === "branch" && routineKind !== "git") {
     return `routine template at ${templatePath} references unknown variable {{${expression}}}`;
   }
 

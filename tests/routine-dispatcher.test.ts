@@ -16,6 +16,10 @@ import type {
   PrepareRoutineWorkspaceInput
 } from "../src/routines/workspace.js";
 import { openRunStore } from "../src/run-store.js";
+import {
+  createGitWorkspaceAhead,
+  createGitWorkspaceAtBase
+} from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
 
@@ -36,6 +40,214 @@ afterEach(async () => {
 });
 
 describe("RoutineFiringDispatcher", () => {
+  it("succeeds a kind: git firing with commits ahead and discovers every open PR", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/dependency-update/01JABCDEFG";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const providerInputs: ProviderRunInput[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        providerInputs.push(input);
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([
+      {
+        head: { ref: branchName, sha: "abc123" },
+        number: 17,
+        state: "open"
+      },
+      {
+        head: { ref: branchName, sha: "def456" },
+        number: 18,
+        state: "open"
+      },
+      {
+        head: { ref: "another-branch", sha: "ignored" },
+        number: 19,
+        state: "open"
+      }
+    ]);
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName,
+          branchRef: `refs/heads/${branchName}`,
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "01JABCDEFGHJKMNPQRSTVWXYZ12",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "dependency-update",
+                  prompt: "Commit on {{branch.name}} ({{branch.ref}}).",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "dependency-update.md")
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(prepareRoutineWorkspace).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: "git" })
+      );
+      expect(providerInputs).toEqual([
+        expect.objectContaining({ branchName, workspacePath })
+      ]);
+      expect(providerInputs[0]?.prompt).toContain(
+        `Commit on ${branchName} (refs/heads/${branchName}).`
+      );
+      expect(listPullRequestsForBranch).toHaveBeenCalledWith({
+        branch: branchName,
+        owner: "pmatos",
+        repo: "alpha",
+        token: "secret-token"
+      });
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+          pullRequests: [
+            expect.objectContaining({ prNumber: 17 }),
+            expect.objectContaining({ prNumber: 18 })
+          ],
+          state: "succeeded",
+          terminalReason: null
+        })
+      ]);
+      expect(runStore.listOpenTrackedPullRequests()).toEqual([]);
+      expect(runStore.hasPullRequestFollowupWork()).toBe(false);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("fails a kind: git firing with no commits ahead of base", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/dependency-update/fire-zero";
+    await createGitWorkspaceAtBase({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-zero",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "dependency-update",
+                  prompt: "Update dependencies.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "dependency-update.md")
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-zero",
+          pullRequests: [],
+          state: "failed",
+          terminalReason: "no_workspace_changes"
+        })
+      ]);
+      expect(listPullRequestsForBranch).not.toHaveBeenCalled();
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("fires a due one-shot report routine exactly once", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

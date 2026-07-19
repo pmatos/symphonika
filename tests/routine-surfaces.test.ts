@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildCli } from "../src/cli.js";
 import { createHttpApp } from "../src/http/app.js";
 import { openRunStore } from "../src/run-store.js";
+import { renderStatusDashboard } from "../src/status-dashboard.js";
 
 const tempRoots: string[] = [];
 
@@ -47,7 +48,22 @@ describe("routine operator surfaces", () => {
           name: "daily-report",
           nextFireAt: "2026-05-22T10:00:00.000Z",
           projectName: "alpha",
+          pullRequestNumbers: [42],
           state: "active"
+        })
+      ]);
+
+      const firingsResponse = await app.request(
+        "/api/routines/daily-report/firings?project=alpha"
+      );
+      const firingsBody = (await firingsResponse.json()) as {
+        firings: unknown[];
+      };
+      expect(firingsResponse.status).toBe(200);
+      expect(firingsBody.firings).toEqual([
+        expect.objectContaining({
+          id: "fire-1",
+          pullRequests: [expect.objectContaining({ prNumber: 42 })]
         })
       ]);
     } finally {
@@ -73,6 +89,38 @@ describe("routine operator surfaces", () => {
       expect(body).toContain("Routines");
       expect(body).toContain("daily-report");
       expect(body).toContain("next_fire_at");
+      expect(body).toContain("#42");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("renders linked PR numbers on the terminal status dashboard", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      seedRoutine(store);
+
+      const dashboard = renderStatusDashboard({
+        daemon: "running",
+        issueCounts: {
+          candidate: 0,
+          failed: 0,
+          filtered: 0,
+          running: 0,
+          stale: 0
+        },
+        lastPollOutcome: "ok",
+        latestEvents: new Map(),
+        projects: [],
+        reload: "ok",
+        routines: store.listRoutines(),
+        runs: [],
+        stateRoot
+      });
+
+      expect(dashboard).toContain("daily-report");
+      expect(dashboard).toContain("#42");
     } finally {
       store.close();
     }
@@ -107,10 +155,10 @@ describe("routine operator surfaces", () => {
     ]);
 
     expect(output.stdout).toContain(
-      "project  routine  state  next_fire_at  last_fired_at"
+      "project  routine  state  next_fire_at  last_fired_at  pull_requests"
     );
     expect(output.stdout).toContain(
-      "alpha  daily-report  active  2026-05-22T10:00:00.000Z  -"
+      "alpha  daily-report  active  2026-05-22T10:00:00.000Z  -  #42"
     );
   });
 });
@@ -118,7 +166,7 @@ describe("routine operator surfaces", () => {
 function seedRoutine(store: ReturnType<typeof openRunStore>): void {
   store.syncRoutines("alpha", [
     {
-      kind: "report",
+      kind: "git",
       name: "daily-report",
       prompt: "Report.",
       provider: null,
@@ -126,4 +174,23 @@ function seedRoutine(store: ReturnType<typeof openRunStore>): void {
       sourcePath: "/tmp/daily-report.md"
     }
   ]);
+  store.createRoutineFiring({
+    id: "fire-1",
+    projectName: "alpha",
+    providerCommand: "codex fake",
+    providerName: "codex",
+    routineName: "daily-report"
+  });
+  store.completeRoutineFiring({
+    id: "fire-1",
+    state: "succeeded",
+    workspacePath: "/tmp/workspace"
+  });
+  store.recordRoutinePullRequest({
+    firingId: "fire-1",
+    headSha: "abc123",
+    prNumber: 42,
+    projectName: "alpha",
+    routineName: "daily-report"
+  });
 }

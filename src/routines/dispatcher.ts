@@ -4,6 +4,13 @@ import path from "node:path";
 import type { Logger } from "pino";
 
 import type { ActiveRunRegistry } from "../lifecycle/active-runs.js";
+import { classifyFailure } from "../lifecycle/classify-failure.js";
+import {
+  resolveEnvBackedValue,
+  tryListPullRequestsForBranch,
+  type GitHubIssuesApi,
+  type RawGitHubPullRequest
+} from "../issue-polling.js";
 import type {
   AgentProviderName,
   AgentProviderRegistry,
@@ -33,7 +40,9 @@ export type DispatchDueRoutinesInput = {
   agentProviders: AgentProviderRegistry;
   configDir: string;
   createFiringId?: () => string;
+  env?: NodeJS.ProcessEnv;
   globalConcurrency: { maxInFlight: number | undefined };
+  githubIssuesApi?: GitHubIssuesApi;
   logger?: Logger;
   now?: Date;
   prepareRoutineWorkspace?: (
@@ -177,6 +186,9 @@ export async function dispatchDueRoutines(
         fired.push(firingId);
         await runRoutineFiring({
           firingId,
+          env: input.env ?? process.env,
+          githubIssuesApi: input.githubIssuesApi,
+          logger: input.logger,
           prepareRoutineWorkspace,
           project,
           provider,
@@ -200,7 +212,10 @@ export async function dispatchDueRoutines(
 async function runRoutineFiring(input: {
   activeRuns: ActiveRunRegistry;
   configDir: string;
+  env: NodeJS.ProcessEnv;
   firingId: string;
+  githubIssuesApi: GitHubIssuesApi | undefined;
+  logger: Logger | undefined;
   prepareRoutineWorkspace: (
     input: PrepareRoutineWorkspaceInput
   ) => Promise<PreparedRoutineWorkspace>;
@@ -224,6 +239,7 @@ async function runRoutineFiring(input: {
     prepared = await input.prepareRoutineWorkspace({
       configDir: input.configDir,
       firingId: input.firingId,
+      kind: input.routine.kind,
       project: input.project,
       routineName: input.routine.name
     });
@@ -278,13 +294,29 @@ async function runRoutineFiring(input: {
         events.push(event.normalized);
       }
     }
-    const outcome = classifyRoutineOutcome(events);
+    const outcome = await classifyRoutineOutcome(events, {
+      baseBranch: input.project.workspace.git.base_branch,
+      kind: input.routine.kind,
+      workspacePath: prepared.workspacePath
+    });
     input.runStore.completeRoutineFiring({
       id: input.firingId,
       state: outcome.kind,
       terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
       workspacePath: prepared.workspacePath
     });
+    if (outcome.kind === "succeeded" && input.routine.kind === "git") {
+      await discoverRoutinePullRequests({
+        branchName: prepared.branchName,
+        env: input.env,
+        firingId: input.firingId,
+        githubIssuesApi: input.githubIssuesApi,
+        logger: input.logger,
+        project: input.project,
+        routineName: input.routine.name,
+        runStore: input.runStore
+      });
+    }
   } catch (error) {
     const reason =
       error instanceof RoutinePromptRenderError
@@ -318,6 +350,14 @@ async function prepareRoutineEvidence(input: {
 }> {
   const routine = input.routine;
   const rendered = renderRoutinePrompt({
+    ...(routine.kind === "git"
+      ? {
+          branch: {
+            name: input.prepared.branchName,
+            ref: input.prepared.branchRef
+          }
+        }
+      : {}),
     firing: { id: input.firingId },
     project: { name: input.project.name },
     provider: { command: input.providerCommand, name: input.providerName },
@@ -352,6 +392,14 @@ async function prepareRoutineEvidence(input: {
       `${JSON.stringify(
         {
           autonomy_preamble_version: rendered.preambleVersion,
+          ...(routine.kind === "git"
+            ? {
+                branch: {
+                  name: input.prepared.branchName,
+                  ref: input.prepared.branchRef
+                }
+              }
+            : {}),
           firing: { id: input.firingId },
           project: { name: input.project.name },
           provider: {
@@ -399,9 +447,33 @@ async function appendRoutineEvent(input: {
   ]);
 }
 
-function classifyRoutineOutcome(
-  events: NormalizedProviderEvent[]
-): RoutineTerminalOutcome {
+async function classifyRoutineOutcome(
+  events: NormalizedProviderEvent[],
+  workspace: {
+    baseBranch: string;
+    kind: RoutineStatus["kind"];
+    workspacePath: string;
+  }
+): Promise<RoutineTerminalOutcome> {
+  if (workspace.kind === "git") {
+    const classified = await classifyFailure({
+      cancelRequested: false,
+      events,
+      successWorkspace: {
+        baseBranch: workspace.baseBranch,
+        workspacePath: workspace.workspacePath
+      }
+    });
+    switch (classified.kind) {
+      case "success":
+        return { kind: "succeeded", reason: classified.reason };
+      case "cancelled":
+        return { kind: "cancelled", reason: classified.reason };
+      case "failed":
+      case "input_required":
+        return { kind: "failed", reason: classified.reason };
+    }
+  }
   const inputRequired = events.find((event) => event.type === "input_required");
   if (inputRequired !== undefined) {
     return {
@@ -438,6 +510,75 @@ function classifyRoutineOutcome(
         ? `process_exit_signal_${stringField(exit, "signal") ?? "unknown"}`
         : `process_exit_${exitCode}`
   };
+}
+
+async function discoverRoutinePullRequests(input: {
+  branchName: string;
+  env: NodeJS.ProcessEnv;
+  firingId: string;
+  githubIssuesApi: GitHubIssuesApi | undefined;
+  logger: Logger | undefined;
+  project: RunControllerProjectConfig;
+  routineName: string;
+  runStore: RunStore;
+}): Promise<void> {
+  if (input.githubIssuesApi === undefined) {
+    return;
+  }
+  const token = resolveEnvBackedValue(input.project.tracker.token, input.env);
+  if (token === undefined) {
+    input.logger?.warn(
+      { project: input.project.name, routine: input.routineName },
+      "symphonika routine PR discovery token unavailable"
+    );
+    return;
+  }
+
+  let pullRequests: RawGitHubPullRequest[] | undefined;
+  try {
+    pullRequests = await tryListPullRequestsForBranch(input.githubIssuesApi, {
+      branch: input.branchName,
+      owner: input.project.tracker.owner,
+      repo: input.project.tracker.repo,
+      token
+    });
+  } catch (error) {
+    input.logger?.warn(
+      { branch: input.branchName, err: error },
+      "symphonika routine PR discovery failed"
+    );
+    return;
+  }
+
+  for (const pullRequest of pullRequests ?? []) {
+    if (!isOpenPullRequestForBranch(pullRequest, input.branchName)) {
+      continue;
+    }
+    input.runStore.recordRoutinePullRequest({
+      firingId: input.firingId,
+      headSha: pullRequest.head.sha,
+      prNumber: pullRequest.number,
+      projectName: input.project.name,
+      routineName: input.routineName
+    });
+  }
+}
+
+function isOpenPullRequestForBranch(
+  pullRequest: RawGitHubPullRequest,
+  branchName: string
+): pullRequest is RawGitHubPullRequest & {
+  head: { ref: string; sha: string };
+  number: number;
+} {
+  return (
+    pullRequest.state === "open" &&
+    pullRequest.number !== undefined &&
+    pullRequest.number > 0 &&
+    pullRequest.head?.ref === branchName &&
+    pullRequest.head.sha !== undefined &&
+    pullRequest.head.sha.length > 0
+  );
 }
 
 function capSkipReason(

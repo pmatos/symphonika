@@ -170,12 +170,12 @@ Symphonika stores both:
 
 ### 4.12 Routine
 
-A Routine is a Project-owned scheduled prompt declaration. Slice 1 supports hand-authored Markdown
+A Routine is a Project-owned scheduled prompt declaration. Symphonika supports hand-authored Markdown
 routine files with YAML front matter:
 
 - `name`
 - `schedule.at`
-- `kind: report`
+- `kind: report` or `kind: git`
 - optional `provider`
 
 The Markdown body is the routine prompt template. `name` must be safe as a single workspace path
@@ -184,9 +184,9 @@ segment because routine firing workspaces live under `<workspace.root>/routines/
 ### 4.13 Routine Firing
 
 A Routine Firing is one durable execution of a Routine. It records the Routine, Project, provider,
-workspace path, prompt evidence, provider logs, terminal reason, and lifecycle state. Slice 1
-supports one-shot `schedule.at` routines only; after the first firing is created, the Routine becomes
-`expired` and must not fire again on daemon restart.
+workspace path, prompt evidence, provider logs, terminal reason, lifecycle state, and any pull
+requests discovered from a `kind: git` firing branch. One-shot `schedule.at` routines become
+`expired` after the first firing is created and must not fire again on daemon restart.
 
 ## 5. Config Files
 
@@ -317,7 +317,7 @@ Available top-level objects:
 Symphonika prepends a standard autonomy preamble to every rendered workflow prompt.
 
 Routine prompt rendering uses the same strict templating rules and the same standard autonomy
-preamble. For `kind: report`, available top-level objects are:
+preamble. For every Routine kind, available top-level objects are:
 
 - `project`
 - `workspace`
@@ -325,8 +325,9 @@ preamble. For `kind: report`, available top-level objects are:
 - `routine`
 - `firing`
 
-`issue`, `run`, and `branch` are unavailable to routine prompts. Referencing any of them fails
-rendering with terminal reason `prompt_render_error`.
+`kind: git` additionally exposes `branch.name` and `branch.ref`. `branch` is unavailable to
+`kind: report`; `issue` and `run` are unavailable to every Routine kind. Referencing an unavailable
+object fails rendering with terminal reason `prompt_render_error`.
 
 The preamble tells the agent:
 
@@ -542,11 +543,20 @@ supports one-shot `schedule.at` only:
 - `fire_now` when `now >= at` and the Routine has not fired
 - `expired` after a firing exists or the Routine state is `expired`
 
-When a Routine fires, Symphonika allocates a ULID firing id, prepares a workspace at
-`<workspace.root>/routines/<routine-name>/<firing-id>/` on the Project base branch, renders the
-routine prompt, runs the configured provider, records a `routine_firings` row, and marks the
-Routine `expired`. Routine Firings use states `queued`, `preparing_workspace`, `running`,
-`succeeded`, `failed`, and `cancelled`.
+When a Routine fires, Symphonika allocates a ULID firing id and prepares a workspace at
+`<workspace.root>/routines/<routine-name>/<firing-id>/`. A `kind: report` workspace is detached at
+the Project base branch. A `kind: git` workspace is checked out on
+`sym/<project>/routine/<routine-name>/<first-10-firing-id-chars>`, created from the Project base.
+Symphonika renders the routine prompt, runs the configured provider, records a `routine_firings`
+row, and marks a one-shot Routine `expired`. Routine Firings use states `queued`,
+`preparing_workspace`, `running`, `succeeded`, `failed`, and `cancelled`.
+
+For `kind: report`, provider exit code 0 succeeds without requiring commits. For `kind: git`, exit
+code 0 applies the same commits-ahead-of-base inspection as §12.1: zero commits fails with
+`no_workspace_changes`, inspection failure fails with `workspace_inspection_failed`, and one or
+more commits succeeds. On the succeeded transition, Symphonika lists every open pull request whose
+head is the firing branch and records its PR number and head SHA. Routine PR discovery is
+informational only: it never enters PR Follow-up, review re-dispatch, or auto-merge.
 
 Routine Firings consume the same per-Project and global `max_in_flight` slots as issue Runs. If a
 cap is already full when a Routine is due, the daemon skips that fire for this slice and logs the
@@ -632,6 +642,10 @@ tracks PRs that can be associated with a completed Symphonika Run by the determi
 Repository workflows and coding agents remain responsible for opening PRs, writing comments, and
 removing `agent-ready`; Symphonika records the discovered PR number and head SHA so the daemon can
 continue the same branch after review feedback.
+
+Routine PR discovery is a separate, read-only association. A succeeded `kind: git` Routine Firing
+records every open PR found on its deterministic firing branch, but those PRs are never candidates
+for review re-dispatch or auto-merge.
 
 The v1 trigger model is poll-based and runs on the daemon tick. Webhooks are deferred.
 
@@ -1022,7 +1036,8 @@ frame, but caches the full `doctor` validation path for 5000 ms by default so pa
 not continuously re-run provider probes or GitHub validation reads. `--doctor-ttl-ms 0` disables that
 cache when an operator explicitly wants every frame to perform full validation.
 
-`routines` lists routine status per Project with `state`, `next_fire_at`, and `last_fired_at`.
+`routines` lists routine status per Project with `state`, `next_fire_at`, `last_fired_at`, and PR
+numbers discovered for the latest firing.
 
 `clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
 
@@ -1042,7 +1057,7 @@ The UI is primarily read-only. It shows:
 - raw log links or content
 - rendered prompt links
 - retry and continuation state
-- routines with `state`, `next_fire_at`, and `last_fired_at`
+- routines with `state`, `next_fire_at`, `last_fired_at`, and discovered PR numbers
 - a per-run interactive workflow graph
 
 Operator pages stay server-rendered and primarily read-only, but a page may embed a
@@ -1060,7 +1075,8 @@ The v1 mutating web actions are explicit active-run cancellation and a manual po
 uses the normal daemon scheduler path.
 
 The HTTP API exposes `GET /api/routines` with the same routine status shape as the CLI and
-dashboard.
+dashboard. `GET /api/routines/:id/firings` returns firing history and linked PRs for the named
+Routine; callers use `?project=<name>` to disambiguate the same Routine name across Projects.
 
 Label creation, stale-claim reset, and workspace cleanup remain CLI-only.
 

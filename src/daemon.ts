@@ -455,7 +455,9 @@ export async function startDaemon(
           ...(options.createRoutineFiringId === undefined
             ? {}
             : { createFiringId: options.createRoutineFiringId }),
+          env,
           globalConcurrency: runtimeConfig.globalConcurrency(),
+          githubIssuesApi,
           logger,
           ...(options.prepareRoutineWorkspace === undefined
             ? {}

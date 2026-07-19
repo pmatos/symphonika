@@ -30,6 +30,22 @@ const baseInput = {
 };
 
 describe("RoutinePromptRenderer", () => {
+  it("renders branch variables for kind: git routines", () => {
+    const rendered = renderRoutinePrompt({
+      ...baseInput,
+      branch: {
+        name: "sym/symphonika/routine/daily-report/01JABCDEF0",
+        ref: "refs/heads/sym/symphonika/routine/daily-report/01JABCDEF0"
+      },
+      routine: { ...baseInput.routine, kind: "git" },
+      template: "Work on {{branch.name}} at {{branch.ref}}."
+    });
+
+    expect(rendered.prompt).toContain(
+      "Work on sym/symphonika/routine/daily-report/01JABCDEF0 at refs/heads/sym/symphonika/routine/daily-report/01JABCDEF0."
+    );
+  });
+
   it("renders routine variables and prepends the standard autonomy preamble", () => {
     const routinePrompt = renderRoutinePrompt(baseInput);
     const issuePrompt = renderAutonomousPrompt({

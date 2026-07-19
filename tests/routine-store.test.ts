@@ -22,6 +22,74 @@ afterEach(async () => {
 });
 
 describe("RunStore routines", () => {
+  it("records every pull request discovered for a successful firing", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-git-1",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+
+      store.recordRoutinePullRequest({
+        firingId: "fire-git-1",
+        headSha: "abc123",
+        prNumber: 17,
+        projectName: "alpha",
+        routineName: "dependency-update"
+      });
+      store.recordRoutinePullRequest({
+        firingId: "fire-git-1",
+        headSha: "def456",
+        prNumber: 18,
+        projectName: "alpha",
+        routineName: "dependency-update"
+      });
+
+      expect(
+        store.listRoutineFirings({ routineName: "dependency-update" })
+      ).toEqual([
+        expect.objectContaining({
+          id: "fire-git-1",
+          pullRequests: [
+            {
+              firingId: "fire-git-1",
+              headSha: "abc123",
+              prNumber: 17,
+              projectName: "alpha",
+              routineName: "dependency-update"
+            },
+            {
+              firingId: "fire-git-1",
+              headSha: "def456",
+              prNumber: 18,
+              projectName: "alpha",
+              routineName: "dependency-update"
+            }
+          ]
+        })
+      ]);
+      expect(store.listRoutines()).toEqual([
+        expect.objectContaining({ pullRequestNumbers: [17, 18] })
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("upserts routines and lists operator status fields", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -45,6 +113,7 @@ describe("RunStore routines", () => {
           nextFireAt: "2026-05-22T10:00:00.000Z",
           projectName: "alpha",
           provider: null,
+          pullRequestNumbers: [],
           scheduleAt: "2026-05-22T10:00:00.000Z",
           sourcePath: "/tmp/daily-report.md",
           state: "active"

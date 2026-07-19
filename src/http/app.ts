@@ -211,9 +211,10 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     app.get("/api/routines", (context) => {
       const project = context.req.query("project");
       return context.json({
-        routines: runStore.listRoutines(
-          project === undefined ? {} : { project }
-        )
+        routines: runStore.listRoutines({
+          includeInactive: context.req.query("include_inactive") === "true",
+          ...(project === undefined ? {} : { project })
+        })
       });
     });
 

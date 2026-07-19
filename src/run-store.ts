@@ -1098,8 +1098,9 @@ export class RunStore {
         "provider_name = excluded.provider_name,",
         "schedule_at = excluded.schedule_at,",
         "prompt_body = excluded.prompt_body,",
-        // Preserve expired one-shots across daemon restarts and reloads.
-        "state = case when routines.state = 'expired' then routines.state else 'active' end,",
+        // An inactive one-shot with firing evidence was expired before its
+        // Project was disabled or removed. Restore that state on re-enable.
+        "state = case when routines.state = 'expired' or routines.last_fired_at is not null then 'expired' else 'active' end,",
         "updated_at = excluded.updated_at"
       ].join(" ")
     );
@@ -1134,25 +1135,38 @@ export class RunStore {
     apply();
   }
 
+  markRoutinesInactiveForProject(projectName: string): void {
+    this.database
+      .prepare(
+        "update routines set state = 'inactive', updated_at = ? where project_name = ? and state != 'inactive'"
+      )
+      .run(timestamp(), projectName);
+  }
+
   pruneRoutinesForUnknownProjects(projectNames: Iterable<string>): void {
     const now = timestamp();
     const names = [...new Set(projectNames)];
     if (names.length === 0) {
       this.database
-        .prepare("update routines set state = 'inactive', updated_at = ?")
+        .prepare(
+          "update routines set state = 'inactive', updated_at = ? where state != 'inactive'"
+        )
         .run(now);
       return;
     }
     const placeholders = names.map(() => "?").join(", ");
     this.database
       .prepare(
-        `update routines set state = 'inactive', updated_at = ? where project_name not in (${placeholders})`
+        `update routines set state = 'inactive', updated_at = ? where project_name not in (${placeholders}) and state != 'inactive'`
       )
       .run(now, ...names);
   }
 
-  listRoutines(filter: { project?: string } = {}): RoutineStatus[] {
-    const conditions: string[] = ["state != 'inactive'"];
+  listRoutines(
+    filter: { includeInactive?: boolean; project?: string } = {}
+  ): RoutineStatus[] {
+    const conditions: string[] =
+      filter.includeInactive === true ? [] : ["state != 'inactive'"];
     const params: Record<string, unknown> = {};
     if (filter.project !== undefined) {
       conditions.push("project_name = @project");

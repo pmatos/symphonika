@@ -93,7 +93,11 @@ export function registerPages(options: RegisterPagesOptions): void {
         `<h1 class="page-title">Dashboard</h1>`,
         renderHeader(options.version, snapshot),
         renderProjectsCard(snapshot, options.issuePollStatus),
-        renderRoutinesTable(options.runStore.listRoutines()),
+        renderRoutinesTable(
+          options.runStore.listRoutines({
+            includeInactive: context.req.query("include_inactive") === "true"
+          })
+        ),
         renderStaleIssuesCard(options.issuePollStatus?.filteredIssues ?? []),
         renderRunsTable("Recent runs", recentRuns)
       ].join("")

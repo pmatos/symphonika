@@ -180,6 +180,9 @@ routine files with YAML front matter:
 
 The Markdown body is the routine prompt template. `name` must be safe as a single workspace path
 segment because routine firing workspaces live under `<workspace.root>/routines/<name>/<firing-id>/`.
+Routine states are `active`, `expired`, and `inactive`. `inactive` means the owning Project is
+disabled or omitted from the current valid Service Config snapshot; the row remains durable but is
+hidden from default operator listings.
 
 ### 4.13 Routine Firing
 
@@ -529,9 +532,10 @@ Invalid Projects are disabled. Valid Projects may continue running.
 Existing runs continue by default. Removing a Project from service config marks it inactive rather
 than killing active full-permission agents. Operators can explicitly cancel runs.
 
-Routine rows for Projects omitted from the current valid service-config snapshot are marked
-inactive and pruned from operator routine listings on reload. Historical `routine_firings` rows
-remain durable run-store evidence.
+Routine rows for Projects disabled or omitted from the current valid Service Config snapshot are
+marked inactive and pruned from default operator listings on reload. Historical `routine_firings`
+rows and `last_fired_at` remain durable Run Store evidence. Re-enabling a Project restores its
+configured Routines to `active` or `expired` without re-firing an already-fired one-shot.
 
 ### 8.5 Routines
 
@@ -992,7 +996,7 @@ Bootstrap CLI commands:
 - `symphonika status [--config <path>] [--dashboard] [--watch] [--interval-ms <ms>] [--doctor-ttl-ms <ms>]`
 - `symphonika poll-now [--config <path>]`
 - `symphonika runs [--config <path>]`
-- `symphonika routines [--config <path>]`
+- `symphonika routines [--config <path>] [--project <project>] [--include-inactive]`
 - `symphonika show-run <run-id> [--config <path>]`
 - `symphonika cancel <run-id> [--config <path>]`
 - `symphonika clear-stale <project> <issue-number> [--config <path>] --yes`
@@ -1022,7 +1026,8 @@ frame, but caches the full `doctor` validation path for 5000 ms by default so pa
 not continuously re-run provider probes or GitHub validation reads. `--doctor-ttl-ms 0` disables that
 cache when an operator explicitly wants every frame to perform full validation.
 
-`routines` lists routine status per Project with `state`, `next_fire_at`, and `last_fired_at`.
+`routines` lists Routine status per Project with `state`, `next_fire_at`, and `last_fired_at`.
+Inactive Routines are hidden by default; `--include-inactive` includes them.
 
 `clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
 
@@ -1059,8 +1064,9 @@ separate frontend application. See ADR-0056.
 The v1 mutating web actions are explicit active-run cancellation and a manual poll-now trigger that
 uses the normal daemon scheduler path.
 
-The HTTP API exposes `GET /api/routines` with the same routine status shape as the CLI and
-dashboard.
+The HTTP API exposes `GET /api/routines` with the same Routine status shape as the CLI and
+dashboard. Inactive Routines are hidden by default; `?include_inactive=true` includes them. The
+server-rendered dashboard accepts the same query parameter.
 
 Label creation, stale-claim reset, and workspace cleanup remain CLI-only.
 

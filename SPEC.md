@@ -1028,9 +1028,16 @@ cache when an operator explicitly wants every frame to perform full validation.
 
 ## 14. Local Web UI and API
 
-v1 ships a local HTTP API and lightweight server-rendered operator pages.
+v1 ships a local HTTP API and server-rendered operator pages.
 
 Default bind host: `127.0.0.1`.
+
+Richer visual design of these server-rendered pages is part of the v1 bootstrap scope. It may
+include a cohesive design system, system-adaptive light and dark themes, responsive layouts,
+accessibility-focused styling, and a self-hosted webfont pipeline. This presentation scope does not
+create a separate frontend application or client build, and it does not broaden the web surface's
+allowed mutations. `PRODUCT.md` and `DESIGN.md` record the product and design-system contract; see
+ADR-0057 for the scope decision.
 
 The UI is primarily read-only. It shows:
 
@@ -1086,7 +1093,6 @@ The bootstrap slice is accepted when:
 
 - remote workers
 - external sandboxing
-- richer UI
 - workspace cleanup commands
 - stale-claim TTLs
 - GitHub Projects board support

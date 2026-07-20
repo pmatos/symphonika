@@ -323,10 +323,23 @@ async function loadRuntimeConfigSnapshot(input: {
     }
 
     if (pollingProject.data.disabled === true) {
+      // Disabling a Project halts new dispatch but does not cancel an active
+      // run, and the Project stays in the runtime map. Carry forward the last
+      // loaded WorkflowSnapshot when one exists so the Watchdog keeps this
+      // Project's evidence.ignore policy for its still-running rows; otherwise
+      // build-output churn would masquerade as progress and keep a wedged run
+      // alive (ADR 0054).
+      const previousWorkflow = input.previous?.projects.find(
+        (project) => project.name === pollingProject.data.name
+      )?.workflow;
       dispatchProjects.push({
         ...pollingProject.data,
         routines: [],
-        workflow: detail.data.workflow,
+        workflow:
+          previousWorkflow !== undefined &&
+          "expandedWorkflow" in previousWorkflow
+            ? previousWorkflow
+            : detail.data.workflow,
         workspace: detail.data.workspace
       });
       continue;

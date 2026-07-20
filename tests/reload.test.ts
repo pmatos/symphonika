@@ -915,6 +915,42 @@ describe("RuntimeConfigReloader watchdog config", () => {
     );
   });
 
+  it("rejects the whole candidate snapshot on first load when one Project override is invalid", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      projectLines: ["    watchdog:", "      grace_minutes: 180"]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    const configPath = path.join(root, "symphonika.yml");
+    const oneProjectConfig = await readFile(configPath, "utf8");
+    const projectStart = oneProjectConfig.indexOf("  - name: symphonika");
+    const invalidSecondProject = oneProjectConfig
+      .slice(projectStart)
+      .replace("  - name: symphonika", "  - name: s11")
+      .replace("      grace_minutes: 180", "      grace_minutes: 0");
+    await writeFile(
+      configPath,
+      oneProjectConfig.replace("  - name: symphonika", "  - name: vow") +
+        invalidSecondProject
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    const snapshot = await reloader.reload();
+
+    // No prior snapshot exists, so one invalid override must reject the entire
+    // candidate: nothing goes live, not even the valid sibling "vow".
+    expect(snapshot).toBeUndefined();
+    expect(reloader.getSnapshot()).toBeUndefined();
+    expect(reloader.projectsByName().size).toBe(0);
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: false
+    });
+    expect(reloader.getStatus().errors.join("\n")).toMatch(
+      /projects\.1\.watchdog\.grace_minutes/
+    );
+  });
+
   it("rejects unknown Project watchdog keys and keeps the last-known-good snapshot", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "WORKFLOW.md", {

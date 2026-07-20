@@ -328,6 +328,30 @@ async function loadRuntimeConfigSnapshot(input: {
     }
     pollingProjects.push(pollingProject.data);
 
+    // SPEC 5.1: an invalid Project watchdog override — a non-positive-integer
+    // grace_minutes or an unknown key — rejects the entire candidate snapshot
+    // for all Projects, even on first load (where there is no last-known-good,
+    // so nothing goes live). This is stricter than the other detail fields
+    // below (workspace, workflow, ...), whose first-load failure only drops the
+    // offending Project from dispatch while valid siblings keep polling.
+    const rawWatchdog = (rawProject as { watchdog?: unknown }).watchdog;
+    if (rawWatchdog !== undefined) {
+      const watchdogOverride =
+        projectWatchdogConfigSchema.safeParse(rawWatchdog);
+      if (!watchdogOverride.success) {
+        errors.push(
+          ...watchdogOverride.error.issues.map((issue) =>
+            formatZodIssueWithPrefix(issue, [
+              "projects",
+              String(index),
+              "watchdog"
+            ])
+          )
+        );
+        return lastKnownGoodOrNothing(input.previous, errors);
+      }
+    }
+
     const detail = runtimeProjectDetailSchema.safeParse(rawProject);
     if (!detail.success) {
       errors.push(

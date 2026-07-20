@@ -295,6 +295,24 @@ Each Project must reference a valid `WORKFLOW.md`.
 `WORKFLOW.md` is reloadable and repository-owned. It contains the prompt body and may contain
 optional YAML front matter for prompt-adjacent execution policy.
 
+Markdown Workflow Contract front matter may declare repository-owned Watchdog evidence noise as
+workspace-relative directory paths:
+
+```yaml
+---
+evidence:
+  ignore:
+    - vendor/
+    - out/
+---
+```
+
+Each `evidence.ignore` entry must be a non-empty string, must not start with `/`, and must not
+contain `..`. The list is additive to the Watchdog's built-in directory excludes; it cannot disable
+them. Invalid entries make the Workflow Contract invalid through the normal doctor and defensive
+reload surfaces. Unlike the rendered prompt captured for an attempt, the current valid
+`evidence.ignore` policy is resolved for active Runs on every Watchdog reconciliation tick.
+
 Workflow contracts are re-read as part of the daemon's defensive service-config reload. A valid
 workflow edit applies to future attempts. In-flight attempts keep the rendered prompt and workflow
 content hash captured when the attempt was created. If a reload sees an invalid workflow for an
@@ -869,9 +887,14 @@ signal to advance and must not accrue idle time; rows in `state = "waiting"` are
 wait-state path. A `running` Run that already carries `cancel_requested` is also skipped, so the
 Watchdog does not overwrite a more specific in-flight cancellation with `no_progress`.
 
-For each sampled Run, Symphonika records one durable `watchdog_samples` row keyed by `run_id`:
-`sampled_at`, `last_tool_call_at`, `last_message_at`, `workspace_mtime_max`, `turn_id_set_size`,
-`output_tokens_total`, `normalized_log_offset`, `normalized_log_path`, and `idle_since`. `idle_since`
+For each sampled Run, Symphonika records one durable latest `watchdog_samples` row keyed by
+`run_id` and an append-only `watchdog_sample_history` row keyed by `(run_id, sampled_at)`. Both
+contain `sampled_at`, `last_tool_call_at`, `last_message_at`, `workspace_mtime_max`,
+`turn_id_set_size`, `output_tokens_total`, `normalized_log_offset`, `normalized_log_path`, and
+`idle_since`. The latest row keeps reconciliation reads bounded; the history supports operator
+rolling-window calculations. In particular, `show-run` computes output-token growth over the final
+sample's five-minute window by walking persisted cumulative totals (and treating a normalized-log
+path change as a counter reset), never by re-scanning the Normalized Event Log. `idle_since`
 survives daemon restart, so a Run that was already observed idle resumes its grace window from the
 first idle observation rather than from process boot. It is cleared on entry to `waiting` (so an
 unsampled wait excursion does not accrue idle time) and reset on attempt change (so a transient
@@ -881,9 +904,11 @@ Sampling reads the Normalized Event Log only forward of the stored byte offset a
 Workspace tree once. A transient retry writes a new per-attempt log path, so the byte offset and the
 output-token baseline are reset whenever `normalized_log_path` changes and the new attempt's events
 are read from the start. The hard-coded v1 exclude set is `.git/`, `target/`, and `node_modules/`,
-skipped at the directory-entry level and not descended; `watchdog.mtime_ignore` adds
-workspace-relative globs whose matching files are dropped from the mtime walk at the individual-file
-level, so build-output churn (e.g. `*.log`) cannot keep a wedged Run alive.
+skipped at the directory-entry level and not descended. The current per-Project Workflow Contract's
+`evidence.ignore` list adds workspace-relative directory trees that are also skipped before descent;
+the hard-coded set always remains active. Separately, `watchdog.mtime_ignore` adds workspace-relative
+globs whose matching files are dropped from the mtime walk at the individual-file level, so
+build-output churn (e.g. `*.log`) cannot keep a wedged Run alive.
 
 A sampled Run is making progress when any one signal advances since the previous sample:
 
@@ -1052,6 +1077,11 @@ frame, but caches the full `doctor` validation path for 5000 ms by default so pa
 not continuously re-run provider probes or GitHub validation reads. `--doctor-ttl-ms 0` disables that
 cache when an operator explicitly wants every frame to perform full validation.
 
+`show-run` renders the latest persisted Watchdog Progress Signal, including tool-call and workspace
+mtime ages, observed turn-id count, five-minute output-token growth, and `idle_since` plus effective
+grace remaining when idle. `status` and its dashboard render an idle indicator only for active Runs
+whose latest sample has `idle_since` set.
+
 `routines` lists Routine status per Project with `state`, `next_fire_at`, `last_fired_at`, and PR
 numbers discovered for the latest firing. Inactive Routines are hidden by default;
 `--include-inactive` includes them.
@@ -1060,9 +1090,16 @@ numbers discovered for the latest firing. Inactive Routines are hidden by defaul
 
 ## 14. Local Web UI and API
 
-v1 ships a local HTTP API and lightweight server-rendered operator pages.
+v1 ships a local HTTP API and server-rendered operator pages.
 
 Default bind host: `127.0.0.1`.
+
+Richer visual design of these server-rendered pages is part of the v1 bootstrap scope. It may
+include a cohesive design system, system-adaptive light and dark themes, responsive layouts,
+accessibility-focused styling, and a self-hosted webfont pipeline. This presentation scope does not
+create a separate frontend application or client build, and it does not broaden the web surface's
+allowed mutations. `PRODUCT.md` and `DESIGN.md` record the product and design-system contract; see
+ADR-0057 for the scope decision.
 
 The UI is primarily read-only. It shows:
 
@@ -1098,6 +1135,11 @@ firing history and linked PRs for the named Routine; callers use `?project=<name
 the same Routine name across Projects and `?include_inactive=true` to resolve an inactive Routine and
 reach its durable firing history.
 
+`GET /api/runs/:id` exposes the latest sample as a camel-cased top-level `watchdog` object, including
+the effective `graceMs` and server-computed `graceRemainingMs`. `GET /api/status` adds a `watchdog`
+object to each active Run with `idleSince` and `graceRemainingMs` when idle. When the effective
+Watchdog policy is disabled, both endpoints return exactly `{ "enabled": false }` for that object.
+
 Label creation, stale-claim reset, and workspace cleanup remain CLI-only.
 
 ## 15. Bootstrap Acceptance Bar
@@ -1122,7 +1164,6 @@ The bootstrap slice is accepted when:
 
 - remote workers
 - external sandboxing
-- richer UI
 - workspace cleanup commands
 - stale-claim TTLs
 - GitHub Projects board support

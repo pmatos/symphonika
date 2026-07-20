@@ -21,7 +21,12 @@ import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
 import type { InitOptions, InitProvider, InitReport } from "./init.js";
 import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
-import { RuntimeConfigReloader, type RuntimeReloadStatus } from "./reload.js";
+import {
+  resolveWatchdogConfig,
+  RuntimeConfigReloader,
+  type RuntimeReloadStatus,
+  type WatchdogServiceConfig
+} from "./reload.js";
 import type {
   ListRunsFilter,
   OpenRunStoreOptions,
@@ -58,6 +63,13 @@ import {
   planWorkspacePaths,
   type WorkspacePathPlan
 } from "./workspace-paths.js";
+import {
+  buildWatchdogIdleStatus,
+  buildWatchdogStatus,
+  formatWatchdogDuration,
+  type WatchdogIdleStatus,
+  type WatchdogStatus
+} from "./watchdog-status.js";
 
 export type CliDependencies = {
   fetch?: FetchFn;
@@ -589,9 +601,8 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           dashboard: boolean,
           redrawState?: { previousLineCount: number }
         ): Promise<void> => {
-          const stateRoot = resolveStateRoot(
-            withConfigPath(options.config)
-          ).stateRoot;
+          const state = resolveStateRoot(withConfigPath(options.config));
+          const stateRoot = state.stateRoot;
           const store = openRunStore({ stateRoot });
           try {
             const report = await refreshDoctorReport();
@@ -601,6 +612,15 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
                 ? ({ error: "not configured", kind: "unavailable" } as const)
                 : await fetchDaemonStatus(fetcher, daemonUrl, stateRoot);
             const all = store.listRuns();
+            const watchdogService = await loadWatchdogServiceConfig(
+              state.configPath
+            );
+            const watchdogByRun = collectWatchdogIdleStatuses(
+              store,
+              all,
+              watchdogService,
+              Date.now()
+            );
             const byState = new Map<string, number>();
             for (const run of all) {
               byState.set(run.state, (byState.get(run.state) ?? 0) + 1);
@@ -624,7 +644,8 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
                 reload: formatReloadOutcome(daemonStatus),
                 routines: store.listRoutines(),
                 runs: all,
-                stateRoot
+                stateRoot,
+                watchdogByRun
               });
               if (redrawState !== undefined) {
                 const frame = renderStatusDashboardRedrawFrame(
@@ -703,6 +724,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
                   program,
                   `  ${run.id}  ${run.project}  #${run.issueNumber}  ${run.state}  ${run.provider}${suffix}\n`
                 );
+                const watchdogLine = formatWatchdogIdleLine(
+                  watchdogByRun.get(run.id)
+                );
+                if (watchdogLine !== undefined) {
+                  writeOut(program, `    ${watchdogLine}\n`);
+                }
               }
             }
             printStaleSection(program, report.projects);
@@ -946,6 +973,26 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
               );
             }
           }
+          const watchdogService = await loadWatchdogServiceConfig(
+            state.configPath
+          );
+          const nowMs = Date.now();
+          const watchdog = buildWatchdogStatus({
+            config: resolveWatchdogConfig(watchdogService, detail.project),
+            nowMs,
+            runId: detail.id,
+            runStore: store
+          });
+          const growth =
+            watchdog.enabled && watchdog.sampledAt !== undefined
+              ? store.watchdogOutputTokenGrowth(
+                  detail.id,
+                  new Date(
+                    Date.parse(watchdog.sampledAt) - 5 * 60_000
+                  ).toISOString()
+                )
+              : 0;
+          writeOut(program, formatProgressSignal(watchdog, growth, nowMs));
           const events = store.listProviderEvents(id, {
             limit: options.events
           });
@@ -1638,6 +1685,96 @@ function formatArtifactKinds(artifacts: RunArtifactDescriptor[]): string {
         : `${artifact.kind}(${artifact.sizeBytes} bytes)`
     );
   return present.length === 0 ? "(none)" : present.join(", ");
+}
+
+async function loadWatchdogServiceConfig(
+  configPath: string
+): Promise<WatchdogServiceConfig> {
+  const reloader = new RuntimeConfigReloader({ configPath });
+  await reloader.reload();
+  return reloader.watchdogServiceConfig();
+}
+
+function formatProgressSignal(
+  watchdog: WatchdogStatus,
+  outputTokenGrowth5m: number,
+  nowMs: number
+): string {
+  if (!watchdog.enabled) {
+    return "\nProgress Signal:\n  watchdog: disabled\n";
+  }
+  if (watchdog.sampledAt === undefined) {
+    return "\nProgress Signal:\n  (no sample persisted)\n";
+  }
+
+  const lines = [
+    "",
+    "Progress Signal:",
+    `  last tool_call: ${formatAge(watchdog.lastToolCallAt, nowMs)}`,
+    `  workspace mtime: ${formatAge(watchdog.workspaceMtimeMax, nowMs)}`,
+    `  turn_ids observed: ${watchdog.turnIdSetSize ?? 0}`,
+    `  output tokens / 5m: ${outputTokenGrowth5m === 0 ? "0" : `+${outputTokenGrowth5m}`}`
+  ];
+  if (watchdog.idleSince !== undefined) {
+    lines.push(`  idle_since: ${watchdog.idleSince}`);
+  }
+  if (watchdog.graceRemainingMs !== undefined) {
+    lines.push(
+      `  grace remaining: ${formatWatchdogDuration(watchdog.graceRemainingMs)}`
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function formatAge(
+  timestamp: string | null | undefined,
+  nowMs: number
+): string {
+  if (timestamp === null || timestamp === undefined) {
+    return "never";
+  }
+  const ageMs = nowMs - Date.parse(timestamp);
+  return ageMs < 0
+    ? `in ${formatWatchdogDuration(-ageMs)}`
+    : `${formatWatchdogDuration(ageMs)} ago`;
+}
+
+function collectWatchdogIdleStatuses(
+  store: RunStore,
+  runs: RunStatus[],
+  serviceConfig: WatchdogServiceConfig,
+  nowMs: number
+): Map<string, WatchdogIdleStatus> {
+  const statuses = new Map<string, WatchdogIdleStatus>();
+  for (const run of runs) {
+    if (!statusDashboardShowsLatestEvent(run.state)) {
+      continue;
+    }
+    statuses.set(
+      run.id,
+      buildWatchdogIdleStatus({
+        config: resolveWatchdogConfig(serviceConfig, run.project),
+        nowMs,
+        runId: run.id,
+        runStore: store
+      })
+    );
+  }
+  return statuses;
+}
+
+function formatWatchdogIdleLine(
+  watchdog: WatchdogIdleStatus | undefined
+): string | undefined {
+  if (
+    watchdog === undefined ||
+    !watchdog.enabled ||
+    watchdog.idleSince === undefined ||
+    watchdog.graceRemainingMs === undefined
+  ) {
+    return undefined;
+  }
+  return `watchdog idle since ${watchdog.idleSince} (grace remaining ${formatWatchdogDuration(watchdog.graceRemainingMs)})`;
 }
 
 async function fillMissingRunDisplayPaths(

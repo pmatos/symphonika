@@ -24,6 +24,7 @@ const WORKSPACE_PROGRESS_THRESHOLD_MS = 1_000;
 export type ReconcileWatchdogInput = {
   activeRuns: ActiveRunRegistry;
   config: WatchdogConfig;
+  evidenceIgnoreForProject?: (projectName: string) => readonly string[];
   logger?: Logger;
   now?: () => Date;
   projects?: WatchdogServiceConfig["projects"];
@@ -74,6 +75,7 @@ export async function reconcileWatchdog(
     const config = resolveWatchdogConfig(serviceConfig, run.projectName);
     const previous = input.runStore.getWatchdogSample(run.runId);
     const next = await sampleRun({
+      directoryIgnore: input.evidenceIgnoreForProject?.(run.projectName) ?? [],
       mtimeIgnore: config.mtimeIgnore,
       previous,
       run,
@@ -132,7 +134,8 @@ export async function reconcileWatchdog(
 
 export async function sampleWorkspaceMtimeMax(
   workspacePath: string,
-  mtimeIgnore: readonly string[] = []
+  mtimeIgnore: readonly string[] = [],
+  directoryIgnore: readonly string[] = []
 ): Promise<number> {
   if (workspacePath.length === 0) {
     return 0;
@@ -144,10 +147,14 @@ export async function sampleWorkspaceMtimeMax(
       return Math.floor(root.mtimeMs);
     }
     const ignore = mtimeIgnore.map(globToRegExp);
+    const ignoredDirectories = new Set(
+      directoryIgnore.map(normalizeDirectoryIgnore)
+    );
     return await walkWorkspaceMtimeMax(
       workspacePath,
       workspacePath,
       ignore,
+      ignoredDirectories,
       Math.floor(root.mtimeMs)
     );
   } catch {
@@ -156,6 +163,7 @@ export async function sampleWorkspaceMtimeMax(
 }
 
 async function sampleRun(input: {
+  directoryIgnore: readonly string[];
   mtimeIgnore: readonly string[];
   previous: WatchdogSample | undefined;
   run: WatchdogCandidateRun;
@@ -207,7 +215,8 @@ async function sampleRun(input: {
     turnIdSetSize,
     workspaceMtimeMax: await sampleWorkspaceMtimeMax(
       input.run.workspacePath,
-      input.mtimeIgnore
+      input.mtimeIgnore,
+      input.directoryIgnore
     )
   };
 }
@@ -251,6 +260,7 @@ async function walkWorkspaceMtimeMax(
   directory: string,
   workspaceRoot: string,
   ignore: readonly RegExp[],
+  ignoredDirectories: ReadonlySet<string>,
   currentMax: number
 ): Promise<number> {
   let max = currentMax;
@@ -262,10 +272,15 @@ async function walkWorkspaceMtimeMax(
   }
 
   for await (const entry of dir) {
-    if (entry.isDirectory() && WORKSPACE_EXCLUDED_DIRS.has(entry.name)) {
+    const entryPath = path.join(directory, entry.name);
+    const relative = workspaceRelativePath(workspaceRoot, entryPath);
+    if (
+      entry.isDirectory() &&
+      (WORKSPACE_EXCLUDED_DIRS.has(entry.name) ||
+        ignoredDirectories.has(relative))
+    ) {
       continue;
     }
-    const entryPath = path.join(directory, entry.name);
     let stats;
     try {
       // lstat (not stat) so symlinks are never followed: a symlinked directory
@@ -282,7 +297,13 @@ async function walkWorkspaceMtimeMax(
       max = Math.max(max, Math.floor(stats.mtimeMs));
       max = Math.max(
         max,
-        await walkWorkspaceMtimeMax(entryPath, workspaceRoot, ignore, max)
+        await walkWorkspaceMtimeMax(
+          entryPath,
+          workspaceRoot,
+          ignore,
+          ignoredDirectories,
+          max
+        )
       );
     } else if (!isMtimeIgnored(workspaceRoot, entryPath, ignore)) {
       // ADR 0054: drop files whose workspace-relative path matches an
@@ -302,11 +323,19 @@ function isMtimeIgnored(
   if (ignore.length === 0) {
     return false;
   }
-  const relative = path
-    .relative(workspaceRoot, entryPath)
-    .split(path.sep)
-    .join("/");
+  const relative = workspaceRelativePath(workspaceRoot, entryPath);
   return ignore.some((pattern) => pattern.test(relative));
+}
+
+function normalizeDirectoryIgnore(directory: string): string {
+  return directory.replace(/^\.\/+/, "").replace(/\/+$/, "");
+}
+
+function workspaceRelativePath(
+  workspaceRoot: string,
+  entryPath: string
+): string {
+  return path.relative(workspaceRoot, entryPath).split(path.sep).join("/");
 }
 
 // Compile a workspace-relative glob to an anchored RegExp. `*` matches within a

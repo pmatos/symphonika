@@ -84,7 +84,7 @@ export type WatchdogServiceConfig = {
   watchdog: WatchdogConfig;
 };
 
-const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
+export const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
   enabled: true,
   graceMinutes: 30,
   mtimeIgnore: [],
@@ -248,6 +248,13 @@ export class RuntimeConfigReloader {
     return this.snapshot?.globalConcurrency ?? { maxInFlight: undefined };
   }
 
+  watchdogServiceConfig(): WatchdogServiceConfig {
+    return {
+      projects: this.snapshot?.projects ?? [],
+      watchdog: this.snapshot?.watchdog ?? DEFAULT_WATCHDOG_CONFIG
+    };
+  }
+
   async reload(): Promise<RuntimeConfigSnapshot | undefined> {
     const attemptedAt = new Date().toISOString();
     const reloadInput = {
@@ -366,6 +373,15 @@ async function loadRuntimeConfigSnapshot(input: {
     }
 
     if (pollingProject.data.disabled === true) {
+      // Disabling a Project halts new dispatch but does not cancel an active
+      // run, and the Project stays in the runtime map. Carry forward the last
+      // loaded WorkflowSnapshot when one exists so the Watchdog keeps this
+      // Project's evidence.ignore policy for its still-running rows; otherwise
+      // build-output churn would masquerade as progress and keep a wedged run
+      // alive (ADR 0054).
+      const previousWorkflow = input.previous?.projects.find(
+        (project) => project.name === pollingProject.data.name
+      )?.workflow;
       dispatchProjects.push({
         ...pollingProject.data,
         routines: [],
@@ -376,7 +392,11 @@ async function loadRuntimeConfigSnapshot(input: {
                 graceMinutes: detail.data.watchdog.grace_minutes
               }
             }),
-        workflow: detail.data.workflow,
+        workflow:
+          previousWorkflow !== undefined &&
+          "expandedWorkflow" in previousWorkflow
+            ? previousWorkflow
+            : detail.data.workflow,
         workspace: detail.data.workspace
       });
       continue;
@@ -543,6 +563,7 @@ async function readWorkflowSnapshot(
     return {
       body: "",
       contentHash: expanded.workflow.contentHash,
+      evidence: { ignore: [] },
       expandedWorkflow: expanded.workflow,
       format,
       path: workflowPath
@@ -558,6 +579,7 @@ async function readWorkflowSnapshot(
   return {
     body: workflow.body,
     contentHash: workflow.contentHash,
+    evidence: workflow.evidence,
     expandedWorkflow: expanded.workflow,
     format,
     path: workflow.path

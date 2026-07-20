@@ -140,7 +140,9 @@ describe("sampleWorkspaceMtimeMax", () => {
     await utimes(excluded, excludedTime, excludedTime);
     await utimes(root, includedTime, includedTime);
 
-    expect(await sampleWorkspaceMtimeMax(root)).toBe(includedTime.getTime());
+    expect(await sampleWorkspaceMtimeMax(root, [], ["vendor/"])).toBe(
+      includedTime.getTime()
+    );
   });
 
   it("does not follow symlinked directories out of the workspace", async () => {
@@ -193,6 +195,27 @@ describe("sampleWorkspaceMtimeMax", () => {
     expect(await sampleWorkspaceMtimeMax(root)).toBe(newerTime.getTime());
     // The glob drops .log files at any depth, so src.ts's 10:00 wins.
     expect(await sampleWorkspaceMtimeMax(root, ["**/*.log"])).toBe(
+      baseTime.getTime()
+    );
+  });
+
+  it("does not descend into directories declared by evidence.ignore", async () => {
+    const root = await makeTempRoot();
+    await mkdir(path.join(root, "vendor", "generated"), { recursive: true });
+    const included = path.join(root, "src.ts");
+    const ignoredDirectory = path.join(root, "vendor");
+    const ignored = path.join(ignoredDirectory, "generated", "newer.ts");
+    await writeFile(included, "included\n");
+    await writeFile(ignored, "ignored\n");
+
+    const baseTime = new Date("2026-05-22T10:00:00.000Z");
+    const newerTime = new Date("2026-05-22T12:00:00.000Z");
+    await utimes(included, baseTime, baseTime);
+    await utimes(ignored, newerTime, newerTime);
+    await utimes(ignoredDirectory, newerTime, newerTime);
+    await utimes(root, baseTime, baseTime);
+
+    expect(await sampleWorkspaceMtimeMax(root, [], ["vendor/"])).toBe(
       baseTime.getTime()
     );
   });

@@ -20,7 +20,10 @@ export {
   validateWorkflowContract,
   validateWorkflowTemplate
 } from "./workflow/contract-loading.js";
-export type { WorkflowContract } from "./workflow/contract-loading.js";
+export type {
+  WorkflowContract,
+  WorkflowEvidence
+} from "./workflow/contract-loading.js";
 export {
   expandWorkflowDefinition,
   explainWorkflow,

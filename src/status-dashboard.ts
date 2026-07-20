@@ -2,6 +2,10 @@ import type { DoctorProjectReport } from "./doctor.js";
 import type { NormalizedProviderEvent } from "./provider.js";
 import type { ProviderEventRecord, RunState, RunStatus } from "./run-store.js";
 import type { RoutineStatus } from "./routines/types.js";
+import {
+  formatWatchdogDuration,
+  type WatchdogIdleStatus
+} from "./watchdog-status.js";
 
 type DashboardIssueCounts = {
   candidate: number;
@@ -27,6 +31,7 @@ export type StatusDashboardInput = {
   routines?: RoutineStatus[];
   runs: RunStatus[];
   stateRoot: string;
+  watchdogByRun?: ReadonlyMap<string, WatchdogIdleStatus>;
 };
 
 export type StatusDashboardRedrawFrame = {
@@ -98,7 +103,11 @@ export function renderStatusDashboard(input: StatusDashboardInput): string {
     `│ Runs: active ${activeRuns.length} | succeeded ${runCounts.succeeded ?? 0} | failed ${runCounts.failed ?? 0} | cancelled ${runCounts.cancelled ?? 0} | total ${input.runs.length}`,
     `│ Last poll: ${input.lastPollOutcome}`,
     "├─ Active runs",
-    ...formatActiveRuns(activeRuns, input.latestEvents),
+    ...formatActiveRuns(
+      activeRuns,
+      input.latestEvents,
+      input.watchdogByRun ?? new Map()
+    ),
     "├─ Attention",
     ...formatAttention(input.projects, attentionRuns),
     "├─ Routines",
@@ -168,7 +177,8 @@ function countRunsByState(
 
 function formatActiveRuns(
   runs: RunStatus[],
-  latestEvents: ReadonlyMap<string, DashboardEventSummary>
+  latestEvents: ReadonlyMap<string, DashboardEventSummary>,
+  watchdogByRun: ReadonlyMap<string, WatchdogIdleStatus>
 ): string[] {
   if (runs.length === 0) {
     return ["│   No active runs"];
@@ -177,22 +187,35 @@ function formatActiveRuns(
   return [
     "│   ID           PROJECT      ISSUE   STATE                PROVIDER  EVENT",
     "│   -------------------------------------------------------------------------------",
-    ...runs.map((run) => {
+    ...runs.flatMap((run) => {
       const event = latestEvents.get(run.id);
-      return [
-        "│  ",
-        pad(truncate(run.id, 12), 12),
-        " ",
-        pad(truncate(run.project, 12), 12),
-        " ",
-        pad(`#${run.issueNumber}`, 7),
-        " ",
-        pad(run.state, 20),
-        " ",
-        pad(run.provider || "-", 8),
-        " ",
-        truncate(eventSummary(event), 42)
-      ].join("");
+      const lines = [
+        [
+          "│  ",
+          pad(truncate(run.id, 12), 12),
+          " ",
+          pad(truncate(run.project, 12), 12),
+          " ",
+          pad(`#${run.issueNumber}`, 7),
+          " ",
+          pad(run.state, 20),
+          " ",
+          pad(run.provider || "-", 8),
+          " ",
+          truncate(eventSummary(event), 42)
+        ].join("")
+      ];
+      const watchdog = watchdogByRun.get(run.id);
+      if (
+        watchdog?.enabled === true &&
+        watchdog.idleSince !== undefined &&
+        watchdog.graceRemainingMs !== undefined
+      ) {
+        lines.push(
+          `│      watchdog idle since ${watchdog.idleSince} (grace remaining ${formatWatchdogDuration(watchdog.graceRemainingMs)})`
+        );
+      }
+      return lines;
     })
   ];
 }

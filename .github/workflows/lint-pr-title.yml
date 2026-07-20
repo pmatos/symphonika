@@ -21,3 +21,12 @@ jobs:
       - uses: amannn/action-semantic-pull-request@v6.1.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Mirrors commitlint's default subject-case rule (commitlint.config.cjs), which
+          # rejects sentence-case/start-case/pascal-case/upper-case subjects — all of which
+          # start with an uppercase letter — so a squash-merged title can't pass this check
+          # and then fail the push-time commitlint job on main.
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: >-
+            The subject must not start with an uppercase letter, to match this repo's
+            commitlint subject-case rule.

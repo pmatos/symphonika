@@ -84,7 +84,7 @@ export type WatchdogServiceConfig = {
   watchdog: WatchdogConfig;
 };
 
-const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
+export const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
   enabled: true,
   graceMinutes: 30,
   mtimeIgnore: [],
@@ -246,6 +246,13 @@ export class RuntimeConfigReloader {
 
   globalConcurrency(): { maxInFlight: number | undefined } {
     return this.snapshot?.globalConcurrency ?? { maxInFlight: undefined };
+  }
+
+  watchdogServiceConfig(): WatchdogServiceConfig {
+    return {
+      projects: this.snapshot?.projects ?? [],
+      watchdog: this.snapshot?.watchdog ?? DEFAULT_WATCHDOG_CONFIG
+    };
   }
 
   async reload(): Promise<RuntimeConfigSnapshot | undefined> {

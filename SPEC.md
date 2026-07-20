@@ -883,9 +883,14 @@ signal to advance and must not accrue idle time; rows in `state = "waiting"` are
 wait-state path. A `running` Run that already carries `cancel_requested` is also skipped, so the
 Watchdog does not overwrite a more specific in-flight cancellation with `no_progress`.
 
-For each sampled Run, Symphonika records one durable `watchdog_samples` row keyed by `run_id`:
-`sampled_at`, `last_tool_call_at`, `last_message_at`, `workspace_mtime_max`, `turn_id_set_size`,
-`output_tokens_total`, `normalized_log_offset`, `normalized_log_path`, and `idle_since`. `idle_since`
+For each sampled Run, Symphonika records one durable latest `watchdog_samples` row keyed by
+`run_id` and an append-only `watchdog_sample_history` row keyed by `(run_id, sampled_at)`. Both
+contain `sampled_at`, `last_tool_call_at`, `last_message_at`, `workspace_mtime_max`,
+`turn_id_set_size`, `output_tokens_total`, `normalized_log_offset`, `normalized_log_path`, and
+`idle_since`. The latest row keeps reconciliation reads bounded; the history supports operator
+rolling-window calculations. In particular, `show-run` computes output-token growth over the final
+sample's five-minute window by walking persisted cumulative totals (and treating a normalized-log
+path change as a counter reset), never by re-scanning the Normalized Event Log. `idle_since`
 survives daemon restart, so a Run that was already observed idle resumes its grace window from the
 first idle observation rather than from process boot. It is cleared on entry to `waiting` (so an
 unsampled wait excursion does not accrue idle time) and reset on attempt change (so a transient
@@ -1068,6 +1073,11 @@ frame, but caches the full `doctor` validation path for 5000 ms by default so pa
 not continuously re-run provider probes or GitHub validation reads. `--doctor-ttl-ms 0` disables that
 cache when an operator explicitly wants every frame to perform full validation.
 
+`show-run` renders the latest persisted Watchdog Progress Signal, including tool-call and workspace
+mtime ages, observed turn-id count, five-minute output-token growth, and `idle_since` plus effective
+grace remaining when idle. `status` and its dashboard render an idle indicator only for active Runs
+whose latest sample has `idle_since` set.
+
 `routines` lists routine status per Project with `state`, `next_fire_at`, `last_fired_at`, and PR
 numbers discovered for the latest firing.
 
@@ -1116,6 +1126,11 @@ uses the normal daemon scheduler path.
 The HTTP API exposes `GET /api/routines` with the same routine status shape as the CLI and
 dashboard. `GET /api/routines/:id/firings` returns firing history and linked PRs for the named
 Routine; callers use `?project=<name>` to disambiguate the same Routine name across Projects.
+
+`GET /api/runs/:id` exposes the latest sample as a camel-cased top-level `watchdog` object, including
+the effective `graceMs` and server-computed `graceRemainingMs`. `GET /api/status` adds a `watchdog`
+object to each active Run with `idleSince` and `graceRemainingMs` when idle. When the effective
+Watchdog policy is disabled, both endpoints return exactly `{ "enabled": false }` for that object.
 
 Label creation, stale-claim reset, and workspace cleanup remain CLI-only.
 

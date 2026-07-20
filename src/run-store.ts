@@ -386,6 +386,12 @@ type WatchdogSampleRow = {
   workspace_mtime_max: number;
 };
 
+type WatchdogTokenSampleRow = {
+  normalized_log_path: string;
+  output_tokens_total: number;
+  sampled_at: string;
+};
+
 type PullRequestDiscoveryRunRow = {
   branch_name: string;
   id: string;
@@ -780,42 +786,99 @@ export class RunStore {
   }
 
   upsertWatchdogSample(sample: WatchdogSample): void {
-    this.database
+    const values = {
+      idle_since: sample.idleSince,
+      last_message_at: sample.lastMessageAt,
+      last_tool_call_at: sample.lastToolCallAt,
+      normalized_log_offset: sample.normalizedLogOffset,
+      normalized_log_path: sample.normalizedLogPath,
+      output_tokens_total: sample.outputTokensTotal,
+      run_id: sample.runId,
+      sampled_at: sample.sampledAt,
+      turn_id_set_size: sample.turnIdSetSize,
+      workspace_mtime_max: sample.workspaceMtimeMax
+    };
+    const latest = this.database.prepare(
+      [
+        "insert into watchdog_samples (",
+        "run_id, sampled_at, last_tool_call_at, last_message_at,",
+        "workspace_mtime_max, turn_id_set_size, output_tokens_total,",
+        "normalized_log_offset, normalized_log_path, idle_since",
+        ") values (",
+        "@run_id, @sampled_at, @last_tool_call_at, @last_message_at,",
+        "@workspace_mtime_max, @turn_id_set_size, @output_tokens_total,",
+        "@normalized_log_offset, @normalized_log_path, @idle_since",
+        ")",
+        "on conflict(run_id) do update set",
+        "sampled_at = excluded.sampled_at,",
+        "last_tool_call_at = excluded.last_tool_call_at,",
+        "last_message_at = excluded.last_message_at,",
+        "workspace_mtime_max = excluded.workspace_mtime_max,",
+        "turn_id_set_size = excluded.turn_id_set_size,",
+        "output_tokens_total = excluded.output_tokens_total,",
+        "normalized_log_offset = excluded.normalized_log_offset,",
+        "normalized_log_path = excluded.normalized_log_path,",
+        "idle_since = excluded.idle_since"
+      ].join(" ")
+    );
+    const history = this.database.prepare(
+      [
+        "insert or replace into watchdog_sample_history (",
+        "run_id, sampled_at, last_tool_call_at, last_message_at,",
+        "workspace_mtime_max, turn_id_set_size, output_tokens_total,",
+        "normalized_log_offset, normalized_log_path, idle_since",
+        ") values (",
+        "@run_id, @sampled_at, @last_tool_call_at, @last_message_at,",
+        "@workspace_mtime_max, @turn_id_set_size, @output_tokens_total,",
+        "@normalized_log_offset, @normalized_log_path, @idle_since",
+        ")"
+      ].join(" ")
+    );
+    this.database.transaction(() => {
+      latest.run(values);
+      history.run(values);
+    })();
+  }
+
+  watchdogOutputTokenGrowth(runId: string, windowStart: string): number {
+    const baseline = this.database
       .prepare(
         [
-          "insert into watchdog_samples (",
-          "run_id, sampled_at, last_tool_call_at, last_message_at,",
-          "workspace_mtime_max, turn_id_set_size, output_tokens_total,",
-          "normalized_log_offset, normalized_log_path, idle_since",
-          ") values (",
-          "@run_id, @sampled_at, @last_tool_call_at, @last_message_at,",
-          "@workspace_mtime_max, @turn_id_set_size, @output_tokens_total,",
-          "@normalized_log_offset, @normalized_log_path, @idle_since",
-          ")",
-          "on conflict(run_id) do update set",
-          "sampled_at = excluded.sampled_at,",
-          "last_tool_call_at = excluded.last_tool_call_at,",
-          "last_message_at = excluded.last_message_at,",
-          "workspace_mtime_max = excluded.workspace_mtime_max,",
-          "turn_id_set_size = excluded.turn_id_set_size,",
-          "output_tokens_total = excluded.output_tokens_total,",
-          "normalized_log_offset = excluded.normalized_log_offset,",
-          "normalized_log_path = excluded.normalized_log_path,",
-          "idle_since = excluded.idle_since"
+          "select sampled_at, output_tokens_total, normalized_log_path",
+          "from watchdog_sample_history",
+          "where run_id = ? and sampled_at <= ?",
+          "order by sampled_at desc limit 1"
         ].join(" ")
       )
-      .run({
-        idle_since: sample.idleSince,
-        last_message_at: sample.lastMessageAt,
-        last_tool_call_at: sample.lastToolCallAt,
-        normalized_log_offset: sample.normalizedLogOffset,
-        normalized_log_path: sample.normalizedLogPath,
-        output_tokens_total: sample.outputTokensTotal,
-        run_id: sample.runId,
-        sampled_at: sample.sampledAt,
-        turn_id_set_size: sample.turnIdSetSize,
-        workspace_mtime_max: sample.workspaceMtimeMax
-      });
+      .get(runId, windowStart) as WatchdogTokenSampleRow | undefined;
+    const inWindow = this.database
+      .prepare(
+        [
+          "select sampled_at, output_tokens_total, normalized_log_path",
+          "from watchdog_sample_history",
+          "where run_id = ? and sampled_at > ?",
+          "order by sampled_at asc"
+        ].join(" ")
+      )
+      .all(runId, windowStart) as WatchdogTokenSampleRow[];
+    const samples = baseline === undefined ? inWindow : [baseline, ...inWindow];
+    if (samples.length < 2) {
+      return 0;
+    }
+
+    let growth = 0;
+    let previous = samples[0]!;
+    for (const current of samples.slice(1)) {
+      growth +=
+        current.normalized_log_path === previous.normalized_log_path
+          ? Math.max(
+              0,
+              current.output_tokens_total - previous.output_tokens_total
+            )
+          : Math.max(0, current.output_tokens_total);
+      previous = current;
+    }
+    return growth;
   }
 
   rememberWatchdogTurnIds(runId: string, turnIds: Iterable<string>): number {
@@ -2399,6 +2462,21 @@ export class RunStore {
         foreign key (run_id) references runs(id)
       );
 
+      create table if not exists watchdog_sample_history (
+        run_id text not null,
+        sampled_at text not null,
+        last_tool_call_at text,
+        workspace_mtime_max real not null,
+        turn_id_set_size integer not null,
+        output_tokens_total integer not null,
+        normalized_log_offset integer not null,
+        idle_since text,
+        normalized_log_path text not null default '',
+        last_message_at text,
+        primary key (run_id, sampled_at),
+        foreign key (run_id) references runs(id)
+      );
+
       create table if not exists watchdog_turn_ids (
         run_id text not null,
         turn_id text not null,
@@ -2491,6 +2569,23 @@ export class RunStore {
       }
     });
     apply();
+
+    // Runs after the ensureColumn additions above so databases created before
+    // watchdog_samples gained normalized_log_path/last_message_at have those
+    // columns before the history backfill reads them.
+    this.database.exec(`
+      insert or ignore into watchdog_sample_history (
+        run_id, sampled_at, last_tool_call_at, last_message_at,
+        workspace_mtime_max, turn_id_set_size, output_tokens_total,
+        normalized_log_offset, normalized_log_path, idle_since
+      )
+      select
+        run_id, sampled_at, last_tool_call_at, last_message_at,
+        workspace_mtime_max, turn_id_set_size, output_tokens_total,
+        normalized_log_offset, normalized_log_path, idle_since
+      from watchdog_samples;
+    `);
+
     this.backfillAttemptMetadataPaths();
   }
 

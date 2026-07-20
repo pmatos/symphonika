@@ -182,6 +182,94 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("exposes the persisted watchdog sample on /api/runs/:id", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "watchdog-detail",
+        issue: sampleIssue({ number: 202 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("watchdog-detail", "running");
+      test.runStore.upsertWatchdogSample({
+        idleSince: "2026-05-22T11:25:30.000Z",
+        lastMessageAt: "2026-05-22T11:25:45.000Z",
+        lastToolCallAt: "2026-05-22T11:25:00.000Z",
+        normalizedLogOffset: 123,
+        normalizedLogPath: "/tmp/provider.normalized.jsonl",
+        outputTokensTotal: 36_365,
+        runId: "watchdog-detail",
+        sampledAt: "2026-05-22T14:01:00.000Z",
+        turnIdSetSize: 1,
+        workspaceMtimeMax: Date.parse("2026-05-22T11:25:30.000Z")
+      });
+
+      const app = createHttpApp({
+        now: () => Date.parse("2026-05-22T14:01:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/api/runs/watchdog-detail");
+      const body = (await response.json()) as Record<string, unknown>;
+
+      expect(response.status).toBe(200);
+      expect(body.watchdog).toEqual({
+        enabled: true,
+        graceMs: 1_800_000,
+        graceRemainingMs: -7_530_000,
+        idleSince: "2026-05-22T11:25:30.000Z",
+        lastToolCallAt: "2026-05-22T11:25:00.000Z",
+        outputTokensTotal: 36_365,
+        sampledAt: "2026-05-22T14:01:00.000Z",
+        turnIdSetSize: 1,
+        workspaceMtimeMax: "2026-05-22T11:25:30.000Z"
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("omits watchdog sample fields when the watchdog is disabled", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "watchdog-disabled",
+        issue: sampleIssue({ number: 202 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.upsertWatchdogSample({
+        idleSince: "2026-05-22T11:45:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: "2026-05-22T11:40:00.000Z",
+        normalizedLogOffset: 0,
+        normalizedLogPath: "",
+        outputTokensTotal: 10,
+        runId: "watchdog-disabled",
+        sampledAt: "2026-05-22T11:59:00.000Z",
+        turnIdSetSize: 1,
+        workspaceMtimeMax: Date.parse("2026-05-22T11:41:00.000Z")
+      });
+
+      const app = createHttpApp({
+        getWatchdogConfig: () => ({ enabled: false, graceMinutes: 30 }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/api/runs/watchdog-disabled");
+      const body = (await response.json()) as { watchdog?: unknown };
+
+      expect(body.watchdog).toEqual({ enabled: false });
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("streams /api/runs/:id/files/provider_raw only for artifacts inside the run evidence dir", async () => {
     const test = await setup();
     try {

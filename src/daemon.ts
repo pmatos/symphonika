@@ -381,6 +381,12 @@ export async function startDaemon(
         await reconcileWatchdog({
           activeRuns,
           config: watchdog,
+          evidenceIgnoreForProject: (projectName) => {
+            const workflow = projects.get(projectName)?.workflow;
+            return workflow !== undefined && "expandedWorkflow" in workflow
+              ? workflow.evidence.ignore
+              : [];
+          },
           logger,
           now: () => new Date(nowMs),
           projects: serviceConfig.projects,

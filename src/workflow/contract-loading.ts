@@ -8,8 +8,13 @@ import { validatePromptTemplateExpressions } from "./autonomous-prompt.js";
 export type WorkflowContract = {
   body: string;
   contentHash: string;
+  evidence: WorkflowEvidence;
   errors: string[];
   path: string;
+};
+
+export type WorkflowEvidence = {
+  ignore: string[];
 };
 
 export type ProjectWorkflowReference = {
@@ -71,6 +76,7 @@ export function parseWorkflowContract(
     return {
       body: contents,
       contentHash: contentHash(contents),
+      evidence: { ignore: [] },
       errors: [],
       path: workflowPath
     };
@@ -83,6 +89,7 @@ export function parseWorkflowContract(
     return {
       body: "",
       contentHash: contentHash(contents),
+      evidence: { ignore: [] },
       errors: [
         `workflow front matter at ${workflowPath} is missing a closing ---`
       ],
@@ -93,6 +100,7 @@ export function parseWorkflowContract(
   const frontMatterSource = lines.slice(1, closingLine).join("\n");
   const errors: string[] = [];
   const frontMatter = parseFrontMatter(frontMatterSource, workflowPath, errors);
+  const evidence = parseWorkflowEvidence(frontMatter, workflowPath, errors);
 
   if (frontMatter !== undefined) {
     for (const key of Object.keys(frontMatter)) {
@@ -107,9 +115,60 @@ export function parseWorkflowContract(
   return {
     body: lines.slice(closingLine + 1).join("\n"),
     contentHash: contentHash(contents),
+    evidence,
     errors,
     path: workflowPath
   };
+}
+
+function parseWorkflowEvidence(
+  frontMatter: Record<string, unknown> | undefined,
+  workflowPath: string,
+  errors: string[]
+): WorkflowEvidence {
+  const rawEvidence = frontMatter?.evidence;
+  if (rawEvidence === undefined) {
+    return { ignore: [] };
+  }
+  if (!isRecord(rawEvidence)) {
+    errors.push(
+      `workflow front matter at ${workflowPath} evidence must be a mapping`
+    );
+    return { ignore: [] };
+  }
+  if (rawEvidence.ignore === undefined) {
+    return { ignore: [] };
+  }
+  if (!Array.isArray(rawEvidence.ignore)) {
+    errors.push(
+      `workflow front matter at ${workflowPath} evidence.ignore must be a list`
+    );
+    return { ignore: [] };
+  }
+  const ignore: string[] = [];
+  for (const [index, entry] of rawEvidence.ignore.entries()) {
+    if (typeof entry !== "string" || entry.trim().length === 0) {
+      errors.push(
+        `workflow front matter at ${workflowPath} evidence.ignore[${index}] must be a non-empty string`
+      );
+      continue;
+    }
+    const trimmed = entry.trim();
+    if (trimmed.includes("..")) {
+      errors.push(
+        `workflow front matter at ${workflowPath} evidence.ignore[${index}] must not contain ..`
+      );
+      continue;
+    }
+    if (trimmed.startsWith("/")) {
+      errors.push(
+        `workflow front matter at ${workflowPath} evidence.ignore[${index}] must be workspace-relative`
+      );
+      continue;
+    }
+    ignore.push(trimmed);
+  }
+  return { ignore };
 }
 
 export function validateWorkflowTemplate(

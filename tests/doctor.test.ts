@@ -290,6 +290,29 @@ describe("doctor", () => {
     expect(output.stdout).toContain("doctor ok");
   });
 
+  it("reports invalid Workflow Contract evidence.ignore entries", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath);
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["../escape"]',
+        "---",
+        "Work on {{issue.title}} for {{project.name}}.",
+        ""
+      ].join("\n")
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const output = await runDoctorCommand(configPath);
+
+    expect(process.exitCode).toBe(1);
+    expect(output.stderr).toContain("evidence.ignore[0] must not contain ..");
+  });
+
   it("rejects workflow front matter service discovery keys", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");

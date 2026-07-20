@@ -29,13 +29,11 @@ A Progress Signal is the tuple:
 - `last_tool_call_at` — timestamp of the most recent `NormalizedProviderEventType = "tool_call"`
   event.
 - `workspace_mtime_max` — maximum file mtime under the Run's `workspacePath`, with `.git/`,
-  `target/`, `node_modules/`, and any workspace-relative glob listed in the watchdog config's
-  `mtime_ignore` set excluded so build-output churn neither masks real stalls nor forces them. The
-  exclude set lives in the `watchdog` service config (below) — not in the Workflow Contract, whose
-  parsed front matter the contract loader discards. Carrying it requires the service-config reload
-  schema and the `RuntimeConfigSnapshot` to gain an explicit, validated `watchdog` field as part of
-  this work; today the schema only passes unknown top-level keys through and the snapshot is built
-  from known fields, so a `watchdog` block would otherwise be dropped before the daemon reads it.
+  `target/`, and `node_modules/` excluded at the directory level. The daemon-owned watchdog config's
+  `mtime_ignore` set excludes matching individual files. The follow-up evidence-ignore slice also
+  retains a repository-owned `evidence.ignore` directory list from Markdown Workflow Contract front
+  matter; those workspace-relative trees are pruned before descent while the built-in set always
+  remains active. Together these layers keep build-output churn from masking real stalls.
 - `turn_id_set_size` — distinct `turnId` values observed across `usage_updated` and
   `turn_completed` events. Only the Codex provider tags these events with a `turnId`; the Claude
   provider emits `sessionId` instead, so this signal advances for Codex Runs only. Claude Runs
@@ -152,6 +150,12 @@ must not overwrite it with `no_progress` — this mirrors the existing `reconcil
    clock is started in step 5 rather than tripping the threshold immediately.
 5. Otherwise persists the still-idle sample, setting `idle_since` on the first idle observation
    (when it is still unset) so the grace clock starts on first idle and survives restarts.
+
+The evidence-ignore follow-up resolves the current valid Workflow Contract snapshot for each Run's
+Project on every daemon reconciliation tick. Invalid `evidence.ignore` edits use the same
+operator-visible reload error and last-known-good snapshot behavior as other Workflow Contract
+validation failures. Declared entries prune matching directory entries before metadata reads or
+descent; the service-config `mtime_ignore` glob layer continues to filter individual files.
 
 Separately from the per-tick steps above, `idle_since` is cleared as a transition-time hook
 whenever a Run leaves `running` for `waiting`. This cannot be a step of the sampling loop, which

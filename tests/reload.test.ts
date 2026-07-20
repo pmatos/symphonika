@@ -306,6 +306,143 @@ describe("RuntimeConfigReloader workflow validation", () => {
     ]);
   });
 
+  it("retains Workflow Contract evidence.ignore in the Project snapshot", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["vendor/", "out/"]',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    const workflow = reloader.projectsByName().get("symphonika")?.workflow;
+    if (workflow === undefined || !("expandedWorkflow" in workflow)) {
+      throw new Error("expected workflow snapshot to be an object");
+    }
+    expect(workflow.evidence.ignore).toEqual(["vendor/", "out/"]);
+  });
+
+  it("retains a disabled Project's evidence.ignore across the reload that disables it", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["vendor/", "out/"]',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n")
+    );
+
+    const configPath = path.join(root, "symphonika.yml");
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    const enabledWorkflow = reloader
+      .projectsByName()
+      .get("symphonika")?.workflow;
+    if (
+      enabledWorkflow === undefined ||
+      !("expandedWorkflow" in enabledWorkflow)
+    ) {
+      throw new Error(
+        "expected the enabled Project to load a workflow snapshot"
+      );
+    }
+    expect(enabledWorkflow.evidence.ignore).toEqual(["vendor/", "out/"]);
+
+    // Disabling a Project halts new dispatch but does not cancel an already
+    // active run; the Watchdog keeps sampling that run, so its evidence.ignore
+    // policy must survive the reload that flips the Project to disabled.
+    const disabledConfig = (await readFile(configPath, "utf8")).replace(
+      "disabled: false",
+      "disabled: true"
+    );
+    await writeFile(configPath, disabledConfig);
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({
+      ok: true,
+      usingLastKnownGood: false
+    });
+    const disabledWorkflow = reloader
+      .projectsByName()
+      .get("symphonika")?.workflow;
+    if (
+      disabledWorkflow === undefined ||
+      !("expandedWorkflow" in disabledWorkflow)
+    ) {
+      throw new Error(
+        "expected the disabled Project to retain its workflow snapshot"
+      );
+    }
+    expect(disabledWorkflow.evidence.ignore).toEqual(["vendor/", "out/"]);
+  });
+
+  it("keeps the last-known-good Workflow Contract when evidence.ignore becomes invalid", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    const workflowPath = path.join(root, "WORKFLOW.md");
+    await writeFile(
+      workflowPath,
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["vendor/"]',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const firstSnapshot = reloader.getSnapshot();
+
+    await writeFile(
+      workflowPath,
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["../escape"]',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n")
+    );
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()).toBe(firstSnapshot);
+    const workflow = reloader.projectsByName().get("symphonika")?.workflow;
+    if (workflow === undefined || !("expandedWorkflow" in workflow)) {
+      throw new Error("expected the last-known-good workflow snapshot");
+    }
+    expect(workflow.evidence.ignore).toEqual(["vendor/"]);
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: true
+    });
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      "evidence.ignore[0] must not contain .."
+    );
+  });
+
   it("keeps the last-known-good snapshot when project detail validation fails on reload", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "WORKFLOW.md");

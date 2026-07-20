@@ -292,6 +292,24 @@ Each Project must reference a valid `WORKFLOW.md`.
 `WORKFLOW.md` is reloadable and repository-owned. It contains the prompt body and may contain
 optional YAML front matter for prompt-adjacent execution policy.
 
+Markdown Workflow Contract front matter may declare repository-owned Watchdog evidence noise as
+workspace-relative directory paths:
+
+```yaml
+---
+evidence:
+  ignore:
+    - vendor/
+    - out/
+---
+```
+
+Each `evidence.ignore` entry must be a non-empty string, must not start with `/`, and must not
+contain `..`. The list is additive to the Watchdog's built-in directory excludes; it cannot disable
+them. Invalid entries make the Workflow Contract invalid through the normal doctor and defensive
+reload surfaces. Unlike the rendered prompt captured for an attempt, the current valid
+`evidence.ignore` policy is resolved for active Runs on every Watchdog reconciliation tick.
+
 Workflow contracts are re-read as part of the daemon's defensive service-config reload. A valid
 workflow edit applies to future attempts. In-flight attempts keep the rendered prompt and workflow
 content hash captured when the attempt was created. If a reload sees an invalid workflow for an
@@ -877,9 +895,11 @@ Sampling reads the Normalized Event Log only forward of the stored byte offset a
 Workspace tree once. A transient retry writes a new per-attempt log path, so the byte offset and the
 output-token baseline are reset whenever `normalized_log_path` changes and the new attempt's events
 are read from the start. The hard-coded v1 exclude set is `.git/`, `target/`, and `node_modules/`,
-skipped at the directory-entry level and not descended; `watchdog.mtime_ignore` adds
-workspace-relative globs whose matching files are dropped from the mtime walk at the individual-file
-level, so build-output churn (e.g. `*.log`) cannot keep a wedged Run alive.
+skipped at the directory-entry level and not descended. The current per-Project Workflow Contract's
+`evidence.ignore` list adds workspace-relative directory trees that are also skipped before descent;
+the hard-coded set always remains active. Separately, `watchdog.mtime_ignore` adds workspace-relative
+globs whose matching files are dropped from the mtime walk at the individual-file level, so
+build-output churn (e.g. `*.log`) cannot keep a wedged Run alive.
 
 A sampled Run is making progress when any one signal advances since the previous sample:
 

@@ -68,11 +68,11 @@ export type WatchdogConfig = {
   sampleIntervalSeconds: number;
 };
 
-export type ProjectWatchdogConfig = {
+type ProjectWatchdogConfig = {
   graceMinutes: number;
 };
 
-export type RuntimeProjectConfig = RunControllerProjectConfig & {
+type RuntimeProjectConfig = RunControllerProjectConfig & {
   watchdog?: ProjectWatchdogConfig;
 };
 

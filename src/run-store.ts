@@ -2233,6 +2233,58 @@ export class RunStore {
     return swept;
   }
 
+  reconcileLeakedRoutineFirings(reason = "leaked_routine_firing"): {
+    firingId: string;
+    projectName: string;
+    routineName: string;
+    previousState: RoutineFiringState;
+  }[] {
+    // A daemon crash or kill can leave a routine firing durably in queued,
+    // preparing_workspace, or running. markLeakedRunsAsStale only sweeps the
+    // runs table, so without this reconciliation the orphaned firing keeps
+    // hasActiveRoutineFiring returning true forever, permanently skipping every
+    // future recurring tick for that routine. routine_firings has no 'stale'
+    // state, so leaked rows are settled as 'failed' with a distinct
+    // terminal_reason to remove them from the active set.
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, routine_name, state from routine_firings",
+          "where state in ('queued','preparing_workspace','running')"
+        ].join(" ")
+      )
+      .all() as {
+      id: string;
+      project_name: string;
+      routine_name: string;
+      state: RoutineFiringState;
+    }[];
+    const swept = rows.map((row) => ({
+      firingId: row.id,
+      previousState: row.state,
+      projectName: row.project_name,
+      routineName: row.routine_name
+    }));
+    const update = this.database.prepare(
+      [
+        "update routine_firings set",
+        "state = 'failed',",
+        "terminal_reason = ?,",
+        "updated_at = ?",
+        "where id = ?"
+      ].join(" ")
+    );
+    const apply = this.database.transaction(() => {
+      for (const entry of swept) {
+        const updatedAt = timestamp();
+        update.run(reason, updatedAt, entry.firingId);
+        this.recordRoutineFiringTransition(entry.firingId, "failed", updatedAt);
+      }
+    });
+    apply();
+    return swept;
+  }
+
   failLegacyInputRequiredRuns(
     options: { graceMs?: number; now?: Date } = {}
   ): { runId: string; projectName: string; issueNumber: number }[] {

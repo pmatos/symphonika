@@ -406,4 +406,102 @@ describe("RunStore routines", () => {
       store.close();
     }
   });
+
+  it("reconciles leaked routine firings so the overlap gate is freed", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines(
+        "alpha",
+        [
+          {
+            kind: "report",
+            name: "daily-report",
+            prompt: "Report.",
+            provider: "codex",
+            schedule: { cron: "30 1 * * *", tz: "Europe/Lisbon" },
+            sourcePath: "/tmp/daily-report.md"
+          }
+        ],
+        { now: new Date("2026-03-27T02:00:00.000Z") }
+      );
+      store.createRoutineFiring({
+        id: "leaked-fire",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.updateRoutineFiringState("leaked-fire", "running");
+      expect(
+        store.hasActiveRoutineFiring({
+          name: "daily-report",
+          projectName: "alpha"
+        })
+      ).toBe(true);
+
+      const swept = store.reconcileLeakedRoutineFirings();
+
+      expect(swept).toEqual([
+        {
+          firingId: "leaked-fire",
+          previousState: "running",
+          projectName: "alpha",
+          routineName: "daily-report"
+        }
+      ]);
+      expect(
+        store.hasActiveRoutineFiring({
+          name: "daily-report",
+          projectName: "alpha"
+        })
+      ).toBe(false);
+      expect(store.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "leaked-fire",
+          state: "failed",
+          terminalReason: "leaked_routine_firing"
+        })
+      ]);
+      expect(
+        store
+          .listRoutineFiringTransitions("leaked-fire")
+          .map((entry) => entry.state)
+      ).toEqual(["queued", "running", "failed"]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reconcileLeakedRoutineFirings leaves terminal firings untouched", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "done-fire",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.completeRoutineFiring({ id: "done-fire", state: "succeeded" });
+
+      expect(store.reconcileLeakedRoutineFirings()).toEqual([]);
+      expect(store.listRoutineFirings()).toEqual([
+        expect.objectContaining({ id: "done-fire", state: "succeeded" })
+      ]);
+    } finally {
+      store.close();
+    }
+  });
 });

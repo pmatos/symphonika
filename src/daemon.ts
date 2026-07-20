@@ -170,6 +170,25 @@ export async function startDaemon(
       "symphonika startup: orphan sweep complete"
     );
   }
+  const leakedFirings = runStore.reconcileLeakedRoutineFirings();
+  for (const entry of leakedFirings) {
+    logger.warn(
+      {
+        firingId: entry.firingId,
+        previousState: entry.previousState,
+        project: entry.projectName,
+        routine: entry.routineName,
+        terminalReason: "leaked_routine_firing"
+      },
+      "symphonika startup: marked orphaned routine firing as failed"
+    );
+  }
+  if (leakedFirings.length > 0) {
+    logger.info(
+      { count: leakedFirings.length },
+      "symphonika startup: routine firing sweep complete"
+    );
+  }
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const runtimeConfig = new RuntimeConfigReloader({

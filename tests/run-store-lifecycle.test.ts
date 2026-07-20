@@ -954,4 +954,82 @@ describe("run-store schema migration", () => {
       database.close();
     }
   });
+
+  it("backfills sample history when upgrading a pre-history watchdog_samples table", async () => {
+    const root = await makeTempRoot();
+    const dbPath = databasePath(root);
+    const writer = new Database(dbPath);
+    try {
+      writer.exec(`
+        create table runs (
+          id text primary key,
+          project_name text not null,
+          issue_number integer not null,
+          issue_title text not null,
+          state text not null,
+          issue_snapshot_json text not null,
+          metadata_path text,
+          created_at text not null,
+          updated_at text not null
+        );
+        create table watchdog_samples (
+          run_id text primary key,
+          sampled_at text not null,
+          last_tool_call_at text,
+          workspace_mtime_max real not null,
+          turn_id_set_size integer not null,
+          output_tokens_total integer not null,
+          normalized_log_offset integer not null,
+          idle_since text,
+          foreign key (run_id) references runs(id)
+        );
+        insert into runs (
+          id, project_name, issue_number, issue_title, state,
+          issue_snapshot_json, created_at, updated_at
+        ) values (
+          'legacy-watchdog', 'symphonika', 99, 't', 'queued', '{}',
+          '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'
+        );
+        insert into watchdog_samples (
+          run_id, sampled_at, last_tool_call_at, workspace_mtime_max,
+          turn_id_set_size, output_tokens_total, normalized_log_offset, idle_since
+        ) values (
+          'legacy-watchdog', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z',
+          1234.5, 3, 100, 7, null
+        );
+      `);
+    } finally {
+      writer.close();
+    }
+
+    const store = openRunStore({ stateRoot: root });
+    store.close();
+
+    const reader = new Database(dbPath, { readonly: true });
+    try {
+      expect(columnNames(reader, "watchdog_samples")).toEqual(
+        expect.arrayContaining(["normalized_log_path", "last_message_at"])
+      );
+      const history = reader
+        .prepare(
+          "select run_id, output_tokens_total, normalized_log_path, last_message_at from watchdog_sample_history where run_id = ?"
+        )
+        .get("legacy-watchdog") as
+        | {
+            last_message_at: string | null;
+            normalized_log_path: string;
+            output_tokens_total: number;
+            run_id: string;
+          }
+        | undefined;
+      expect(history).toEqual({
+        last_message_at: null,
+        normalized_log_path: "",
+        output_tokens_total: 100,
+        run_id: "legacy-watchdog"
+      });
+    } finally {
+      reader.close();
+    }
+  });
 });

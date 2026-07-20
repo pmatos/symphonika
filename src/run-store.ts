@@ -2393,17 +2393,6 @@ export class RunStore {
         foreign key (run_id) references runs(id)
       );
 
-      insert or ignore into watchdog_sample_history (
-        run_id, sampled_at, last_tool_call_at, last_message_at,
-        workspace_mtime_max, turn_id_set_size, output_tokens_total,
-        normalized_log_offset, normalized_log_path, idle_since
-      )
-      select
-        run_id, sampled_at, last_tool_call_at, last_message_at,
-        workspace_mtime_max, turn_id_set_size, output_tokens_total,
-        normalized_log_offset, normalized_log_path, idle_since
-      from watchdog_samples;
-
       create table if not exists routines (
         project_name text not null,
         name text not null,
@@ -2475,6 +2464,23 @@ export class RunStore {
       }
     });
     apply();
+
+    // Runs after the ensureColumn additions above so databases created before
+    // watchdog_samples gained normalized_log_path/last_message_at have those
+    // columns before the history backfill reads them.
+    this.database.exec(`
+      insert or ignore into watchdog_sample_history (
+        run_id, sampled_at, last_tool_call_at, last_message_at,
+        workspace_mtime_max, turn_id_set_size, output_tokens_total,
+        normalized_log_offset, normalized_log_path, idle_since
+      )
+      select
+        run_id, sampled_at, last_tool_call_at, last_message_at,
+        workspace_mtime_max, turn_id_set_size, output_tokens_total,
+        normalized_log_offset, normalized_log_path, idle_since
+      from watchdog_samples;
+    `);
+
     this.backfillAttemptMetadataPaths();
   }
 

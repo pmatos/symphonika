@@ -23,6 +23,7 @@ import type {
 } from "../src/provider.js";
 import { openRunStore } from "../src/run-store.js";
 import type { PreparedIssueWorkspace } from "../src/workspace.js";
+import { createDeferred } from "./helpers/deferred.js";
 import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
@@ -107,6 +108,46 @@ function recordingCodexProvider(
     ): AsyncGenerator<ProviderEvent> {
       providerInputs.push(input);
       await Promise.resolve();
+      yield {
+        normalized: { exitCode: 0, type: "process_exit" },
+        raw: { code: 0, kind: "exit" }
+      };
+    }),
+    validate: vi.fn().mockResolvedValue(undefined)
+  };
+}
+
+type GatedProvider = AgentProvider & {
+  cancel: ReturnType<typeof vi.fn>;
+  ready: Promise<void>;
+  release: () => void;
+};
+
+// Provider that yields session_started, then blocks until released — modelling
+// an agent that is still "running" (e.g. mid-way through removing agent-ready
+// and opening its PR) so a reconcile tick can fire while the run is in-flight.
+// Releasing yields a clean exit 0. cancel() also releases the gate so a
+// (regressed) eligibility_loss cancel unwinds the generator instead of hanging
+// the test; the assertion that cancel was never called is what catches the bug.
+function gatedSuccessProvider(): GatedProvider {
+  const readyGate = createDeferred<void>();
+  const releaseGate = createDeferred<void>();
+  const cancel = vi.fn((): Promise<void> => {
+    releaseGate.resolve();
+    return Promise.resolve();
+  });
+  return {
+    cancel,
+    name: "codex",
+    ready: readyGate.promise,
+    release: () => releaseGate.resolve(),
+    runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+      readyGate.resolve();
+      yield {
+        normalized: { sessionId: "fake", type: "session_started" },
+        raw: { kind: "session" }
+      };
+      await releaseGate.promise;
       yield {
         normalized: { exitCode: 0, type: "process_exit" },
         raw: { code: 0, kind: "exit" }
@@ -370,6 +411,161 @@ describe("wait state lifecycle", () => {
       // Only the planning state ran a provider attempt. The wait state must
       // NOT spawn an agent.
       expect(providerInputs).toHaveLength(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("does not cancel a fresh raw FSM run whose agent removes agent-ready before it parks (issue #258)", async () => {
+    const root = await makeTempRoot();
+    await writeWaitStateProject(root);
+
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    const eligibleIssue = issueFixture();
+    // The implement agent opens its PR and removes agent-ready as its terminal
+    // action. Every poll after dispatch therefore surfaces the issue as
+    // ineligible (labels_all no longer satisfied), landing it in
+    // pollStatus.filteredIssues where reconcileActiveRuns re-checks it. Pre-fix
+    // this cancelled the still-running run as eligibility_loss.
+    const ineligibleIssue = {
+      ...eligibleIssue,
+      labels: ["sym:claimed", "sym:running"]
+    };
+
+    let listCalls = 0;
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue({
+        ...ineligibleIssue,
+        labels: ineligibleIssue.labels.map((name) => ({ name }))
+      }),
+      getPullRequestFollowupState: vi
+        .fn()
+        .mockResolvedValue(prState({ statusCheckRollupState: "PENDING" })),
+      listOpenIssues: vi.fn(() => {
+        listCalls += 1;
+        return Promise.resolve([
+          listCalls === 1 ? eligibleIssue : ineligibleIssue
+        ]);
+      }),
+      listPullRequestsForBranch: vi.fn().mockResolvedValue([
+        {
+          draft: false,
+          head: { ref: preparedWorkspace.branchName, sha: "abc123def456" },
+          html_url: "https://github.com/pmatos/symphonika/pull/256",
+          number: 256,
+          state: "open"
+        }
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const provider = gatedSuccessProvider();
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => `run-258-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      const databasePath = path.join(root, ".symphonika", "symphonika.db");
+
+      // Startup dispatched the implement run; it is now blocked inside the
+      // provider (agent still "running"). Its in-flight entry is registered
+      // with the label-immunity bit already resolved.
+      await provider.ready;
+
+      // Drive ticks whose polls no longer contain agent-ready. Each tick runs
+      // reconcileActiveRuns against the still-in-flight run with the issue
+      // ineligible — the exact ordering that used to cancel it.
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+
+      expect(provider.cancel).not.toHaveBeenCalled();
+      const midRun = new Database(databasePath, { readonly: true });
+      try {
+        const row = midRun
+          .prepare("select state, cancel_reason from runs where id = ?")
+          .get("run-258-1") as
+          { state: string; cancel_reason: string | null } | undefined;
+        expect(row?.state).not.toBe("cancelled");
+        expect(row?.cancel_reason).toBeNull();
+      } finally {
+        midRun.close();
+      }
+
+      // The agent finishes: exit 0 with the branch ahead of base. The run must
+      // advance into the label-immune wait state instead of dying.
+      provider.release();
+
+      const waitingRow = await waitForWaitingRow(databasePath);
+      expect(waitingRow).toMatchObject({
+        state: "waiting",
+        current_state_id: "holding"
+      });
+      expect(waitingRow.continuation_parent_run_id).toBe("run-258-1");
+
+      // Acceptance: the implement run is recorded as succeeded (advanced to the
+      // wait state), never cancelled, with its branch persisted so PR discovery
+      // can pick it up.
+      const parentDb = new Database(databasePath, { readonly: true });
+      try {
+        const parent = parentDb
+          .prepare(
+            "select state, cancel_reason, branch_name from runs where id = ?"
+          )
+          .get("run-258-1") as {
+          state: string;
+          cancel_reason: string | null;
+          branch_name: string | null;
+        };
+        expect(parent.state).toBe("succeeded");
+        expect(parent.cancel_reason).toBeNull();
+        expect(parent.branch_name).toBe(preparedWorkspace.branchName);
+      } finally {
+        parentDb.close();
+      }
+      expect(provider.cancel).not.toHaveBeenCalled();
+
+      // Acceptance: the PR is registered in tracked_pull_requests. PR follow-up
+      // is throttled to once per second after startup, so drive ticks until the
+      // discovery loop records the row.
+      const deadline = Date.now() + 6000;
+      let tracked: Record<string, unknown> | undefined;
+      while (Date.now() < deadline) {
+        await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+        const trackedDb = new Database(databasePath, { readonly: true });
+        try {
+          tracked = trackedDb
+            .prepare(
+              "select pr_number, branch_name, state from tracked_pull_requests limit 1"
+            )
+            .get() as Record<string, unknown> | undefined;
+        } finally {
+          trackedDb.close();
+        }
+        if (tracked !== undefined) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      }
+      expect(tracked).toMatchObject({
+        branch_name: preparedWorkspace.branchName,
+        pr_number: 256
+      });
     } finally {
       await daemon.stop();
     }

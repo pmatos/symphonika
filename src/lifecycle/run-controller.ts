@@ -2041,15 +2041,24 @@ export class RunController {
         return;
       }
 
-      // Raw FSM continuations are state-advance runs: the FSM, not the issue
-      // labels, decides whether the agent keeps running. Computed here so both
-      // activeRuns.attachProvider and scheduleNext (in finally) carry the
-      // same label-immunity guarantee — including into retry scheduling.
-      // See ADR 0046.
-      respectsIssueLabels = !(
-        input.isContinuation &&
-        loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm"
-      );
+      // Raw FSM runs are FSM-governed: the state machine, not the issue label
+      // set, decides whether the agent keeps running — for the initial state as
+      // much as for state-advance continuations. This immunity covers the whole
+      // in-flight walk, including the fresh initial state, because a raw FSM
+      // agent state legitimately removes the eligibility label (`agent-ready`)
+      // as its terminal action before the run parks into a label-immune wait
+      // state. Without covering the initial state, reconcileActiveRuns re-checks
+      // labels while the provider is still draining, sees `agent-ready` gone,
+      // and cancels the finished run as ELIGIBILITY_LOSS — orphaning its PR
+      // (issue #258). The unregister-in-finally ordering means the in-flight
+      // entry only exists while the provider is live, so gating on "provider
+      // exited" cannot close the window; label-immunity is the fix. Computed
+      // here so both activeRuns.attachProvider and scheduleNext (in finally)
+      // carry the same guarantee, including into retry scheduling. Markdown
+      // compatibility-graph workflows keep their label-driven behavior.
+      // CLOSED_ISSUE cancellation still applies. See ADR 0046.
+      respectsIssueLabels =
+        loadedWorkflow.expandedWorkflow.source.kind !== "raw_fsm";
       // For raw FSM workflows, the agent action's `prompt` field points at the
       // template file to send to the provider for this state. Resolve it here
       // so startAttempt renders the right prompt (rather than the YAML body of

@@ -54,11 +54,11 @@ Stay on this branch for all commits. Do not switch branches or open new ones.
 
    ```sh
    gh pr create --base main --head {{branch.name}} \
-     --title "<conventional title>" \
+     --title "<type>: <subject>" \
      --body "<summary>\n\nCloses #{{issue.number}}"
    ```
 
-   Use a conventional title that describes the change (for example, "Add project README"); do not prefix the title with an agent name such as `[codex]` or `[claude]`. Do not use `--web`, `--draft`, or any other flag that opens a browser, waits for input, or downgrades the PR.
+   Use a Conventional Commits title (`type: subject`, lower-case subject — for example, "feat: add project readme") that describes the change; do not prefix the title with an agent name such as `[codex]` or `[claude]`. Do not use `--web`, `--draft`, or any other flag that opens a browser, waits for input, or downgrades the PR.
 7. On successful completion, remove `agent-ready` from the issue with `gh issue edit {{issue.number}} --remove-label agent-ready` so the orchestrator does not schedule a redundant continuation (per SPEC §9.3 and §12.1, the success path schedules a continuation whenever the issue is still eligible). The PR opened in step 6 carries the work into review; the operator owns any further label transitions on PR open and merge.
 8. If the work cannot proceed at all, post an explanatory comment with `gh issue comment {{issue.number}} --body "<what blocked you and what would unblock it>"`, then exit cleanly. Do not apply `needs-human` or any other handoff label as an exit strategy — the operator decides how to triage. Also write an `EVIDENCE.md` at `{{workspace.path}}/EVIDENCE.md` recording the same explanation for the workspace record.
 9. Update `SPEC.md`, `CONTEXT.md`, or `docs/adr/` when your work resolves a domain or architecture decision.

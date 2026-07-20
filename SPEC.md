@@ -1010,6 +1010,7 @@ Bootstrap CLI commands:
 - `symphonika doctor [--config <path>]`
 - `symphonika init-project [--config <path>] --yes`
 - `symphonika daemon [--config <path>] [--port <port>]`
+- `symphonika service install [--config <path>] [--force] [--print] [--no-reload]`
 - `symphonika status [--config <path>] [--dashboard] [--watch] [--interval-ms <ms>] [--doctor-ttl-ms <ms>]`
 - `symphonika poll-now [--config <path>]`
 - `symphonika runs [--config <path>]`
@@ -1035,6 +1036,10 @@ config path and points the operator to `symphonika init`.
 
 `init` writes local files only and never mutates GitHub. `init-project` creates missing operational
 labels only after explicit confirmation.
+
+`service install --config <path>` resolves the selected Service Config to an absolute path and
+bakes it into the generated unit as `daemon --config <absolute-path>`. Omitting `--config` keeps the
+unit on the daemon's normal project-local/user-config discovery path.
 
 `status --dashboard` renders a compact terminal status dashboard from the run store and daemon
 `/api/status` endpoint. `status --watch` refreshes that read-only dashboard in place; it must not

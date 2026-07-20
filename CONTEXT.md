@@ -119,6 +119,9 @@ _Avoid_: issue when referring to execution status
 
 **Routine**:
 A project-owned scheduled prompt declaration that can launch a Coding Agent without a GitHub Issue.
+When its Project is disabled or omitted from the current valid Service Config snapshot, the Routine
+is inactive: it is hidden from default operator listings while its firing state remains durable for
+later re-enable.
 _Avoid_: workflow contract when referring to recurring or one-shot scheduled work
 
 **Routine Firing**:

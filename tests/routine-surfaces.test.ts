@@ -71,6 +71,38 @@ describe("routine operator surfaces", () => {
     }
   });
 
+  it("reaches an inactive routine's firings only with include_inactive", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      seedRoutine(store);
+      store.markRoutinesInactiveForProject("alpha");
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const hiddenResponse = await app.request(
+        "/api/routines/daily-report/firings?project=alpha"
+      );
+      expect(hiddenResponse.status).toBe(404);
+
+      const includedResponse = await app.request(
+        "/api/routines/daily-report/firings?project=alpha&include_inactive=true"
+      );
+      const includedBody = (await includedResponse.json()) as {
+        firings: unknown[];
+      };
+      expect(includedResponse.status).toBe(200);
+      expect(includedBody.firings).toEqual([
+        expect.objectContaining({ id: "fire-1" })
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("renders routines on the local dashboard page", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -126,6 +158,31 @@ describe("routine operator surfaces", () => {
     }
   });
 
+  it("renders inactive routines on the dashboard only when requested", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      seedRoutine(store);
+      store.markRoutinesInactiveForProject("alpha");
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const defaultResponse = await app.request("/");
+      const defaultBody = await defaultResponse.text();
+      const inactiveResponse = await app.request("/?include_inactive=true");
+      const inactiveBody = await inactiveResponse.text();
+
+      expect(defaultBody).not.toContain("daily-report");
+      expect(inactiveBody).toContain("daily-report");
+      expect(inactiveBody).toContain("inactive");
+    } finally {
+      store.close();
+    }
+  });
+
   it("symphonika routines lists routines per project", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -160,6 +217,39 @@ describe("routine operator surfaces", () => {
     expect(output.stdout).toContain(
       "alpha  daily-report  active  2026-05-22T10:00:00.000Z  -  #42"
     );
+  });
+
+  it("symphonika routines can include inactive routines", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    seedRoutine(store);
+    store.markRoutinesInactiveForProject("alpha");
+    store.close();
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({
+      openRunStore: () => openRunStore({ stateRoot }),
+      registerSignalHandlers: false
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+    program.exitOverride();
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "routines",
+      "--include-inactive",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+
+    expect(output.stdout).toContain("alpha  daily-report  inactive  -  -");
   });
 });
 

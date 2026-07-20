@@ -236,9 +236,10 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     app.get("/api/routines", (context) => {
       const project = context.req.query("project");
       return context.json({
-        routines: runStore.listRoutines(
-          project === undefined ? {} : { project }
-        )
+        routines: runStore.listRoutines({
+          includeInactive: context.req.query("include_inactive") === "true",
+          ...(project === undefined ? {} : { project })
+        })
       });
     });
 
@@ -246,7 +247,10 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       const routineName = context.req.param("id");
       const project = context.req.query("project");
       const matches = runStore
-        .listRoutines(project === undefined ? {} : { project })
+        .listRoutines({
+          includeInactive: context.req.query("include_inactive") === "true",
+          ...(project === undefined ? {} : { project })
+        })
         .filter((routine) => routine.name === routineName);
       if (matches.length === 0) {
         return context.json({ error: "routine not found" }, 404);

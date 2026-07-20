@@ -1190,11 +1190,14 @@ export class RunStore {
         "last_fired_at = case",
         "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then null",
         "else routines.last_fired_at end,",
-        // Recurring schedules remain active; unchanged expired one-shots stay expired.
+        // Recurring schedules stay active; a rescheduled routine reactivates.
+        // Otherwise an already-fired or previously-expired one-shot stays
+        // expired — including an inactive one-shot restored on Project
+        // re-enable, whose firing evidence must not re-fire (ADR-0021).
         "state = case",
         "when excluded.schedule_cron is not null then 'active'",
-        "when routines.schedule_at is not excluded.schedule_at then 'active'",
-        "when routines.state = 'expired' then 'expired'",
+        "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then 'active'",
+        "when routines.state = 'expired' or routines.last_fired_at is not null then 'expired'",
         "else 'active' end,",
         "updated_at = excluded.updated_at"
       ].join(" ")
@@ -1250,25 +1253,38 @@ export class RunStore {
     apply();
   }
 
+  markRoutinesInactiveForProject(projectName: string): void {
+    this.database
+      .prepare(
+        "update routines set state = 'inactive', updated_at = ? where project_name = ? and state != 'inactive'"
+      )
+      .run(timestamp(), projectName);
+  }
+
   pruneRoutinesForUnknownProjects(projectNames: Iterable<string>): void {
     const now = timestamp();
     const names = [...new Set(projectNames)];
     if (names.length === 0) {
       this.database
-        .prepare("update routines set state = 'inactive', updated_at = ?")
+        .prepare(
+          "update routines set state = 'inactive', updated_at = ? where state != 'inactive'"
+        )
         .run(now);
       return;
     }
     const placeholders = names.map(() => "?").join(", ");
     this.database
       .prepare(
-        `update routines set state = 'inactive', updated_at = ? where project_name not in (${placeholders})`
+        `update routines set state = 'inactive', updated_at = ? where project_name not in (${placeholders}) and state != 'inactive'`
       )
       .run(now, ...names);
   }
 
-  listRoutines(filter: { project?: string } = {}): RoutineStatus[] {
-    const conditions: string[] = ["state != 'inactive'"];
+  listRoutines(
+    filter: { includeInactive?: boolean; project?: string } = {}
+  ): RoutineStatus[] {
+    const conditions: string[] =
+      filter.includeInactive === true ? [] : ["state != 'inactive'"];
     const params: Record<string, unknown> = {};
     if (filter.project !== undefined) {
       conditions.push("project_name = @project");

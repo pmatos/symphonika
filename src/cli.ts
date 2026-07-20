@@ -118,6 +118,12 @@ type PollNowResponse = {
   state: "dispatching" | "idle";
 };
 
+type RoutinesOptions = {
+  config?: string;
+  includeInactive?: boolean;
+  project?: string;
+};
+
 const DEFAULT_STATUS_WATCH_DOCTOR_TTL_MS = 5000;
 
 export function buildCli(dependencies: CliDependencies = {}): Command {
@@ -840,16 +846,18 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .command("routines")
     .description("list routines from the run store")
     .option("--config <path>", "service config path")
+    .option("--include-inactive", "include routines for inactive Projects")
     .option("--project <project>", "filter by project name")
-    .action((options: { config?: string; project?: string }) => {
+    .action((options: RoutinesOptions) => {
       const stateRoot = resolveStateRoot(
         withConfigPath(options.config)
       ).stateRoot;
       const store = openRunStore({ stateRoot });
       try {
-        const routines = store.listRoutines(
-          options.project === undefined ? {} : { project: options.project }
-        );
+        const routines = store.listRoutines({
+          includeInactive: options.includeInactive === true,
+          ...(options.project === undefined ? {} : { project: options.project })
+        });
         if (routines.length === 0) {
           writeOut(program, "(no routines)\n");
           return;

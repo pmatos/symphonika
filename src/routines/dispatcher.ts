@@ -81,6 +81,7 @@ export async function dispatchDueRoutines(
 
   for (const project of projects) {
     if (project.disabled === true) {
+      input.runStore.markRoutinesInactiveForProject(project.name);
       continue;
     }
     input.runStore.syncRoutines(project.name, project.routines ?? [], {

@@ -20,7 +20,7 @@ export default tseslint.config(
     languageOptions: {
       parserOptions: {
         projectService: {
-          allowDefaultProject: ["*.mjs", "fuzz/*.mjs"]
+          allowDefaultProject: ["*.mjs", "fuzz/*.mjs", "commitlint.config.cjs"]
         },
         tsconfigRootDir: import.meta.dirname
       }
@@ -36,6 +36,16 @@ export default tseslint.config(
     rules: {
       "@typescript-eslint/no-unsafe-call": "off",
       "@typescript-eslint/no-unsafe-member-access": "off"
+    }
+  },
+  {
+    files: ["commitlint.config.cjs"],
+    languageOptions: {
+      sourceType: "commonjs",
+      globals: {
+        module: "writable",
+        require: "readonly"
+      }
     }
   },
   eslintConfigPrettier

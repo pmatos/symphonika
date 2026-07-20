@@ -5,6 +5,7 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
+import type { RunControllerProvidersConfig } from "../src/lifecycle/run-controller.js";
 import type {
   AgentProvider,
   ProviderEvent,
@@ -508,7 +509,84 @@ describe("RoutineFiringDispatcher", () => {
       runStore.close();
     }
   });
+
+  it.each(["providers config", "agent provider registry"] as const)(
+    "skips a due routine when its provider is missing from the %s",
+    async (missingFrom) => {
+      const root = await makeTempRoot();
+      const stateRoot = path.join(root, ".symphonika");
+      const runStore = openRunStore({ stateRoot });
+      const provider = {
+        cancel: vi.fn().mockResolvedValue(undefined),
+        name: "claude",
+        runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+          await Promise.resolve();
+          yield {
+            normalized: { exitCode: 0, type: "process_exit" },
+            raw: { code: 0, kind: "exit" }
+          };
+        }),
+        validate: vi.fn().mockResolvedValue(undefined)
+      } satisfies AgentProvider;
+      const providersConfig =
+        missingFrom === "providers config"
+          ? { codex: { command: "codex fake" } }
+          : {
+              claude: { command: "claude fake" },
+              codex: { command: "codex fake" }
+            };
+
+      try {
+        const result = await dispatchDueRoutines({
+          activeRuns: new ActiveRunRegistry(),
+          agentProviders:
+            missingFrom === "agent provider registry"
+              ? {}
+              : { claude: provider },
+          configDir: root,
+          globalConcurrency: { maxInFlight: undefined },
+          now: new Date("2026-05-22T10:00:01.000Z"),
+          prepareRoutineWorkspace: vi.fn(),
+          projects: new Map([
+            ["alpha", dueRoutineProjectFixture(root, "claude")]
+          ]),
+          providersConfig: providersConfig as RunControllerProvidersConfig,
+          runStore,
+          stateRoot
+        });
+
+        expect(result).toEqual({
+          fired: [],
+          skipped: [
+            {
+              projectName: "alpha",
+              reason: "provider_not_registered: claude",
+              routineName: "daily-report"
+            }
+          ]
+        });
+      } finally {
+        runStore.close();
+      }
+    }
+  );
 });
+
+function dueRoutineProjectFixture(root: string, provider: "codex" | "claude") {
+  return {
+    ...runStoreProjectFixture(),
+    routines: [
+      {
+        kind: "report" as const,
+        name: "daily-report",
+        prompt: "Routine {{routine.name}} for {{project.name}}.",
+        provider,
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: path.join(root, "daily-report.md")
+      }
+    ]
+  };
+}
 
 function runStoreProjectFixture() {
   return {

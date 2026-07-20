@@ -222,7 +222,10 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       const routineName = context.req.param("id");
       const project = context.req.query("project");
       const matches = runStore
-        .listRoutines(project === undefined ? {} : { project })
+        .listRoutines({
+          includeInactive: context.req.query("include_inactive") === "true",
+          ...(project === undefined ? {} : { project })
+        })
         .filter((routine) => routine.name === routineName);
       if (matches.length === 0) {
         return context.json({ error: "routine not found" }, 404);

@@ -1095,7 +1095,8 @@ The HTTP API exposes `GET /api/routines` with the same Routine status shape as t
 dashboard. Inactive Routines are hidden by default; `?include_inactive=true` includes them, and the
 server-rendered dashboard accepts the same query parameter. `GET /api/routines/:id/firings` returns
 firing history and linked PRs for the named Routine; callers use `?project=<name>` to disambiguate
-the same Routine name across Projects.
+the same Routine name across Projects and `?include_inactive=true` to resolve an inactive Routine and
+reach its durable firing history.
 
 Label creation, stale-claim reset, and workspace cleanup remain CLI-only.
 

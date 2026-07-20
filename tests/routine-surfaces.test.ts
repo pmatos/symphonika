@@ -71,6 +71,38 @@ describe("routine operator surfaces", () => {
     }
   });
 
+  it("reaches an inactive routine's firings only with include_inactive", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      seedRoutine(store);
+      store.markRoutinesInactiveForProject("alpha");
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const hiddenResponse = await app.request(
+        "/api/routines/daily-report/firings?project=alpha"
+      );
+      expect(hiddenResponse.status).toBe(404);
+
+      const includedResponse = await app.request(
+        "/api/routines/daily-report/firings?project=alpha&include_inactive=true"
+      );
+      const includedBody = (await includedResponse.json()) as {
+        firings: unknown[];
+      };
+      expect(includedResponse.status).toBe(200);
+      expect(includedBody.firings).toEqual([
+        expect.objectContaining({ id: "fire-1" })
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("renders routines on the local dashboard page", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

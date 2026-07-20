@@ -21,6 +21,7 @@ import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
 import type { InitOptions, InitProvider, InitReport } from "./init.js";
 import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
+import type { RoutineStatus } from "./routines/types.js";
 import {
   resolveWatchdogConfig,
   RuntimeConfigReloader,
@@ -864,7 +865,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         }
         writeOut(
           program,
-          "project  routine  state  next_fire_at  last_fired_at  pull_requests\n"
+          "project  routine  state  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests\n"
         );
         for (const routine of routines) {
           writeOut(
@@ -875,6 +876,10 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
               routine.state,
               routine.nextFireAt ?? "-",
               routine.lastFiredAt ?? "-",
+              routine.lastAttemptedAt ?? "-",
+              routine.lastSkipReason ?? "-",
+              routine.lastSkipAt ?? "-",
+              formatRoutineSkipCounts(routine.skipCounts24h),
               formatRoutinePullRequestNumbers(routine.pullRequestNumbers)
             ].join("  ") + "\n"
           );
@@ -1662,6 +1667,12 @@ function formatRoutinePullRequestNumbers(numbers: number[]): string {
   return numbers.length === 0
     ? "-"
     : numbers.map((number) => `#${number}`).join(",");
+}
+
+function formatRoutineSkipCounts(
+  counts: RoutineStatus["skipCounts24h"]
+): string {
+  return `overlap=${counts.overlap},concurrency_cap=${counts.concurrency_cap},catch_up_window=${counts.catch_up_window}`;
 }
 
 function parseNonNegativeInt(value: string): number {

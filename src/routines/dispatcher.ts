@@ -24,6 +24,7 @@ import type {
 import type { RunStore } from "../run-store.js";
 import {
   evaluateRoutineSchedule,
+  nextRecurringFireAt,
   type RoutineScheduleEvaluation
 } from "./schedule.js";
 import {
@@ -84,6 +85,49 @@ export async function dispatchDueRoutines(
       input.runStore.markRoutinesInactiveForProject(project.name);
       continue;
     }
+    if (input.recomputeSchedulesFromNow === true) {
+      const declarations = new Map(
+        (project.routines ?? []).map((routine) => [routine.name, routine])
+      );
+      for (const persisted of input.runStore.listRoutines({
+        project: project.name
+      })) {
+        const declaration = declarations.get(persisted.name);
+        if (
+          declaration === undefined ||
+          !("cron" in declaration.schedule) ||
+          (declaration.catchUp ?? "skip") !== "skip" ||
+          persisted.state !== "active" ||
+          persisted.nextFireAt === null ||
+          new Date(persisted.nextFireAt).getTime() > now.getTime() ||
+          persisted.scheduleCron !== declaration.schedule.cron ||
+          persisted.scheduleTz !== declaration.schedule.tz
+        ) {
+          continue;
+        }
+        const nextFireAt = nextRecurringFireAt(declaration.schedule, now);
+        if (
+          input.runStore.skipRoutineFiring({
+            attemptedAt: now.toISOString(),
+            name: persisted.name,
+            nextFireAt,
+            projectName: project.name,
+            reason: "catch_up_window"
+          })
+        ) {
+          logRoutineSkip(input.logger, {
+            reason: "catch_up_window",
+            routine: persisted.name,
+            scheduledAt: persisted.nextFireAt
+          });
+          skipped.push({
+            projectName: project.name,
+            reason: "catch_up_window",
+            routineName: persisted.name
+          });
+        }
+      }
+    }
     input.runStore.syncRoutines(project.name, project.routines ?? [], {
       now,
       recomputeRecurring: input.recomputeSchedulesFromNow === true
@@ -111,26 +155,32 @@ export async function dispatchDueRoutines(
         continue;
       }
       if (
+        !routine.allowOverlap &&
         input.runStore.hasActiveRoutineFiring({
           name: routine.name,
           projectName: project.name
         })
       ) {
-        advanceSkippedRecurringRoutine(input.runStore, {
-          evaluation,
-          now,
-          projectName: project.name,
-          routineName: routine.name
-        });
-        input.logger?.info(
-          { project: project.name, routine: routine.name },
-          "symphonika routine firing skipped by overlap"
-        );
-        skipped.push({
-          projectName: project.name,
-          reason: "routine overlap",
-          routineName: routine.name
-        });
+        if (
+          recordDueRoutineSkip(input.runStore, {
+            evaluation,
+            now,
+            projectName: project.name,
+            reason: "overlap",
+            routine
+          })
+        ) {
+          logRoutineSkip(input.logger, {
+            reason: "overlap",
+            routine: routine.name,
+            scheduledAt: routine.nextFireAt ?? now.toISOString()
+          });
+          skipped.push({
+            projectName: project.name,
+            reason: "overlap",
+            routineName: routine.name
+          });
+        }
         continue;
       }
       const providerName = routine.provider ?? project.agent.provider;
@@ -152,21 +202,26 @@ export async function dispatchDueRoutines(
         project
       );
       if (capReason !== null) {
-        advanceSkippedRecurringRoutine(input.runStore, {
-          evaluation,
-          now,
-          projectName: project.name,
-          routineName: routine.name
-        });
-        input.logger?.info(
-          { project: project.name, reason: capReason, routine: routine.name },
-          "symphonika routine firing skipped by concurrency cap"
-        );
-        skipped.push({
-          projectName: project.name,
-          reason: capReason,
-          routineName: routine.name
-        });
+        if (
+          recordDueRoutineSkip(input.runStore, {
+            evaluation,
+            now,
+            projectName: project.name,
+            reason: "concurrency_cap",
+            routine
+          })
+        ) {
+          logRoutineSkip(input.logger, {
+            reason: "concurrency_cap",
+            routine: routine.name,
+            scheduledAt: routine.nextFireAt ?? now.toISOString()
+          });
+          skipped.push({
+            projectName: project.name,
+            reason: "concurrency_cap",
+            routineName: routine.name
+          });
+        }
         continue;
       }
 
@@ -685,24 +740,43 @@ function routineSchedule(routine: RoutineStatus): RoutineSchedule {
   return { at: routine.scheduleAt };
 }
 
-function advanceSkippedRecurringRoutine(
+function recordDueRoutineSkip(
   runStore: RunStore,
   input: {
     evaluation: Extract<RoutineScheduleEvaluation, { kind: "fire_now" }>;
     now: Date;
     projectName: string;
-    routineName: string;
+    reason: "overlap" | "concurrency_cap";
+    routine: RoutineStatus;
+  }
+): boolean {
+  return runStore.skipRoutineFiring({
+    attemptedAt: input.now.toISOString(),
+    name: input.routine.name,
+    ...(input.evaluation.nextAt === undefined
+      ? {}
+      : { nextFireAt: input.evaluation.nextAt }),
+    projectName: input.projectName,
+    reason: input.reason
+  });
+}
+
+function logRoutineSkip(
+  logger: Logger | undefined,
+  input: {
+    reason: "overlap" | "concurrency_cap" | "catch_up_window";
+    routine: string;
+    scheduledAt: string;
   }
 ): void {
-  if (input.evaluation.nextAt === undefined) {
-    return;
-  }
-  runStore.advanceRecurringRoutine({
-    name: input.routineName,
-    nextFireAt: input.evaluation.nextAt,
-    projectName: input.projectName,
-    skippedAt: input.now.toISOString()
-  });
+  logger?.info(
+    {
+      reason: input.reason,
+      routine: input.routine,
+      scheduled_at: input.scheduledAt
+    },
+    "routine.skipped"
+  );
 }
 
 async function appendJsonl(filePath: string, value: unknown): Promise<void> {

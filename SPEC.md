@@ -177,6 +177,8 @@ Markdown routine files with YAML front matter:
 - exactly one schedule shape: `schedule.at` or `schedule.cron` with optional `schedule.tz`
 - `kind: report` or `kind: git`
 - optional `provider`
+- optional `catch_up: fire_once_if_missed` (omitted means missed clock events are skipped)
+- optional `allow_overlap: true` (omitted means overlapping firings are skipped)
 
 Recurring schedules use five-field POSIX cron. They accept the `hourly`, `daily`, `weekly`,
 `monthly`, and `yearly` aliases with or without an `@` prefix. `schedule.tz` defaults to `Etc/UTC`.
@@ -195,6 +197,10 @@ workspace path, prompt evidence, provider logs, terminal reason, lifecycle state
 requests discovered from a `kind: git` firing branch. A one-shot `schedule.at` Routine becomes
 `expired` after its firing is claimed and must not fire again on daemon restart. A recurring Routine
 remains active and advances to its next clock event after every firing.
+
+A clock event skipped for catch-up policy, overlap, or a concurrency cap is not a Routine Firing:
+no `routine_firings` row is created. The Routine instead records `last_attempted_at`,
+`last_skip_reason`, and `last_skip_at`, together with rolling 24-hour counts for each skip reason.
 
 ## 5. Config Files
 
@@ -387,6 +393,8 @@ Routine schedules must define exactly one of:
 
 Supplying both shapes, neither shape, an invalid cron expression, or an invalid timezone is a
 deterministic declaration-load error. `tz` is valid only with `cron` and defaults to `Etc/UTC`.
+`catch_up`, when present, must be `fire_once_if_missed`; `allow_overlap`, when present, must be a
+boolean. Their omitted defaults are missed-event skip and `false`, respectively.
 
 ## 6. Credentials
 
@@ -443,6 +451,7 @@ SQLite stores durable orchestration state:
 - raw log file paths
 - routines
 - routine firings
+- exact-timestamp Routine skip counters used to compute rolling 24-hour per-reason totals
 
 The run store is not a replacement for GitHub as the canonical tracker. It is durable runtime
 evidence and restart state.
@@ -600,13 +609,18 @@ more commits succeeds. On the succeeded transition, Symphonika lists every open 
 head is the firing branch and records its PR number and head SHA. Routine PR discovery is
 informational only: it never enters PR Follow-up, review re-dispatch, or auto-merge.
 
-On daemon startup, recurring `next_fire_at` values are recomputed from the current clock. Missed
-ticks are not caught up in this slice. Timezone and DST behavior comes from `cron-parser`; the
-Orchestrator does not implement separate DST rules.
+On daemon startup, a recurring Routine with `catch_up: fire_once_if_missed` preserves a due
+`next_fire_at` and fires at most once even when the outage spans several clock events. The claim
+then advances `next_fire_at` strictly beyond the current clock. Without the opt-in, startup advances
+past the missed window without firing and records a `catch_up_window` skip. Timezone and DST
+behavior comes from `cron-parser`; the Orchestrator does not implement separate DST rules.
 
 Routine Firings consume the same per-Project and global `max_in_flight` slots as issue Runs. If a
-cap is already full, or an earlier firing of the same Routine overlaps, the daemon skips that clock
-event and logs the skip; no firing row is written. Persisted skip reasons and counters are deferred.
+cap is already full, the daemon records a `concurrency_cap` skip. If an earlier firing of the same
+Routine remains non-terminal, the daemon records an `overlap` skip unless `allow_overlap: true` is
+configured; overlap opt-in does not bypass concurrency caps. Every skip atomically advances the
+clock event, updates the Routine's latest-attempt/skip fields and rolling counter evidence, writes no
+Routine Firing row, and emits `routine.skipped` with `reason`, `routine`, and `scheduled_at` fields.
 
 ## 9. GitHub Tracker Behavior
 
@@ -1099,8 +1113,9 @@ mtime ages, observed turn-id count, five-minute output-token growth, and `idle_s
 grace remaining when idle. `status` and its dashboard render an idle indicator only for active Runs
 whose latest sample has `idle_since` set.
 
-`routines` lists Routine status per Project with `state`, `next_fire_at`, `last_fired_at`, and PR
-numbers discovered for the latest firing. Inactive Routines are hidden by default;
+`routines` lists Routine status per Project with `state`, `next_fire_at`, `last_fired_at`,
+`last_attempted_at`, `last_skip_reason`, `last_skip_at`, rolling 24-hour skip counts per reason, and
+PR numbers discovered for the latest firing. Inactive Routines are hidden by default;
 `--include-inactive` includes them.
 
 `clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
@@ -1128,7 +1143,8 @@ The UI is primarily read-only. It shows:
 - raw log links or content
 - rendered prompt links
 - retry and continuation state
-- routines with `state`, `next_fire_at`, `last_fired_at`, and discovered PR numbers
+- routines with firing/attempt timestamps, latest skip evidence, rolling 24-hour skip counts, and
+  discovered PR numbers
 - a per-run interactive workflow graph
 
 Operator pages stay server-rendered and primarily read-only, but a page may embed a
@@ -1146,7 +1162,8 @@ The v1 mutating web actions are explicit active-run cancellation and a manual po
 uses the normal daemon scheduler path.
 
 The HTTP API exposes `GET /api/routines` with the same Routine status shape as the CLI and
-dashboard. Inactive Routines are hidden by default; `?include_inactive=true` includes them, and the
+dashboard, including latest-attempt/skip fields and per-reason `skipCounts24h`. Inactive Routines
+are hidden by default; `?include_inactive=true` includes them, and the
 server-rendered dashboard accepts the same query parameter. `GET /api/routines/:id/firings` returns
 firing history and linked PRs for the named Routine; callers use `?project=<name>` to disambiguate
 the same Routine name across Projects and `?include_inactive=true` to resolve an inactive Routine and

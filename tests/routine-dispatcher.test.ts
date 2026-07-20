@@ -525,6 +525,212 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it.each([
+    {
+      expectedFires: [],
+      expectedNextFireAt: "2026-05-22T10:01:00.000Z",
+      gap: "shorter than the interval",
+      now: "2026-05-22T10:00:30.000Z"
+    },
+    {
+      expectedFires: ["catch-up-fire"],
+      expectedNextFireAt: "2026-05-22T10:02:00.000Z",
+      gap: "long enough to miss one interval",
+      now: "2026-05-22T10:01:30.000Z"
+    }
+  ])(
+    "handles a restart gap $gap",
+    async ({ expectedFires, expectedNextFireAt, now }) => {
+      const root = await makeTempRoot();
+      const stateRoot = path.join(root, ".symphonika");
+      const runStore = openRunStore({ stateRoot });
+      const provider = quietProvider();
+      const routine = {
+        ...minuteRoutine(root),
+        catchUp: "fire_once_if_missed" as const
+      };
+      runStore.syncRoutines("alpha", [routine], {
+        now: new Date("2026-05-22T09:59:30.000Z")
+      });
+      expect(
+        runStore.claimRoutineFiring({
+          firedAt: "2026-05-22T10:00:00.000Z",
+          firingId: "previous-fire",
+          nextFireAt: "2026-05-22T10:01:00.000Z",
+          projectName: "alpha",
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName: "minute-report"
+        })
+      ).toBe(true);
+      runStore.completeRoutineFiring({
+        id: "previous-fire",
+        state: "succeeded"
+      });
+
+      try {
+        const result = await dispatchDueRoutines({
+          ...recurringDispatchInput({
+            activeRuns: new ActiveRunRegistry(),
+            provider,
+            root,
+            routine,
+            runStore
+          }),
+          createFiringId: () => "catch-up-fire",
+          now: new Date(now),
+          recomputeSchedulesFromNow: true
+        });
+
+        expect(result.fired).toEqual(expectedFires);
+        expect(provider.runAttempt).toHaveBeenCalledTimes(expectedFires.length);
+        expect(runStore.listRoutines()[0]?.nextFireAt).toBe(expectedNextFireAt);
+      } finally {
+        runStore.close();
+      }
+    }
+  );
+
+  it("fires one catch-up after restart when multiple recurring ticks were missed", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const provider = quietProvider();
+    const routine = {
+      ...minuteRoutine(root),
+      catchUp: "fire_once_if_missed" as const
+    };
+    runStore.syncRoutines("alpha", [routine], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+    expect(
+      runStore.claimRoutineFiring({
+        firedAt: "2026-05-22T10:00:00.000Z",
+        firingId: "previous-fire",
+        nextFireAt: "2026-05-22T10:01:00.000Z",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "minute-report"
+      })
+    ).toBe(true);
+    runStore.completeRoutineFiring({
+      id: "previous-fire",
+      state: "succeeded"
+    });
+
+    try {
+      const input = {
+        ...recurringDispatchInput({
+          activeRuns: new ActiveRunRegistry(),
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        createFiringId: () => "catch-up-fire",
+        now: new Date("2026-05-22T10:03:30.000Z"),
+        recomputeSchedulesFromNow: true
+      };
+
+      const first = await dispatchDueRoutines(input);
+      const second = await dispatchDueRoutines({
+        ...input,
+        createFiringId: () => "unexpected-fire",
+        recomputeSchedulesFromNow: false
+      });
+
+      expect(first.fired).toEqual(["catch-up-fire"]);
+      expect(second.fired).toEqual([]);
+      expect(provider.runAttempt).toHaveBeenCalledTimes(1);
+      expect(runStore.listRoutineFirings().map((firing) => firing.id)).toEqual([
+        "catch-up-fire",
+        "previous-fire"
+      ]);
+      expect(runStore.listRoutines()[0]).toMatchObject({
+        lastFiredAt: "2026-05-22T10:03:30.000Z",
+        nextFireAt: "2026-05-22T10:04:00.000Z"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("records a catch-up window skip on restart when catch-up is omitted", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const provider = quietProvider();
+    const routine = minuteRoutine(root);
+    const logger = pino({ enabled: false });
+    const logInfo = vi.spyOn(logger, "info");
+    runStore.syncRoutines("alpha", [routine], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+    expect(
+      runStore.claimRoutineFiring({
+        firedAt: "2026-05-22T10:00:00.000Z",
+        firingId: "previous-fire",
+        nextFireAt: "2026-05-22T10:01:00.000Z",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "minute-report"
+      })
+    ).toBe(true);
+    runStore.completeRoutineFiring({
+      id: "previous-fire",
+      state: "succeeded"
+    });
+
+    try {
+      const result = await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns: new ActiveRunRegistry(),
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        logger,
+        now: new Date("2026-05-22T10:01:30.000Z"),
+        recomputeSchedulesFromNow: true
+      });
+
+      expect(result.fired).toEqual([]);
+      expect(result.skipped).toEqual([
+        {
+          projectName: "alpha",
+          reason: "catch_up_window",
+          routineName: "minute-report"
+        }
+      ]);
+      expect(runStore.listRoutineFirings().map((firing) => firing.id)).toEqual([
+        "previous-fire"
+      ]);
+      expect(
+        runStore.listRoutines({ now: new Date("2026-05-22T10:01:30.000Z") })[0]
+      ).toMatchObject({
+        lastAttemptedAt: "2026-05-22T10:01:30.000Z",
+        lastSkipAt: "2026-05-22T10:01:30.000Z",
+        lastSkipReason: "catch_up_window",
+        nextFireAt: "2026-05-22T10:02:00.000Z",
+        skipCounts24h: { catch_up_window: 1 }
+      });
+      expect(logInfo).toHaveBeenCalledWith(
+        {
+          reason: "catch_up_window",
+          routine: "minute-report",
+          scheduled_at: "2026-05-22T10:01:00.000Z"
+        },
+        "routine.skipped"
+      );
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("skips a recurring tick at the concurrency cap and advances its schedule", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
@@ -538,32 +744,51 @@ describe("RoutineFiringDispatcher", () => {
     });
     const provider = quietProvider();
     const routine = minuteRoutine(root);
+    const logger = pino({ enabled: false });
+    const logInfo = vi.spyOn(logger, "info");
     runStore.syncRoutines("alpha", [routine], {
       now: new Date("2026-05-22T09:59:30.000Z")
     });
 
     try {
-      const result = await dispatchDueRoutines(
-        recurringDispatchInput({
+      const result = await dispatchDueRoutines({
+        ...recurringDispatchInput({
           activeRuns,
           provider,
           root,
           routine,
           runStore
-        })
-      );
+        }),
+        logger
+      });
 
       expect(result.fired).toEqual([]);
       expect(result.skipped).toEqual([
         {
           projectName: "alpha",
-          reason: "project alpha max_in_flight (1) reached",
+          reason: "concurrency_cap",
           routineName: "minute-report"
         }
       ]);
       expect(runStore.listRoutineFirings()).toEqual([]);
       expect(runStore.listRoutines()[0]?.nextFireAt).toBe(
         "2026-05-22T10:01:00.000Z"
+      );
+      expect(
+        runStore.listRoutines({ now: new Date("2026-05-22T10:00:00.000Z") })[0]
+      ).toMatchObject({
+        lastAttemptedAt: "2026-05-22T10:00:00.000Z",
+        lastSkipAt: "2026-05-22T10:00:00.000Z",
+        lastSkipReason: "concurrency_cap",
+        skipCounts24h: { concurrency_cap: 1 }
+      });
+      expect(logInfo).toHaveBeenCalledWith(
+        {
+          reason: "concurrency_cap",
+          routine: "minute-report",
+          scheduled_at: "2026-05-22T10:00:00.000Z"
+        },
+        "routine.skipped"
       );
     } finally {
       activeRuns.unregister("issue-run");
@@ -577,6 +802,8 @@ describe("RoutineFiringDispatcher", () => {
     const runStore = openRunStore({ stateRoot });
     const provider = quietProvider();
     const routine = minuteRoutine(root);
+    const logger = pino({ enabled: false });
+    const logInfo = vi.spyOn(logger, "info");
     runStore.syncRoutines("alpha", [routine], {
       now: new Date("2026-05-22T09:59:30.000Z")
     });
@@ -589,21 +816,22 @@ describe("RoutineFiringDispatcher", () => {
     });
 
     try {
-      const result = await dispatchDueRoutines(
-        recurringDispatchInput({
+      const result = await dispatchDueRoutines({
+        ...recurringDispatchInput({
           activeRuns: new ActiveRunRegistry(),
           provider,
           root,
           routine,
           runStore
-        })
-      );
+        }),
+        logger
+      });
 
       expect(result.fired).toEqual([]);
       expect(result.skipped).toEqual([
         {
           projectName: "alpha",
-          reason: "routine overlap",
+          reason: "overlap",
           routineName: "minute-report"
         }
       ]);
@@ -614,7 +842,100 @@ describe("RoutineFiringDispatcher", () => {
         "2026-05-22T10:01:00.000Z"
       );
       expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(
+        runStore.listRoutines({ now: new Date("2026-05-22T10:00:00.000Z") })[0]
+      ).toMatchObject({
+        lastAttemptedAt: "2026-05-22T10:00:00.000Z",
+        lastSkipAt: "2026-05-22T10:00:00.000Z",
+        lastSkipReason: "overlap",
+        skipCounts24h: { overlap: 1 }
+      });
+      expect(logInfo).toHaveBeenCalledWith(
+        {
+          reason: "overlap",
+          routine: "minute-report",
+          scheduled_at: "2026-05-22T10:00:00.000Z"
+        },
+        "routine.skipped"
+      );
+      runStore.completeRoutineFiring({
+        id: "previous-fire",
+        state: "succeeded"
+      });
+      const beforeNextClock = await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns: new ActiveRunRegistry(),
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        now: new Date("2026-05-22T10:00:30.000Z")
+      });
+      const nextClock = await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns: new ActiveRunRegistry(),
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        now: new Date("2026-05-22T10:01:00.000Z")
+      });
+      expect(beforeNextClock.fired).toEqual([]);
+      expect(nextClock.fired).toEqual(["new-fire"]);
     } finally {
+      runStore.close();
+    }
+  });
+
+  it("fires an overlapping recurring tick when overlap is allowed", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const provider = quietProvider();
+    const routine = { ...minuteRoutine(root), allowOverlap: true };
+    const activeRuns = new ActiveRunRegistry();
+    activeRuns.reserveSlot({
+      issueNumber: -1,
+      projectName: "alpha",
+      respectsIssueLabels: false,
+      runId: "previous-fire"
+    });
+    runStore.syncRoutines("alpha", [routine], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+    runStore.createRoutineFiring({
+      id: "previous-fire",
+      projectName: "alpha",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      routineName: "minute-report"
+    });
+
+    try {
+      const dispatchInput = recurringDispatchInput({
+        activeRuns,
+        provider,
+        root,
+        routine,
+        runStore
+      });
+      const project = dispatchInput.projects.get("alpha")!;
+      dispatchInput.projects = new Map([
+        ["alpha", { ...project, max_in_flight: 2 }]
+      ]);
+      const result = await dispatchDueRoutines(dispatchInput);
+
+      expect(result.fired).toEqual(["new-fire"]);
+      expect(result.skipped).toEqual([]);
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({ id: "new-fire", state: "succeeded" }),
+        expect.objectContaining({ id: "previous-fire", state: "queued" })
+      ]);
+      expect(provider.runAttempt).toHaveBeenCalledTimes(1);
+    } finally {
+      activeRuns.unregister("previous-fire");
       runStore.close();
     }
   });

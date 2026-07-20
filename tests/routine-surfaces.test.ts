@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { buildCli } from "../src/cli.js";
 import { createHttpApp } from "../src/http/app.js";
+import { nextRecurringFireAt } from "../src/routines/schedule.js";
 import { openRunStore } from "../src/run-store.js";
 import { renderStatusDashboard } from "../src/status-dashboard.js";
 
@@ -27,6 +28,109 @@ afterEach(async () => {
 });
 
 describe("routine operator surfaces", () => {
+  it("shows skip metadata and 24-hour counts on every routine status surface", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const now = new Date();
+    const schedule = { cron: "* * * * *", tz: "Etc/UTC" };
+    store.syncRoutines(
+      "alpha",
+      [
+        {
+          kind: "report",
+          name: "minute-report",
+          prompt: "Report.",
+          provider: null,
+          schedule,
+          sourcePath: "/tmp/minute-report.md"
+        }
+      ],
+      { now: new Date(now.getTime() - 2 * 60_000) }
+    );
+    expect(
+      store.skipRoutineFiring({
+        attemptedAt: now.toISOString(),
+        name: "minute-report",
+        nextFireAt: nextRecurringFireAt(schedule, now),
+        projectName: "alpha",
+        reason: "overlap"
+      })
+    ).toBe(true);
+
+    try {
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+      const apiResponse = await app.request("/api/routines");
+      const apiBody = (await apiResponse.json()) as {
+        routines: Array<Record<string, unknown>>;
+      };
+      expect(apiBody.routines[0]).toMatchObject({
+        lastAttemptedAt: now.toISOString(),
+        lastSkipAt: now.toISOString(),
+        lastSkipReason: "overlap",
+        skipCounts24h: {
+          catch_up_window: 0,
+          concurrency_cap: 0,
+          overlap: 1
+        }
+      });
+
+      const pageResponse = await app.request("/");
+      const page = await pageResponse.text();
+      expect(page).toContain("last_attempted_at");
+      expect(page).toContain("overlap=1");
+
+      const dashboard = renderStatusDashboard({
+        daemon: "running",
+        issueCounts: {
+          candidate: 0,
+          failed: 0,
+          filtered: 0,
+          running: 0,
+          stale: 0
+        },
+        lastPollOutcome: "ok",
+        latestEvents: new Map(),
+        projects: [],
+        reload: "ok",
+        routines: store.listRoutines(),
+        runs: [],
+        stateRoot
+      });
+      expect(dashboard).toContain("overlap=1");
+
+      const output = { stderr: "", stdout: "" };
+      const program = buildCli({
+        openRunStore: () => openRunStore({ stateRoot }),
+        registerSignalHandlers: false
+      });
+      program.configureOutput({
+        writeErr: (message) => {
+          output.stderr += message;
+        },
+        writeOut: (message) => {
+          output.stdout += message;
+        }
+      });
+      program.exitOverride();
+      await program.parseAsync([
+        "node",
+        "symphonika",
+        "routines",
+        "--config",
+        path.join(stateRoot, "symphonika.yml")
+      ]);
+      expect(output.stdout).toContain("last_attempted_at");
+      expect(output.stdout).toContain("last_skip_reason");
+      expect(output.stdout).toContain("overlap=1");
+    } finally {
+      store.close();
+    }
+  });
+
   it("GET /api/routines returns routine status rows", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -212,10 +316,10 @@ describe("routine operator surfaces", () => {
     ]);
 
     expect(output.stdout).toContain(
-      "project  routine  state  next_fire_at  last_fired_at  pull_requests"
+      "project  routine  state  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests"
     );
     expect(output.stdout).toContain(
-      "alpha  daily-report  active  2026-05-22T10:00:00.000Z  -  #42"
+      "alpha  daily-report  active  2026-05-22T10:00:00.000Z  -  -  -  -  overlap=0,concurrency_cap=0,catch_up_window=0  #42"
     );
   });
 

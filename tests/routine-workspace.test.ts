@@ -27,6 +27,43 @@ afterEach(async () => {
 });
 
 describe("Routine workspace preparation", () => {
+  it("isolates overlapping git firings by firing id", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const project = {
+      name: "alpha",
+      workspace: {
+        git: { base_branch: "main", remote: remotePath },
+        root: workspaceRoot
+      }
+    };
+
+    const first = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+      kind: "git",
+      project,
+      routineName: "dependency-update"
+    });
+    const second = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId: "01KLMNOPQRJKMNPQRSTVWXYZ12",
+      kind: "git",
+      project,
+      routineName: "dependency-update"
+    });
+
+    expect(first.workspacePath).not.toBe(second.workspacePath);
+    expect(first.branchName).not.toBe(second.branchName);
+    await expect(
+      git(["-C", first.workspacePath, "rev-parse", "--abbrev-ref", "HEAD"])
+    ).resolves.toBe(first.branchName);
+    await expect(
+      git(["-C", second.workspacePath, "rev-parse", "--abbrev-ref", "HEAD"])
+    ).resolves.toBe(second.branchName);
+  });
+
   it("creates a deterministic kind: git branch from the project base", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

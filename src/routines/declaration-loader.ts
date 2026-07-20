@@ -102,6 +102,23 @@ function parseRoutineDeclaration(
   const schedule = recordField(frontMatter, "schedule");
   const parsedSchedule = parseRoutineSchedule(schedule, routinePath, errors);
 
+  const catchUpValue = stringField(frontMatter, "catch_up");
+  if (
+    Object.hasOwn(frontMatter, "catch_up") &&
+    catchUpValue !== "fire_once_if_missed"
+  ) {
+    errors.push(
+      `routine at ${routinePath} catch_up must be fire_once_if_missed`
+    );
+  }
+  const allowOverlapValue = frontMatter.allow_overlap;
+  if (
+    Object.hasOwn(frontMatter, "allow_overlap") &&
+    typeof allowOverlapValue !== "boolean"
+  ) {
+    errors.push(`routine at ${routinePath} allow_overlap must be a boolean`);
+  }
+
   if (prompt.trim().length === 0) {
     errors.push(`routine at ${routinePath} prompt body must not be empty`);
   }
@@ -113,6 +130,10 @@ function parseRoutineDeclaration(
   return {
     errors: [],
     routine: {
+      allowOverlap:
+        typeof allowOverlapValue === "boolean" ? allowOverlapValue : false,
+      catchUp:
+        catchUpValue === "fire_once_if_missed" ? "fire_once_if_missed" : "skip",
       kind: kind as RoutineKind,
       name: name!,
       prompt,

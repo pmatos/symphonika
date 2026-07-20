@@ -42,7 +42,7 @@ import {
   runPullRequestFollowup,
   type PullRequestFollowupPolicy
 } from "./pull-request-followup.js";
-import { RuntimeConfigReloader } from "./reload.js";
+import { resolveWatchdogConfig, RuntimeConfigReloader } from "./reload.js";
 import {
   INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS,
   openRunStore,
@@ -642,7 +642,8 @@ export async function startDaemon(
       };
     },
     getRuns: () => runStore.listRuns(),
-    getWatchdogConfig: () => runtimeConfig.watchdogConfig(),
+    getWatchdogConfig: (projectName) =>
+      resolveWatchdogConfig(runtimeConfig.watchdogServiceConfig(), projectName),
     getScheduled: () => activeRuns.peekDelayed(),
     getStatusSnapshot: () =>
       buildStatusSnapshot({

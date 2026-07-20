@@ -248,8 +248,11 @@ export class RuntimeConfigReloader {
     return this.snapshot?.globalConcurrency ?? { maxInFlight: undefined };
   }
 
-  watchdogConfig(): WatchdogConfig {
-    return this.snapshot?.watchdog ?? DEFAULT_WATCHDOG_CONFIG;
+  watchdogServiceConfig(): WatchdogServiceConfig {
+    return {
+      projects: this.snapshot?.projects ?? [],
+      watchdog: this.snapshot?.watchdog ?? DEFAULT_WATCHDOG_CONFIG
+    };
   }
 
   async reload(): Promise<RuntimeConfigSnapshot | undefined> {

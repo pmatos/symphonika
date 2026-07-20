@@ -980,6 +980,103 @@ describe("CLI run commands", () => {
     }
   });
 
+  it("show-run resolves the per-project watchdog grace override", async () => {
+    const stateRoot = await makeTempRoot();
+    await writeFile(
+      path.join(stateRoot, "WORKFLOW.md"),
+      "Work on {{issue.title}}.\n",
+      "utf8"
+    );
+    await writeFile(
+      path.join(stateRoot, "symphonika.yml"),
+      [
+        "state:",
+        "  root: ./.symphonika",
+        "polling:",
+        "  interval_ms: 1000",
+        "watchdog:",
+        "  grace_minutes: 20",
+        "providers:",
+        "  codex:",
+        '    command: "codex -p symphonika"',
+        "  claude:",
+        '    command: "claude -p"',
+        "projects:",
+        "  - name: alpha",
+        "    disabled: false",
+        "    weight: 1",
+        "    watchdog:",
+        "      grace_minutes: 60",
+        "    tracker:",
+        "      kind: github",
+        "      owner: pmatos",
+        "      repo: symphonika",
+        '      token: "$GITHUB_TOKEN"',
+        "    issue_filters:",
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: ["blocked"]',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/alpha",
+        "      git:",
+        "        remote: git@github.com:pmatos/symphonika.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    workflow: ./WORKFLOW.md",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "override-idle",
+      issue: sampleIssue({ number: 909, title: "Override grace" }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("override-idle", "running");
+    store.upsertWatchdogSample({
+      idleSince: "2026-05-22T11:45:00.000Z",
+      lastMessageAt: null,
+      lastToolCallAt: null,
+      normalizedLogOffset: 0,
+      normalizedLogPath: "",
+      outputTokensTotal: 0,
+      runId: "override-idle",
+      sampledAt: "2026-05-22T11:59:00.000Z",
+      turnIdSetSize: 0,
+      workspaceMtimeMax: 0
+    });
+    store.close();
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-22T12:00:00.000Z"));
+    try {
+      const { output, program } = captureProgram(stateRoot);
+      await program.parseAsync([
+        "node",
+        "symphonika",
+        "show-run",
+        "override-idle",
+        "--config",
+        path.join(stateRoot, "symphonika.yml")
+      ]);
+
+      // Idle for 15m. Project "alpha" overrides grace to 60m, so 45m remain.
+      // Before the fix these surfaces used the global 20m grace and showed 5m.
+      expect(output.stdout).toContain("grace remaining: 45m");
+      expect(output.stdout).not.toContain("grace remaining: 5m");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("show-run preserves the final Progress Signal after watchdog termination", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

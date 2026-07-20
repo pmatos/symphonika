@@ -22,9 +22,10 @@ import type { InitOptions, InitProvider, InitReport } from "./init.js";
 import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
 import {
+  resolveWatchdogConfig,
   RuntimeConfigReloader,
   type RuntimeReloadStatus,
-  type WatchdogConfig
+  type WatchdogServiceConfig
 } from "./reload.js";
 import type {
   ListRunsFilter,
@@ -596,11 +597,13 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
                 ? ({ error: "not configured", kind: "unavailable" } as const)
                 : await fetchDaemonStatus(fetcher, daemonUrl, stateRoot);
             const all = store.listRuns();
-            const watchdogConfig = await loadWatchdogConfig(state.configPath);
+            const watchdogService = await loadWatchdogServiceConfig(
+              state.configPath
+            );
             const watchdogByRun = collectWatchdogIdleStatuses(
               store,
               all,
-              watchdogConfig,
+              watchdogService,
               Date.now()
             );
             const byState = new Map<string, number>();
@@ -953,10 +956,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
               );
             }
           }
-          const watchdogConfig = await loadWatchdogConfig(state.configPath);
+          const watchdogService = await loadWatchdogServiceConfig(
+            state.configPath
+          );
           const nowMs = Date.now();
           const watchdog = buildWatchdogStatus({
-            config: watchdogConfig,
+            config: resolveWatchdogConfig(watchdogService, detail.project),
             nowMs,
             runId: detail.id,
             runStore: store
@@ -1665,12 +1670,12 @@ function formatArtifactKinds(artifacts: RunArtifactDescriptor[]): string {
   return present.length === 0 ? "(none)" : present.join(", ");
 }
 
-async function loadWatchdogConfig(
+async function loadWatchdogServiceConfig(
   configPath: string
-): Promise<ReturnType<RuntimeConfigReloader["watchdogConfig"]>> {
+): Promise<WatchdogServiceConfig> {
   const reloader = new RuntimeConfigReloader({ configPath });
   await reloader.reload();
-  return reloader.watchdogConfig();
+  return reloader.watchdogServiceConfig();
 }
 
 function formatProgressSignal(
@@ -1720,7 +1725,7 @@ function formatAge(
 function collectWatchdogIdleStatuses(
   store: RunStore,
   runs: RunStatus[],
-  config: Pick<WatchdogConfig, "enabled" | "graceMinutes">,
+  serviceConfig: WatchdogServiceConfig,
   nowMs: number
 ): Map<string, WatchdogIdleStatus> {
   const statuses = new Map<string, WatchdogIdleStatus>();
@@ -1731,7 +1736,7 @@ function collectWatchdogIdleStatuses(
     statuses.set(
       run.id,
       buildWatchdogIdleStatus({
-        config,
+        config: resolveWatchdogConfig(serviceConfig, run.project),
         nowMs,
         runId: run.id,
         runStore: store

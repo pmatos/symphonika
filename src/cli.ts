@@ -844,7 +844,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         }
         writeOut(
           program,
-          "project  routine  state  next_fire_at  last_fired_at\n"
+          "project  routine  state  next_fire_at  last_fired_at  pull_requests\n"
         );
         for (const routine of routines) {
           writeOut(
@@ -854,7 +854,8 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
               routine.name,
               routine.state,
               routine.nextFireAt ?? "-",
-              routine.lastFiredAt ?? "-"
+              routine.lastFiredAt ?? "-",
+              formatRoutinePullRequestNumbers(routine.pullRequestNumbers)
             ].join("  ") + "\n"
           );
         }
@@ -1633,6 +1634,12 @@ function parsePositiveInt(value: string): number {
     throw new InvalidArgumentError("must be a positive integer");
   }
   return n;
+}
+
+function formatRoutinePullRequestNumbers(numbers: number[]): string {
+  return numbers.length === 0
+    ? "-"
+    : numbers.map((number) => `#${number}`).join(",");
 }
 
 function parseNonNegativeInt(value: string): number {

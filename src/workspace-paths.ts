@@ -20,8 +20,8 @@ export type WorkspacePathPlan = {
 export function planWorkspacePaths(
   input: WorkspacePathInputs
 ): WorkspacePathPlan {
-  const projectSlug = slugify(input.project.name, "project");
-  const issueSlug = slugify(input.issue.title, "issue");
+  const projectSlug = slugifyWorkspaceSegment(input.project.name, "project");
+  const issueSlug = slugifyWorkspaceSegment(input.issue.title, "issue");
   const issueDirectoryName = `${input.issue.number}-${issueSlug}`;
   const workspaceRoot = path.resolve(
     input.configDir ?? process.cwd(),
@@ -38,7 +38,10 @@ export function planWorkspacePaths(
   };
 }
 
-function slugify(input: string, fallback: string): string {
+export function slugifyWorkspaceSegment(
+  input: string,
+  fallback: string
+): string {
   const asciiInput = Array.from(input.normalize("NFKD"))
     .filter((character) => character.charCodeAt(0) <= 0x7f)
     .join("");

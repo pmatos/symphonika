@@ -42,7 +42,7 @@ export type RuntimeConfigSnapshot = {
   loadedAt: string;
   polling: PollingServiceConfig;
   pollingIntervalMs: number;
-  projects: RunControllerProjectConfig[];
+  projects: RuntimeProjectConfig[];
   providers: RunControllerProvidersConfig;
   pullRequestPolicy: PullRequestFollowupPolicy;
   watchdog: WatchdogConfig;
@@ -66,6 +66,22 @@ export type WatchdogConfig = {
   graceMinutes: number;
   mtimeIgnore: string[];
   sampleIntervalSeconds: number;
+};
+
+type ProjectWatchdogConfig = {
+  graceMinutes: number;
+};
+
+type RuntimeProjectConfig = RunControllerProjectConfig & {
+  watchdog?: ProjectWatchdogConfig;
+};
+
+export type WatchdogServiceConfig = {
+  projects: readonly {
+    name: string;
+    watchdog?: ProjectWatchdogConfig;
+  }[];
+  watchdog: WatchdogConfig;
 };
 
 const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
@@ -98,6 +114,12 @@ const watchdogConfigSchema = z
     mtime_ignore: z.array(z.string().trim().min(1)).default([])
   })
   .passthrough();
+
+const projectWatchdogConfigSchema = z
+  .object({
+    grace_minutes: z.number().int().positive()
+  })
+  .strict();
 
 const pollingProjectSchema = z
   .object({
@@ -140,6 +162,7 @@ const runtimeProjectDetailSchema = z
   .object({
     name: z.string().trim().min(1),
     routines: z.array(pathStringSchema).optional(),
+    watchdog: projectWatchdogConfigSchema.optional(),
     workspace: projectWorkspaceSchema,
     workflow: workflowReferenceSchema
   })
@@ -225,10 +248,6 @@ export class RuntimeConfigReloader {
     return this.snapshot?.globalConcurrency ?? { maxInFlight: undefined };
   }
 
-  watchdogConfig(): WatchdogConfig {
-    return this.snapshot?.watchdog ?? DEFAULT_WATCHDOG_CONFIG;
-  }
-
   async reload(): Promise<RuntimeConfigSnapshot | undefined> {
     const attemptedAt = new Date().toISOString();
     const reloadInput = {
@@ -295,7 +314,7 @@ async function loadRuntimeConfigSnapshot(input: {
   }
 
   const pollingProjects: PollingProjectConfig[] = [];
-  const dispatchProjects: RunControllerProjectConfig[] = [];
+  const dispatchProjects: RuntimeProjectConfig[] = [];
 
   for (const [index, rawProject] of parsed.data.projects.entries()) {
     const pollingProject = pollingProjectSchema.safeParse(rawProject);
@@ -308,6 +327,30 @@ async function loadRuntimeConfigSnapshot(input: {
       continue;
     }
     pollingProjects.push(pollingProject.data);
+
+    // SPEC 5.1: an invalid Project watchdog override — a non-positive-integer
+    // grace_minutes or an unknown key — rejects the entire candidate snapshot
+    // for all Projects, even on first load (where there is no last-known-good,
+    // so nothing goes live). This is stricter than the other detail fields
+    // below (workspace, workflow, ...), whose first-load failure only drops the
+    // offending Project from dispatch while valid siblings keep polling.
+    const rawWatchdog = (rawProject as { watchdog?: unknown }).watchdog;
+    if (rawWatchdog !== undefined) {
+      const watchdogOverride =
+        projectWatchdogConfigSchema.safeParse(rawWatchdog);
+      if (!watchdogOverride.success) {
+        errors.push(
+          ...watchdogOverride.error.issues.map((issue) =>
+            formatZodIssueWithPrefix(issue, [
+              "projects",
+              String(index),
+              "watchdog"
+            ])
+          )
+        );
+        return lastKnownGoodOrNothing(input.previous, errors);
+      }
+    }
 
     const detail = runtimeProjectDetailSchema.safeParse(rawProject);
     if (!detail.success) {
@@ -326,6 +369,13 @@ async function loadRuntimeConfigSnapshot(input: {
       dispatchProjects.push({
         ...pollingProject.data,
         routines: [],
+        ...(detail.data.watchdog === undefined
+          ? {}
+          : {
+              watchdog: {
+                graceMinutes: detail.data.watchdog.grace_minutes
+              }
+            }),
         workflow: detail.data.workflow,
         workspace: detail.data.workspace
       });
@@ -353,6 +403,13 @@ async function loadRuntimeConfigSnapshot(input: {
     dispatchProjects.push({
       ...pollingProject.data,
       routines,
+      ...(detail.data.watchdog === undefined
+        ? {}
+        : {
+            watchdog: {
+              graceMinutes: detail.data.watchdog.grace_minutes
+            }
+          }),
       workflow,
       workspace: detail.data.workspace
     });
@@ -404,6 +461,22 @@ function normalizeWatchdogConfig(
     sampleIntervalSeconds:
       raw?.sample_interval_seconds ??
       DEFAULT_WATCHDOG_CONFIG.sampleIntervalSeconds
+  };
+}
+
+export function resolveWatchdogConfig(
+  serviceConfig: WatchdogServiceConfig,
+  projectName: string
+): WatchdogConfig {
+  const projectOverride = serviceConfig.projects.find(
+    (project) => project.name === projectName
+  )?.watchdog;
+  if (projectOverride === undefined) {
+    return serviceConfig.watchdog;
+  }
+  return {
+    ...serviceConfig.watchdog,
+    graceMinutes: projectOverride.graceMinutes
   };
 }
 

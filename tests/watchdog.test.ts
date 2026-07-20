@@ -333,6 +333,68 @@ describe("reconcileWatchdog", () => {
     }
   });
 
+  it("uses the Project grace override when deciding whether an idle run is stale", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const normalizedLogPath = path.join(root, "provider.normalized.jsonl");
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      seedRun(store, "run-vow", "vow");
+      store.updateRunEvidence("run-vow", {
+        branchName: "sym/vow/200-watchdog",
+        branchRef: "refs/heads/sym/vow/200-watchdog",
+        issueSnapshotPath: path.join(root, "issue.json"),
+        metadataPath: path.join(root, "metadata.json"),
+        normalizedLogPath,
+        promptPath: path.join(root, "prompt.md"),
+        rawLogPath: path.join(root, "raw.jsonl"),
+        workflowGraphPath: path.join(root, "workflow.json"),
+        workspacePath
+      });
+      store.updateRunState("run-vow", "running");
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T09:00:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath,
+        outputTokensTotal: 0,
+        runId: "run-vow",
+        sampledAt: "2026-05-22T09:00:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
+      });
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel,
+        issueNumber: 198,
+        projectName: "vow",
+        runId: "run-vow"
+      });
+
+      await reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          mtimeIgnore: [],
+          sampleIntervalSeconds: 60
+        },
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        projects: [{ name: "vow", watchdog: { graceMinutes: 180 } }],
+        runStore: store
+      });
+
+      expect(store.getRun("run-vow")?.state).toBe("running");
+      expect(cancel).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
+
   it("starts normalized-log sampling at the stored offset", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -1084,7 +1146,11 @@ describe("reconcileWatchdog", () => {
   });
 });
 
-function seedRun(store: RunStore, id: string): void {
+function seedRun(
+  store: RunStore,
+  id: string,
+  projectName = "symphonika"
+): void {
   store.createRun({
     id,
     issue: {
@@ -1099,7 +1165,7 @@ function seedRun(store: RunStore, id: string): void {
       updated_at: "2026-05-22T09:00:00.000Z",
       url: "https://example.test/198"
     },
-    projectName: "symphonika",
+    projectName,
     providerCommand: "codex fake",
     providerName: "codex"
   });

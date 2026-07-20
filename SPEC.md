@@ -278,6 +278,13 @@ projects:
 
 The bootstrap slice must use this final multi-project shape even with one configured Project.
 
+A Project may override only `watchdog.grace_minutes` with a positive integer. It inherits
+`watchdog.enabled`, `watchdog.sample_interval_seconds`, and `watchdog.mtime_ignore` from daemon
+scope, so a Project can lengthen its grace window but cannot opt into a daemon-disabled Watchdog.
+Project overrides are part of the defensive Service Config reload snapshot: any invalid value or
+unknown key rejects the candidate snapshot for all Projects and leaves the last known-good snapshot
+live.
+
 ### 5.2 Workflow Contract
 
 Each Project must reference a valid `WORKFLOW.md`.

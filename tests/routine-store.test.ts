@@ -115,6 +115,51 @@ describe("RunStore routines", () => {
           provider: null,
           pullRequestNumbers: [],
           scheduleAt: "2026-05-22T10:00:00.000Z",
+          scheduleCron: null,
+          scheduleTz: null,
+          sourcePath: "/tmp/daily-report.md",
+          state: "active"
+        }
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("persists the next clock event for a recurring routine", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines(
+        "alpha",
+        [
+          {
+            kind: "report",
+            name: "daily-report",
+            prompt: "Report.",
+            provider: null,
+            schedule: {
+              cron: "30 1 * * *",
+              tz: "Europe/Lisbon"
+            },
+            sourcePath: "/tmp/daily-report.md"
+          }
+        ],
+        { now: new Date("2026-03-27T02:00:00.000Z") }
+      );
+
+      expect(store.listRoutines()).toEqual([
+        {
+          kind: "report",
+          lastFiredAt: null,
+          name: "daily-report",
+          nextFireAt: "2026-03-28T01:30:00.000Z",
+          projectName: "alpha",
+          provider: null,
+          pullRequestNumbers: [],
+          scheduleAt: null,
+          scheduleCron: "30 1 * * *",
+          scheduleTz: "Europe/Lisbon",
           sourcePath: "/tmp/daily-report.md",
           state: "active"
         }
@@ -313,6 +358,89 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("claims a recurring tick once and advances its next fire time", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      const routine = {
+        kind: "report" as const,
+        name: "daily-report",
+        prompt: "Report.",
+        provider: "codex" as const,
+        schedule: { cron: "30 1 * * *", tz: "Europe/Lisbon" },
+        sourcePath: "/tmp/daily-report.md"
+      };
+      store.syncRoutines("alpha", [routine], {
+        now: new Date("2026-03-27T02:00:00.000Z")
+      });
+
+      const first = store.claimRoutineFiring({
+        firedAt: "2026-03-28T01:30:00.000Z",
+        firingId: "fire-1",
+        nextFireAt: "2026-03-29T01:30:00.000Z",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      const duplicate = store.claimRoutineFiring({
+        firedAt: "2026-03-28T01:30:00.000Z",
+        firingId: "fire-2",
+        nextFireAt: "2026-03-29T01:30:00.000Z",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.completeRoutineFiring({ id: "fire-1", state: "failed" });
+
+      expect(first).toBe(true);
+      expect(duplicate).toBe(false);
+      expect(store.listRoutineFirings().map((firing) => firing.id)).toEqual([
+        "fire-1"
+      ]);
+      expect(store.listRoutines()[0]).toMatchObject({
+        lastFiredAt: "2026-03-28T01:30:00.000Z",
+        nextFireAt: "2026-03-29T01:30:00.000Z",
+        state: "active"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("recomputes recurring next fire time from now on daemon startup", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      const routine = {
+        kind: "report" as const,
+        name: "daily-report",
+        prompt: "Report.",
+        provider: null,
+        schedule: { cron: "30 1 * * *", tz: "Europe/Lisbon" },
+        sourcePath: "/tmp/daily-report.md"
+      };
+      store.syncRoutines("alpha", [routine], {
+        now: new Date("2026-03-27T02:00:00.000Z")
+      });
+      expect(store.listRoutines()[0]?.nextFireAt).toBe(
+        "2026-03-28T01:30:00.000Z"
+      );
+
+      store.syncRoutines("alpha", [routine], {
+        now: new Date("2026-03-29T02:00:00.000Z"),
+        recomputeRecurring: true
+      });
+
+      expect(store.listRoutines()[0]?.nextFireAt).toBe(
+        "2026-03-30T00:30:00.000Z"
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("markRoutineExpired claims active routines exactly once", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -344,6 +472,104 @@ describe("RunStore routines", () => {
       expect(store.listRoutines()[0]?.lastFiredAt).toBe(
         "2026-05-22T10:00:02.000Z"
       );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reconciles leaked routine firings so the overlap gate is freed", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines(
+        "alpha",
+        [
+          {
+            kind: "report",
+            name: "daily-report",
+            prompt: "Report.",
+            provider: "codex",
+            schedule: { cron: "30 1 * * *", tz: "Europe/Lisbon" },
+            sourcePath: "/tmp/daily-report.md"
+          }
+        ],
+        { now: new Date("2026-03-27T02:00:00.000Z") }
+      );
+      store.createRoutineFiring({
+        id: "leaked-fire",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.updateRoutineFiringState("leaked-fire", "running");
+      expect(
+        store.hasActiveRoutineFiring({
+          name: "daily-report",
+          projectName: "alpha"
+        })
+      ).toBe(true);
+
+      const swept = store.reconcileLeakedRoutineFirings();
+
+      expect(swept).toEqual([
+        {
+          firingId: "leaked-fire",
+          previousState: "running",
+          projectName: "alpha",
+          routineName: "daily-report"
+        }
+      ]);
+      expect(
+        store.hasActiveRoutineFiring({
+          name: "daily-report",
+          projectName: "alpha"
+        })
+      ).toBe(false);
+      expect(store.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "leaked-fire",
+          state: "failed",
+          terminalReason: "leaked_routine_firing"
+        })
+      ]);
+      expect(
+        store
+          .listRoutineFiringTransitions("leaked-fire")
+          .map((entry) => entry.state)
+      ).toEqual(["queued", "running", "failed"]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reconcileLeakedRoutineFirings leaves terminal firings untouched", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "done-fire",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.completeRoutineFiring({ id: "done-fire", state: "succeeded" });
+
+      expect(store.reconcileLeakedRoutineFirings()).toEqual([]);
+      expect(store.listRoutineFirings()).toEqual([
+        expect.objectContaining({ id: "done-fire", state: "succeeded" })
+      ]);
     } finally {
       store.close();
     }

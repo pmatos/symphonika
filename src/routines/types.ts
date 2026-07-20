@@ -12,9 +12,7 @@ export type RoutineFiringState =
   | "failed"
   | "cancelled";
 
-type RoutineSchedule = {
-  at: string;
-};
+export type RoutineSchedule = { at: string } | { cron: string; tz: string };
 
 export type RoutineDeclaration = {
   kind: RoutineKind;
@@ -41,7 +39,9 @@ export type RoutineStatus = {
   projectName: string;
   provider: AgentProviderName | null;
   pullRequestNumbers: number[];
-  scheduleAt: string;
+  scheduleAt: string | null;
+  scheduleCron: string | null;
+  scheduleTz: string | null;
   sourcePath: string;
   state: RoutineState;
 };

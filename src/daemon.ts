@@ -170,6 +170,25 @@ export async function startDaemon(
       "symphonika startup: orphan sweep complete"
     );
   }
+  const leakedFirings = runStore.reconcileLeakedRoutineFirings();
+  for (const entry of leakedFirings) {
+    logger.warn(
+      {
+        firingId: entry.firingId,
+        previousState: entry.previousState,
+        project: entry.projectName,
+        routine: entry.routineName,
+        terminalReason: "leaked_routine_firing"
+      },
+      "symphonika startup: marked orphaned routine firing as failed"
+    );
+  }
+  if (leakedFirings.length > 0) {
+    logger.info(
+      { count: leakedFirings.length },
+      "symphonika startup: routine firing sweep complete"
+    );
+  }
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const runtimeConfig = new RuntimeConfigReloader({
@@ -197,6 +216,7 @@ export async function startDaemon(
   let lastPollErrorsKey = "";
   let lastPullRequestFollowupAt = Date.now();
   let lastWatchdogSampleAt = Date.now();
+  let recomputeRoutineSchedulesFromNow = true;
   let pendingPollNow: Promise<PollNowResult> | undefined;
   const inflightDispatches = new Set<Promise<void>>();
   const projectsLoader = (): Promise<
@@ -459,6 +479,8 @@ export async function startDaemon(
           logger.info(prResult, "symphonika PR follow-up action completed");
           return;
         }
+        const recomputeSchedulesFromNow = recomputeRoutineSchedulesFromNow;
+        recomputeRoutineSchedulesFromNow = false;
         const routineResult = await dispatchDueRoutines({
           activeRuns,
           agentProviders,
@@ -475,6 +497,7 @@ export async function startDaemon(
             : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),
           projects: runtimeConfig.projectsByName(),
           providersConfig: runtimeConfig.providersConfig(),
+          recomputeSchedulesFromNow,
           runStore,
           stateRoot: state.stateRoot
         });

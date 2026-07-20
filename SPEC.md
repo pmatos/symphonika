@@ -170,13 +170,17 @@ Symphonika stores both:
 
 ### 4.12 Routine
 
-A Routine is a Project-owned scheduled prompt declaration. Symphonika supports hand-authored Markdown
-routine files with YAML front matter:
+A Routine is a Project-owned scheduled prompt declaration. Symphonika supports hand-authored
+Markdown routine files with YAML front matter:
 
 - `name`
-- `schedule.at`
+- exactly one schedule shape: `schedule.at` or `schedule.cron` with optional `schedule.tz`
 - `kind: report` or `kind: git`
 - optional `provider`
+
+Recurring schedules use five-field POSIX cron. They accept the `hourly`, `daily`, `weekly`,
+`monthly`, and `yearly` aliases with or without an `@` prefix. `schedule.tz` defaults to `Etc/UTC`.
+Aliases are expanded during validation without rewriting the declaration file.
 
 The Markdown body is the routine prompt template. `name` must be safe as a single workspace path
 segment because routine firing workspaces live under `<workspace.root>/routines/<name>/<firing-id>/`.
@@ -185,8 +189,9 @@ segment because routine firing workspaces live under `<workspace.root>/routines/
 
 A Routine Firing is one durable execution of a Routine. It records the Routine, Project, provider,
 workspace path, prompt evidence, provider logs, terminal reason, lifecycle state, and any pull
-requests discovered from a `kind: git` firing branch. One-shot `schedule.at` routines become
-`expired` after the first firing is created and must not fire again on daemon restart.
+requests discovered from a `kind: git` firing branch. A one-shot `schedule.at` Routine becomes
+`expired` after its firing is claimed and must not fire again on daemon restart. A recurring Routine
+remains active and advances to its next clock event after every firing.
 
 ## 5. Config Files
 
@@ -372,8 +377,13 @@ service config directory and are re-read on every daemon tick with the rest of t
 Invalid routine declarations are reported through the same reload-error surface as invalid workflow
 contracts, and the daemon keeps using the last known good snapshot.
 
-Slice 1 supports only one-shot `schedule.at` routines. Cron and any second schedule field are
-invalid in this slice.
+Routine schedules must define exactly one of:
+
+- `{ at: <ISO 8601 timestamp> }`
+- `{ cron: <five-field POSIX cron or supported alias>, tz?: <IANA timezone> }`
+
+Supplying both shapes, neither shape, an invalid cron expression, or an invalid timezone is a
+deterministic declaration-load error. `tz` is valid only with `cron` and defaults to `Etc/UTC`.
 
 ## 6. Credentials
 
@@ -561,20 +571,23 @@ remain durable run-store evidence.
 
 ### 8.5 Routines
 
-On each daemon tick, Symphonika evaluates loaded active Routines. Slice 1's `ScheduleEvaluator`
-supports one-shot `schedule.at` only:
+On each daemon tick, Symphonika evaluates loaded active Routines. `ScheduleEvaluator` supports:
 
 - `wait_until` when `now < at`
 - `fire_now` when `now >= at` and the Routine has not fired
 - `expired` after a firing exists or the Routine state is `expired`
+- recurring five-field cron evaluated in the Routine's IANA timezone, returning the next fire time
+  strictly after `now`
 
 When a Routine fires, Symphonika allocates a ULID firing id and prepares a workspace at
 `<workspace.root>/routines/<routine-name>/<firing-id>/`. A `kind: report` workspace is detached at
 the Project base branch. A `kind: git` workspace is checked out on
 `sym/<project>/routine/<routine-name>/<first-10-firing-id-chars>`, created from the Project base.
-Symphonika renders the routine prompt, runs the configured provider, records a `routine_firings`
-row, and marks a one-shot Routine `expired`. Routine Firings use states `queued`,
-`preparing_workspace`, `running`, `succeeded`, `failed`, and `cancelled`.
+Symphonika renders the routine prompt, runs the configured provider, and records a `routine_firings`
+row. One-shot Routines become `expired`; recurring Routines remain active and atomically advance
+`next_fire_at` before the provider executes, so successful and failed firings both leave the next
+clock event visible. Routine Firings use states `queued`, `preparing_workspace`, `running`,
+`succeeded`, `failed`, and `cancelled`.
 
 For `kind: report`, provider exit code 0 succeeds without requiring commits. For `kind: git`, exit
 code 0 applies the same commits-ahead-of-base inspection as §12.1: zero commits fails with
@@ -583,9 +596,13 @@ more commits succeeds. On the succeeded transition, Symphonika lists every open 
 head is the firing branch and records its PR number and head SHA. Routine PR discovery is
 informational only: it never enters PR Follow-up, review re-dispatch, or auto-merge.
 
+On daemon startup, recurring `next_fire_at` values are recomputed from the current clock. Missed
+ticks are not caught up in this slice. Timezone and DST behavior comes from `cron-parser`; the
+Orchestrator does not implement separate DST rules.
+
 Routine Firings consume the same per-Project and global `max_in_flight` slots as issue Runs. If a
-cap is already full when a Routine is due, the daemon skips that fire for this slice and logs the
-skip; no firing row is written.
+cap is already full, or an earlier firing of the same Routine overlaps, the daemon skips that clock
+event and logs the skip; no firing row is written. Persisted skip reasons and counters are deferred.
 
 ## 9. GitHub Tracker Behavior
 
@@ -1149,6 +1166,8 @@ The bootstrap slice is accepted when:
 - daemon runs the configured provider through either Codex JSON-RPC or Claude stream-json
 - daemon captures raw logs, normalized events, rendered prompt, issue snapshot, and provider metadata
 - durable run state is updated in SQLite
+- a configured recurring `kind: report` Routine fires on its clock tick, records a Routine Firing,
+  and exposes its next clock event
 - CLI and local status page show Projects, runs, failures, input-required events, stale state, and
   log links
 

@@ -4,7 +4,12 @@ import path from "node:path";
 import { parse } from "yaml";
 
 import type { AgentProviderName } from "../provider.js";
-import type { RoutineDeclaration, RoutineKind } from "./types.js";
+import { isIanaTimezone, normalizeRoutineCron } from "./schedule.js";
+import type {
+  RoutineDeclaration,
+  RoutineKind,
+  RoutineSchedule
+} from "./types.js";
 
 export type RoutineDeclarationLoadResult = {
   errors: string[];
@@ -95,23 +100,7 @@ function parseRoutineDeclaration(
   }
 
   const schedule = recordField(frontMatter, "schedule");
-  const at =
-    schedule === undefined ? undefined : dateStringField(schedule, "at");
-  if (schedule === undefined || at === undefined) {
-    errors.push(`routine at ${routinePath} schedule.at is required`);
-  } else if (Number.isNaN(new Date(at).getTime())) {
-    errors.push(
-      `routine at ${routinePath} schedule.at must be a valid ISO 8601 date`
-    );
-  }
-  if (schedule !== undefined) {
-    const scheduleKeys = Object.keys(schedule);
-    if (scheduleKeys.length !== 1 || scheduleKeys[0] !== "at") {
-      errors.push(
-        `routine at ${routinePath} schedule must define only one schedule field; supported in this slice: at`
-      );
-    }
-  }
+  const parsedSchedule = parseRoutineSchedule(schedule, routinePath, errors);
 
   if (prompt.trim().length === 0) {
     errors.push(`routine at ${routinePath} prompt body must not be empty`);
@@ -128,10 +117,77 @@ function parseRoutineDeclaration(
       name: name!,
       prompt,
       provider,
-      schedule: { at: at! },
+      schedule: parsedSchedule!,
       sourcePath: routinePath
     }
   };
+}
+
+function parseRoutineSchedule(
+  schedule: Record<string, unknown> | undefined,
+  routinePath: string,
+  errors: string[]
+): RoutineSchedule | undefined {
+  if (schedule === undefined) {
+    errors.push(
+      `routine at ${routinePath} schedule must define exactly one of schedule.at or schedule.cron`
+    );
+    return undefined;
+  }
+
+  const at = dateStringField(schedule, "at");
+  const cron = stringField(schedule, "cron");
+  if ((at === undefined) === (cron === undefined)) {
+    errors.push(
+      `routine at ${routinePath} schedule must define exactly one of schedule.at or schedule.cron`
+    );
+    return undefined;
+  }
+
+  if (at !== undefined) {
+    if (Object.keys(schedule).some((key) => key !== "at")) {
+      errors.push(
+        `routine at ${routinePath} schedule.at cannot be combined with other schedule fields`
+      );
+      return undefined;
+    }
+    if (Number.isNaN(new Date(at).getTime())) {
+      errors.push(
+        `routine at ${routinePath} schedule.at must be a valid ISO 8601 date`
+      );
+      return undefined;
+    }
+    return { at };
+  }
+
+  if (Object.keys(schedule).some((key) => key !== "cron" && key !== "tz")) {
+    errors.push(
+      `routine at ${routinePath} schedule.cron supports only the optional schedule.tz field`
+    );
+    return undefined;
+  }
+  const configuredTimezone = stringField(schedule, "tz");
+  if (Object.hasOwn(schedule, "tz") && configuredTimezone === undefined) {
+    errors.push(
+      `routine at ${routinePath} schedule.tz must be a non-empty IANA timezone`
+    );
+    return undefined;
+  }
+  const tz = configuredTimezone ?? "Etc/UTC";
+  if (!isIanaTimezone(tz)) {
+    errors.push(
+      `routine at ${routinePath} schedule.tz "${tz}" is not a valid IANA timezone`
+    );
+    return undefined;
+  }
+  try {
+    return { cron: normalizeRoutineCron(cron!), tz };
+  } catch (error) {
+    errors.push(
+      `routine at ${routinePath} schedule.cron is invalid: ${errorMessage(error)}`
+    );
+    return undefined;
+  }
 }
 
 function parseFrontMatter(

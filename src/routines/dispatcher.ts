@@ -22,12 +22,15 @@ import type {
   RunControllerProvidersConfig
 } from "../lifecycle/run-controller.js";
 import type { RunStore } from "../run-store.js";
-import { evaluateRoutineSchedule } from "./schedule.js";
+import {
+  evaluateRoutineSchedule,
+  type RoutineScheduleEvaluation
+} from "./schedule.js";
 import {
   renderRoutinePrompt,
   RoutinePromptRenderError
 } from "./prompt-renderer.js";
-import type { RoutineStatus } from "./types.js";
+import type { RoutineSchedule, RoutineStatus } from "./types.js";
 import { createUlid } from "./ulid.js";
 import {
   prepareRoutineWorkspace as defaultPrepareRoutineWorkspace,
@@ -50,6 +53,7 @@ export type DispatchDueRoutinesInput = {
   ) => Promise<PreparedRoutineWorkspace>;
   projects: Map<string, RunControllerProjectConfig>;
   providersConfig: RunControllerProvidersConfig;
+  recomputeSchedulesFromNow?: boolean;
   runStore: RunStore;
   stateRoot: string;
 };
@@ -79,7 +83,10 @@ export async function dispatchDueRoutines(
     if (project.disabled === true) {
       continue;
     }
-    input.runStore.syncRoutines(project.name, project.routines ?? []);
+    input.runStore.syncRoutines(project.name, project.routines ?? [], {
+      now,
+      recomputeRecurring: input.recomputeSchedulesFromNow === true
+    });
   }
   input.runStore.pruneRoutinesForUnknownProjects(
     projects.map((project) => project.name)
@@ -94,11 +101,35 @@ export async function dispatchDueRoutines(
     })) {
       const evaluation = evaluateRoutineSchedule({
         lastFiredAt: routine.lastFiredAt,
+        nextFireAt: routine.nextFireAt,
         now,
-        schedule: { at: routine.scheduleAt },
+        schedule: routineSchedule(routine),
         state: routine.state
       });
       if (evaluation.kind !== "fire_now") {
+        continue;
+      }
+      if (
+        input.runStore.hasActiveRoutineFiring({
+          name: routine.name,
+          projectName: project.name
+        })
+      ) {
+        advanceSkippedRecurringRoutine(input.runStore, {
+          evaluation,
+          now,
+          projectName: project.name,
+          routineName: routine.name
+        });
+        input.logger?.info(
+          { project: project.name, routine: routine.name },
+          "symphonika routine firing skipped by overlap"
+        );
+        skipped.push({
+          projectName: project.name,
+          reason: "routine overlap",
+          routineName: routine.name
+        });
         continue;
       }
       const providerName = routine.provider ?? project.agent.provider;
@@ -120,6 +151,12 @@ export async function dispatchDueRoutines(
         project
       );
       if (capReason !== null) {
+        advanceSkippedRecurringRoutine(input.runStore, {
+          evaluation,
+          now,
+          projectName: project.name,
+          routineName: routine.name
+        });
         input.logger?.info(
           { project: project.name, reason: capReason, routine: routine.name },
           "symphonika routine firing skipped by concurrency cap"
@@ -147,8 +184,9 @@ export async function dispatchDueRoutines(
 
       const reEvaluation = evaluateRoutineSchedule({
         lastFiredAt: routineDetail.lastFiredAt,
+        nextFireAt: routineDetail.nextFireAt,
         now,
-        schedule: { at: routineDetail.scheduleAt },
+        schedule: routineSchedule(routineDetail),
         state: routineDetail.state
       });
       if (reEvaluation.kind !== "fire_now") {
@@ -164,6 +202,9 @@ export async function dispatchDueRoutines(
       const claimed = input.runStore.claimRoutineFiring({
         firedAt: now.toISOString(),
         firingId,
+        ...(reEvaluation.nextAt === undefined
+          ? {}
+          : { nextFireAt: reEvaluation.nextAt }),
         projectName: project.name,
         providerCommand,
         providerName,
@@ -367,6 +408,8 @@ async function prepareRoutineEvidence(input: {
       kind: routine.kind,
       name: routine.name,
       schedule_at: routine.scheduleAt,
+      schedule_cron: routine.scheduleCron,
+      schedule_tz: routine.scheduleTz,
       source_path: routine.sourcePath
     },
     template: routine.prompt,
@@ -412,6 +455,8 @@ async function prepareRoutineEvidence(input: {
             kind: routine.kind,
             name: routine.name,
             schedule_at: routine.scheduleAt,
+            schedule_cron: routine.scheduleCron,
+            schedule_tz: routine.scheduleTz,
             source_path: routine.sourcePath
           },
           template_content_hash: rendered.templateContentHash,
@@ -622,6 +667,41 @@ function syntheticRoutineIssueNumber(firingId: string): number {
     hash = (hash * 31 + char.charCodeAt(0)) | 0;
   }
   return -Math.max(1, Math.abs(hash));
+}
+
+function routineSchedule(routine: RoutineStatus): RoutineSchedule {
+  if (routine.scheduleCron !== null) {
+    return {
+      cron: routine.scheduleCron,
+      tz: routine.scheduleTz ?? "Etc/UTC"
+    };
+  }
+  if (routine.scheduleAt === null) {
+    throw new Error(
+      `routine ${routine.projectName}/${routine.name} has no persisted schedule`
+    );
+  }
+  return { at: routine.scheduleAt };
+}
+
+function advanceSkippedRecurringRoutine(
+  runStore: RunStore,
+  input: {
+    evaluation: Extract<RoutineScheduleEvaluation, { kind: "fire_now" }>;
+    now: Date;
+    projectName: string;
+    routineName: string;
+  }
+): void {
+  if (input.evaluation.nextAt === undefined) {
+    return;
+  }
+  runStore.advanceRecurringRoutine({
+    name: input.routineName,
+    nextFireAt: input.evaluation.nextAt,
+    projectName: input.projectName,
+    skippedAt: input.now.toISOString()
+  });
 }
 
 async function appendJsonl(filePath: string, value: unknown): Promise<void> {

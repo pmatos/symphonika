@@ -7,6 +7,7 @@ import type { Database as SqliteDatabase } from "better-sqlite3";
 import type { IssueSnapshot } from "./issue-polling.js";
 import { isPathInside } from "./path-safety.js";
 import type { AgentProviderName, NormalizedProviderEvent } from "./provider.js";
+import { nextRecurringFireAt } from "./routines/schedule.js";
 import type {
   RoutineDeclaration,
   RoutineFiringState,
@@ -443,9 +444,12 @@ type RoutineRow = {
   kind: RoutineKind;
   last_fired_at: string | null;
   name: string;
+  next_fire_at: string | null;
   project_name: string;
   provider_name: AgentProviderName | null;
   schedule_at: string;
+  schedule_cron: string | null;
+  schedule_tz: string | null;
   source_path: string;
   state: RoutineState;
   updated_at: string;
@@ -1156,23 +1160,42 @@ export class RunStore {
     return rows.map((row) => mapProjectStateRow(row));
   }
 
-  syncRoutines(projectName: string, routines: RoutineDeclaration[]): void {
+  syncRoutines(
+    projectName: string,
+    routines: RoutineDeclaration[],
+    options: { now?: Date; recomputeRecurring?: boolean } = {}
+  ): void {
     const now = timestamp();
+    const scheduleNow = options.now ?? new Date();
     const upsert = this.database.prepare(
       [
         "insert into routines (",
-        "project_name, name, source_path, kind, provider_name, schedule_at, prompt_body, state, created_at, updated_at",
+        "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, created_at, updated_at",
         ") values (",
-        "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @prompt_body, 'active', @created_at, @updated_at",
+        "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'active', @created_at, @updated_at",
         ")",
         "on conflict(project_name, name) do update set",
         "source_path = excluded.source_path,",
         "kind = excluded.kind,",
         "provider_name = excluded.provider_name,",
         "schedule_at = excluded.schedule_at,",
+        "schedule_cron = excluded.schedule_cron,",
+        "schedule_tz = excluded.schedule_tz,",
+        "next_fire_at = case",
+        "when @recompute_recurring = 1 and excluded.schedule_cron is not null then excluded.next_fire_at",
+        "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then excluded.next_fire_at",
+        "when routines.next_fire_at is null and routines.state != 'expired' then excluded.next_fire_at",
+        "else routines.next_fire_at end,",
         "prompt_body = excluded.prompt_body,",
-        // Preserve expired one-shots across daemon restarts and reloads.
-        "state = case when routines.state = 'expired' then routines.state else 'active' end,",
+        "last_fired_at = case",
+        "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then null",
+        "else routines.last_fired_at end,",
+        // Recurring schedules remain active; unchanged expired one-shots stay expired.
+        "state = case",
+        "when excluded.schedule_cron is not null then 'active'",
+        "when routines.schedule_at is not excluded.schedule_at then 'active'",
+        "when routines.state = 'expired' then 'expired'",
+        "else 'active' end,",
         "updated_at = excluded.updated_at"
       ].join(" ")
     );
@@ -1191,6 +1214,20 @@ export class RunStore {
           .run(projectName, ...names);
       }
       for (const routine of routines) {
+        const scheduleValues =
+          "cron" in routine.schedule
+            ? {
+                nextFireAt: nextRecurringFireAt(routine.schedule, scheduleNow),
+                scheduleAt: "",
+                scheduleCron: routine.schedule.cron,
+                scheduleTz: routine.schedule.tz
+              }
+            : {
+                nextFireAt: routine.schedule.at,
+                scheduleAt: routine.schedule.at,
+                scheduleCron: null,
+                scheduleTz: null
+              };
         upsert.run({
           created_at: now,
           kind: routine.kind,
@@ -1198,7 +1235,13 @@ export class RunStore {
           project_name: projectName,
           prompt_body: routine.prompt,
           provider_name: routine.provider,
-          schedule_at: routine.schedule.at,
+          next_fire_at: scheduleValues.nextFireAt,
+          recompute_recurring: options.recomputeRecurring === true ? 1 : 0,
+          // Existing databases have a NOT NULL schedule_at column. An empty
+          // legacy value identifies recurring rows; schedule_cron is canonical.
+          schedule_at: scheduleValues.scheduleAt,
+          schedule_cron: scheduleValues.scheduleCron,
+          schedule_tz: scheduleValues.scheduleTz,
           source_path: routine.sourcePath,
           updated_at: now
         });
@@ -1236,7 +1279,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select project_name, name, source_path, kind, provider_name, schedule_at, state, last_fired_at, created_at, updated_at",
+          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, last_fired_at, created_at, updated_at",
           "from routines",
           where,
           "order by project_name asc, name asc"
@@ -1261,7 +1304,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select project_name, name, source_path, kind, provider_name, schedule_at, state, last_fired_at, created_at, updated_at, prompt_body",
+          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, last_fired_at, created_at, updated_at, prompt_body",
           "from routines where project_name = ? and name = ? and state != 'inactive'"
         ].join(" ")
       )
@@ -1278,6 +1321,48 @@ export class RunStore {
       ),
       prompt: row.prompt_body
     };
+  }
+
+  hasActiveRoutineFiring(input: {
+    name: string;
+    projectName: string;
+  }): boolean {
+    const row = this.database
+      .prepare(
+        [
+          "select 1 from routine_firings",
+          "where project_name = ? and routine_name = ?",
+          "and state in ('queued', 'preparing_workspace', 'running')",
+          "limit 1"
+        ].join(" ")
+      )
+      .get(input.projectName, input.name);
+    return row !== undefined;
+  }
+
+  advanceRecurringRoutine(input: {
+    nextFireAt: string;
+    name: string;
+    projectName: string;
+    skippedAt: string;
+  }): boolean {
+    const result = this.database
+      .prepare(
+        [
+          "update routines set next_fire_at = @next_fire_at, updated_at = @updated_at",
+          "where project_name = @project_name and name = @name",
+          "and state = 'active' and schedule_cron is not null",
+          "and next_fire_at is not null and next_fire_at <= @skipped_at"
+        ].join(" ")
+      )
+      .run({
+        name: input.name,
+        next_fire_at: input.nextFireAt,
+        project_name: input.projectName,
+        skipped_at: input.skippedAt,
+        updated_at: timestamp()
+      });
+    return result.changes > 0;
   }
 
   markRoutineExpired(input: {
@@ -1332,6 +1417,7 @@ export class RunStore {
   claimRoutineFiring(input: {
     firedAt: string;
     firingId: string;
+    nextFireAt?: string;
     projectName: string;
     providerCommand: string;
     providerName: AgentProviderName;
@@ -1349,13 +1435,22 @@ export class RunStore {
         .prepare(
           [
             "update routines set",
-            "state = 'expired',",
-            "last_fired_at = ?,",
-            "updated_at = ?",
-            "where project_name = ? and name = ? and state = 'active'"
+            "state = case when schedule_cron is null then 'expired' else 'active' end,",
+            "next_fire_at = case when schedule_cron is null then null else @next_fire_at end,",
+            "last_fired_at = @fired_at,",
+            "updated_at = @updated_at",
+            "where project_name = @project_name and name = @routine_name and state = 'active'",
+            "and next_fire_at is not null and next_fire_at <= @fired_at",
+            "and (schedule_cron is null or @next_fire_at is not null)"
           ].join(" ")
         )
-        .run(input.firedAt, timestamp(), input.projectName, input.routineName);
+        .run({
+          fired_at: input.firedAt,
+          next_fire_at: input.nextFireAt ?? null,
+          project_name: input.projectName,
+          routine_name: input.routineName,
+          updated_at: timestamp()
+        });
       if (result.changes === 0) {
         throw new RoutineAlreadyClaimedError();
       }
@@ -2292,6 +2387,58 @@ export class RunStore {
     return swept;
   }
 
+  reconcileLeakedRoutineFirings(reason = "leaked_routine_firing"): {
+    firingId: string;
+    projectName: string;
+    routineName: string;
+    previousState: RoutineFiringState;
+  }[] {
+    // A daemon crash or kill can leave a routine firing durably in queued,
+    // preparing_workspace, or running. markLeakedRunsAsStale only sweeps the
+    // runs table, so without this reconciliation the orphaned firing keeps
+    // hasActiveRoutineFiring returning true forever, permanently skipping every
+    // future recurring tick for that routine. routine_firings has no 'stale'
+    // state, so leaked rows are settled as 'failed' with a distinct
+    // terminal_reason to remove them from the active set.
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, routine_name, state from routine_firings",
+          "where state in ('queued','preparing_workspace','running')"
+        ].join(" ")
+      )
+      .all() as {
+      id: string;
+      project_name: string;
+      routine_name: string;
+      state: RoutineFiringState;
+    }[];
+    const swept = rows.map((row) => ({
+      firingId: row.id,
+      previousState: row.state,
+      projectName: row.project_name,
+      routineName: row.routine_name
+    }));
+    const update = this.database.prepare(
+      [
+        "update routine_firings set",
+        "state = 'failed',",
+        "terminal_reason = ?,",
+        "updated_at = ?",
+        "where id = ?"
+      ].join(" ")
+    );
+    const apply = this.database.transaction(() => {
+      for (const entry of swept) {
+        const updatedAt = timestamp();
+        update.run(reason, updatedAt, entry.firingId);
+        this.recordRoutineFiringTransition(entry.firingId, "failed", updatedAt);
+      }
+    });
+    apply();
+    return swept;
+  }
+
   failLegacyInputRequiredRuns(
     options: { graceMs?: number; now?: Date } = {}
   ): { runId: string; projectName: string; issueNumber: number }[] {
@@ -2491,6 +2638,9 @@ export class RunStore {
         kind text not null,
         provider_name text,
         schedule_at text not null,
+        schedule_cron text,
+        schedule_tz text,
+        next_fire_at text,
         prompt_body text not null,
         state text not null,
         last_fired_at text,
@@ -2558,6 +2708,9 @@ export class RunStore {
       ["attempts", "workflow_graph_path", "text"],
       ["watchdog_samples", "normalized_log_path", "text not null default ''"],
       ["watchdog_samples", "last_message_at", "text"],
+      ["routines", "schedule_cron", "text"],
+      ["routines", "schedule_tz", "text"],
+      ["routines", "next_fire_at", "text"],
       ["routine_firings", "prompt_path", "text"],
       ["routine_firings", "raw_log_path", "text"],
       ["routine_firings", "normalized_log_path", "text"]
@@ -3003,14 +3156,13 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
     kind: row.kind,
     lastFiredAt: row.last_fired_at ?? null,
     name: row.name,
-    nextFireAt:
-      row.state === "active" && row.last_fired_at === null
-        ? row.schedule_at
-        : null,
+    nextFireAt: row.state === "active" ? row.next_fire_at : null,
     projectName: row.project_name,
     provider: row.provider_name ?? null,
     pullRequestNumbers: [],
-    scheduleAt: row.schedule_at,
+    scheduleAt: row.schedule_at.length === 0 ? null : row.schedule_at,
+    scheduleCron: row.schedule_cron ?? null,
+    scheduleTz: row.schedule_tz ?? null,
     sourcePath: row.source_path,
     state: row.state
   };

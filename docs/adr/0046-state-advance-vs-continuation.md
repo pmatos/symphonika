@@ -55,6 +55,26 @@ State advance:
   remain the fresh-dispatch guard that prevents a second daemon polling tick from claiming the
   same issue mid-walk.
 
+The label-immunity bit (`respectsIssueLabels = false`) covers the entire in-flight walk of a
+`raw_fsm` run, **including its fresh initial state**, not only state-advance continuations. A
+`raw_fsm` agent state legitimately removes the eligibility label (`agent-ready`) as its terminal
+action — the `implement` state opens the PR, drops `agent-ready`, and exits so the run parks into
+the label-immune `wait_for_pr` state. If the initial state kept respecting labels, the daemon tick
+would run `reconcileActiveRuns` (which re-checks eligibility) while the provider is still draining,
+see `agent-ready` gone, and cancel the finished run with `ELIGIBILITY_LOSS` before it could park —
+orphaning the PR it just opened (issue #258). Two structural facts make this the only workable fix:
+`runAttemptLifecycle` unregisters the in-flight slot as the *first* action in its `finally`, so the
+run entry exists only while the provider is live (there is no "provider exited but still active"
+window to gate on); and the park itself happens asynchronously in the provider-exit path, not inside
+the reconcile pass, so reordering work within a tick cannot help. Extending the existing
+label-immunity flag to fresh `raw_fsm` runs closes the window uniformly.
+
+The trade-off: an operator can no longer abort a fresh `raw_fsm` run mid-flight by pulling
+`agent-ready` (or adding a `labels_none` entry such as `needs-human`) — the same stance already
+accepted for continuations. Aborts go through closing the issue (still honored as `CLOSED_ISSUE`) or
+an operator cancel. Markdown compatibility-graph workflows are unaffected: they are not `raw_fsm`,
+so their initial fresh dispatch keeps the label-driven behavior.
+
 Label-driven continuations remain a distinct concept. They keep the cap, the eligibility re-check,
 and the `executeContinuation` path because their purpose is to re-dispatch the same workflow when
 an operator (or the workflow itself) decides the issue should run again, not to advance the state

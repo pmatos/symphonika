@@ -46,7 +46,7 @@ export async function prepareRoutineWorkspace(
           "sym",
           slugifyWorkspaceSegment(input.project.name, "project"),
           "routine",
-          input.routineName,
+          slugifyWorkspaceSegment(input.routineName, "routine"),
           input.firingId.slice(0, 10)
         ].join("/")
       : input.project.workspace.git.base_branch;

@@ -64,6 +64,39 @@ describe("Routine workspace preparation", () => {
       git(["-C", prepared.workspacePath, "show", "--no-patch", "--format=%s"])
     ).resolves.toBe("Initial commit");
   });
+
+  it("slugifies git-ref-hostile routine names into valid branch refs", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+
+    const prepared = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+      kind: "git",
+      project: {
+        name: "alpha",
+        workspace: {
+          git: { base_branch: "main", remote: remotePath },
+          root: workspaceRoot
+        }
+      },
+      routineName: "deps..update"
+    });
+
+    expect(prepared.branchName).toBe(
+      "sym/alpha/routine/deps-update/01JABCDEFG"
+    );
+    expect(prepared.branchRef).toBe(
+      "refs/heads/sym/alpha/routine/deps-update/01JABCDEFG"
+    );
+    await expect(git(["check-ref-format", prepared.branchRef])).resolves.toBe(
+      ""
+    );
+    await expect(
+      git(["-C", prepared.workspacePath, "rev-parse", "--abbrev-ref", "HEAD"])
+    ).resolves.toBe(prepared.branchName);
+  });
 });
 
 async function createRemoteRepository(root: string): Promise<string> {

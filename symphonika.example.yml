@@ -29,6 +29,10 @@ projects:
     # per-project shared bare-repo fetch lock — see ADR 0053. Omit (or
     # leave commented) to keep the default.
     # max_in_flight: 1
+    # Verification-heavy Projects can lengthen the daemon Watchdog grace.
+    # enabled, sample_interval_seconds, and mtime_ignore remain daemon-scoped.
+    # watchdog:
+    #   grace_minutes: 180
     tracker:
       kind: github
       owner: pmatos

@@ -5,7 +5,11 @@ import path from "node:path";
 import type { Logger } from "pino";
 
 import type { NormalizedProviderEvent } from "../provider.js";
-import type { WatchdogConfig } from "../reload.js";
+import {
+  resolveWatchdogConfig,
+  type WatchdogConfig,
+  type WatchdogServiceConfig
+} from "../reload.js";
 import type {
   RunStore,
   WatchdogCandidateRun,
@@ -22,6 +26,7 @@ export type ReconcileWatchdogInput = {
   config: WatchdogConfig;
   logger?: Logger;
   now?: () => Date;
+  projects?: WatchdogServiceConfig["projects"];
   runStore: RunStore;
 };
 
@@ -58,13 +63,18 @@ export async function reconcileWatchdog(
 
   const now = input.now?.() ?? new Date();
   const sampledAt = now.toISOString();
+  const serviceConfig: WatchdogServiceConfig = {
+    projects: input.projects ?? [],
+    watchdog: input.config
+  };
   let sampled = 0;
   let terminated = 0;
 
   for (const run of input.runStore.listWatchdogCandidateRuns()) {
+    const config = resolveWatchdogConfig(serviceConfig, run.projectName);
     const previous = input.runStore.getWatchdogSample(run.runId);
     const next = await sampleRun({
-      mtimeIgnore: input.config.mtimeIgnore,
+      mtimeIgnore: config.mtimeIgnore,
       previous,
       run,
       runStore: input.runStore,
@@ -96,10 +106,7 @@ export async function reconcileWatchdog(
     if (progress || idleSince === null) {
       continue;
     }
-    if (
-      now.getTime() - Date.parse(idleSince) <
-      input.config.graceMinutes * 60_000
-    ) {
+    if (now.getTime() - Date.parse(idleSince) < config.graceMinutes * 60_000) {
       continue;
     }
 
@@ -226,11 +233,15 @@ async function readNormalizedEventsSince(
   }
 
   let contents = "";
-  for await (const chunk of createReadStream(filePath, {
-    encoding: "utf8",
-    start
-  })) {
-    contents += chunk;
+  try {
+    for await (const chunk of createReadStream(filePath, {
+      encoding: "utf8",
+      start
+    })) {
+      contents += chunk;
+    }
+  } catch {
+    return { events: [], offset };
   }
   const events = parseJsonlEvents(contents);
   return { events, offset: size };

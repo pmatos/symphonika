@@ -129,6 +129,12 @@ One durable execution attempt of a Routine, with its own workspace, provider log
 and lifecycle state.
 _Avoid_: run when specifically referring to non-issue scheduled execution
 
+**Routine Pull Request**:
+An informational association discovered from a succeeded `kind: git` Routine Firing's deterministic
+branch. It records the PR number and head SHA but never enters PR Follow-up, review re-dispatch, or
+auto-merge.
+_Avoid_: PR Follow-up when referring to Routine-opened pull requests
+
 **Run Lifecycle**:
 The stateful progression of one Run from dispatch selection through provider execution, scheduling,
 waiting, cancellation, or terminal labels.
@@ -222,6 +228,7 @@ _Avoid_: chat session
 - A **Run** can succeed even when its **Issue** remains open
 - A **Routine** belongs to one **Project** and may create zero or more **Routine Firings**
 - A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
+- A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
 - A **Watchdog** samples a **Progress Signal** for each active **Run** during daemon reconciliation and may mark no-progress work `stale`, preserving **Workspace** contents
 - A **Continuation** is capped so an eligible issue cannot loop forever

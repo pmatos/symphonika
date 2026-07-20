@@ -74,6 +74,8 @@ journalctl --user -u symphonika -f
 
 `service install` writes `symphonika.service` and `symphonika.slice` into `~/.config/systemd/user/` and runs `systemctl --user daemon-reload` for you. It derives the unit from the running process — the `node` runtime executing the resolved `dist/cli.js` — so the unit matches your install (npm global, nvm, pnpm, or a source checkout) instead of a hardcoded bin path. Re-run it after a `node` upgrade to refresh a version-pinned path; pass `--force` to overwrite existing units or `--print` to review the generated units without writing them.
 
+The generated unit uses the daemon's normal config discovery by default. To run the service with a non-default config, install it with `symphonika service install --config <path>`; relative paths are resolved when the unit is generated and the absolute path is baked into `ExecStart`.
+
 What the generated units give you:
 
 - **`symphonika.slice`** owns the daemon and every process it spawns. `MemoryHigh=` / `MemoryMax=` cap the whole tree so a runaway tool is killed *inside* the slice instead of triggering a global OOM. The generated caps assume a large workstation (see [`systemd/symphonika.slice`](systemd/symphonika.slice)); edit the installed `~/.config/systemd/user/symphonika.slice` to match your host (re-running `service install --force` overwrites it).

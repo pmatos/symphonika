@@ -22,6 +22,36 @@ afterEach(async () => {
 });
 
 describe("RoutineDeclarationLoader", () => {
+  it("parses a Markdown kind: git routine", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "dependency-update.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: dependency-update",
+        "schedule:",
+        "  at: 2026-05-22T10:00:00.000Z",
+        "kind: git",
+        "---",
+        "Update dependencies on {{branch.name}}.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.routine).toEqual({
+      kind: "git",
+      name: "dependency-update",
+      prompt: "Update dependencies on {{branch.name}}.\n",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: routinePath
+    });
+  });
+
   it("parses a Markdown kind: report routine with one-shot at schedule", async () => {
     const root = await makeTempRoot();
     const routinePath = path.join(root, "weekly-report.md");

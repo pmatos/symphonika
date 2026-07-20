@@ -116,8 +116,8 @@ function formatRoutines(routines: RoutineStatus[]): string[] {
     return ["│   No routines configured"];
   }
   return [
-    "│   PROJECT      ROUTINE              STATE     NEXT_FIRE_AT              LAST_FIRED_AT",
-    "│   --------------------------------------------------------------------------------",
+    "│   PROJECT      ROUTINE              STATE     NEXT_FIRE_AT              LAST_FIRED_AT             PRS",
+    "│   ------------------------------------------------------------------------------------------------",
     ...routines.map((routine) =>
       [
         "│  ",
@@ -129,10 +129,18 @@ function formatRoutines(routines: RoutineStatus[]): string[] {
         " ",
         pad(truncate(routine.nextFireAt ?? "-", 25), 25),
         " ",
-        truncate(routine.lastFiredAt ?? "-", 25)
+        pad(truncate(routine.lastFiredAt ?? "-", 25), 25),
+        " ",
+        formatRoutinePullRequestNumbers(routine.pullRequestNumbers)
       ].join("")
     )
   ];
+}
+
+function formatRoutinePullRequestNumbers(numbers: number[]): string {
+  return numbers.length === 0
+    ? "-"
+    : numbers.map((number) => `#${number}`).join(",");
 }
 
 export function summarizeDashboardEvent(

@@ -12,6 +12,25 @@ import path from "node:path";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+const normalizedLogRemoval = vi.hoisted(() => ({
+  filePath: null as string | null
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    stat: async (filePath: string) => {
+      const result = await actual.stat(filePath);
+      if (filePath === normalizedLogRemoval.filePath) {
+        normalizedLogRemoval.filePath = null;
+        await actual.unlink(filePath);
+      }
+      return result;
+    }
+  };
+});
+
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
 import {
   reconcileWatchdog,
@@ -34,6 +53,7 @@ async function makeTempRoot(): Promise<string> {
 }
 
 afterEach(async () => {
+  normalizedLogRemoval.filePath = null;
   await Promise.all(
     tempRoots
       .splice(0)
@@ -232,6 +252,78 @@ describe("reconcileWatchdog", () => {
     }
   });
 
+  it("continues sampling when a normalized log disappears after stat", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const removedLogPath = path.join(root, "a.normalized.jsonl");
+    const laterLogPath = path.join(root, "b.normalized.jsonl");
+    await writeFile(
+      removedLogPath,
+      JSON.stringify({ type: "rate_limit_updated" }) + "\n"
+    );
+    await writeFile(laterLogPath, "");
+
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      seedRun(store, "run-a-removed-log");
+      seedRun(store, "run-b-later");
+      for (const [runId, normalizedLogPath] of [
+        ["run-a-removed-log", removedLogPath],
+        ["run-b-later", laterLogPath]
+      ] as const) {
+        store.updateRunEvidence(runId, {
+          branchName: `sym/symphonika/${runId}`,
+          branchRef: `refs/heads/sym/symphonika/${runId}`,
+          issueSnapshotPath: path.join(root, `${runId}-issue.json`),
+          metadataPath: path.join(root, `${runId}-metadata.json`),
+          normalizedLogPath,
+          promptPath: path.join(root, `${runId}-prompt.md`),
+          rawLogPath: path.join(root, `${runId}-raw.jsonl`),
+          workflowGraphPath: path.join(root, `${runId}-workflow.json`),
+          workspacePath
+        });
+        store.updateRunState(runId, "running");
+      }
+      const priorOffset = 1;
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T09:59:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: priorOffset,
+        normalizedLogPath: removedLogPath,
+        outputTokensTotal: 0,
+        runId: "run-a-removed-log",
+        sampledAt: "2026-05-22T09:59:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
+      });
+      normalizedLogRemoval.filePath = removedLogPath;
+
+      await expect(
+        reconcileWatchdog({
+          activeRuns: new ActiveRunRegistry(),
+          config: {
+            enabled: true,
+            graceMinutes: 30,
+            mtimeIgnore: [],
+            sampleIntervalSeconds: 60
+          },
+          logger,
+          now: () => new Date("2026-05-22T10:00:00.000Z"),
+          runStore: store
+        })
+      ).resolves.toEqual({ sampled: 2, terminated: 0 });
+
+      expect(
+        store.getWatchdogSample("run-a-removed-log")?.normalizedLogOffset
+      ).toBe(priorOffset);
+      expect(store.getWatchdogSample("run-b-later")).toBeDefined();
+    } finally {
+      store.close();
+    }
+  });
+
   it("marks a still-idle active run stale with no_progress and cancels it", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -328,6 +420,68 @@ describe("reconcileWatchdog", () => {
       });
       expect(cancel).toHaveBeenCalledOnce();
       expect(activeRuns.get("run-idle")?.cancelReason).toBe("no_progress");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("uses the Project grace override when deciding whether an idle run is stale", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const normalizedLogPath = path.join(root, "provider.normalized.jsonl");
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      seedRun(store, "run-vow", "vow");
+      store.updateRunEvidence("run-vow", {
+        branchName: "sym/vow/200-watchdog",
+        branchRef: "refs/heads/sym/vow/200-watchdog",
+        issueSnapshotPath: path.join(root, "issue.json"),
+        metadataPath: path.join(root, "metadata.json"),
+        normalizedLogPath,
+        promptPath: path.join(root, "prompt.md"),
+        rawLogPath: path.join(root, "raw.jsonl"),
+        workflowGraphPath: path.join(root, "workflow.json"),
+        workspacePath
+      });
+      store.updateRunState("run-vow", "running");
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T09:00:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath,
+        outputTokensTotal: 0,
+        runId: "run-vow",
+        sampledAt: "2026-05-22T09:00:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
+      });
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel,
+        issueNumber: 198,
+        projectName: "vow",
+        runId: "run-vow"
+      });
+
+      await reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          mtimeIgnore: [],
+          sampleIntervalSeconds: 60
+        },
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        projects: [{ name: "vow", watchdog: { graceMinutes: 180 } }],
+        runStore: store
+      });
+
+      expect(store.getRun("run-vow")?.state).toBe("running");
+      expect(cancel).not.toHaveBeenCalled();
     } finally {
       store.close();
     }
@@ -1084,7 +1238,11 @@ describe("reconcileWatchdog", () => {
   });
 });
 
-function seedRun(store: RunStore, id: string): void {
+function seedRun(
+  store: RunStore,
+  id: string,
+  projectName = "symphonika"
+): void {
   store.createRun({
     id,
     issue: {
@@ -1099,7 +1257,7 @@ function seedRun(store: RunStore, id: string): void {
       updated_at: "2026-05-22T09:00:00.000Z",
       url: "https://example.test/198"
     },
-    projectName: "symphonika",
+    projectName,
     providerCommand: "codex fake",
     providerName: "codex"
   });

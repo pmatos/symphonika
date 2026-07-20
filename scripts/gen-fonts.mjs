@@ -18,13 +18,28 @@ import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const WEIGHTS = ["400", "500", "600"];
 // Pinned so regeneration is reproducible; bump to adopt a newer Fontsource build.
 const FONT_VERSION = "5.2.7";
 const CDN = `https://cdn.jsdelivr.net/fontsource/fonts/ibm-plex-mono@${FONT_VERSION}`;
+// Full digests for the exact Fontsource release artifacts. Update these only
+// after reviewing the new font bytes when bumping FONT_VERSION.
+const FONT_SOURCES = [
+  {
+    weight: "400",
+    sha256: "08949f728dc52d528e69b1667d15c89a5686a4ee9a296ff90983985f99c380f7"
+  },
+  {
+    weight: "500",
+    sha256: "01d285447409c8a588692162439a038b8cbd7871309ee20267b0d2d91c6e8e22"
+  },
+  {
+    weight: "600",
+    sha256: "0d1f0b8d0722224e32e9f28261bdc86c79115be73444ae5eceb73976a1bcdf83"
+  }
+];
 const OUT = fileURLToPath(new URL("../src/http/fonts.ts", import.meta.url));
 
-async function fetchWoff2(weight) {
+async function fetchWoff2({ weight, sha256: expectedSha256 }) {
   const url = `${CDN}/latin-${weight}-normal.woff2`;
   const res = await fetch(url);
   if (!res.ok) {
@@ -34,16 +49,23 @@ async function fetchWoff2(weight) {
   if (bytes.subarray(0, 4).toString("latin1") !== "wOF2") {
     throw new Error(`fetched ${url} is not a woff2 file`);
   }
-  return bytes;
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  if (sha256 !== expectedSha256) {
+    throw new Error(
+      `${url} SHA-256 mismatch: expected ${expectedSha256}, got ${sha256}`
+    );
+  }
+  return { bytes, sha256 };
 }
 
 const fonts = [];
-for (const weight of WEIGHTS) {
-  const bytes = await fetchWoff2(weight);
+for (const source of FONT_SOURCES) {
+  const { weight } = source;
+  const { bytes, sha256 } = await fetchWoff2(source);
   fonts.push({
     weight,
     base64: bytes.toString("base64"),
-    hash: createHash("sha256").update(bytes).digest("hex").slice(0, 8)
+    hash: sha256.slice(0, 8)
   });
   console.log(
     `fetched ${weight}: ${bytes.length} bytes, hash ${fonts.at(-1).hash}`
@@ -139,5 +161,7 @@ L.push("  return bytes;");
 L.push("}");
 L.push("");
 
+// Every remote payload reaching this sink matched its pinned full SHA-256 above.
+// codeql[js/http-to-file-access]
 writeFileSync(OUT, L.join("\n"));
 console.log(`wrote ${OUT}`);

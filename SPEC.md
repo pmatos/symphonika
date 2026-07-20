@@ -175,7 +175,7 @@ Markdown routine files with YAML front matter:
 
 - `name`
 - exactly one schedule shape: `schedule.at` or `schedule.cron` with optional `schedule.tz`
-- `kind: report`
+- `kind: report` or `kind: git`
 - optional `provider`
 
 Recurring schedules use five-field POSIX cron. They accept the `hourly`, `daily`, `weekly`,
@@ -188,9 +188,10 @@ segment because routine firing workspaces live under `<workspace.root>/routines/
 ### 4.13 Routine Firing
 
 A Routine Firing is one durable execution of a Routine. It records the Routine, Project, provider,
-workspace path, prompt evidence, provider logs, terminal reason, and lifecycle state. A one-shot
-`schedule.at` Routine becomes `expired` after its firing is claimed. A recurring Routine remains
-active and advances to its next clock event after every firing.
+workspace path, prompt evidence, provider logs, terminal reason, lifecycle state, and any pull
+requests discovered from a `kind: git` firing branch. A one-shot `schedule.at` Routine becomes
+`expired` after its firing is claimed and must not fire again on daemon restart. A recurring Routine
+remains active and advances to its next clock event after every firing.
 
 ## 5. Config Files
 
@@ -282,12 +283,37 @@ projects:
 
 The bootstrap slice must use this final multi-project shape even with one configured Project.
 
+A Project may override only `watchdog.grace_minutes` with a positive integer. It inherits
+`watchdog.enabled`, `watchdog.sample_interval_seconds`, and `watchdog.mtime_ignore` from daemon
+scope, so a Project can lengthen its grace window but cannot opt into a daemon-disabled Watchdog.
+Project overrides are part of the defensive Service Config reload snapshot: any invalid value or
+unknown key rejects the candidate snapshot for all Projects and leaves the last known-good snapshot
+live.
+
 ### 5.2 Workflow Contract
 
 Each Project must reference a valid `WORKFLOW.md`.
 
 `WORKFLOW.md` is reloadable and repository-owned. It contains the prompt body and may contain
 optional YAML front matter for prompt-adjacent execution policy.
+
+Markdown Workflow Contract front matter may declare repository-owned Watchdog evidence noise as
+workspace-relative directory paths:
+
+```yaml
+---
+evidence:
+  ignore:
+    - vendor/
+    - out/
+---
+```
+
+Each `evidence.ignore` entry must be a non-empty string, must not start with `/`, and must not
+contain `..`. The list is additive to the Watchdog's built-in directory excludes; it cannot disable
+them. Invalid entries make the Workflow Contract invalid through the normal doctor and defensive
+reload surfaces. Unlike the rendered prompt captured for an attempt, the current valid
+`evidence.ignore` policy is resolved for active Runs on every Watchdog reconciliation tick.
 
 Workflow contracts are re-read as part of the daemon's defensive service-config reload. A valid
 workflow edit applies to future attempts. In-flight attempts keep the rendered prompt and workflow
@@ -321,7 +347,7 @@ Available top-level objects:
 Symphonika prepends a standard autonomy preamble to every rendered workflow prompt.
 
 Routine prompt rendering uses the same strict templating rules and the same standard autonomy
-preamble. For `kind: report`, available top-level objects are:
+preamble. For every Routine kind, available top-level objects are:
 
 - `project`
 - `workspace`
@@ -329,8 +355,9 @@ preamble. For `kind: report`, available top-level objects are:
 - `routine`
 - `firing`
 
-`issue`, `run`, and `branch` are unavailable to routine prompts. Referencing any of them fails
-rendering with terminal reason `prompt_render_error`.
+`kind: git` additionally exposes `branch.name` and `branch.ref`. `branch` is unavailable to
+`kind: report`; `issue` and `run` are unavailable to every Routine kind. Referencing an unavailable
+object fails rendering with terminal reason `prompt_render_error`.
 
 The preamble tells the agent:
 
@@ -552,13 +579,22 @@ On each daemon tick, Symphonika evaluates loaded active Routines. `ScheduleEvalu
 - recurring five-field cron evaluated in the Routine's IANA timezone, returning the next fire time
   strictly after `now`
 
-When a Routine fires, Symphonika allocates a ULID firing id, prepares a workspace at
-`<workspace.root>/routines/<routine-name>/<firing-id>/` on the Project base branch, renders the
-routine prompt, runs the configured provider, and records a `routine_firings` row. One-shot Routines
-become `expired`; recurring Routines remain active and atomically advance `next_fire_at` before the
-provider executes, so successful and failed firings both leave the next clock event visible.
-Routine Firings use states `queued`, `preparing_workspace`, `running`, `succeeded`, `failed`, and
-`cancelled`.
+When a Routine fires, Symphonika allocates a ULID firing id and prepares a workspace at
+`<workspace.root>/routines/<routine-name>/<firing-id>/`. A `kind: report` workspace is detached at
+the Project base branch. A `kind: git` workspace is checked out on
+`sym/<project>/routine/<routine-name>/<first-10-firing-id-chars>`, created from the Project base.
+Symphonika renders the routine prompt, runs the configured provider, and records a `routine_firings`
+row. One-shot Routines become `expired`; recurring Routines remain active and atomically advance
+`next_fire_at` before the provider executes, so successful and failed firings both leave the next
+clock event visible. Routine Firings use states `queued`, `preparing_workspace`, `running`,
+`succeeded`, `failed`, and `cancelled`.
+
+For `kind: report`, provider exit code 0 succeeds without requiring commits. For `kind: git`, exit
+code 0 applies the same commits-ahead-of-base inspection as §12.1: zero commits fails with
+`no_workspace_changes`, inspection failure fails with `workspace_inspection_failed`, and one or
+more commits succeeds. On the succeeded transition, Symphonika lists every open pull request whose
+head is the firing branch and records its PR number and head SHA. Routine PR discovery is
+informational only: it never enters PR Follow-up, review re-dispatch, or auto-merge.
 
 On daemon startup, recurring `next_fire_at` values are recomputed from the current clock. Missed
 ticks are not caught up in this slice. Timezone and DST behavior comes from `cron-parser`; the
@@ -648,6 +684,10 @@ tracks PRs that can be associated with a completed Symphonika Run by the determi
 Repository workflows and coding agents remain responsible for opening PRs, writing comments, and
 removing `agent-ready`; Symphonika records the discovered PR number and head SHA so the daemon can
 continue the same branch after review feedback.
+
+Routine PR discovery is a separate, read-only association. A succeeded `kind: git` Routine Firing
+records every open PR found on its deterministic firing branch, but those PRs are never candidates
+for review re-dispatch or auto-merge.
 
 The v1 trigger model is poll-based and runs on the daemon tick. Webhooks are deferred.
 
@@ -872,9 +912,11 @@ Sampling reads the Normalized Event Log only forward of the stored byte offset a
 Workspace tree once. A transient retry writes a new per-attempt log path, so the byte offset and the
 output-token baseline are reset whenever `normalized_log_path` changes and the new attempt's events
 are read from the start. The hard-coded v1 exclude set is `.git/`, `target/`, and `node_modules/`,
-skipped at the directory-entry level and not descended; `watchdog.mtime_ignore` adds
-workspace-relative globs whose matching files are dropped from the mtime walk at the individual-file
-level, so build-output churn (e.g. `*.log`) cannot keep a wedged Run alive.
+skipped at the directory-entry level and not descended. The current per-Project Workflow Contract's
+`evidence.ignore` list adds workspace-relative directory trees that are also skipped before descent;
+the hard-coded set always remains active. Separately, `watchdog.mtime_ignore` adds workspace-relative
+globs whose matching files are dropped from the mtime walk at the individual-file level, so
+build-output churn (e.g. `*.log`) cannot keep a wedged Run alive.
 
 A sampled Run is making progress when any one signal advances since the previous sample:
 
@@ -1005,6 +1047,7 @@ Bootstrap CLI commands:
 - `symphonika doctor [--config <path>]`
 - `symphonika init-project [--config <path>] --yes`
 - `symphonika daemon [--config <path>] [--port <port>]`
+- `symphonika service install [--config <path>] [--force] [--print] [--no-reload]`
 - `symphonika status [--config <path>] [--dashboard] [--watch] [--interval-ms <ms>] [--doctor-ttl-ms <ms>]`
 - `symphonika poll-now [--config <path>]`
 - `symphonika runs [--config <path>]`
@@ -1031,6 +1074,10 @@ config path and points the operator to `symphonika init`.
 `init` writes local files only and never mutates GitHub. `init-project` creates missing operational
 labels only after explicit confirmation.
 
+`service install --config <path>` resolves the selected Service Config to an absolute path and
+bakes it into the generated unit as `daemon --config <absolute-path>`. Omitting `--config` keeps the
+unit on the daemon's normal project-local/user-config discovery path.
+
 `status --dashboard` renders a compact terminal status dashboard from the run store and daemon
 `/api/status` endpoint. `status --watch` refreshes that read-only dashboard in place; it must not
 dispatch work or mutate GitHub state. Watch mode refreshes daemon status and run-store data every
@@ -1038,15 +1085,23 @@ frame, but caches the full `doctor` validation path for 5000 ms by default so pa
 not continuously re-run provider probes or GitHub validation reads. `--doctor-ttl-ms 0` disables that
 cache when an operator explicitly wants every frame to perform full validation.
 
-`routines` lists routine status per Project with `state`, `next_fire_at`, and `last_fired_at`.
+`routines` lists routine status per Project with `state`, `next_fire_at`, `last_fired_at`, and PR
+numbers discovered for the latest firing.
 
 `clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
 
 ## 14. Local Web UI and API
 
-v1 ships a local HTTP API and lightweight server-rendered operator pages.
+v1 ships a local HTTP API and server-rendered operator pages.
 
 Default bind host: `127.0.0.1`.
+
+Richer visual design of these server-rendered pages is part of the v1 bootstrap scope. It may
+include a cohesive design system, system-adaptive light and dark themes, responsive layouts,
+accessibility-focused styling, and a self-hosted webfont pipeline. This presentation scope does not
+create a separate frontend application or client build, and it does not broaden the web surface's
+allowed mutations. `PRODUCT.md` and `DESIGN.md` record the product and design-system contract; see
+ADR-0057 for the scope decision.
 
 The UI is primarily read-only. It shows:
 
@@ -1058,7 +1113,7 @@ The UI is primarily read-only. It shows:
 - raw log links or content
 - rendered prompt links
 - retry and continuation state
-- routines with `state`, `next_fire_at`, and `last_fired_at`
+- routines with `state`, `next_fire_at`, `last_fired_at`, and discovered PR numbers
 - a per-run interactive workflow graph
 
 Operator pages stay server-rendered and primarily read-only, but a page may embed a
@@ -1076,7 +1131,8 @@ The v1 mutating web actions are explicit active-run cancellation and a manual po
 uses the normal daemon scheduler path.
 
 The HTTP API exposes `GET /api/routines` with the same routine status shape as the CLI and
-dashboard.
+dashboard. `GET /api/routines/:id/firings` returns firing history and linked PRs for the named
+Routine; callers use `?project=<name>` to disambiguate the same Routine name across Projects.
 
 Label creation, stale-claim reset, and workspace cleanup remain CLI-only.
 
@@ -1104,7 +1160,6 @@ The bootstrap slice is accepted when:
 
 - remote workers
 - external sandboxing
-- richer UI
 - workspace cleanup commands
 - stale-claim TTLs
 - GitHub Projects board support

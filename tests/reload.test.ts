@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { RuntimeConfigReloader } from "../src/reload.js";
+import { resolveWatchdogConfig, RuntimeConfigReloader } from "../src/reload.js";
 
 const tempRoots: string[] = [];
 
@@ -25,7 +25,11 @@ afterEach(async () => {
 async function writeProjectConfig(
   root: string,
   workflowFileName: string,
-  options: { serviceLines?: string[]; workspaceHookLines?: string[] } = {}
+  options: {
+    projectLines?: string[];
+    serviceLines?: string[];
+    workspaceHookLines?: string[];
+  } = {}
 ): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(
@@ -45,6 +49,7 @@ async function writeProjectConfig(
       "  - name: symphonika",
       "    disabled: false",
       "    weight: 1",
+      ...(options.projectLines ?? []),
       "    tracker:",
       "      kind: github",
       "      owner: pmatos",
@@ -299,6 +304,143 @@ describe("RuntimeConfigReloader workflow validation", () => {
       "run_agent",
       "done"
     ]);
+  });
+
+  it("retains Workflow Contract evidence.ignore in the Project snapshot", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["vendor/", "out/"]',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    const workflow = reloader.projectsByName().get("symphonika")?.workflow;
+    if (workflow === undefined || !("expandedWorkflow" in workflow)) {
+      throw new Error("expected workflow snapshot to be an object");
+    }
+    expect(workflow.evidence.ignore).toEqual(["vendor/", "out/"]);
+  });
+
+  it("retains a disabled Project's evidence.ignore across the reload that disables it", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["vendor/", "out/"]',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n")
+    );
+
+    const configPath = path.join(root, "symphonika.yml");
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    const enabledWorkflow = reloader
+      .projectsByName()
+      .get("symphonika")?.workflow;
+    if (
+      enabledWorkflow === undefined ||
+      !("expandedWorkflow" in enabledWorkflow)
+    ) {
+      throw new Error(
+        "expected the enabled Project to load a workflow snapshot"
+      );
+    }
+    expect(enabledWorkflow.evidence.ignore).toEqual(["vendor/", "out/"]);
+
+    // Disabling a Project halts new dispatch but does not cancel an already
+    // active run; the Watchdog keeps sampling that run, so its evidence.ignore
+    // policy must survive the reload that flips the Project to disabled.
+    const disabledConfig = (await readFile(configPath, "utf8")).replace(
+      "disabled: false",
+      "disabled: true"
+    );
+    await writeFile(configPath, disabledConfig);
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({
+      ok: true,
+      usingLastKnownGood: false
+    });
+    const disabledWorkflow = reloader
+      .projectsByName()
+      .get("symphonika")?.workflow;
+    if (
+      disabledWorkflow === undefined ||
+      !("expandedWorkflow" in disabledWorkflow)
+    ) {
+      throw new Error(
+        "expected the disabled Project to retain its workflow snapshot"
+      );
+    }
+    expect(disabledWorkflow.evidence.ignore).toEqual(["vendor/", "out/"]);
+  });
+
+  it("keeps the last-known-good Workflow Contract when evidence.ignore becomes invalid", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    const workflowPath = path.join(root, "WORKFLOW.md");
+    await writeFile(
+      workflowPath,
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["vendor/"]',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const firstSnapshot = reloader.getSnapshot();
+
+    await writeFile(
+      workflowPath,
+      [
+        "---",
+        "evidence:",
+        '  ignore: ["../escape"]',
+        "---",
+        "Work on {{issue.title}}.",
+        ""
+      ].join("\n")
+    );
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()).toBe(firstSnapshot);
+    const workflow = reloader.projectsByName().get("symphonika")?.workflow;
+    if (workflow === undefined || !("expandedWorkflow" in workflow)) {
+      throw new Error("expected the last-known-good workflow snapshot");
+    }
+    expect(workflow.evidence.ignore).toEqual(["vendor/"]);
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: true
+    });
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      "evidence.ignore[0] must not contain .."
+    );
   });
 
   it("keeps the last-known-good snapshot when project detail validation fails on reload", async () => {
@@ -832,6 +974,191 @@ describe("RuntimeConfigReloader concurrency caps", () => {
 });
 
 describe("RuntimeConfigReloader watchdog config", () => {
+  it("resolves a Project grace override while inheriting daemon settings", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      projectLines: ["    watchdog:", "      grace_minutes: 180"],
+      serviceLines: [
+        "watchdog:",
+        "  enabled: true",
+        "  grace_minutes: 30",
+        "  sample_interval_seconds: 45",
+        "  mtime_ignore:",
+        '    - "*.log"'
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    const snapshot = await reloader.reload();
+
+    expect(snapshot).toBeDefined();
+    expect(resolveWatchdogConfig(snapshot!, "symphonika")).toEqual({
+      enabled: true,
+      graceMinutes: 180,
+      mtimeIgnore: ["*.log"],
+      sampleIntervalSeconds: 45
+    });
+  });
+
+  it("keeps every Project on the last-known-good snapshot when one override is invalid", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      projectLines: ["    watchdog:", "      grace_minutes: 180"],
+      serviceLines: [
+        "watchdog:",
+        "  enabled: true",
+        "  grace_minutes: 30",
+        "  sample_interval_seconds: 60"
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    const configPath = path.join(root, "symphonika.yml");
+    const oneProjectConfig = await readFile(configPath, "utf8");
+    const projectStart = oneProjectConfig.indexOf("  - name: symphonika");
+    const s11Project = oneProjectConfig
+      .slice(projectStart)
+      .replace("  - name: symphonika", "  - name: s11")
+      .replace("      grace_minutes: 180", "      grace_minutes: 30");
+    await writeFile(
+      configPath,
+      oneProjectConfig.replace("  - name: symphonika", "  - name: vow") +
+        s11Project
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    const firstSnapshot = await reloader.reload();
+    expect(resolveWatchdogConfig(firstSnapshot!, "vow").graceMinutes).toBe(180);
+
+    const validConfig = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      validConfig.replace("      grace_minutes: 30", "      grace_minutes: 1.5")
+    );
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()).toBe(firstSnapshot);
+    expect(
+      resolveWatchdogConfig(reloader.getSnapshot()!, "vow").graceMinutes
+    ).toBe(180);
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: true
+    });
+    expect(reloader.getStatus().errors.join("\n")).toMatch(
+      /projects\.1\.watchdog\.grace_minutes/
+    );
+  });
+
+  it("rejects the whole candidate snapshot on first load when one Project override is invalid", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      projectLines: ["    watchdog:", "      grace_minutes: 180"]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    const configPath = path.join(root, "symphonika.yml");
+    const oneProjectConfig = await readFile(configPath, "utf8");
+    const projectStart = oneProjectConfig.indexOf("  - name: symphonika");
+    const invalidSecondProject = oneProjectConfig
+      .slice(projectStart)
+      .replace("  - name: symphonika", "  - name: s11")
+      .replace("      grace_minutes: 180", "      grace_minutes: 0");
+    await writeFile(
+      configPath,
+      oneProjectConfig.replace("  - name: symphonika", "  - name: vow") +
+        invalidSecondProject
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    const snapshot = await reloader.reload();
+
+    // No prior snapshot exists, so one invalid override must reject the entire
+    // candidate: nothing goes live, not even the valid sibling "vow".
+    expect(snapshot).toBeUndefined();
+    expect(reloader.getSnapshot()).toBeUndefined();
+    expect(reloader.projectsByName().size).toBe(0);
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: false
+    });
+    expect(reloader.getStatus().errors.join("\n")).toMatch(
+      /projects\.1\.watchdog\.grace_minutes/
+    );
+  });
+
+  it("rejects unknown Project watchdog keys and keeps the last-known-good snapshot", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      projectLines: ["    watchdog:", "      grace_minutes: 180"]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    const configPath = path.join(root, "symphonika.yml");
+    const reloader = new RuntimeConfigReloader({ configPath });
+    const firstSnapshot = await reloader.reload();
+    const validConfig = await readFile(configPath, "utf8");
+
+    await writeFile(
+      configPath,
+      validConfig.replace(
+        "      grace_minutes: 180",
+        ["      grace_minutes: 180", "      sample_interval_seconds: 5"].join(
+          "\n"
+        )
+      )
+    );
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()).toBe(firstSnapshot);
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: true
+    });
+    expect(reloader.getStatus().errors.join("\n")).toMatch(
+      /projects\.0\.watchdog.*unrecognized key/i
+    );
+  });
+
+  it.each(["0", "-1", '"180"'])(
+    "rejects Project grace_minutes: %s",
+    async (graceMinutes) => {
+      const root = await makeTempRoot();
+      await writeProjectConfig(root, "WORKFLOW.md", {
+        projectLines: ["    watchdog:", `      grace_minutes: ${graceMinutes}`]
+      });
+      await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+      const reloader = new RuntimeConfigReloader({
+        configPath: path.join(root, "symphonika.yml")
+      });
+
+      await reloader.reload();
+
+      expect(reloader.getStatus().ok).toBe(false);
+      expect(reloader.getStatus().errors.join("\n")).toMatch(
+        /projects\.0\.watchdog\.grace_minutes/
+      );
+    }
+  );
+
+  it("keeps daemon disable authoritative over a Project grace override", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      projectLines: ["    watchdog:", "      grace_minutes: 180"],
+      serviceLines: ["watchdog:", "  enabled: false"]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    const snapshot = await reloader.reload();
+
+    expect(resolveWatchdogConfig(snapshot!, "symphonika")).toMatchObject({
+      enabled: false,
+      graceMinutes: 180
+    });
+  });
+
   it("defaults the daemon-scope watchdog settings", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "WORKFLOW.md");
@@ -848,6 +1175,10 @@ describe("RuntimeConfigReloader watchdog config", () => {
       mtimeIgnore: [],
       sampleIntervalSeconds: 60
     });
+    const snapshot = reloader.getSnapshot()!;
+    expect(resolveWatchdogConfig(snapshot, "symphonika")).toBe(
+      snapshot.watchdog
+    );
   });
 
   it("parses explicit daemon-scope watchdog settings", async () => {

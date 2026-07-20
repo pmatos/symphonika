@@ -73,12 +73,14 @@ describe("daemon watchdog", () => {
     }
   });
 
-  it("keeps a provider alive when workspace mtime is the only progress signal", async () => {
+  it("keeps a provider alive when an undeclared vendor directory is its only progress signal", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
     const prepared = preparedWorkspaceFixture(root);
-    await mkdir(prepared.workspacePath, { recursive: true });
-    const provider = workspaceMtimeProvider();
+    await mkdir(path.join(prepared.workspacePath, "vendor"), {
+      recursive: true
+    });
+    const provider = workspaceMtimeProvider("vendor/heartbeat.txt");
 
     const daemon = await startDaemon({
       agentProviders: { codex: provider },
@@ -97,6 +99,79 @@ describe("daemon watchdog", () => {
       const run = await getRun(daemon.url, "run-watchdog-mtime");
       expect(run).toMatchObject({
         id: "run-watchdog-mtime",
+        state: "running",
+        terminalReason: null
+      });
+    } finally {
+      provider.stopAll();
+      await daemon.stop();
+    }
+  });
+
+  it("stales a provider whose only workspace changes are ignored by its Workflow Contract", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root, { evidenceIgnore: ["vendor/"] });
+    const prepared = preparedWorkspaceFixture(root);
+    await mkdir(path.join(prepared.workspacePath, "vendor"), {
+      recursive: true
+    });
+    const provider = workspaceMtimeProvider("vendor/heartbeat.txt");
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => "run-watchdog-ignored-vendor",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: githubIssuesApiFixture(),
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: prepareWorkspace(prepared)
+    });
+
+    try {
+      const run = await waitForRunState(daemon.url, "stale", {
+        timeoutMs: 1_000
+      });
+      expect(run).toMatchObject({
+        id: "run-watchdog-ignored-vendor",
+        state: "stale",
+        terminalReason: "no_progress"
+      });
+    } finally {
+      provider.stopAll();
+      await daemon.stop();
+    }
+  });
+
+  it("keeps a provider alive when normal workspace changes accompany ignored output", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root, { evidenceIgnore: ["out/"] });
+    const prepared = preparedWorkspaceFixture(root);
+    await mkdir(path.join(prepared.workspacePath, "out"), { recursive: true });
+    const provider = workspaceMtimeProvider([
+      "out/generated.txt",
+      "heartbeat.txt"
+    ]);
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => "run-watchdog-ignored-out-with-progress",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: githubIssuesApiFixture(),
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: prepareWorkspace(prepared)
+    });
+
+    try {
+      await waitForRunState(daemon.url, "running");
+      await new Promise((resolve) => setTimeout(resolve, 220));
+      const run = await getRun(
+        daemon.url,
+        "run-watchdog-ignored-out-with-progress"
+      );
+      expect(run).toMatchObject({
         state: "running",
         terminalReason: null
       });
@@ -200,18 +275,24 @@ function idleUsageProvider(): ControllableProvider {
   });
 }
 
-function workspaceMtimeProvider(): ControllableProvider {
+function workspaceMtimeProvider(
+  relativePath: string | string[] = "heartbeat.txt"
+): ControllableProvider {
   return controllableProvider(async function* (
     input: ProviderRunInput,
     stopped: Promise<void>
   ): AsyncGenerator<ProviderEvent> {
-    const touched = path.join(input.workspacePath, "heartbeat.txt");
-    await writeFile(touched, "heartbeat\n");
+    const touched = (
+      Array.isArray(relativePath) ? relativePath : [relativePath]
+    ).map((entry) => path.join(input.workspacePath, entry));
+    await Promise.all(touched.map((entry) => writeFile(entry, "heartbeat\n")));
     let tick = 0;
     const interval = setInterval(() => {
       tick += 1;
       const next = new Date(Date.now() + tick * 1_000);
-      void utimes(touched, next, next);
+      for (const entry of touched) {
+        void utimes(entry, next, next);
+      }
     }, 15);
     try {
       await stopped;
@@ -351,7 +432,10 @@ function prepareWorkspace(prepared: PreparedIssueWorkspace) {
   };
 }
 
-async function writeProject(root: string): Promise<void> {
+async function writeProject(
+  root: string,
+  options: { evidenceIgnore?: string[] } = {}
+): Promise<void> {
   await writeFile(
     path.join(root, "symphonika.yml"),
     [
@@ -397,7 +481,17 @@ async function writeProject(root: string): Promise<void> {
   );
   await writeFile(
     path.join(root, "WORKFLOW.md"),
-    "Work on #{{issue.number}}.\n"
+    options.evidenceIgnore === undefined
+      ? "Work on #{{issue.number}}.\n"
+      : [
+          "---",
+          "evidence:",
+          "  ignore:",
+          ...options.evidenceIgnore.map((entry) => `    - ${entry}`),
+          "---",
+          "Work on #{{issue.number}}.",
+          ""
+        ].join("\n")
   );
 }
 

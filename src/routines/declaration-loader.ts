@@ -17,7 +17,7 @@ export type RoutineDeclarationLoadResult = {
 };
 
 const providerNames = new Set(["codex", "claude"]);
-const routineKinds = new Set(["report"]);
+const routineKinds = new Set(["git", "report"]);
 
 export async function loadRoutineDeclaration(
   routinePath: string
@@ -86,7 +86,7 @@ function parseRoutineDeclaration(
   if (kind === undefined) {
     errors.push(`routine at ${routinePath} kind is required`);
   } else if (!routineKinds.has(kind)) {
-    errors.push(`routine at ${routinePath} kind must be report`);
+    errors.push(`routine at ${routinePath} kind must be git or report`);
   }
 
   const providerValue = stringField(frontMatter, "provider");

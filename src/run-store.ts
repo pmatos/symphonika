@@ -12,6 +12,7 @@ import type {
   RoutineDeclaration,
   RoutineFiringState,
   RoutineKind,
+  RoutinePullRequestStatus,
   RoutineState,
   RoutineStatus
 } from "./routines/types.js";
@@ -128,6 +129,7 @@ export type RoutineFiringStatus = {
   projectName: string;
   provider: AgentProviderName;
   providerCommand: string;
+  pullRequests: RoutinePullRequestStatus[];
   routineName: string;
   state: RoutineFiringState;
   terminalReason: string | null;
@@ -458,6 +460,14 @@ type RoutineFiringRow = {
   terminal_reason: string | null;
   updated_at: string;
   workspace_path: string | null;
+};
+
+type RoutinePullRequestRow = {
+  firing_id: string;
+  head_sha: string;
+  pr_number: number;
+  project_name: string;
+  routine_name: string;
 };
 
 const PULL_REQUEST_DISCOVERY_LIMIT = 25;
@@ -1215,7 +1225,13 @@ export class RunStore {
           .join(" ")
       )
       .all(params) as RoutineRow[];
-    return rows.map((row) => mapRoutineRow(row));
+    return rows.map((row) => ({
+      ...mapRoutineRow(row),
+      pullRequestNumbers: this.latestRoutinePullRequestNumbers(
+        row.project_name,
+        row.name
+      )
+    }));
   }
 
   getRoutine(input: {
@@ -1236,6 +1252,10 @@ export class RunStore {
     }
     return {
       ...mapRoutineRow(row),
+      pullRequestNumbers: this.latestRoutinePullRequestNumbers(
+        row.project_name,
+        row.name
+      ),
       prompt: row.prompt_body
     };
   }
@@ -1450,12 +1470,18 @@ export class RunStore {
       });
   }
 
-  listRoutineFirings(filter: { project?: string } = {}): RoutineFiringStatus[] {
+  listRoutineFirings(
+    filter: { project?: string; routineName?: string } = {}
+  ): RoutineFiringStatus[] {
     const conditions: string[] = [];
     const params: Record<string, unknown> = {};
     if (filter.project !== undefined) {
       conditions.push("project_name = @project");
       params.project = filter.project;
+    }
+    if (filter.routineName !== undefined) {
+      conditions.push("routine_name = @routine_name");
+      params.routine_name = filter.routineName;
     }
     const where =
       conditions.length === 0 ? "" : `where ${conditions.join(" and ")}`;
@@ -1471,7 +1497,72 @@ export class RunStore {
           .join(" ")
       )
       .all(params) as RoutineFiringRow[];
-    return rows.map((row) => mapRoutineFiringRow(row));
+    return rows.map((row) => ({
+      ...mapRoutineFiringRow(row),
+      pullRequests: this.listRoutinePullRequests({ firingId: row.id })
+    }));
+  }
+
+  recordRoutinePullRequest(input: RoutinePullRequestStatus): void {
+    this.database
+      .prepare(
+        [
+          "insert into routine_pull_requests (",
+          "project_name, routine_name, firing_id, pr_number, head_sha, created_at, updated_at",
+          ") values (",
+          "@project_name, @routine_name, @firing_id, @pr_number, @head_sha, @created_at, @updated_at",
+          ")",
+          "on conflict(project_name, routine_name, firing_id, pr_number) do update set",
+          "head_sha = excluded.head_sha, updated_at = excluded.updated_at"
+        ].join(" ")
+      )
+      .run({
+        created_at: timestamp(),
+        firing_id: input.firingId,
+        head_sha: input.headSha,
+        pr_number: input.prNumber,
+        project_name: input.projectName,
+        routine_name: input.routineName,
+        updated_at: timestamp()
+      });
+  }
+
+  listRoutinePullRequests(
+    filter: {
+      firingId?: string;
+      project?: string;
+      routineName?: string;
+    } = {}
+  ): RoutinePullRequestStatus[] {
+    const conditions: string[] = [];
+    const params: Record<string, unknown> = {};
+    if (filter.firingId !== undefined) {
+      conditions.push("firing_id = @firing_id");
+      params.firing_id = filter.firingId;
+    }
+    if (filter.project !== undefined) {
+      conditions.push("project_name = @project");
+      params.project = filter.project;
+    }
+    if (filter.routineName !== undefined) {
+      conditions.push("routine_name = @routine_name");
+      params.routine_name = filter.routineName;
+    }
+    const where =
+      conditions.length === 0 ? "" : `where ${conditions.join(" and ")}`;
+    const rows = this.database
+      .prepare(
+        [
+          "select project_name, routine_name, firing_id, pr_number, head_sha",
+          "from routine_pull_requests",
+          where,
+          "order by pr_number asc"
+        ]
+          .filter((part) => part.length > 0)
+          .join(" ")
+      )
+      .all(params) as RoutinePullRequestRow[];
+    return rows.map(mapRoutinePullRequestRow);
   }
 
   listRoutineFiringTransitions(id: string): RoutineFiringStateTransition[] {
@@ -2505,6 +2596,20 @@ export class RunStore {
         created_at text not null,
         foreign key (firing_id) references routine_firings(id)
       );
+
+      create table if not exists routine_pull_requests (
+        id integer primary key autoincrement,
+        project_name text not null,
+        routine_name text not null,
+        firing_id text not null,
+        pr_number integer not null,
+        head_sha text not null,
+        created_at text not null,
+        updated_at text not null,
+        unique(project_name, routine_name, firing_id, pr_number),
+        foreign key (project_name, routine_name) references routines(project_name, name),
+        foreign key (firing_id) references routine_firings(id)
+      );
     `);
 
     const additions: Array<[string, string, string]> = [
@@ -2617,6 +2722,26 @@ export class RunStore {
         "insert into routine_firing_state_transitions (firing_id, sequence, state, created_at) values (?, ?, ?, ?)"
       )
       .run(firingId, sequence, state, createdAt);
+  }
+
+  private latestRoutinePullRequestNumbers(
+    projectName: string,
+    routineName: string
+  ): number[] {
+    const latest = this.database
+      .prepare(
+        [
+          "select id from routine_firings",
+          "where project_name = ? and routine_name = ?",
+          "order by created_at desc, id desc limit 1"
+        ].join(" ")
+      )
+      .get(projectName, routineName) as { id: string } | undefined;
+    return latest === undefined
+      ? []
+      : this.listRoutinePullRequests({ firingId: latest.id }).map(
+          (pullRequest) => pullRequest.prNumber
+        );
   }
 
   private getRunArtifactRow(runId: string): RunArtifactRow | undefined {
@@ -2939,6 +3064,7 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
     nextFireAt: row.state === "active" ? row.next_fire_at : null,
     projectName: row.project_name,
     provider: row.provider_name ?? null,
+    pullRequestNumbers: [],
     scheduleAt: row.schedule_at.length === 0 ? null : row.schedule_at,
     scheduleCron: row.schedule_cron ?? null,
     scheduleTz: row.schedule_tz ?? null,
@@ -2954,11 +3080,24 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
     projectName: row.project_name,
     provider: row.provider_name,
     providerCommand: row.provider_command,
+    pullRequests: [],
     routineName: row.routine_name,
     state: row.state,
     terminalReason: row.terminal_reason ?? null,
     updatedAt: row.updated_at,
     workspacePath: row.workspace_path ?? ""
+  };
+}
+
+function mapRoutinePullRequestRow(
+  row: RoutinePullRequestRow
+): RoutinePullRequestStatus {
+  return {
+    firingId: row.firing_id,
+    headSha: row.head_sha,
+    prNumber: row.pr_number,
+    projectName: row.project_name,
+    routineName: row.routine_name
   };
 }
 

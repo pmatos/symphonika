@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 const execFile = promisify(execFileCallback);
 
 export type ServiceInstallOptions = {
+  configPath?: string;
   env?: NodeJS.ProcessEnv;
   execPath?: string;
   force?: boolean;
@@ -35,6 +36,7 @@ export type ServiceInstallReport = {
 };
 
 export type ServiceUnitInput = {
+  configPath?: string;
   execPath: string;
   path: string;
   scriptPath: string;
@@ -61,6 +63,11 @@ const SLICE_UNIT = [
 // sidestep the version-manager bin directory entirely, which is what the
 // hardcoded ~/.npm-global path got wrong (see docs/adr/0055).
 export function renderServiceUnit(input: ServiceUnitInput): string {
+  const daemonConfigOption =
+    input.configPath === undefined ? "" : ` --config "$3"`;
+  const configArgument =
+    input.configPath === undefined ? "" : ` ${systemdArg(input.configPath)}`;
+
   return [
     "[Unit]",
     "Description=Symphonika orchestrator daemon",
@@ -92,8 +99,9 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
     "# the unit matches the actual install (npm-global, nvm, pnpm, source",
     "# checkout) instead of a fixed bin path. The runtime and script are",
     "# passed as positional args and re-quoted inside the shell so paths",
-    "# containing spaces survive.",
-    `ExecStart=/bin/sh -c 't=$(gh auth token); [ -n "$t" ] || { echo "ERROR: gh auth token returned empty"; exit 1; }; export GITHUB_TOKEN="$t"; exec "$1" "$2" daemon' symphonika ${systemdArg(input.execPath)} ${systemdArg(input.scriptPath)}`,
+    "# containing spaces survive. An explicitly selected config uses the",
+    "# same positional-argument path.",
+    `ExecStart=/bin/sh -c 't=$(gh auth token); [ -n "$t" ] || { echo "ERROR: gh auth token returned empty"; exit 1; }; export GITHUB_TOKEN="$t"; exec "$1" "$2" daemon${daemonConfigOption}' symphonika ${systemdArg(input.execPath)} ${systemdArg(input.scriptPath)}${configArgument}`,
     "",
     "# Keep the daemon and everything it spawns in its own cgroup slice.",
     "# A scope-wide OOM in a spawned tool (compiler, verifier, ...) no",
@@ -156,7 +164,14 @@ export async function runServiceInstall(
 
   const files: ServiceUnitFile[] = [
     {
-      content: renderServiceUnit({ execPath, path: daemonPath, scriptPath }),
+      content: renderServiceUnit({
+        ...(options.configPath === undefined
+          ? {}
+          : { configPath: options.configPath }),
+        execPath,
+        path: daemonPath,
+        scriptPath
+      }),
       path: path.join(unitDir, "symphonika.service")
     },
     {

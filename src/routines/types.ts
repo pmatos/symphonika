@@ -1,6 +1,6 @@
 import type { AgentProviderName } from "../provider.js";
 
-export type RoutineKind = "report";
+export type RoutineKind = "git" | "report";
 
 export type RoutineState = "active" | "expired" | "inactive";
 
@@ -23,6 +23,14 @@ export type RoutineDeclaration = {
   sourcePath: string;
 };
 
+export type RoutinePullRequestStatus = {
+  firingId: string;
+  headSha: string;
+  prNumber: number;
+  projectName: string;
+  routineName: string;
+};
+
 export type RoutineStatus = {
   kind: RoutineKind;
   lastFiredAt: string | null;
@@ -30,6 +38,7 @@ export type RoutineStatus = {
   nextFireAt: string | null;
   projectName: string;
   provider: AgentProviderName | null;
+  pullRequestNumbers: number[];
   scheduleAt: string | null;
   scheduleCron: string | null;
   scheduleTz: string | null;

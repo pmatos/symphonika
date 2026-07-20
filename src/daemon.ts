@@ -347,6 +347,10 @@ export async function startDaemon(
     if (!state.configExists) {
       return;
     }
+    const serviceConfig = runtimeConfig.getSnapshot();
+    if (serviceConfig === undefined) {
+      return;
+    }
     const projects = runtimeConfig.projectsByName();
     if (projects.size === 0) {
       return;
@@ -387,7 +391,7 @@ export async function startDaemon(
     }
 
     try {
-      const watchdog = runtimeConfig.watchdogConfig();
+      const watchdog = serviceConfig.watchdog;
       const nowMs = Date.now();
       if (
         watchdog.enabled &&
@@ -397,8 +401,15 @@ export async function startDaemon(
         await reconcileWatchdog({
           activeRuns,
           config: watchdog,
+          evidenceIgnoreForProject: (projectName) => {
+            const workflow = projects.get(projectName)?.workflow;
+            return workflow !== undefined && "expandedWorkflow" in workflow
+              ? workflow.evidence.ignore
+              : [];
+          },
           logger,
           now: () => new Date(nowMs),
+          projects: serviceConfig.projects,
           runStore
         });
       }
@@ -477,7 +488,9 @@ export async function startDaemon(
           ...(options.createRoutineFiringId === undefined
             ? {}
             : { createFiringId: options.createRoutineFiringId }),
+          env,
           globalConcurrency: runtimeConfig.globalConcurrency(),
+          githubIssuesApi,
           logger,
           ...(options.prepareRoutineWorkspace === undefined
             ? {}

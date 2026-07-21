@@ -79,6 +79,7 @@ describe("CLI", () => {
 
       expect(stdout).toContain("Usage: symphonika");
       expect(stdout).toContain("Commands:");
+      expect(stdout).toContain("add-routine");
       expect(stdout).toContain("doctor");
       expect(stdout).toContain("workflow");
       expect(stdout).toContain("show-run");
@@ -103,6 +104,7 @@ describe("CLI", () => {
 
     expect(stdout).toContain("Usage: symphonika");
     expect(stdout).toContain("Commands:");
+    expect(stdout).toContain("add-routine");
     expect(stdout).toContain("doctor");
     expect(stdout).toContain("clear-stale");
     expect(stdout).toContain("workflow");

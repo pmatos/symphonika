@@ -21,6 +21,7 @@ import {
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
+import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import {
   loadExpandedWorkflow,
   validateExpandedWorkflowReferences
@@ -204,6 +205,7 @@ const projectSchema = z
         provider: providerNameSchema
       })
       .passthrough(),
+    routines: z.array(pathStringSchema).optional(),
     workflow: workflowReferenceSchema
   })
   .passthrough();
@@ -280,6 +282,13 @@ export async function runDoctor(
       project.workflow.format
     );
     errors.push(...workflowErrors);
+    errors.push(
+      ...(await collectRoutineErrors(
+        (project.routines ?? []).map((routinePath) =>
+          path.resolve(path.dirname(configPath), routinePath)
+        )
+      ))
+    );
     const staleIssues = await fetchStaleIssues(project, env, githubIssuesApi);
     projects.push({
       ...validation,
@@ -290,6 +299,27 @@ export async function runDoctor(
   }
 
   return report(configPath, errors, projects);
+}
+
+async function collectRoutineErrors(routinePaths: string[]): Promise<string[]> {
+  const errors: string[] = [];
+  const seenNames = new Map<string, string>();
+  for (const routinePath of routinePaths) {
+    const result = await loadRoutineDeclaration(routinePath);
+    if (result.routine === null) {
+      errors.push(...result.errors);
+      continue;
+    }
+    const existing = seenNames.get(result.routine.name);
+    if (existing !== undefined) {
+      errors.push(
+        `duplicate routine name "${result.routine.name}" declared by ${existing} and ${result.routine.sourcePath}`
+      );
+      continue;
+    }
+    seenNames.set(result.routine.name, result.routine.sourcePath);
+  }
+  return errors;
 }
 
 async function collectWorkflowErrors(

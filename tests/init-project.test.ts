@@ -70,7 +70,9 @@ describe("Project initialization", () => {
     });
 
     expect(report.ok).toBe(false);
-    expect(report.errors).toEqual([`service config not found at ${configPath}`]);
+    expect(report.errors).toEqual([
+      `service config not found at ${configPath}`
+    ]);
     expect(githubApi.validateRepositoryAccess).not.toHaveBeenCalled();
   });
 

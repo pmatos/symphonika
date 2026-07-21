@@ -477,13 +477,27 @@ export async function runInitProject(
 
   const project = buildProjectConfig({ metadata, settings, stateRoot });
   const rawProjects = projectsNode.toJSON();
-  const existingIndex = rawProjects.findIndex(
-    (entry) =>
-      typeof entry === "object" &&
-      entry !== null &&
-      "name" in entry &&
-      (entry as { name?: unknown }).name === settings.projectName
+  const matchingIndexes = rawProjects.reduce<number[]>(
+    (indexes, entry, index) => {
+      if (
+        typeof entry === "object" &&
+        entry !== null &&
+        "name" in entry &&
+        (entry as { name?: unknown }).name === settings.projectName
+      ) {
+        indexes.push(index);
+      }
+      return indexes;
+    },
+    []
   );
+  if (matchingIndexes.length > 1) {
+    errors.push(
+      `project ${settings.projectName} appears ${matchingIndexes.length} times in ${configPath}; remove the duplicate Projects before running init-project`
+    );
+    return initProjectReport(configPath, errors, warnings, projects);
+  }
+  const existingIndex = matchingIndexes[0] ?? -1;
   if (existingIndex >= 0 && options.force !== true) {
     errors.push(
       `project ${settings.projectName} already exists in ${configPath}; pass --force to replace that Project`

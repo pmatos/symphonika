@@ -241,6 +241,44 @@ describe("Project initialization", () => {
     ]);
     expect(config.projects[1]?.agent.provider).toBe("claude");
   });
+
+  it("refuses to force-replace when the config already has duplicate Project names", async () => {
+    const root = await makeTempRoot();
+    const repositoryRoot = path.join(root, "dup-project");
+    const configPath = path.join(root, "config", "symphonika.yml");
+    await createGitHubRepository(
+      repositoryRoot,
+      "https://github.com/acme/dup-project.git"
+    );
+    await writeDuplicateProjectConfig(configPath, root, "dup-project");
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi.fn().mockResolvedValue([...REQUIRED_OPERATIONAL_LABELS]),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runInitProject({
+      configPath,
+      cwd: repositoryRoot,
+      env: { GITHUB_TOKEN: "secret-token" },
+      force: true,
+      githubApi,
+      yes: true
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toEqual([
+      `project dup-project appears 2 times in ${configPath}; remove the duplicate Projects before running init-project`
+    ]);
+    const config = parse(await readFile(configPath, "utf8")) as {
+      projects: Array<{ name: string }>;
+    };
+    expect(config.projects.map((project) => project.name)).toEqual([
+      "dup-project",
+      "dup-project"
+    ]);
+    expect(githubApi.validateRepositoryAccess).not.toHaveBeenCalled();
+  });
 });
 
 async function makeTempRoot(): Promise<string> {
@@ -320,6 +358,55 @@ async function writeEmptyConfig(
       "  claude:",
       "    command: claude --stream",
       "projects: []",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeDuplicateProjectConfig(
+  configPath: string,
+  root: string,
+  name: string
+): Promise<void> {
+  const project = (repo: string): string[] => [
+    `  - name: ${name}`,
+    "    tracker:",
+    "      kind: github",
+    "      owner: acme",
+    `      repo: ${repo}`,
+    '      token: "$GITHUB_TOKEN"',
+    "    issue_filters:",
+    '      states: ["open"]',
+    '      labels_all: ["agent-ready"]',
+    '      labels_none: ["blocked"]',
+    "    priority:",
+    "      labels: {}",
+    "      default: 99",
+    "    workspace:",
+    `      root: ${path.join(root, "state", "workspaces", repo)}`,
+    "      git:",
+    `        remote: https://github.com/acme/${repo}.git`,
+    "        base_branch: main",
+    "    agent:",
+    "      provider: codex",
+    `    workflow: ${path.join(root, repo, "WORKFLOW.md")}`
+  ];
+
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(
+    configPath,
+    [
+      "state:",
+      `  root: ${path.join(root, "state")}`,
+      "providers:",
+      "  codex:",
+      "    command: codex app-server",
+      "  claude:",
+      "    command: claude --stream",
+      "projects:",
+      ...project("first-copy"),
+      ...project("second-copy"),
       ""
     ].join("\n"),
     "utf8"

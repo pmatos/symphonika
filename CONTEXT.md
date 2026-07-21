@@ -129,6 +129,12 @@ One durable execution attempt of a Routine, with its own workspace, provider log
 and lifecycle state.
 _Avoid_: run when specifically referring to non-issue scheduled execution
 
+**Routine Skip**:
+An operator-visible clock attempt that did not create a Routine Firing because of a catch-up window,
+an overlapping non-terminal firing, or a concurrency cap. It updates the Routine's latest skip
+evidence and rolling counters but creates no `routine_firings` row.
+_Avoid_: Routine Firing when no provider execution was launched
+
 **Routine Pull Request**:
 An informational association discovered from a succeeded `kind: git` Routine Firing's deterministic
 branch. It records the PR number and head SHA but never enters PR Follow-up, review re-dispatch, or
@@ -227,6 +233,7 @@ _Avoid_: chat session
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
 - A **Routine** belongs to one **Project** and may create zero or more **Routine Firings**
+- A **Routine** may record **Routine Skips** without creating Routine Firings
 - A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**

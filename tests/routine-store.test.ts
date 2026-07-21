@@ -107,8 +107,13 @@ describe("RunStore routines", () => {
 
       expect(store.listRoutines()).toEqual([
         {
+          allowOverlap: false,
+          catchUp: "skip",
           kind: "report",
+          lastAttemptedAt: null,
           lastFiredAt: null,
+          lastSkipAt: null,
+          lastSkipReason: null,
           name: "daily-report",
           nextFireAt: "2026-05-22T10:00:00.000Z",
           projectName: "alpha",
@@ -117,6 +122,11 @@ describe("RunStore routines", () => {
           scheduleAt: "2026-05-22T10:00:00.000Z",
           scheduleCron: null,
           scheduleTz: null,
+          skipCounts24h: {
+            catch_up_window: 0,
+            concurrency_cap: 0,
+            overlap: 0
+          },
           sourcePath: "/tmp/daily-report.md",
           state: "active"
         }
@@ -150,8 +160,13 @@ describe("RunStore routines", () => {
 
       expect(store.listRoutines()).toEqual([
         {
+          allowOverlap: false,
+          catchUp: "skip",
           kind: "report",
+          lastAttemptedAt: null,
           lastFiredAt: null,
+          lastSkipAt: null,
+          lastSkipReason: null,
           name: "daily-report",
           nextFireAt: "2026-03-28T01:30:00.000Z",
           projectName: "alpha",
@@ -160,9 +175,138 @@ describe("RunStore routines", () => {
           scheduleAt: null,
           scheduleCron: "30 1 * * *",
           scheduleTz: "Europe/Lisbon",
+          skipCounts24h: {
+            catch_up_window: 0,
+            concurrency_cap: 0,
+            overlap: 0
+          },
           sourcePath: "/tmp/daily-report.md",
           state: "active"
         }
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("records a skipped clock attempt and exposes rolling 24-hour counts", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines(
+        "alpha",
+        [
+          {
+            allowOverlap: true,
+            catchUp: "fire_once_if_missed",
+            kind: "report",
+            name: "minute-report",
+            prompt: "Report.",
+            provider: null,
+            schedule: { cron: "* * * * *", tz: "Etc/UTC" },
+            sourcePath: "/tmp/minute-report.md"
+          }
+        ],
+        { now: new Date("2026-05-23T09:59:30.000Z") }
+      );
+
+      const skipped = store.skipRoutineFiring({
+        attemptedAt: "2026-05-23T10:00:00.000Z",
+        name: "minute-report",
+        nextFireAt: "2026-05-23T10:01:00.000Z",
+        projectName: "alpha",
+        reason: "overlap"
+      });
+
+      expect(skipped).toBe(true);
+      expect(store.listRoutineFirings()).toEqual([]);
+      expect(
+        store.listRoutines({ now: new Date("2026-05-23T10:00:00.000Z") })[0]
+      ).toMatchObject({
+        allowOverlap: true,
+        catchUp: "fire_once_if_missed",
+        lastAttemptedAt: "2026-05-23T10:00:00.000Z",
+        lastSkipAt: "2026-05-23T10:00:00.000Z",
+        lastSkipReason: "overlap",
+        nextFireAt: "2026-05-23T10:01:00.000Z",
+        skipCounts24h: {
+          catch_up_window: 0,
+          concurrency_cap: 0,
+          overlap: 1
+        }
+      });
+      expect(
+        store.listRoutines({ now: new Date("2026-05-24T10:00:00.001Z") })[0]
+          ?.skipCounts24h.overlap
+      ).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a one-shot routine active and due after an overlap or concurrency-cap skip", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+
+      const overlapSkipped = store.skipRoutineFiring({
+        attemptedAt: "2026-05-22T10:00:00.000Z",
+        name: "daily-report",
+        projectName: "alpha",
+        reason: "overlap"
+      });
+      expect(overlapSkipped).toBe(true);
+      expect(
+        store.listRoutines({ now: new Date("2026-05-22T10:00:01.000Z") })[0]
+      ).toEqual(
+        expect.objectContaining({
+          lastSkipReason: "overlap",
+          nextFireAt: "2026-05-22T10:00:00.000Z",
+          state: "active"
+        })
+      );
+
+      const capSkipped = store.skipRoutineFiring({
+        attemptedAt: "2026-05-22T10:00:01.000Z",
+        name: "daily-report",
+        projectName: "alpha",
+        reason: "concurrency_cap"
+      });
+      expect(capSkipped).toBe(true);
+      expect(
+        store.listRoutines({ now: new Date("2026-05-22T10:00:02.000Z") })[0]
+      ).toEqual(
+        expect.objectContaining({
+          lastSkipReason: "concurrency_cap",
+          nextFireAt: "2026-05-22T10:00:00.000Z",
+          skipCounts24h: {
+            catch_up_window: 0,
+            concurrency_cap: 1,
+            overlap: 1
+          },
+          state: "active"
+        })
+      );
+
+      store.createRoutineFiring({
+        id: "fire-1",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      expect(store.listRoutineFirings()).toEqual([
+        expect.objectContaining({ id: "fire-1", routineName: "daily-report" })
       ]);
     } finally {
       store.close();

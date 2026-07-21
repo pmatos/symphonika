@@ -125,8 +125,8 @@ function formatRoutines(routines: RoutineStatus[]): string[] {
     return ["│   No routines configured"];
   }
   return [
-    "│   PROJECT      ROUTINE              STATE     NEXT_FIRE_AT              LAST_FIRED_AT             PRS",
-    "│   ------------------------------------------------------------------------------------------------",
+    "│   PROJECT      ROUTINE              STATE     NEXT_FIRE_AT              LAST_FIRED_AT             LAST_ATTEMPTED_AT         LAST_SKIP_REASON   LAST_SKIP_AT              SKIPS_24H                                                        PRS",
+    "│   -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------",
     ...routines.map((routine) =>
       [
         "│  ",
@@ -140,6 +140,14 @@ function formatRoutines(routines: RoutineStatus[]): string[] {
         " ",
         pad(truncate(routine.lastFiredAt ?? "-", 25), 25),
         " ",
+        pad(truncate(routine.lastAttemptedAt ?? "-", 25), 25),
+        " ",
+        pad(truncate(routine.lastSkipReason ?? "-", 18), 18),
+        " ",
+        pad(truncate(routine.lastSkipAt ?? "-", 25), 25),
+        " ",
+        formatRoutineSkipCounts(routine.skipCounts24h),
+        " ",
         formatRoutinePullRequestNumbers(routine.pullRequestNumbers)
       ].join("")
     )
@@ -150,6 +158,12 @@ function formatRoutinePullRequestNumbers(numbers: number[]): string {
   return numbers.length === 0
     ? "-"
     : numbers.map((number) => `#${number}`).join(",");
+}
+
+function formatRoutineSkipCounts(
+  counts: RoutineStatus["skipCounts24h"]
+): string {
+  return `overlap=${counts.overlap},concurrency_cap=${counts.concurrency_cap},catch_up_window=${counts.catch_up_window}`;
 }
 
 export function summarizeDashboardEvent(

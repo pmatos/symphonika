@@ -10,9 +10,11 @@ import type { AgentProviderName, NormalizedProviderEvent } from "./provider.js";
 import { nextRecurringFireAt } from "./routines/schedule.js";
 import type {
   RoutineDeclaration,
+  RoutineCatchUpPolicy,
   RoutineFiringState,
   RoutineKind,
   RoutinePullRequestStatus,
+  RoutineSkipReason,
   RoutineState,
   RoutineStatus
 } from "./routines/types.js";
@@ -440,9 +442,14 @@ type ProjectStateRow = {
 };
 
 type RoutineRow = {
+  allow_overlap: number;
+  catch_up: RoutineCatchUpPolicy;
   created_at: string;
   kind: RoutineKind;
+  last_attempted_at: string | null;
   last_fired_at: string | null;
+  last_skip_at: string | null;
+  last_skip_reason: RoutineSkipReason | null;
   name: string;
   next_fire_at: string | null;
   project_name: string;
@@ -1170,19 +1177,21 @@ export class RunStore {
     const upsert = this.database.prepare(
       [
         "insert into routines (",
-        "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, created_at, updated_at",
+        "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, allow_overlap, catch_up, created_at, updated_at",
         ") values (",
-        "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'active', @created_at, @updated_at",
+        "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'active', @allow_overlap, @catch_up, @created_at, @updated_at",
         ")",
         "on conflict(project_name, name) do update set",
         "source_path = excluded.source_path,",
         "kind = excluded.kind,",
         "provider_name = excluded.provider_name,",
+        "allow_overlap = excluded.allow_overlap,",
+        "catch_up = excluded.catch_up,",
         "schedule_at = excluded.schedule_at,",
         "schedule_cron = excluded.schedule_cron,",
         "schedule_tz = excluded.schedule_tz,",
         "next_fire_at = case",
-        "when @recompute_recurring = 1 and excluded.schedule_cron is not null then excluded.next_fire_at",
+        "when @recompute_recurring = 1 and excluded.schedule_cron is not null and excluded.catch_up = 'skip' then excluded.next_fire_at",
         "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then excluded.next_fire_at",
         "when routines.next_fire_at is null and routines.state != 'expired' then excluded.next_fire_at",
         "else routines.next_fire_at end,",
@@ -1232,6 +1241,8 @@ export class RunStore {
                 scheduleTz: null
               };
         upsert.run({
+          allow_overlap: routine.allowOverlap === true ? 1 : 0,
+          catch_up: routine.catchUp ?? "skip",
           created_at: now,
           kind: routine.kind,
           name: routine.name,
@@ -1281,7 +1292,7 @@ export class RunStore {
   }
 
   listRoutines(
-    filter: { includeInactive?: boolean; project?: string } = {}
+    filter: { includeInactive?: boolean; now?: Date; project?: string } = {}
   ): RoutineStatus[] {
     const conditions: string[] =
       filter.includeInactive === true ? [] : ["state != 'inactive'"];
@@ -1295,7 +1306,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, last_fired_at, created_at, updated_at",
+          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, allow_overlap, catch_up, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at",
           "from routines",
           where,
           "order by project_name asc, name asc"
@@ -1304,13 +1315,48 @@ export class RunStore {
           .join(" ")
       )
       .all(params) as RoutineRow[];
+    const countsNow = filter.now ?? new Date();
     return rows.map((row) => ({
       ...mapRoutineRow(row),
       pullRequestNumbers: this.latestRoutinePullRequestNumbers(
         row.project_name,
         row.name
+      ),
+      skipCounts24h: this.routineSkipCounts24h(
+        row.project_name,
+        row.name,
+        countsNow
       )
     }));
+  }
+
+  private routineSkipCounts24h(
+    projectName: string,
+    routineName: string,
+    now: Date
+  ): Record<RoutineSkipReason, number> {
+    const counts: Record<RoutineSkipReason, number> = {
+      catch_up_window: 0,
+      concurrency_cap: 0,
+      overlap: 0
+    };
+    const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1_000).toISOString();
+    const rows = this.database
+      .prepare(
+        [
+          "select reason, sum(count) as count from routine_skip_counts",
+          "where project_name = ? and routine_name = ?",
+          "and skipped_at >= ? and skipped_at <= ? group by reason"
+        ].join(" ")
+      )
+      .all(projectName, routineName, cutoff, now.toISOString()) as Array<{
+      count: number;
+      reason: RoutineSkipReason;
+    }>;
+    for (const row of rows) {
+      counts[row.reason] = row.count;
+    }
+    return counts;
   }
 
   getRoutine(input: {
@@ -1320,7 +1366,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, last_fired_at, created_at, updated_at, prompt_body",
+          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, allow_overlap, catch_up, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at, prompt_body",
           "from routines where project_name = ? and name = ? and state != 'inactive'"
         ].join(" ")
       )
@@ -1334,6 +1380,11 @@ export class RunStore {
       pullRequestNumbers: this.latestRoutinePullRequestNumbers(
         row.project_name,
         row.name
+      ),
+      skipCounts24h: this.routineSkipCounts24h(
+        row.project_name,
+        row.name,
+        new Date()
       ),
       prompt: row.prompt_body
     };
@@ -1356,29 +1407,58 @@ export class RunStore {
     return row !== undefined;
   }
 
-  advanceRecurringRoutine(input: {
-    nextFireAt: string;
+  skipRoutineFiring(input: {
+    attemptedAt: string;
     name: string;
+    nextFireAt?: string;
     projectName: string;
-    skippedAt: string;
+    reason: RoutineSkipReason;
   }): boolean {
-    const result = this.database
-      .prepare(
-        [
-          "update routines set next_fire_at = @next_fire_at, updated_at = @updated_at",
-          "where project_name = @project_name and name = @name",
-          "and state = 'active' and schedule_cron is not null",
-          "and next_fire_at is not null and next_fire_at <= @skipped_at"
-        ].join(" ")
-      )
-      .run({
-        name: input.name,
-        next_fire_at: input.nextFireAt,
-        project_name: input.projectName,
-        skipped_at: input.skippedAt,
-        updated_at: timestamp()
-      });
-    return result.changes > 0;
+    const apply = this.database.transaction(() => {
+      const result = this.database
+        .prepare(
+          [
+            "update routines set",
+            "state = 'active',",
+            "next_fire_at = coalesce(@next_fire_at, next_fire_at),",
+            "last_attempted_at = @attempted_at,",
+            "last_skip_reason = @reason,",
+            "last_skip_at = @attempted_at,",
+            "updated_at = @updated_at",
+            "where project_name = @project_name and name = @name and state = 'active'",
+            "and next_fire_at is not null and next_fire_at <= @attempted_at",
+            "and (schedule_cron is null or @next_fire_at is not null)"
+          ].join(" ")
+        )
+        .run({
+          attempted_at: input.attemptedAt,
+          name: input.name,
+          next_fire_at: input.nextFireAt ?? null,
+          project_name: input.projectName,
+          reason: input.reason,
+          updated_at: timestamp()
+        });
+      if (result.changes === 0) {
+        return false;
+      }
+      this.database
+        .prepare(
+          [
+            "insert into routine_skip_counts (project_name, routine_name, reason, skipped_at, count)",
+            "values (@project_name, @routine_name, @reason, @skipped_at, 1)",
+            "on conflict(project_name, routine_name, reason, skipped_at)",
+            "do update set count = count + 1"
+          ].join(" ")
+        )
+        .run({
+          project_name: input.projectName,
+          reason: input.reason,
+          routine_name: input.name,
+          skipped_at: input.attemptedAt
+        });
+      return true;
+    });
+    return apply();
   }
 
   markRoutineExpired(input: {
@@ -1454,6 +1534,7 @@ export class RunStore {
             "state = case when schedule_cron is null then 'expired' else 'active' end,",
             "next_fire_at = case when schedule_cron is null then null else @next_fire_at end,",
             "last_fired_at = @fired_at,",
+            "last_attempted_at = @fired_at,",
             "updated_at = @updated_at",
             "where project_name = @project_name and name = @routine_name and state = 'active'",
             "and next_fire_at is not null and next_fire_at <= @fired_at",
@@ -2659,10 +2740,25 @@ export class RunStore {
         next_fire_at text,
         prompt_body text not null,
         state text not null,
+        allow_overlap integer not null default 0,
+        catch_up text not null default 'skip',
         last_fired_at text,
+        last_attempted_at text,
+        last_skip_reason text,
+        last_skip_at text,
         created_at text not null,
         updated_at text not null,
         primary key (project_name, name)
+      );
+
+      create table if not exists routine_skip_counts (
+        project_name text not null,
+        routine_name text not null,
+        reason text not null,
+        skipped_at text not null,
+        count integer not null,
+        primary key (project_name, routine_name, reason, skipped_at),
+        foreign key (project_name, routine_name) references routines(project_name, name) on delete cascade
       );
 
       create table if not exists routine_firings (
@@ -2727,6 +2823,11 @@ export class RunStore {
       ["routines", "schedule_cron", "text"],
       ["routines", "schedule_tz", "text"],
       ["routines", "next_fire_at", "text"],
+      ["routines", "allow_overlap", "integer not null default 0"],
+      ["routines", "catch_up", "text not null default 'skip'"],
+      ["routines", "last_attempted_at", "text"],
+      ["routines", "last_skip_reason", "text"],
+      ["routines", "last_skip_at", "text"],
       ["routine_firings", "prompt_path", "text"],
       ["routine_firings", "raw_log_path", "text"],
       ["routine_firings", "normalized_log_path", "text"]
@@ -3169,8 +3270,13 @@ function mapProjectStateRow(row: ProjectStateRow): ProjectState {
 
 function mapRoutineRow(row: RoutineRow): RoutineStatus {
   return {
+    allowOverlap: row.allow_overlap === 1,
+    catchUp: row.catch_up,
     kind: row.kind,
+    lastAttemptedAt: row.last_attempted_at ?? null,
     lastFiredAt: row.last_fired_at ?? null,
+    lastSkipAt: row.last_skip_at ?? null,
+    lastSkipReason: row.last_skip_reason ?? null,
     name: row.name,
     nextFireAt: row.state === "active" ? row.next_fire_at : null,
     projectName: row.project_name,
@@ -3179,6 +3285,11 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
     scheduleAt: row.schedule_at.length === 0 ? null : row.schedule_at,
     scheduleCron: row.schedule_cron ?? null,
     scheduleTz: row.schedule_tz ?? null,
+    skipCounts24h: {
+      catch_up_window: 0,
+      concurrency_cap: 0,
+      overlap: 0
+    },
     sourcePath: row.source_path,
     state: row.state
   };

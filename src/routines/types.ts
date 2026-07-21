@@ -12,9 +12,16 @@ export type RoutineFiringState =
   | "failed"
   | "cancelled";
 
+export type RoutineCatchUpPolicy = "skip" | "fire_once_if_missed";
+
+export type RoutineSkipReason =
+  "overlap" | "concurrency_cap" | "catch_up_window";
+
 export type RoutineSchedule = { at: string } | { cron: string; tz: string };
 
 export type RoutineDeclaration = {
+  allowOverlap?: boolean;
+  catchUp?: RoutineCatchUpPolicy;
   kind: RoutineKind;
   name: string;
   prompt: string;
@@ -32,8 +39,13 @@ export type RoutinePullRequestStatus = {
 };
 
 export type RoutineStatus = {
+  allowOverlap: boolean;
+  catchUp: RoutineCatchUpPolicy;
   kind: RoutineKind;
+  lastAttemptedAt: string | null;
   lastFiredAt: string | null;
+  lastSkipAt: string | null;
+  lastSkipReason: RoutineSkipReason | null;
   name: string;
   nextFireAt: string | null;
   projectName: string;
@@ -42,6 +54,7 @@ export type RoutineStatus = {
   scheduleAt: string | null;
   scheduleCron: string | null;
   scheduleTz: string | null;
+  skipCounts24h: Record<RoutineSkipReason, number>;
   sourcePath: string;
   state: RoutineState;
 };

@@ -22,6 +22,65 @@ afterEach(async () => {
 });
 
 describe("RoutineDeclarationLoader", () => {
+  it("parses catch-up and overlap policy opt-ins", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "catch-up-report.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: catch-up-report",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "catch_up: fire_once_if_missed",
+        "allow_overlap: true",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.routine).toMatchObject({
+      allowOverlap: true,
+      catchUp: "fire_once_if_missed"
+    });
+  });
+
+  it.each([
+    [
+      "catch_up",
+      "catch_up: replay_all",
+      "catch_up must be fire_once_if_missed"
+    ],
+    ["allow_overlap", "allow_overlap: yes", "allow_overlap must be a boolean"]
+  ])("rejects an invalid %s policy", async (_policy, field, expectedError) => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "invalid-policy.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: invalid-policy",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        field,
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.routine).toBeNull();
+    expect(result.errors.join("\n")).toContain(expectedError);
+  });
+
   it("parses a Markdown kind: git routine", async () => {
     const root = await makeTempRoot();
     const routinePath = path.join(root, "dependency-update.md");
@@ -43,6 +102,8 @@ describe("RoutineDeclarationLoader", () => {
 
     expect(result.errors).toEqual([]);
     expect(result.routine).toEqual({
+      allowOverlap: false,
+      catchUp: "skip",
       kind: "git",
       name: "dependency-update",
       prompt: "Update dependencies on {{branch.name}}.\n",
@@ -74,6 +135,8 @@ describe("RoutineDeclarationLoader", () => {
 
     expect(result.errors).toEqual([]);
     expect(result.routine).toEqual({
+      allowOverlap: false,
+      catchUp: "skip",
       kind: "report",
       name: "weekly-report",
       prompt: "Summarize {{project.name}} from {{workspace.path}}.\n",

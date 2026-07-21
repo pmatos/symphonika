@@ -765,13 +765,13 @@ function renderRoutinesTable(routines: RoutineStatus[]): string {
   const rows = routines
     .map(
       (routine) =>
-        `<tr><td>${escapeHtml(routine.projectName)}</td><td>${escapeHtml(routine.name)}</td><td>${escapeHtml(routine.state)}</td><td><code>${escapeHtml(routine.nextFireAt ?? "-")}</code></td><td><code>${escapeHtml(routine.lastFiredAt ?? "-")}</code></td><td>${escapeHtml(formatRoutinePullRequestNumbers(routine.pullRequestNumbers))}</td></tr>`
+        `<tr><td>${escapeHtml(routine.projectName)}</td><td>${escapeHtml(routine.name)}</td><td>${escapeHtml(routine.state)}</td><td><code>${escapeHtml(routine.nextFireAt ?? "-")}</code></td><td><code>${escapeHtml(routine.lastFiredAt ?? "-")}</code></td><td><code>${escapeHtml(routine.lastAttemptedAt ?? "-")}</code></td><td>${escapeHtml(routine.lastSkipReason ?? "-")}</td><td><code>${escapeHtml(routine.lastSkipAt ?? "-")}</code></td><td>${escapeHtml(formatRoutineSkipCounts(routine.skipCounts24h))}</td><td>${escapeHtml(formatRoutinePullRequestNumbers(routine.pullRequestNumbers))}</td></tr>`
     )
     .join("");
   return tableSection(
     "Routines",
     routines.length,
-    "<tr><th>Project</th><th>Routine</th><th>State</th><th>next_fire_at</th><th>last_fired_at</th><th>Pull requests</th></tr>",
+    "<tr><th>Project</th><th>Routine</th><th>State</th><th>next_fire_at</th><th>last_fired_at</th><th>last_attempted_at</th><th>last_skip_reason</th><th>last_skip_at</th><th>skips_24h</th><th>Pull requests</th></tr>",
     rows
   );
 }
@@ -780,6 +780,12 @@ function formatRoutinePullRequestNumbers(numbers: number[]): string {
   return numbers.length === 0
     ? "-"
     : numbers.map((number) => `#${number}`).join(", ");
+}
+
+function formatRoutineSkipCounts(
+  counts: RoutineStatus["skipCounts24h"]
+): string {
+  return `overlap=${counts.overlap},concurrency_cap=${counts.concurrency_cap},catch_up_window=${counts.catch_up_window}`;
 }
 
 function renderRunsTable(title: string, runs: RunStatus[]): string {

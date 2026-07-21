@@ -305,6 +305,71 @@ describe("daemon routine firing", () => {
       await daemon.stop();
     }
   });
+
+  it("fires exactly one missed recurring event on restart with catch-up enabled", async () => {
+    const root = await makeTempRoot();
+    const routine = {
+      catchUp: "fire_once_if_missed" as const,
+      kind: "report" as const,
+      name: "yearly-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { cron: "0 0 1 1 *", tz: "Etc/UTC" },
+      sourcePath: path.join(root, "yearly-report.md")
+    };
+    await writeRecurringRoutineProject(root, true);
+    const seededStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    seededStore.syncRoutines("alpha", [routine], {
+      now: new Date("2020-06-01T00:00:00.000Z")
+    });
+    seededStore.close();
+    const providerInputs: ProviderRunInput[] = [];
+    const provider = quietProvider();
+    vi.mocked(provider.runAttempt).mockImplementation(async function* (input) {
+      await Promise.resolve();
+      providerInputs.push(input);
+      yield {
+        normalized: { exitCode: 0, type: "process_exit" },
+        raw: { code: 0, kind: "exit" }
+      };
+    });
+    const startedAt = Date.now();
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRoutineFiringId: () => "catch-up-fire",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareRoutineWorkspace: vi.fn().mockResolvedValue({
+        branchName: "main",
+        branchRef: "refs/remotes/origin/main",
+        cachePath: path.join(root, ".cache", "repo.git"),
+        reused: false,
+        workspacePath: path.join(root, "catch-up-workspace")
+      })
+    });
+
+    try {
+      await waitForProviderInputs(providerInputs, 1);
+      const routines = await waitForRoutine(daemon.url, "active");
+      expect(routines[0]?.lastFiredAt).toEqual(expect.any(String));
+      expect(new Date(routines[0]?.nextFireAt ?? 0).getTime()).toBeGreaterThan(
+        startedAt
+      );
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      expect(providerInputs).toHaveLength(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
 });
 
 function quietProvider(): AgentProvider {
@@ -344,7 +409,10 @@ async function writeRoutineProject(
   await writeProjectConfig(root, "alpha", ["./daily-report.md"]);
 }
 
-async function writeRecurringRoutineProject(root: string): Promise<void> {
+async function writeRecurringRoutineProject(
+  root: string,
+  catchUp = false
+): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(path.join(root, "WORKFLOW.md"), "Work.");
   await writeFile(
@@ -355,6 +423,7 @@ async function writeRecurringRoutineProject(root: string): Promise<void> {
       "schedule:",
       "  cron: yearly",
       "kind: report",
+      ...(catchUp ? ["catch_up: fire_once_if_missed"] : []),
       "---",
       "Report.",
       ""

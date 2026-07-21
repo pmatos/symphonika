@@ -157,6 +157,84 @@ function gatedSuccessProvider(): GatedProvider {
   };
 }
 
+async function writeWaitStateBlockedTerminalProject(
+  root: string
+): Promise<void> {
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "polling:",
+      "  interval_ms: 30000",
+      "providers:",
+      "  codex:",
+      `    command: "${DEFAULT_CODEX_COMMAND}"`,
+      "  claude:",
+      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      "projects:",
+      "  - name: symphonika",
+      "    disabled: false",
+      "    weight: 1",
+      "    tracker:",
+      "      kind: github",
+      "      owner: pmatos",
+      "      repo: symphonika",
+      '      token: "$GITHUB_TOKEN"',
+      "    issue_filters:",
+      '      states: ["open"]',
+      '      labels_all: ["agent-ready"]',
+      '      labels_none: ["blocked", "needs-human"]',
+      "    priority:",
+      "      labels: {}",
+      "      default: 99",
+      "    workspace:",
+      "      root: ./.symphonika/workspaces/symphonika",
+      "      git:",
+      "        remote: git@github.com:pmatos/symphonika.git",
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      "    workflow: ./workflow.yml",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: agent_then_wait_blocked",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      complete_when:",
+      "        provider_success: true",
+      "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: holding",
+      "    holding:",
+      "      action:",
+      "        kind: wait",
+      "      transitions:",
+      "        - to: done",
+      "          when:",
+      "            checks: success",
+      "            mergeable: true",
+      "    done:",
+      "      terminal: blocked",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "plan-prompt.md"),
+    "Plan work on #{{issue.number}}.\n"
+  );
+}
+
 async function writeWaitStateProject(root: string): Promise<void> {
   await writeFile(
     path.join(root, "symphonika.yml"),
@@ -624,6 +702,68 @@ describe("wait state lifecycle", () => {
       expect(after?.terminalStateId).toBe("done");
       expect(after?.stateTransitionReason).toContain(
         "holding advanced to done"
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("records a waiting run as blocked (not succeeded) when it advances into a terminal: blocked node", async () => {
+    const root = await makeTempRoot();
+    await writeWaitStateBlockedTerminalProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.createWaitingRun({
+        currentStateId: "holding",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika"
+      });
+      store.trackPullRequest({
+        branchName: "sym/symphonika/8-wait-state-acceptance-fixture",
+        headSha: "deadbeef",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      const after = store.getRun("waiting-run");
+      expect(after?.state).toBe("blocked");
+      expect(after?.terminalStateId).toBe("done");
+      expect(after?.terminalReason).toBe("workflow_terminal_blocked");
+      expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:blocked"] })
       );
     } finally {
       store.close();

@@ -1007,6 +1007,24 @@ export class RunController {
           terminalStateId: next.id,
           transitionReason: decision.reason
         });
+        // A wait/merge_pr row can advance straight into a workflow-authored
+        // `terminal: blocked` node (e.g. a PR follow-up that gives up on
+        // merge conflicts). Honor the same RunState/label contract as the
+        // provider-attempt path (ADR 0058) so the issue doesn't stay
+        // eligible for redispatch under a stale "succeeded" verdict.
+        if (next.terminal === "blocked") {
+          this.runStore.recordTerminalReason(
+            runId,
+            "workflow_terminal_blocked",
+            "deterministic"
+          );
+          this.runStore.updateRunState(runId, "blocked");
+          await this.markIssueBlocked({
+            issueNumber: refreshed.number,
+            repository
+          });
+          return;
+        }
         this.runStore.updateRunState(runId, "succeeded");
         return;
       }
@@ -1067,6 +1085,22 @@ export class RunController {
         terminalStateId: decision.stateId,
         transitionReason: `entered terminal state ${decision.terminal}`
       });
+      // See the matching `terminal === "blocked"` handling in the `advance`
+      // branch above — same ADR 0058 contract, reached via a direct
+      // terminate decision instead of an advance-to-terminal one.
+      if (decision.terminal === "blocked") {
+        this.runStore.recordTerminalReason(
+          runId,
+          "workflow_terminal_blocked",
+          "deterministic"
+        );
+        this.runStore.updateRunState(runId, "blocked");
+        await this.markIssueBlocked({
+          issueNumber: refreshed.number,
+          repository
+        });
+        return;
+      }
       this.runStore.updateRunState(runId, "succeeded");
     }
   }

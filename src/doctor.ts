@@ -534,12 +534,6 @@ export async function runInitProject(
     return initProjectReport(configPath, errors, warnings, projects);
   }
 
-  await writeFile(configPath, document.toString(), "utf8");
-  if (!(await fileExists(settings.workflowPath))) {
-    await mkdir(path.dirname(settings.workflowPath), { recursive: true });
-    await writeFile(settings.workflowPath, defaultWorkflowContract(), "utf8");
-  }
-
   projects.push(
     await createOperationalLabels({
       errors,
@@ -553,6 +547,15 @@ export async function runInitProject(
       yes: options.yes === true
     })
   );
+  if (errors.length > 0) {
+    return initProjectReport(configPath, errors, warnings, projects);
+  }
+
+  await writeFile(configPath, document.toString(), "utf8");
+  if (!(await fileExists(settings.workflowPath))) {
+    await mkdir(path.dirname(settings.workflowPath), { recursive: true });
+    await writeFile(settings.workflowPath, defaultWorkflowContract(), "utf8");
+  }
 
   return initProjectReport(configPath, errors, warnings, projects);
 }

@@ -320,7 +320,7 @@ describe("Project initialization", () => {
     ).rejects.toThrow();
   });
 
-  it("registers the Project but requires --yes before creating missing operational labels", async () => {
+  it("does not register the Project without --yes when operational labels are missing", async () => {
     const root = await makeTempRoot();
     const repositoryRoot = path.join(root, "new-project");
     const configPath = path.join(root, "config", "symphonika.yml");
@@ -329,6 +329,7 @@ describe("Project initialization", () => {
       "https://github.com/acme/new-project.git"
     );
     await writeExistingConfig(configPath, root);
+    const originalContents = await readFile(configPath, "utf8");
     const githubApi: GitHubApi = {
       createLabel: vi.fn(),
       listLabels: vi.fn().mockResolvedValue([]),
@@ -360,13 +361,57 @@ describe("Project initialization", () => {
       })
     ]);
     expect(githubApi.createLabel).not.toHaveBeenCalled();
-    const config = parse(await readFile(configPath, "utf8")) as {
-      projects: Array<{ name: string }>;
+    await expect(readFile(configPath, "utf8")).resolves.toBe(originalContents);
+    await expect(
+      readFile(path.join(repositoryRoot, "WORKFLOW.md"), "utf8")
+    ).rejects.toThrow();
+  });
+
+  it("does not persist the new Project when operational label creation fails", async () => {
+    const root = await makeTempRoot();
+    const repositoryRoot = path.join(root, "new-project");
+    const configPath = path.join(root, "config", "symphonika.yml");
+    await createGitHubRepository(
+      repositoryRoot,
+      "https://github.com/acme/new-project.git"
+    );
+    await writeExistingConfig(configPath, root);
+    const originalContents = await readFile(configPath, "utf8");
+    const missingLabel = REQUIRED_OPERATIONAL_LABELS[0];
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn().mockRejectedValue(new Error("permission denied")),
+      listLabels: vi
+        .fn()
+        .mockResolvedValue(
+          REQUIRED_OPERATIONAL_LABELS.filter((label) => label !== missingLabel)
+        ),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
-    expect(config.projects.map((project) => project.name)).toEqual([
-      "existing",
-      "new-project"
+
+    const report = await runInitProject({
+      configPath,
+      cwd: repositoryRoot,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      yes: true
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toEqual([
+      `projects.new-project.tracker.repository acme/new-project could not create operational label ${missingLabel}: permission denied`
     ]);
+    expect(report.projects).toEqual([
+      expect.objectContaining({
+        createdOperationalLabels: [],
+        missingOperationalLabels: [missingLabel],
+        name: "new-project"
+      })
+    ]);
+    expect(githubApi.createLabel).toHaveBeenCalledOnce();
+    await expect(readFile(configPath, "utf8")).resolves.toBe(originalContents);
+    await expect(
+      readFile(path.join(repositoryRoot, "WORKFLOW.md"), "utf8")
+    ).rejects.toThrow();
   });
 });
 

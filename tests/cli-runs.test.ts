@@ -112,6 +112,41 @@ describe("CLI run commands", () => {
     expect(output.stdout).toContain("r-failed");
   });
 
+  it("status shows the terminal-reason suffix for blocked runs in the plain-text recent-runs listing", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "r-blocked",
+      issue: sampleIssue({ number: 5 }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.recordTerminalReason(
+      "r-blocked",
+      "no_workspace_changes",
+      "deterministic"
+    );
+    store.updateRunState("r-blocked", "blocked");
+    store.close();
+
+    const { output, program } = captureProgram(stateRoot);
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "status",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+
+    expect(output.stdout).toContain("blocked: 1");
+    // Regression: blocked runs must keep the terminal-reason suffix that
+    // failed runs already show — see issue #271 / ADR 0058.
+    expect(output.stdout).toContain(
+      "r-blocked  alpha  #5  blocked  codex  — no_workspace_changes"
+    );
+  });
+
   it("status identifies only active runs inside the watchdog grace window", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -1331,6 +1366,67 @@ describe("CLI run commands", () => {
     const verifyStore = openRunStore({ stateRoot });
     expect(verifyStore.getRun("cancel-live")?.cancelRequested).toBe(false);
     verifyStore.close();
+  });
+
+  it("cancel reports the correct already-blocked conflict message for a blocked run", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "cancel-blocked",
+      issue: sampleIssue({ number: 12 }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.recordTerminalReason(
+      "cancel-blocked",
+      "no_workspace_changes",
+      "deterministic"
+    );
+    store.updateRunState("cancel-blocked", "blocked");
+    store.close();
+
+    const cfg = path.join(stateRoot, "symphonika.yml");
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    await mkdir(resolvedStateRoot, { recursive: true });
+    await writeFile(
+      path.join(resolvedStateRoot, "daemon.json"),
+      JSON.stringify({ url: "http://127.0.0.1:3030" }),
+      "utf8"
+    );
+    const { output, program } = captureProgram(stateRoot, {
+      fetch: (input: string | URL | Request) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        if (url.endsWith("/api/status")) {
+          return Promise.resolve(
+            Response.json({ stateRoot: resolvedStateRoot })
+          );
+        }
+        return Promise.resolve(
+          Response.json(
+            { kind: "already-terminal", state: "blocked" },
+            { status: 409 }
+          )
+        );
+      }
+    });
+    await expect(
+      program.parseAsync([
+        "node",
+        "symphonika",
+        "cancel",
+        "cancel-blocked",
+        "--config",
+        cfg
+      ])
+    ).rejects.toThrow();
+
+    expect(output.stderr).toContain("run cancel-blocked already blocked");
   });
 
   it("poll-now discovers the local daemon, preflights state root, and prints the poll summary", async () => {

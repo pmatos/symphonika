@@ -82,6 +82,7 @@ type InitProjectPromptInput = {
     | "priorityLabels"
     | "projectName"
     | "provider"
+    | "confirmOperationalLabels"
     | "requiredLabels"
     | "workflowPath";
   message: string;
@@ -541,6 +542,7 @@ export async function runInitProject(
       ...(options.onWarning === undefined
         ? {}
         : { onWarning: options.onWarning }),
+      ...(options.prompt === undefined ? {} : { prompt: options.prompt }),
       project: registeredProject,
       validation: accessValidation,
       warnings,
@@ -822,6 +824,7 @@ async function createOperationalLabels(input: {
   errors: string[];
   githubApi: GitHubApi;
   onWarning?: (warning: string) => void;
+  prompt?: InitProjectPrompt;
   project: ProjectConfig;
   validation: ProjectGitHubAccessValidation;
   warnings: string[];
@@ -834,11 +837,22 @@ async function createOperationalLabels(input: {
     const warning = `init-project ${input.yes ? "will" : "would"} create operational labels in ${repositoryName}: ${missingOperationalLabels.join(", ")}`;
     input.warnings.push(warning);
     input.onWarning?.(warning);
-    if (input.yes !== true) {
-      input.errors.push(
-        "pass --yes to create missing operational labels non-interactively"
-      );
-    } else {
+    let confirmed = input.yes;
+    if (!confirmed) {
+      try {
+        confirmed = await confirmOperationalLabelCreation({
+          missingOperationalLabels,
+          ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
+          repositoryName
+        });
+        if (!confirmed) {
+          input.errors.push("operational label creation was declined");
+        }
+      } catch (error) {
+        input.errors.push(errorMessage(error));
+      }
+    }
+    if (confirmed) {
       for (const label of missingOperationalLabels) {
         try {
           await input.githubApi.createLabel({ ...repository, name: label });
@@ -858,6 +872,35 @@ async function createOperationalLabels(input: {
     name: input.project.name,
     repository: repositoryName
   };
+}
+
+async function confirmOperationalLabelCreation(input: {
+  missingOperationalLabels: string[];
+  prompt?: InitProjectPrompt;
+  repositoryName: string;
+}): Promise<boolean> {
+  const promptController = createInitProjectPromptController(
+    input.prompt,
+    false
+  );
+  try {
+    const answer = (
+      await promptController.ask({
+        defaultValue: "yes",
+        key: "confirmOperationalLabels",
+        message: `Create missing operational labels in ${input.repositoryName}: ${input.missingOperationalLabels.join(", ")}? (yes/no)`
+      })
+    ).toLowerCase();
+    if (answer === "yes" || answer === "y") {
+      return true;
+    }
+    if (answer === "no" || answer === "n") {
+      return false;
+    }
+    throw new Error("operational label confirmation must be yes or no");
+  } finally {
+    promptController.close();
+  }
 }
 
 async function fileExists(filePath: string): Promise<boolean> {

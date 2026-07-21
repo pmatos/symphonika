@@ -320,7 +320,66 @@ describe("Project initialization", () => {
     ).rejects.toThrow();
   });
 
-  it("does not register the Project without --yes when operational labels are missing", async () => {
+  it("creates missing operational labels after interactive confirmation", async () => {
+    const root = await makeTempRoot();
+    const repositoryRoot = path.join(root, "new-project");
+    const configPath = path.join(root, "config", "symphonika.yml");
+    await createGitHubRepository(
+      repositoryRoot,
+      "https://github.com/acme/new-project.git"
+    );
+    await writeExistingConfig(configPath, root);
+    const prompted: string[] = [];
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi.fn().mockResolvedValue([]),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runInitProject({
+      configPath,
+      cwd: repositoryRoot,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      prompt: (input) => {
+        prompted.push(input.key);
+        return Promise.resolve("");
+      }
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.projects).toEqual([
+      expect.objectContaining({
+        createdOperationalLabels: [...REQUIRED_OPERATIONAL_LABELS],
+        name: "new-project"
+      })
+    ]);
+    expect(prompted).toEqual([
+      "projectName",
+      "provider",
+      "baseBranch",
+      "requiredLabels",
+      "excludedLabels",
+      "priorityLabels",
+      "workflowPath",
+      "confirmOperationalLabels"
+    ]);
+    expect(githubApi.createLabel).toHaveBeenCalledTimes(
+      REQUIRED_OPERATIONAL_LABELS.length
+    );
+    const config = parse(await readFile(configPath, "utf8")) as {
+      projects: Array<{ name: string }>;
+    };
+    expect(config.projects.map((project) => project.name)).toEqual([
+      "existing",
+      "new-project"
+    ]);
+    await expect(
+      readFile(path.join(repositoryRoot, "WORKFLOW.md"), "utf8")
+    ).resolves.toContain("# Implementing issue #{{issue.number}}");
+  });
+
+  it("does not register the Project when interactive label creation is declined", async () => {
     const root = await makeTempRoot();
     const repositoryRoot = path.join(root, "new-project");
     const configPath = path.join(root, "config", "symphonika.yml");
@@ -342,13 +401,11 @@ describe("Project initialization", () => {
       env: { GITHUB_TOKEN: "secret-token" },
       githubApi,
       prompt: (input) =>
-        Promise.resolve(input.key === "provider" ? "codex" : "")
+        Promise.resolve(input.key === "confirmOperationalLabels" ? "no" : "")
     });
 
     expect(report.ok).toBe(false);
-    expect(report.errors).toEqual([
-      "pass --yes to create missing operational labels non-interactively"
-    ]);
+    expect(report.errors).toEqual(["operational label creation was declined"]);
     expect(report.warnings).toEqual([
       expect.stringContaining(
         "init-project would create operational labels in acme/new-project"

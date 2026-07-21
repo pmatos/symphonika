@@ -3168,6 +3168,106 @@ describe("daemon dispatch", () => {
       await daemon.stop();
     }
   });
+
+  // Regression test for #272: a pre-attempt error (e.g. provider.validate()
+  // rejecting before any attempt row is created) must not be routed through
+  // the FSM as if the agent action had executed and legitimately fallen
+  // through to a workflow-declared `terminal: blocked` node. Distinct from
+  // the test above, where the agent genuinely runs and the workflow author's
+  // FSM deliberately routes a successful run to a blocked terminal.
+  it("does not reclassify a pre-attempt error as workflow_terminal_blocked", async () => {
+    const root = await makeTempRoot();
+    await writePreAttemptFallbackBlockedRawFsmProject(root);
+
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([
+          issueFixture({
+            labels: ["agent-ready"],
+            number: 8,
+            title: "Dispatch an end-to-end run through a test provider"
+          })
+        ])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex" as const,
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi
+        .fn()
+        .mockRejectedValue(
+          new Error("simulated pre-attempt contention: max_in_flight reached")
+        )
+    } satisfies AgentProvider;
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => "run-pre-attempt-error",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 0 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      const status = await waitForRun(daemon.url, "failed");
+      const run = firstRun(status);
+      expect(run).toMatchObject({
+        id: "run-pre-attempt-error",
+        issueNumber: 8,
+        state: "failed"
+      });
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const storedRun = database
+          .prepare(
+            [
+              "select state, terminal_reason, failure_classification",
+              "from runs where id = ?"
+            ].join(" ")
+          )
+          .get("run-pre-attempt-error");
+        expect(storedRun).toMatchObject({
+          state: "failed",
+          terminal_reason:
+            "simulated pre-attempt contention: max_in_flight reached",
+          failure_classification: "transient"
+        });
+
+        const attemptCount = database
+          .prepare("select count(*) as c from attempts where run_id = ?")
+          .get("run-pre-attempt-error") as { c: number };
+        expect(attemptCount.c).toBe(0);
+      } finally {
+        database.close();
+      }
+
+      expect(codexProvider.runAttempt).not.toHaveBeenCalled();
+    } finally {
+      await daemon.stop();
+    }
+  });
 });
 
 function issueFixture(overrides: {
@@ -3400,6 +3500,40 @@ async function writeBlockedTerminalRawFsmProject(root: string): Promise<void> {
       "      complete_when:",
       "        provider_success: true",
       "        branch_ahead_of_base: true",
+      "      transitions:",
+      "        - to: done",
+      "    done:",
+      "      terminal: blocked",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "prompt.md"),
+    "Work on #{{issue.number}}: {{issue.title}}.\n"
+  );
+}
+
+// No `complete_when`, so decideNextStep never rejects on an unmet predicate,
+// and an unconditional fallback transition into a `terminal: blocked` node.
+// A run whose agent action never actually executed (a pre-attempt error, e.g.
+// contention or a provider.validate() failure) must not be routed through
+// this transition as if the agent had run and legitimately reached it.
+async function writePreAttemptFallbackBlockedRawFsmProject(
+  root: string
+): Promise<void> {
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: pre_attempt_fallback_blocked",
+      "  initial: run_agent",
+      "  states:",
+      "    run_agent:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: prompt.md",
       "      transitions:",
       "        - to: done",
       "    done:",

@@ -41,6 +41,7 @@ describe("GitHub Project validation", () => {
           "sym:claimed",
           "sym:running",
           "sym:failed",
+          "sym:blocked",
           "sym:stale"
         ]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
@@ -117,10 +118,15 @@ describe("GitHub Project validation", () => {
 
     expect(report.ok).toBe(false);
     expect(report.errors).toContain(
-      "projects.symphonika.tracker.repository pmatos/symphonika is missing operational labels: sym:running, sym:failed, sym:stale"
+      "projects.symphonika.tracker.repository pmatos/symphonika is missing operational labels: sym:running, sym:failed, sym:blocked, sym:stale"
     );
     expect(report.projects[0]).toMatchObject({
-      missingOperationalLabels: ["sym:running", "sym:failed", "sym:stale"],
+      missingOperationalLabels: [
+        "sym:running",
+        "sym:failed",
+        "sym:blocked",
+        "sym:stale"
+      ],
       validForDispatch: false
     });
     expect(githubApi.createLabel).not.toHaveBeenCalled();
@@ -138,6 +144,7 @@ describe("GitHub Project validation", () => {
           "sym:claimed",
           "sym:running",
           "sym:failed",
+          "sym:blocked",
           "sym:stale"
         ]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
@@ -252,7 +259,7 @@ describe("GitHub Project initialization", () => {
 
     expect(report.ok).toBe(false);
     expect(report.warnings).toContain(
-      "init-project would create operational labels in pmatos/symphonika: sym:running, sym:failed, sym:stale"
+      "init-project would create operational labels in pmatos/symphonika: sym:running, sym:failed, sym:blocked, sym:stale"
     );
     expect(report.errors).toContain(
       "pass --yes to create missing operational labels non-interactively"
@@ -279,13 +286,13 @@ describe("GitHub Project initialization", () => {
 
     expect(report.ok).toBe(true);
     expect(report.warnings).toContain(
-      "init-project will create operational labels in pmatos/symphonika: sym:running, sym:stale"
+      "init-project will create operational labels in pmatos/symphonika: sym:running, sym:blocked, sym:stale"
     );
     expect(report.projects[0]).toMatchObject({
-      createdOperationalLabels: ["sym:running", "sym:stale"],
-      missingOperationalLabels: ["sym:running", "sym:stale"]
+      createdOperationalLabels: ["sym:running", "sym:blocked", "sym:stale"],
+      missingOperationalLabels: ["sym:running", "sym:blocked", "sym:stale"]
     });
-    expect(githubApi.createLabel).toHaveBeenCalledTimes(2);
+    expect(githubApi.createLabel).toHaveBeenCalledTimes(3);
     expect(githubApi.createLabel).toHaveBeenNthCalledWith(1, {
       name: "sym:running",
       owner: "pmatos",
@@ -293,6 +300,12 @@ describe("GitHub Project initialization", () => {
       token: "secret-token"
     });
     expect(githubApi.createLabel).toHaveBeenNthCalledWith(2, {
+      name: "sym:blocked",
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "secret-token"
+    });
+    expect(githubApi.createLabel).toHaveBeenNthCalledWith(3, {
       name: "sym:stale",
       owner: "pmatos",
       repo: "symphonika",
@@ -326,8 +339,9 @@ describe("GitHub Project initialization", () => {
     });
 
     expect(events).toEqual([
-      "warning:init-project will create operational labels in pmatos/symphonika: sym:failed, sym:stale",
+      "warning:init-project will create operational labels in pmatos/symphonika: sym:failed, sym:blocked, sym:stale",
       "create:sym:failed",
+      "create:sym:blocked",
       "create:sym:stale"
     ]);
   });
@@ -360,8 +374,8 @@ describe("GitHub Project initialization", () => {
       "projects.symphonika.tracker.repository pmatos/symphonika could not create operational label sym:stale: already exists"
     );
     expect(report.projects[0]).toMatchObject({
-      createdOperationalLabels: ["sym:running"],
-      missingOperationalLabels: ["sym:running", "sym:stale"]
+      createdOperationalLabels: ["sym:running", "sym:blocked"],
+      missingOperationalLabels: ["sym:running", "sym:blocked", "sym:stale"]
     });
   });
 });

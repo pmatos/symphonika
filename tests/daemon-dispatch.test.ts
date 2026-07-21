@@ -1499,11 +1499,13 @@ describe("daemon dispatch", () => {
 
     try {
       // Wait until both the planning and implementing rows have finished and
-      // had their workspace evidence written. Counting `state in ('failed',
+      // had their workspace evidence written. Counting `state in ('blocked',
       // 'succeeded')` avoids a race where the implementing continuation row
       // exists (insert is synchronous) but startAttempt has not yet populated
-      // `workspace_path`; the implementer also classifies as failed because
-      // the test provider exits clean without committing.
+      // `workspace_path`; the implementer also classifies as blocked (its own
+      // per-state result is no_workspace_changes, and its FSM fallback lands
+      // on a `terminal: blocked` node) because the test provider exits clean
+      // without committing.
       const deadline = Date.now() + 15_000;
       const databaseFile = path.join(root, ".symphonika", "symphonika.db");
       while (Date.now() < deadline) {
@@ -1512,7 +1514,7 @@ describe("daemon dispatch", () => {
           try {
             const row = database
               .prepare(
-                "select count(*) as c from runs where state in ('failed','succeeded')"
+                "select count(*) as c from runs where state in ('blocked','succeeded')"
               )
               .get() as { c: number };
             if (row.c >= 2) {
@@ -1544,12 +1546,13 @@ describe("daemon dispatch", () => {
         const planningRun = rows[0]!;
         const implementingRun = rows[1]!;
 
-        // The planning row classifies as failed (no commits → no_workspace_changes)
+        // The planning row classifies as blocked (no commits → no_workspace_changes,
+        // a non-actionable decline rather than a real failure — see ADR 0058)
         // but the workflow predicate engine still advanced the FSM. Both pieces
         // of state must be present on the row.
         expect(planningRun).toMatchObject({
           id: "run-fsm-advance-noop-1",
-          state: "failed",
+          state: "blocked",
           is_continuation: 0,
           current_state_id: "implementing",
           terminal_state_id: null,
@@ -1560,11 +1563,15 @@ describe("daemon dispatch", () => {
         );
 
         // The implementing run was spawned by the state advance, sharing the
-        // workspace with planning.
+        // workspace with planning. It also exits clean without committing, and
+        // its only fallback transition lands on a `terminal: blocked` FSM node,
+        // so it too records as blocked (not failed).
         expect(implementingRun).toMatchObject({
           id: "run-fsm-advance-noop-2",
           is_continuation: 1,
-          continuation_parent_run_id: "run-fsm-advance-noop-1"
+          continuation_parent_run_id: "run-fsm-advance-noop-1",
+          state: "blocked",
+          terminal_reason: "workflow_terminal_blocked"
         });
         expect(planningRun["workspace_path"]).toBe(workspacePath);
         expect(implementingRun["workspace_path"]).toBe(workspacePath);
@@ -1573,15 +1580,17 @@ describe("daemon dispatch", () => {
       }
 
       // Label hygiene: the planning step's per-state outcome classifies as
-      // failed (no_workspace_changes), but its workflow outcome advanced to
-      // `implementing`. applyTerminalLabels must NOT add `sym:failed` on
+      // blocked (no_workspace_changes), but its workflow outcome advanced to
+      // `implementing`. applyTerminalLabels must NOT add `sym:blocked` on
       // that transition — otherwise the issue stays externally marked
-      // failed even though a later state may succeed (subsequent
+      // blocked even though a later state may succeed (subsequent
       // applyTerminalLabels calls only remove `sym:running`). The
-      // implementing step does legitimately fail here (provider exits clean
-      // without committing → no_workspace_changes → no transition matches
-      // except the fallback `to: failed` terminal), so we expect exactly
-      // one `sym:failed` label add (from implementing's terminal), not two.
+      // implementing step does legitimately terminate here (provider exits
+      // clean without committing → no_workspace_changes → no transition
+      // matches except the fallback `to: failed` node, which is
+      // `terminal: blocked`), so we expect exactly one `sym:blocked` label
+      // add (from implementing's terminal), not two, and zero `sym:failed`
+      // adds — nothing here indicates a real failure.
       const failedLabelAdds =
         githubIssuesApi.addLabelsToIssue.mock.calls.filter(
           (call: unknown[]) => {
@@ -1589,21 +1598,29 @@ describe("daemon dispatch", () => {
             return args?.labels?.includes("sym:failed") === true;
           }
         );
-      expect(failedLabelAdds).toHaveLength(1);
+      expect(failedLabelAdds).toHaveLength(0);
+      const blockedLabelAdds =
+        githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+          (call: unknown[]) => {
+            const args = call[0] as { labels?: string[] } | undefined;
+            return args?.labels?.includes("sym:blocked") === true;
+          }
+        );
+      expect(blockedLabelAdds).toHaveLength(1);
     } finally {
       await daemon.stop();
     }
   });
 
-  // Regression: when the FSM intends to advance after a failed-deterministic
-  // outcome, `applyTerminalLabels` suppresses `sym:failed` on the assumption
-  // that `executeStateAdvance` will run. But `scheduleNext`'s `stateAdvance`
-  // branch calls `refreshIssue` first, and that can bail on a transient
-  // GitHub API failure. Without restoration the run is persisted as failed
-  // and the issue has had `sym:running` removed but never gets `sym:failed`
-  // — stuck wearing only `sym:claimed`. Verify the rollback puts
-  // `sym:failed` back on `refreshIssue` failures.
-  it("restores sym:failed when a state-advance refresh aborts after fsmContinuing suppression", async () => {
+  // Regression: when the FSM intends to advance after a blocked-deterministic
+  // outcome (no_workspace_changes), `applyTerminalLabels` suppresses
+  // `sym:blocked` on the assumption that `executeStateAdvance` will run. But
+  // `scheduleNext`'s `stateAdvance` branch calls `refreshIssue` first, and
+  // that can bail on a transient GitHub API failure. Without restoration the
+  // run is persisted as blocked and the issue has had `sym:running` removed
+  // but never gets `sym:blocked` — stuck wearing only `sym:claimed`. Verify
+  // the rollback puts `sym:blocked` back on `refreshIssue` failures.
+  it("restores sym:blocked when a state-advance refresh aborts after fsmContinuing suppression", async () => {
     const root = await makeTempRoot();
     await writeTransitionOnlyMultiStateRawFsmProject(root);
 
@@ -1626,9 +1643,11 @@ describe("daemon dispatch", () => {
     const codexProvider = successfulCodexProvider();
     const preparedWorkspace = preparedWorkspaceFixture(root);
     // Base commit only — planning exits clean without committing →
-    // outcome.kind = failed, classification = deterministic. FSM matches
-    // `to: implementing when: provider_success: true`, so stateAdvance
-    // fires, but getIssue (via refreshIssue) throws → scheduleNext bails.
+    // outcome.kind = failed, classification = deterministic, reason =
+    // no_workspace_changes (which isBlockedOutcome maps to RunState
+    // "blocked"). FSM matches `to: implementing when: provider_success:
+    // true`, so stateAdvance fires, but getIssue (via refreshIssue) throws →
+    // scheduleNext bails.
     await createGitWorkspaceAtBase(preparedWorkspace);
 
     let runCounter = 0;
@@ -1658,7 +1677,7 @@ describe("daemon dispatch", () => {
           const database = new Database(databaseFile, { readonly: true });
           try {
             const row = database
-              .prepare("select count(*) as c from runs where state = 'failed'")
+              .prepare("select count(*) as c from runs where state = 'blocked'")
               .get() as { c: number };
             if (row.c >= 1) {
               break;
@@ -1671,7 +1690,7 @@ describe("daemon dispatch", () => {
         }
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      // Give scheduleNext's bail-out path time to call markIssueFailed
+      // Give scheduleNext's bail-out path time to call markIssueBlocked
       // before reading the mock call list.
       await new Promise((resolve) => setTimeout(resolve, 50));
 
@@ -1686,7 +1705,7 @@ describe("daemon dispatch", () => {
         // any implementing row from being created.
         expect(rows).toHaveLength(1);
         expect(rows[0]).toMatchObject({
-          state: "failed",
+          state: "blocked",
           is_continuation: 0,
           current_state_id: "implementing"
         });
@@ -1694,15 +1713,15 @@ describe("daemon dispatch", () => {
         database.close();
       }
 
-      // The rollback restored `sym:failed` so the issue is not orphaned.
-      const failedLabelAdds =
+      // The rollback restored `sym:blocked` so the issue is not orphaned.
+      const blockedLabelAdds =
         githubIssuesApi.addLabelsToIssue.mock.calls.filter(
           (call: unknown[]) => {
             const args = call[0] as { labels?: string[] } | undefined;
-            return args?.labels?.includes("sym:failed") === true;
+            return args?.labels?.includes("sym:blocked") === true;
           }
         );
-      expect(failedLabelAdds).toHaveLength(1);
+      expect(blockedLabelAdds).toHaveLength(1);
     } finally {
       await daemon.stop();
     }
@@ -3081,7 +3100,7 @@ describe("daemon dispatch", () => {
   // entering a terminal node — that case still records state="succeeded"
   // because the workflow merely stalled. This test exercises the explicit
   // `terminal: blocked` node path, which is a workflow-author-declared failure.
-  it("walks a raw FSM workflow to a terminal blocked node and records the run as failed", async () => {
+  it("walks a raw FSM workflow to a terminal blocked node and records the run as blocked", async () => {
     const root = await makeTempRoot();
     await writeBlockedTerminalRawFsmProject(root);
 
@@ -3119,13 +3138,13 @@ describe("daemon dispatch", () => {
     });
 
     try {
-      const status = await waitForRun(daemon.url, "failed");
+      const status = await waitForRun(daemon.url, "blocked");
       await new Promise((resolve) => setTimeout(resolve, 100));
       const run = firstRun(status);
       expect(run).toMatchObject({
         id: "run-raw-fsm-terminal-blocked",
         issueNumber: 8,
-        state: "failed"
+        state: "blocked"
       });
 
       const finalStatus = (await fetch(`${daemon.url}/api/status`).then((r) =>
@@ -3148,7 +3167,7 @@ describe("daemon dispatch", () => {
           )
           .get("run-raw-fsm-terminal-blocked");
         expect(storedRun).toMatchObject({
-          state: "failed",
+          state: "blocked",
           current_state_id: null,
           terminal_state_id: "done",
           terminal_reason: "workflow_terminal_blocked",
@@ -3158,12 +3177,21 @@ describe("daemon dispatch", () => {
         database.close();
       }
 
+      // A workflow-declared `terminal: blocked` node is a non-actionable
+      // no-op verdict, not a real failure — it must add `sym:blocked`, not
+      // `sym:failed`. See ADR 0058 / issue #271.
       const failedLabelCalls =
         githubIssuesApi.addLabelsToIssue.mock.calls.filter((call) => {
           const arg = call[0] as { labels?: string[] } | undefined;
           return arg?.labels?.includes("sym:failed") ?? false;
         });
-      expect(failedLabelCalls.length).toBeGreaterThanOrEqual(1);
+      expect(failedLabelCalls).toHaveLength(0);
+      const blockedLabelCalls =
+        githubIssuesApi.addLabelsToIssue.mock.calls.filter((call) => {
+          const arg = call[0] as { labels?: string[] } | undefined;
+          return arg?.labels?.includes("sym:blocked") ?? false;
+        });
+      expect(blockedLabelCalls.length).toBeGreaterThanOrEqual(1);
     } finally {
       await daemon.stop();
     }

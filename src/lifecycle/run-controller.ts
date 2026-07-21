@@ -206,11 +206,12 @@ type ApplyLabelsInput = {
   // True when applyWorkflowOutcome advanced the raw-FSM walk to a non-terminal
   // next state or parked into a wait/merge_pr action. The per-state
   // ClassifiedTerminal may still be `failed` (e.g. a planning step that
-  // exited provider_success=true without committing → no_workspace_changes),
-  // but the workflow as a whole is continuing — so `sym:failed` must not be
-  // added on this transition or the issue will stay externally marked failed
-  // even after a later state succeeds (subsequent applyTerminalLabels calls
-  // only remove `sym:running`).
+  // exited provider_success=true without committing → no_workspace_changes,
+  // which isBlockedOutcome would otherwise map to `sym:blocked`), but the
+  // workflow as a whole is continuing — so neither `sym:failed` nor
+  // `sym:blocked` must be added on this transition or the issue will stay
+  // externally marked failed/blocked even after a later state succeeds
+  // (subsequent applyTerminalLabels calls only remove `sym:running`).
   fsmContinuing: boolean;
   issueNumber: number;
   outcome: ClassifiedTerminal;
@@ -1006,6 +1007,24 @@ export class RunController {
           terminalStateId: next.id,
           transitionReason: decision.reason
         });
+        // A wait/merge_pr row can advance straight into a workflow-authored
+        // `terminal: blocked` node (e.g. a PR follow-up that gives up on
+        // merge conflicts). Honor the same RunState/label contract as the
+        // provider-attempt path (ADR 0058) so the issue doesn't stay
+        // eligible for redispatch under a stale "succeeded" verdict.
+        if (next.terminal === "blocked") {
+          this.runStore.recordTerminalReason(
+            runId,
+            "workflow_terminal_blocked",
+            "deterministic"
+          );
+          this.runStore.updateRunState(runId, "blocked");
+          await this.markIssueBlocked({
+            issueNumber: refreshed.number,
+            repository
+          });
+          return;
+        }
         this.runStore.updateRunState(runId, "succeeded");
         return;
       }
@@ -1066,6 +1085,22 @@ export class RunController {
         terminalStateId: decision.stateId,
         transitionReason: `entered terminal state ${decision.terminal}`
       });
+      // See the matching `terminal === "blocked"` handling in the `advance`
+      // branch above — same ADR 0058 contract, reached via a direct
+      // terminate decision instead of an advance-to-terminal one.
+      if (decision.terminal === "blocked") {
+        this.runStore.recordTerminalReason(
+          runId,
+          "workflow_terminal_blocked",
+          "deterministic"
+        );
+        this.runStore.updateRunState(runId, "blocked");
+        await this.markIssueBlocked({
+          issueNumber: refreshed.number,
+          repository
+        });
+        return;
+      }
       this.runStore.updateRunState(runId, "succeeded");
     }
   }
@@ -2754,6 +2789,30 @@ export class RunController {
     );
   }
 
+  private async markIssueBlocked(input: {
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+  }): Promise<void> {
+    const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
+    try {
+      await api.addLabelsToIssue({
+        ...input.repository,
+        issueNumber: input.issueNumber,
+        labels: ["sym:blocked"]
+      });
+    } catch (err) {
+      this.logger?.warn(
+        { err, issueNumber: input.issueNumber },
+        "symphonika failed to add sym:blocked label; sym:claimed left in place"
+      );
+      return;
+    }
+    this.logger?.info(
+      { issueNumber: input.issueNumber },
+      "symphonika marked issue sym:blocked"
+    );
+  }
+
   private async applyTerminalLabels(input: ApplyLabelsInput): Promise<void> {
     const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
     if (input.outcome.kind === "cancelled") {
@@ -2797,6 +2856,20 @@ export class RunController {
           {
             issueNumber: input.issueNumber,
             label: "sym:failed",
+            operation: "removeLabel",
+            phase: "closed-issue-cleanup"
+          }
+        );
+        await this.bestEffort(
+          () =>
+            api.removeLabelsFromIssue({
+              ...input.repository,
+              issueNumber: input.issueNumber,
+              labels: ["sym:blocked"]
+            }),
+          {
+            issueNumber: input.issueNumber,
+            label: "sym:blocked",
             operation: "removeLabel",
             phase: "closed-issue-cleanup"
           }
@@ -2845,10 +2918,17 @@ export class RunController {
       !input.willRetry &&
       !input.fsmContinuing
     ) {
-      await this.markIssueFailed({
-        issueNumber: input.issueNumber,
-        repository: input.repository
-      });
+      if (isBlockedOutcome(input.outcome)) {
+        await this.markIssueBlocked({
+          issueNumber: input.issueNumber,
+          repository: input.repository
+        });
+      } else {
+        await this.markIssueFailed({
+          issueNumber: input.issueNumber,
+          repository: input.repository
+        });
+      }
     }
   }
 
@@ -2935,21 +3015,29 @@ export class RunController {
       // stateAdvance != null implies it). What it did depends on the outcome:
       //
       // - `failed && !willRetry`: applyTerminalLabels suppressed `sym:failed`
-      //   on the assumption that the FSM would continue. The suppression
-      //   promise is now broken; restore `sym:failed` so the issue is not
-      //   orphaned with only `sym:claimed`. Then return — there is no retry
-      //   to fire and no continuation to schedule.
-      // - `failed && willRetry`: applyTerminalLabels did not add `sym:failed`
+      //   (or `sym:blocked`, see isBlockedOutcome) on the assumption that the
+      //   FSM would continue. The suppression promise is now broken; restore
+      //   whichever label matches the outcome so the issue is not orphaned
+      //   with only `sym:claimed`. Then return — there is no retry to fire and
+      //   no continuation to schedule.
+      // - `failed && willRetry`: applyTerminalLabels did not add either label
       //   (it short-circuited on `willRetry`). The transient-retry branch
       //   below is the right path; fall through so it fires.
-      // - `success`: applyTerminalLabels did not add `sym:failed`, and no
+      // - `success`: applyTerminalLabels did not add either label, and no
       //   retry applies. Fall through; `suppressContinuation` (always true
       //   when `stateAdvance != null`) ends the call.
       if (input.outcome.kind === "failed" && !input.willRetry) {
-        await this.markIssueFailed({
-          issueNumber: input.issue.number,
-          repository: input.repository
-        });
+        if (isBlockedOutcome(input.outcome)) {
+          await this.markIssueBlocked({
+            issueNumber: input.issue.number,
+            repository: input.repository
+          });
+        } else {
+          await this.markIssueFailed({
+            issueNumber: input.issue.number,
+            repository: input.repository
+          });
+        }
         return;
       }
       // For all other outcomes, fall through to the subsequent branches.
@@ -3235,7 +3323,26 @@ function indentReviewBody(body: string): string {
     .join("\n");
 }
 
+// Reason-based, not a new ClassifiedTerminal.kind: `kind` stays "failed" for
+// these outcomes so retry/classification/scheduling logic (deferRetryableTransientAdvance,
+// willRetry, signalsFromTerminal, fsmContinuing) is untouched by this
+// distinction — only RunState and the GitHub label branch downstream care.
+// See ADR 0058 / issue #271.
+const BLOCKED_TERMINAL_REASONS = new Set([
+  "no_workspace_changes",
+  "workflow_terminal_blocked"
+]);
+
+function isBlockedOutcome(outcome: ClassifiedTerminal): boolean {
+  return (
+    outcome.kind === "failed" && BLOCKED_TERMINAL_REASONS.has(outcome.reason)
+  );
+}
+
 function mapOutcomeToRunState(outcome: ClassifiedTerminal): RunState {
+  if (isBlockedOutcome(outcome)) {
+    return "blocked";
+  }
   switch (outcome.kind) {
     case "success":
       return "succeeded";

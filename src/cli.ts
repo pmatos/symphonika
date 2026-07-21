@@ -1386,6 +1386,7 @@ function isRunState(value: string): value is RunState {
     value === "running" ||
     value === "input_required" ||
     value === "failed" ||
+    value === "blocked" ||
     value === "succeeded" ||
     value === "cancelled" ||
     value === "stale"
@@ -1876,7 +1877,10 @@ function formatRecentRunSuffix(
   },
   store: RunStore
 ): string {
-  if (run.terminalReason === null || run.state !== "failed") {
+  if (
+    run.terminalReason === null ||
+    (run.state !== "failed" && run.state !== "blocked")
+  ) {
     return "";
   }
   const capKind = parseCapReachedReason(run.terminalReason);

@@ -84,6 +84,14 @@ describe("HTTP app — runs API and pages", () => {
         providerName: "claude"
       });
       test.runStore.updateRunState("run-c", "failed");
+      test.runStore.createRun({
+        id: "run-d",
+        issue: sampleIssue({ number: 4 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-d", "blocked");
 
       const app = createHttpApp({
         runStore: test.runStore,
@@ -97,6 +105,15 @@ describe("HTTP app — runs API and pages", () => {
       const body = (await response.json()) as { runs: { id: string }[] };
       expect(response.status).toBe(200);
       expect(body.runs.map((r) => r.id)).toEqual(["run-b"]);
+
+      const blockedResponse = await app.request(
+        "/api/runs?state=blocked&project=alpha"
+      );
+      const blockedBody = (await blockedResponse.json()) as {
+        runs: { id: string }[];
+      };
+      expect(blockedResponse.status).toBe(200);
+      expect(blockedBody.runs.map((r) => r.id)).toEqual(["run-d"]);
     } finally {
       test.cleanup();
     }
@@ -387,6 +404,19 @@ describe("HTTP app — runs API and pages", () => {
         providerName: "codex"
       });
       test.runStore.updateRunState("needs-input", "input_required");
+      test.runStore.createRun({
+        id: "blocked-run",
+        issue: sampleIssue({ number: 14 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.recordTerminalReason(
+        "blocked-run",
+        "no_workspace_changes",
+        "deterministic"
+      );
+      test.runStore.updateRunState("blocked-run", "blocked");
 
       const app = createHttpApp({
         runStore: test.runStore,
@@ -426,6 +456,18 @@ describe("HTTP app — runs API and pages", () => {
         kind: "already-terminal",
         state: "input_required"
       });
+
+      // Regression: cancelling an already-blocked run must not overwrite its
+      // terminal verdict with "cancelled" — see issue #271 / ADR 0058.
+      const blocked = await app.request("/api/runs/blocked-run/cancel", {
+        method: "POST"
+      });
+      expect(blocked.status).toBe(409);
+      expect(await blocked.json()).toMatchObject({
+        kind: "already-terminal",
+        state: "blocked"
+      });
+      expect(test.runStore.getRun("blocked-run")?.state).toBe("blocked");
 
       const form = await app.request("/api/runs/live/cancel", {
         body: "",
@@ -1137,6 +1179,48 @@ describe("HTTP app — runs API and pages", () => {
       expect(body).toContain("alpha");
       expect(body).toContain("#44");
       expect(body).toContain("Stale claim");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("renders a blocked run with the calmer blocked pill and banner, not the failed styling", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "run-blocked",
+        issue: sampleIssue({ number: 271, title: "Declined, superseded" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.recordTerminalReason(
+        "run-blocked",
+        "no_workspace_changes",
+        "deterministic"
+      );
+      test.runStore.updateRunState("run-blocked", "blocked");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const detail = await app.request("/runs/run-blocked");
+      expect(detail.status).toBe(200);
+      const body = await detail.text();
+      expect(body).toContain('pill pill--blocked"');
+      expect(body).not.toContain('pill pill--fail"');
+      expect(body).toContain("banner--blocked");
+      expect(body).toContain("Run blocked");
+      expect(body).toContain("no_workspace_changes");
+
+      const runsList = await app.request("/runs?state=blocked");
+      expect(runsList.status).toBe(200);
+      const runsListBody = await runsList.text();
+      expect(runsListBody).toContain("run-blocked");
+      expect(runsListBody).toContain('pill pill--blocked"');
     } finally {
       test.cleanup();
     }

@@ -26,6 +26,7 @@ export type RunState =
   | "running"
   | "input_required"
   | "failed"
+  | "blocked"
   | "succeeded"
   | "cancelled"
   | "stale"

@@ -46,11 +46,12 @@ const ACTIVE_RUN_STATES = new Set<RunState>([
   "waiting"
 ]);
 
-const ATTENTION_RUN_STATES = new Set<RunState>(["failed", "stale"]);
+const ATTENTION_RUN_STATES = new Set<RunState>(["failed", "blocked", "stale"]);
 
 const RECENT_RUN_STATES = new Set<RunState>([
   "cancelled",
   "failed",
+  "blocked",
   "stale",
   "succeeded"
 ]);
@@ -100,7 +101,7 @@ export function renderStatusDashboard(input: StatusDashboardInput): string {
     `│ State root: ${input.stateRoot}`,
     `│ Projects: ${validProjects} valid / ${invalidProjects} invalid`,
     `│ Issues: candidate ${input.issueCounts.candidate} | filtered ${input.issueCounts.filtered} | running ${input.issueCounts.running} | failed ${input.issueCounts.failed} | stale ${input.issueCounts.stale}`,
-    `│ Runs: active ${activeRuns.length} | succeeded ${runCounts.succeeded ?? 0} | failed ${runCounts.failed ?? 0} | cancelled ${runCounts.cancelled ?? 0} | total ${input.runs.length}`,
+    `│ Runs: active ${activeRuns.length} | succeeded ${runCounts.succeeded ?? 0} | failed ${runCounts.failed ?? 0} | blocked ${runCounts.blocked ?? 0} | cancelled ${runCounts.cancelled ?? 0} | total ${input.runs.length}`,
     `│ Last poll: ${input.lastPollOutcome}`,
     "├─ Active runs",
     ...formatActiveRuns(
@@ -252,7 +253,7 @@ function formatAttention(
     }
   }
   if (lines.length === 0) {
-    return ["│   No failed, input-required, or stale work"];
+    return ["│   No failed, blocked, input-required, or stale work"];
   }
   return lines;
 }

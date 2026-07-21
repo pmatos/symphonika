@@ -7,6 +7,7 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resolveLogLevel, startDaemon } from "../src/daemon.js";
+import type { IssueSnapshot } from "../src/issue-polling.js";
 import { openRunStore, RunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
@@ -15,6 +16,22 @@ async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-daemon-test-"));
   tempRoots.push(root);
   return root;
+}
+
+function sampleIssue(overrides: Partial<IssueSnapshot> = {}): IssueSnapshot {
+  return {
+    body: "",
+    created_at: "",
+    id: 1,
+    labels: [],
+    number: 1,
+    priority: 99,
+    state: "open",
+    title: "issue",
+    updated_at: "",
+    url: "",
+    ...overrides
+  };
 }
 
 afterEach(async () => {
@@ -61,6 +78,56 @@ describe("startDaemon", () => {
       await daemon.stop();
     }
     await expect(readFile(endpointPath, "utf8")).rejects.toThrow();
+  });
+
+  it("preserves a blocked run's terminal verdict when cancel is attempted (issue #271)", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    const seedStore = openRunStore({ stateRoot });
+    seedStore.createRun({
+      id: "run-blocked",
+      issue: sampleIssue({ number: 9 }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    seedStore.recordTerminalReason(
+      "run-blocked",
+      "no_workspace_changes",
+      "deterministic"
+    );
+    seedStore.updateRunState("run-blocked", "blocked");
+    seedStore.close();
+
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      // Regression: src/daemon.ts wires createHttpApp with its own
+      // cancelViaUi closure (a THIRD independent copy of the terminal-states
+      // allowlist, distinct from pages.ts and http/app.ts's fallback). It
+      // must also treat "blocked" as terminal, or cancelling a blocked run
+      // wrongly proceeds and overwrites the verdict with "cancelled".
+      const response = await fetch(
+        `${daemon.url}/api/runs/run-blocked/cancel`,
+        { method: "POST" }
+      );
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        kind: "already-terminal",
+        state: "blocked"
+      });
+
+      const verifyStore = openRunStore({ stateRoot });
+      expect(verifyStore.getRun("run-blocked")?.state).toBe("blocked");
+      verifyStore.close();
+    } finally {
+      await daemon.stop();
+    }
   });
 
   it("cleans up the HTTP listener when endpoint descriptor writing fails", async () => {

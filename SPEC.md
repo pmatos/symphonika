@@ -88,7 +88,7 @@ An issue is eligible when all are true:
 - it has every configured `labels_all` label
 - it has none of the configured `labels_none` labels
 - it does not have blocking operational labels
-- it is not already running, claimed, failed, or stale according to the orchestrator
+- it is not already running, claimed, failed, blocked, or stale according to the orchestrator
 
 v1 uses labels only for blocking. Symphonika does not parse issue body text, task lists, GitHub
 Projects fields, or linked PRs to infer blockers.
@@ -100,6 +100,7 @@ Symphonika owns this narrow GitHub label namespace:
 - `sym:claimed`
 - `sym:running`
 - `sym:failed`
+- `sym:blocked`
 - `sym:stale`
 
 The orchestrator may write these labels for dispatch safety and runtime bookkeeping. Workflow
@@ -665,6 +666,12 @@ On failed deterministic terminal state:
 - add `sym:failed`
 - preserve `sym:claimed` until operator action
 
+On blocked deterministic terminal state (see §12.1, ADR 0058):
+
+- remove `sym:running`
+- add `sym:blocked`
+- preserve `sym:claimed` until operator action
+
 On closed issue:
 
 - cancel active run
@@ -835,6 +842,8 @@ Normalized lifecycle states:
 - `running`
 - `input_required` (transient or legacy only; durable provider-input failures are `failed`)
 - `failed`
+- `blocked` (non-actionable no-op or FSM-declared block — see below; distinct from `failed`, which
+  is reserved for outcomes that indicate something actually broke)
 - `succeeded`
 - `cancelled`
 - `stale`
@@ -848,15 +857,21 @@ On provider exit code 0:
 
 1. Inspect the Workspace issue branch against
    `refs/remotes/origin/<configured-base-branch>..HEAD`.
-2. If the branch has zero commits ahead of base, mark the run `failed` with deterministic terminal
-   reason `no_workspace_changes`.
+2. If the branch has zero commits ahead of base, mark the run `blocked` with deterministic terminal
+   reason `no_workspace_changes` and add `sym:blocked`. This covers the agent correctly declining
+   the task (e.g. the target was already superseded) — exit 0, zero commits, nothing broken.
 3. If Workspace inspection fails, mark the run `failed` with deterministic terminal reason
-   `workspace_inspection_failed`.
+   `workspace_inspection_failed` and add `sym:failed`. This is a real failure (the `git` inspection
+   command itself errored), unlike case 2.
 4. If the branch is ahead of base, mark run `succeeded`.
 5. Remove `sym:running`.
 6. Re-check GitHub issue.
 7. If the issue remains eligible, schedule a short continuation.
 8. If the continuation cap is reached, mark `sym:failed` and surface the reason.
+
+For raw FSM workflows, a state whose `terminal` is `blocked` (§12.2) produces RunState `blocked` and
+`sym:blocked`, mirroring case 2 above; a state whose `terminal` is `failure` produces RunState
+`failed` and `sym:failed`, mirroring case 3. See ADR 0058.
 
 Default continuation delay: about 1 second.
 
@@ -870,9 +885,10 @@ For raw FSM workflows, retryable transient failures consume the retry budget bef
 FSM transitions matching the failure signals are allowed to advance or park the workflow. The retry
 re-enters the same FSM state and preserves the state-advance label-immunity bit when the failed run
 was already mid-walk. Terminal `failure` / `blocked` transitions remain workflow-authored
-deterministic verdicts and pre-empt retry. After the retry budget is exhausted, the final attempt's
-signals are evaluated normally by the FSM; if no workflow transition handles them, the run follows
-the exhausted-retry failure path below.
+deterministic verdicts and pre-empt retry — `failure` maps to RunState `failed` (`sym:failed`),
+`blocked` maps to RunState `blocked` (`sym:blocked`). After the retry budget is exhausted, the final
+attempt's signals are evaluated normally by the FSM; if no workflow transition handles them, the run
+follows the exhausted-retry failure path below.
 
 Default retry policy:
 
@@ -880,17 +896,17 @@ Default retry policy:
 - delays: about `10s`, `30s`, `2m`
 - maximum backoff: `5m`
 
-Do not automatically retry deterministic failures:
+Do not automatically retry these deterministic terminal outcomes:
 
-- prompt render error
-- invalid config
-- missing workflow
-- input required
-- continuation cap reached
-- no workspace commits ahead of base after provider exit code 0
-- workspace success inspection failure
-- workspace branch conflict
-- Project validation failure
+- prompt render error (`failed`)
+- invalid config (`failed`)
+- missing workflow (`failed`)
+- input required (`failed`)
+- continuation cap reached (`failed`)
+- no workspace commits ahead of base after provider exit code 0 (`blocked` — see §12.1)
+- workspace success inspection failure (`failed`)
+- workspace branch conflict (`failed`)
+- Project validation failure (`failed`)
 
 After retry exhaustion:
 

@@ -33,6 +33,7 @@ export type RegisterPagesOptions = {
 const TERMINAL_STATES: ReadonlySet<RunState> = new Set([
   "cancelled",
   "failed",
+  "blocked",
   "input_required",
   "stale",
   "succeeded"
@@ -44,12 +45,17 @@ const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
   "running",
   "input_required",
   "failed",
+  "blocked",
   "succeeded",
   "cancelled",
   "stale"
 ]);
 
 const FAILURE_STATES: ReadonlySet<RunState> = new Set(["failed", "stale"]);
+
+// Runs whose outcome banner should render, but with the calmer "blocked"
+// family/copy rather than the alarming "failed" one — see issue #271.
+const BLOCKED_STATES: ReadonlySet<RunState> = new Set(["blocked"]);
 
 // A single run's detail view is cheap to render; coalescing streamed message
 // tokens collapses hundreds of rows into a handful, so fetch a generous tail.
@@ -150,7 +156,8 @@ export function registerPages(options: RegisterPagesOptions): void {
     });
     const eventsTruncated = tailDesc.length > EVENT_TAIL_LIMIT;
     const events = tailDesc.slice(0, EVENT_TAIL_LIMIT).reverse();
-    const isFailure = FAILURE_STATES.has(detail.state);
+    const isFailure =
+      FAILURE_STATES.has(detail.state) || BLOCKED_STATES.has(detail.state);
     const terminalAttempt = detail.attempts[detail.attempts.length - 1];
     const failureEvent = isFailure
       ? options.runStore.getLastFailureEvent(id, terminalAttempt?.id)
@@ -246,7 +253,9 @@ const DARK_TOKENS = `
   --fail-ink: oklch(0.77 0.15 28);
   --fail-bg: oklch(0.31 0.075 28);
   --ok-ink: oklch(0.8 0.13 152);
-  --ok-bg: oklch(0.3 0.06 152);`;
+  --ok-bg: oklch(0.3 0.06 152);
+  --blocked-ink: oklch(0.8 0.13 300);
+  --blocked-bg: oklch(0.32 0.06 300);`;
 
 const STYLES = `${FONT_FACES}
 :root {
@@ -283,6 +292,8 @@ const STYLES = `${FONT_FACES}
   --fail-bg: oklch(0.945 0.04 28);
   --ok-ink: oklch(0.45 0.12 152);
   --ok-bg: oklch(0.94 0.05 152);
+  --blocked-ink: oklch(0.5 0.15 300);
+  --blocked-bg: oklch(0.945 0.035 300);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {${DARK_TOKENS}
@@ -444,6 +455,7 @@ td code { color: var(--ink-2); }
 .pill--progress { color: var(--progress-ink); background: var(--progress-bg); border-color: color-mix(in oklch, var(--progress-ink) 22%, transparent); }
 .pill--fail { color: var(--fail-ink); background: var(--fail-bg); border-color: color-mix(in oklch, var(--fail-ink) 22%, transparent); }
 .pill--ok { color: var(--ok-ink); background: var(--ok-bg); border-color: color-mix(in oklch, var(--ok-ink) 22%, transparent); }
+.pill--blocked { color: var(--blocked-ink); background: var(--blocked-bg); border-color: color-mix(in oklch, var(--blocked-ink) 22%, transparent); }
 .pill--neutral { color: var(--ink-muted); background: var(--surface-2); border-color: var(--border); }
 
 .fields {
@@ -528,12 +540,17 @@ td code { color: var(--ink-2); }
   padding: var(--sp-3) var(--sp-4);
   margin: 0 0 var(--sp-5);
 }
+.banner--blocked {
+  border-color: var(--blocked-ink);
+  background: var(--blocked-bg);
+}
 .banner-title {
   margin: 0 0 var(--sp-1);
   font-weight: 600;
   text-transform: capitalize;
   color: var(--fail-ink);
 }
+.banner--blocked .banner-title { color: var(--blocked-ink); }
 .banner-reason { margin: 0 0 var(--sp-2); white-space: pre-wrap; color: var(--ink); }
 .banner-context { margin: 0; font-size: var(--fs-meta); color: var(--ink-muted); }
 .banner-context code { color: var(--ink-2); }
@@ -582,7 +599,9 @@ ${body}
 </html>`;
 }
 
-function stateFamily(state: RunState): "ok" | "fail" | "progress" | "neutral" {
+function stateFamily(
+  state: RunState
+): "ok" | "fail" | "blocked" | "progress" | "neutral" {
   switch (state) {
     case "succeeded":
       return "ok";
@@ -590,6 +609,8 @@ function stateFamily(state: RunState): "ok" | "fail" | "progress" | "neutral" {
     case "cancelled":
     case "stale":
       return "fail";
+    case "blocked":
+      return "blocked";
     case "queued":
     case "preparing_workspace":
     case "running":
@@ -994,9 +1015,11 @@ function renderOutcomeBanner(
   failureEvent: ProviderEventRecord | undefined,
   exitEvent: ProviderEventRecord | undefined
 ): string {
-  // Only failure-state runs get a banner. A prior attempt's failure event must
-  // never surface on a run that ultimately succeeded or is still running.
-  if (!FAILURE_STATES.has(detail.state)) {
+  // Only failure- and blocked-state runs get a banner. A prior attempt's
+  // failure event must never surface on a run that ultimately succeeded or is
+  // still running.
+  const isBlocked = BLOCKED_STATES.has(detail.state);
+  if (!FAILURE_STATES.has(detail.state) && !isBlocked) {
     return "";
   }
   const providerMessage =
@@ -1008,7 +1031,9 @@ function renderOutcomeBanner(
   const reason =
     providerMessage !== undefined
       ? `<p class="banner-reason">${escapeHtml(providerMessage)}</p>`
-      : `<p class="banner-reason">No provider failure message was recorded. See the transcript and logs below.</p>`;
+      : isBlocked
+        ? `<p class="banner-reason">The agent finished without making workspace changes, or a workflow needs a human decision. See the terminal reason and transcript below.</p>`
+        : `<p class="banner-reason">No provider failure message was recorded. See the transcript and logs below.</p>`;
 
   const context: string[] = [];
   if (detail.terminalReason !== null) {
@@ -1025,7 +1050,8 @@ function renderOutcomeBanner(
     context.push(`event #${failureEvent.sequence}`);
   }
 
-  return `<section class="banner"><p class="banner-title">Run ${escapeHtml(detail.state)}</p>${reason}<p class="banner-context">${context.join(" &middot; ")}</p></section>`;
+  const bannerClass = isBlocked ? "banner banner--blocked" : "banner";
+  return `<section class="${bannerClass}"><p class="banner-title">Run ${escapeHtml(detail.state)}</p>${reason}<p class="banner-context">${context.join(" &middot; ")}</p></section>`;
 }
 
 // Exit code is reported only when abnormal: codex exits 0 even after refusing a

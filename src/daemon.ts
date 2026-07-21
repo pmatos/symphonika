@@ -615,6 +615,7 @@ export async function startDaemon(
   const TERMINAL_STATES = new Set<RunState>([
     "cancelled",
     "failed",
+    "blocked",
     "input_required",
     "stale",
     "succeeded"

@@ -2266,6 +2266,7 @@ export class RunController {
         // classifyFailure outcome without an FSM-driven overlay.
         if (currentState !== undefined && loadedWorkflow !== undefined) {
           workflowOutcome = this.applyWorkflowOutcome({
+            actionExecuted: attemptCreated,
             currentState,
             deferRetryableTransientAdvance,
             issue: input.issue,
@@ -2496,6 +2497,7 @@ export class RunController {
   }
 
   private applyWorkflowOutcome(input: {
+    actionExecuted: boolean;
     currentState: ExpandedWorkflowState;
     deferRetryableTransientAdvance?: boolean;
     issue: IssueSnapshot;
@@ -2506,7 +2508,7 @@ export class RunController {
   }): WorkflowOutcomeResult {
     const signals = signalsFromTerminal(input.terminal);
     const decision = decideNextStep({
-      actionExecuted: true,
+      actionExecuted: input.actionExecuted,
       signals,
       state: input.currentState
     });

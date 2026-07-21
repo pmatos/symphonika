@@ -470,6 +470,47 @@ describe("Project initialization", () => {
       readFile(path.join(repositoryRoot, "WORKFLOW.md"), "utf8")
     ).rejects.toThrow();
   });
+
+  it("does not persist the new Project when its starter workflow cannot be created", async () => {
+    const root = await makeTempRoot();
+    const repositoryRoot = path.join(root, "new-project");
+    const configPath = path.join(root, "config", "symphonika.yml");
+    await createGitHubRepository(
+      repositoryRoot,
+      "https://github.com/acme/new-project.git"
+    );
+    await writeExistingConfig(configPath, root);
+    const originalContents = await readFile(configPath, "utf8");
+    const workflowParent = path.join(repositoryRoot, "workflow-parent");
+    const workflowPath = path.join(workflowParent, "WORKFLOW.md");
+    await writeFile(workflowParent, "not a directory", "utf8");
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi.fn().mockResolvedValue([...REQUIRED_OPERATIONAL_LABELS]),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runInitProject({
+      configPath,
+      cwd: repositoryRoot,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      prompt: (input) =>
+        Promise.resolve(input.key === "workflowPath" ? workflowPath : "")
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toEqual([
+      expect.stringContaining(
+        `starter Workflow Contract could not be created at ${workflowPath}:`
+      )
+    ]);
+    expect(githubApi.createLabel).not.toHaveBeenCalled();
+    await expect(readFile(configPath, "utf8")).resolves.toBe(originalContents);
+    await expect(readFile(workflowParent, "utf8")).resolves.toBe(
+      "not a directory"
+    );
+  });
 });
 
 async function makeTempRoot(): Promise<string> {

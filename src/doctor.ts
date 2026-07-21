@@ -553,10 +553,24 @@ export async function runInitProject(
     return initProjectReport(configPath, errors, warnings, projects);
   }
 
-  await writeFile(configPath, document.toString(), "utf8");
   if (!(await fileExists(settings.workflowPath))) {
-    await mkdir(path.dirname(settings.workflowPath), { recursive: true });
-    await writeFile(settings.workflowPath, defaultWorkflowContract(), "utf8");
+    try {
+      await mkdir(path.dirname(settings.workflowPath), { recursive: true });
+      await writeFile(settings.workflowPath, defaultWorkflowContract(), "utf8");
+    } catch (error) {
+      errors.push(
+        `starter Workflow Contract could not be created at ${settings.workflowPath}: ${errorMessage(error)}`
+      );
+      return initProjectReport(configPath, errors, warnings, projects);
+    }
+  }
+
+  try {
+    await writeFile(configPath, document.toString(), "utf8");
+  } catch (error) {
+    errors.push(
+      `service config could not be written at ${configPath}: ${errorMessage(error)}`
+    );
   }
 
   return initProjectReport(configPath, errors, warnings, projects);

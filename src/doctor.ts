@@ -1,7 +1,10 @@
-import { readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { stdin, stdout } from "node:process";
+import { createInterface } from "node:readline/promises";
 import { Octokit } from "@octokit/rest";
-import { parse } from "yaml";
+import { isSeq, parse, parseDocument } from "yaml";
 import { z } from "zod";
 
 import type { WorkflowFormat } from "./config-schemas.js";
@@ -15,12 +18,18 @@ import {
   resolveServiceConfigPath
 } from "./config-paths.js";
 import {
+  defaultWorkflowContract,
+  inspectCurrentGitHubProject,
+  type InitProvider
+} from "./init.js";
+import {
   DEFAULT_GITHUB_ISSUES_API,
   type GitHubIssuesApi
 } from "./issue-polling.js";
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
+import { resolveStateRoot } from "./state.js";
 import {
   loadExpandedWorkflow,
   validateExpandedWorkflowReferences
@@ -59,9 +68,28 @@ export type DoctorReport = {
 };
 
 export type InitProjectOptions = DoctorOptions & {
+  force?: boolean;
   onWarning?: (warning: string) => void;
+  prompt?: InitProjectPrompt;
   yes?: boolean;
 };
+
+export type InitProjectPromptInput = {
+  defaultValue: string;
+  key:
+    | "baseBranch"
+    | "excludedLabels"
+    | "priorityLabels"
+    | "projectName"
+    | "provider"
+    | "requiredLabels"
+    | "workflowPath";
+  message: string;
+};
+
+export type InitProjectPrompt = (
+  input: InitProjectPromptInput
+) => Promise<string>;
 
 type InitProjectProjectReport = {
   createdOperationalLabels: string[];
@@ -385,98 +413,405 @@ export async function runInitProject(
   const errors: string[] = [];
   const warnings: string[] = [];
   const projects: InitProjectProjectReport[] = [];
-  const rawConfig = await readConfig(configPath, errors);
-
-  if (rawConfig === undefined) {
-    if (resolvedConfig.source === "user" && !resolvedConfig.configExists) {
-      errors.push(missingUserConfigHint(configPath));
-    }
+  if (!resolvedConfig.configExists) {
+    errors.push(missingUserConfigHint(configPath));
     return initProjectReport(configPath, errors, warnings, projects);
   }
 
-  const parsedConfig = parseServiceConfig(rawConfig, errors);
+  let configContents: string;
+  try {
+    configContents = await readFile(configPath, "utf8");
+  } catch (error) {
+    errors.push(
+      `service config could not be read at ${configPath}: ${errorMessage(error)}`
+    );
+    return initProjectReport(configPath, errors, warnings, projects);
+  }
+
+  const document = parseDocument(configContents);
+  if (document.errors.length > 0) {
+    errors.push(
+      ...document.errors.map(
+        (error) => `service config could not be parsed: ${error.message}`
+      )
+    );
+    return initProjectReport(configPath, errors, warnings, projects);
+  }
+  const projectsNode = document.get("projects", true);
+  if (!isSeq(projectsNode)) {
+    errors.push(
+      "service config must contain a projects sequence; run `symphonika init --force` to recreate the global config"
+    );
+    return initProjectReport(configPath, errors, warnings, projects);
+  }
+
+  let metadata: Awaited<ReturnType<typeof inspectCurrentGitHubProject>>;
+  try {
+    metadata = await inspectCurrentGitHubProject(cwd);
+  } catch (error) {
+    errors.push(errorMessage(error));
+    return initProjectReport(configPath, errors, warnings, projects);
+  }
+
+  let settings: ProjectInitSettings;
+  try {
+    settings = await collectProjectSettings({
+      metadata,
+      ...(options.prompt === undefined ? {} : { prompt: options.prompt }),
+      yes: options.yes === true
+    });
+  } catch (error) {
+    errors.push(errorMessage(error));
+    return initProjectReport(configPath, errors, warnings, projects);
+  }
+
+  let stateRoot: string;
+  try {
+    stateRoot = resolveStateRoot({ configPath, cwd, env }).stateRoot;
+  } catch (error) {
+    errors.push(errorMessage(error));
+    return initProjectReport(configPath, errors, warnings, projects);
+  }
+
+  const project = buildProjectConfig({ metadata, settings, stateRoot });
+  const rawProjects = projectsNode.toJSON();
+  const existingIndex = rawProjects.findIndex(
+    (entry) =>
+      typeof entry === "object" &&
+      entry !== null &&
+      "name" in entry &&
+      (entry as { name?: unknown }).name === settings.projectName
+  );
+  if (existingIndex >= 0 && options.force !== true) {
+    errors.push(
+      `project ${settings.projectName} already exists in ${configPath}; pass --force to replace that Project`
+    );
+    return initProjectReport(configPath, errors, warnings, projects);
+  }
+  if (existingIndex >= 0) {
+    document.setIn(["projects", existingIndex], project);
+  } else {
+    projectsNode.add(project);
+  }
+
+  const parsedConfig = parseServiceConfig(document.toJS(), errors);
   if (parsedConfig === undefined) {
     return initProjectReport(configPath, errors, warnings, projects);
   }
 
-  const githubApi = options.githubApi ?? DEFAULT_GITHUB_API;
+  await writeFile(configPath, document.toString(), "utf8");
+  if (!(await fileExists(settings.workflowPath))) {
+    await mkdir(path.dirname(settings.workflowPath), { recursive: true });
+    await writeFile(settings.workflowPath, defaultWorkflowContract(), "utf8");
+  }
 
-  for (const project of parsedConfig.projects) {
-    const token = resolveEnvBackedValue(project.tracker.token, env);
-    if (token === undefined) {
-      const variableName = envReferenceName(project.tracker.token);
-      errors.push(
-        variableName === undefined
-          ? `projects.${project.name}.tracker.token must reference an environment variable like $GITHUB_TOKEN`
-          : `projects.${project.name}.tracker.token references unset environment variable $${variableName}`
-      );
-      continue;
-    }
-
-    const repository = {
-      owner: project.tracker.owner,
-      repo: project.tracker.repo,
-      token
-    };
-    const repositoryName = `${project.tracker.owner}/${project.tracker.repo}`;
-    const access = await githubApi.validateRepositoryAccess(repository);
-    if (!access.ok) {
-      errors.push(
-        `projects.${project.name}.tracker.repository ${repositoryName} is not accessible: ${access.message ?? "unknown GitHub error"}`
-      );
-      continue;
-    }
-
-    let labels: Set<string>;
-    try {
-      labels = new Set(await githubApi.listLabels(repository));
-    } catch (error) {
-      errors.push(
-        `projects.${project.name}.tracker.repository ${repositoryName} labels could not be listed: ${errorMessage(error)}`
-      );
-      continue;
-    }
-
-    const missingOperationalLabels = REQUIRED_OPERATIONAL_LABELS.filter(
-      (label) => !labels.has(label)
-    );
-    const createdOperationalLabels: string[] = [];
-
-    if (missingOperationalLabels.length > 0) {
-      const warning = `init-project ${options.yes === true ? "will" : "would"} create operational labels in ${repositoryName}: ${missingOperationalLabels.join(", ")}`;
-      warnings.push(warning);
-      options.onWarning?.(warning);
-
-      if (options.yes !== true) {
-        errors.push(
-          "pass --yes to create missing operational labels non-interactively"
-        );
-      } else {
-        for (const label of missingOperationalLabels) {
-          try {
-            await githubApi.createLabel({
-              ...repository,
-              name: label
-            });
-            createdOperationalLabels.push(label);
-          } catch (error) {
-            errors.push(
-              `projects.${project.name}.tracker.repository ${repositoryName} could not create operational label ${label}: ${errorMessage(error)}`
-            );
-          }
-        }
-      }
-    }
-
-    projects.push({
-      createdOperationalLabels,
-      missingOperationalLabels,
-      name: project.name,
-      repository: repositoryName
-    });
+  const registeredProject = parsedConfig.projects.find(
+    (entry) => entry.name === settings.projectName
+  );
+  if (registeredProject === undefined) {
+    errors.push(`registered Project ${settings.projectName} could not be read`);
+    return initProjectReport(configPath, errors, warnings, projects);
+  }
+  const projectReport = await initializeOperationalLabels({
+    env,
+    errors,
+    githubApi: options.githubApi ?? DEFAULT_GITHUB_API,
+    ...(options.onWarning === undefined
+      ? {}
+      : { onWarning: options.onWarning }),
+    project: registeredProject,
+    warnings
+  });
+  if (projectReport !== undefined) {
+    projects.push(projectReport);
   }
 
   return initProjectReport(configPath, errors, warnings, projects);
+}
+
+type ProjectInitSettings = {
+  baseBranch: string;
+  excludedLabels: string[];
+  priorityLabels: Record<string, number>;
+  projectName: string;
+  provider: InitProvider;
+  requiredLabels: string[];
+  workflowPath: string;
+};
+
+async function collectProjectSettings(input: {
+  metadata: Awaited<ReturnType<typeof inspectCurrentGitHubProject>>;
+  prompt?: InitProjectPrompt;
+  yes: boolean;
+}): Promise<ProjectInitSettings> {
+  const defaultWorkflowPath = path.join(
+    input.metadata.projectRoot,
+    "WORKFLOW.md"
+  );
+  const promptController = createInitProjectPromptController(
+    input.prompt,
+    input.yes
+  );
+
+  try {
+    const projectName = await promptController.ask({
+      defaultValue: input.metadata.projectName,
+      key: "projectName",
+      message: "Project name"
+    });
+    const provider = parseInitProvider(
+      await promptController.ask({
+        defaultValue: "codex",
+        key: "provider",
+        message: "Agent Provider (codex or claude)"
+      })
+    );
+    const baseBranch = await promptController.ask({
+      defaultValue: input.metadata.baseBranch,
+      key: "baseBranch",
+      message: "Base branch"
+    });
+    const requiredLabels = parseLabelList(
+      await promptController.ask({
+        defaultValue: "agent-ready",
+        key: "requiredLabels",
+        message: "Required issue labels (comma-separated)"
+      }),
+      "required issue labels"
+    );
+    const excludedLabels = parseLabelList(
+      await promptController.ask({
+        defaultValue: "blocked, needs-human, sym:stale",
+        key: "excludedLabels",
+        message: "Excluded issue labels (comma-separated)"
+      }),
+      "excluded issue labels"
+    );
+    const priorityLabels = parsePriorityLabels(
+      await promptController.ask({
+        defaultValue:
+          "priority:critical=0, priority:high=1, priority:medium=2, priority:low=3",
+        key: "priorityLabels",
+        message: "Priority labels (comma-separated label=number pairs)"
+      })
+    );
+    const workflowAnswer = await promptController.ask({
+      defaultValue: defaultWorkflowPath,
+      key: "workflowPath",
+      message: "Workflow Contract path"
+    });
+
+    if (projectName.trim().length === 0) {
+      throw new Error("Project name must not be empty");
+    }
+    if (baseBranch.trim().length === 0) {
+      throw new Error("base branch must not be empty");
+    }
+    if (workflowAnswer.trim().length === 0) {
+      throw new Error("Workflow Contract path must not be empty");
+    }
+
+    return {
+      baseBranch,
+      excludedLabels,
+      priorityLabels,
+      projectName,
+      provider,
+      requiredLabels,
+      workflowPath: path.isAbsolute(workflowAnswer)
+        ? path.normalize(workflowAnswer)
+        : path.resolve(input.metadata.projectRoot, workflowAnswer)
+    };
+  } finally {
+    promptController.close();
+  }
+}
+
+function createInitProjectPromptController(
+  injectedPrompt: InitProjectPrompt | undefined,
+  yes: boolean
+): { ask: InitProjectPrompt; close: () => void } {
+  if (yes) {
+    return {
+      ask: (input) => Promise.resolve(input.defaultValue),
+      close: () => undefined
+    };
+  }
+  if (injectedPrompt !== undefined) {
+    return {
+      ask: async (input) => {
+        const answer = await injectedPrompt(input);
+        return answer.trim().length === 0 ? input.defaultValue : answer.trim();
+      },
+      close: () => undefined
+    };
+  }
+
+  const readline = createInterface({ input: stdin, output: stdout });
+  return {
+    ask: async (input) => {
+      const answer = await readline.question(
+        `${input.message} [${input.defaultValue}]: `
+      );
+      return answer.trim().length === 0 ? input.defaultValue : answer.trim();
+    },
+    close: () => readline.close()
+  };
+}
+
+function parseInitProvider(value: string): InitProvider {
+  if (value === "codex" || value === "claude") {
+    return value;
+  }
+  throw new Error("Agent Provider must be one of codex, claude");
+}
+
+function parseLabelList(value: string, label: string): string[] {
+  const labels = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  if (labels.length === 0) {
+    throw new Error(`${label} must contain at least one label`);
+  }
+  return labels;
+}
+
+function parsePriorityLabels(value: string): Record<string, number> {
+  const priorities: Record<string, number> = {};
+  for (const entry of value.split(",")) {
+    const match = /^(.+)=([0-9]+)$/.exec(entry.trim());
+    if (match === null || match[1] === undefined || match[2] === undefined) {
+      throw new Error(
+        "priority labels must use comma-separated label=non-negative-integer pairs"
+      );
+    }
+    priorities[match[1].trim()] = Number(match[2]);
+  }
+  return priorities;
+}
+
+function buildProjectConfig(input: {
+  metadata: Awaited<ReturnType<typeof inspectCurrentGitHubProject>>;
+  settings: ProjectInitSettings;
+  stateRoot: string;
+}): unknown {
+  return {
+    name: input.settings.projectName,
+    disabled: false,
+    weight: 1,
+    tracker: {
+      kind: "github",
+      owner: input.metadata.owner,
+      repo: input.metadata.repo,
+      token: "$GITHUB_TOKEN"
+    },
+    issue_filters: {
+      states: ["open"],
+      labels_all: input.settings.requiredLabels,
+      labels_none: input.settings.excludedLabels
+    },
+    priority: {
+      labels: input.settings.priorityLabels,
+      default: 99
+    },
+    workspace: {
+      root: path.join(
+        input.stateRoot,
+        "workspaces",
+        input.settings.projectName
+      ),
+      git: {
+        remote: input.metadata.remote,
+        base_branch: input.settings.baseBranch
+      }
+    },
+    agent: {
+      provider: input.settings.provider
+    },
+    workflow: input.settings.workflowPath
+  };
+}
+
+async function initializeOperationalLabels(input: {
+  env: NodeJS.ProcessEnv;
+  errors: string[];
+  githubApi: GitHubApi;
+  onWarning?: (warning: string) => void;
+  project: ProjectConfig;
+  warnings: string[];
+}): Promise<InitProjectProjectReport | undefined> {
+  const token = resolveEnvBackedValue(input.project.tracker.token, input.env);
+  if (token === undefined) {
+    const variableName = envReferenceName(input.project.tracker.token);
+    input.errors.push(
+      variableName === undefined
+        ? `projects.${input.project.name}.tracker.token must reference an environment variable like $GITHUB_TOKEN`
+        : `projects.${input.project.name}.tracker.token references unset environment variable $${variableName}`
+    );
+    return undefined;
+  }
+
+  const repository = {
+    owner: input.project.tracker.owner,
+    repo: input.project.tracker.repo,
+    token
+  };
+  const repositoryName = `${repository.owner}/${repository.repo}`;
+  const repositoryAccess =
+    await input.githubApi.validateRepositoryAccess(repository);
+  if (!repositoryAccess.ok) {
+    input.errors.push(
+      `projects.${input.project.name}.tracker.repository ${repositoryName} is not accessible: ${repositoryAccess.message ?? "unknown GitHub error"}`
+    );
+    return undefined;
+  }
+
+  let labels: Set<string>;
+  try {
+    labels = new Set(await input.githubApi.listLabels(repository));
+  } catch (error) {
+    input.errors.push(
+      `projects.${input.project.name}.tracker.repository ${repositoryName} labels could not be listed: ${errorMessage(error)}`
+    );
+    return undefined;
+  }
+
+  const missingOperationalLabels = REQUIRED_OPERATIONAL_LABELS.filter(
+    (label) => !labels.has(label)
+  );
+  const createdOperationalLabels: string[] = [];
+  if (missingOperationalLabels.length > 0) {
+    const warning = `init-project will create operational labels in ${repositoryName}: ${missingOperationalLabels.join(", ")}`;
+    input.warnings.push(warning);
+    input.onWarning?.(warning);
+    for (const label of missingOperationalLabels) {
+      try {
+        await input.githubApi.createLabel({ ...repository, name: label });
+        createdOperationalLabels.push(label);
+      } catch (error) {
+        input.errors.push(
+          `projects.${input.project.name}.tracker.repository ${repositoryName} could not create operational label ${label}: ${errorMessage(error)}`
+        );
+      }
+    }
+  }
+
+  return {
+    createdOperationalLabels,
+    missingOperationalLabels,
+    name: input.project.name,
+    repository: repositoryName
+  };
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath, constants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const STALE_CLEAR_LABELS = ["sym:stale", "sym:claimed", "sym:running"] as const;

@@ -102,6 +102,7 @@ const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
   "running",
   "input_required",
   "failed",
+  "blocked",
   "succeeded",
   "cancelled",
   "stale",
@@ -111,6 +112,7 @@ const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
 const TERMINAL_RUN_STATES: ReadonlySet<RunState> = new Set([
   "cancelled",
   "failed",
+  "blocked",
   "input_required",
   "stale",
   "succeeded"

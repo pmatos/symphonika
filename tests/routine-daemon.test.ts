@@ -126,6 +126,76 @@ describe("daemon routine firing", () => {
     }
   });
 
+  it("keeps a last-known-good Routine live when its declaration reload becomes invalid", async () => {
+    const root = await makeTempRoot();
+    const fireAt = new Date(Date.now() + 1_000).toISOString();
+    const routinePath = path.join(root, "daily-report.md");
+    await writeRoutineProject(root, fireAt);
+    const provider = quietProvider();
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "alpha",
+      "routines",
+      "daily-report",
+      "routine-fire-lkg"
+    );
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRoutineFiringId: () => "routine-fire-lkg",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareRoutineWorkspace: vi.fn().mockResolvedValue({
+        branchName: "main",
+        branchRef: "refs/remotes/origin/main",
+        cachePath: path.join(root, ".cache", "repo.git"),
+        reused: false,
+        workspacePath
+      })
+    });
+
+    try {
+      await waitForRoutine(daemon.url, "active");
+      await writeFile(
+        routinePath,
+        ["---", "name: ../unsafe", "kind: report", "---", "Body", ""].join("\n")
+      );
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+
+      const status = (await fetch(`${daemon.url}/api/status`).then((response) =>
+        response.json()
+      )) as {
+        reload?: {
+          errors: string[];
+          ok: boolean;
+          usingLastKnownGood: boolean;
+        };
+      };
+      expect(status.reload).toMatchObject({
+        ok: false,
+        usingLastKnownGood: true
+      });
+      expect(status.reload?.errors.join("\n")).toContain(
+        'name "../unsafe" is not path-safe'
+      );
+      await waitForRoutine(daemon.url, "expired");
+      await vi.waitFor(() => {
+        expect(provider.runAttempt).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("hides disabled Project routines and restores expired one-shots without refiring", async () => {
     const root = await makeTempRoot();
     await writeRoutineProject(root, "2026-05-22T10:00:00.000Z");

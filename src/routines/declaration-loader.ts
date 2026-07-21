@@ -38,7 +38,7 @@ export async function loadRoutineDeclaration(
   return parseRoutineDeclaration(contents, absolutePath);
 }
 
-function parseRoutineDeclaration(
+export function parseRoutineDeclaration(
   contents: string,
   routinePath: string
 ): RoutineDeclarationLoadResult {

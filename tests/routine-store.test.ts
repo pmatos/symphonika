@@ -244,6 +244,75 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("keeps a one-shot routine active and due after an overlap or concurrency-cap skip", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+
+      const overlapSkipped = store.skipRoutineFiring({
+        attemptedAt: "2026-05-22T10:00:00.000Z",
+        name: "daily-report",
+        projectName: "alpha",
+        reason: "overlap"
+      });
+      expect(overlapSkipped).toBe(true);
+      expect(
+        store.listRoutines({ now: new Date("2026-05-22T10:00:01.000Z") })[0]
+      ).toEqual(
+        expect.objectContaining({
+          lastSkipReason: "overlap",
+          nextFireAt: "2026-05-22T10:00:00.000Z",
+          state: "active"
+        })
+      );
+
+      const capSkipped = store.skipRoutineFiring({
+        attemptedAt: "2026-05-22T10:00:01.000Z",
+        name: "daily-report",
+        projectName: "alpha",
+        reason: "concurrency_cap"
+      });
+      expect(capSkipped).toBe(true);
+      expect(
+        store.listRoutines({ now: new Date("2026-05-22T10:00:02.000Z") })[0]
+      ).toEqual(
+        expect.objectContaining({
+          lastSkipReason: "concurrency_cap",
+          nextFireAt: "2026-05-22T10:00:00.000Z",
+          skipCounts24h: {
+            catch_up_window: 0,
+            concurrency_cap: 1,
+            overlap: 1
+          },
+          state: "active"
+        })
+      );
+
+      store.createRoutineFiring({
+        id: "fire-1",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      expect(store.listRoutineFirings()).toEqual([
+        expect.objectContaining({ id: "fire-1", routineName: "daily-report" })
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("removes routines that are no longer configured for the project", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

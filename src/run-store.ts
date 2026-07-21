@@ -1419,8 +1419,8 @@ export class RunStore {
         .prepare(
           [
             "update routines set",
-            "state = case when schedule_cron is null then 'expired' else 'active' end,",
-            "next_fire_at = case when schedule_cron is null then null else @next_fire_at end,",
+            "state = 'active',",
+            "next_fire_at = coalesce(@next_fire_at, next_fire_at),",
             "last_attempted_at = @attempted_at,",
             "last_skip_reason = @reason,",
             "last_skip_at = @attempted_at,",

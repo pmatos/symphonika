@@ -281,6 +281,93 @@ describe("Project initialization", () => {
     ]);
     expect(githubApi.validateRepositoryAccess).not.toHaveBeenCalled();
   });
+
+  it("does not persist the new Project when the repository is not accessible", async () => {
+    const root = await makeTempRoot();
+    const repositoryRoot = path.join(root, "new-project");
+    const configPath = path.join(root, "config", "symphonika.yml");
+    await createGitHubRepository(
+      repositoryRoot,
+      "https://github.com/acme/new-project.git"
+    );
+    await writeExistingConfig(configPath, root);
+    const originalContents = await readFile(configPath, "utf8");
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi.fn(),
+      validateRepositoryAccess: vi
+        .fn()
+        .mockResolvedValue({ message: "not a collaborator", ok: false })
+    };
+
+    const report = await runInitProject({
+      configPath,
+      cwd: repositoryRoot,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      yes: true
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toEqual([
+      "projects.new-project.tracker.repository acme/new-project is not accessible: not a collaborator"
+    ]);
+    expect(githubApi.listLabels).not.toHaveBeenCalled();
+    expect(githubApi.createLabel).not.toHaveBeenCalled();
+    await expect(readFile(configPath, "utf8")).resolves.toBe(originalContents);
+    await expect(
+      readFile(path.join(repositoryRoot, "WORKFLOW.md"), "utf8")
+    ).rejects.toThrow();
+  });
+
+  it("registers the Project but requires --yes before creating missing operational labels", async () => {
+    const root = await makeTempRoot();
+    const repositoryRoot = path.join(root, "new-project");
+    const configPath = path.join(root, "config", "symphonika.yml");
+    await createGitHubRepository(
+      repositoryRoot,
+      "https://github.com/acme/new-project.git"
+    );
+    await writeExistingConfig(configPath, root);
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi.fn().mockResolvedValue([]),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runInitProject({
+      configPath,
+      cwd: repositoryRoot,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      prompt: (input) =>
+        Promise.resolve(input.key === "provider" ? "codex" : "")
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toEqual([
+      "pass --yes to create missing operational labels non-interactively"
+    ]);
+    expect(report.warnings).toEqual([
+      expect.stringContaining(
+        "init-project would create operational labels in acme/new-project"
+      )
+    ]);
+    expect(report.projects).toEqual([
+      expect.objectContaining({
+        createdOperationalLabels: [],
+        name: "new-project"
+      })
+    ]);
+    expect(githubApi.createLabel).not.toHaveBeenCalled();
+    const config = parse(await readFile(configPath, "utf8")) as {
+      projects: Array<{ name: string }>;
+    };
+    expect(config.projects.map((project) => project.name)).toEqual([
+      "existing",
+      "new-project"
+    ]);
+  });
 });
 
 async function makeTempRoot(): Promise<string> {

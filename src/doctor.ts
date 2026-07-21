@@ -515,12 +515,6 @@ export async function runInitProject(
     return initProjectReport(configPath, errors, warnings, projects);
   }
 
-  await writeFile(configPath, document.toString(), "utf8");
-  if (!(await fileExists(settings.workflowPath))) {
-    await mkdir(path.dirname(settings.workflowPath), { recursive: true });
-    await writeFile(settings.workflowPath, defaultWorkflowContract(), "utf8");
-  }
-
   const registeredProject = parsedConfig.projects.find(
     (entry) => entry.name === settings.projectName
   );
@@ -528,19 +522,37 @@ export async function runInitProject(
     errors.push(`registered Project ${settings.projectName} could not be read`);
     return initProjectReport(configPath, errors, warnings, projects);
   }
-  const projectReport = await initializeOperationalLabels({
+
+  const githubApi = options.githubApi ?? DEFAULT_GITHUB_API;
+  const accessValidation = await validateProjectGitHubAccess({
     env,
     errors,
-    githubApi: options.githubApi ?? DEFAULT_GITHUB_API,
-    ...(options.onWarning === undefined
-      ? {}
-      : { onWarning: options.onWarning }),
-    project: registeredProject,
-    warnings
+    githubApi,
+    project: registeredProject
   });
-  if (projectReport !== undefined) {
-    projects.push(projectReport);
+  if (accessValidation === undefined) {
+    return initProjectReport(configPath, errors, warnings, projects);
   }
+
+  await writeFile(configPath, document.toString(), "utf8");
+  if (!(await fileExists(settings.workflowPath))) {
+    await mkdir(path.dirname(settings.workflowPath), { recursive: true });
+    await writeFile(settings.workflowPath, defaultWorkflowContract(), "utf8");
+  }
+
+  projects.push(
+    await createOperationalLabels({
+      errors,
+      githubApi,
+      ...(options.onWarning === undefined
+        ? {}
+        : { onWarning: options.onWarning }),
+      project: registeredProject,
+      validation: accessValidation,
+      warnings,
+      yes: options.yes === true
+    })
+  );
 
   return initProjectReport(configPath, errors, warnings, projects);
 }
@@ -749,14 +761,18 @@ function buildProjectConfig(input: {
   };
 }
 
-async function initializeOperationalLabels(input: {
+type ProjectGitHubAccessValidation = {
+  missingOperationalLabels: string[];
+  repository: { owner: string; repo: string; token: string };
+  repositoryName: string;
+};
+
+async function validateProjectGitHubAccess(input: {
   env: NodeJS.ProcessEnv;
   errors: string[];
   githubApi: GitHubApi;
-  onWarning?: (warning: string) => void;
   project: ProjectConfig;
-  warnings: string[];
-}): Promise<InitProjectProjectReport | undefined> {
+}): Promise<ProjectGitHubAccessValidation | undefined> {
   const token = resolveEnvBackedValue(input.project.tracker.token, input.env);
   if (token === undefined) {
     const variableName = envReferenceName(input.project.tracker.token);
@@ -796,19 +812,39 @@ async function initializeOperationalLabels(input: {
   const missingOperationalLabels = REQUIRED_OPERATIONAL_LABELS.filter(
     (label) => !labels.has(label)
   );
+  return { missingOperationalLabels, repository, repositoryName };
+}
+
+async function createOperationalLabels(input: {
+  errors: string[];
+  githubApi: GitHubApi;
+  onWarning?: (warning: string) => void;
+  project: ProjectConfig;
+  validation: ProjectGitHubAccessValidation;
+  warnings: string[];
+  yes: boolean;
+}): Promise<InitProjectProjectReport> {
+  const { missingOperationalLabels, repository, repositoryName } =
+    input.validation;
   const createdOperationalLabels: string[] = [];
   if (missingOperationalLabels.length > 0) {
-    const warning = `init-project will create operational labels in ${repositoryName}: ${missingOperationalLabels.join(", ")}`;
+    const warning = `init-project ${input.yes ? "will" : "would"} create operational labels in ${repositoryName}: ${missingOperationalLabels.join(", ")}`;
     input.warnings.push(warning);
     input.onWarning?.(warning);
-    for (const label of missingOperationalLabels) {
-      try {
-        await input.githubApi.createLabel({ ...repository, name: label });
-        createdOperationalLabels.push(label);
-      } catch (error) {
-        input.errors.push(
-          `projects.${input.project.name}.tracker.repository ${repositoryName} could not create operational label ${label}: ${errorMessage(error)}`
-        );
+    if (input.yes !== true) {
+      input.errors.push(
+        "pass --yes to create missing operational labels non-interactively"
+      );
+    } else {
+      for (const label of missingOperationalLabels) {
+        try {
+          await input.githubApi.createLabel({ ...repository, name: label });
+          createdOperationalLabels.push(label);
+        } catch (error) {
+          input.errors.push(
+            `projects.${input.project.name}.tracker.repository ${repositoryName} could not create operational label ${label}: ${errorMessage(error)}`
+          );
+        }
       }
     }
   }

@@ -25,7 +25,35 @@ afterEach(async () => {
 });
 
 describe("Project initialization", () => {
-  it("points to global initialization when the Service Config is missing", async () => {
+  it("points to global initialization when the default user Service Config is missing", async () => {
+    const root = await makeTempRoot();
+    const configHome = path.join(root, "config-home");
+    const expectedConfigPath = path.join(
+      configHome,
+      "symphonika",
+      "symphonika.yml"
+    );
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi.fn(),
+      validateRepositoryAccess: vi.fn()
+    };
+
+    const report = await runInitProject({
+      cwd: root,
+      env: { XDG_CONFIG_HOME: configHome },
+      githubApi,
+      yes: true
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toEqual([
+      `no initialized Service Config found at ${expectedConfigPath}; run \`symphonika init\` first`
+    ]);
+    expect(githubApi.validateRepositoryAccess).not.toHaveBeenCalled();
+  });
+
+  it("reports a plain missing-config error for a nonexistent explicit --config path", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "missing", "symphonika.yml");
     const githubApi: GitHubApi = {
@@ -42,9 +70,7 @@ describe("Project initialization", () => {
     });
 
     expect(report.ok).toBe(false);
-    expect(report.errors).toEqual([
-      `no initialized Service Config found at ${configPath}; run \`symphonika init\` first`
-    ]);
+    expect(report.errors).toEqual([`service config not found at ${configPath}`]);
     expect(githubApi.validateRepositoryAccess).not.toHaveBeenCalled();
   });
 

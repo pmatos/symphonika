@@ -412,7 +412,11 @@ export async function runInitProject(
   const warnings: string[] = [];
   const projects: InitProjectProjectReport[] = [];
   if (!resolvedConfig.configExists) {
-    errors.push(missingUserConfigHint(configPath));
+    errors.push(
+      resolvedConfig.source === "user"
+        ? missingUserConfigHint(configPath)
+        : `service config not found at ${configPath}`
+    );
     return initProjectReport(configPath, errors, warnings, projects);
   }
 

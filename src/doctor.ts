@@ -135,6 +135,11 @@ const OPERATIONAL_LABEL_DESCRIPTIONS: Record<
   (typeof REQUIRED_OPERATIONAL_LABELS)[number],
   LabelDescription
 > = {
+  "sym:blocked": {
+    color: "d4c5f9",
+    description:
+      "A Symphonika run reached a non-actionable blocked state (the agent declined the task, or a workflow needs a human decision). Not a crash."
+  },
   "sym:claimed": {
     color: "5319e7",
     description: "Symphonika has claimed this issue for an orchestrated run."

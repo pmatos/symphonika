@@ -60,7 +60,7 @@ label drift but still stop when the Issue closes.
 _Avoid_: dispatch eligibility when referring to active-run or scheduled-work re-checks
 
 **Operational Label**:
-A GitHub issue label owned by the orchestrator for dispatch safety and runtime bookkeeping; v1 labels are `sym:claimed`, `sym:running`, `sym:failed`, and `sym:stale`.
+A GitHub issue label owned by the orchestrator for dispatch safety and runtime bookkeeping; v1 labels are `sym:claimed`, `sym:running`, `sym:failed`, `sym:blocked`, and `sym:stale`.
 _Avoid_: workflow label
 
 **Workflow Label**:
@@ -70,6 +70,13 @@ _Avoid_: operational label
 **Stale Claim**:
 A durable orchestrator claim on an issue for which no live local run exists.
 _Avoid_: failed run
+
+**Blocked Run**:
+A Run that reached a deterministic, non-actionable terminal outcome — the agent correctly declined
+the task (`no_workspace_changes`) or a raw FSM workflow reached a `blocked` terminal state — as
+opposed to a `failed` Run, which is reserved for outcomes that indicate something actually broke
+(crash, malformed event, workspace-prep error, unexpected exit code). See ADR 0058.
+_Avoid_: failed run, error
 
 **Issue Reservation**:
 The orchestrator's exclusive claim on a Project's Issue, whether currently in flight as an

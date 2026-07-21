@@ -342,7 +342,7 @@ describe("runSmoke", () => {
     expect(report.ok).toBe(false);
     expect(report.runDetail).toMatchObject({
       issueNumber,
-      state: "failed",
+      state: "blocked",
       terminalReason: "no_workspace_changes",
       workspacePath
     });
@@ -350,7 +350,7 @@ describe("runSmoke", () => {
     expect(report.errors[0]).toContain("terminalReason=no_workspace_changes");
     expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith({
       issueNumber,
-      labels: ["sym:failed"],
+      labels: ["sym:blocked"],
       owner: "pmatos",
       repo: "symphonika",
       token: "test-token"

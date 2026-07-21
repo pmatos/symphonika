@@ -395,7 +395,9 @@ describe("CLI run commands", () => {
     expect(output.stdout).toContain(
       "watchdog idle since 2026-05-13T08:45:00.000Z"
     );
-    expect(output.stdout).toContain("No failed, input-required, or stale work");
+    expect(output.stdout).toContain(
+      "No failed, blocked, input-required, or stale work"
+    );
   });
 
   it("status --dashboard does not report input_required rows as active", async () => {

@@ -6,6 +6,5 @@
     "src/lifecycle/eligibility-interface.ts",
     "src/lifecycle/run-lifecycle-interface.ts"
   ],
-  "project": ["src/**/*.ts", "fuzz/**/*.mjs"],
-  "ignoreBinaries": ["scripts/smoke.sh"]
+  "project": ["src/**/*.ts", "fuzz/**/*.mjs"]
 }

@@ -74,7 +74,7 @@ export type InitProjectOptions = DoctorOptions & {
   yes?: boolean;
 };
 
-export type InitProjectPromptInput = {
+type InitProjectPromptInput = {
   defaultValue: string;
   key:
     | "baseBranch"
@@ -87,9 +87,7 @@ export type InitProjectPromptInput = {
   message: string;
 };
 
-export type InitProjectPrompt = (
-  input: InitProjectPromptInput
-) => Promise<string>;
+type InitProjectPrompt = (input: InitProjectPromptInput) => Promise<string>;
 
 type InitProjectProjectReport = {
   createdOperationalLabels: string[];

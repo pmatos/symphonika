@@ -11,7 +11,7 @@ import { defaultUserConfigPath, defaultUserStateRoot } from "./config-paths.js";
 
 export type InitProvider = "codex" | "claude";
 
-export type InitPromptInput = {
+type InitPromptInput = {
   defaultValue: string;
   key:
     | "claudeCommand"
@@ -25,7 +25,7 @@ export type InitPromptInput = {
   message: string;
 };
 
-export type InitPrompt = (input: InitPromptInput) => Promise<string>;
+type InitPrompt = (input: InitPromptInput) => Promise<string>;
 
 export type InitOptions = {
   env?: NodeJS.ProcessEnv;

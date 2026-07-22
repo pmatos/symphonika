@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
@@ -480,11 +480,13 @@ export async function runInitProject(
   const rawProjects = projectsNode.toJSON();
   const matchingIndexes = rawProjects.reduce<number[]>(
     (indexes, entry, index) => {
+      const rawName =
+        typeof entry === "object" && entry !== null && "name" in entry
+          ? (entry as { name?: unknown }).name
+          : undefined;
       if (
-        typeof entry === "object" &&
-        entry !== null &&
-        "name" in entry &&
-        (entry as { name?: unknown }).name === settings.projectName
+        typeof rawName === "string" &&
+        rawName.trim() === settings.projectName
       ) {
         indexes.push(index);
       }
@@ -535,6 +537,20 @@ export async function runInitProject(
     return initProjectReport(configPath, errors, warnings, projects);
   }
 
+  let createdWorkflow = false;
+  if (!(await fileExists(settings.workflowPath))) {
+    try {
+      await mkdir(path.dirname(settings.workflowPath), { recursive: true });
+      await writeFile(settings.workflowPath, defaultWorkflowContract(), "utf8");
+      createdWorkflow = true;
+    } catch (error) {
+      errors.push(
+        `starter Workflow Contract could not be created at ${settings.workflowPath}: ${errorMessage(error)}`
+      );
+      return initProjectReport(configPath, errors, warnings, projects);
+    }
+  }
+
   projects.push(
     await createOperationalLabels({
       errors,
@@ -550,19 +566,8 @@ export async function runInitProject(
     })
   );
   if (errors.length > 0) {
+    await removeCreatedWorkflow(settings.workflowPath, createdWorkflow, errors);
     return initProjectReport(configPath, errors, warnings, projects);
-  }
-
-  if (!(await fileExists(settings.workflowPath))) {
-    try {
-      await mkdir(path.dirname(settings.workflowPath), { recursive: true });
-      await writeFile(settings.workflowPath, defaultWorkflowContract(), "utf8");
-    } catch (error) {
-      errors.push(
-        `starter Workflow Contract could not be created at ${settings.workflowPath}: ${errorMessage(error)}`
-      );
-      return initProjectReport(configPath, errors, warnings, projects);
-    }
   }
 
   try {
@@ -571,6 +576,7 @@ export async function runInitProject(
     errors.push(
       `service config could not be written at ${configPath}: ${errorMessage(error)}`
     );
+    await removeCreatedWorkflow(settings.workflowPath, createdWorkflow, errors);
   }
 
   return initProjectReport(configPath, errors, warnings, projects);
@@ -914,6 +920,23 @@ async function confirmOperationalLabelCreation(input: {
     throw new Error("operational label confirmation must be yes or no");
   } finally {
     promptController.close();
+  }
+}
+
+async function removeCreatedWorkflow(
+  workflowPath: string,
+  createdWorkflow: boolean,
+  errors: string[]
+): Promise<void> {
+  if (!createdWorkflow) {
+    return;
+  }
+  try {
+    await rm(workflowPath);
+  } catch (error) {
+    errors.push(
+      `starter Workflow Contract could not be removed after failed initialization at ${workflowPath}: ${errorMessage(error)}`
+    );
   }
 }
 

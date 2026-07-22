@@ -244,7 +244,7 @@ describe("Project initialization", () => {
     expect(config.projects[1]?.agent.provider).toBe("claude");
   });
 
-  it("refuses to force-replace when the config already has duplicate Project names", async () => {
+  it("refuses to force-replace normalized duplicate Project names", async () => {
     const root = await makeTempRoot();
     const repositoryRoot = path.join(root, "dup-project");
     const configPath = path.join(root, "config", "symphonika.yml");
@@ -277,7 +277,7 @@ describe("Project initialization", () => {
     };
     expect(config.projects.map((project) => project.name)).toEqual([
       "dup-project",
-      "dup-project"
+      "dup-project "
     ]);
     expect(githubApi.validateRepositoryAccess).not.toHaveBeenCalled();
   });
@@ -486,7 +486,7 @@ describe("Project initialization", () => {
     await writeFile(workflowParent, "not a directory", "utf8");
     const githubApi: GitHubApi = {
       createLabel: vi.fn(),
-      listLabels: vi.fn().mockResolvedValue([...REQUIRED_OPERATIONAL_LABELS]),
+      listLabels: vi.fn().mockResolvedValue([]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -601,8 +601,8 @@ async function writeDuplicateProjectConfig(
   root: string,
   name: string
 ): Promise<void> {
-  const project = (repo: string): string[] => [
-    `  - name: ${name}`,
+  const project = (repo: string, projectName: string): string[] => [
+    `  - name: ${JSON.stringify(projectName)}`,
     "    tracker:",
     "      kind: github",
     "      owner: acme",
@@ -637,8 +637,8 @@ async function writeDuplicateProjectConfig(
       "  claude:",
       "    command: claude --stream",
       "projects:",
-      ...project("first-copy"),
-      ...project("second-copy"),
+      ...project("first-copy", name),
+      ...project("second-copy", `${name} `),
       ""
     ].join("\n"),
     "utf8"

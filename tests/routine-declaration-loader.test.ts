@@ -416,4 +416,28 @@ describe("RoutineDeclarationLoader", () => {
       `routine at ${routinePath} schedule.at must be a valid ISO 8601 date`
     );
   });
+
+  it("accepts a schedule.at value that omits seconds", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "no-seconds-date.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: no-seconds-date",
+        "schedule:",
+        "  at: 2026-08-01T09:30Z",
+        "kind: report",
+        "---",
+        "Body",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.routine).toMatchObject({
+      schedule: { at: "2026-08-01T09:30:00.000Z" }
+    });
+  });
 });

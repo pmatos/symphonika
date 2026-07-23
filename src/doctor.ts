@@ -166,7 +166,7 @@ const OPERATIONAL_LABEL_DESCRIPTIONS: Record<
   "sym:blocked": {
     color: "d4c5f9",
     description:
-      "A Symphonika run reached a non-actionable blocked state (the agent declined the task, or a workflow needs a human decision). Not a crash."
+      "A non-actionable blocked run: the agent declined the task, or a workflow needs a human decision."
   },
   "sym:claimed": {
     color: "5319e7",

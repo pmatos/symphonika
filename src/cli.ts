@@ -4,6 +4,8 @@ import { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import type { AddRoutineOptions, AddRoutineReport } from "./add-routine.js";
+import { runAddRoutine } from "./add-routine.js";
 import type { DaemonHandle, StartDaemonOptions } from "./daemon.js";
 import { startDaemon } from "./daemon.js";
 import { resolveServiceConfigPath } from "./config-paths.js";
@@ -18,10 +20,10 @@ import type {
   InitProjectReport
 } from "./doctor.js";
 import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
-import type { InitOptions, InitReport } from "./init.js";
+import type { InitOptions, InitProvider, InitReport } from "./init.js";
 import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
-import type { RoutineStatus } from "./routines/types.js";
+import type { RoutineKind, RoutineStatus } from "./routines/types.js";
 import {
   resolveWatchdogConfig,
   RuntimeConfigReloader,
@@ -76,6 +78,7 @@ export type CliDependencies = {
   fetch?: FetchFn;
   openRunStore?: (options: OpenRunStoreOptions) => RunStore;
   registerSignalHandlers?: boolean;
+  runAddRoutine?: (options: AddRoutineOptions) => Promise<AddRoutineReport>;
   runClearStale?: (options: ClearStaleOptions) => Promise<ClearStaleReport>;
   runDoctor?: (options: DoctorOptions) => Promise<DoctorReport>;
   runInit?: (options: InitOptions) => Promise<InitReport>;
@@ -128,6 +131,7 @@ type RoutinesOptions = {
 const DEFAULT_STATUS_WATCH_DOCTOR_TTL_MS = 5000;
 
 export function buildCli(dependencies: CliDependencies = {}): Command {
+  const addRoutine = dependencies.runAddRoutine ?? runAddRoutine;
   const doctor = dependencies.runDoctor ?? runDoctor;
   const init = dependencies.runInit ?? runInit;
   const initProject = dependencies.runInitProject ?? runInitProject;
@@ -201,6 +205,66 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       writeOut(program, "then:      cd <project> && symphonika init-project\n");
       writeOut(program, "after:     symphonika doctor\n");
     });
+
+  program
+    .command("add-routine")
+    .description("create and register a Project Routine declaration")
+    .argument("<name>", "path-safe Routine name")
+    .requiredOption("--project <name>", "project name from symphonika.yml")
+    .option("--schedule <expr>", "cron expression or supported alias")
+    .option("--at <iso8601>", "one-shot ISO 8601 timestamp")
+    .requiredOption(
+      "--kind <kind>",
+      "Routine kind (git or report)",
+      parseRoutineKind
+    )
+    .option("--provider <name>", "provider override", parseProvider)
+    .option("--tz <iana>", "IANA timezone for a recurring schedule")
+    .option("--config <path>", "service config path")
+    .action(
+      async (
+        name: string,
+        options: {
+          at?: string;
+          config?: string;
+          kind: RoutineKind;
+          project: string;
+          provider?: InitProvider;
+          schedule?: string;
+          tz?: string;
+        }
+      ) => {
+        const report = await addRoutine({
+          ...(options.at === undefined ? {} : { at: options.at }),
+          ...withConfigPath(options.config),
+          kind: options.kind,
+          name,
+          project: options.project,
+          ...(options.provider === undefined
+            ? {}
+            : { provider: options.provider }),
+          ...(options.schedule === undefined
+            ? {}
+            : { schedule: options.schedule }),
+          ...(options.tz === undefined ? {} : { tz: options.tz })
+        });
+
+        if (!report.ok) {
+          writeErr(program, "add-routine failed:\n");
+          for (const error of report.errors) {
+            writeErr(program, `- ${error}\n`);
+          }
+          process.exitCode = 1;
+          return;
+        }
+
+        writeOut(program, "add-routine ok\n");
+        writeOut(program, `project:    ${report.project}\n`);
+        writeOut(program, `routine:    ${report.routineName}\n`);
+        writeOut(program, `file:       ${report.filePath}\n`);
+        writeOut(program, `registered: ${report.registeredPath}\n`);
+      }
+    );
 
   program
     .command("init-project")
@@ -1890,6 +1954,20 @@ function parseIssueNumber(value: string): number {
   }
 
   return issue;
+}
+
+function parseProvider(value: string): InitProvider {
+  if (value === "codex" || value === "claude") {
+    return value;
+  }
+  throw new InvalidArgumentError("provider must be one of codex, claude");
+}
+
+function parseRoutineKind(value: string): RoutineKind {
+  if (value === "git" || value === "report") {
+    return value;
+  }
+  throw new InvalidArgumentError("kind must be one of git, report");
 }
 
 function pluralize(word: string, count: number): string {

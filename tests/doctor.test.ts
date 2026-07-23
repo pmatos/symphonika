@@ -139,6 +139,77 @@ describe("doctor", () => {
     expect(output.stderr).toContain("workflow contract not found");
   });
 
+  it("reports invalid enumerated Routine declarations beside workflow errors", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const routinePath = path.join(root, "routines", "broken.md");
+    await writeValidConfig(configPath, {
+      routinePaths: ["./routines/broken.md"]
+    });
+    await mkdir(path.dirname(routinePath));
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: broken",
+        "schedule:",
+        "  cron: fortnightly",
+        "kind: report",
+        "---",
+        "Create a report.",
+        ""
+      ].join("\n")
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const output = await runDoctorCommand(configPath);
+
+    expect(process.exitCode).toBe(1);
+    expect(output.stdout).toBe("");
+    expect(output.stderr).toContain("doctor failed");
+    expect(output.stderr).toContain(`routine at ${routinePath}`);
+    expect(output.stderr).toContain("schedule.cron is invalid");
+  });
+
+  it("reports duplicate Routine names within one Project", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const firstPath = path.join(root, "routines", "first.md");
+    const secondPath = path.join(root, "routines", "second.md");
+    await writeValidConfig(configPath, {
+      routinePaths: ["./routines/first.md", "./routines/second.md"]
+    });
+    await mkdir(path.dirname(firstPath));
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    const routine = [
+      "---",
+      "name: repeated",
+      "schedule:",
+      "  cron: daily",
+      "kind: report",
+      "---",
+      "Create a report.",
+      ""
+    ].join("\n");
+    await writeFile(firstPath, routine);
+    await writeFile(secondPath, routine);
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const output = await runDoctorCommand(configPath);
+
+    expect(process.exitCode).toBe(1);
+    expect(output.stderr).toContain('duplicate routine name "repeated"');
+    expect(output.stderr).toContain(firstPath);
+    expect(output.stderr).toContain(secondPath);
+  });
+
   it("resolves environment-backed tracker tokens without printing secret values", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");
@@ -451,6 +522,7 @@ async function writeValidConfig(
     agentProvider?: string;
     claudeCommand?: string;
     codexCommand?: string;
+    routinePaths?: string[];
     token?: string;
     trackerKind?: string;
     workspaceHookLines?: string[];
@@ -500,6 +572,14 @@ async function writeValidConfig(
       "    agent:",
       `      provider: ${overrides.agentProvider ?? "codex"}`,
       `    workflow: ${overrides.workflowPath ?? "./WORKFLOW.md"}`,
+      ...(overrides.routinePaths === undefined
+        ? []
+        : [
+            "    routines:",
+            ...overrides.routinePaths.map(
+              (routinePath) => `      - ${routinePath}`
+            )
+          ]),
       ""
     ].join("\n")
   );

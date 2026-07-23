@@ -38,7 +38,7 @@ export async function loadRoutineDeclaration(
   return parseRoutineDeclaration(contents, absolutePath);
 }
 
-function parseRoutineDeclaration(
+export function parseRoutineDeclaration(
   contents: string,
   routinePath: string
 ): RoutineDeclarationLoadResult {
@@ -254,6 +254,9 @@ function stringField(
     : undefined;
 }
 
+const ISO_8601_DATE_TIME_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+
 function dateStringField(
   record: Record<string, unknown>,
   key: string
@@ -261,6 +264,9 @@ function dateStringField(
   const value = record[key];
   if (typeof value === "string" && value.trim().length > 0) {
     const trimmed = value.trim();
+    if (!ISO_8601_DATE_TIME_PATTERN.test(trimmed)) {
+      return "";
+    }
     const parsed = new Date(trimmed);
     return Number.isNaN(parsed.getTime()) ? trimmed : parsed.toISOString();
   }

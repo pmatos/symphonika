@@ -1094,6 +1094,7 @@ states (§12.6).
 Bootstrap CLI commands:
 
 - `symphonika init [--yes] [--force]`
+- `symphonika add-routine <name> --project <project> (--schedule <expr> | --at <iso8601>) --kind <git|report> [--provider <codex|claude>] [--tz <iana>] [--config <path>]`
 - `symphonika doctor [--config <path>]`
 - `symphonika init-project [--config <path>] [--yes] [--force]`
 - `symphonika daemon [--config <path>] [--port <port>]`
@@ -1118,12 +1119,21 @@ config path and points the operator to `symphonika init`.
 - operational labels
 - provider commands for Codex and Claude
 - workflow contract path and parse
+- every Routine declaration enumerated by each Project, including duplicate Routine names
 - database path
 - workspace root
 
 `init` writes only the user Service Config and never inspects or mutates a repository or GitHub.
 `init-project` registers the current repository, creates a missing starter Workflow Contract, and
 creates missing Operational Labels after the interactive review or explicit `--yes` selection.
+
+`add-routine` writes `<cwd>/routines/<name>.md` with validated YAML front matter and a placeholder
+prompt, then registers the declaration path in the named Project's `routines` list. It preserves
+the Service Config's YAML comments and key ordering where supported by the YAML document parser,
+refuses missing Projects, unsafe names, duplicate names, invalid schedules, and existing target
+files, and never contacts GitHub or triggers a daemon reload. When the generated file is outside
+the Service Config directory, registration uses its absolute path; otherwise it uses a `./`-prefixed
+path relative to the Service Config.
 
 `service install --config <path>` resolves the selected Service Config to an absolute path and
 bakes it into the generated unit as `daemon --config <absolute-path>`. Omitting `--config` keeps the

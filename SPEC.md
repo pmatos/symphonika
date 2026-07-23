@@ -222,11 +222,20 @@ dispatch, retry, continuation, provider-command selection, and PR follow-up poli
 reload is surfaced in structured logs and operator status while the daemon keeps using the last
 known good effective snapshot.
 
-`symphonika init` is the default first-run path for a project checkout. It runs from inside a
-GitHub-backed repository, derives the Project from `origin`, writes the user service config, chooses
-`$XDG_STATE_HOME/symphonika` (or `~/.local/state/symphonika`) as the state root, and creates a
-starter repository-owned `WORKFLOW.md` only when one does not already exist. It does not create
-GitHub operational labels; `init-project --yes` remains the explicit label-creation step.
+`symphonika init` initializes Symphonika's user Service Config independently of any repository. It
+prompts for service-level state, polling, pull-request merge policy, and Codex/Claude commands,
+writes `$XDG_CONFIG_HOME/symphonika/symphonika.yml` (or the home-directory fallback), and starts
+with `projects: []`. `--yes` accepts every displayed default without prompting, and `--force` is
+required to replace an existing user config.
+
+`symphonika init-project` runs inside a GitHub-backed repository and requires an existing selected
+Service Config. It derives repository defaults from `origin`, prompts for the Project name, Agent
+Provider, base branch, issue-label filters, priority-label mapping, and Workflow Contract path, and
+appends the Project without discarding unrelated Projects or hand-authored config. A duplicate
+Project name is refused unless `--force`, which replaces only that sequence entry. The command
+creates a starter Workflow Contract only when the selected path is absent, then creates missing
+Operational Labels in the newly registered repository. `--yes` accepts Project defaults and
+performs label setup without prompting.
 
 Example:
 
@@ -291,7 +300,9 @@ projects:
       - ./daily-report.md
 ```
 
-The bootstrap slice must use this final multi-project shape even with one configured Project.
+The bootstrap slice must use this final multi-project shape even with one configured Project. The
+intermediate global config written before the first `init-project` invocation intentionally has an
+empty `projects` sequence and is not daemon-ready until a Project is registered.
 
 A Project may override only `watchdog.grace_minutes` with a positive integer. It inherits
 `watchdog.enabled`, `watchdog.sample_interval_seconds`, and `watchdog.mtime_ignore` from daemon
@@ -427,9 +438,9 @@ state:
   root: ~/.local/state/symphonika
 ```
 
-Project repositories do not need a deploy-local state directory when using `symphonika init`; state
-and workspaces live under the user state root. Repositories that carry their own project-local
-`symphonika.yml` should gitignore `.symphonika/`.
+Project repositories do not need a deploy-local state directory when using the initialized user
+config; state and workspaces live under the user state root. Repositories that carry their own
+project-local `symphonika.yml` should gitignore `.symphonika/`.
 
 ### 7.2 Run Store
 
@@ -1082,9 +1093,9 @@ states (§12.6).
 
 Bootstrap CLI commands:
 
-- `symphonika init [--provider codex|claude] [--force]`
+- `symphonika init [--yes] [--force]`
 - `symphonika doctor [--config <path>]`
-- `symphonika init-project [--config <path>] --yes`
+- `symphonika init-project [--config <path>] [--yes] [--force]`
 - `symphonika daemon [--config <path>] [--port <port>]`
 - `symphonika service install [--config <path>] [--force] [--print] [--no-reload]`
 - `symphonika status [--config <path>] [--dashboard] [--watch] [--interval-ms <ms>] [--doctor-ttl-ms <ms>]`
@@ -1110,8 +1121,9 @@ config path and points the operator to `symphonika init`.
 - database path
 - workspace root
 
-`init` writes local files only and never mutates GitHub. `init-project` creates missing operational
-labels only after explicit confirmation.
+`init` writes only the user Service Config and never inspects or mutates a repository or GitHub.
+`init-project` registers the current repository, creates a missing starter Workflow Contract, and
+creates missing Operational Labels after the interactive review or explicit `--yes` selection.
 
 `service install --config <path>` resolves the selected Service Config to an absolute path and
 bakes it into the generated unit as `daemon --config <absolute-path>`. Omitting `--config` keeps the
@@ -1198,10 +1210,12 @@ The bootstrap slice is accepted when:
 
 - tests pass
 - lint passes
-- `init` can create a user service config and starter workflow from a GitHub-backed project checkout
+- `init` can create an empty user Service Config with interactive service-level settings
+- `init-project` can append a Project without losing existing config and create its starter
+  Workflow Contract
 - `doctor` validates service config, GitHub auth, operational labels, Codex and Claude provider
   commands, workflow file, database path, and workspace root
-- `init-project` can create missing operational labels after confirmation
+- `init-project` can create missing operational labels after interactive review or `--yes`
 - `daemon` can claim one `agent-ready` issue in this repository
 - daemon prepares the deterministic issue worktree and branch
 - daemon runs the configured provider through either Codex JSON-RPC or Claude stream-json

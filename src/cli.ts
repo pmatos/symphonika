@@ -18,7 +18,7 @@ import type {
   InitProjectReport
 } from "./doctor.js";
 import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
-import type { InitOptions, InitProvider, InitReport } from "./init.js";
+import type { InitOptions, InitReport } from "./init.js";
 import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
 import type { RoutineStatus } from "./routines/types.js";
@@ -176,20 +176,13 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
 
   program
     .command("init")
-    .description(
-      "create a user service config for the current GitHub repository"
-    )
-    .option(
-      "--provider <name>",
-      "agent provider for the project",
-      parseProvider,
-      "codex"
-    )
+    .description("create the user service config")
+    .option("--yes", "use defaults without interactive prompts")
     .option("--force", "overwrite an existing user service config")
-    .action(async (options: { force?: boolean; provider: InitProvider }) => {
+    .action(async (options: { force?: boolean; yes?: boolean }) => {
       const report = await init({
         force: options.force === true,
-        provider: options.provider
+        yes: options.yes === true
       });
 
       if (!report.ok) {
@@ -204,77 +197,65 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       writeOut(program, "init ok\n");
       writeOut(program, `config:    ${report.configPath}\n`);
       writeOut(program, `state:     ${report.stateRoot}\n`);
-      if (report.repository !== null) {
-        writeOut(program, `repo:      ${report.repository}\n`);
-      }
-      if (report.projectName !== null) {
-        writeOut(program, `project:   ${report.projectName}\n`);
-      }
-      if (report.workflowPath !== null) {
-        const workflowLabel = report.createdWorkflow
-          ? "workflow:"
-          : "workflow:  existing";
-        writeOut(program, `${workflowLabel} ${report.workflowPath}\n`);
-      }
-      writeOut(
-        program,
-        "next:      export GITHUB_TOKEN=... && symphonika doctor\n"
-      );
-      writeOut(program, "then:      symphonika init-project --yes\n");
+      writeOut(program, "next:      export GITHUB_TOKEN=...\n");
+      writeOut(program, "then:      cd <project> && symphonika init-project\n");
+      writeOut(program, "after:     symphonika doctor\n");
     });
 
   program
     .command("init-project")
-    .description(
-      "create missing GitHub operational labels after explicit confirmation"
-    )
+    .description("register the current GitHub repository as a Project")
     .option("--config <path>", "service config path")
+    .option("--force", "replace a Project with the same name")
     .option(
       "--yes",
-      "create missing operational labels without an interactive prompt"
+      "use defaults and create missing labels without interactive prompts"
     )
-    .action(async (options: { config?: string; yes?: boolean }) => {
-      const emittedWarnings = new Set<string>();
-      const report = await initProject({
-        ...withConfigPath(options.config),
-        onWarning: (warning) => {
-          emittedWarnings.add(warning);
+    .action(
+      async (options: { config?: string; force?: boolean; yes?: boolean }) => {
+        const emittedWarnings = new Set<string>();
+        const report = await initProject({
+          ...withConfigPath(options.config),
+          force: options.force === true,
+          onWarning: (warning) => {
+            emittedWarnings.add(warning);
+            writeErr(program, `warning: ${warning}\n`);
+          },
+          yes: options.yes === true
+        });
+
+        for (const warning of report.warnings) {
+          if (emittedWarnings.has(warning)) {
+            continue;
+          }
           writeErr(program, `warning: ${warning}\n`);
-        },
-        yes: options.yes === true
-      });
-
-      for (const warning of report.warnings) {
-        if (emittedWarnings.has(warning)) {
-          continue;
         }
-        writeErr(program, `warning: ${warning}\n`);
-      }
 
-      if (!report.ok) {
-        writeErr(program, "init-project failed:\n");
-        for (const error of report.errors) {
-          writeErr(program, `- ${error}\n`);
+        if (!report.ok) {
+          writeErr(program, "init-project failed:\n");
+          for (const error of report.errors) {
+            writeErr(program, `- ${error}\n`);
+          }
+          process.exitCode = 1;
+          return;
         }
-        process.exitCode = 1;
-        return;
-      }
 
-      const createdLabels = report.projects.flatMap((project) =>
-        project.createdOperationalLabels.map((label) => ({
-          label,
-          repository: project.repository
-        }))
-      );
+        const createdLabels = report.projects.flatMap((project) =>
+          project.createdOperationalLabels.map((label) => ({
+            label,
+            repository: project.repository
+          }))
+        );
 
-      writeOut(
-        program,
-        `init-project ok: created ${createdLabels.length} ${pluralize("label", createdLabels.length)}\n`
-      );
-      for (const created of createdLabels) {
-        writeOut(program, `- ${created.label} in ${created.repository}\n`);
+        writeOut(
+          program,
+          `init-project ok: registered ${report.projects.length} ${pluralize("Project", report.projects.length)} and created ${createdLabels.length} ${pluralize("label", createdLabels.length)}\n`
+        );
+        for (const created of createdLabels) {
+          writeOut(program, `- ${created.label} in ${created.repository}\n`);
+        }
       }
-    });
+    );
 
   program
     .command("clear-stale")
@@ -1909,13 +1890,6 @@ function parseIssueNumber(value: string): number {
   }
 
   return issue;
-}
-
-function parseProvider(value: string): InitProvider {
-  if (value === "codex" || value === "claude") {
-    return value;
-  }
-  throw new InvalidArgumentError("provider must be one of codex, claude");
 }
 
 function pluralize(word: string, count: number): string {

@@ -546,26 +546,16 @@ describe("CLI", () => {
     }
   });
 
-  it("init creates a user service config for the current GitHub project", async () => {
+  it("init --yes creates a global service config without requiring a Git repository", async () => {
     const previousExitCode = process.exitCode;
     const previousCwd = process.cwd();
     const previousConfigHome = process.env.XDG_CONFIG_HOME;
     const previousStateHome = process.env.XDG_STATE_HOME;
     process.exitCode = 0;
     const root = await makeTempRoot();
-    const projectRoot = path.join(root, "s11");
     const configHome = path.join(root, "config");
     const stateHome = path.join(root, "state");
-    await mkdir(projectRoot, { recursive: true });
-    await execFile("git", ["init", "--initial-branch", "main"], {
-      cwd: projectRoot
-    });
-    await execFile(
-      "git",
-      ["remote", "add", "origin", "https://github.com/pmatos/s11.git"],
-      { cwd: projectRoot }
-    );
-    process.chdir(projectRoot);
+    process.chdir(root);
     process.env.XDG_CONFIG_HOME = configHome;
     process.env.XDG_STATE_HOME = stateHome;
     const output = { stderr: "", stdout: "" };
@@ -581,25 +571,19 @@ describe("CLI", () => {
     });
     const configPath = path.join(configHome, "symphonika", "symphonika.yml");
     const stateRoot = path.join(stateHome, "symphonika");
-    const workflowPath = path.join(projectRoot, "WORKFLOW.md");
 
     try {
-      await program.parseAsync(["node", "symphonika", "init"]);
+      await program.parseAsync(["node", "symphonika", "init", "--yes"]);
 
       const config = await readFile(configPath, "utf8");
-      const workflow = await readFile(workflowPath, "utf8");
       expect(config).toContain(`root: ${stateRoot}`);
-      expect(config).toContain("owner: pmatos");
-      expect(config).toContain("repo: s11");
-      expect(config).toContain("remote: https://github.com/pmatos/s11.git");
-      expect(config).toContain(
-        `root: ${path.join(stateRoot, "workspaces", "s11")}`
-      );
-      expect(config).toContain(`workflow: ${workflowPath}`);
-      expect(workflow).toContain("# Implementing issue #{{issue.number}}");
+      expect(config).toContain("interval_ms: 30000");
+      expect(config).toContain("projects: []");
+      expect(config).not.toContain("tracker:");
+      expect(config).not.toContain("watchdog:");
       expect(output.stdout).toContain("init ok");
       expect(output.stdout).toContain(configPath);
-      expect(output.stdout).toContain("symphonika doctor");
+      expect(output.stdout).toContain("symphonika init-project");
       expect(output.stderr).toBe("");
       expect(process.exitCode).not.toBe(1);
     } finally {
@@ -650,12 +634,14 @@ describe("CLI", () => {
       "init-project",
       "--config",
       "custom.yml",
+      "--force",
       "--yes"
     ]);
 
     expect(initializations).toHaveLength(1);
     expect(initializations[0]).toMatchObject({
       configPath: "custom.yml",
+      force: true,
       yes: true
     });
     expect(output.stderr).toContain("will create operational labels");

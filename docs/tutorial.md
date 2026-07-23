@@ -7,7 +7,7 @@ claims an `agent-ready` issue from a GitHub repository you own, runs a coding ag
 - a built `symphonika` CLI on your `PATH`
 - a user-level `symphonika.yml` service config pointed at one of your repositories
 - a repository-owned `WORKFLOW.md` workflow contract that the agent will execute
-- the four `sym:*` operational labels created on the target repository
+- the `sym:*` Operational Labels created on the target repository
 - one completed run (via `smoke`) with logs you can inspect
 - a long-running `daemon` you can stop and start at will
 
@@ -83,22 +83,28 @@ The rest of this tutorial uses `symphonika <subcommand>` for brevity.
 
 ---
 
-## 3. Initialize Symphonika from your project
+## 3. Initialize Symphonika, then register your Project
 
-Go to the repository you want Symphonika to manage and run `init` there. You do
-not need a separate deployment directory.
+Create the user Service Config first, then go to the repository you want Symphonika to manage and
+register it:
 
 ```sh
+symphonika init
 cd ~/dev/s11
-symphonika init --provider codex     # or: --provider claude
+symphonika init-project
 ```
 
-`init` reads the GitHub `origin` remote, creates the user service config at
+`init` creates the user service config at
 `$XDG_CONFIG_HOME/symphonika/symphonika.yml` (usually
 `~/.config/symphonika/symphonika.yml`), stores local runtime state under
-`$XDG_STATE_HOME/symphonika` (usually `~/.local/state/symphonika`), and creates
-`WORKFLOW.md` in the project only if that file is absent. It does not touch
-GitHub; label creation still happens later via `init-project --yes`.
+`$XDG_STATE_HOME/symphonika` (usually `~/.local/state/symphonika`), and starts with
+`projects: []`. It prompts for service-level settings and never inspects a repository or touches
+GitHub.
+
+`init-project` reads the current repository's GitHub `origin`, prompts for the Project-specific
+settings, appends the Project, creates `WORKFLOW.md` only if the selected path is absent, and creates
+missing `sym:*` Operational Labels. Pass `--yes` to either command to accept every displayed
+default without prompting. Run `init-project` again from another checkout to add another Project.
 
 If you already have a user config, `init` refuses to overwrite it unless you pass
 `--force`. For hand-authored setups, every command still accepts `--config
@@ -221,7 +227,7 @@ If you are running Claude, skip this section.
 
 ## 6. Review your `WORKFLOW.md`
 
-`symphonika init` creates a starter `WORKFLOW.md` if your project does not
+`symphonika init-project` creates a starter `WORKFLOW.md` if your project does not
 already have one. The workflow contract is the prompt the agent receives, with
 placeholders that Symphonika fills in at dispatch time. Available placeholders
 are listed in [SPEC.md §5.3](../SPEC.md#53-templating); the most useful are
@@ -306,26 +312,15 @@ database path, workspace root. It dispatches no work.
 symphonika doctor
 ```
 
-The first time you run this against a fresh repository, `doctor` will exit
-non-zero and report the four `sym:*` operational labels as missing — for
-example:
-
-```
-doctor failed:
-- projects.my-app.tracker.repository your-handle/your-repo is missing operational labels: sym:claimed, sym:running, sym:failed, sym:stale
-```
-
-That specific error is expected and is exactly what step 8 (`init-project --yes`)
-resolves; re-run `doctor` after step 8 and it should print `doctor ok`. Any
-*other* error — a bad token, an unreadable workflow file, a missing provider
-binary — is a real problem and must be fixed before continuing, because smoke
-and daemon refuse to start when `doctor` is unhappy.
+Because `init-project` already provisions the Operational Labels, `doctor` should print `doctor ok`.
+Any error — a bad token, an unreadable workflow file, a missing provider binary, or deleted labels —
+must be fixed before continuing, because smoke and daemon refuse to start when `doctor` is unhappy.
 
 Common first-run errors and what they mean:
 
 - *"GitHub auth failed"* — `GITHUB_TOKEN` is unset, expired, or lacks scopes.
 - *"workflow file not found"* — check the `workflow:` path in the user service
-  config. `init` writes an absolute path; hand-authored relative paths resolve
+  config. `init-project` writes an absolute path; hand-authored relative paths resolve
   from the directory containing `symphonika.yml`.
 - *"provider command not on PATH"* — the `codex` or `claude` binary cannot be
   resolved. Check `which codex` / `which claude`.
@@ -333,19 +328,18 @@ Common first-run errors and what they mean:
 
 ---
 
-## 8. Create the operational labels
+## 8. Add another Project
 
-Symphonika owns four GitHub labels (`sym:claimed`, `sym:running`, `sym:failed`,
-`sym:stale`) and refuses to create them silently. Run `init-project` once per
-target repository:
+To manage another repository with the same daemon, run `init-project` from that checkout. It appends
+the new Project and provisions its Operational Labels without replacing existing Projects:
 
 ```sh
-symphonika init-project --yes
+cd ~/dev/another-project
+symphonika init-project
 ```
 
-The `--yes` flag is the explicit confirmation. Without it the command runs in
-preview mode and prints what *would* be created without touching GitHub. After
-this completes, `doctor` should report a clean bill of health.
+If a Project with the chosen name already exists, the command refuses to continue. `--force`
+replaces only that matching entry; it does not overwrite the rest of the Service Config.
 
 ---
 
@@ -543,8 +537,8 @@ from whichever provider started the attempt.
 ## Appendix A: Troubleshooting
 
 **`doctor` says no initialized user service config exists.** Run
-`symphonika init` from the GitHub repository you want Symphonika to manage, then
-run `symphonika doctor` again.
+`symphonika init`, then run `symphonika init-project` from the GitHub repository you want
+Symphonika to manage before running `symphonika doctor` again.
 
 **`doctor` complains about a `sym:stale` label on an issue.** A previous attempt
 left durable claim labels but no live local run. Run

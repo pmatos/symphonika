@@ -719,6 +719,16 @@ export class RunController {
       providerCommand,
       providerName: payload.providerName,
       repository,
+      // Forward the caller-owned label-immunity flag into the retry attempt,
+      // mirroring runFreshLifecycle. Without this, runAttemptLifecycle sees
+      // input.respectsIssueLabels === undefined and recomputes it from the
+      // workflow kind; for a non-raw_fsm (markdown-compatible) PR follow-up
+      // retry that resolves to `true`, and attachProvider flips the reserved
+      // slot's `false` back to label-controlled — re-opening the
+      // eligibility_loss cancellation storm this change closes. See ADR 0044.
+      ...(payload.respectsIssueLabels === undefined
+        ? {}
+        : { respectsIssueLabels: payload.respectsIssueLabels }),
       runId: payload.runId
     });
   }

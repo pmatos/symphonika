@@ -391,4 +391,29 @@ describe("RoutineDeclarationLoader", () => {
       `routine at ${routinePath} schedule.at must be a valid ISO 8601 date`
     );
   });
+
+  it("rejects a non-ISO schedule.at value that JavaScript can still parse", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "non-iso-date.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: non-iso-date",
+        "schedule:",
+        '  at: "1"',
+        "kind: report",
+        "---",
+        "Body",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.routine).toBeNull();
+    expect(result.errors).toContain(
+      `routine at ${routinePath} schedule.at must be a valid ISO 8601 date`
+    );
+  });
 });

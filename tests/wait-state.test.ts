@@ -123,6 +123,33 @@ type GatedProvider = AgentProvider & {
   release: () => void;
 };
 
+type GatedValidationProvider = AgentProvider & {
+  ready: Promise<void>;
+  release: () => void;
+};
+
+function gatedValidationSuccessProvider(): GatedValidationProvider {
+  const readyGate = createDeferred<void>();
+  const releaseGate = createDeferred<void>();
+  return {
+    cancel: vi.fn().mockResolvedValue(undefined),
+    name: "codex",
+    ready: readyGate.promise,
+    release: () => releaseGate.resolve(),
+    runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+      await Promise.resolve();
+      yield {
+        normalized: { exitCode: 0, type: "process_exit" },
+        raw: { code: 0, kind: "exit" }
+      };
+    }),
+    validate: vi.fn(async () => {
+      readyGate.resolve();
+      await releaseGate.promise;
+    })
+  };
+}
+
 // Provider that yields session_started, then blocks until released — modelling
 // an agent that is still "running" (e.g. mid-way through removing agent-ready
 // and opening its PR) so a reconcile tick can fire while the run is in-flight.
@@ -359,6 +386,39 @@ function prState(
     url: "https://example.test/pr/99",
     ...overrides
   };
+}
+
+async function waitForTerminalRunDetail(
+  daemonUrl: string,
+  runId: string,
+  timeoutMs = 15_000
+): Promise<{
+  run: {
+    cancelReason: string | null;
+    cancelRequested: boolean;
+    id: string;
+    state: string;
+  };
+}> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${daemonUrl}/api/runs/${runId}`);
+    if (response.ok) {
+      const detail = (await response.json()) as {
+        run: {
+          cancelReason: string | null;
+          cancelRequested: boolean;
+          id: string;
+          state: string;
+        };
+      };
+      if (["cancelled", "failed", "succeeded"].includes(detail.run.state)) {
+        return detail;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`terminal run ${runId} not observed before timeout`);
 }
 
 function buildController(input: {
@@ -649,6 +709,144 @@ describe("wait state lifecycle", () => {
     }
   });
 
+  it("keeps an open PR review follow-up alive while provider validation is pending", async () => {
+    const root = await makeTempRoot();
+    await writeWaitStateProject(root);
+
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    const seedStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    try {
+      const issue = issueFixture();
+      seedStore.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      seedStore.updateRunEvidence("parent-run", {
+        branchName: preparedWorkspace.branchName,
+        branchRef: preparedWorkspace.branchRef,
+        issueSnapshotPath: "/tmp/issue-snapshot.json",
+        metadataPath: "/tmp/prompt-metadata.json",
+        normalizedLogPath: "/tmp/provider.normalized.jsonl",
+        promptPath: "/tmp/prompt.md",
+        rawLogPath: "/tmp/provider.raw.jsonl",
+        workflowGraphPath: "/tmp/workflow-graph.json",
+        workspacePath: preparedWorkspace.workspacePath
+      });
+      seedStore.updateRunState("parent-run", "succeeded");
+      seedStore.trackPullRequest({
+        branchName: preparedWorkspace.branchName,
+        headSha: "review-head",
+        issueNumber: issue.number,
+        prNumber: 277,
+        prUrl: "https://github.com/pmatos/symphonika/pull/277",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+    } finally {
+      seedStore.close();
+    }
+
+    const ineligibleIssue = {
+      ...issueFixture(),
+      labels: ["sym:claimed"]
+    };
+    const githubIssuesApi: GitHubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue({
+        ...ineligibleIssue,
+        labels: ineligibleIssue.labels.map((name) => ({ name }))
+      }),
+      getPullRequestFollowupState: vi.fn().mockResolvedValue(
+        prState({
+          headSha: "review-head",
+          number: 277,
+          reviewDecision: "CHANGES_REQUESTED",
+          unresolvedReviewThreads: [
+            {
+              comments: [
+                {
+                  author: "reviewer",
+                  body: "Please address this feedback.",
+                  createdAt: "2026-07-23T10:00:00Z",
+                  line: 42,
+                  path: "src/daemon.ts",
+                  url: "https://github.com/pmatos/symphonika/pull/277#discussion_r1"
+                }
+              ],
+              id: "PRRT_review_followup",
+              isResolved: false,
+              line: 42,
+              path: "src/daemon.ts"
+            }
+          ],
+          url: "https://github.com/pmatos/symphonika/pull/277"
+        })
+      ),
+      listOpenIssues: vi.fn().mockResolvedValue([ineligibleIssue]),
+      listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const provider = gatedValidationSuccessProvider();
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => `run-277-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      // PR follow-up is throttled for the first second after daemon startup.
+      await new Promise((resolve) => setTimeout(resolve, 1_050));
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      await provider.ready;
+
+      // Reconcile the label-ineligible issue while the review continuation has
+      // only reserved its slot and is still validating the provider.
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      provider.release();
+
+      const detail = await waitForTerminalRunDetail(daemon.url, "run-277-1");
+      expect(detail.run).toMatchObject({
+        cancelReason: null,
+        cancelRequested: false,
+        id: "run-277-1",
+        state: "succeeded"
+      });
+
+      const runsResponse = await fetch(
+        `${daemon.url}/api/runs?project=symphonika`
+      );
+      const runs = (await runsResponse.json()) as {
+        runs: Array<{ id: string; provider: string }>;
+      };
+      expect(
+        runs.runs.filter(
+          (run) => run.id.startsWith("run-277-") && run.provider === "codex"
+        )
+      ).toHaveLength(1);
+    } finally {
+      provider.release();
+      await daemon.stop();
+    }
+  });
+
   it("advances a waiting run to a terminal state when PR predicates match", async () => {
     const root = await makeTempRoot();
     await writeWaitStateProject(root);
@@ -874,6 +1072,7 @@ describe("wait state lifecycle", () => {
         headSha: "deadbeef",
         id: tracked.id,
         prUrl: tracked.prUrl,
+        reviewFollowupCapReached: false,
         state: "merged"
       });
       expect(store.listOpenTrackedPullRequests()).toHaveLength(0);

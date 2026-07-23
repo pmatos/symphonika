@@ -719,6 +719,16 @@ export class RunController {
       providerCommand,
       providerName: payload.providerName,
       repository,
+      // Forward the caller-owned label-immunity flag into the retry attempt,
+      // mirroring runFreshLifecycle. Without this, runAttemptLifecycle sees
+      // input.respectsIssueLabels === undefined and recomputes it from the
+      // workflow kind; for a non-raw_fsm (markdown-compatible) PR follow-up
+      // retry that resolves to `true`, and attachProvider flips the reserved
+      // slot's `false` back to label-controlled — re-opening the
+      // eligibility_loss cancellation storm this change closes. See ADR 0044.
+      ...(payload.respectsIssueLabels === undefined
+        ? {}
+        : { respectsIssueLabels: payload.respectsIssueLabels }),
       runId: payload.runId
     });
   }
@@ -940,6 +950,7 @@ export class RunController {
               headSha: pullRequestState.headSha,
               id: tracked.id,
               prUrl: pullRequestState.url,
+              reviewFollowupCapReached: false,
               state: "merged"
             });
             this.runStore.recordWaitingActivity(
@@ -1679,6 +1690,7 @@ export class RunController {
         providerCommand,
         providerName: project.agent.provider,
         repository,
+        respectsIssueLabels: false,
         runId
       });
     } catch (error) {
@@ -1812,6 +1824,7 @@ export class RunController {
     providerCommand: string;
     providerName: AgentProviderName;
     repository: GitHubIssueRepositoryInput;
+    respectsIssueLabels?: boolean;
     runId: string;
     schedulerWeights?: Array<{
       currentWeight: number;
@@ -1844,6 +1857,9 @@ export class RunController {
       providerCommand: input.providerCommand,
       providerName: input.providerName,
       repository: input.repository,
+      ...(input.respectsIssueLabels === undefined
+        ? {}
+        : { respectsIssueLabels: input.respectsIssueLabels }),
       runId: input.runId
     });
   }
@@ -1856,6 +1872,7 @@ export class RunController {
     providerCommand: string;
     providerName: AgentProviderName;
     repository: GitHubIssueRepositoryInput;
+    respectsIssueLabels?: boolean;
     runId: string;
     schedulerWeights?: Array<{
       currentWeight: number;
@@ -1953,6 +1970,9 @@ export class RunController {
       this.activeRuns.reserveSlot({
         issueNumber: input.issue.number,
         projectName: input.project.name,
+        ...(input.respectsIssueLabels === undefined
+          ? {}
+          : { respectsIssueLabels: input.respectsIssueLabels }),
         runId: input.runId
       });
     } catch (error) {
@@ -1977,6 +1997,7 @@ export class RunController {
     providerCommand: string;
     providerName: AgentProviderName;
     repository: GitHubIssueRepositoryInput;
+    respectsIssueLabels?: boolean;
     runId: string;
   }): Promise<void> {
     const attemptId = `${input.runId}-attempt-${input.attemptNumber}`;
@@ -1989,15 +2010,16 @@ export class RunController {
     let started: StartedAttempt | undefined;
     let caughtError: unknown;
     // Hoisted so the finally can read them on any exit path (including a
-    // loadWorkflow throw or a parked-state early return). Initial values
-    // are safe defaults: respectsIssueLabels=true (matches reserveSlot's
-    // default), parkedAsWaiting=false (default failure pipeline runs).
-    // See ADR 0052 — slot-leak fix.
+    // loadWorkflow throw or a parked-state early return). The initial label
+    // policy matches the reservation-time override when the caller supplied
+    // one (PR Follow-up), otherwise it keeps reserveSlot's label-controlled
+    // default. parkedAsWaiting=false enables the default failure pipeline.
+    // See ADR 0044 / ADR 0052.
     let loadedWorkflow:
       Awaited<ReturnType<typeof this.loadWorkflow>> | undefined;
     let currentState: ReturnType<typeof findWorkflowState> | undefined;
     let projectForAttempt = input.project;
-    let respectsIssueLabels = true;
+    let respectsIssueLabels = input.respectsIssueLabels ?? true;
     let parkedAsWaiting = false;
     let preservedWatchdogTerminal = false;
 
@@ -2093,9 +2115,11 @@ export class RunController {
       // exited" cannot close the window; label-immunity is the fix. Computed
       // here so both activeRuns.attachProvider and scheduleNext (in finally)
       // carry the same guarantee, including into retry scheduling. Markdown
-      // compatibility-graph workflows keep their label-driven behavior.
+      // compatibility-graph workflows keep their label-driven behavior unless
+      // the caller explicitly owns continuation eligibility (PR Follow-up).
       // CLOSED_ISSUE cancellation still applies. See ADR 0046.
       respectsIssueLabels =
+        input.respectsIssueLabels ??
         loadedWorkflow.expandedWorkflow.source.kind !== "raw_fsm";
       // For raw FSM workflows, the agent action's `prompt` field points at the
       // template file to send to the provider for this state. Resolve it here

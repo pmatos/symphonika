@@ -151,7 +151,9 @@ Continuations are capped. Default: `3` per issue.
 A PR Follow-up is a poll-driven orchestration loop for a pull request discovered from a
 Symphonika-created Issue Branch. It records the PR number and head SHA, watches review feedback,
 checks, and mergeability, re-dispatches the Coding Agent into the same Workspace when unresolved
-review feedback appears, and merges the PR when the configured policy says it is clear.
+review feedback appears, and merges the PR when the configured policy says it is clear. Review
+follow-up Runs are workflow-owned continuation work: they require the Issue to remain open, but
+workflow-label drift does not cancel them.
 
 ### 4.10 Agent Provider
 
@@ -998,6 +1000,17 @@ tracked. For each tracked open PR:
 5. If the PR is open, non-draft, mergeable, has no unresolved review feedback, satisfies the review
    policy, and has passing status checks when required, merge it using the configured merge method.
 
+Review follow-up Runs ignore `labels_all` and `labels_none` from the moment their in-flight slot is
+reserved, including workspace preparation and provider validation. Issue closure and operator
+cancellation still cancel them. Fresh dispatches and ordinary label-controlled Continuations keep
+their existing label eligibility checks.
+
+Every successful tracked-PR observation durably records whether the PR is open, still has unresolved
+review feedback, and has exhausted the configured review-dispatch cap. A transient observation
+failure preserves the prior value. Resolved feedback, a raised cap, PR closure, or PR merge clears
+the value on the next successful observation. Cap exhaustion does not fail or cancel a parked
+workflow Run: the Run stays `waiting` for human action or a later observation.
+
 Default PR follow-up policy: poll enabled, at most `3` review dispatches per PR, squash merge,
 require successful status checks, and do not require an explicit approval unless repository rules
 surface `REVIEW_REQUIRED`.
@@ -1029,7 +1042,9 @@ Lifecycle:
    If the destination is terminal, the waiting Run records `terminal_state_id` and transitions to
    `succeeded`.
 4. If no transition matches and the wait state's `complete_when` is not violated, the wait stays
-   parked (`stay_waiting`); reconciliation will re-evaluate it on the next tick.
+   parked (`stay_waiting`); reconciliation will re-evaluate it on the next tick. If unresolved
+   review feedback has exhausted the PR Follow-up dispatch cap, the Run remains parked and its
+   detail surfaces identify the tracked PR and require manual attention.
 5. Issue close cancels a waiting Run with `cancel_reason = "closed_issue"`. Operator cancel marks
    the cancel reason; the next re-evaluation tick observes the cancel-requested flag and
    transitions the Run to `cancelled`.
@@ -1211,6 +1226,13 @@ reach its durable firing history.
 the effective `graceMs` and server-computed `graceRemainingMs`. `GET /api/status` adds a `watchdog`
 object to each active Run with `idleSince` and `graceRemainingMs` when idle. When the effective
 Watchdog policy is disabled, both endpoints return exactly `{ "enabled": false }` for that object.
+
+For a waiting Run whose tracked PR has unresolved review feedback after the configured dispatch
+cap, `GET /api/runs/:id` also exposes a top-level `pullRequestFollowup` object with
+`attention = "cap_reached"`, `dispatchCount`, `maxDispatches`, `prNumber`, and `prUrl`; otherwise
+the field is `null`. The matching server-rendered Run page shows an amber manual-attention warning
+linked to the PR. Both surfaces use only persisted tracking state and the current loaded policy; they
+do not call GitHub while serving a request.
 
 Label creation, stale-claim reset, and workspace cleanup remain CLI-only.
 

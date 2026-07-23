@@ -671,6 +671,7 @@ export async function startDaemon(
         perProject
       };
     },
+    getPullRequestFollowupPolicy: () => runtimeConfig.pullRequestPolicy(),
     getRuns: () => runStore.listRuns(),
     getWatchdogConfig: (projectName) =>
       resolveWatchdogConfig(runtimeConfig.watchdogServiceConfig(), projectName),

@@ -55,8 +55,8 @@ _Avoid_: continuation eligibility when referring to first claim selection
 
 **Continuation Eligibility**:
 The question "may this already-owned Run lifecycle keep going?", including open state for every Run,
-and label re-checks only for label-controlled work. State Advance and waiting rows keep going on
-label drift but still stop when the Issue closes.
+and label re-checks only for label-controlled work. State Advance, waiting rows, and PR Follow-up
+Runs keep going on label drift but still stop when the Issue closes.
 _Avoid_: dispatch eligibility when referring to active-run or scheduled-work re-checks
 
 **Operational Label**:
@@ -97,7 +97,9 @@ The repository-owned process for pushing branches, opening pull requests, updati
 _Avoid_: orchestrator workflow
 
 **PR Follow-up**:
-The orchestrator-owned polling loop for pull requests discovered from Symphonika-created Issue Branches; it re-dispatches review feedback and merges PRs only when policy says they are clear.
+The orchestrator-owned polling loop for pull requests discovered from Symphonika-created Issue
+Branches; it re-dispatches review feedback as workflow-owned, label-immune continuation work and
+merges PRs only when policy says they are clear.
 _Avoid_: arbitrary PR detection
 
 **Pull Request State**:
@@ -230,6 +232,7 @@ _Avoid_: chat session
 - A **Coding Agent** may write **Workflow Labels**
 - A **Coding Agent** owns the **PR Workflow**
 - A **PR Follow-up** watches only PRs associated with completed Symphonika **Runs**
+- A **PR Follow-up** remains eligible while its Issue is open even when workflow labels drift
 - **Pull Request State** is derived from tracker observations and feeds **Workflow Predicate** projection and **PR Follow-up** verdicts
 - Each dispatched **Issue** has exactly one active **Workspace** per run
 - Each **Workspace** uses one **Issue Branch**

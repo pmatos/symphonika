@@ -193,6 +193,7 @@ export type TrackedPullRequest = {
   prNumber: number;
   prUrl: string;
   reviewDispatchCount: number;
+  reviewFollowupCapReached: boolean;
   runId: string;
   state: PullRequestTrackingState;
   updatedAt: string;
@@ -417,6 +418,7 @@ type TrackedPullRequestRow = {
   pr_number: number;
   pr_url: string;
   review_dispatch_count: number;
+  review_followup_cap_reached: number;
   run_id: string;
   state: PullRequestTrackingState;
   updated_at: string;
@@ -2337,6 +2339,7 @@ export class RunStore {
           "select id, project_name, issue_number, run_id, pr_number, pr_url,",
           "branch_name, head_sha_at_dispatch, last_seen_head_sha,",
           "last_review_dispatch_fingerprint, review_dispatch_count,",
+          "review_followup_cap_reached,",
           "last_followup_run_id, state, last_observed_at, created_at, updated_at",
           "from tracked_pull_requests",
           "where project_name = ? and issue_number = ?",
@@ -2355,6 +2358,7 @@ export class RunStore {
           "select id, project_name, issue_number, run_id, pr_number, pr_url,",
           "branch_name, head_sha_at_dispatch, last_seen_head_sha,",
           "last_review_dispatch_fingerprint, review_dispatch_count,",
+          "review_followup_cap_reached,",
           "last_followup_run_id, state, last_observed_at, created_at, updated_at",
           "from tracked_pull_requests",
           "where state = 'open'",
@@ -2370,6 +2374,7 @@ export class RunStore {
     headSha: string;
     id: number;
     prUrl: string;
+    reviewFollowupCapReached: boolean;
     state: PullRequestTrackingState;
   }): void {
     const now = timestamp();
@@ -2379,6 +2384,7 @@ export class RunStore {
           "update tracked_pull_requests set",
           "pr_url = @pr_url,",
           "last_seen_head_sha = @last_seen_head_sha,",
+          "review_followup_cap_reached = @review_followup_cap_reached,",
           "state = @state,",
           "last_observed_at = @last_observed_at,",
           "updated_at = @updated_at",
@@ -2390,6 +2396,7 @@ export class RunStore {
         last_observed_at: now,
         last_seen_head_sha: input.headSha,
         pr_url: input.prUrl,
+        review_followup_cap_reached: input.reviewFollowupCapReached ? 1 : 0,
         state: input.state,
         updated_at: now
       });
@@ -2664,6 +2671,7 @@ export class RunStore {
         last_seen_head_sha text not null,
         last_review_dispatch_fingerprint text,
         review_dispatch_count integer not null default 0,
+        review_followup_cap_reached integer not null default 0,
         last_followup_run_id text,
         state text not null,
         last_observed_at text not null,
@@ -2816,6 +2824,11 @@ export class RunStore {
       ["runs", "current_state_id", "text"],
       ["runs", "terminal_state_id", "text"],
       ["runs", "state_transition_reason", "text"],
+      [
+        "tracked_pull_requests",
+        "review_followup_cap_reached",
+        "integer not null default 0"
+      ],
       ["attempts", "failure_classification", "text"],
       ["attempts", "metadata_path", "text"],
       ["attempts", "workflow_graph_path", "text"],
@@ -3348,6 +3361,7 @@ function mapTrackedPullRequestRow(
     prNumber: row.pr_number,
     prUrl: row.pr_url,
     reviewDispatchCount: row.review_dispatch_count,
+    reviewFollowupCapReached: row.review_followup_cap_reached === 1,
     runId: row.run_id,
     state: row.state,
     updatedAt: row.updated_at

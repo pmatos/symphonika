@@ -4,15 +4,18 @@ import path from "node:path";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type {
-  GitHubIssuesApi,
-  RawGitHubPullRequestFollowupState
+import {
+  emptyIssuePollStatus,
+  type GitHubIssuesApi,
+  type RawGitHubPullRequestFollowupState
 } from "../src/issue-polling.js";
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
+import { reconcileActiveRuns } from "../src/lifecycle/reconcile.js";
 import {
   RunController,
   type RunControllerProjectConfig,
-  type RunControllerProvidersConfig
+  type RunControllerProvidersConfig,
+  type ScheduleHandler
 } from "../src/lifecycle/run-controller.js";
 import type {
   AgentProvider,
@@ -157,6 +160,471 @@ describe("pull request follow-up", () => {
         lastFollowupRunId: "review-run-1",
         prNumber: 81,
         reviewDispatchCount: 1
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a markdown PR follow-up retry label-immune across the retry handoff", async () => {
+    const root = await makeTempRoot();
+    // writeProject writes a markdown (non-raw_fsm) WORKFLOW.md. The label-
+    // immunity bug only bites non-raw_fsm workflows: for raw_fsm the retry's
+    // recompute independently yields false and masks the missing handoff.
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-review-followup";
+      const workspacePath = path.join(
+        root,
+        ".symphonika",
+        "workspaces",
+        "symphonika",
+        "issues",
+        "54-review-followup"
+      );
+      await createGitWorkspaceAhead({ branchName, workspacePath });
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath
+      });
+
+      const activeRuns = new ActiveRunRegistry();
+      const scheduledRetries: Array<() => Promise<void>> = [];
+      let attempts = 0;
+      let retryEntryRespectsIssueLabels: boolean | undefined;
+      const provider: AgentProvider = {
+        cancel: vi.fn().mockResolvedValue(undefined),
+        name: "codex",
+        // eslint-disable-next-line @typescript-eslint/require-await
+        async *runAttempt(
+          input: ProviderRunInput
+        ): AsyncGenerator<ProviderEvent> {
+          attempts += 1;
+          if (attempts === 1) {
+            // Initial follow-up attempt fails transiently → schedules a retry.
+            yield {
+              normalized: { exitCode: 1, type: "process_exit" },
+              raw: { code: 1, kind: "exit" }
+            };
+            return;
+          }
+          // The retry attempt: capture the label-immunity the in-flight entry
+          // carries after attachProvider. reconcile.ts consumes this exact
+          // field to decide eligibility_loss cancellation; the executeRetry →
+          // runAttemptLifecycle handoff must keep it `false` so a reconcile
+          // tick cannot cancel the retry while `agent-ready` is absent.
+          retryEntryRespectsIssueLabels = activeRuns.getInFlight(
+            input.run.id
+          )?.respectsIssueLabels;
+          yield {
+            normalized: { exitCode: 0, type: "process_exit" },
+            raw: { code: 0, kind: "exit" }
+          };
+        },
+        validate: vi.fn().mockResolvedValue(undefined)
+      };
+
+      const project = projectConfig();
+      // getIssue returns the issue WITHOUT `agent-ready` throughout — a PR
+      // follow-up dispatches on an open issue regardless of labels, and the
+      // retry must preserve that immunity.
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue(issueFixture()),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(
+          prState({
+            reviewDecision: "CHANGES_REQUESTED",
+            unresolvedReviewThreads: [
+              {
+                comments: [
+                  {
+                    author: "reviewer",
+                    body: "Please wire this into the daemon poll loop.",
+                    createdAt: "2026-05-04T10:00:00Z",
+                    line: 24,
+                    path: "src/daemon.ts",
+                    url: "https://github.com/pmatos/symphonika/pull/81#discussion_r1"
+                  }
+                ],
+                id: "PRRT_kwDO",
+                isResolved: false,
+                line: 24,
+                path: "src/daemon.ts"
+              }
+            ]
+          })
+        ),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([
+          {
+            draft: false,
+            head: { ref: branchName, sha: "abc123" },
+            html_url: "https://github.com/pmatos/symphonika/pull/81",
+            number: 81,
+            state: "open"
+          }
+        ]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        activeRuns,
+        githubIssuesApi,
+        project,
+        provider,
+        root,
+        runStore: store,
+        schedule: ({ fire, kind }) => {
+          if (kind === "retry") {
+            scheduledRetries.push(fire);
+          }
+        },
+        workspacePath
+      });
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        logger: pino({ enabled: false }),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      expect(result).toMatchObject({
+        action: "review_dispatch",
+        runId: "review-run-1"
+      });
+      // The initial attempt failed transiently and scheduled exactly one retry.
+      expect(attempts).toBe(1);
+      expect(scheduledRetries).toHaveLength(1);
+
+      // Drive the scheduled retry synchronously.
+      await scheduledRetries[0]!();
+
+      expect(attempts).toBe(2);
+      // Regression guard: without the executeRetry → runAttemptLifecycle
+      // handoff, the markdown recompute + attachProvider flip this back to
+      // `true`, re-opening the eligibility_loss cancellation storm.
+      expect(retryEntryRespectsIssueLabels).toBe(false);
+
+      const reviewRun = store.getRun("review-run-1");
+      expect(reviewRun?.cancelReason ?? null).toBeNull();
+      expect(reviewRun).toMatchObject({ state: "succeeded" });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("preserves label immunity through a PR follow-up retry on a non-raw_fsm workflow", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-review-followup";
+      const workspacePath = path.join(
+        root,
+        ".symphonika",
+        "workspaces",
+        "symphonika",
+        "issues",
+        "54-review-followup"
+      );
+      await createGitWorkspaceAhead({ branchName, workspacePath });
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath
+      });
+
+      const project = projectConfig();
+      const activeRuns = new ActiveRunRegistry();
+      let attempts = 0;
+      let respectsDuringRetry: boolean | undefined;
+      let cancelledDuringRetry: boolean | undefined;
+
+      // Issue snapshot used for the mid-retry reconcile tick: it lacks
+      // `agent-ready`, so evaluateProjectEligibility reports it ineligible.
+      // Under the bug this cancels the retry with eligibility_loss even
+      // though a PR follow-up retry must stay label-immune. See the Codex
+      // review on run-controller.ts:710-723.
+      const reconcilePollStatus = emptyIssuePollStatus();
+      reconcilePollStatus.candidateIssues = [
+        { issue: normalizedIssue(), project: project.name }
+      ];
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue(issueFixture()),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(
+          prState({
+            reviewDecision: "CHANGES_REQUESTED",
+            unresolvedReviewThreads: [
+              {
+                comments: [
+                  {
+                    author: "reviewer",
+                    body: "Please handle this edge case.",
+                    createdAt: "2026-05-04T10:00:00Z",
+                    line: 24,
+                    path: "src/daemon.ts",
+                    url: "https://github.com/pmatos/symphonika/pull/81#discussion_r1"
+                  }
+                ],
+                id: "PRRT_kwDO",
+                isResolved: false,
+                line: 24,
+                path: "src/daemon.ts"
+              }
+            ]
+          })
+        ),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([
+          {
+            draft: false,
+            head: { ref: branchName, sha: "abc123" },
+            html_url: "https://github.com/pmatos/symphonika/pull/81",
+            number: 81,
+            state: "open"
+          }
+        ]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+
+      const provider: AgentProvider = {
+        cancel: vi.fn().mockResolvedValue(undefined),
+        name: "codex",
+        runAttempt: vi.fn(async function* (
+          input: ProviderRunInput
+        ): AsyncGenerator<ProviderEvent> {
+          await Promise.resolve();
+          attempts += 1;
+          if (attempts === 1) {
+            yield {
+              normalized: { exitCode: 1, type: "process_exit" },
+              raw: { code: 1, kind: "exit" }
+            };
+            return;
+          }
+          // Retry attempt: attachProvider has already run by this point, so
+          // the active-run entry reflects whatever executeRetry propagated
+          // into runAttemptLifecycle. Fire a reconcile tick right here to
+          // simulate the daemon's concurrent poll racing the in-flight
+          // retry attempt.
+          respectsDuringRetry = activeRuns.get(
+            input.run.id
+          )?.respectsIssueLabels;
+          await reconcileActiveRuns({
+            activeRuns,
+            env: { GITHUB_TOKEN: "secret-token" },
+            githubIssuesApi,
+            logger: pino({ enabled: false }),
+            pollStatus: reconcilePollStatus,
+            projects: new Map([[project.name, project]]),
+            runStore: store
+          });
+          cancelledDuringRetry = activeRuns.get(input.run.id)?.cancelRequested;
+          yield {
+            normalized: { exitCode: 0, type: "process_exit" },
+            raw: { code: 0, kind: "exit" }
+          };
+        }),
+        validate: vi.fn().mockResolvedValue(undefined)
+      };
+
+      const scheduledRetries: Array<() => Promise<void>> = [];
+      const controller = new RunController({
+        activeRuns,
+        agentProviders: { codex: provider },
+        configDir: root,
+        createRunId: () => "review-run-1",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        prepareIssueWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".symphonika", "workspaces", ".cache"),
+            issueDirectoryName: "54-review-followup",
+            reused: true,
+            workspacePath
+          }),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        providersLoader: () => Promise.resolve(providersConfig()),
+        runStore: store,
+        // Capture scheduled retries instead of using real timers, so the
+        // test can fire executeRetry deterministically.
+        schedule: (scheduleInput) => {
+          if (scheduleInput.kind === "retry") {
+            scheduledRetries.push(scheduleInput.fire);
+          }
+        },
+        stateRoot: path.join(root, ".symphonika")
+      });
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        logger: pino({ enabled: false }),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      expect(result).toEqual({
+        action: "review_dispatch",
+        prNumber: 81,
+        runId: "review-run-1"
+      });
+      expect(attempts).toBe(1);
+      expect(scheduledRetries).toHaveLength(1);
+
+      await scheduledRetries[0]!();
+
+      expect(attempts).toBe(2);
+      expect(respectsDuringRetry).toBe(false);
+      expect(cancelledDuringRetry).toBe(false);
+      expect(store.getRun("review-run-1")).toMatchObject({
+        state: "succeeded"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("persists that unresolved review feedback exhausted the dispatch cap", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-review-followup";
+      const workspacePath = path.join(root, "workspace");
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath
+      });
+      store.trackPullRequest({
+        branchName,
+        headSha: "abc123",
+        issueNumber: 54,
+        prNumber: 81,
+        prUrl: "https://example.test/pr/81",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+      const tracked = store.listOpenTrackedPullRequests()[0]!;
+      for (let dispatch = 1; dispatch <= 3; dispatch += 1) {
+        store.recordPullRequestReviewDispatch({
+          fingerprint: `feedback-${dispatch}`,
+          headSha: "abc123",
+          id: tracked.id,
+          runId: `review-run-${dispatch}`
+        });
+      }
+
+      const project = projectConfig();
+      const getPullRequestFollowupState = vi.fn().mockResolvedValue(
+        prState({
+          reviewDecision: "CHANGES_REQUESTED",
+          unresolvedReviewThreads: [
+            {
+              comments: [],
+              id: "PRRT_cap_reached",
+              isResolved: false,
+              line: 24,
+              path: "src/daemon.ts"
+            }
+          ]
+        })
+      );
+      const githubIssuesApi: GitHubIssuesApi = {
+        getPullRequestFollowupState,
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([])
+      };
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: runController({
+          githubIssuesApi,
+          project,
+          provider: fakeProvider([]),
+          root,
+          runStore: store,
+          workspacePath
+        }),
+        runStore: store
+      });
+
+      expect(result).toEqual({
+        action: "none",
+        reason: "no pull request follow-up action"
+      });
+      expect(store.listOpenTrackedPullRequests()[0]).toMatchObject({
+        reviewDispatchCount: 3,
+        reviewFollowupCapReached: true
+      });
+
+      getPullRequestFollowupState.mockRejectedValueOnce(
+        new Error("transient GitHub failure")
+      );
+      await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: runController({
+          githubIssuesApi,
+          project,
+          provider: fakeProvider([]),
+          root,
+          runStore: store,
+          workspacePath
+        }),
+        runStore: store
+      });
+      expect(store.listOpenTrackedPullRequests()[0]).toMatchObject({
+        reviewFollowupCapReached: true
+      });
+
+      getPullRequestFollowupState.mockResolvedValueOnce(
+        prState({
+          reviewDecision: "APPROVED",
+          statusCheckRollupState: "PENDING",
+          unresolvedReviewThreads: []
+        })
+      );
+      await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: runController({
+          githubIssuesApi,
+          project,
+          provider: fakeProvider([]),
+          root,
+          runStore: store,
+          workspacePath
+        }),
+        runStore: store
+      });
+      expect(store.listOpenTrackedPullRequests()[0]).toMatchObject({
+        reviewFollowupCapReached: false
       });
     } finally {
       store.close();
@@ -461,16 +929,18 @@ describe("pull request follow-up", () => {
 });
 
 function runController(input: {
+  activeRuns?: ActiveRunRegistry;
   githubIssuesApi: GitHubIssuesApi;
   project: RunControllerProjectConfig;
   provider: AgentProvider;
   root: string;
   runStore: RunStore;
+  schedule?: ScheduleHandler;
   workspacePath: string;
 }): RunController {
   let nextRun = 0;
   return new RunController({
-    activeRuns: new ActiveRunRegistry(),
+    activeRuns: input.activeRuns ?? new ActiveRunRegistry(),
     agentProviders: { codex: input.provider },
     configDir: input.root,
     createRunId: () => {
@@ -494,7 +964,7 @@ function runController(input: {
       Promise.resolve(new Map([[input.project.name, input.project]])),
     providersLoader: () => Promise.resolve(providersConfig()),
     runStore: input.runStore,
-    schedule: () => undefined,
+    schedule: input.schedule ?? (() => undefined),
     stateRoot: path.join(input.root, ".symphonika")
   });
 }

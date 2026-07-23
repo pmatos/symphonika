@@ -605,6 +605,7 @@ describe("CLI", () => {
         initializations.push(options);
         return Promise.resolve({
           configPath: "/tmp/custom.yml",
+          createdWorkflowPath: "/tmp/new-project/WORKFLOW.md",
           errors: [],
           ok: true,
           projects: [
@@ -649,6 +650,9 @@ describe("CLI", () => {
     expect(output.stderr).toContain("will create operational labels");
     expect(output.stdout).toContain("init-project ok");
     expect(output.stdout).toContain("sym:running");
+    expect(output.stdout).toContain(
+      "created starter Workflow Contract at /tmp/new-project/WORKFLOW.md"
+    );
   });
 
   it("explains the expanded workflow graph for a selected project", async () => {

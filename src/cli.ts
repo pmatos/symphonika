@@ -318,6 +318,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         for (const created of createdLabels) {
           writeOut(program, `- ${created.label} in ${created.repository}\n`);
         }
+        if (report.createdWorkflowPath !== null) {
+          writeOut(
+            program,
+            `- created starter Workflow Contract at ${report.createdWorkflowPath}\n`
+          );
+        }
       }
     );
 

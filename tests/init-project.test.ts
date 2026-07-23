@@ -100,6 +100,9 @@ describe("Project initialization", () => {
     });
 
     expect(report.ok).toBe(true);
+    expect(report.createdWorkflowPath).toBe(
+      path.join(repositoryRoot, "WORKFLOW.md")
+    );
     expect(report.projects).toEqual([
       expect.objectContaining({
         name: "new-project",
@@ -309,6 +312,7 @@ describe("Project initialization", () => {
     });
 
     expect(report.ok).toBe(false);
+    expect(report.createdWorkflowPath).toBeNull();
     expect(report.errors).toEqual([
       "projects.new-project.tracker.repository acme/new-project is not accessible: not a collaborator"
     ]);
@@ -405,6 +409,7 @@ describe("Project initialization", () => {
     });
 
     expect(report.ok).toBe(false);
+    expect(report.createdWorkflowPath).toBeNull();
     expect(report.errors).toEqual(["operational label creation was declined"]);
     expect(report.warnings).toEqual([
       expect.stringContaining(
@@ -454,6 +459,7 @@ describe("Project initialization", () => {
     });
 
     expect(report.ok).toBe(false);
+    expect(report.createdWorkflowPath).toBeNull();
     expect(report.errors).toEqual([
       `projects.new-project.tracker.repository acme/new-project could not create operational label ${missingLabel}: permission denied`
     ]);
@@ -510,6 +516,44 @@ describe("Project initialization", () => {
     await expect(readFile(workflowParent, "utf8")).resolves.toBe(
       "not a directory"
     );
+  });
+
+  it("refuses to scaffold a starter workflow at a path that resolves to the raw_fsm format", async () => {
+    const root = await makeTempRoot();
+    const repositoryRoot = path.join(root, "new-project");
+    const configPath = path.join(root, "config", "symphonika.yml");
+    await createGitHubRepository(
+      repositoryRoot,
+      "https://github.com/acme/new-project.git"
+    );
+    await writeExistingConfig(configPath, root);
+    const originalContents = await readFile(configPath, "utf8");
+    const workflowPath = path.join(repositoryRoot, "workflow.yml");
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi.fn().mockResolvedValue([...REQUIRED_OPERATIONAL_LABELS]),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runInitProject({
+      configPath,
+      cwd: repositoryRoot,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      prompt: (input) =>
+        Promise.resolve(input.key === "workflowPath" ? workflowPath : "")
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.createdWorkflowPath).toBeNull();
+    expect(report.errors).toEqual([
+      expect.stringContaining(
+        `starter Workflow Contract could not be created at ${workflowPath}: the path resolves to the raw_fsm workflow format`
+      )
+    ]);
+    expect(githubApi.createLabel).not.toHaveBeenCalled();
+    await expect(readFile(configPath, "utf8")).resolves.toBe(originalContents);
+    await expect(readFile(workflowPath, "utf8")).rejects.toThrow();
   });
 });
 

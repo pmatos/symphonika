@@ -33,6 +33,7 @@ import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import { resolveStateRoot } from "./state.js";
 import {
   loadExpandedWorkflow,
+  resolveWorkflowFormat,
   validateExpandedWorkflowReferences
 } from "./workflow.js";
 
@@ -100,6 +101,7 @@ type InitProjectProjectReport = {
 
 export type InitProjectReport = {
   configPath: string;
+  createdWorkflowPath: string | null;
   errors: string[];
   ok: boolean;
   projects: InitProjectProjectReport[];
@@ -569,6 +571,18 @@ export async function runInitProject(
 
   let createdWorkflow = false;
   if (!(await fileExists(settings.workflowPath))) {
+    const resolvedFormat = resolveWorkflowFormat(
+      registeredProject.workflow.format,
+      settings.workflowPath
+    );
+    if (resolvedFormat.kind !== "markdown") {
+      errors.push(
+        resolvedFormat.kind === "error"
+          ? `starter Workflow Contract could not be created at ${settings.workflowPath}: ${resolvedFormat.error}`
+          : `starter Workflow Contract could not be created at ${settings.workflowPath}: the path resolves to the raw_fsm workflow format; init-project only scaffolds Markdown contracts, so create this file manually or choose a path ending in .md`
+      );
+      return initProjectReport(configPath, errors, warnings, projects);
+    }
     try {
       await mkdir(path.dirname(settings.workflowPath), { recursive: true });
       await writeFile(settings.workflowPath, defaultWorkflowContract(), "utf8");
@@ -609,7 +623,13 @@ export async function runInitProject(
     await removeCreatedWorkflow(settings.workflowPath, createdWorkflow, errors);
   }
 
-  return initProjectReport(configPath, errors, warnings, projects);
+  return initProjectReport(
+    configPath,
+    errors,
+    warnings,
+    projects,
+    createdWorkflow && errors.length === 0 ? settings.workflowPath : null
+  );
 }
 
 type ProjectInitSettings = {
@@ -1352,10 +1372,12 @@ function initProjectReport(
   configPath: string,
   errors: string[],
   warnings: string[],
-  projects: InitProjectProjectReport[]
+  projects: InitProjectProjectReport[],
+  createdWorkflowPath: string | null = null
 ): InitProjectReport {
   return {
     configPath,
+    createdWorkflowPath,
     errors,
     ok: errors.length === 0,
     projects,

@@ -58,7 +58,7 @@ type WorkflowTemplateUseExpansion = {
   unresolvedExitTargets: Set<string>;
 };
 
-type ResolvedWorkflowFormat =
+export type ResolvedWorkflowFormat =
   { kind: "markdown" | "raw_fsm" } | { error: string; kind: "error" };
 
 export type ExpandedWorkflowLoadResult = {
@@ -482,7 +482,7 @@ async function expandRawStateMachineWorkflow(
   };
 }
 
-function resolveWorkflowFormat(
+export function resolveWorkflowFormat(
   format: WorkflowFormat,
   workflowPath: string
 ): ResolvedWorkflowFormat {

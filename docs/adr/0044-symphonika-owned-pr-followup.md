@@ -21,6 +21,20 @@ Continuation so existing status surfaces show it without a separate run-state mo
 Symphonika fingerprints the head SHA plus unresolved feedback and does not dispatch the same
 fingerprint twice; it also caps review follow-ups per PR, defaulting to three.
 
+PR review follow-up is workflow-owned continuation work, not label-controlled work. Once
+`dispatchReviewFollowup` confirms that the Issue is open, the Run's reservation is label-immune
+before workspace preparation or provider validation begins. Reconciliation may still cancel it for
+Issue closure or an operator request, but it must not cancel it because `labels_all` or
+`labels_none` drifted. Ordinary Continuations retain their label checks.
+
+The tracked-PR row durably records whether the latest successful observation found unresolved
+feedback after the configured review-dispatch cap. Observation failures preserve the prior value;
+resolved feedback, a raised cap, PR closure, or PR merge clears it on a later successful
+observation. Cap exhaustion leaves a parked workflow Run in `waiting`. The Run JSON detail exposes
+structured cap context, and the server-rendered detail page shows an amber manual-attention warning
+linked to the tracked PR. Request handling reads persisted state plus the current loaded policy and
+does not perform a GitHub request.
+
 When a tracked PR is open, non-draft, mergeable, has no unresolved review feedback, has passing
 status checks when required, and satisfies the configured review policy, Symphonika merges it using
 the configured method. The default policy is squash merge, require successful status checks, and do

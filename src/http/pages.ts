@@ -24,10 +24,21 @@ import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 
 export type RegisterPagesOptions = {
   app: Hono;
+  getPullRequestFollowupPolicy?: () => {
+    maxReviewDispatchesPerPr: number;
+  };
   getStatusSnapshot?: () => StatusSnapshot;
   issuePollStatus?: IssuePollStatus;
   runStore: RunStore;
   version: string;
+};
+
+export type PullRequestFollowupAttention = {
+  attention: "cap_reached";
+  dispatchCount: number;
+  maxDispatches: number;
+  prNumber: number;
+  prUrl: string;
 };
 
 const TERMINAL_STATES: ReadonlySet<RunState> = new Set([
@@ -187,9 +198,17 @@ export function registerPages(options: RegisterPagesOptions): void {
             ),
             kind: capKind
           };
+    const pullRequestFollowup = buildPullRequestFollowupAttention({
+      detail,
+      maxDispatches:
+        options.getPullRequestFollowupPolicy?.().maxReviewDispatchesPerPr ??
+        null,
+      runStore: options.runStore
+    });
     const sections = [
       `<h1 class="page-title">Run <code>${escapeHtml(detail.id)}</code></h1>`,
       renderOutcomeBanner(detail, failureEvent, exitEvent),
+      renderPullRequestFollowupAttention(pullRequestFollowup),
       renderRunSummary(detail, capContext),
       renderWorkflowGraphSummary(detail.id, workflowGraph),
       renderCancelForm(detail),
@@ -544,6 +563,10 @@ td code { color: var(--ink-2); }
   border-color: var(--blocked-ink);
   background: var(--blocked-bg);
 }
+.banner--attention {
+  border-color: var(--progress-ink);
+  background: var(--progress-bg);
+}
 .banner-title {
   margin: 0 0 var(--sp-1);
   font-weight: 600;
@@ -551,6 +574,7 @@ td code { color: var(--ink-2); }
   color: var(--fail-ink);
 }
 .banner--blocked .banner-title { color: var(--blocked-ink); }
+.banner--attention .banner-title { color: var(--progress-ink); }
 .banner-reason { margin: 0 0 var(--sp-2); white-space: pre-wrap; color: var(--ink); }
 .banner-context { margin: 0; font-size: var(--fs-meta); color: var(--ink-muted); }
 .banner-context code { color: var(--ink-2); }
@@ -835,6 +859,44 @@ type CapContext = {
   count: number;
   kind: ReturnType<typeof parseCapReachedReason>;
 };
+
+export function buildPullRequestFollowupAttention(input: {
+  detail: Pick<RunStatus, "issueNumber" | "project" | "state">;
+  maxDispatches: number | null;
+  runStore: RunStore;
+}): PullRequestFollowupAttention | null {
+  if (input.detail.state !== "waiting" || input.maxDispatches === null) {
+    return null;
+  }
+  const tracked = input.runStore.findTrackedPullRequestByIssue({
+    issueNumber: input.detail.issueNumber,
+    projectName: input.detail.project
+  });
+  if (
+    tracked === undefined ||
+    tracked.state !== "open" ||
+    !tracked.reviewFollowupCapReached ||
+    tracked.reviewDispatchCount < input.maxDispatches
+  ) {
+    return null;
+  }
+  return {
+    attention: "cap_reached",
+    dispatchCount: tracked.reviewDispatchCount,
+    maxDispatches: input.maxDispatches,
+    prNumber: tracked.prNumber,
+    prUrl: tracked.prUrl
+  };
+}
+
+function renderPullRequestFollowupAttention(
+  attention: PullRequestFollowupAttention | null
+): string {
+  if (attention === null) {
+    return "";
+  }
+  return `<section class="banner banner--attention"><p class="banner-title">Manual attention required</p><p class="banner-reason">PR review follow-up reached its dispatch cap (${attention.dispatchCount} of ${attention.maxDispatches}) while unresolved feedback remains.</p><p class="banner-context"><a href="${escapeHtml(attention.prUrl)}">Open pull request #${attention.prNumber}</a></p></section>`;
+}
 
 function renderRunSummary(
   detail: RunStatus,

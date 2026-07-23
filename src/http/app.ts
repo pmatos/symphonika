@@ -24,7 +24,7 @@ import {
   buildWatchdogIdleStatus,
   buildWatchdogStatus
 } from "../watchdog-status.js";
-import { registerPages } from "./pages.js";
+import { buildPullRequestFollowupAttention, registerPages } from "./pages.js";
 
 type CancelRunFn = (
   runId: string,
@@ -76,6 +76,9 @@ export type HttpAppOptions = {
     projectName: string;
     runId: string;
   }>;
+  getPullRequestFollowupPolicy?: () => {
+    maxReviewDispatchesPerPr: number;
+  };
   getRuns?: () => RunStatus[];
   getReloadStatus?: () => RuntimeReloadStatus;
   getScheduled?: () => Array<{
@@ -283,9 +286,17 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       }
       const events = runStore.listProviderEvents(detail.id, { limit: 100 });
       const { attempts, transitions, ...run } = detail;
+      const pullRequestFollowup = buildPullRequestFollowupAttention({
+        detail,
+        maxDispatches:
+          options.getPullRequestFollowupPolicy?.().maxReviewDispatchesPerPr ??
+          null,
+        runStore
+      });
       return context.json({
         attempts,
         events,
+        pullRequestFollowup,
         run,
         transitions,
         watchdog: buildWatchdogStatus({
@@ -386,6 +397,11 @@ export function createHttpApp(options: HttpAppOptions): Hono {
 
     registerPages({
       app,
+      ...(options.getPullRequestFollowupPolicy === undefined
+        ? {}
+        : {
+            getPullRequestFollowupPolicy: options.getPullRequestFollowupPolicy
+          }),
       ...(options.getStatusSnapshot === undefined
         ? {}
         : { getStatusSnapshot: options.getStatusSnapshot }),

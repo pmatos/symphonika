@@ -163,6 +163,138 @@ describe("pull request follow-up", () => {
     }
   });
 
+  it("persists that unresolved review feedback exhausted the dispatch cap", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-review-followup";
+      const workspacePath = path.join(root, "workspace");
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath
+      });
+      store.trackPullRequest({
+        branchName,
+        headSha: "abc123",
+        issueNumber: 54,
+        prNumber: 81,
+        prUrl: "https://example.test/pr/81",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+      const tracked = store.listOpenTrackedPullRequests()[0]!;
+      for (let dispatch = 1; dispatch <= 3; dispatch += 1) {
+        store.recordPullRequestReviewDispatch({
+          fingerprint: `feedback-${dispatch}`,
+          headSha: "abc123",
+          id: tracked.id,
+          runId: `review-run-${dispatch}`
+        });
+      }
+
+      const project = projectConfig();
+      const getPullRequestFollowupState = vi.fn().mockResolvedValue(
+        prState({
+          reviewDecision: "CHANGES_REQUESTED",
+          unresolvedReviewThreads: [
+            {
+              comments: [],
+              id: "PRRT_cap_reached",
+              isResolved: false,
+              line: 24,
+              path: "src/daemon.ts"
+            }
+          ]
+        })
+      );
+      const githubIssuesApi: GitHubIssuesApi = {
+        getPullRequestFollowupState,
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([])
+      };
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: runController({
+          githubIssuesApi,
+          project,
+          provider: fakeProvider([]),
+          root,
+          runStore: store,
+          workspacePath
+        }),
+        runStore: store
+      });
+
+      expect(result).toEqual({
+        action: "none",
+        reason: "no pull request follow-up action"
+      });
+      expect(store.listOpenTrackedPullRequests()[0]).toMatchObject({
+        reviewDispatchCount: 3,
+        reviewFollowupCapReached: true
+      });
+
+      getPullRequestFollowupState.mockRejectedValueOnce(
+        new Error("transient GitHub failure")
+      );
+      await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: runController({
+          githubIssuesApi,
+          project,
+          provider: fakeProvider([]),
+          root,
+          runStore: store,
+          workspacePath
+        }),
+        runStore: store
+      });
+      expect(store.listOpenTrackedPullRequests()[0]).toMatchObject({
+        reviewFollowupCapReached: true
+      });
+
+      getPullRequestFollowupState.mockResolvedValueOnce(
+        prState({
+          reviewDecision: "APPROVED",
+          statusCheckRollupState: "PENDING",
+          unresolvedReviewThreads: []
+        })
+      );
+      await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: runController({
+          githubIssuesApi,
+          project,
+          provider: fakeProvider([]),
+          root,
+          runStore: store,
+          workspacePath
+        }),
+        runStore: store
+      });
+      expect(store.listOpenTrackedPullRequests()[0]).toMatchObject({
+        reviewFollowupCapReached: false
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("defers auto-merge when the issue has a waiting merge_pr run so the workflow's method override wins", async () => {
     const root = await makeTempRoot();
     await writeMergePrProject(root);

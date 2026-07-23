@@ -302,6 +302,7 @@ async function processTrackedPullRequests(input: {
         headSha: tracked.lastSeenHeadSha,
         id: tracked.id,
         prUrl: tracked.prUrl,
+        reviewFollowupCapReached: false,
         state: "closed"
       });
       continue;
@@ -313,6 +314,10 @@ async function processTrackedPullRequests(input: {
       headSha: state.headSha,
       id: tracked.id,
       prUrl: state.url,
+      reviewFollowupCapReached:
+        trackingState === "open" &&
+        pullRequestNeedsReviewFollowup(state) &&
+        tracked.reviewDispatchCount >= input.policy.maxReviewDispatchesPerPr,
       state: trackingState
     });
     if (trackingState !== "open") {
@@ -369,6 +374,7 @@ async function processTrackedPullRequests(input: {
       headSha: state.headSha,
       id: tracked.id,
       prUrl: state.url,
+      reviewFollowupCapReached: false,
       state: "merged"
     });
     return { action: "merged", prNumber: tracked.prNumber };

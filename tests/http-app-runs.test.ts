@@ -166,6 +166,124 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("shows and clears manual attention when PR review follow-up exhausts its cap", async () => {
+    const test = await setup();
+    try {
+      const issue = sampleIssue({
+        number: 54,
+        title: "Review follow-up cap"
+      });
+      test.runStore.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("parent-run", "succeeded");
+      test.runStore.createWaitingRun({
+        currentStateId: "holding",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "alpha"
+      });
+      test.runStore.trackPullRequest({
+        branchName: "sym/alpha/54-review-followup-cap",
+        headSha: "abc123",
+        issueNumber: issue.number,
+        prNumber: 81,
+        prUrl: "https://github.com/pmatos/symphonika/pull/81",
+        projectName: "alpha",
+        runId: "parent-run"
+      });
+      const tracked = test.runStore.listOpenTrackedPullRequests()[0]!;
+      for (let dispatch = 1; dispatch <= 3; dispatch += 1) {
+        test.runStore.recordPullRequestReviewDispatch({
+          fingerprint: `feedback-${dispatch}`,
+          headSha: "abc123",
+          id: tracked.id,
+          runId: `review-run-${dispatch}`
+        });
+      }
+      test.runStore.recordPullRequestObservation({
+        headSha: "abc123",
+        id: tracked.id,
+        prUrl: tracked.prUrl,
+        reviewFollowupCapReached: true,
+        state: "open"
+      });
+
+      const app = createHttpApp({
+        getPullRequestFollowupPolicy: () => ({
+          maxReviewDispatchesPerPr: 3
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const detailResponse = await app.request("/api/runs/waiting-run");
+      const detail = (await detailResponse.json()) as {
+        pullRequestFollowup: null | {
+          attention: string;
+          dispatchCount: number;
+          maxDispatches: number;
+          prNumber: number;
+          prUrl: string;
+        };
+      };
+      expect(detail.pullRequestFollowup).toEqual({
+        attention: "cap_reached",
+        dispatchCount: 3,
+        maxDispatches: 3,
+        prNumber: 81,
+        prUrl: "https://github.com/pmatos/symphonika/pull/81"
+      });
+
+      const pageResponse = await app.request("/runs/waiting-run");
+      const page = await pageResponse.text();
+      expect(page).toContain('class="banner banner--attention"');
+      expect(page).toContain("Manual attention required");
+      expect(page).toContain(
+        "PR review follow-up reached its dispatch cap (3 of 3) while unresolved feedback remains."
+      );
+      expect(page).toContain(
+        'href="https://github.com/pmatos/symphonika/pull/81"'
+      );
+
+      const raisedCapApp = createHttpApp({
+        getPullRequestFollowupPolicy: () => ({
+          maxReviewDispatchesPerPr: 4
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const raisedCapDetail = (await (
+        await raisedCapApp.request("/api/runs/waiting-run")
+      ).json()) as { pullRequestFollowup: unknown };
+      expect(raisedCapDetail.pullRequestFollowup).toBeNull();
+
+      test.runStore.recordPullRequestObservation({
+        headSha: "abc123",
+        id: tracked.id,
+        prUrl: tracked.prUrl,
+        reviewFollowupCapReached: false,
+        state: "open"
+      });
+
+      const clearedDetail = (await (
+        await app.request("/api/runs/waiting-run")
+      ).json()) as { pullRequestFollowup: unknown };
+      expect(clearedDetail.pullRequestFollowup).toBeNull();
+      const clearedPage = await (await app.request("/runs/waiting-run")).text();
+      expect(clearedPage).not.toContain("Manual attention required");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("returns 404 for /api/runs/:id when missing and detail otherwise", async () => {
     const test = await setup();
     try {

@@ -746,6 +746,7 @@ describe("run-store lifecycle CRUD", () => {
         headSha: "def456",
         id: tracked!.id,
         prUrl: tracked!.prUrl,
+        reviewFollowupCapReached: false,
         state: "merged"
       });
 

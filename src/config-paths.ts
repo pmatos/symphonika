@@ -63,7 +63,7 @@ export function isDefaultUserConfigPath(
 }
 
 export function missingUserConfigHint(configPath: string): string {
-  return `no initialized user service config found at ${configPath}; run \`symphonika init\` from the GitHub project you want Symphonika to manage`;
+  return `no initialized Service Config found at ${configPath}; run \`symphonika init\` first`;
 }
 
 function resolution(

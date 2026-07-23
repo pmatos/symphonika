@@ -44,9 +44,10 @@ Exit codes:
 2. **GitHub credentials**: export `GITHUB_TOKEN` (or the variable referenced
    by `tracker.token` in your config) with write access to issues for the
    target repository.
-3. **Operational labels created**: the four `sym:*` labels must already exist
-   on the target repository. Smoke never creates labels itself. Run
-   `symphonika init-project --yes` once as an operator to create them.
+3. **Operational labels created**: the `sym:*` labels must already exist on the target repository.
+   Smoke never creates labels itself. For a new setup, `symphonika init-project` provisions them
+   while registering the repository. For this hand-authored example config, verify the labels in
+   the repository settings rather than force-replacing the checked-in Project entry.
 4. **Provider binary on `PATH`**: install the binary that matches
    `agent.provider`. Codex provides `codex`; Claude provides `claude`.
 5. **At least one issue labeled `agent-ready`** that does not also carry any
@@ -57,7 +58,6 @@ Exit codes:
 ```sh
 export GITHUB_TOKEN=<your-personal-token>
 npx symphonika doctor --config symphonika.example.yml
-npx symphonika init-project --config symphonika.example.yml --yes   # one-time, creates sym:* labels
 npm run smoke -- --config symphonika.example.yml                    # equivalent to: symphonika smoke --config …
 ```
 

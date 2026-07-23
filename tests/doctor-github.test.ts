@@ -1,6 +1,8 @@
+import { execFile as execFileCallback } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -13,6 +15,7 @@ import type { GitHubIssuesApi } from "../src/issue-polling.js";
 import type { AgentProviderRegistry } from "../src/provider.js";
 
 const tempRoots: string[] = [];
+const execFile = promisify(execFileCallback);
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-github-test-"));
@@ -241,7 +244,7 @@ function fakeAgentProviders(): AgentProviderRegistry {
 }
 
 describe("GitHub Project initialization", () => {
-  it("warns about the target repository and labels without mutating unless confirmed", async () => {
+  it("refuses to replace an existing Project name unless forced", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);
     const githubApi: GitHubApi = {
@@ -254,16 +257,15 @@ describe("GitHub Project initialization", () => {
       configPath: "symphonika.yml",
       cwd: root,
       env: { GITHUB_TOKEN: "secret-token" },
-      githubApi
+      githubApi,
+      yes: true
     });
 
     expect(report.ok).toBe(false);
-    expect(report.warnings).toContain(
-      "init-project would create operational labels in pmatos/symphonika: sym:running, sym:failed, sym:blocked, sym:stale"
+    expect(report.errors[0]).toMatch(
+      /project symphonika already exists.*pass --force/i
     );
-    expect(report.errors).toContain(
-      "pass --yes to create missing operational labels non-interactively"
-    );
+    expect(githubApi.validateRepositoryAccess).not.toHaveBeenCalled();
     expect(githubApi.createLabel).not.toHaveBeenCalled();
   });
 
@@ -280,6 +282,7 @@ describe("GitHub Project initialization", () => {
       configPath: "symphonika.yml",
       cwd: root,
       env: { GITHUB_TOKEN: "secret-token" },
+      force: true,
       githubApi,
       yes: true
     });
@@ -331,6 +334,7 @@ describe("GitHub Project initialization", () => {
       configPath: "symphonika.yml",
       cwd: root,
       env: { GITHUB_TOKEN: "secret-token" },
+      force: true,
       githubApi,
       onWarning: (warning) => {
         events.push(`warning:${warning}`);
@@ -365,6 +369,7 @@ describe("GitHub Project initialization", () => {
       configPath: "symphonika.yml",
       cwd: root,
       env: { GITHUB_TOKEN: "secret-token" },
+      force: true,
       githubApi,
       yes: true
     });
@@ -555,6 +560,12 @@ describe("runClearStale", () => {
 
 async function writeValidProject(root: string): Promise<void> {
   await mkdir(root, { recursive: true });
+  await execFile("git", ["init", "--initial-branch", "main"], { cwd: root });
+  await execFile(
+    "git",
+    ["remote", "add", "origin", "https://github.com/pmatos/symphonika.git"],
+    { cwd: root }
+  );
   await writeFile(
     path.join(root, "symphonika.yml"),
     [

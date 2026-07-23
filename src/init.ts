@@ -2,6 +2,8 @@ import { execFile as execFileCallback } from "node:child_process";
 import { constants } from "node:fs";
 import { access, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { stdin, stdout } from "node:process";
+import { createInterface } from "node:readline/promises";
 import { promisify } from "node:util";
 import { stringify } from "yaml";
 
@@ -9,29 +11,48 @@ import { defaultUserConfigPath, defaultUserStateRoot } from "./config-paths.js";
 
 export type InitProvider = "codex" | "claude";
 
+type InitPromptInput = {
+  defaultValue: string;
+  key:
+    | "claudeCommand"
+    | "codexCommand"
+    | "mergeEnabled"
+    | "mergeMethod"
+    | "pollingIntervalMs"
+    | "requireReviewDecision"
+    | "requireStatusSuccess"
+    | "stateRoot";
+  message: string;
+};
+
+type InitPrompt = (input: InitPromptInput) => Promise<string>;
+
 export type InitOptions = {
-  cwd?: string;
   env?: NodeJS.ProcessEnv;
   force?: boolean;
   homeDir?: string;
-  provider?: InitProvider;
+  prompt?: InitPrompt;
+  yes?: boolean;
 };
 
 export type InitReport = {
   configPath: string;
   createdConfig: boolean;
-  createdWorkflow: boolean;
   errors: string[];
   ok: boolean;
-  projectName: string | null;
-  repository: string | null;
   stateRoot: string;
-  workflowPath: string | null;
 };
 
 type GitHubRemote = {
   owner: string;
   repo: string;
+};
+
+export type GitHubProjectMetadata = GitHubRemote & {
+  baseBranch: string;
+  projectName: string;
+  projectRoot: string;
+  remote: string;
 };
 
 const execFile = promisify(execFileCallback);
@@ -41,34 +62,35 @@ const DEFAULT_CODEX_COMMAND =
 const DEFAULT_CLAUDE_COMMAND =
   "claude -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json";
 
+type GlobalInitSettings = {
+  claudeCommand: string;
+  codexCommand: string;
+  mergeEnabled: boolean;
+  mergeMethod: "merge" | "rebase" | "squash";
+  pollingIntervalMs: number;
+  requireReviewDecision: boolean;
+  requireStatusSuccess: boolean;
+  stateRoot: string;
+};
+
 export async function runInit(options: InitOptions = {}): Promise<InitReport> {
-  const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
-  const provider = options.provider ?? "codex";
   const userPathOptions = {
     ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir }),
     env
   };
   const configPath = defaultUserConfigPath(userPathOptions);
-  const stateRoot = defaultUserStateRoot(userPathOptions);
+  const defaultStateRoot = defaultUserStateRoot(userPathOptions);
+  let stateRoot = defaultStateRoot;
   const errors: string[] = [];
   const baseReport = (overrides: Partial<InitReport> = {}): InitReport => ({
     configPath,
     createdConfig: false,
-    createdWorkflow: false,
     errors,
     ok: false,
-    projectName: null,
-    repository: null,
     stateRoot,
-    workflowPath: null,
     ...overrides
   });
-
-  if (provider !== "codex" && provider !== "claude") {
-    errors.push("provider must be one of codex, claude");
-    return baseReport();
-  }
 
   if (options.force !== true && (await fileExists(configPath))) {
     errors.push(
@@ -77,80 +99,36 @@ export async function runInit(options: InitOptions = {}): Promise<InitReport> {
     return baseReport();
   }
 
-  let projectRoot: string;
-  let remoteUrl: string;
-  let baseBranch: string;
+  let settings: GlobalInitSettings;
   try {
-    projectRoot = await gitOutput(["rev-parse", "--show-toplevel"], cwd);
-    remoteUrl = await gitOutput(["remote", "get-url", "origin"], projectRoot);
-    baseBranch = await detectBaseBranch(projectRoot);
+    settings = await collectGlobalSettings({
+      defaultStateRoot,
+      ...(options.prompt === undefined ? {} : { prompt: options.prompt }),
+      yes: options.yes === true
+    });
   } catch (error) {
-    errors.push(
-      `symphonika init must run inside a Git repository with an origin remote: ${errorMessage(error)}`
-    );
+    errors.push(errorMessage(error));
     return baseReport();
   }
-
-  const parsedRemote = parseGitHubRemote(remoteUrl);
-  if (parsedRemote === null) {
-    errors.push(
-      `origin remote must point at github.com for automatic init; found ${remoteUrl}`
-    );
-    return baseReport();
-  }
-
-  const projectName = sanitizeProjectName(parsedRemote.repo);
-  const workflowPath = path.join(projectRoot, "WORKFLOW.md");
-  const config = buildServiceConfig({
-    baseBranch,
-    projectName,
-    provider,
-    remote: remoteUrl,
-    stateRoot,
-    workflowPath,
-    ...parsedRemote
-  });
+  stateRoot = settings.stateRoot;
+  const config = buildServiceConfig(settings);
 
   await mkdir(path.dirname(configPath), { recursive: true });
   await writeFile(configPath, stringify(config), "utf8");
 
-  let createdWorkflow = false;
-  if (!(await fileExists(workflowPath))) {
-    await writeFile(workflowPath, defaultWorkflowContract(), "utf8");
-    createdWorkflow = true;
-  }
-
   return baseReport({
     createdConfig: true,
-    createdWorkflow,
-    ok: true,
-    projectName,
-    repository: `${parsedRemote.owner}/${parsedRemote.repo}`,
-    workflowPath
+    ok: true
   });
 }
 
-function buildServiceConfig(input: {
-  baseBranch: string;
-  owner: string;
-  projectName: string;
-  provider: InitProvider;
-  remote: string;
-  repo: string;
-  stateRoot: string;
-  workflowPath: string;
-}): unknown {
+function buildServiceConfig(settings: GlobalInitSettings): unknown {
   return {
     state: {
-      root: input.stateRoot
+      root: settings.stateRoot
     },
     polling: {
-      interval_ms: 30000
-    },
-    watchdog: {
-      enabled: true,
-      grace_minutes: 30,
-      sample_interval_seconds: 60
+      interval_ms: settings.pollingIntervalMs
     },
     pull_requests: {
       enabled: true,
@@ -158,59 +136,179 @@ function buildServiceConfig(input: {
         max_dispatches_per_pr: 3
       },
       merge: {
-        enabled: false,
-        method: "squash",
-        require_review_decision: false,
-        require_status_success: true
+        enabled: settings.mergeEnabled,
+        method: settings.mergeMethod,
+        require_review_decision: settings.requireReviewDecision,
+        require_status_success: settings.requireStatusSuccess
       }
     },
     providers: {
       codex: {
-        command: DEFAULT_CODEX_COMMAND
+        command: settings.codexCommand
       },
       claude: {
-        command: DEFAULT_CLAUDE_COMMAND
+        command: settings.claudeCommand
       }
     },
-    projects: [
-      {
-        name: input.projectName,
-        disabled: false,
-        weight: 1,
-        tracker: {
-          kind: "github",
-          owner: input.owner,
-          repo: input.repo,
-          token: "$GITHUB_TOKEN"
-        },
-        issue_filters: {
-          states: ["open"],
-          labels_all: ["agent-ready"],
-          labels_none: ["blocked", "needs-human", "sym:stale"]
-        },
-        priority: {
-          labels: {
-            "priority:critical": 0,
-            "priority:high": 1,
-            "priority:medium": 2,
-            "priority:low": 3
-          },
-          default: 99
-        },
-        workspace: {
-          root: path.join(input.stateRoot, "workspaces", input.projectName),
-          git: {
-            remote: input.remote,
-            base_branch: input.baseBranch
-          }
-        },
-        agent: {
-          provider: input.provider
-        },
-        workflow: input.workflowPath
-      }
-    ]
+    projects: []
   };
+}
+
+async function collectGlobalSettings(input: {
+  defaultStateRoot: string;
+  prompt?: InitPrompt;
+  yes: boolean;
+}): Promise<GlobalInitSettings> {
+  const defaults = {
+    claudeCommand: DEFAULT_CLAUDE_COMMAND,
+    codexCommand: DEFAULT_CODEX_COMMAND,
+    mergeEnabled: "no",
+    mergeMethod: "squash",
+    pollingIntervalMs: "30000",
+    requireReviewDecision: "no",
+    requireStatusSuccess: "yes",
+    stateRoot: input.defaultStateRoot
+  } as const;
+  const promptController = createPromptController(input.prompt, input.yes);
+
+  try {
+    const stateRoot = await promptController.ask({
+      defaultValue: defaults.stateRoot,
+      key: "stateRoot",
+      message: "State root"
+    });
+    const pollingIntervalMs = positiveInteger(
+      await promptController.ask({
+        defaultValue: defaults.pollingIntervalMs,
+        key: "pollingIntervalMs",
+        message: "Polling interval (ms)"
+      }),
+      "polling interval"
+    );
+    const mergeEnabled = parseBooleanAnswer(
+      await promptController.ask({
+        defaultValue: defaults.mergeEnabled,
+        key: "mergeEnabled",
+        message: "Enable automatic pull-request merging"
+      }),
+      "automatic pull-request merging"
+    );
+    const mergeMethod = parseMergeMethod(
+      await promptController.ask({
+        defaultValue: defaults.mergeMethod,
+        key: "mergeMethod",
+        message: "Pull-request merge method (squash, merge, or rebase)"
+      })
+    );
+    const requireStatusSuccess = parseBooleanAnswer(
+      await promptController.ask({
+        defaultValue: defaults.requireStatusSuccess,
+        key: "requireStatusSuccess",
+        message: "Require successful status checks before merge"
+      }),
+      "status-check requirement"
+    );
+    const requireReviewDecision = parseBooleanAnswer(
+      await promptController.ask({
+        defaultValue: defaults.requireReviewDecision,
+        key: "requireReviewDecision",
+        message: "Require an approving review before merge"
+      }),
+      "review requirement"
+    );
+    const codexCommand = await promptController.ask({
+      defaultValue: defaults.codexCommand,
+      key: "codexCommand",
+      message: "Codex command"
+    });
+    const claudeCommand = await promptController.ask({
+      defaultValue: defaults.claudeCommand,
+      key: "claudeCommand",
+      message: "Claude command"
+    });
+
+    for (const [label, value] of [
+      ["state root", stateRoot],
+      ["Codex command", codexCommand],
+      ["Claude command", claudeCommand]
+    ] as const) {
+      if (value.trim().length === 0) {
+        throw new Error(`${label} must not be empty`);
+      }
+    }
+
+    return {
+      claudeCommand,
+      codexCommand,
+      mergeEnabled,
+      mergeMethod,
+      pollingIntervalMs,
+      requireReviewDecision,
+      requireStatusSuccess,
+      stateRoot
+    };
+  } finally {
+    promptController.close();
+  }
+}
+
+function createPromptController(
+  injectedPrompt: InitPrompt | undefined,
+  yes: boolean
+): { ask: InitPrompt; close: () => void } {
+  if (yes) {
+    return {
+      ask: (input) => Promise.resolve(input.defaultValue),
+      close: () => undefined
+    };
+  }
+
+  if (injectedPrompt !== undefined) {
+    return {
+      ask: async (input) => {
+        const answer = await injectedPrompt(input);
+        return answer.trim().length === 0 ? input.defaultValue : answer.trim();
+      },
+      close: () => undefined
+    };
+  }
+
+  const readline = createInterface({ input: stdin, output: stdout });
+  return {
+    ask: async (input) => {
+      const answer = await readline.question(
+        `${input.message} [${input.defaultValue}]: `
+      );
+      return answer.trim().length === 0 ? input.defaultValue : answer.trim();
+    },
+    close: () => readline.close()
+  };
+}
+
+function positiveInteger(value: string, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function parseBooleanAnswer(value: string, label: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (["y", "yes", "true"].includes(normalized)) {
+    return true;
+  }
+  if (["n", "no", "false"].includes(normalized)) {
+    return false;
+  }
+  throw new Error(`${label} must be yes or no`);
+}
+
+function parseMergeMethod(value: string): GlobalInitSettings["mergeMethod"] {
+  if (value === "squash" || value === "merge" || value === "rebase") {
+    return value;
+  }
+  throw new Error("merge method must be one of squash, merge, rebase");
 }
 
 async function detectBaseBranch(projectRoot: string): Promise<string> {
@@ -243,6 +341,39 @@ async function detectBaseBranch(projectRoot: string): Promise<string> {
   }
 
   return "main";
+}
+
+export async function inspectCurrentGitHubProject(
+  cwd: string
+): Promise<GitHubProjectMetadata> {
+  let projectRoot: string;
+  let remote: string;
+  let baseBranch: string;
+  try {
+    projectRoot = await gitOutput(["rev-parse", "--show-toplevel"], cwd);
+    remote = await gitOutput(["remote", "get-url", "origin"], projectRoot);
+    baseBranch = await detectBaseBranch(projectRoot);
+  } catch (error) {
+    throw new Error(
+      `symphonika init-project must run inside a Git repository with an origin remote: ${errorMessage(error)}`,
+      { cause: error }
+    );
+  }
+
+  const parsedRemote = parseGitHubRemote(remote);
+  if (parsedRemote === null) {
+    throw new Error(
+      `origin remote must point at github.com for automatic Project initialization; found ${remote}`
+    );
+  }
+
+  return {
+    ...parsedRemote,
+    baseBranch,
+    projectName: sanitizeProjectName(parsedRemote.repo),
+    projectRoot,
+    remote
+  };
 }
 
 async function gitOutput(args: string[], cwd: string): Promise<string> {
@@ -302,7 +433,7 @@ function sanitizeProjectName(repo: string): string {
   return sanitized.replace(/^-+|-+$/g, "") || "project";
 }
 
-function defaultWorkflowContract(): string {
+export function defaultWorkflowContract(): string {
   return [
     "# Implementing issue #{{issue.number}}: {{issue.title}}",
     "",

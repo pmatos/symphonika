@@ -18,6 +18,22 @@ cd symphonika
 npm ci
 ```
 
+After linking or otherwise installing the CLI, initialize Symphonika once, then register each
+repository from inside its checkout:
+
+```sh
+npm link
+symphonika init
+cd /path/to/project
+symphonika init-project
+symphonika doctor
+```
+
+Both initialization commands show their defaults interactively. Use `--yes` for unattended setup;
+use `init --force` only to replace the global config, and `init-project --force` only to replace a
+Project with the same name. Export the GitHub credential referenced by the generated Project before
+running `init-project` or `doctor`.
+
 Run the local quality gate:
 
 ```sh

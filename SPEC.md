@@ -235,9 +235,12 @@ Service Config. It derives repository defaults from `origin`, prompts for the Pr
 Provider, base branch, issue-label filters, priority-label mapping, and Workflow Contract path, and
 appends the Project without discarding unrelated Projects or hand-authored config. A duplicate
 Project name is refused unless `--force`, which replaces only that sequence entry. The command
-creates a starter Workflow Contract only when the selected path is absent, then creates missing
-Operational Labels in the newly registered repository. `--yes` accepts Project defaults and
-performs label setup without prompting.
+creates a starter Workflow Contract only when the selected path is absent, prints the created path
+on success, and then creates missing Operational Labels in the newly registered repository. The
+starter contract is Markdown; the command refuses to scaffold a selected path that resolves to the
+`raw_fsm` format (a `.yaml`, `.yml`, or `.json` extension, or an explicit `format: raw_fsm`), since
+writing Markdown prose into a raw FSM file would register a Project with a workflow contract that
+fails to parse. `--yes` accepts Project defaults and performs label setup without prompting.
 
 Example:
 

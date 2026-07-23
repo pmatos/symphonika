@@ -29,11 +29,13 @@ export {
   explainWorkflow,
   loadExpandedWorkflow,
   loadProjectWorkflow,
+  resolveWorkflowFormat,
   validateExpandedWorkflowReferences
 } from "./workflow/fsm-expansion.js";
 export type {
   ExpandedWorkflowLoadResult,
-  ProjectWorkflowLoadResult
+  ProjectWorkflowLoadResult,
+  ResolvedWorkflowFormat
 } from "./workflow/fsm-expansion.js";
 export type {
   ExpandedWorkflow,

@@ -124,6 +124,12 @@ describe("add-routine", () => {
       name: "../escape",
       options: { schedule: "daily" },
       problem: "is not path-safe"
+    },
+    {
+      label: "non-ISO one-shot timestamp",
+      name: "bad-at",
+      options: { at: "1" },
+      problem: "schedule.at must be a valid ISO 8601 date"
     }
   ])("refuses a $label without creating or registering it", async (input) => {
     const root = await makeTempRoot();

@@ -511,6 +511,46 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("restores a one-shot routine whose at time elapsed while its Project was disabled as expired, not active", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      const routine = {
+        kind: "report" as const,
+        name: "one-shot-report",
+        prompt: "Report.",
+        provider: null,
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: "/tmp/one-shot-report.md"
+      };
+      store.syncRoutines("alpha", [routine], {
+        now: new Date("2026-05-20T00:00:00.000Z")
+      });
+
+      // The Project (not the routine itself) is disabled -- the
+      // Project-cascade path, distinct from the routine's own
+      // disabled: true front matter.
+      store.markRoutinesInactiveForProject("alpha");
+      expect(store.listRoutines({ includeInactive: true })[0]).toMatchObject({
+        state: "inactive"
+      });
+
+      // Project is re-enabled after the one-shot's `at` has elapsed; it
+      // never fired while inactive. syncRoutines runs again on the next
+      // reload with the same declaration.
+      store.syncRoutines("alpha", [routine], {
+        now: new Date("2026-05-23T00:00:00.000Z")
+      });
+
+      expect(store.listRoutines()[0]).toMatchObject({
+        state: "expired",
+        disabledReason: null
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("does not disable a protected routine name that is absent from the declared list", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

@@ -600,7 +600,10 @@ than killing active full-permission agents. Operators can explicitly cancel runs
 Routine rows for Projects disabled or omitted from the current valid Service Config snapshot are
 marked `inactive` and pruned from default operator listings on reload. Historical `routine_firings`
 rows and `last_fired_at` remain durable Run Store evidence. Re-enabling a Project restores its
-configured Routines to `active` or `expired` without re-firing an already-fired one-shot.
+configured Routines to `active` or `expired` without re-firing an already-fired one-shot. A one-shot
+Routine whose `at` elapsed while its Project was disabled and that never fired is restored to
+`expired`, not `active`, on re-enable — it does not fire retroactively, mirroring the same guarantee
+a routine-level `disabled` restore gives (§8.5).
 
 `inactive` is a Project-cascade state and is distinct from a Routine's own `disabled` or `invalid`
 state (§8.5): a Routine can be `disabled` while its Project stays fully enabled, and `disabled`

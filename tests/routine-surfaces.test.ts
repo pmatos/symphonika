@@ -215,10 +215,9 @@ describe("routine operator surfaces", () => {
         state: "cancelled"
       });
 
-      const alreadyTerminal = await app.request(
-        "/api/runs/fire-live/cancel",
-        { method: "POST" }
-      );
+      const alreadyTerminal = await app.request("/api/runs/fire-live/cancel", {
+        method: "POST"
+      });
       expect(alreadyTerminal.status).toBe(409);
       expect(await alreadyTerminal.json()).toMatchObject({
         kind: "already-terminal",

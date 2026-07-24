@@ -124,7 +124,10 @@ export function parseRoutineDeclaration(
   }
 
   const disabledValue = frontMatter.disabled;
-  if (Object.hasOwn(frontMatter, "disabled") && typeof disabledValue !== "boolean") {
+  if (
+    Object.hasOwn(frontMatter, "disabled") &&
+    typeof disabledValue !== "boolean"
+  ) {
     errors.push(`routine at ${routinePath} disabled must be a boolean`);
   }
 

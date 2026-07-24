@@ -312,7 +312,10 @@ describe("daemon routine firing", () => {
     const root = await makeTempRoot();
     const fireAt = new Date(Date.now() + 60_000).toISOString();
     await mkdir(root, { recursive: true });
-    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}}.\n"
+    );
     await writeFile(
       path.join(root, "daily-report.md"),
       [
@@ -360,8 +363,8 @@ describe("daemon routine firing", () => {
       await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
       await new Promise((resolve) => setTimeout(resolve, 80));
 
-      const body = (await fetch(`${daemon.url}/api/routines`).then(
-        (response) => response.json()
+      const body = (await fetch(`${daemon.url}/api/routines`).then((response) =>
+        response.json()
       )) as { routines: RoutineApiRow[] };
       expect(body.routines).toContainEqual(
         expect.objectContaining({

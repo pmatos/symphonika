@@ -3,11 +3,7 @@ import type { AgentProviderName } from "../provider.js";
 export type RoutineKind = "git" | "report";
 
 export type RoutineState =
-  | "active"
-  | "expired"
-  | "inactive"
-  | "disabled"
-  | "invalid";
+  "active" | "expired" | "inactive" | "disabled" | "invalid";
 
 export type RoutineDisabledReason = "operator" | "removed_from_config";
 

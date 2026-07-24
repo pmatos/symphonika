@@ -368,9 +368,7 @@ describe("RunStore routines", () => {
       expect(
         store.listRoutines({ project: "alpha" }).map((routine) => routine.name)
       ).toEqual(expect.arrayContaining(["daily-report", "weekly-report"]));
-      expect(
-        store.listRoutines({ project: "alpha" })
-      ).toContainEqual(
+      expect(store.listRoutines({ project: "alpha" })).toContainEqual(
         expect.objectContaining({
           name: "weekly-report",
           state: "disabled",

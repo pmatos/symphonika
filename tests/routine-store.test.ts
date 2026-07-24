@@ -1170,4 +1170,47 @@ describe("RunStore routines", () => {
       store.close();
     }
   });
+
+  it("restores a dormant invalid stub to state=invalid when its still-broken declaration reappears", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.upsertInvalidRoutineStub({
+        name: "broken-routine",
+        projectName: "alpha",
+        sourcePath: "/tmp/broken-routine.md"
+      });
+      expect(store.listRoutines()).toContainEqual(
+        expect.objectContaining({ name: "broken-routine", state: "invalid" })
+      );
+
+      // The routine's Project is disabled, cascading the still-invalid stub
+      // to 'inactive' -- simulating the operator disabling the Project
+      // while the broken declaration is present.
+      store.markRoutinesInactiveForProject("alpha");
+      expect(store.listRoutines({ includeInactive: true })).toContainEqual(
+        expect.objectContaining({ name: "broken-routine", state: "inactive" })
+      );
+
+      // Project is re-enabled; the declaration is still broken, so the
+      // reload pipeline calls upsertInvalidRoutineStub again with the same
+      // identity. The dormant stub must be reclaimed back to 'invalid'
+      // rather than staying stuck at 'inactive'.
+      store.upsertInvalidRoutineStub({
+        name: "broken-routine",
+        projectName: "alpha",
+        sourcePath: "/tmp/broken-routine.md"
+      });
+
+      expect(store.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          name: "broken-routine",
+          state: "invalid",
+          disabledReason: null
+        })
+      );
+    } finally {
+      store.close();
+    }
+  });
 });

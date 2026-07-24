@@ -1323,8 +1323,12 @@ export class RunStore {
   // front matter elsewhere). kind/schedule_at/prompt_body are unreadable
   // sentinels — evaluateRoutineSchedule (src/routines/schedule.ts) never
   // fires a non-'active' row, so these values are never read as real config.
-  // Never overwrites an existing row for the same name: a routine that is
-  // (or later becomes) validly configured must not be reset to 'invalid'.
+  // A validly-configured routine always has a non-empty prompt_body, so
+  // prompt_body = '' reliably identifies a row that has never been anything
+  // but this stub. On conflict, reclaim such a row back to 'invalid' (it may
+  // have gone dormant as 'disabled'/'inactive' via a Project-cascade or
+  // removal-from-config while still broken) but never touch a row that has
+  // ever held a real declaration.
   upsertInvalidRoutineStub(input: {
     name: string;
     projectName: string;
@@ -1339,7 +1343,12 @@ export class RunStore {
           ") values (",
           "@project_name, @name, @source_path, 'report', '', '', 'invalid', @created_at, @updated_at",
           ")",
-          "on conflict(project_name, name) do nothing"
+          "on conflict(project_name, name) do update set",
+          "source_path = excluded.source_path,",
+          "state = 'invalid',",
+          "disabled_reason = null,",
+          "updated_at = excluded.updated_at",
+          "where routines.prompt_body = ''"
         ].join(" ")
       )
       .run({

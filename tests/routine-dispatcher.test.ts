@@ -437,6 +437,250 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("marks a firing cancelled when an operator cancel lands before the provider exits cleanly", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        // Simulates an operator cancel landing on the shared registry while
+        // the provider process is mid-run; the process then exits cleanly
+        // regardless (e.g. it already finished its work before the SIGTERM
+        // was observed).
+        await activeRuns.requestCancel("fire-cancel", "operator");
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName: "main",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns,
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-cancel",
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md")
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-cancel",
+          cancelReason: "operator",
+          state: "cancelled"
+        })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("marks a firing cancelled when an operator cancel lands before the provider throws", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        await activeRuns.requestCancel("fire-cancel-throw", "operator");
+        throw new Error("provider process killed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName: "main",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns,
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-cancel-throw",
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md")
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-cancel-throw",
+          cancelReason: "operator",
+          state: "cancelled"
+        })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("never launches the provider when an operator cancel lands during workspace preparation", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const prepareRoutineWorkspace = vi.fn(
+      async (): Promise<PreparedRoutineWorkspace> => {
+        // Simulates an operator cancel landing while workspace prep (e.g. a
+        // slow git clone) is still in flight, before the provider has been
+        // attached — reserveSlot's noop cancel handler is all that exists at
+        // this point.
+        await activeRuns.requestCancel("fire-cancel-prepare", "operator");
+        return {
+          branchName: "main",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        };
+      }
+    );
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns,
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-cancel-prepare",
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md")
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-cancel-prepare",
+          cancelReason: "operator",
+          state: "cancelled"
+        })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("fires every recurring tick and advances next_fire_at after success or failure", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
@@ -1073,6 +1317,86 @@ describe("RoutineFiringDispatcher", () => {
       }
     }
   );
+
+  it("skips an invalid routine stub without blocking a sibling routine's dispatch", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    runStore.upsertInvalidRoutineStub({
+      name: "broken-routine",
+      projectName: "alpha",
+      sourcePath: path.join(root, "broken-routine.md")
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName: "main",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      const result = await dispatchDueRoutines({
+        activeRuns,
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-sibling",
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              invalidRoutineNames: ["broken-routine"],
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md")
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(result.fired).toEqual(["fire-sibling"]);
+      expect(
+        runStore.listRoutines().find((r) => r.name === "broken-routine")?.state
+      ).toBe("invalid");
+    } finally {
+      runStore.close();
+    }
+  });
 });
 
 function dueRoutineProjectFixture(root: string, provider: "codex" | "claude") {

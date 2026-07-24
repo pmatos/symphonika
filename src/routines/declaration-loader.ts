@@ -13,6 +13,7 @@ import type {
 
 export type RoutineDeclarationLoadResult = {
   errors: string[];
+  partialName?: string;
   routine: RoutineDeclaration | null;
 };
 
@@ -76,10 +77,13 @@ export function parseRoutineDeclaration(
   }
 
   const name = stringField(frontMatter, "name");
+  let partialName: string | undefined;
   if (name === undefined) {
     errors.push(`routine at ${routinePath} name is required`);
   } else if (!isPathSafeRoutineName(name)) {
     errors.push(`routine at ${routinePath} name "${name}" is not path-safe`);
+  } else {
+    partialName = name;
   }
 
   const kind = stringField(frontMatter, "kind");
@@ -119,12 +123,24 @@ export function parseRoutineDeclaration(
     errors.push(`routine at ${routinePath} allow_overlap must be a boolean`);
   }
 
+  const disabledValue = frontMatter.disabled;
+  if (
+    Object.hasOwn(frontMatter, "disabled") &&
+    typeof disabledValue !== "boolean"
+  ) {
+    errors.push(`routine at ${routinePath} disabled must be a boolean`);
+  }
+
   if (prompt.trim().length === 0) {
     errors.push(`routine at ${routinePath} prompt body must not be empty`);
   }
 
   if (errors.length > 0) {
-    return { errors, routine: null };
+    return {
+      errors,
+      ...(partialName === undefined ? {} : { partialName }),
+      routine: null
+    };
   }
 
   return {
@@ -134,6 +150,7 @@ export function parseRoutineDeclaration(
         typeof allowOverlapValue === "boolean" ? allowOverlapValue : false,
       catchUp:
         catchUpValue === "fire_once_if_missed" ? "fire_once_if_missed" : "skip",
+      disabled: typeof disabledValue === "boolean" ? disabledValue : false,
       kind: kind as RoutineKind,
       name: name!,
       prompt,

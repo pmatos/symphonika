@@ -810,13 +810,13 @@ function renderRoutinesTable(routines: RoutineStatus[]): string {
   const rows = routines
     .map(
       (routine) =>
-        `<tr><td>${escapeHtml(routine.projectName)}</td><td>${escapeHtml(routine.name)}</td><td>${escapeHtml(routine.state)}</td><td><code>${escapeHtml(routine.nextFireAt ?? "-")}</code></td><td><code>${escapeHtml(routine.lastFiredAt ?? "-")}</code></td><td><code>${escapeHtml(routine.lastAttemptedAt ?? "-")}</code></td><td>${escapeHtml(routine.lastSkipReason ?? "-")}</td><td><code>${escapeHtml(routine.lastSkipAt ?? "-")}</code></td><td>${escapeHtml(formatRoutineSkipCounts(routine.skipCounts24h))}</td><td>${escapeHtml(formatRoutinePullRequestNumbers(routine.pullRequestNumbers))}</td></tr>`
+        `<tr><td>${escapeHtml(routine.projectName)}</td><td>${escapeHtml(routine.name)}</td><td>${escapeHtml(routine.state)}</td><td>${escapeHtml(routine.disabledReason ?? "-")}</td><td><code>${escapeHtml(routine.nextFireAt ?? "-")}</code></td><td><code>${escapeHtml(routine.lastFiredAt ?? "-")}</code></td><td><code>${escapeHtml(routine.lastAttemptedAt ?? "-")}</code></td><td>${escapeHtml(routine.lastSkipReason ?? "-")}</td><td><code>${escapeHtml(routine.lastSkipAt ?? "-")}</code></td><td>${escapeHtml(formatRoutineSkipCounts(routine.skipCounts24h))}</td><td>${escapeHtml(formatRoutinePullRequestNumbers(routine.pullRequestNumbers))}</td></tr>`
     )
     .join("");
   return tableSection(
     "Routines",
     routines.length,
-    "<tr><th>Project</th><th>Routine</th><th>State</th><th>next_fire_at</th><th>last_fired_at</th><th>last_attempted_at</th><th>last_skip_reason</th><th>last_skip_at</th><th>skips_24h</th><th>Pull requests</th></tr>",
+    "<tr><th>Project</th><th>Routine</th><th>State</th><th>Disabled reason</th><th>next_fire_at</th><th>last_fired_at</th><th>last_attempted_at</th><th>last_skip_reason</th><th>last_skip_at</th><th>skips_24h</th><th>Pull requests</th></tr>",
     rows
   );
 }

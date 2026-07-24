@@ -401,7 +401,11 @@ The preamble tells the agent:
 Projects may define `routines: string[]` in `symphonika.yml`. Paths are resolved relative to the
 service config directory and are re-read on every daemon tick with the rest of the runtime snapshot.
 Invalid routine declarations are reported through the same reload-error surface as invalid workflow
-contracts, and the daemon keeps using the last known good snapshot.
+contracts. Unlike a workflow contract or Project-detail error, an invalid routine declaration does
+not revert the whole daemon's config to its last known good snapshot: only that routine falls back
+to its own last known good declaration (matched by file path), keeping the rest of the Project's
+routines, sibling Projects, and the Workflow Contract on the current reload. A routine with no prior
+valid declaration to fall back to is `state = invalid` until fixed; see §8.4.
 
 Routine schedules must define exactly one of:
 
@@ -411,7 +415,9 @@ Routine schedules must define exactly one of:
 Supplying both shapes, neither shape, an invalid cron expression, or an invalid timezone is a
 deterministic declaration-load error. `tz` is valid only with `cron` and defaults to `Etc/UTC`.
 `catch_up`, when present, must be `fire_once_if_missed`; `allow_overlap`, when present, must be a
-boolean. Their omitted defaults are missed-event skip and `false`, respectively.
+boolean. Their omitted defaults are missed-event skip and `false`, respectively. `disabled`, when
+present, must be a boolean; omitted defaults to `false`. `disabled: true` stops future scheduling
+for that routine on the next reload without affecting an in-flight firing; see §8.4.
 
 ## 6. Credentials
 
@@ -595,9 +601,17 @@ Existing runs continue by default. Removing a Project from service config marks 
 than killing active full-permission agents. Operators can explicitly cancel runs.
 
 Routine rows for Projects disabled or omitted from the current valid Service Config snapshot are
-marked inactive and pruned from default operator listings on reload. Historical `routine_firings`
+marked `inactive` and pruned from default operator listings on reload. Historical `routine_firings`
 rows and `last_fired_at` remain durable Run Store evidence. Re-enabling a Project restores its
-configured Routines to `active` or `expired` without re-firing an already-fired one-shot.
+configured Routines to `active` or `expired` without re-firing an already-fired one-shot. A one-shot
+Routine whose `at` elapsed while its Project was disabled and that never fired is restored to
+`expired`, not `active`, on re-enable — it does not fire retroactively, mirroring the same guarantee
+a routine-level `disabled` restore gives (§8.5).
+
+`inactive` is a Project-cascade state and is distinct from a Routine's own `disabled` or `invalid`
+state (§8.5): a Routine can be `disabled` while its Project stays fully enabled, and `disabled`
+routines are shown in default operator listings — with their `disabled_reason` — unlike `inactive`
+ones.
 
 ### 8.5 Routines
 
@@ -638,6 +652,31 @@ Routine remains non-terminal, the daemon records an `overlap` skip unless `allow
 configured; overlap opt-in does not bypass concurrency caps. Every skip atomically advances the
 clock event, updates the Routine's latest-attempt/skip fields and rolling counter evidence, writes no
 Routine Firing row, and emits `routine.skipped` with `reason`, `routine`, and `scheduled_at` fields.
+
+`symphonika cancel <id>` accepts a `run_id` or a Routine Firing id. A non-terminal Routine Firing
+transitions to `cancelled` with `cancel_reason = "operator"`; the provider process is killed and the
+workspace and logs are preserved, matching issue Run cancellation. Cancelling an unknown id or a
+Routine Firing already in a terminal state (`succeeded`, `failed`, `cancelled`) returns a clear
+error and makes no state change.
+
+A Routine with `disabled: true` in its own front matter transitions to `state = disabled`,
+`disabled_reason = "operator"` on the next reload; future scheduling stops but an in-flight firing
+continues to completion under the snapshot it started with — the daemon never cancels it as a side
+effect of the routine becoming disabled. Removing a Routine's path from a still-enabled Project's
+`routines:` list has the same in-flight-continues behavior, with `disabled_reason =
+"removed_from_config"`. Restoring a Routine — removing `disabled: true` or re-adding its path —
+un-disables it on the next reload and recomputes `next_fire_at` strictly after the current clock; a
+one-shot Routine whose `at` elapsed while disabled is marked `expired` instead of firing
+retroactively. `catch_up: fire_once_if_missed` does not apply to a routine-level restore — that
+policy is for daemon outage, not deliberate operator disable.
+
+An invalid Routine declaration on reload does not abort reload for the rest of the fleet (§5.4): the
+daemon logs the error and surfaces it in the operator status surface and `doctor`. A Routine with a
+prior valid declaration keeps firing on it unchanged; its `state` does not transition away from that
+last known good value. A Routine with no prior valid declaration — a newly added file, invalid from
+the start — is `state = invalid` and does not fire until a valid reload succeeds. A declaration with
+no parseable `name` field cannot be represented as a `routines` row at all (the table's primary key
+is `(project_name, name)`) and is reported only through the reload-error and `doctor` surfaces.
 
 ## 9. GitHub Tracker Behavior
 

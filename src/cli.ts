@@ -916,7 +916,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         }
         writeOut(
           program,
-          "project  routine  state  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests\n"
+          "project  routine  state  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests\n"
         );
         for (const routine of routines) {
           writeOut(
@@ -925,6 +925,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
               routine.projectName,
               routine.name,
               routine.state,
+              routine.disabledReason ?? "-",
               routine.nextFireAt ?? "-",
               routine.lastFiredAt ?? "-",
               routine.lastAttemptedAt ?? "-",
@@ -1074,8 +1075,10 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
 
   program
     .command("cancel")
-    .description("request cancellation of an active run via the run store")
-    .argument("<id>", "run id")
+    .description(
+      "request cancellation of an active run or routine firing via the daemon"
+    )
+    .argument("<id>", "run id or routine firing id")
     .option("--config <path>", "service config path")
     .option("--daemon-url <url>", "local daemon base URL")
     .action(
@@ -1114,13 +1117,13 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           return;
         }
         if (outcome.kind === "not-found") {
-          writeErr(program, `run ${id} not found\n`);
-          program.error(`run ${id} not found`, { exitCode: 1 });
+          writeErr(program, `id ${id} not found\n`);
+          program.error(`id ${id} not found`, { exitCode: 1 });
           return;
         }
         if (outcome.kind === "already-terminal") {
-          writeErr(program, `run ${id} already ${outcome.state}\n`);
-          program.error(`run ${id} already ${outcome.state}`, { exitCode: 1 });
+          writeErr(program, `id ${id} already ${outcome.state}\n`);
+          program.error(`id ${id} already ${outcome.state}`, { exitCode: 1 });
           return;
         }
         writeErr(program, `cancel failed: ${outcome.error}\n`);

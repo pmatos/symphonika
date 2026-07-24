@@ -50,6 +50,7 @@ import {
   type SyncProjectStateInput
 } from "./run-store.js";
 import { dispatchDueRoutines } from "./routines/dispatcher.js";
+import type { RoutineFiringState } from "./routines/types.js";
 import type {
   PreparedRoutineWorkspace,
   PrepareRoutineWorkspaceInput
@@ -303,6 +304,21 @@ export async function startDaemon(
     try {
       const snapshot = await runtimeConfig.reload();
       const reloadStatus = runtimeConfig.getStatus();
+      if (snapshot !== undefined) {
+        // A brand-new routine declaration with no prior valid snapshot gets
+        // a state = 'invalid' identity here (see docs/adr/0060). Reload
+        // itself never touches the run store; this is the one call site
+        // that has both the fresh snapshot and the store in scope.
+        for (const invalid of snapshot.invalidRoutines) {
+          if (invalid.name !== undefined) {
+            runStore.upsertInvalidRoutineStub({
+              name: invalid.name,
+              projectName: invalid.projectName,
+              sourcePath: invalid.path
+            });
+          }
+        }
+      }
       if (snapshot === undefined) {
         replaceIssuePollStatus(issuePollStatus, {
           candidateIssues: [],
@@ -620,23 +636,37 @@ export async function startDaemon(
     "stale",
     "succeeded"
   ]);
+  const TERMINAL_FIRING_STATES = new Set<RoutineFiringState>([
+    "succeeded",
+    "failed",
+    "cancelled"
+  ]);
   const cancelViaUi = async (
-    runId: string
+    id: string
   ): Promise<
     | { kind: "cancelled" }
     | { kind: "not-found" }
-    | { kind: "already-terminal"; state: RunState }
+    | { kind: "already-terminal"; state: RunState | RoutineFiringState }
   > => {
-    const detail = runStore.getRun(runId);
-    if (detail === undefined) {
-      return { kind: "not-found" };
+    const detail = runStore.getRun(id);
+    if (detail !== undefined) {
+      if (TERMINAL_STATES.has(detail.state)) {
+        return { kind: "already-terminal", state: detail.state };
+      }
+      runStore.markCancelRequested(id, "operator");
+      await activeRuns.requestCancel(id, "operator");
+      return { kind: "cancelled" };
     }
-    if (TERMINAL_STATES.has(detail.state)) {
-      return { kind: "already-terminal", state: detail.state };
+    const firing = runStore.getRoutineFiring(id);
+    if (firing !== undefined) {
+      if (TERMINAL_FIRING_STATES.has(firing.state)) {
+        return { kind: "already-terminal", state: firing.state };
+      }
+      runStore.markRoutineFiringCancelRequested(id, "operator");
+      await activeRuns.requestCancel(id, "operator");
+      return { kind: "cancelled" };
     }
-    runStore.markCancelRequested(runId, "operator");
-    await activeRuns.requestCancel(runId, "operator");
-    return { kind: "cancelled" };
+    return { kind: "not-found" };
   };
   const app = createHttpApp({
     cancelRun: cancelViaUi,

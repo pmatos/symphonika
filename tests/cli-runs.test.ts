@@ -1426,7 +1426,52 @@ describe("CLI run commands", () => {
       ])
     ).rejects.toThrow();
 
-    expect(output.stderr).toContain("run cancel-blocked already blocked");
+    // Neutral wording — the CLI cannot tell a run id from a routine firing
+    // id apart before the daemon responds, so the message no longer claims
+    // it was specifically a "run".
+    expect(output.stderr).toContain("id cancel-blocked already blocked");
+  });
+
+  it("cancel reports a neutral not-found message for an unknown id", async () => {
+    const stateRoot = await makeTempRoot();
+    const cfg = path.join(stateRoot, "symphonika.yml");
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    await mkdir(resolvedStateRoot, { recursive: true });
+    await writeFile(
+      path.join(resolvedStateRoot, "daemon.json"),
+      JSON.stringify({ url: "http://127.0.0.1:3030" }),
+      "utf8"
+    );
+    const { output, program } = captureProgram(stateRoot, {
+      fetch: (input: string | URL | Request) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        if (url.endsWith("/api/status")) {
+          return Promise.resolve(
+            Response.json({ stateRoot: resolvedStateRoot })
+          );
+        }
+        return Promise.resolve(
+          Response.json({ kind: "not-found" }, { status: 404 })
+        );
+      }
+    });
+    await expect(
+      program.parseAsync([
+        "node",
+        "symphonika",
+        "cancel",
+        "no-such-id",
+        "--config",
+        cfg
+      ])
+    ).rejects.toThrow();
+
+    expect(output.stderr).toContain("id no-such-id not found");
   });
 
   it("poll-now discovers the local daemon, preflights state root, and prints the poll summary", async () => {

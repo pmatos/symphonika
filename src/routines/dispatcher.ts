@@ -130,6 +130,7 @@ export async function dispatchDueRoutines(
     }
     input.runStore.syncRoutines(project.name, project.routines ?? [], {
       now,
+      protectedNames: project.invalidRoutineNames ?? [],
       recomputeRecurring: input.recomputeSchedulesFromNow === true
     });
   }
@@ -144,6 +145,17 @@ export async function dispatchDueRoutines(
     for (const routine of input.runStore.listRoutines({
       project: project.name
     })) {
+      // A disabled/invalid/expired/inactive routine can have no persisted
+      // schedule at all (an invalid stub's schedule columns are unreadable
+      // sentinels). evaluateRoutineSchedule already treats every non-active
+      // state as never-fire, but routineSchedule() below is evaluated
+      // eagerly as a function argument, so it must never be reached for a
+      // non-active row — skip here rather than let it throw and abort the
+      // whole dispatch tick (which would also block issue dispatch, since
+      // both share one try/catch in daemon.ts's launchWork).
+      if (routine.state !== "active") {
+        continue;
+      }
       const evaluation = evaluateRoutineSchedule({
         lastFiredAt: routine.lastFiredAt,
         nextFireAt: routine.nextFireAt,
@@ -369,6 +381,21 @@ async function runRoutineFiring(input: {
       respectsIssueLabels: false
     });
 
+    // A cancel can land DURING the potentially long workspace prep above (or
+    // provider.validate) — before this point only the reserveSlot noop
+    // cancel handler existed, so the attachProvider hand-off just fired
+    // provider.cancel against a provider that runAttempt has not started
+    // yet, which is a no-op, and the latched cancelRequested suppresses any
+    // later cancel. Re-check here and skip launching a provider we could no
+    // longer stop; the catch block below classifies the cancellation.
+    // Mirrors run-controller.ts's cancelDuringPrepare checkpoint (ADR 0052).
+    const cancelDuringPrepare = input.activeRuns.get(input.firingId);
+    if (cancelDuringPrepare?.cancelRequested === true) {
+      throw new Error(
+        `routine firing ${input.firingId} was cancelled before provider start`
+      );
+    }
+
     for await (const event of input.provider.runAttempt({
       branchName: prepared.branchName,
       issue: routineIssueSnapshot(input.routine),
@@ -393,15 +420,26 @@ async function runRoutineFiring(input: {
         events.push(event.normalized);
       }
     }
-    const outcome = await classifyRoutineOutcome(events, {
-      baseBranch: input.project.workspace.git.base_branch,
-      kind: input.routine.kind,
-      workspacePath: prepared.workspacePath
-    });
+    // Mirrors classifyFailure's cancelRequested fast path (checked before
+    // any exit-code/event inspection there too): once an operator cancel is
+    // observed, the firing reports cancelled even if the process happened
+    // to exit cleanly in the same race.
+    const cancelEntry = input.activeRuns.get(input.firingId);
+    const outcome =
+      cancelEntry?.cancelRequested === true
+        ? { kind: "cancelled" as const, reason: "cancelled" }
+        : await classifyRoutineOutcome(events, {
+            baseBranch: input.project.workspace.git.base_branch,
+            kind: input.routine.kind,
+            workspacePath: prepared.workspacePath
+          });
     input.runStore.completeRoutineFiring({
       id: input.firingId,
       state: outcome.kind,
       terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
+      ...(cancelEntry?.cancelReason === undefined
+        ? {}
+        : { cancelReason: cancelEntry.cancelReason }),
       workspacePath: prepared.workspacePath
     });
     if (outcome.kind === "succeeded" && input.routine.kind === "git") {
@@ -417,14 +455,20 @@ async function runRoutineFiring(input: {
       });
     }
   } catch (error) {
-    const reason =
-      error instanceof RoutinePromptRenderError
+    const cancelEntry = input.activeRuns.get(input.firingId);
+    const cancelled = cancelEntry?.cancelRequested === true;
+    const reason = cancelled
+      ? "cancelled"
+      : error instanceof RoutinePromptRenderError
         ? error.terminalReason
         : errorMessage(error);
     input.runStore.completeRoutineFiring({
       id: input.firingId,
-      state: "failed",
+      state: cancelled ? "cancelled" : "failed",
       terminalReason: reason,
+      ...(cancelEntry?.cancelReason === undefined
+        ? {}
+        : { cancelReason: cancelEntry.cancelReason }),
       ...(prepared === undefined
         ? {}
         : { workspacePath: prepared.workspacePath })
@@ -559,6 +603,10 @@ async function classifyRoutineOutcome(
   }
 ): Promise<RoutineTerminalOutcome> {
   if (workspace.kind === "git") {
+    // The caller (runRoutineFiring) always intercepts a real cancel before
+    // reaching this call, so this classifyFailure fast path is never live —
+    // kept false rather than threaded through for a call the caller has
+    // already ruled out.
     const classified = await classifyFailure({
       cancelRequested: false,
       events,

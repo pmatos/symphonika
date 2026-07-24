@@ -175,6 +175,59 @@ describe("routine operator surfaces", () => {
     }
   });
 
+  it("POST /api/runs/:id/cancel cancels a routine firing via the store-only fallback", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-live",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.updateRoutineFiringState("fire-live", "running");
+
+      // No cancelRun option — exercises the runStore-only fallback path.
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const ok = await app.request("/api/runs/fire-live/cancel", {
+        method: "POST"
+      });
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toEqual({ kind: "cancelled" });
+      expect(store.getRoutineFiring("fire-live")).toMatchObject({
+        cancelReason: "operator",
+        state: "cancelled"
+      });
+
+      const alreadyTerminal = await app.request("/api/runs/fire-live/cancel", {
+        method: "POST"
+      });
+      expect(alreadyTerminal.status).toBe(409);
+      expect(await alreadyTerminal.json()).toMatchObject({
+        kind: "already-terminal",
+        state: "cancelled"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("reaches an inactive routine's firings only with include_inactive", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -231,6 +284,38 @@ describe("routine operator surfaces", () => {
     }
   });
 
+  it("renders a disabled routine's disable reason on the local dashboard page", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          disabled: true
+        }
+      ]);
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain("Disabled reason");
+      expect(body).toContain("operator");
+    } finally {
+      store.close();
+    }
+  });
+
   it("renders linked PR numbers on the terminal status dashboard", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -257,6 +342,47 @@ describe("routine operator surfaces", () => {
 
       expect(dashboard).toContain("daily-report");
       expect(dashboard).toContain("#42");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("renders a disabled routine's disable reason on the terminal status dashboard", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          disabled: true
+        }
+      ]);
+
+      const dashboard = renderStatusDashboard({
+        daemon: "running",
+        issueCounts: {
+          candidate: 0,
+          failed: 0,
+          filtered: 0,
+          running: 0,
+          stale: 0
+        },
+        lastPollOutcome: "ok",
+        latestEvents: new Map(),
+        projects: [],
+        reload: "ok",
+        routines: store.listRoutines(),
+        runs: [],
+        stateRoot
+      });
+
+      expect(dashboard).toContain("DISABLED_REASON");
+      expect(dashboard).toContain("operator");
     } finally {
       store.close();
     }
@@ -316,10 +442,53 @@ describe("routine operator surfaces", () => {
     ]);
 
     expect(output.stdout).toContain(
-      "project  routine  state  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests"
+      "project  routine  state  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests"
     );
     expect(output.stdout).toContain(
-      "alpha  daily-report  active  2026-05-22T10:00:00.000Z  -  -  -  -  overlap=0,concurrency_cap=0,catch_up_window=0  #42"
+      "alpha  daily-report  active  -  2026-05-22T10:00:00.000Z  -  -  -  -  overlap=0,concurrency_cap=0,catch_up_window=0  #42"
+    );
+  });
+
+  it("symphonika routines renders the disable reason next to a disabled routine's state", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.syncRoutines("alpha", [
+      {
+        kind: "report",
+        name: "daily-report",
+        prompt: "Report.",
+        provider: null,
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: "/tmp/daily-report.md",
+        disabled: true
+      }
+    ]);
+    store.close();
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({
+      openRunStore: () => openRunStore({ stateRoot }),
+      registerSignalHandlers: false
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+    program.exitOverride();
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "routines",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+
+    expect(output.stdout).toContain(
+      "alpha  daily-report  disabled  operator  "
     );
   });
 

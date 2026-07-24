@@ -2,7 +2,10 @@ import type { AgentProviderName } from "../provider.js";
 
 export type RoutineKind = "git" | "report";
 
-export type RoutineState = "active" | "expired" | "inactive";
+export type RoutineState =
+  "active" | "expired" | "inactive" | "disabled" | "invalid";
+
+export type RoutineDisabledReason = "operator" | "removed_from_config";
 
 export type RoutineFiringState =
   | "queued"
@@ -22,6 +25,7 @@ export type RoutineSchedule = { at: string } | { cron: string; tz: string };
 export type RoutineDeclaration = {
   allowOverlap?: boolean;
   catchUp?: RoutineCatchUpPolicy;
+  disabled?: boolean;
   kind: RoutineKind;
   name: string;
   prompt: string;
@@ -41,6 +45,7 @@ export type RoutinePullRequestStatus = {
 export type RoutineStatus = {
   allowOverlap: boolean;
   catchUp: RoutineCatchUpPolicy;
+  disabledReason: RoutineDisabledReason | null;
   kind: RoutineKind;
   lastAttemptedAt: string | null;
   lastFiredAt: string | null;

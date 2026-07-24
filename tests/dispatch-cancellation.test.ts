@@ -6,7 +6,6 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startDaemon } from "../src/daemon.js";
-import type { DaemonHandle } from "../src/daemon.js";
 import type {
   AgentProvider,
   ProviderEvent,
@@ -143,9 +142,9 @@ async function writeProject(root: string): Promise<string> {
       "  root: ./.symphonika",
       "polling:",
       // Large enough that the background poll timer never fires on its own
-      // during the test; both tests drive ticks explicitly via /api/poll-now
-      // so the mock's call-count-based responses stay deterministic. See
-      // issue #283.
+      // during the test; each test drives its cancellation tick explicitly
+      // via /api/poll-now so the mock's call-count-based responses stay
+      // deterministic. See issue #283.
       "  interval_ms: 60000",
       "providers:",
       "  codex:",
@@ -212,85 +211,6 @@ async function waitForRunState(
   throw new Error(`run did not reach ${state} before timeout`);
 }
 
-// Diagnostic-only (see below): bounds an arbitrary promise so a step that
-// never settles fails fast with a label identifying which step hung, instead
-// of the whole test riding to vitest's opaque global 35s timeout.
-async function withTimeout<T>(
-  promise: Promise<T>,
-  ms: number,
-  label: string
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(
-        new Error(`timed out after ${ms}ms waiting for: ${label} (issue #283)`)
-      );
-    }, ms);
-  });
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// Diagnostic-only, added while chasing issue #283 (intermittent Node-24-only
-// hang in this file). Dumps whether the mock provider's cancel() was ever
-// invoked, the run row straight from the DB, and a live /api/status snapshot
-// when waitForRunState fails to observe "cancelled" in time — narrows down
-// whether cancellation was silently dropped vs. delivered-but-not-persisted
-// vs. something else entirely (see issue #283 for the three candidate
-// branches). Remove once the root cause is confirmed and fixed.
-async function dumpCancellationDiagnostics(input: {
-  daemon: DaemonHandle;
-  provider: ControllableProvider;
-  root: string;
-  runId: string;
-}): Promise<void> {
-  const lines = [
-    `--- dispatch-cancellation diagnostic dump (${input.runId}) ---`,
-    `provider.cancel.mock.calls: ${JSON.stringify(input.provider.cancel.mock.calls)}`
-  ];
-  try {
-    const response = await fetch(`${input.daemon.url}/api/status`);
-    lines.push(`GET /api/status: ${JSON.stringify(await response.json())}`);
-  } catch (error) {
-    lines.push(`GET /api/status failed: ${String(error)}`);
-  }
-  try {
-    const database = new Database(
-      path.join(input.root, ".symphonika", "symphonika.db"),
-      { readonly: true }
-    );
-    try {
-      const row = database
-        .prepare(
-          "select state, cancel_requested, cancel_reason from runs where id = ?"
-        )
-        .get(input.runId);
-      lines.push(`DB row: ${JSON.stringify(row)}`);
-    } finally {
-      database.close();
-    }
-  } catch (error) {
-    lines.push(`DB read failed: ${String(error)}`);
-  }
-  // console.error (not the disabled pino logger) so this reaches the CI job
-  // log even though vitest normally captures per-test stdout/stderr.
-  console.error(lines.join("\n"));
-}
-
-// Diagnostic-only (see comment above): bounds daemon.stop() so a stuck
-// in-flight dispatch can't ride the whole test to the global 35s vitest
-// timeout — it fails fast with an attributable message instead.
-async function stopDaemonWithDiagnosticTimeout(
-  daemon: DaemonHandle,
-  timeoutMs = 3_000
-): Promise<void> {
-  await withTimeout(daemon.stop(), timeoutMs, "daemon.stop()");
-}
-
 describe("dispatch cancellation", () => {
   it("cancels active run when issue is closed and removes operational labels best-effort", async () => {
     const root = await makeTempRoot();
@@ -329,34 +249,23 @@ describe("dispatch cancellation", () => {
     });
 
     try {
-      // Drive ticks explicitly instead of racing the background poll
-      // interval: the first dispatches the issue, the second observes it has
-      // become ineligible and cancels. Relying on the passive setInterval
-      // under contended CI load left this racing an unbounded delay before
-      // the run was ever cancelled (issue #283).
-      let status: { runs: Array<Record<string, unknown>> };
-      try {
-        await withTimeout(
-          fetch(`${daemon.url}/api/poll-now`, { method: "POST" }),
-          5_000,
-          "poll-now #1 (dispatch)"
-        );
-        await withTimeout(provider.ready, 5_000, "provider.ready");
-        await withTimeout(
-          fetch(`${daemon.url}/api/poll-now`, { method: "POST" }),
-          5_000,
-          "poll-now #2 (cancel)"
-        );
-        status = await waitForRunState(daemon.url, "cancelled");
-      } catch (error) {
-        await dumpCancellationDiagnostics({
-          daemon,
-          provider,
-          root,
-          runId: "run-cancel-closed"
-        });
-        throw error;
-      }
+      // startDaemon() itself dispatches the eligible issue before it even
+      // returns (src/daemon.ts's initial refreshIssuePollStatus + the
+      // synchronous reconcile()/launchWork() at startup) — there is no need
+      // to trigger that first tick from the test. Wait for provider.ready
+      // first: it only resolves once runAttempt() has been called, which
+      // happens strictly after attachProvider in the same synchronous
+      // handoff, so by the time it resolves the reserve→attach window has
+      // already closed safely. Only then trigger a poll-now tick to deliver
+      // the now-closed/ineligible issue and cancel deterministically.
+      // Triggering an extra tick before provider.ready (as an earlier version
+      // of this fix did) instead raced that same reserve→attach window from
+      // the other side — reconcile could see the issue as already ineligible
+      // and cancel the run before the provider ever attached, leaving
+      // provider.ready permanently unresolved (see issue #283).
+      await provider.ready;
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      const status = await waitForRunState(daemon.url, "cancelled");
       const run = status.runs[0] as Record<string, unknown>;
 
       expect(provider.cancel).toHaveBeenCalledWith("run-cancel-closed");
@@ -385,7 +294,7 @@ describe("dispatch cancellation", () => {
       // Workspace preserved.
       await expect(stat(prepared.workspacePath)).resolves.toBeDefined();
     } finally {
-      await stopDaemonWithDiagnosticTimeout(daemon);
+      await daemon.stop();
     }
   });
 
@@ -431,34 +340,11 @@ describe("dispatch cancellation", () => {
     });
 
     try {
-      // Drive ticks explicitly instead of racing the background poll
-      // interval: the first dispatches the issue, the second observes it has
-      // become ineligible and cancels. Relying on the passive setInterval
-      // under contended CI load left this racing an unbounded delay before
-      // the run was ever cancelled (issue #283).
-      let status: { runs: Array<Record<string, unknown>> };
-      try {
-        await withTimeout(
-          fetch(`${daemon.url}/api/poll-now`, { method: "POST" }),
-          5_000,
-          "poll-now #1 (dispatch)"
-        );
-        await withTimeout(provider.ready, 5_000, "provider.ready");
-        await withTimeout(
-          fetch(`${daemon.url}/api/poll-now`, { method: "POST" }),
-          5_000,
-          "poll-now #2 (cancel)"
-        );
-        status = await waitForRunState(daemon.url, "cancelled");
-      } catch (error) {
-        await dumpCancellationDiagnostics({
-          daemon,
-          provider,
-          root,
-          runId: "run-cancel-eligibility"
-        });
-        throw error;
-      }
+      // See the sibling test above for why this is provider.ready then a
+      // single poll-now, not a poll-now before it (issue #283).
+      await provider.ready;
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      const status = await waitForRunState(daemon.url, "cancelled");
       const run = status.runs[0] as Record<string, unknown>;
 
       expect(provider.cancel).toHaveBeenCalledWith("run-cancel-eligibility");
@@ -500,7 +386,7 @@ describe("dispatch cancellation", () => {
         database.close();
       }
     } finally {
-      await stopDaemonWithDiagnosticTimeout(daemon);
+      await daemon.stop();
     }
   });
 });

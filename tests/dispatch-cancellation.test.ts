@@ -212,6 +212,29 @@ async function waitForRunState(
   throw new Error(`run did not reach ${state} before timeout`);
 }
 
+// Diagnostic-only (see below): bounds an arbitrary promise so a step that
+// never settles fails fast with a label identifying which step hung, instead
+// of the whole test riding to vitest's opaque global 35s timeout.
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(`timed out after ${ms}ms waiting for: ${label} (issue #283)`)
+      );
+    }, ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Diagnostic-only, added while chasing issue #283 (intermittent Node-24-only
 // hang in this file). Dumps whether the mock provider's cancel() was ever
 // invoked, the run row straight from the DB, and a live /api/status snapshot
@@ -265,21 +288,7 @@ async function stopDaemonWithDiagnosticTimeout(
   daemon: DaemonHandle,
   timeoutMs = 3_000
 ): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(
-        new Error(
-          `daemon.stop() did not resolve within ${timeoutMs}ms — an in-flight dispatch is likely stuck (issue #283)`
-        )
-      );
-    }, timeoutMs);
-  });
-  try {
-    await Promise.race([daemon.stop(), timeout]);
-  } finally {
-    clearTimeout(timer);
-  }
+  await withTimeout(daemon.stop(), timeoutMs, "daemon.stop()");
 }
 
 describe("dispatch cancellation", () => {
@@ -325,11 +334,19 @@ describe("dispatch cancellation", () => {
       // become ineligible and cancels. Relying on the passive setInterval
       // under contended CI load left this racing an unbounded delay before
       // the run was ever cancelled (issue #283).
-      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
-      await provider.ready;
-      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
       let status: { runs: Array<Record<string, unknown>> };
       try {
+        await withTimeout(
+          fetch(`${daemon.url}/api/poll-now`, { method: "POST" }),
+          5_000,
+          "poll-now #1 (dispatch)"
+        );
+        await withTimeout(provider.ready, 5_000, "provider.ready");
+        await withTimeout(
+          fetch(`${daemon.url}/api/poll-now`, { method: "POST" }),
+          5_000,
+          "poll-now #2 (cancel)"
+        );
         status = await waitForRunState(daemon.url, "cancelled");
       } catch (error) {
         await dumpCancellationDiagnostics({
@@ -419,11 +436,19 @@ describe("dispatch cancellation", () => {
       // become ineligible and cancels. Relying on the passive setInterval
       // under contended CI load left this racing an unbounded delay before
       // the run was ever cancelled (issue #283).
-      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
-      await provider.ready;
-      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
       let status: { runs: Array<Record<string, unknown>> };
       try {
+        await withTimeout(
+          fetch(`${daemon.url}/api/poll-now`, { method: "POST" }),
+          5_000,
+          "poll-now #1 (dispatch)"
+        );
+        await withTimeout(provider.ready, 5_000, "provider.ready");
+        await withTimeout(
+          fetch(`${daemon.url}/api/poll-now`, { method: "POST" }),
+          5_000,
+          "poll-now #2 (cancel)"
+        );
         status = await waitForRunState(daemon.url, "cancelled");
       } catch (error) {
         await dumpCancellationDiagnostics({

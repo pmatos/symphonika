@@ -141,7 +141,11 @@ async function writeProject(root: string): Promise<string> {
       "state:",
       "  root: ./.symphonika",
       "polling:",
-      "  interval_ms: 25",
+      // Large enough that the background poll timer never fires on its own
+      // during the test; each test drives its cancellation tick explicitly
+      // via /api/poll-now so the mock's call-count-based responses stay
+      // deterministic. See issue #283.
+      "  interval_ms: 60000",
       "providers:",
       "  codex:",
       `    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"`,
@@ -245,7 +249,22 @@ describe("dispatch cancellation", () => {
     });
 
     try {
+      // startDaemon() itself dispatches the eligible issue before it even
+      // returns (src/daemon.ts's initial refreshIssuePollStatus + the
+      // synchronous reconcile()/launchWork() at startup) — there is no need
+      // to trigger that first tick from the test. Wait for provider.ready
+      // first: it only resolves once runAttempt() has been called, which
+      // happens strictly after attachProvider in the same synchronous
+      // handoff, so by the time it resolves the reserve→attach window has
+      // already closed safely. Only then trigger a poll-now tick to deliver
+      // the now-closed/ineligible issue and cancel deterministically.
+      // Triggering an extra tick before provider.ready (as an earlier version
+      // of this fix did) instead raced that same reserve→attach window from
+      // the other side — reconcile could see the issue as already ineligible
+      // and cancel the run before the provider ever attached, leaving
+      // provider.ready permanently unresolved (see issue #283).
       await provider.ready;
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
       const status = await waitForRunState(daemon.url, "cancelled");
       const run = status.runs[0] as Record<string, unknown>;
 
@@ -321,7 +340,10 @@ describe("dispatch cancellation", () => {
     });
 
     try {
+      // See the sibling test above for why this is provider.ready then a
+      // single poll-now, not a poll-now before it (issue #283).
       await provider.ready;
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
       const status = await waitForRunState(daemon.url, "cancelled");
       const run = status.runs[0] as Record<string, unknown>;
 

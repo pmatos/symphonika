@@ -12,6 +12,7 @@ import {
   type RuntimeReloadStatus,
   type WatchdogConfig
 } from "../reload.js";
+import type { RoutineFiringState } from "../routines/types.js";
 import type { StatusSnapshot } from "../status.js";
 import type {
   ListRunsFilter,
@@ -475,21 +476,40 @@ function parseRunArtifactKind(value: string): RunArtifactKind | undefined {
   return RUN_ARTIFACT_KINDS.has(value) ? (value as RunArtifactKind) : undefined;
 }
 
+const TERMINAL_FIRING_STATES: ReadonlySet<RoutineFiringState> = new Set([
+  "succeeded",
+  "failed",
+  "cancelled"
+]);
+
 function cancelRunInStore(
   runStore: RunStore,
-  runId: string
+  id: string
 ): ReturnType<CancelRunFn> {
-  const detail = runStore.getRun(runId);
-  if (detail === undefined) {
-    return { kind: "not-found" };
+  const detail = runStore.getRun(id);
+  if (detail !== undefined) {
+    if (TERMINAL_RUN_STATES.has(detail.state)) {
+      return { kind: "already-terminal", state: detail.state };
+    }
+    runStore.markCancelRequested(id, "operator");
+    runStore.recordTerminalReason(id, "operator");
+    runStore.updateRunState(id, "cancelled");
+    return { kind: "cancelled" };
   }
-  if (TERMINAL_RUN_STATES.has(detail.state)) {
-    return { kind: "already-terminal", state: detail.state };
+  const firing = runStore.getRoutineFiring(id);
+  if (firing !== undefined) {
+    if (TERMINAL_FIRING_STATES.has(firing.state)) {
+      return { kind: "already-terminal", state: firing.state };
+    }
+    runStore.markRoutineFiringCancelRequested(id, "operator");
+    runStore.completeRoutineFiring({
+      cancelReason: "operator",
+      id,
+      state: "cancelled"
+    });
+    return { kind: "cancelled" };
   }
-  runStore.markCancelRequested(runId, "operator");
-  runStore.recordTerminalReason(runId, "operator");
-  runStore.updateRunState(runId, "cancelled");
-  return { kind: "cancelled" };
+  return { kind: "not-found" };
 }
 
 function parsePositiveInt(value: string | undefined): number | undefined {

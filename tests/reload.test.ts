@@ -814,7 +814,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
     ]);
   });
 
-  it("keeps the last-known-good snapshot when a routine declaration becomes invalid", async () => {
+  it("keeps a routine on its last-known-good declaration when a reload edit makes it invalid, without reverting sibling routines or the whole snapshot", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "WORKFLOW.md");
     await writeFile(
@@ -835,6 +835,20 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         ""
       ].join("\n")
     );
+    const siblingPath = path.join(root, "weekly-report.md");
+    await writeFile(
+      siblingPath,
+      [
+        "---",
+        "name: weekly-report",
+        "schedule:",
+        "  at: 2026-05-23T10:00:00.000Z",
+        "kind: report",
+        "---",
+        "Report on {{project.name}}.",
+        ""
+      ].join("\n")
+    );
     const configPath = path.join(root, "symphonika.yml");
     const original = await readFile(configPath, "utf8");
     await writeFile(
@@ -844,7 +858,8 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "    routines:",
-          "      - ./daily-report.md"
+          "      - ./daily-report.md",
+          "      - ./weekly-report.md"
         ].join("\n")
       )
     );
@@ -852,20 +867,149 @@ describe("RuntimeConfigReloader concurrency caps", () => {
     const reloader = new RuntimeConfigReloader({ configPath });
     await reloader.reload();
     const firstSnapshot = reloader.getSnapshot();
+    // Corrupt the name field itself — the file's path is unchanged, so
+    // carry-forward must be keyed on source path, not on the (now broken)
+    // parsed name.
     await writeFile(
       routinePath,
       ["---", "name: ../bad", "kind: report", "---", "Body", ""].join("\n")
     );
     await reloader.reload();
 
-    expect(reloader.getSnapshot()).toBe(firstSnapshot);
+    // The snapshot is rebuilt (not a whole-snapshot rollback to the prior
+    // object) — a single routine's invalidity no longer freezes the rest of
+    // the Project's config.
+    expect(reloader.getSnapshot()).not.toBe(firstSnapshot);
+    const project = reloader.projectsByName().get("symphonika");
+    expect(project?.routines).toEqual([
+      expect.objectContaining({
+        name: "daily-report",
+        schedule: { at: "2026-05-22T10:00:00.000Z" }
+      }),
+      expect.objectContaining({ name: "weekly-report" })
+    ]);
+    // Still surfaced as a reload error (doctor/status visibility), but this
+    // is no longer a whole-snapshot last-known-good rollback.
     expect(reloader.getStatus()).toMatchObject({
       ok: false,
-      usingLastKnownGood: true
+      usingLastKnownGood: false
     });
     expect(reloader.getStatus().errors.join("\n")).toContain(
       'name "../bad" is not path-safe'
     );
+  });
+
+  it("does not block reload of a sibling project when another project's routine declaration is invalid", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work v1.\n");
+    const configPath = path.join(root, "symphonika.yml");
+    const oneProjectConfig = await readFile(configPath, "utf8");
+    const projectStart = oneProjectConfig.indexOf("  - name: symphonika");
+    const s11Project = oneProjectConfig
+      .slice(projectStart)
+      .replace("  - name: symphonika", "  - name: s11")
+      .replace(
+        "    workflow: ./WORKFLOW.md",
+        [
+          "    workflow: ./WORKFLOW.md",
+          "    routines:",
+          "      - ./broken-routine.md"
+        ].join("\n")
+      );
+    await writeFile(
+      configPath,
+      oneProjectConfig.replace("  - name: symphonika", "  - name: vow") +
+        s11Project
+    );
+    await writeFile(
+      path.join(root, "broken-routine.md"),
+      ["---", "name: ../bad", "kind: report", "---", "Body", ""].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+    // Sibling project "vow" reloads normally — it is present with a fully
+    // resolved workflow (dispatchProjects.push only happens after a
+    // successful workflow read) even though "s11"'s routine never had a
+    // valid declaration to fall back on.
+    expect(reloader.getStatus().ok).toBe(false);
+    expect(reloader.projectsByName().get("vow")).toBeDefined();
+    expect(reloader.projectsByName().get("s11")?.routines).toEqual([]);
+  });
+
+  it("records a brand-new invalid routine with a parseable name without blocking the snapshot", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work.\n");
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original.replace(
+        "    workflow: ./WORKFLOW.md",
+        [
+          "    workflow: ./WORKFLOW.md",
+          "    routines:",
+          "      - ./new-invalid.md"
+        ].join("\n")
+      )
+    );
+    // Valid name, but no schedule and no kind — never had a prior valid
+    // snapshot to carry forward.
+    await writeFile(
+      path.join(root, "new-invalid.md"),
+      ["---", "name: new-invalid", "---", "Body", ""].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    const snapshot = await reloader.reload();
+
+    expect(snapshot).toBeDefined();
+    expect(reloader.getStatus().ok).toBe(false);
+    expect(reloader.projectsByName().get("symphonika")?.routines).toEqual([]);
+    expect(reloader.getSnapshot()?.invalidRoutines).toEqual([
+      expect.objectContaining({
+        name: "new-invalid",
+        projectName: "symphonika"
+      })
+    ]);
+  });
+
+  it("does not record an invalidRoutines name for a new routine with no parseable name", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work.\n");
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original.replace(
+        "    workflow: ./WORKFLOW.md",
+        [
+          "    workflow: ./WORKFLOW.md",
+          "    routines:",
+          "      - ./unnamed.md"
+        ].join("\n")
+      )
+    );
+    await writeFile(
+      path.join(root, "unnamed.md"),
+      ["---", "kind: report", "---", "Body", ""].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    const snapshot = await reloader.reload();
+
+    expect(snapshot).toBeDefined();
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      "name is required"
+    );
+    expect(
+      reloader
+        .getSnapshot()
+        ?.invalidRoutines.some((entry) => entry.name !== undefined)
+    ).toBe(false);
   });
 
   it("rejects duplicate routine names within a project", async () => {

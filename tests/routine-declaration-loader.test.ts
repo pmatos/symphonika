@@ -104,6 +104,7 @@ describe("RoutineDeclarationLoader", () => {
     expect(result.routine).toEqual({
       allowOverlap: false,
       catchUp: "skip",
+      disabled: false,
       kind: "git",
       name: "dependency-update",
       prompt: "Update dependencies on {{branch.name}}.\n",
@@ -137,6 +138,7 @@ describe("RoutineDeclarationLoader", () => {
     expect(result.routine).toEqual({
       allowOverlap: false,
       catchUp: "skip",
+      disabled: false,
       kind: "report",
       name: "weekly-report",
       prompt: "Summarize {{project.name}} from {{workspace.path}}.\n",
@@ -439,5 +441,112 @@ describe("RoutineDeclarationLoader", () => {
     expect(result.routine).toMatchObject({
       schedule: { at: "2026-08-01T09:30:00.000Z" }
     });
+  });
+
+  it("parses a disabled: true front-matter flag", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "disabled-routine.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: disabled-routine",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "disabled: true",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.routine).toMatchObject({ disabled: true });
+  });
+
+  it("defaults disabled to false when the field is omitted", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "enabled-routine.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: enabled-routine",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.routine).toMatchObject({ disabled: false });
+  });
+
+  it("rejects a non-boolean disabled value", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "invalid-disabled.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: invalid-disabled",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "disabled: yes",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.routine).toBeNull();
+    expect(result.errors.join("\n")).toContain("disabled must be a boolean");
+  });
+
+  it("captures a partial name when other fields are invalid", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "missing-partial.md");
+    await writeFile(
+      routinePath,
+      ["---", "name: missing-partial", "---", "Body", ""].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.routine).toBeNull();
+    expect(result.partialName).toBe("missing-partial");
+  });
+
+  it("omits partialName when the name itself is unsafe", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "unsafe-partial.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: ../weekly-report",
+        "schedule:",
+        "  at: 2026-05-22T10:00:00.000Z",
+        "kind: report",
+        "---",
+        "Body",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.routine).toBeNull();
+    expect(result.partialName).toBeUndefined();
   });
 });

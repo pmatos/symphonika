@@ -11,6 +11,7 @@ import { nextRecurringFireAt } from "./routines/schedule.js";
 import type {
   RoutineDeclaration,
   RoutineCatchUpPolicy,
+  RoutineDisabledReason,
   RoutineFiringState,
   RoutineKind,
   RoutinePullRequestStatus,
@@ -127,6 +128,8 @@ export type ProjectState = {
 };
 
 export type RoutineFiringStatus = {
+  cancelReason: CancelReason | null;
+  cancelRequested: boolean;
   createdAt: string;
   id: string;
   projectName: string;
@@ -448,6 +451,7 @@ type RoutineRow = {
   allow_overlap: number;
   catch_up: RoutineCatchUpPolicy;
   created_at: string;
+  disabled_reason: RoutineDisabledReason | null;
   kind: RoutineKind;
   last_attempted_at: string | null;
   last_fired_at: string | null;
@@ -466,6 +470,8 @@ type RoutineRow = {
 };
 
 type RoutineFiringRow = {
+  cancel_reason: CancelReason | null;
+  cancel_requested: number;
   created_at: string;
   id: string;
   project_name: string;
@@ -1173,16 +1179,23 @@ export class RunStore {
   syncRoutines(
     projectName: string,
     routines: RoutineDeclaration[],
-    options: { now?: Date; recomputeRecurring?: boolean } = {}
+    options: {
+      now?: Date;
+      protectedNames?: string[];
+      recomputeRecurring?: boolean;
+    } = {}
   ): void {
     const now = timestamp();
     const scheduleNow = options.now ?? new Date();
+    const nowIso = scheduleNow.toISOString();
     const upsert = this.database.prepare(
       [
         "insert into routines (",
-        "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, allow_overlap, catch_up, created_at, updated_at",
+        "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, catch_up, created_at, updated_at",
         ") values (",
-        "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'active', @allow_overlap, @catch_up, @created_at, @updated_at",
+        "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body,",
+        "case when @disabled = 1 then 'disabled' else 'active' end,",
+        "@disabled_reason, @allow_overlap, @catch_up, @created_at, @updated_at",
         ")",
         "on conflict(project_name, name) do update set",
         "source_path = excluded.source_path,",
@@ -1196,6 +1209,13 @@ export class RunStore {
         "next_fire_at = case",
         "when @recompute_recurring = 1 and excluded.schedule_cron is not null and excluded.catch_up = 'skip' then excluded.next_fire_at",
         "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then excluded.next_fire_at",
+        // Un-disabling (front matter disabled: true removed, or the routine's
+        // path restored after removal) always recomputes from the current
+        // tick's now — never resurrects a next_fire_at computed before the
+        // routine was disabled. For cron this is always strictly future; for
+        // an elapsed one-shot the state branch below routes to 'expired',
+        // where next_fire_at is never read.
+        "when (routines.state = 'disabled' or routines.state = 'inactive') and @disabled = 0 then excluded.next_fire_at",
         "when routines.next_fire_at is null and routines.state != 'expired' then excluded.next_fire_at",
         "else routines.next_fire_at end,",
         "prompt_body = excluded.prompt_body,",
@@ -1206,27 +1226,40 @@ export class RunStore {
         // Otherwise an already-fired or previously-expired one-shot stays
         // expired — including an inactive one-shot restored on Project
         // re-enable, whose firing evidence must not re-fire (ADR-0021).
+        // An operator-disabled routine (@disabled = 1) wins over every other
+        // branch, even a schedule change made in the same edit.
         "state = case",
+        "when @disabled = 1 then 'disabled'",
         "when excluded.schedule_cron is not null then 'active'",
         "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then 'active'",
+        // Restoring a one-shot whose `at` already elapsed while disabled must
+        // not fire it retroactively — treat it the same as a missed one-shot
+        // without catch-up: expired, never fired.
+        "when (routines.state = 'disabled' or routines.state = 'inactive') and @disabled = 0 and excluded.schedule_cron is null and routines.last_fired_at is null and excluded.schedule_at <= @now_iso then 'expired'",
         "when routines.state = 'expired' or routines.last_fired_at is not null then 'expired'",
         "else 'active' end,",
+        "disabled_reason = excluded.disabled_reason,",
         "updated_at = excluded.updated_at"
       ].join(" ")
     );
     const apply = this.database.transaction(() => {
-      if (routines.length === 0) {
-        this.database
-          .prepare("delete from routines where project_name = ?")
-          .run(projectName);
-      } else {
-        const names = routines.map((routine) => routine.name);
-        const placeholders = names.map(() => "?").join(", ");
+      const declaredNames = routines.map((routine) => routine.name);
+      const excludedNames = [
+        ...new Set([...declaredNames, ...(options.protectedNames ?? [])])
+      ];
+      if (excludedNames.length === 0) {
         this.database
           .prepare(
-            `delete from routines where project_name = ? and name not in (${placeholders})`
+            "update routines set state = 'disabled', disabled_reason = 'removed_from_config', updated_at = ? where project_name = ? and state != 'disabled'"
           )
-          .run(projectName, ...names);
+          .run(now, projectName);
+      } else {
+        const placeholders = excludedNames.map(() => "?").join(", ");
+        this.database
+          .prepare(
+            `update routines set state = 'disabled', disabled_reason = 'removed_from_config', updated_at = ? where project_name = ? and name not in (${placeholders}) and state != 'disabled'`
+          )
+          .run(now, projectName, ...excludedNames);
       }
       for (const routine of routines) {
         const scheduleValues =
@@ -1247,12 +1280,15 @@ export class RunStore {
           allow_overlap: routine.allowOverlap === true ? 1 : 0,
           catch_up: routine.catchUp ?? "skip",
           created_at: now,
+          disabled: routine.disabled === true ? 1 : 0,
+          disabled_reason: routine.disabled === true ? "operator" : null,
           kind: routine.kind,
           name: routine.name,
           project_name: projectName,
           prompt_body: routine.prompt,
           provider_name: routine.provider,
           next_fire_at: scheduleValues.nextFireAt,
+          now_iso: nowIso,
           recompute_recurring: options.recomputeRecurring === true ? 1 : 0,
           // Existing databases have a NOT NULL schedule_at column. An empty
           // legacy value identifies recurring rows; schedule_cron is canonical.
@@ -1273,6 +1309,39 @@ export class RunStore {
         "update routines set state = 'inactive', updated_at = ? where project_name = ? and state != 'inactive'"
       )
       .run(timestamp(), projectName);
+  }
+
+  // Persists identity-only evidence for a routine declaration that has never
+  // had a valid snapshot (a brand-new file with a parseable name but invalid
+  // front matter elsewhere). kind/schedule_at/prompt_body are unreadable
+  // sentinels — evaluateRoutineSchedule (src/routines/schedule.ts) never
+  // fires a non-'active' row, so these values are never read as real config.
+  // Never overwrites an existing row for the same name: a routine that is
+  // (or later becomes) validly configured must not be reset to 'invalid'.
+  upsertInvalidRoutineStub(input: {
+    name: string;
+    projectName: string;
+    sourcePath: string;
+  }): void {
+    const now = timestamp();
+    this.database
+      .prepare(
+        [
+          "insert into routines (",
+          "project_name, name, source_path, kind, schedule_at, prompt_body, state, created_at, updated_at",
+          ") values (",
+          "@project_name, @name, @source_path, 'report', '', '', 'invalid', @created_at, @updated_at",
+          ")",
+          "on conflict(project_name, name) do nothing"
+        ].join(" ")
+      )
+      .run({
+        created_at: now,
+        name: input.name,
+        project_name: input.projectName,
+        source_path: input.sourcePath,
+        updated_at: now
+      });
   }
 
   pruneRoutinesForUnknownProjects(projectNames: Iterable<string>): void {
@@ -1309,7 +1378,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, allow_overlap, catch_up, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at",
+          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at",
           "from routines",
           where,
           "order by project_name asc, name asc"
@@ -1369,7 +1438,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, allow_overlap, catch_up, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at, prompt_body",
+          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at, prompt_body",
           "from routines where project_name = ? and name = ? and state != 'inactive'"
         ].join(" ")
       )
@@ -1577,6 +1646,7 @@ export class RunStore {
   }
 
   completeRoutineFiring(input: {
+    cancelReason?: CancelReason;
     id: string;
     state: Extract<RoutineFiringState, "succeeded" | "failed" | "cancelled">;
     terminalReason?: string | null;
@@ -1589,12 +1659,14 @@ export class RunStore {
           "update routine_firings set",
           "state = @state,",
           "terminal_reason = @terminal_reason,",
+          "cancel_reason = coalesce(@cancel_reason, cancel_reason),",
           "workspace_path = coalesce(@workspace_path, workspace_path),",
           "updated_at = @updated_at",
           "where id = @id"
         ].join(" ")
       )
       .run({
+        cancel_reason: input.cancelReason ?? null,
         id: input.id,
         state: input.state,
         terminal_reason: input.terminalReason ?? null,
@@ -1602,6 +1674,35 @@ export class RunStore {
         workspace_path: input.workspacePath ?? null
       });
     this.recordRoutineFiringTransition(input.id, input.state, now);
+  }
+
+  getRoutineFiring(id: string): RoutineFiringStatus | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, cancel_requested, cancel_reason, created_at, updated_at",
+          "from routine_firings where id = ?"
+        ].join(" ")
+      )
+      .get(id) as RoutineFiringRow | undefined;
+    if (row === undefined) {
+      return undefined;
+    }
+    return {
+      ...mapRoutineFiringRow(row),
+      pullRequests: this.listRoutinePullRequests({ firingId: row.id })
+    };
+  }
+
+  markRoutineFiringCancelRequested(
+    firingId: string,
+    reason: CancelReason
+  ): void {
+    this.database
+      .prepare(
+        "update routine_firings set cancel_requested = 1, cancel_reason = ?, updated_at = ? where id = ?"
+      )
+      .run(reason, timestamp(), firingId);
   }
 
   updateRoutineFiringWorkspace(input: {
@@ -1651,7 +1752,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, created_at, updated_at",
+          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           where,
           "order by created_at desc, id desc"
@@ -2755,6 +2856,7 @@ export class RunStore {
         last_attempted_at text,
         last_skip_reason text,
         last_skip_at text,
+        disabled_reason text,
         created_at text not null,
         updated_at text not null,
         primary key (project_name, name)
@@ -2782,6 +2884,8 @@ export class RunStore {
         raw_log_path text,
         normalized_log_path text,
         terminal_reason text,
+        cancel_requested integer not null default 0,
+        cancel_reason text,
         created_at text not null,
         updated_at text not null,
         foreign key (project_name, routine_name) references routines(project_name, name)
@@ -2842,9 +2946,12 @@ export class RunStore {
       ["routines", "last_attempted_at", "text"],
       ["routines", "last_skip_reason", "text"],
       ["routines", "last_skip_at", "text"],
+      ["routines", "disabled_reason", "text"],
       ["routine_firings", "prompt_path", "text"],
       ["routine_firings", "raw_log_path", "text"],
-      ["routine_firings", "normalized_log_path", "text"]
+      ["routine_firings", "normalized_log_path", "text"],
+      ["routine_firings", "cancel_requested", "integer not null default 0"],
+      ["routine_firings", "cancel_reason", "text"]
     ];
 
     const apply = this.database.transaction(() => {
@@ -3286,6 +3393,7 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
   return {
     allowOverlap: row.allow_overlap === 1,
     catchUp: row.catch_up,
+    disabledReason: row.disabled_reason ?? null,
     kind: row.kind,
     lastAttemptedAt: row.last_attempted_at ?? null,
     lastFiredAt: row.last_fired_at ?? null,
@@ -3311,6 +3419,8 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
 
 function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
   return {
+    cancelReason: row.cancel_reason ?? null,
+    cancelRequested: row.cancel_requested === 1,
     createdAt: row.created_at,
     id: row.id,
     projectName: row.project_name,

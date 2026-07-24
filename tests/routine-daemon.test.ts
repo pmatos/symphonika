@@ -126,6 +126,115 @@ describe("daemon routine firing", () => {
     }
   });
 
+  it("cancels an in-flight routine firing by id, killing the provider and preserving workspace evidence", async () => {
+    const root = await makeTempRoot();
+    const fireAt = new Date(Date.now() + 50).toISOString();
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "alpha",
+      "routines",
+      "daily-report",
+      "routine-fire-cancel"
+    );
+    await writeRoutineProject(root, fireAt);
+    let resolveHold: (() => void) | undefined;
+    const holdUntilCancelled = new Promise<void>((resolve) => {
+      resolveHold = resolve;
+    });
+    const provider = {
+      cancel: vi.fn(() => {
+        resolveHold?.();
+        return Promise.resolve();
+      }),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        await holdUntilCancelled;
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName: "main",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRoutineFiringId: () => "routine-fire-cancel",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareRoutineWorkspace
+    });
+
+    try {
+      await waitForFiringState(daemon.url, "daily-report", "alpha", "running");
+
+      const cancelResponse = await fetch(
+        `${daemon.url}/api/runs/routine-fire-cancel/cancel`,
+        { method: "POST" }
+      );
+      expect(cancelResponse.status).toBe(200);
+      expect(await cancelResponse.json()).toEqual({ kind: "cancelled" });
+
+      await vi.waitFor(() => {
+        expect(provider.cancel).toHaveBeenCalledWith("routine-fire-cancel");
+      });
+      const firing = await waitForFiringState(
+        daemon.url,
+        "daily-report",
+        "alpha",
+        "cancelled"
+      );
+      expect(firing).toMatchObject({
+        id: "routine-fire-cancel",
+        cancelReason: "operator",
+        state: "cancelled",
+        workspacePath
+      });
+
+      // Unknown id
+      const notFound = await fetch(`${daemon.url}/api/runs/no-such-id/cancel`, {
+        method: "POST"
+      });
+      expect(notFound.status).toBe(404);
+
+      // Already-terminal firing
+      const alreadyTerminal = await fetch(
+        `${daemon.url}/api/runs/routine-fire-cancel/cancel`,
+        { method: "POST" }
+      );
+      expect(alreadyTerminal.status).toBe(409);
+      expect(await alreadyTerminal.json()).toEqual({
+        kind: "already-terminal",
+        state: "cancelled"
+      });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("keeps a last-known-good Routine live when its declaration reload becomes invalid", async () => {
     const root = await makeTempRoot();
     const fireAt = new Date(Date.now() + 1_000).toISOString();
@@ -180,9 +289,12 @@ describe("daemon routine firing", () => {
           usingLastKnownGood: boolean;
         };
       };
+      // Per-routine isolation (docs/adr/0060): a single routine's invalidity
+      // no longer forces a whole-snapshot last-known-good rollback — only
+      // that routine carries forward its own last-known-good declaration.
       expect(status.reload).toMatchObject({
         ok: false,
-        usingLastKnownGood: true
+        usingLastKnownGood: false
       });
       expect(status.reload?.errors.join("\n")).toContain(
         'name "../unsafe" is not path-safe'
@@ -191,6 +303,77 @@ describe("daemon routine firing", () => {
       await vi.waitFor(() => {
         expect(provider.runAttempt).toHaveBeenCalledTimes(1);
       });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("gives a brand-new invalid routine declaration a persistent invalid identity across ticks", async () => {
+    const root = await makeTempRoot();
+    const fireAt = new Date(Date.now() + 60_000).toISOString();
+    await mkdir(root, { recursive: true });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    await writeFile(
+      path.join(root, "daily-report.md"),
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        `  at: ${fireAt}`,
+        "kind: report",
+        "---",
+        "Routine {{routine.name}} for {{project.name}}.",
+        ""
+      ].join("\n")
+    );
+    // Valid name, but no schedule/kind — never had a prior valid snapshot.
+    await writeFile(
+      path.join(root, "broken-routine.md"),
+      ["---", "name: broken-routine", "---", "Body", ""].join("\n")
+    );
+    await writeProjectConfig(root, "alpha", [
+      "./daily-report.md",
+      "./broken-routine.md"
+    ]);
+    const provider = quietProvider();
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareRoutineWorkspace: vi.fn()
+    });
+
+    try {
+      await waitForRoutine(daemon.url, "invalid");
+      // Multiple dispatch ticks must not let syncRoutines's removal-detection
+      // path demote the stub to disabled/removed_from_config.
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      const body = (await fetch(`${daemon.url}/api/routines`).then(
+        (response) => response.json()
+      )) as { routines: RoutineApiRow[] };
+      expect(body.routines).toContainEqual(
+        expect.objectContaining({
+          name: "broken-routine",
+          projectName: "alpha",
+          state: "invalid"
+        })
+      );
+      expect(body.routines).toContainEqual(
+        expect.objectContaining({ name: "daily-report", state: "active" })
+      );
+      expect(provider.runAttempt).not.toHaveBeenCalled();
     } finally {
       await daemon.stop();
     }
@@ -592,6 +775,35 @@ async function waitForRoutine(
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`routine did not reach ${state}`);
+}
+
+type RoutineFiringApiRow = {
+  cancelReason: string | null;
+  id: string;
+  state: string;
+  workspacePath: string;
+};
+
+async function waitForFiringState(
+  baseUrl: string,
+  routineName: string,
+  project: string,
+  state: string
+): Promise<RoutineFiringApiRow> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const body = (await fetch(
+      `${baseUrl}/api/routines/${routineName}/firings?project=${project}`
+    ).then((response) => response.json())) as {
+      firings: RoutineFiringApiRow[];
+    };
+    const match = body.firings.find((firing) => firing.state === state);
+    if (match !== undefined) {
+      return match;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`firing did not reach ${state}`);
 }
 
 async function waitForNoRoutines(baseUrl: string): Promise<RoutineApiRow[]> {

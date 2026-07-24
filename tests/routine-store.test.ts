@@ -109,6 +109,7 @@ describe("RunStore routines", () => {
         {
           allowOverlap: false,
           catchUp: "skip",
+          disabledReason: null,
           kind: "report",
           lastAttemptedAt: null,
           lastFiredAt: null,
@@ -162,6 +163,7 @@ describe("RunStore routines", () => {
         {
           allowOverlap: false,
           catchUp: "skip",
+          disabledReason: null,
           kind: "report",
           lastAttemptedAt: null,
           lastFiredAt: null,
@@ -313,7 +315,7 @@ describe("RunStore routines", () => {
     }
   });
 
-  it("removes routines that are no longer configured for the project", async () => {
+  it("soft-disables routines that are no longer configured for the project", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
@@ -347,11 +349,193 @@ describe("RunStore routines", () => {
         }
       ]);
 
-      expect(store.listRoutines().map((routine) => routine.name)).toEqual([
-        "weekly-report"
-      ]);
+      // Unlike Project-cascade 'inactive' rows, a routine disabled because its
+      // path was removed from config stays visible by default, with its
+      // reason attached (ADR-0021 precedent applies to Projects, not this).
+      expect(store.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          name: "daily-report",
+          state: "disabled",
+          disabledReason: "removed_from_config"
+        })
+      );
+      expect(store.listRoutines()).toContainEqual(
+        expect.objectContaining({ name: "weekly-report", state: "active" })
+      );
+
       store.syncRoutines("alpha", []);
-      expect(store.listRoutines({ project: "alpha" })).toEqual([]);
+
+      expect(
+        store.listRoutines({ project: "alpha" }).map((routine) => routine.name)
+      ).toEqual(expect.arrayContaining(["daily-report", "weekly-report"]));
+      expect(
+        store.listRoutines({ project: "alpha" })
+      ).toContainEqual(
+        expect.objectContaining({
+          name: "weekly-report",
+          state: "disabled",
+          disabledReason: "removed_from_config"
+        })
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("marks a routine disabled with reason operator when its declaration sets disabled: true", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          disabled: true
+        }
+      ]);
+
+      expect(store.listRoutines()[0]).toMatchObject({
+        state: "disabled",
+        disabledReason: "operator"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a routine disabled even when its schedule changes in the same edit", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: null,
+          schedule: { cron: "30 1 * * *", tz: "Etc/UTC" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      expect(store.listRoutines()[0]).toMatchObject({ state: "active" });
+
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: null,
+          schedule: { cron: "0 2 * * *", tz: "Etc/UTC" },
+          sourcePath: "/tmp/daily-report.md",
+          disabled: true
+        }
+      ]);
+
+      expect(store.listRoutines({ includeInactive: true })[0]).toMatchObject({
+        state: "disabled",
+        disabledReason: "operator"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("restores a disabled recurring routine with next_fire_at recomputed strictly in the future", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      const routine = {
+        kind: "report" as const,
+        name: "daily-report",
+        prompt: "Report.",
+        provider: null,
+        schedule: { cron: "30 1 * * *", tz: "Europe/Lisbon" },
+        sourcePath: "/tmp/daily-report.md",
+        disabled: true
+      };
+      store.syncRoutines("alpha", [routine], {
+        now: new Date("2026-03-27T02:00:00.000Z")
+      });
+      expect(store.listRoutines({ includeInactive: true })[0]).toMatchObject({
+        state: "disabled",
+        disabledReason: "operator"
+      });
+
+      store.syncRoutines("alpha", [{ ...routine, disabled: false }], {
+        now: new Date("2026-03-29T02:00:00.000Z")
+      });
+
+      expect(store.listRoutines()[0]).toMatchObject({
+        state: "active",
+        disabledReason: null,
+        nextFireAt: "2026-03-30T00:30:00.000Z"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("restores a one-shot routine whose at time elapsed while disabled as expired, not active", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      const routine = {
+        kind: "report" as const,
+        name: "one-shot-report",
+        prompt: "Report.",
+        provider: null,
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: "/tmp/one-shot-report.md",
+        disabled: true
+      };
+      store.syncRoutines("alpha", [routine], {
+        now: new Date("2026-05-20T00:00:00.000Z")
+      });
+      expect(store.listRoutines({ includeInactive: true })[0]).toMatchObject({
+        state: "disabled",
+        disabledReason: "operator"
+      });
+
+      store.syncRoutines("alpha", [{ ...routine, disabled: false }], {
+        now: new Date("2026-05-23T00:00:00.000Z")
+      });
+
+      expect(store.listRoutines()[0]).toMatchObject({
+        state: "expired",
+        disabledReason: null
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("does not disable a protected routine name that is absent from the declared list", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+
+      store.syncRoutines("alpha", [], {
+        protectedNames: ["daily-report"]
+      });
+
+      expect(store.listRoutines()[0]).toMatchObject({
+        name: "daily-report",
+        state: "active"
+      });
     } finally {
       store.close();
     }
@@ -714,6 +898,156 @@ describe("RunStore routines", () => {
       expect(store.listRoutineFirings()).toEqual([
         expect.objectContaining({ id: "done-fire", state: "succeeded" })
       ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("getRoutineFiring returns a single firing by id and undefined for an unknown id", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-lookup",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+
+      expect(store.getRoutineFiring("fire-lookup")).toMatchObject({
+        id: "fire-lookup",
+        projectName: "alpha",
+        routineName: "daily-report",
+        state: "queued",
+        cancelRequested: false,
+        cancelReason: null
+      });
+      expect(store.getRoutineFiring("does-not-exist")).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("markRoutineFiringCancelRequested marks a firing as cancel-requested", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-cancel",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+
+      store.markRoutineFiringCancelRequested("fire-cancel", "operator");
+
+      expect(store.getRoutineFiring("fire-cancel")).toMatchObject({
+        cancelRequested: true,
+        cancelReason: "operator"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("completeRoutineFiring records the cancel reason for a cancelled firing", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-completed-cancel",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+
+      store.completeRoutineFiring({
+        id: "fire-completed-cancel",
+        state: "cancelled",
+        cancelReason: "operator"
+      });
+
+      expect(store.getRoutineFiring("fire-completed-cancel")).toMatchObject({
+        state: "cancelled",
+        cancelReason: "operator"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("upsertInvalidRoutineStub creates an invalid row once and does not overwrite an existing row", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.upsertInvalidRoutineStub({
+        name: "broken-routine",
+        projectName: "alpha",
+        sourcePath: "/tmp/broken-routine.md"
+      });
+
+      expect(store.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          name: "broken-routine",
+          projectName: "alpha",
+          state: "invalid"
+        })
+      );
+
+      // A subsequent stub call for an already-active routine of the same
+      // name must never clobber real, valid configuration.
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "broken-routine",
+          prompt: "Now valid.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/broken-routine.md"
+        }
+      ]);
+      store.upsertInvalidRoutineStub({
+        name: "broken-routine",
+        projectName: "alpha",
+        sourcePath: "/tmp/broken-routine.md"
+      });
+
+      expect(store.listRoutines()).toContainEqual(
+        expect.objectContaining({ name: "broken-routine", state: "active" })
+      );
     } finally {
       store.close();
     }

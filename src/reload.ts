@@ -39,6 +39,16 @@ export type RuntimeConfigSnapshot = {
   // Global concurrency cap snapshot. `maxInFlight: undefined` means
   // unbounded. See ADR 0053.
   globalConcurrency: { maxInFlight: number | undefined };
+  // Routine declarations that failed to load this reload and have no prior
+  // valid snapshot to carry forward — a brand-new file, invalid from the
+  // start. `name` is present only when the front matter's `name` field
+  // itself parsed successfully; entries with no resolvable name can only be
+  // surfaced through `errors`, never as a store row (no identity to key on).
+  invalidRoutines: Array<{
+    name?: string;
+    path: string;
+    projectName: string;
+  }>;
   loadedAt: string;
   polling: PollingServiceConfig;
   pollingIntervalMs: number;
@@ -322,6 +332,7 @@ async function loadRuntimeConfigSnapshot(input: {
 
   const pollingProjects: PollingProjectConfig[] = [];
   const dispatchProjects: RuntimeProjectConfig[] = [];
+  const invalidRoutines: RuntimeConfigSnapshot["invalidRoutines"] = [];
 
   for (const [index, rawProject] of parsed.data.projects.entries()) {
     const pollingProject = pollingProjectSchema.safeParse(rawProject);
@@ -402,14 +413,23 @@ async function loadRuntimeConfigSnapshot(input: {
       continue;
     }
 
-    const routines = await readRoutineDeclarations(
+    const previousRoutines =
+      input.previous?.projects.find(
+        (project) => project.name === pollingProject.data.name
+      )?.routines ?? [];
+    const routineResult = await readRoutineDeclarations(
       (detail.data.routines ?? []).map((routinePath) =>
         path.resolve(input.configDir, routinePath)
       ),
+      previousRoutines,
       errors
     );
-    if (routines === undefined) {
-      return lastKnownGoodOrNothing(input.previous, errors);
+    for (const invalid of routineResult.invalidNew) {
+      invalidRoutines.push({
+        ...(invalid.name === undefined ? {} : { name: invalid.name }),
+        path: invalid.path,
+        projectName: pollingProject.data.name
+      });
     }
 
     const workflow = await readWorkflowSnapshot(
@@ -420,9 +440,13 @@ async function loadRuntimeConfigSnapshot(input: {
     if (workflow === undefined) {
       return lastKnownGoodOrNothing(input.previous, errors);
     }
+    const invalidRoutineNames = routineResult.invalidNew
+      .map((invalid) => invalid.name)
+      .filter((name): name is string => name !== undefined);
     dispatchProjects.push({
       ...pollingProject.data,
-      routines,
+      ...(invalidRoutineNames.length === 0 ? {} : { invalidRoutineNames }),
+      routines: routineResult.routines,
       ...(detail.data.watchdog === undefined
         ? {}
         : {
@@ -453,6 +477,7 @@ async function loadRuntimeConfigSnapshot(input: {
       globalConcurrency: {
         maxInFlight: parsed.data.global?.max_in_flight
       },
+      invalidRoutines,
       loadedAt: input.attemptedAt,
       polling,
       pollingIntervalMs:
@@ -588,15 +613,39 @@ async function readWorkflowSnapshot(
 
 async function readRoutineDeclarations(
   routinePaths: string[],
+  previousRoutines: RoutineDeclaration[],
   errors: string[]
-): Promise<RoutineDeclaration[] | undefined> {
+): Promise<{
+  invalidNew: Array<{ name?: string; path: string }>;
+  routines: RoutineDeclaration[];
+}> {
   const routines: RoutineDeclaration[] = [];
-  const startingErrorCount = errors.length;
+  const invalidNew: Array<{ name?: string; path: string }> = [];
   const seenNames = new Map<string, string>();
+  const previousBySourcePath = new Map(
+    previousRoutines.map((routine) => [routine.sourcePath, routine])
+  );
   for (const routinePath of routinePaths) {
     const result = await loadRoutineDeclaration(routinePath);
     if (result.routine === null) {
       errors.push(...result.errors);
+      // Carry-forward is keyed on the file's own path, not on the freshly
+      // parsed name — a broken edit can corrupt the name field itself while
+      // the path symphonika.yml references stays the same. Falling back to
+      // name would wrongly treat that as "no prior valid declaration" and
+      // let the removal-detection path in RunStore.syncRoutines demote a
+      // still-configured routine to disabled/removed_from_config.
+      const previous = previousBySourcePath.get(routinePath);
+      if (previous !== undefined) {
+        routines.push(previous);
+      } else {
+        invalidNew.push({
+          ...(result.partialName === undefined
+            ? {}
+            : { name: result.partialName }),
+          path: routinePath
+        });
+      }
       continue;
     }
     const existing = seenNames.get(result.routine.name);
@@ -609,7 +658,7 @@ async function readRoutineDeclarations(
     seenNames.set(result.routine.name, result.routine.sourcePath);
     routines.push(result.routine);
   }
-  return errors.length > startingErrorCount ? undefined : routines;
+  return { invalidNew, routines };
 }
 
 function lastKnownGoodOrNothing(

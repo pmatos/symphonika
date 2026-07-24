@@ -93,6 +93,12 @@ type LoadedWorkflow = {
 };
 
 export type RunControllerProjectConfig = PollingProjectConfig & {
+  // Names of routines declared for this Project whose current reload is
+  // invalid and has no prior valid snapshot to carry forward. Protects
+  // their store rows (state = 'invalid') from being soft-disabled as
+  // "removed from config" by the next syncRoutines call — see
+  // docs/adr/0060-routine-lifecycle-control.md.
+  invalidRoutineNames?: string[];
   routines?: RoutineDeclaration[];
   workflow: WorkflowReference | WorkflowSnapshot;
   workspace: {

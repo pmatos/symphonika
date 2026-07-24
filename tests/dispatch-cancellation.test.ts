@@ -141,7 +141,11 @@ async function writeProject(root: string): Promise<string> {
       "state:",
       "  root: ./.symphonika",
       "polling:",
-      "  interval_ms: 25",
+      // Large enough that the background poll timer never fires on its own
+      // during the test; both tests drive ticks explicitly via /api/poll-now
+      // so the mock's call-count-based responses stay deterministic. See
+      // issue #283.
+      "  interval_ms: 60000",
       "providers:",
       "  codex:",
       `    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"`,
@@ -245,7 +249,14 @@ describe("dispatch cancellation", () => {
     });
 
     try {
+      // Drive ticks explicitly instead of racing the background poll
+      // interval: the first dispatches the issue, the second observes it has
+      // become ineligible and cancels. Relying on the passive setInterval
+      // under contended CI load left this racing an unbounded delay before
+      // the run was ever cancelled (issue #283).
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
       await provider.ready;
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
       const status = await waitForRunState(daemon.url, "cancelled");
       const run = status.runs[0] as Record<string, unknown>;
 
@@ -321,7 +332,14 @@ describe("dispatch cancellation", () => {
     });
 
     try {
+      // Drive ticks explicitly instead of racing the background poll
+      // interval: the first dispatches the issue, the second observes it has
+      // become ineligible and cancels. Relying on the passive setInterval
+      // under contended CI load left this racing an unbounded delay before
+      // the run was ever cancelled (issue #283).
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
       await provider.ready;
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
       const status = await waitForRunState(daemon.url, "cancelled");
       const run = status.runs[0] as Record<string, unknown>;
 

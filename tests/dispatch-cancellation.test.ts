@@ -6,6 +6,7 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startDaemon } from "../src/daemon.js";
+import type { DaemonHandle } from "../src/daemon.js";
 import type {
   AgentProvider,
   ProviderEvent,
@@ -211,6 +212,76 @@ async function waitForRunState(
   throw new Error(`run did not reach ${state} before timeout`);
 }
 
+// Diagnostic-only, added while chasing issue #283 (intermittent Node-24-only
+// hang in this file). Dumps whether the mock provider's cancel() was ever
+// invoked, the run row straight from the DB, and a live /api/status snapshot
+// when waitForRunState fails to observe "cancelled" in time — narrows down
+// whether cancellation was silently dropped vs. delivered-but-not-persisted
+// vs. something else entirely (see issue #283 for the three candidate
+// branches). Remove once the root cause is confirmed and fixed.
+async function dumpCancellationDiagnostics(input: {
+  daemon: DaemonHandle;
+  provider: ControllableProvider;
+  root: string;
+  runId: string;
+}): Promise<void> {
+  const lines = [
+    `--- dispatch-cancellation diagnostic dump (${input.runId}) ---`,
+    `provider.cancel.mock.calls: ${JSON.stringify(input.provider.cancel.mock.calls)}`
+  ];
+  try {
+    const response = await fetch(`${input.daemon.url}/api/status`);
+    lines.push(`GET /api/status: ${JSON.stringify(await response.json())}`);
+  } catch (error) {
+    lines.push(`GET /api/status failed: ${String(error)}`);
+  }
+  try {
+    const database = new Database(
+      path.join(input.root, ".symphonika", "symphonika.db"),
+      { readonly: true }
+    );
+    try {
+      const row = database
+        .prepare(
+          "select state, cancel_requested, cancel_reason from runs where id = ?"
+        )
+        .get(input.runId);
+      lines.push(`DB row: ${JSON.stringify(row)}`);
+    } finally {
+      database.close();
+    }
+  } catch (error) {
+    lines.push(`DB read failed: ${String(error)}`);
+  }
+  // console.error (not the disabled pino logger) so this reaches the CI job
+  // log even though vitest normally captures per-test stdout/stderr.
+  console.error(lines.join("\n"));
+}
+
+// Diagnostic-only (see comment above): bounds daemon.stop() so a stuck
+// in-flight dispatch can't ride the whole test to the global 35s vitest
+// timeout — it fails fast with an attributable message instead.
+async function stopDaemonWithDiagnosticTimeout(
+  daemon: DaemonHandle,
+  timeoutMs = 3_000
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(
+          `daemon.stop() did not resolve within ${timeoutMs}ms — an in-flight dispatch is likely stuck (issue #283)`
+        )
+      );
+    }, timeoutMs);
+  });
+  try {
+    await Promise.race([daemon.stop(), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 describe("dispatch cancellation", () => {
   it("cancels active run when issue is closed and removes operational labels best-effort", async () => {
     const root = await makeTempRoot();
@@ -257,7 +328,18 @@ describe("dispatch cancellation", () => {
       await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
       await provider.ready;
       await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
-      const status = await waitForRunState(daemon.url, "cancelled");
+      let status: { runs: Array<Record<string, unknown>> };
+      try {
+        status = await waitForRunState(daemon.url, "cancelled");
+      } catch (error) {
+        await dumpCancellationDiagnostics({
+          daemon,
+          provider,
+          root,
+          runId: "run-cancel-closed"
+        });
+        throw error;
+      }
       const run = status.runs[0] as Record<string, unknown>;
 
       expect(provider.cancel).toHaveBeenCalledWith("run-cancel-closed");
@@ -286,7 +368,7 @@ describe("dispatch cancellation", () => {
       // Workspace preserved.
       await expect(stat(prepared.workspacePath)).resolves.toBeDefined();
     } finally {
-      await daemon.stop();
+      await stopDaemonWithDiagnosticTimeout(daemon);
     }
   });
 
@@ -340,7 +422,18 @@ describe("dispatch cancellation", () => {
       await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
       await provider.ready;
       await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
-      const status = await waitForRunState(daemon.url, "cancelled");
+      let status: { runs: Array<Record<string, unknown>> };
+      try {
+        status = await waitForRunState(daemon.url, "cancelled");
+      } catch (error) {
+        await dumpCancellationDiagnostics({
+          daemon,
+          provider,
+          root,
+          runId: "run-cancel-eligibility"
+        });
+        throw error;
+      }
       const run = status.runs[0] as Record<string, unknown>;
 
       expect(provider.cancel).toHaveBeenCalledWith("run-cancel-eligibility");
@@ -382,7 +475,7 @@ describe("dispatch cancellation", () => {
         database.close();
       }
     } finally {
-      await daemon.stop();
+      await stopDaemonWithDiagnosticTimeout(daemon);
     }
   });
 });

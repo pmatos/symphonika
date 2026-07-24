@@ -74,10 +74,8 @@ export class RoutineConfigEditor {
           return { changed: false, routineName: declaration.routine.name };
         }
         const existing = await loadRoutineDeclaration(existingPath);
-        if (existing.routine === null) {
-          throw new Error(existing.errors.join("; "));
-        }
-        if (existing.routine.name === declaration.routine.name) {
+        const existingName = existing.routine?.name ?? existing.partialName;
+        if (existingName === declaration.routine.name) {
           throw new Error(
             `routine name "${declaration.routine.name}" already exists in project "${input.projectName}" at ${item.value}`
           );

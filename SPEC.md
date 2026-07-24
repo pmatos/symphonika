@@ -93,6 +93,13 @@ An issue is eligible when all are true:
 v1 uses labels only for blocking. Symphonika does not parse issue body text, task lists, GitHub
 Projects fields, or linked PRs to infer blockers.
 
+The configured `labels_all` values are Required Eligibility Labels. Every Required Eligibility
+Label must exist in the Project repository before the Project can dispatch work. `doctor` reports
+missing Required Eligibility Labels as validation errors, and `init-project` offers to create them
+after confirmation (or creates them under `--yes`). They remain repository-owned workflow labels;
+provisioning them does not make them Operational Labels or give the orchestrator authority to apply
+them to issues.
+
 ### 4.4 Operational Labels
 
 Symphonika owns this narrow GitHub label namespace:
@@ -236,11 +243,12 @@ Provider, base branch, issue-label filters, priority-label mapping, and Workflow
 appends the Project without discarding unrelated Projects or hand-authored config. A duplicate
 Project name is refused unless `--force`, which replaces only that sequence entry. The command
 creates a starter Workflow Contract only when the selected path is absent, prints the created path
-on success, and then creates missing Operational Labels in the newly registered repository. The
-starter contract is Markdown; the command refuses to scaffold a selected path that resolves to the
-`raw_fsm` format (a `.yaml`, `.yml`, or `.json` extension, or an explicit `format: raw_fsm`), since
-writing Markdown prose into a raw FSM file would register a Project with a workflow contract that
-fails to parse. `--yes` accepts Project defaults and performs label setup without prompting.
+on success, and then creates missing Operational Labels and configured Required Eligibility Labels
+in the newly registered repository. The starter contract is Markdown; the command refuses to
+scaffold a selected path that resolves to the `raw_fsm` format (a `.yaml`, `.yml`, or `.json`
+extension, or an explicit `format: raw_fsm`), since writing Markdown prose into a raw FSM file would
+register a Project with a workflow contract that fails to parse. `--yes` accepts Project defaults
+and performs label setup without prompting.
 
 Example:
 
@@ -686,7 +694,9 @@ The GitHub tracker adapter supports:
 
 - validating repository access
 - validating operational labels
+- validating configured Required Eligibility Labels
 - creating operational labels after explicit confirmation
+- creating configured Required Eligibility Labels after explicit confirmation
 - fetching candidate issues
 - fetching current issue state for reconciliation
 - applying and removing operational labels
@@ -1174,6 +1184,7 @@ config path and points the operator to `symphonika init`.
 - GitHub auth
 - repository access
 - operational labels
+- configured Required Eligibility Labels (`issue_filters.labels_all`)
 - provider commands for Codex and Claude
 - workflow contract path and parse
 - every Routine declaration enumerated by each Project, including duplicate Routine names
@@ -1182,7 +1193,8 @@ config path and points the operator to `symphonika init`.
 
 `init` writes only the user Service Config and never inspects or mutates a repository or GitHub.
 `init-project` registers the current repository, creates a missing starter Workflow Contract, and
-creates missing Operational Labels after the interactive review or explicit `--yes` selection.
+creates missing Operational Labels and configured Required Eligibility Labels after the
+interactive review or explicit `--yes` selection.
 
 `add-routine` writes `<cwd>/routines/<name>.md` with validated YAML front matter and a placeholder
 prompt, then registers the declaration path in the named Project's `routines` list. It preserves
@@ -1288,8 +1300,10 @@ The bootstrap slice is accepted when:
 - `init-project` can append a Project without losing existing config and create its starter
   Workflow Contract
 - `doctor` validates service config, GitHub auth, operational labels, Codex and Claude provider
-  commands, workflow file, database path, and workspace root
-- `init-project` can create missing operational labels after interactive review or `--yes`
+  commands, workflow file, database path, workspace root, and configured Required Eligibility
+  Labels
+- `init-project` can create missing operational and Required Eligibility Labels after interactive
+  review or `--yes`
 - `daemon` can claim one `agent-ready` issue in this repository
 - daemon prepares the deterministic issue worktree and branch
 - daemon runs the configured provider through either Codex JSON-RPC or Claude stream-json

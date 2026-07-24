@@ -477,6 +477,7 @@ describe("CLI", () => {
           ok: true,
           projects: [
             {
+              missingEligibilityLabels: [],
               missingOperationalLabels: [],
               name: "symphonika",
               staleIssues: [
@@ -610,14 +611,17 @@ describe("CLI", () => {
           ok: true,
           projects: [
             {
+              createdEligibilityLabels: ["agent-ready"],
               createdOperationalLabels: ["sym:running"],
+              missingEligibilityLabels: ["agent-ready"],
               missingOperationalLabels: ["sym:running"],
               name: "symphonika",
               repository: "pmatos/symphonika"
             }
           ],
           warnings: [
-            "init-project will create operational labels in pmatos/symphonika: sym:running"
+            "init-project will create operational labels in pmatos/symphonika: sym:running",
+            "init-project will create required eligibility labels in pmatos/symphonika: agent-ready"
           ]
         });
       }
@@ -648,7 +652,11 @@ describe("CLI", () => {
       yes: true
     });
     expect(output.stderr).toContain("will create operational labels");
-    expect(output.stdout).toContain("init-project ok");
+    expect(output.stderr).toContain("will create required eligibility labels");
+    expect(output.stdout).toContain(
+      "init-project ok: registered 1 Project and created 2 labels"
+    );
+    expect(output.stdout).toContain("agent-ready");
     expect(output.stdout).toContain("sym:running");
     expect(output.stdout).toContain(
       "created starter Workflow Contract at /tmp/new-project/WORKFLOW.md"

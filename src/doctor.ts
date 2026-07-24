@@ -55,6 +55,7 @@ type StaleIssueSummary = {
 };
 
 export type DoctorProjectReport = {
+  missingEligibilityLabels: string[];
   missingOperationalLabels: string[];
   name: string;
   staleIssues: StaleIssueSummary[];
@@ -84,6 +85,7 @@ type InitProjectPromptInput = {
     | "priorityLabels"
     | "projectName"
     | "provider"
+    | "confirmEligibilityLabels"
     | "confirmOperationalLabels"
     | "requiredLabels"
     | "workflowPath";
@@ -93,7 +95,9 @@ type InitProjectPromptInput = {
 type InitProjectPrompt = (input: InitProjectPromptInput) => Promise<string>;
 
 type InitProjectProjectReport = {
+  createdEligibilityLabels: string[];
   createdOperationalLabels: string[];
+  missingEligibilityLabels: string[];
   missingOperationalLabels: string[];
   name: string;
   repository: string;
@@ -154,7 +158,7 @@ type ServiceConfig = z.infer<typeof serviceConfigSchema>;
 type ProjectConfig = z.infer<typeof projectSchema>;
 type ProjectValidation = Pick<
   DoctorProjectReport,
-  "missingOperationalLabels" | "validForDispatch"
+  "missingEligibilityLabels" | "missingOperationalLabels" | "validForDispatch"
 >;
 type LabelDescription = {
   color: string;
@@ -596,7 +600,7 @@ export async function runInitProject(
   }
 
   projects.push(
-    await createOperationalLabels({
+    await createProjectLabels({
       errors,
       githubApi,
       ...(options.onWarning === undefined
@@ -837,6 +841,7 @@ function buildProjectConfig(input: {
 }
 
 type ProjectGitHubAccessValidation = {
+  missingEligibilityLabels: string[];
   missingOperationalLabels: string[];
   repository: { owner: string; repo: string; token: string };
   repositoryName: string;
@@ -887,10 +892,19 @@ async function validateProjectGitHubAccess(input: {
   const missingOperationalLabels = REQUIRED_OPERATIONAL_LABELS.filter(
     (label) => !labels.has(label)
   );
-  return { missingOperationalLabels, repository, repositoryName };
+  const missingEligibilityLabels = findMissingEligibilityLabels(
+    input.project,
+    labels
+  );
+  return {
+    missingEligibilityLabels,
+    missingOperationalLabels,
+    repository,
+    repositoryName
+  };
 }
 
-async function createOperationalLabels(input: {
+async function createProjectLabels(input: {
   errors: string[];
   githubApi: GitHubApi;
   onWarning?: (warning: string) => void;
@@ -900,8 +914,13 @@ async function createOperationalLabels(input: {
   warnings: string[];
   yes: boolean;
 }): Promise<InitProjectProjectReport> {
-  const { missingOperationalLabels, repository, repositoryName } =
-    input.validation;
+  const {
+    missingEligibilityLabels,
+    missingOperationalLabels,
+    repository,
+    repositoryName
+  } = input.validation;
+  const createdEligibilityLabels: string[] = [];
   const createdOperationalLabels: string[] = [];
   if (missingOperationalLabels.length > 0) {
     const warning = `init-project ${input.yes ? "will" : "would"} create operational labels in ${repositoryName}: ${missingOperationalLabels.join(", ")}`;
@@ -935,9 +954,43 @@ async function createOperationalLabels(input: {
       }
     }
   }
+  if (missingEligibilityLabels.length > 0) {
+    const warning = `init-project ${input.yes ? "will" : "would"} create required eligibility labels in ${repositoryName}: ${missingEligibilityLabels.join(", ")}`;
+    input.warnings.push(warning);
+    input.onWarning?.(warning);
+    let confirmed = input.yes;
+    if (!confirmed) {
+      try {
+        confirmed = await confirmEligibilityLabelCreation({
+          missingEligibilityLabels,
+          ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
+          repositoryName
+        });
+        if (!confirmed) {
+          input.errors.push("required eligibility label creation was declined");
+        }
+      } catch (error) {
+        input.errors.push(errorMessage(error));
+      }
+    }
+    if (confirmed) {
+      for (const label of missingEligibilityLabels) {
+        try {
+          await input.githubApi.createLabel({ ...repository, name: label });
+          createdEligibilityLabels.push(label);
+        } catch (error) {
+          input.errors.push(
+            `projects.${input.project.name}.tracker.repository ${repositoryName} could not create required eligibility label ${label}: ${errorMessage(error)}`
+          );
+        }
+      }
+    }
+  }
 
   return {
+    createdEligibilityLabels,
     createdOperationalLabels,
+    missingEligibilityLabels,
     missingOperationalLabels,
     name: input.project.name,
     repository: repositoryName
@@ -968,6 +1021,35 @@ async function confirmOperationalLabelCreation(input: {
       return false;
     }
     throw new Error("operational label confirmation must be yes or no");
+  } finally {
+    promptController.close();
+  }
+}
+
+async function confirmEligibilityLabelCreation(input: {
+  missingEligibilityLabels: string[];
+  prompt?: InitProjectPrompt;
+  repositoryName: string;
+}): Promise<boolean> {
+  const promptController = createInitProjectPromptController(
+    input.prompt,
+    false
+  );
+  try {
+    const answer = (
+      await promptController.ask({
+        defaultValue: "yes",
+        key: "confirmEligibilityLabels",
+        message: `Create missing required eligibility labels in ${input.repositoryName}: ${input.missingEligibilityLabels.join(", ")}? (yes/no)`
+      })
+    ).toLowerCase();
+    if (answer === "yes" || answer === "y") {
+      return true;
+    }
+    if (answer === "no" || answer === "n") {
+      return false;
+    }
+    throw new Error("eligibility label confirmation must be yes or no");
   } finally {
     promptController.close();
   }
@@ -1158,7 +1240,7 @@ class OctokitGitHubApi implements GitHubApi {
     input: GitHubRepositoryInput & { name: string }
   ): Promise<void> {
     const octokit = this.octokit(input.token);
-    const labelDescription = operationalLabelDescription(input.name);
+    const labelDescription = labelDescriptionFor(input.name);
 
     await octokit.rest.issues.createLabel({
       color: labelDescription.color,
@@ -1281,6 +1363,7 @@ async function validateProject(
       );
     }
     return {
+      missingEligibilityLabels: [],
       missingOperationalLabels: [],
       validForDispatch: false
     };
@@ -1288,6 +1371,7 @@ async function validateProject(
 
   if (githubApi === undefined) {
     return {
+      missingEligibilityLabels: [],
       missingOperationalLabels: [],
       validForDispatch
     };
@@ -1304,6 +1388,7 @@ async function validateProject(
       `projects.${project.name}.tracker.repository ${project.tracker.owner}/${project.tracker.repo} is not accessible: ${access.message ?? "unknown GitHub error"}`
     );
     return {
+      missingEligibilityLabels: [],
       missingOperationalLabels: [],
       validForDispatch: false
     };
@@ -1317,9 +1402,20 @@ async function validateProject(
       `projects.${project.name}.tracker.repository ${project.tracker.owner}/${project.tracker.repo} labels could not be listed: ${errorMessage(error)}`
     );
     return {
+      missingEligibilityLabels: [],
       missingOperationalLabels: [],
       validForDispatch: false
     };
+  }
+
+  const missingEligibilityLabels = findMissingEligibilityLabels(
+    project,
+    labels
+  );
+  if (missingEligibilityLabels.length > 0) {
+    errors.push(
+      `projects.${project.name}.tracker.repository ${project.tracker.owner}/${project.tracker.repo} is missing required eligibility labels: ${missingEligibilityLabels.join(", ")}`
+    );
   }
 
   const missingOperationalLabels = REQUIRED_OPERATIONAL_LABELS.filter(
@@ -1332,8 +1428,12 @@ async function validateProject(
   }
 
   return {
+    missingEligibilityLabels,
     missingOperationalLabels,
-    validForDispatch: validForDispatch && missingOperationalLabels.length === 0
+    validForDispatch:
+      validForDispatch &&
+      missingEligibilityLabels.length === 0 &&
+      missingOperationalLabels.length === 0
   };
 }
 
@@ -1348,6 +1448,15 @@ function resolveEnvBackedValue(
 
   const value = env[variableName];
   return value === undefined || value.length === 0 ? undefined : value;
+}
+
+function findMissingEligibilityLabels(
+  project: ProjectConfig,
+  repositoryLabels: ReadonlySet<string>
+): string[] {
+  return [...new Set(project.issue_filters.labels_all)].filter(
+    (label) => !repositoryLabels.has(label)
+  );
 }
 
 function envReferenceName(input: string): string | undefined {
@@ -1391,14 +1500,14 @@ function formatZodIssue(issue: z.ZodIssue): string {
   return `${location}: ${issue.message}`;
 }
 
-function operationalLabelDescription(name: string): LabelDescription {
+function labelDescriptionFor(name: string): LabelDescription {
   if (isOperationalLabel(name)) {
     return OPERATIONAL_LABEL_DESCRIPTIONS[name];
   }
 
   return {
-    color: "6a737d",
-    description: "Symphonika operational label."
+    color: "1d76db",
+    description: "Required for Symphonika dispatch eligibility."
   };
 }
 

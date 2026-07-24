@@ -87,7 +87,9 @@ describe("Project initialization", () => {
     await writeExistingConfig(configPath, root);
     const githubApi: GitHubApi = {
       createLabel: vi.fn(),
-      listLabels: vi.fn().mockResolvedValue([...REQUIRED_OPERATIONAL_LABELS]),
+      listLabels: vi
+        .fn()
+        .mockResolvedValue(["agent-ready", ...REQUIRED_OPERATIONAL_LABELS]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -158,7 +160,13 @@ describe("Project initialization", () => {
     const prompted: string[] = [];
     const githubApi: GitHubApi = {
       createLabel: vi.fn(),
-      listLabels: vi.fn().mockResolvedValue([...REQUIRED_OPERATIONAL_LABELS]),
+      listLabels: vi
+        .fn()
+        .mockResolvedValue([
+          "ready",
+          "backend",
+          ...REQUIRED_OPERATIONAL_LABELS
+        ]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -215,7 +223,9 @@ describe("Project initialization", () => {
     await writeExistingConfig(configPath, root);
     const githubApi: GitHubApi = {
       createLabel: vi.fn(),
-      listLabels: vi.fn().mockResolvedValue([...REQUIRED_OPERATIONAL_LABELS]),
+      listLabels: vi
+        .fn()
+        .mockResolvedValue(["agent-ready", ...REQUIRED_OPERATIONAL_LABELS]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -258,7 +268,9 @@ describe("Project initialization", () => {
     await writeDuplicateProjectConfig(configPath, root, "dup-project");
     const githubApi: GitHubApi = {
       createLabel: vi.fn(),
-      listLabels: vi.fn().mockResolvedValue([...REQUIRED_OPERATIONAL_LABELS]),
+      listLabels: vi
+        .fn()
+        .mockResolvedValue(["agent-ready", ...REQUIRED_OPERATIONAL_LABELS]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -336,7 +348,7 @@ describe("Project initialization", () => {
     const prompted: string[] = [];
     const githubApi: GitHubApi = {
       createLabel: vi.fn(),
-      listLabels: vi.fn().mockResolvedValue([]),
+      listLabels: vi.fn().mockResolvedValue(["agent-ready"]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -383,6 +395,51 @@ describe("Project initialization", () => {
     ).resolves.toContain("# Implementing issue #{{issue.number}}");
   });
 
+  it("creates a missing required eligibility label under --yes", async () => {
+    const root = await makeTempRoot();
+    const repositoryRoot = path.join(root, "new-project");
+    const configPath = path.join(root, "config", "symphonika.yml");
+    await createGitHubRepository(
+      repositoryRoot,
+      "https://github.com/acme/new-project.git"
+    );
+    await writeExistingConfig(configPath, root);
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn().mockResolvedValue(undefined),
+      listLabels: vi.fn().mockResolvedValue([...REQUIRED_OPERATIONAL_LABELS]),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runInitProject({
+      configPath,
+      cwd: repositoryRoot,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      yes: true
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.warnings).toContain(
+      "init-project will create required eligibility labels in acme/new-project: agent-ready"
+    );
+    expect(report.projects).toEqual([
+      expect.objectContaining({
+        createdEligibilityLabels: ["agent-ready"],
+        createdOperationalLabels: [],
+        missingEligibilityLabels: ["agent-ready"],
+        missingOperationalLabels: [],
+        name: "new-project"
+      })
+    ]);
+    expect(githubApi.createLabel).toHaveBeenCalledOnce();
+    expect(githubApi.createLabel).toHaveBeenCalledWith({
+      name: "agent-ready",
+      owner: "acme",
+      repo: "new-project",
+      token: "secret-token"
+    });
+  });
+
   it("does not register the Project when interactive label creation is declined", async () => {
     const root = await makeTempRoot();
     const repositoryRoot = path.join(root, "new-project");
@@ -395,7 +452,7 @@ describe("Project initialization", () => {
     const originalContents = await readFile(configPath, "utf8");
     const githubApi: GitHubApi = {
       createLabel: vi.fn(),
-      listLabels: vi.fn().mockResolvedValue([]),
+      listLabels: vi.fn().mockResolvedValue(["agent-ready"]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -444,9 +501,12 @@ describe("Project initialization", () => {
       createLabel: vi.fn().mockRejectedValue(new Error("permission denied")),
       listLabels: vi
         .fn()
-        .mockResolvedValue(
-          REQUIRED_OPERATIONAL_LABELS.filter((label) => label !== missingLabel)
-        ),
+        .mockResolvedValue([
+          "agent-ready",
+          ...REQUIRED_OPERATIONAL_LABELS.filter(
+            (label) => label !== missingLabel
+          )
+        ]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 

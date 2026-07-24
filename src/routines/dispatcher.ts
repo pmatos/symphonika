@@ -370,6 +370,21 @@ async function runRoutineFiring(input: {
       respectsIssueLabels: false
     });
 
+    // A cancel can land DURING the potentially long workspace prep above (or
+    // provider.validate) — before this point only the reserveSlot noop
+    // cancel handler existed, so the attachProvider hand-off just fired
+    // provider.cancel against a provider that runAttempt has not started
+    // yet, which is a no-op, and the latched cancelRequested suppresses any
+    // later cancel. Re-check here and skip launching a provider we could no
+    // longer stop; the catch block below classifies the cancellation.
+    // Mirrors run-controller.ts's cancelDuringPrepare checkpoint (ADR 0052).
+    const cancelDuringPrepare = input.activeRuns.get(input.firingId);
+    if (cancelDuringPrepare?.cancelRequested === true) {
+      throw new Error(
+        `routine firing ${input.firingId} was cancelled before provider start`
+      );
+    }
+
     for await (const event of input.provider.runAttempt({
       branchName: prepared.branchName,
       issue: routineIssueSnapshot(input.routine),

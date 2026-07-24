@@ -257,6 +257,71 @@ describe("add-routine", () => {
     expect(await readFile(configPath, "utf8")).toBe(original);
   });
 
+  it("registers a Routine when an unrelated existing declaration cannot be loaded", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeConfig(configPath, ["./routines/missing.md"]);
+
+    const report = await runAddRoutine({
+      configPath,
+      cwd: root,
+      kind: "report",
+      name: "daily-report",
+      project: "alpha",
+      schedule: "daily"
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.errors).toEqual([]);
+    expect(await readFile(report.filePath, "utf8")).toContain(
+      "name: daily-report"
+    );
+    expect(await readFile(configPath, "utf8")).toContain(
+      [
+        "    routines:",
+        "      - ./routines/missing.md",
+        "      - ./routines/daily-report.md",
+        ""
+      ].join("\n")
+    );
+  });
+
+  it("refuses a duplicate name recovered from an invalid existing declaration", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const existingPath = path.join(root, "routines", "existing.md");
+    await mkdir(path.dirname(existingPath));
+    await writeFile(
+      existingPath,
+      [
+        "---",
+        "name: daily-report",
+        "kind: report",
+        "---",
+        "Create the report.",
+        ""
+      ].join("\n")
+    );
+    await writeConfig(configPath, ["./routines/existing.md"]);
+    const original = await readFile(configPath, "utf8");
+
+    const report = await runAddRoutine({
+      configPath,
+      cwd: root,
+      kind: "report",
+      name: "daily-report",
+      project: "alpha",
+      schedule: "daily"
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain(
+      'routine name "daily-report" already exists in project "alpha" at ./routines/existing.md'
+    );
+    await expect(readFile(report.filePath, "utf8")).rejects.toThrow();
+    expect(await readFile(configPath, "utf8")).toBe(original);
+  });
+
   it("does not overwrite an existing Routine file", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");

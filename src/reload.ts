@@ -637,7 +637,19 @@ async function readRoutineDeclarations(
       // still-configured routine to disabled/removed_from_config.
       const previous = previousBySourcePath.get(routinePath);
       if (previous !== undefined) {
-        routines.push(previous);
+        // Register the carried-forward name too — otherwise a later file in
+        // this same pass that legitimately (re)uses this name slips past
+        // the duplicate check below, since seenNames would have no record
+        // of it ever being declared.
+        const existingForCarryForward = seenNames.get(previous.name);
+        if (existingForCarryForward !== undefined) {
+          errors.push(
+            `duplicate routine name "${previous.name}" declared by ${existingForCarryForward} and ${previous.sourcePath}`
+          );
+        } else {
+          seenNames.set(previous.name, previous.sourcePath);
+          routines.push(previous);
+        }
       } else {
         invalidNew.push({
           ...(result.partialName === undefined

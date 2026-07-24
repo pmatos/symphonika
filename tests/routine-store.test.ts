@@ -539,6 +539,62 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("overwrites a stale operator disabled_reason when a front-matter-disabled routine is then removed from config", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          disabled: true
+        },
+        {
+          kind: "report",
+          name: "weekly-report",
+          prompt: "Report.",
+          provider: null,
+          schedule: { at: "2026-05-23T10:00:00.000Z" },
+          sourcePath: "/tmp/weekly-report.md"
+        }
+      ]);
+      expect(store.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          name: "daily-report",
+          state: "disabled",
+          disabledReason: "operator"
+        })
+      );
+
+      // daily-report's path is now removed from symphonika.yml entirely,
+      // while weekly-report stays declared.
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "weekly-report",
+          prompt: "Report.",
+          provider: null,
+          schedule: { at: "2026-05-23T10:00:00.000Z" },
+          sourcePath: "/tmp/weekly-report.md"
+        }
+      ]);
+
+      expect(store.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          name: "daily-report",
+          state: "disabled",
+          disabledReason: "removed_from_config"
+        })
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("prunes routines for removed projects while preserving firing evidence", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

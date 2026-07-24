@@ -1247,17 +1247,21 @@ export class RunStore {
       const excludedNames = [
         ...new Set([...declaredNames, ...(options.protectedNames ?? [])])
       ];
+      // Excludes only rows already disabled *for this same reason* — an
+      // operator-disabled routine (disabled_reason='operator') whose path is
+      // then also removed from config must be upgraded to
+      // 'removed_from_config', not left with the stale prior reason.
       if (excludedNames.length === 0) {
         this.database
           .prepare(
-            "update routines set state = 'disabled', disabled_reason = 'removed_from_config', updated_at = ? where project_name = ? and state != 'disabled'"
+            "update routines set state = 'disabled', disabled_reason = 'removed_from_config', updated_at = ? where project_name = ? and not (state = 'disabled' and disabled_reason = 'removed_from_config')"
           )
           .run(now, projectName);
       } else {
         const placeholders = excludedNames.map(() => "?").join(", ");
         this.database
           .prepare(
-            `update routines set state = 'disabled', disabled_reason = 'removed_from_config', updated_at = ? where project_name = ? and name not in (${placeholders}) and state != 'disabled'`
+            `update routines set state = 'disabled', disabled_reason = 'removed_from_config', updated_at = ? where project_name = ? and name not in (${placeholders}) and not (state = 'disabled' and disabled_reason = 'removed_from_config')`
           )
           .run(now, projectName, ...excludedNames);
       }

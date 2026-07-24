@@ -59,6 +59,13 @@ and label re-checks only for label-controlled work. State Advance, waiting rows,
 Runs keep going on label drift but still stop when the Issue closes.
 _Avoid_: dispatch eligibility when referring to active-run or scheduled-work re-checks
 
+**Required Eligibility Label**:
+A repository-owned GitHub issue label configured in a Project's `issue_filters.labels_all`.
+Every configured Required Eligibility Label must exist in the Project repository before the
+Project can dispatch; unlike an Operational Label, Symphonika reads but does not own its workflow
+meaning.
+_Avoid_: operational label
+
 **Operational Label**:
 A GitHub issue label owned by the orchestrator for dispatch safety and runtime bookkeeping; v1 labels are `sym:claimed`, `sym:running`, `sym:failed`, `sym:blocked`, and `sym:stale`.
 _Avoid_: workflow label
@@ -225,6 +232,7 @@ _Avoid_: chat session
 - An **Eligible Issue** is an **Issue** that a **Project** may dispatch
 - **Dispatch Eligibility** and **Continuation Eligibility** are separate questions over the same
   Issue predicate family
+- A Project's **Required Eligibility Labels** must exist in its Issue Tracker before dispatch
 - An **Orchestrator** dispatches zero or more **Issues** across one or more **Projects**
 - An **Orchestrator** may write **Operational Labels**
 - A **Stale Claim** blocks automatic dispatch until explicitly cleared in v1

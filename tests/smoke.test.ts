@@ -515,7 +515,8 @@ async function writeBootstrapProject(root: string): Promise<void> {
 function successfulGitHubApi(): GitHubApi {
   return {
     createLabel: () => Promise.resolve(),
-    listLabels: () => Promise.resolve([...REQUIRED_OPERATIONAL_LABELS]),
+    listLabels: () =>
+      Promise.resolve(["agent-ready", ...REQUIRED_OPERATIONAL_LABELS]),
     validateRepositoryAccess: () => Promise.resolve({ ok: true })
   };
 }

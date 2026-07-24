@@ -145,6 +145,17 @@ export async function dispatchDueRoutines(
     for (const routine of input.runStore.listRoutines({
       project: project.name
     })) {
+      // A disabled/invalid/expired/inactive routine can have no persisted
+      // schedule at all (an invalid stub's schedule columns are unreadable
+      // sentinels). evaluateRoutineSchedule already treats every non-active
+      // state as never-fire, but routineSchedule() below is evaluated
+      // eagerly as a function argument, so it must never be reached for a
+      // non-active row — skip here rather than let it throw and abort the
+      // whole dispatch tick (which would also block issue dispatch, since
+      // both share one try/catch in daemon.ts's launchWork).
+      if (routine.state !== "active") {
+        continue;
+      }
       const evaluation = evaluateRoutineSchedule({
         lastFiredAt: routine.lastFiredAt,
         nextFireAt: routine.nextFireAt,

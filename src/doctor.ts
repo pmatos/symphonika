@@ -158,9 +158,7 @@ type ServiceConfig = z.infer<typeof serviceConfigSchema>;
 type ProjectConfig = z.infer<typeof projectSchema>;
 type ProjectValidation = Pick<
   DoctorProjectReport,
-  | "missingEligibilityLabels"
-  | "missingOperationalLabels"
-  | "validForDispatch"
+  "missingEligibilityLabels" | "missingOperationalLabels" | "validForDispatch"
 >;
 type LabelDescription = {
   color: string;
@@ -969,9 +967,7 @@ async function createProjectLabels(input: {
           repositoryName
         });
         if (!confirmed) {
-          input.errors.push(
-            "required eligibility label creation was declined"
-          );
+          input.errors.push("required eligibility label creation was declined");
         }
       } catch (error) {
         input.errors.push(errorMessage(error));

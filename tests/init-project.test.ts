@@ -501,14 +501,12 @@ describe("Project initialization", () => {
       createLabel: vi.fn().mockRejectedValue(new Error("permission denied")),
       listLabels: vi
         .fn()
-        .mockResolvedValue(
-          [
-            "agent-ready",
-            ...REQUIRED_OPERATIONAL_LABELS.filter(
-              (label) => label !== missingLabel
-            )
-          ]
-        ),
+        .mockResolvedValue([
+          "agent-ready",
+          ...REQUIRED_OPERATIONAL_LABELS.filter(
+            (label) => label !== missingLabel
+          )
+        ]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 

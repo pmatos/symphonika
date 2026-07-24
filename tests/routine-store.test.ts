@@ -632,6 +632,70 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("clears a stale disabled_reason when markRoutinesInactiveForProject cascades a Project disable", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          disabled: true
+        }
+      ]);
+      expect(store.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          state: "disabled",
+          disabledReason: "operator"
+        })
+      );
+
+      store.markRoutinesInactiveForProject("alpha");
+
+      expect(store.listRoutines({ includeInactive: true })).toContainEqual(
+        expect.objectContaining({ state: "inactive", disabledReason: null })
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("clears a stale disabled_reason when pruneRoutinesForUnknownProjects cascades a Project removal", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines("alpha", [
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          disabled: true
+        }
+      ]);
+      expect(store.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          state: "disabled",
+          disabledReason: "operator"
+        })
+      );
+
+      store.pruneRoutinesForUnknownProjects(["beta"]);
+
+      expect(store.listRoutines({ includeInactive: true })).toContainEqual(
+        expect.objectContaining({ state: "inactive", disabledReason: null })
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("records a firing and expires the one-shot routine", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

@@ -1310,7 +1310,10 @@ export class RunStore {
   markRoutinesInactiveForProject(projectName: string): void {
     this.database
       .prepare(
-        "update routines set state = 'inactive', updated_at = ? where project_name = ? and state != 'inactive'"
+        // disabled_reason only means anything on state = 'disabled' — clear
+        // it here so an inactive row never surfaces a stale routine-level
+        // reason left over from before the Project-cascade (ADR-0060).
+        "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name = ? and state != 'inactive'"
       )
       .run(timestamp(), projectName);
   }
@@ -1351,10 +1354,13 @@ export class RunStore {
   pruneRoutinesForUnknownProjects(projectNames: Iterable<string>): void {
     const now = timestamp();
     const names = [...new Set(projectNames)];
+    // disabled_reason only means anything on state = 'disabled' — clear it
+    // here so an inactive row never surfaces a stale routine-level reason
+    // left over from before the Project-cascade (ADR-0060).
     if (names.length === 0) {
       this.database
         .prepare(
-          "update routines set state = 'inactive', updated_at = ? where state != 'inactive'"
+          "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where state != 'inactive'"
         )
         .run(now);
       return;
@@ -1362,7 +1368,7 @@ export class RunStore {
     const placeholders = names.map(() => "?").join(", ");
     this.database
       .prepare(
-        `update routines set state = 'inactive', updated_at = ? where project_name not in (${placeholders}) and state != 'inactive'`
+        `update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name not in (${placeholders}) and state != 'inactive'`
       )
       .run(now, ...names);
   }

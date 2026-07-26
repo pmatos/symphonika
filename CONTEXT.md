@@ -30,7 +30,9 @@ priority mapping, no Workflow Contract, and no `sym:*` operational labels.
 _Avoid_: routine-only Project — a Routine Host owns no Routines; Routines target it
 
 **Service Config**:
-The reloadable orchestrator-owned configuration file that lists Projects and service-level runtime settings.
+The reloadable orchestrator-owned configuration file that lists Projects, Routines, and service-level
+runtime settings. It is the only registry that knows Project names, so it is where a Routine's target
+Projects are declared.
 _Avoid_: workflow when referring to the multi-project registry
 
 **Workflow Contract**:
@@ -58,7 +60,7 @@ A normalized unit of project work read from the issue tracker.
 _Avoid_: ticket, task
 
 **Eligible Issue**:
-An open issue that matches a Project's required labels, avoids excluded labels, and is not already claimed by the orchestrator; v1 treats excluded labels such as `blocked` as the only blocker signal.
+An open issue that matches a Dispatch Project's required labels, avoids excluded labels, and is not already claimed by the orchestrator; v1 treats excluded labels such as `blocked` as the only blocker signal.
 _Avoid_: active issue unless referring to tracker state
 
 **Dispatch Eligibility**:
@@ -92,7 +94,7 @@ opposed to a `failed` Run, which is reserved for outcomes that indicate somethin
 _Avoid_: failed run, error
 
 **Issue Reservation**:
-The orchestrator's exclusive claim on a Project's Issue, whether currently in flight as an
+The orchestrator's exclusive claim on a Dispatch Project's Issue, whether currently in flight as an
 executing Run or scheduled for imminent dispatch as a delayed retry, Continuation, State Advance,
 or wait park.
 _Avoid_: lock, in-flight when the claim spans both in-flight and scheduled work
@@ -167,8 +169,9 @@ _Avoid_: run when specifically referring to non-issue scheduled execution
 
 **Routine Skip**:
 An operator-visible clock attempt that did not create a Routine Firing because of a catch-up window,
-an overlapping non-terminal firing, or a concurrency cap. It updates the Routine's latest skip
-evidence and rolling counters but creates no `routine_firings` row.
+an overlapping non-terminal firing, or a concurrency cap. It updates that Routine Target's latest
+skip evidence and rolling counters but creates no `routine_firings` row; a Routine can be skipped
+against one Target while firing normally against its others.
 _Avoid_: Routine Firing when no provider execution was launched
 
 **Routine Pull Request**:
@@ -224,7 +227,8 @@ The first usable implementation slice that lets Symphonika run this repository a
 _Avoid_: prototype, toy
 
 **Project Cursor**:
-A Project's scheduler state for polling cadence, last poll outcome, and retry timing.
+A Dispatch Project's scheduler state for polling cadence, last poll outcome, and retry timing.
+Routine Hosts are never polled and have no cursor.
 _Avoid_: issue cursor
 
 **Agent Provider**:
@@ -253,10 +257,10 @@ _Avoid_: chat session
 - An **Autonomous Prompt** is rendered from a **Workflow Contract** or workflow state prompt for one
   **Run**
 - An **Issue Tracker** provides many **Issues**
-- An **Eligible Issue** is an **Issue** that a **Project** may dispatch
+- An **Eligible Issue** is an **Issue** that a **Dispatch Project** may dispatch
 - **Dispatch Eligibility** and **Continuation Eligibility** are separate questions over the same
   Issue predicate family
-- An **Orchestrator** dispatches zero or more **Issues** across one or more **Projects**
+- An **Orchestrator** dispatches zero or more **Issues** across one or more **Dispatch Projects**
 - An **Orchestrator** may write **Operational Labels**
 - A **Stale Claim** blocks automatic dispatch until explicitly cleared in v1
 - An **Issue Reservation** prevents duplicate dispatch while an Issue is either executing or scheduled
@@ -284,7 +288,7 @@ _Avoid_: chat session
 - A **Continuation** is capped so an eligible issue cannot loop forever
 - A **State Advance** is not capped by the continuation cap; the FSM bounds the walk via terminal states
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete
-- A **Project Cursor** belongs to exactly one **Project**
+- A **Project Cursor** belongs to exactly one **Dispatch Project**
 - **Full-Permission Agent Execution** is the default and assumed provider posture
 - An **Autonomous Run** fails if the provider requests interactive input
 

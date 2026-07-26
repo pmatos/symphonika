@@ -274,6 +274,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .option(
       "--mode <mode>",
       "project mode: dispatch (default) or routine-host",
+      parseProjectMode,
       "dispatch"
     )
     .option(
@@ -284,14 +285,11 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       async (options: {
         config?: string;
         force?: boolean;
-        mode?: string;
+        mode: "dispatch" | "routine_host";
         yes?: boolean;
       }) => {
         const emittedWarnings = new Set<string>();
-        const mode =
-          options.mode === "routine-host" || options.mode === "routine_host"
-            ? "routine_host"
-            : "dispatch";
+        const mode = options.mode;
         const report = await initProject({
           ...withConfigPath(options.config),
           force: options.force === true,
@@ -2002,6 +2000,16 @@ function parseRoutineKind(value: string): RoutineKind {
     return value;
   }
   throw new InvalidArgumentError("kind must be one of git, report");
+}
+
+function parseProjectMode(value: string): "dispatch" | "routine_host" {
+  if (value === "dispatch") {
+    return "dispatch";
+  }
+  if (value === "routine-host" || value === "routine_host") {
+    return "routine_host";
+  }
+  throw new InvalidArgumentError("mode must be one of dispatch, routine-host");
 }
 
 function pluralize(word: string, count: number): string {

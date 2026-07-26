@@ -466,6 +466,36 @@ describe("CLI", () => {
     ).rejects.toThrow(/issue number/i);
   });
 
+  it("init-project rejects an unsupported --mode value instead of silently dispatching", async () => {
+    const program = buildCli({
+      registerSignalHandlers: false,
+      runInitProject: () => Promise.reject(new Error("should not be invoked"))
+    });
+    program.exitOverride();
+    for (const command of program.commands) {
+      command.exitOverride();
+    }
+    program.configureOutput({
+      writeErr: () => {
+        /* swallow Commander's stderr noise */
+      },
+      writeOut: () => {
+        /* swallow Commander's stdout noise */
+      }
+    });
+
+    await expect(
+      program.parseAsync([
+        "node",
+        "symphonika",
+        "init-project",
+        "--mode",
+        "routine-hsot",
+        "--yes"
+      ])
+    ).rejects.toThrow(/mode must be one of/i);
+  });
+
   it("doctor prints stale issues per project after the OK summary", async () => {
     const output = { stderr: "", stdout: "" };
     const program = buildCli({

@@ -2,6 +2,13 @@
 
 Symphonika is a fresh orchestrator for turning tracked project work into isolated coding-agent runs.
 
+> **Prospective model:** The **Dispatch Project** / **Routine Host** split and service-level
+> **Routine** / **Routine Target** / **Routine Fan-out** definitions are target-state vocabulary
+> for [#290](https://github.com/pmatos/symphonika/issues/290) and
+> [#295](https://github.com/pmatos/symphonika/issues/295), not the current implementation
+> contract. Until those issues land, `SPEC.md`, ADR-0060, and the Service Config loader remain
+> authoritative for the implemented flat **Project**, project-owned **Routine** model.
+
 ## Language
 
 **Orchestrator**:

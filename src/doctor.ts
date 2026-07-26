@@ -320,6 +320,7 @@ const routineHostProjectSchema = z
     name: z.string().trim().min(1),
     mode: z.literal("routine_host"),
     disabled: z.boolean().optional(),
+    max_in_flight: z.number().int().positive().optional(),
     tracker: trackerSchema.optional(),
     workspace: projectWorkspaceSchema,
     agent: agentSchema

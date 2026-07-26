@@ -550,6 +550,45 @@ describe("Routine Host doctor (ADR 0062)", () => {
     expect(report.errors.some((e) => e.includes("priority"))).toBe(true);
   });
 
+  it("rejects an invalid max_in_flight on a Routine Host instead of passing it through", async () => {
+    const root = await makeTempRoot();
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      path.join(root, "symphonika.yml"),
+      [
+        "state:",
+        "  root: ./.symphonika",
+        "providers:",
+        "  codex:",
+        '    command: "codex -p symphonika"',
+        "  claude:",
+        '    command: "claude -p"',
+        "projects:",
+        "  - name: capped-host",
+        "    mode: routine_host",
+        "    max_in_flight: 0", // invalid — must be a positive integer
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/capped-host",
+        "      git:",
+        "        remote: git@github.com:pmatos/capped-host.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex"
+      ].join("\n")
+    );
+    process.env.GITHUB_TOKEN = "test-token";
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath: path.join(root, "symphonika.yml"),
+      env: process.env,
+      githubApi: githubApiWithLabels([])
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors.some((e) => e.includes("max_in_flight"))).toBe(true);
+  });
+
   it("reserves a brand-new invalid declaration's recovered name in validateServiceRoutines too", async () => {
     const root = await makeTempRoot();
     await mkdir(root, { recursive: true });

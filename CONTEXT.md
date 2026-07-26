@@ -13,11 +13,28 @@ The external system that provides issues, states, and metadata used for dispatch
 _Avoid_: Linear when speaking tracker-generically
 
 **Project**:
-A Symphonika-managed work source with its own tracker configuration, issue filters, priority mapping, workflow contract, workspace root, and agent-provider settings.
+A Symphonika-managed work source with its own workspace root and agent-provider settings, declared in
+the Service Config. Every Project declares whether it is a Dispatch Project or a Routine Host.
 _Avoid_: GitHub Project when referring to a Symphonika Project
 
+**Dispatch Project**:
+A Project that Symphonika polls for Eligible Issues and dispatches Runs against. It additionally
+requires tracker configuration, issue filters, priority mapping, and a Workflow Contract.
+_Avoid_: Project when the distinction from a Routine Host matters
+
+**Routine Host**:
+A Project that is never polled for issues and exists only to give Routine Firings a repository and a
+workspace — including Routines with no natural repo tie (a nightly weather digest, say), since every
+Routine must target at least one Project. It declares a name, workspace root, and agent settings —
+plus tracker configuration only when its `kind: git` firings should get Routine Pull Request
+discovery. It has no issue filters, no priority mapping, no Workflow Contract, and no `sym:*`
+operational labels.
+_Avoid_: routine-only Project — a Routine Host owns no Routines; Routines target it
+
 **Service Config**:
-The reloadable orchestrator-owned configuration file that lists Projects and service-level runtime settings.
+The reloadable orchestrator-owned configuration file that lists Projects, Routines, and service-level
+runtime settings. It is the only registry that knows Project names, so it is where a Routine's target
+Projects are declared.
 _Avoid_: workflow when referring to the multi-project registry
 
 **Workflow Contract**:
@@ -45,12 +62,12 @@ A normalized unit of project work read from the issue tracker.
 _Avoid_: ticket, task
 
 **Eligible Issue**:
-An open issue that matches a Project's required labels, avoids excluded labels, and is not already claimed by the orchestrator; v1 treats excluded labels such as `blocked` as the only blocker signal.
+An open issue that matches a Dispatch Project's required labels, avoids excluded labels, and is not already claimed by the orchestrator; v1 treats excluded labels such as `blocked` as the only blocker signal.
 _Avoid_: active issue unless referring to tracker state
 
 **Dispatch Eligibility**:
-The question "may this Project freshly claim this Issue?", including open state, required labels,
-excluded labels, and blocking operational labels.
+The question "may this Dispatch Project freshly claim this Issue?", including open state, required
+labels, excluded labels, and blocking operational labels.
 _Avoid_: continuation eligibility when referring to first claim selection
 
 **Continuation Eligibility**:
@@ -60,10 +77,10 @@ Runs keep going on label drift but still stop when the Issue closes.
 _Avoid_: dispatch eligibility when referring to active-run or scheduled-work re-checks
 
 **Required Eligibility Label**:
-A repository-owned GitHub issue label configured in a Project's `issue_filters.labels_all`.
-Every configured Required Eligibility Label must exist in the Project repository before the
-Project can dispatch; unlike an Operational Label, Symphonika reads but does not own its workflow
-meaning.
+A repository-owned GitHub issue label configured in a Dispatch Project's `issue_filters.labels_all`.
+Every configured Required Eligibility Label must exist in the Dispatch Project's repository before
+the Dispatch Project can dispatch; unlike an Operational Label, Symphonika reads but does not own
+its workflow meaning.
 _Avoid_: operational label
 
 **Operational Label**:
@@ -86,7 +103,7 @@ opposed to a `failed` Run, which is reserved for outcomes that indicate somethin
 _Avoid_: failed run, error
 
 **Issue Reservation**:
-The orchestrator's exclusive claim on a Project's Issue, whether currently in flight as an
+The orchestrator's exclusive claim on a Dispatch Project's Issue, whether currently in flight as an
 executing Run or scheduled for imminent dispatch as a delayed retry, Continuation, State Advance,
 or wait park.
 _Avoid_: lock, in-flight when the claim spans both in-flight and scheduled work
@@ -134,21 +151,40 @@ One orchestrator-managed execution lifecycle for one issue in one workspace.
 _Avoid_: issue when referring to execution status
 
 **Routine**:
-A project-owned scheduled prompt declaration that can launch a Coding Agent without a GitHub Issue.
-When its Project is disabled or omitted from the current valid Service Config snapshot, the Routine
-is inactive: it is hidden from default operator listings while its firing state remains durable for
-later re-enable.
-_Avoid_: workflow contract when referring to recurring or one-shot scheduled work
+A service-level scheduled prompt declaration that can launch a Coding Agent without a GitHub Issue,
+targeting one or more Projects — never zero. Symphonika has no project-less Routine: Routine Firing
+capacity caps and skip accounting are tracked per Project, so a Routine with no natural repo tie
+still declares against a minimal Routine Host rather than standing free of any Project. Its name is
+unique across the Service Config. When a targeted Project is disabled or omitted from the current
+valid Service Config snapshot, that Routine Target is inactive: it is hidden from default operator
+listings while its firing state remains durable for later re-enable.
+_Avoid_: workflow contract when referring to recurring or one-shot scheduled work; project-owned
+routine — a Routine names its Projects, not the other way round
+
+**Routine Target**:
+One Project named in a Routine's project list. Each Target carries its own schedule state, skip
+counters, and Firing history, so a single Routine can be firing against one Project while skipped
+against another.
+_Avoid_: routine instance
+
+**Routine Fan-out**:
+The expansion of one Routine clock event into one clock attempt per active Routine Target. Each
+attempt independently yields either a Routine Firing or a Routine Skip, so one clock event can fire
+against some Targets while skipping against others. Inactive Targets are excluded from the fan-out
+entirely: they are neither attempted nor recorded as a Skip. Siblings from a single clock event
+share a correlation identity so operator surfaces can present them as one event.
+_Avoid_: continuation, retry
 
 **Routine Firing**:
-One durable execution attempt of a Routine, with its own workspace, provider logs, prompt evidence,
-and lifecycle state.
+One durable execution attempt of a Routine against one Routine Target, with its own workspace,
+provider logs, prompt evidence, and lifecycle state.
 _Avoid_: run when specifically referring to non-issue scheduled execution
 
 **Routine Skip**:
 An operator-visible clock attempt that did not create a Routine Firing because of a catch-up window,
-an overlapping non-terminal firing, or a concurrency cap. It updates the Routine's latest skip
-evidence and rolling counters but creates no `routine_firings` row.
+an overlapping non-terminal firing, or a concurrency cap. It updates that Routine Target's latest
+skip evidence and rolling counters but creates no `routine_firings` row; a Routine can be skipped
+against one Target while firing normally against its others.
 _Avoid_: Routine Firing when no provider execution was launched
 
 **Routine Pull Request**:
@@ -204,7 +240,8 @@ The first usable implementation slice that lets Symphonika run this repository a
 _Avoid_: prototype, toy
 
 **Project Cursor**:
-A Project's scheduler state for polling cadence, last poll outcome, and retry timing.
+A Dispatch Project's scheduler state for polling cadence, last poll outcome, and retry timing.
+Routine Hosts are never polled and have no cursor.
 _Avoid_: issue cursor
 
 **Agent Provider**:
@@ -221,19 +258,23 @@ _Avoid_: chat session
 
 ## Relationships
 
-- A **Service Config** lists one or more **Projects**
-- A **Project** owns one **Issue Tracker** configuration
-- A **Project** references one **Workflow Contract**
+- A **Service Config** lists one or more **Projects** and zero or more **Routines**
+- Every **Project** is either a **Dispatch Project** or a **Routine Host**
+- A **Dispatch Project** owns one **Issue Tracker** configuration
+- A **Dispatch Project** references one **Workflow Contract**
+- Only **Dispatch Projects** are polled for **Eligible Issues**
+- A **Routine Host** declares an **Issue Tracker** configuration only to enable **Routine Pull
+  Request** discovery for its `kind: git` firings
 - A **Workflow Contract** compiles to an **Expanded Workflow Graph**
 - A **Workflow Template** contributes resolved states to an **Expanded Workflow Graph**
 - An **Autonomous Prompt** is rendered from a **Workflow Contract** or workflow state prompt for one
   **Run**
 - An **Issue Tracker** provides many **Issues**
-- An **Eligible Issue** is an **Issue** that a **Project** may dispatch
+- An **Eligible Issue** is an **Issue** that a **Dispatch Project** may dispatch
 - **Dispatch Eligibility** and **Continuation Eligibility** are separate questions over the same
   Issue predicate family
-- A Project's **Required Eligibility Labels** must exist in its Issue Tracker before dispatch
-- An **Orchestrator** dispatches zero or more **Issues** across one or more **Projects**
+- An **Orchestrator** dispatches zero or more **Issues** across one or more **Dispatch Projects**
+- A **Dispatch Project**'s **Required Eligibility Labels** must exist in its Issue Tracker before dispatch
 - An **Orchestrator** may write **Operational Labels**
 - A **Stale Claim** blocks automatic dispatch until explicitly cleared in v1
 - An **Issue Reservation** prevents duplicate dispatch while an Issue is either executing or scheduled
@@ -250,8 +291,11 @@ _Avoid_: chat session
 - A **Normalized Event Log** is derived from a **Provider Event Log**
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
-- A **Routine** belongs to one **Project** and may create zero or more **Routine Firings**
-- A **Routine** may record **Routine Skips** without creating Routine Firings
+- A **Routine** targets one or more **Projects** of either kind, and its name is unique across the
+  **Service Config**
+- One **Routine** clock event is evaluated once per active **Routine Target**, yielding either a
+  **Routine Firing** or a **Routine Skip**; inactive Targets are not evaluated
+- A **Routine Target** may record **Routine Skips** without creating Routine Firings
 - A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
@@ -259,7 +303,7 @@ _Avoid_: chat session
 - A **Continuation** is capped so an eligible issue cannot loop forever
 - A **State Advance** is not capped by the continuation cap; the FSM bounds the walk via terminal states
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete
-- A **Project Cursor** belongs to exactly one **Project**
+- A **Project Cursor** belongs to exactly one **Dispatch Project**
 - **Full-Permission Agent Execution** is the default and assumed provider posture
 - An **Autonomous Run** fails if the provider requests interactive input
 
@@ -272,3 +316,5 @@ _Avoid_: chat session
 
 - "Orchestrator" is resolved as a fresh implementation following the Symphony specification, not a modification of the existing Symphony Elixir reference implementation.
 - "Project" is resolved as a Symphonika-managed work source, not a GitHub Projects board.
+- "Job" is deliberately not a Symphonika term. Operator surfaces name a **Run** or a **Routine
+  Firing** explicitly; mixed listings are titled by what they show rather than by an umbrella noun.

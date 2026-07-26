@@ -5,7 +5,6 @@ export const pathStringSchema = z
   .trim()
   .min(1)
   .refine((value) => !value.includes("\0"), "path must not contain NUL bytes");
-export const projectModeSchema = z.enum(["dispatch", "routine_host"]);
 
 const workflowPathSchema = pathStringSchema;
 

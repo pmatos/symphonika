@@ -305,7 +305,10 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         }
 
         const createdLabels = report.projects.flatMap((project) =>
-          project.createdOperationalLabels.map((label) => ({
+          [
+            ...project.createdOperationalLabels,
+            ...project.createdEligibilityLabels
+          ].map((label) => ({
             label,
             repository: project.repository
           }))
@@ -733,6 +736,10 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
                 `  ${project.name}: ${project.validForDispatch ? "valid" : "invalid"}\n`
               );
               writeOut(program, `    workflow: ${project.workflowPath}\n`);
+              writeOut(
+                program,
+                `    missing required eligibility labels: ${formatList(project.missingEligibilityLabels)}\n`
+              );
               writeOut(
                 program,
                 `    missing operational labels: ${formatList(project.missingOperationalLabels)}\n`

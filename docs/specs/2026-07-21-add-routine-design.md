@@ -40,6 +40,12 @@ then fails, the command removes only the file it just created, leaving the Servi
 The command does not contact the daemon or trigger reload; the next normal tick observes both local
 file changes together.
 
+Duplicate-name detection is best-effort across existing declarations. A valid existing Routine name,
+or a path-safe `partialName` recovered from otherwise-invalid front matter, still blocks a
+collision. A missing or corrupt declaration whose name cannot be recovered is skipped for this
+registration-only check, so unrelated broken files do not roll back a valid scaffold. `doctor`
+continues to report the broken declaration independently.
+
 ## Generated declaration
 
 Front matter preserves the operator's cron expression rather than replacing aliases with their

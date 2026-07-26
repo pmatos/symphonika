@@ -32,7 +32,7 @@ afterEach(async () => {
 });
 
 describe("GitHub Project validation", () => {
-  it("marks a Project valid for dispatch when repository access and operational labels are present", async () => {
+  it("marks a Project valid for dispatch when operational and required eligibility labels are present", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);
     const githubApi: GitHubApi = {
@@ -60,6 +60,7 @@ describe("GitHub Project validation", () => {
 
     expect(report.ok).toBe(true);
     expect(report.projects[0]).toMatchObject({
+      missingEligibilityLabels: [],
       missingOperationalLabels: [],
       validForDispatch: true
     });
@@ -107,7 +108,7 @@ describe("GitHub Project validation", () => {
     await writeValidProject(root);
     const githubApi: GitHubApi = {
       createLabel: vi.fn(),
-      listLabels: vi.fn().mockResolvedValue(["sym:claimed"]),
+      listLabels: vi.fn().mockResolvedValue(["agent-ready", "sym:claimed"]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -130,6 +131,43 @@ describe("GitHub Project validation", () => {
         "sym:blocked",
         "sym:stale"
       ],
+      validForDispatch: false
+    });
+    expect(githubApi.createLabel).not.toHaveBeenCalled();
+  });
+
+  it("reports missing required eligibility labels and rejects dispatch", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi
+        .fn()
+        .mockResolvedValue([
+          "sym:claimed",
+          "sym:running",
+          "sym:failed",
+          "sym:blocked",
+          "sym:stale"
+        ]),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath: "symphonika.yml",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain(
+      "projects.symphonika.tracker.repository pmatos/symphonika is missing required eligibility labels: agent-ready"
+    );
+    expect(report.projects[0]).toMatchObject({
+      missingEligibilityLabels: ["agent-ready"],
+      missingOperationalLabels: [],
       validForDispatch: false
     });
     expect(githubApi.createLabel).not.toHaveBeenCalled();
@@ -274,7 +312,9 @@ describe("GitHub Project initialization", () => {
     await writeValidProject(root);
     const githubApi: GitHubApi = {
       createLabel: vi.fn().mockResolvedValue(undefined),
-      listLabels: vi.fn().mockResolvedValue(["sym:claimed", "sym:failed"]),
+      listLabels: vi
+        .fn()
+        .mockResolvedValue(["agent-ready", "sym:claimed", "sym:failed"]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -326,7 +366,9 @@ describe("GitHub Project initialization", () => {
     };
     const githubApi: GitHubApi = {
       createLabel: vi.fn(createLabel),
-      listLabels: vi.fn().mockResolvedValue(["sym:claimed", "sym:running"]),
+      listLabels: vi
+        .fn()
+        .mockResolvedValue(["agent-ready", "sym:claimed", "sym:running"]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -361,7 +403,9 @@ describe("GitHub Project initialization", () => {
     };
     const githubApi: GitHubApi = {
       createLabel: vi.fn(createLabel),
-      listLabels: vi.fn().mockResolvedValue(["sym:claimed", "sym:failed"]),
+      listLabels: vi
+        .fn()
+        .mockResolvedValue(["agent-ready", "sym:claimed", "sym:failed"]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 

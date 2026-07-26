@@ -182,6 +182,29 @@ const pollingProjectSchema = z
   .passthrough()
   .superRefine(rejectPerProjectRoutines);
 
+// A Routine Host has no use for dispatch-only fields — ADR 0062 says they are
+// "unused and rejected", so a stale or copy-pasted dispatch block must be a
+// declaration-time error rather than silently ignored.
+const DISPATCH_ONLY_KEYS = ["issue_filters", "priority", "workflow"] as const;
+
+function rejectDispatchOnlyKeysOnRoutineHost(
+  rawProject: unknown,
+  ctx: z.RefinementCtx
+): void {
+  if (rawProject === null || typeof rawProject !== "object") {
+    return;
+  }
+  for (const key of DISPATCH_ONLY_KEYS) {
+    if (key in rawProject) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `\`${key}\` is a dispatch-only field and is unused and rejected on a Routine Host (mode: routine_host); see ADR 0062`,
+        path: [key]
+      });
+    }
+  }
+}
+
 // A Routine Host: never polled for issues, exists only to host Routine Firings.
 // Requires name + workspace + agent + mode. `tracker` is optional here; the
 // unconditional "kind: git requires tracker" rule is enforced after routine
@@ -197,7 +220,8 @@ const routineHostProjectSchema = z
     agent: agentSchema
   })
   .passthrough()
-  .superRefine(rejectPerProjectRoutines);
+  .superRefine(rejectPerProjectRoutines)
+  .superRefine(rejectDispatchOnlyKeysOnRoutineHost);
 
 // Runtime detail that varies by mode. Dispatch Projects need workspace +
 // workflow; Routine Hosts need workspace only (no workflow, no per-project

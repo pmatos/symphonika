@@ -368,6 +368,50 @@ describe("Routine Host reload (ADR 0062)", () => {
         .errors.some((e) => e.includes("per-project `routines:` was removed"))
     ).toBe(true);
   });
+
+  it("rejects dispatch-only fields (issue_filters, priority, workflow) on a Routine Host", async () => {
+    const root = await makeTempRoot();
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      path.join(root, "symphonika.yml"),
+      [
+        "state:",
+        "  root: ./.symphonika",
+        "providers:",
+        "  codex:",
+        '    command: "codex -p symphonika"',
+        "  claude:",
+        '    command: "claude -p"',
+        "projects:",
+        "  - name: stale-host",
+        "    mode: routine_host",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/stale-host",
+        "      git:",
+        "        remote: git@github.com:pmatos/stale-host.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    issue_filters:", // dispatch-only — must be rejected on a host
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: ["blocked"]',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workflow: ./WORKFLOW.md"
+      ].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const errors = reloader.getStatus().errors;
+    expect(errors.some((e) => e.includes("issue_filters"))).toBe(true);
+    expect(errors.some((e) => e.includes("priority"))).toBe(true);
+    expect(errors.some((e) => e.includes("workflow"))).toBe(true);
+  });
 });
 
 describe("Routine Host doctor (ADR 0062)", () => {
@@ -397,6 +441,47 @@ describe("Routine Host doctor (ADR 0062)", () => {
     expect(report.projects[0]?.validForHosting).toBe(true);
     expect(report.projects[0]?.validForDispatch).toBe(false);
     expect(report.projects[0]?.missingOperationalLabels).toEqual([]);
+  });
+
+  it("rejects dispatch-only fields (issue_filters, priority, workflow) on a Routine Host", async () => {
+    const root = await makeTempRoot();
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      path.join(root, "symphonika.yml"),
+      [
+        "state:",
+        "  root: ./.symphonika",
+        "providers:",
+        "  codex:",
+        '    command: "codex -p symphonika"',
+        "  claude:",
+        '    command: "claude -p"',
+        "projects:",
+        "  - name: stale-host",
+        "    mode: routine_host",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/stale-host",
+        "      git:",
+        "        remote: git@github.com:pmatos/stale-host.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    priority:", // dispatch-only — must be rejected on a host
+        "      labels: {}",
+        "      default: 99"
+      ].join("\n")
+    );
+    process.env.GITHUB_TOKEN = "test-token";
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath: path.join(root, "symphonika.yml"),
+      env: process.env,
+      githubApi: githubApiWithLabels([])
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors.some((e) => e.includes("priority"))).toBe(true);
   });
 
   it("is green with 7 Routine Hosts plus a Dispatch Project (sym:* labels exist only for dispatch)", async () => {

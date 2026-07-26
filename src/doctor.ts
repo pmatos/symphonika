@@ -469,6 +469,19 @@ async function validateServiceRoutines(
     }
   }
   for (const entry of entries) {
+    // Validate the target project independently of whether the declaration
+    // itself parses — both come from the top-level `routines:` entry, so a
+    // broken file and an unknown target are independent, simultaneously
+    // diagnosable errors. Checking this first means both surface in the
+    // same `doctor` pass instead of requiring a fix-and-rerun cycle to find
+    // the second one.
+    const declared = declaredProjects.find((p) => p.name === entry.projectName);
+    if (declared === undefined) {
+      errors.push(
+        `routines entry targets project "${entry.projectName}" (declared at ${entry.sourcePath}), but no project with that name is declared`
+      );
+    }
+
     const result = await loadRoutineDeclaration(entry.sourcePath);
     if (result.routine === null) {
       errors.push(...result.errors);
@@ -498,12 +511,7 @@ async function validateServiceRoutines(
     }
     seenNames.set(routine.name, routine.sourcePath);
 
-    // Unknown target project.
-    const declared = declaredProjects.find((p) => p.name === entry.projectName);
     if (declared === undefined) {
-      errors.push(
-        `routines entry targets project "${entry.projectName}" (routine "${routine.name}" at ${routine.sourcePath}), but no project with that name is declared`
-      );
       continue;
     }
 

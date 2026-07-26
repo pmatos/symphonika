@@ -710,6 +710,59 @@ describe("Routine Host doctor (ADR 0062)", () => {
     ).toBe(true);
   });
 
+  it("validates a routine's target project even when its own declaration fails to load", async () => {
+    const root = await makeTempRoot();
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      path.join(root, "broken-routine.md"),
+      [
+        "---",
+        "name: broken-routine",
+        "kind: bogus-kind",
+        "schedule:",
+        "  cron: 0 1 * * *",
+        "  tz: Etc/UTC",
+        "---",
+        "Body."
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "symphonika.yml"),
+      [
+        "state:",
+        "  root: ./.symphonika",
+        "providers:",
+        "  codex:",
+        '    command: "codex -p symphonika"',
+        "  claude:",
+        '    command: "claude -p"',
+        "projects:",
+        ...hostProjectLines("host-a"),
+        "routines:",
+        "  - project: nonexistent-project",
+        "    path: ./broken-routine.md"
+      ].join("\n")
+    );
+    process.env.GITHUB_TOKEN = "test-token";
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath: path.join(root, "symphonika.yml"),
+      env: process.env,
+      githubApi: githubApiWithLabels([])
+    });
+
+    expect(report.ok).toBe(false);
+    expect(
+      report.errors.some(
+        (e) =>
+          e.includes('routines entry targets project "nonexistent-project"') &&
+          e.includes("no project with that name is declared")
+      )
+    ).toBe(true);
+    expect(report.errors.some((e) => e.includes("kind"))).toBe(true);
+  });
+
   it("is green with 7 Routine Hosts plus a Dispatch Project (sym:* labels exist only for dispatch)", async () => {
     const root = await makeTempRoot();
     await mkdir(root, { recursive: true });

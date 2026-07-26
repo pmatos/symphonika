@@ -478,6 +478,61 @@ describe("Routine Host reload (ADR 0062)", () => {
       ?.projects.find((p) => p.name === "host-b");
     expect(hostB?.routines ?? []).toEqual([]);
   });
+
+  it("rejects a routine targeting a duplicated Project name instead of silently attaching it to a shadowed duplicate", async () => {
+    const root = await makeTempRoot();
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      path.join(root, "daily-report.md"),
+      [
+        "---",
+        "name: daily-report",
+        "kind: report",
+        "schedule:",
+        "  cron: 0 3 * * *",
+        "  tz: Etc/UTC",
+        "---",
+        "Report."
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "symphonika.yml"),
+      [
+        "state:",
+        "  root: ./.symphonika",
+        "providers:",
+        "  codex:",
+        '    command: "codex -p symphonika"',
+        "  claude:",
+        '    command: "claude -p"',
+        "projects:",
+        ...hostProjectLines("shared-host"),
+        ...hostProjectLines("shared-host"),
+        "routines:",
+        "  - project: shared-host",
+        "    path: ./daily-report.md"
+      ].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const status = reloader.getStatus();
+    expect(status.ok).toBe(false);
+    expect(
+      status.errors.some((e) =>
+        e.includes('"shared-host" is declared more than once')
+      )
+    ).toBe(true);
+    const duplicates = reloader
+      .getSnapshot()
+      ?.projects.filter((p) => p.name === "shared-host");
+    expect(duplicates?.length).toBe(2);
+    for (const project of duplicates ?? []) {
+      expect(project.routines ?? []).toEqual([]);
+    }
+  });
 });
 
 describe("Routine Host doctor (ADR 0062)", () => {

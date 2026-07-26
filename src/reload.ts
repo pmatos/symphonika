@@ -505,9 +505,30 @@ async function loadRuntimeConfigSnapshot(input: {
       ...routinesByProject.keys(),
       ...invalidNamesByProject.keys()
     ]);
+    // `.find()` below resolves a duplicated Project name to its first
+    // match, but `projectsByName()` (what the dispatcher and daemon
+    // actually consume) keeps the last Project declared with that name —
+    // so routines attached to the shadowed duplicate would silently never
+    // run. Reject the target instead of guessing which duplicate should
+    // host it.
+    const projectNameCounts = new Map<string, number>();
+    for (const project of dispatchProjects) {
+      projectNameCounts.set(
+        project.name,
+        (projectNameCounts.get(project.name) ?? 0) + 1
+      );
+    }
     for (const projectName of targetedProjectNames) {
-      const project = dispatchProjects.find((p) => p.name === projectName);
       const routines = routinesByProject.get(projectName) ?? [];
+      if ((projectNameCounts.get(projectName) ?? 0) > 1) {
+        for (const routine of routines) {
+          errors.push(
+            `routines entry targets project "${projectName}" (routine "${routine.name}" at ${routine.sourcePath}), but "${projectName}" is declared more than once; routine targets require a unique project name`
+          );
+        }
+        continue;
+      }
+      const project = dispatchProjects.find((p) => p.name === projectName);
       if (project === undefined) {
         for (const routine of routines) {
           errors.push(

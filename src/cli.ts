@@ -748,7 +748,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             for (const project of report.projects) {
               writeOut(
                 program,
-                `  ${project.name}: ${project.mode} ${project.mode === "routine_host" ? (project.validForHosting ? "valid" : "invalid") : (project.validForDispatch ? "valid" : "invalid")}\n`
+                `  ${project.name}: ${project.mode} ${project.mode === "routine_host" ? (project.validForHosting ? "valid" : "invalid") : project.validForDispatch ? "valid" : "invalid"}\n`
               );
               writeOut(
                 program,

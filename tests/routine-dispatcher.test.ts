@@ -120,7 +120,7 @@ describe("RoutineFiringDispatcher", () => {
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
                   sourcePath: path.join(root, "dependency-update.md"),
-                  projectName: "alpha",
+                  projectName: "alpha"
                 }
               ]
             }
@@ -223,7 +223,7 @@ describe("RoutineFiringDispatcher", () => {
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
                   sourcePath: path.join(root, "dependency-update.md"),
-                  projectName: "alpha",
+                  projectName: "alpha"
                 }
               ]
             }
@@ -330,7 +330,7 @@ describe("RoutineFiringDispatcher", () => {
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
                   sourcePath: path.join(root, "daily-report.md"),
-                  projectName: "alpha",
+                  projectName: "alpha"
                 }
               ],
               tracker: {
@@ -421,7 +421,7 @@ describe("RoutineFiringDispatcher", () => {
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
                   sourcePath: path.join(root, "daily-report.md"),
-                  projectName: "alpha",
+                  projectName: "alpha"
                 }
               ]
             }
@@ -499,7 +499,7 @@ describe("RoutineFiringDispatcher", () => {
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
                   sourcePath: path.join(root, "daily-report.md"),
-                  projectName: "alpha",
+                  projectName: "alpha"
                 }
               ]
             }
@@ -578,7 +578,7 @@ describe("RoutineFiringDispatcher", () => {
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
                   sourcePath: path.join(root, "daily-report.md"),
-                  projectName: "alpha",
+                  projectName: "alpha"
                 }
               ]
             }
@@ -662,7 +662,7 @@ describe("RoutineFiringDispatcher", () => {
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
                   sourcePath: path.join(root, "daily-report.md"),
-                  projectName: "alpha",
+                  projectName: "alpha"
                 }
               ]
             }
@@ -717,7 +717,10 @@ describe("RoutineFiringDispatcher", () => {
       schedule: { cron: "* * * * *", tz: "Etc/UTC" },
       sourcePath: path.join(root, "minute-report.md")
     };
-    const project = { ...runStoreProjectFixture(), routines: [{ ...routine, projectName: "alpha" }] };
+    const project = {
+      ...runStoreProjectFixture(),
+      routines: [{ ...routine, projectName: "alpha" }]
+    };
     const baseInput = {
       activeRuns,
       agentProviders: { codex: provider },
@@ -1239,7 +1242,7 @@ describe("RoutineFiringDispatcher", () => {
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
                   sourcePath: path.join(root, "daily-report.md"),
-                  projectName: "alpha",
+                  projectName: "alpha"
                 }
               ]
             }
@@ -1385,7 +1388,7 @@ describe("RoutineFiringDispatcher", () => {
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
                   sourcePath: path.join(root, "daily-report.md"),
-                  projectName: "alpha",
+                  projectName: "alpha"
                 }
               ]
             }
@@ -1420,7 +1423,7 @@ function dueRoutineProjectFixture(root: string, provider: "codex" | "claude") {
         provider,
         schedule: { at: "2026-05-22T10:00:00.000Z" },
         sourcePath: path.join(root, "daily-report.md"),
-        projectName: "alpha",
+        projectName: "alpha"
       }
     ]
   };
@@ -1508,7 +1511,13 @@ function recurringDispatchInput(input: {
         workspacePath: path.join(input.root, "workspace")
       }),
     projects: new Map([
-      ["alpha", { ...runStoreProjectFixture(), routines: [{ ...input.routine, projectName: "alpha" }] }]
+      [
+        "alpha",
+        {
+          ...runStoreProjectFixture(),
+          routines: [{ ...input.routine, projectName: "alpha" }]
+        }
+      ]
     ]),
     providersConfig: {
       claude: { command: "claude fake" },

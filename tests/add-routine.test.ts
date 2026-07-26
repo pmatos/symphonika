@@ -419,7 +419,9 @@ async function writeConfig(
         ? []
         : [
             "routines:",
-            ...routines.map((routine) => `  - path: ${routine}\n    project: alpha`)
+            ...routines.map(
+              (routine) => `  - path: ${routine}\n    project: alpha`
+            )
           ]),
       ""
     ].join("\n")

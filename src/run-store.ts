@@ -1299,7 +1299,10 @@ export class RunStore {
           const scheduleValues =
             "cron" in routine.schedule
               ? {
-                  nextFireAt: nextRecurringFireAt(routine.schedule, scheduleNow),
+                  nextFireAt: nextRecurringFireAt(
+                    routine.schedule,
+                    scheduleNow
+                  ),
                   scheduleAt: "",
                   scheduleCron: routine.schedule.cron,
                   scheduleTz: routine.schedule.tz

@@ -646,8 +646,7 @@ async function loadDispatchProject(input: {
   // offending Project from dispatch while valid siblings keep polling.
   const rawWatchdog = optionalWatchdogOf(input.rawProject);
   if (rawWatchdog !== undefined) {
-    const watchdogOverride =
-      projectWatchdogConfigSchema.safeParse(rawWatchdog);
+    const watchdogOverride = projectWatchdogConfigSchema.safeParse(rawWatchdog);
     if (!watchdogOverride.success) {
       input.errors.push(
         ...watchdogOverride.error.issues.map((issue) =>
@@ -695,8 +694,7 @@ async function loadDispatchProject(input: {
             }
           }),
       workflow:
-        previousWorkflow !== undefined &&
-        "expandedWorkflow" in previousWorkflow
+        previousWorkflow !== undefined && "expandedWorkflow" in previousWorkflow
           ? previousWorkflow
           : detail.data.workflow,
       workspace: detail.data.workspace
@@ -755,8 +753,7 @@ function loadRoutineHostProject(input: {
   // Same watchdog-override whole-snapshot rejection as Dispatch Projects.
   const rawWatchdog = optionalWatchdogOf(input.rawProject);
   if (rawWatchdog !== undefined) {
-    const watchdogOverride =
-      projectWatchdogConfigSchema.safeParse(rawWatchdog);
+    const watchdogOverride = projectWatchdogConfigSchema.safeParse(rawWatchdog);
     if (!watchdogOverride.success) {
       input.errors.push(
         ...watchdogOverride.error.issues.map((issue) =>
@@ -785,7 +782,9 @@ function loadRoutineHostProject(input: {
 
   input.dispatchProjects.push({
     ...(host.data.tracker === undefined ? {} : { tracker: host.data.tracker }),
-    ...(host.data.disabled === undefined ? {} : { disabled: host.data.disabled }),
+    ...(host.data.disabled === undefined
+      ? {}
+      : { disabled: host.data.disabled }),
     ...(host.data.max_in_flight === undefined
       ? {}
       : { max_in_flight: host.data.max_in_flight }),

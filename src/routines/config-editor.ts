@@ -73,10 +73,7 @@ export class RoutineConfigEditor {
         if (!isMap(item)) {
           throw new Error("service config routines entries must be mappings");
         }
-        const existingPath = path.resolve(
-          configDir,
-          readEntryPath(item)
-        );
+        const existingPath = path.resolve(configDir, readEntryPath(item));
         const existingProject = readEntryProject(item);
         if (existingPath === requestedPath) {
           if (existingProject === input.projectName) {
@@ -96,7 +93,12 @@ export class RoutineConfigEditor {
           );
         }
       }
-      routines.add(document.createNode({ path: input.routinePath, project: input.projectName }));
+      routines.add(
+        document.createNode({
+          path: input.routinePath,
+          project: input.projectName
+        })
+      );
     }
     await writeFile(this.configPath, String(document), "utf8");
 

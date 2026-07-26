@@ -472,9 +472,12 @@ describe("RunStore routines", () => {
         disabledReason: "operator"
       });
 
-      store.syncRoutines([{ ...routine, disabled: false, projectName: "alpha" }], {
-        now: new Date("2026-03-29T02:00:00.000Z")
-      });
+      store.syncRoutines(
+        [{ ...routine, disabled: false, projectName: "alpha" }],
+        {
+          now: new Date("2026-03-29T02:00:00.000Z")
+        }
+      );
 
       expect(store.listRoutines()[0]).toMatchObject({
         state: "active",
@@ -507,9 +510,12 @@ describe("RunStore routines", () => {
         disabledReason: "operator"
       });
 
-      store.syncRoutines([{ ...routine, disabled: false, projectName: "alpha" }], {
-        now: new Date("2026-05-23T00:00:00.000Z")
-      });
+      store.syncRoutines(
+        [{ ...routine, disabled: false, projectName: "alpha" }],
+        {
+          now: new Date("2026-05-23T00:00:00.000Z")
+        }
+      );
 
       expect(store.listRoutines()[0]).toMatchObject({
         state: "expired",

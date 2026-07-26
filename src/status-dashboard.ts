@@ -80,7 +80,9 @@ export function renderStatusDashboardRedrawFrame(
 
 export function renderStatusDashboard(input: StatusDashboardInput): string {
   const validProjects = input.projects.filter((project) =>
-    project.mode === "routine_host" ? project.validForHosting : project.validForDispatch
+    project.mode === "routine_host"
+      ? project.validForHosting
+      : project.validForDispatch
   ).length;
   const invalidProjects = input.projects.length - validProjects;
   const activeRuns = input.runs.filter((run) =>

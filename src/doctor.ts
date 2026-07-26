@@ -169,7 +169,10 @@ export type ClearStaleReport = {
 type ServiceConfig = z.infer<typeof serviceConfigSchema>;
 type ProjectConfig = z.infer<typeof projectSchema>;
 type DispatchProjectConfig = Extract<ProjectConfig, { mode: "dispatch" }>;
-type RoutineHostProjectConfig = Extract<ProjectConfig, { mode: "routine_host" }>;
+type RoutineHostProjectConfig = Extract<
+  ProjectConfig,
+  { mode: "routine_host" }
+>;
 type ProjectValidation = Pick<
   DoctorProjectReport,
   | "missingEligibilityLabels"
@@ -301,7 +304,10 @@ const routineHostProjectSchema = z
   .passthrough()
   .superRefine(rejectPerProjectRoutines);
 
-const projectSchema = z.union([dispatchProjectSchema, routineHostProjectSchema]);
+const projectSchema = z.union([
+  dispatchProjectSchema,
+  routineHostProjectSchema
+]);
 
 const serviceRoutineSchema = z
   .object({
@@ -715,7 +721,9 @@ export async function runInitProject(
       missingOperationalLabels: [],
       name: settings.projectName,
       repository:
-        github === undefined ? metadata.remote : `${github.owner}/${github.repo}`
+        github === undefined
+          ? metadata.remote
+          : `${github.owner}/${github.repo}`
     });
     return initProjectReport(configPath, errors, warnings, projects);
   }

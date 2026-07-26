@@ -15,9 +15,7 @@ import {
 } from "../src/doctor.js";
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
 import { dispatchDueRoutines } from "../src/routines/dispatcher.js";
-import type {
-  PreparedRoutineWorkspace
-} from "../src/routines/workspace.js";
+import type { PreparedRoutineWorkspace } from "../src/routines/workspace.js";
 import type {
   AgentProvider,
   AgentProviderRegistry,
@@ -66,7 +64,10 @@ async function createGitRepo(root: string, remote: string): Promise<void> {
 
 // A Routine Host declaration: name + workspace + agent + mode, optional
 // tracker, no tracker/filters/priority/workflow.
-function hostProjectLines(name: string, options: { tracker?: boolean } = {}): string[] {
+function hostProjectLines(
+  name: string,
+  options: { tracker?: boolean } = {}
+): string[] {
   return [
     `  - name: ${name}`,
     "    mode: routine_host",
@@ -105,7 +106,9 @@ async function writeHostOnlyConfig(
       "  claude:",
       '    command: "claude -p"',
       "projects:",
-      ...hosts.flatMap((h) => hostProjectLines(h.name, { tracker: h.tracker === true }))
+      ...hosts.flatMap((h) =>
+        hostProjectLines(h.name, { tracker: h.tracker === true })
+      )
     ].join("\n")
   );
 }
@@ -121,7 +124,9 @@ describe("Routine Host reload (ADR 0062)", () => {
     await reloader.reload();
     expect(reloader.getStatus().errors).toEqual([]);
     const snapshot = reloader.getSnapshot();
-    expect(snapshot?.projects.map((p) => p.name)).toEqual(["new-composer-host"]);
+    expect(snapshot?.projects.map((p) => p.name)).toEqual([
+      "new-composer-host"
+    ]);
     expect(snapshot?.projects[0]?.mode).toBe("routine_host");
     expect(snapshot?.projects[0]?.workflow).toBeUndefined();
     // A host never enters the polling list.
@@ -152,7 +157,15 @@ describe("Routine Host reload (ADR 0062)", () => {
     const root = await makeTempRoot();
     await mkdir(root, { recursive: true });
     await writeFile(path.join(root, "WORKFLOW.md"), "Work on it.\n");
-    const hostNames = ["s11", "rightkey", "petovita", "jsse", "vow", "forseti", "pewpew"];
+    const hostNames = [
+      "s11",
+      "rightkey",
+      "petovita",
+      "jsse",
+      "vow",
+      "forseti",
+      "pewpew"
+    ];
     await writeFile(
       path.join(root, "symphonika.yml"),
       [
@@ -199,7 +212,8 @@ describe("Routine Host reload (ADR 0062)", () => {
     expect(snapshot?.projects.length).toBe(8);
     expect(snapshot?.polling.projects.length).toBe(1);
     expect(snapshot?.polling.projects[0]?.name).toBe("symphonika");
-    const hosts = snapshot?.projects.filter((p) => p.mode === "routine_host") ?? [];
+    const hosts =
+      snapshot?.projects.filter((p) => p.mode === "routine_host") ?? [];
     expect(hosts.length).toBe(7);
   });
 
@@ -283,7 +297,9 @@ describe("Routine Host reload (ADR 0062)", () => {
         .errors.some((e) => e.includes("kind: git routine requires a tracker"))
     ).toBe(true);
     // The rejected routine must not be attached to the host.
-    const host = reloader.getSnapshot()?.projects.find((p) => p.name === "audit-host");
+    const host = reloader
+      .getSnapshot()
+      ?.projects.find((p) => p.name === "audit-host");
     expect(host?.routines ?? []).toEqual([]);
   });
 
@@ -387,7 +403,15 @@ describe("Routine Host doctor (ADR 0062)", () => {
     const root = await makeTempRoot();
     await mkdir(root, { recursive: true });
     await writeFile(path.join(root, "WORKFLOW.md"), "Work on it.\n");
-    const hostNames = ["s11", "rightkey", "petovita", "jsse", "vow", "forseti", "pewpew"];
+    const hostNames = [
+      "s11",
+      "rightkey",
+      "petovita",
+      "jsse",
+      "vow",
+      "forseti",
+      "pewpew"
+    ];
     await writeFile(
       path.join(root, "symphonika.yml"),
       [
@@ -434,10 +458,9 @@ describe("Routine Host doctor (ADR 0062)", () => {
       // so no repo access / label checks run for them.
       githubApi: {
         createLabel: vi.fn().mockResolvedValue(undefined),
-        listLabels: vi.fn().mockResolvedValue([
-          "agent-ready",
-          ...REQUIRED_OPERATIONAL_LABELS
-        ]),
+        listLabels: vi
+          .fn()
+          .mockResolvedValue(["agent-ready", ...REQUIRED_OPERATIONAL_LABELS]),
         validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
       }
     });
@@ -496,7 +519,9 @@ describe("Routine Host doctor (ADR 0062)", () => {
     // The declaration error is reported...
     expect(report.ok).toBe(false);
     expect(
-      report.errors.some((e) => e.includes("kind: git routine requires a tracker"))
+      report.errors.some((e) =>
+        e.includes("kind: git routine requires a tracker")
+      )
     ).toBe(true);
     // ...AND the host is marked not valid for hosting (not self-contradictory).
     const host = report.projects.find((p) => p.name === "audit-host");
@@ -634,9 +659,7 @@ describe("syncRoutines removal-detection (ADR 0063)", () => {
         ],
         { now: new Date("2026-05-20T00:00:00.000Z") }
       );
-      expect(store.listRoutines({ project: "alpha" })[0]?.state).toBe(
-        "active"
-      );
+      expect(store.listRoutines({ project: "alpha" })[0]?.state).toBe("active");
 
       // Remove the last routine — alpha has zero routines now but must still
       // run removal-detection because `projects: ["alpha"]` seeds the loop.

@@ -28,7 +28,10 @@ const project: RunControllerProjectConfig = {
     states: ["open"]
   },
   workspace: {
-    git: { base_branch: "main", remote: "git@github.com:pmatos/symphonika.git" },
+    git: {
+      base_branch: "main",
+      remote: "git@github.com:pmatos/symphonika.git"
+    },
     root: "./.symphonika/workspaces/symphonika"
   },
   workflow: { format: "auto", path: "./WORKFLOW.md" },

@@ -412,6 +412,72 @@ describe("Routine Host reload (ADR 0062)", () => {
     expect(errors.some((e) => e.includes("priority"))).toBe(true);
     expect(errors.some((e) => e.includes("workflow"))).toBe(true);
   });
+
+  it("reserves a brand-new invalid declaration's recovered name against a later valid same-named routine", async () => {
+    const root = await makeTempRoot();
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      path.join(root, "broken-routine.md"),
+      [
+        "---",
+        "name: shared-name",
+        "kind: bogus-kind", // invalid kind — stays invalid, but name is path-safe
+        "schedule:",
+        "  cron: 0 1 * * *",
+        "  tz: Etc/UTC",
+        "---",
+        "Body."
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "valid-routine.md"),
+      [
+        "---",
+        "name: shared-name",
+        "kind: report",
+        "schedule:",
+        "  cron: 0 2 * * *",
+        "  tz: Etc/UTC",
+        "---",
+        "Report."
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "symphonika.yml"),
+      [
+        "state:",
+        "  root: ./.symphonika",
+        "providers:",
+        "  codex:",
+        '    command: "codex -p symphonika"',
+        "  claude:",
+        '    command: "claude -p"',
+        "projects:",
+        ...hostProjectLines("host-a"),
+        ...hostProjectLines("host-b"),
+        "routines:",
+        "  - project: host-a",
+        "    path: ./broken-routine.md",
+        "  - project: host-b",
+        "    path: ./valid-routine.md"
+      ].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const errors = reloader.getStatus().errors;
+    expect(
+      errors.some((e) => e.includes('duplicate routine name "shared-name"'))
+    ).toBe(true);
+    // The later, otherwise-valid declaration must not be attached/fire while
+    // its name collides with the earlier broken declaration.
+    const hostB = reloader
+      .getSnapshot()
+      ?.projects.find((p) => p.name === "host-b");
+    expect(hostB?.routines ?? []).toEqual([]);
+  });
 });
 
 describe("Routine Host doctor (ADR 0062)", () => {
@@ -482,6 +548,72 @@ describe("Routine Host doctor (ADR 0062)", () => {
 
     expect(report.ok).toBe(false);
     expect(report.errors.some((e) => e.includes("priority"))).toBe(true);
+  });
+
+  it("reserves a brand-new invalid declaration's recovered name in validateServiceRoutines too", async () => {
+    const root = await makeTempRoot();
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      path.join(root, "broken-routine.md"),
+      [
+        "---",
+        "name: shared-name",
+        "kind: bogus-kind",
+        "schedule:",
+        "  cron: 0 1 * * *",
+        "  tz: Etc/UTC",
+        "---",
+        "Body."
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "valid-routine.md"),
+      [
+        "---",
+        "name: shared-name",
+        "kind: report",
+        "schedule:",
+        "  cron: 0 2 * * *",
+        "  tz: Etc/UTC",
+        "---",
+        "Report."
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "symphonika.yml"),
+      [
+        "state:",
+        "  root: ./.symphonika",
+        "providers:",
+        "  codex:",
+        '    command: "codex -p symphonika"',
+        "  claude:",
+        '    command: "claude -p"',
+        "projects:",
+        ...hostProjectLines("host-a"),
+        ...hostProjectLines("host-b"),
+        "routines:",
+        "  - project: host-a",
+        "    path: ./broken-routine.md",
+        "  - project: host-b",
+        "    path: ./valid-routine.md"
+      ].join("\n")
+    );
+    process.env.GITHUB_TOKEN = "test-token";
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath: path.join(root, "symphonika.yml"),
+      env: process.env,
+      githubApi: githubApiWithLabels([])
+    });
+
+    expect(report.ok).toBe(false);
+    expect(
+      report.errors.some((e) =>
+        e.includes('duplicate routine name "shared-name"')
+      )
+    ).toBe(true);
   });
 
   it("is green with 7 Routine Hosts plus a Dispatch Project (sym:* labels exist only for dispatch)", async () => {

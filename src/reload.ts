@@ -987,6 +987,21 @@ async function readRoutineDeclarations(
           routines.push({ ...previous, projectName: entry.projectName });
         }
       } else {
+        // Reserve a brand-new invalid declaration's recovered name too —
+        // otherwise a later declaration in this same pass (especially one
+        // targeting another Project) can legitimately claim the same name
+        // while this file remains broken, violating the service-level
+        // global-name uniqueness requirement (ADR 0063).
+        if (result.partialName !== undefined) {
+          const existingForPartialName = seenNames.get(result.partialName);
+          if (existingForPartialName !== undefined) {
+            errors.push(
+              `duplicate routine name "${result.partialName}" declared by ${existingForPartialName} and ${entry.sourcePath}`
+            );
+          } else {
+            seenNames.set(result.partialName, entry.sourcePath);
+          }
+        }
         invalidNew.push({
           ...(result.partialName === undefined
             ? {}

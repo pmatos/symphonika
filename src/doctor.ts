@@ -471,6 +471,20 @@ async function validateServiceRoutines(
     const result = await loadRoutineDeclaration(entry.sourcePath);
     if (result.routine === null) {
       errors.push(...result.errors);
+      // Reserve an invalid declaration's recovered name too — otherwise a
+      // later declaration in this pass can legitimately claim the same name
+      // while this file remains broken, violating the service-level
+      // global-name uniqueness requirement (ADR 0063).
+      if (result.partialName !== undefined) {
+        const existingForPartialName = seenNames.get(result.partialName);
+        if (existingForPartialName !== undefined) {
+          errors.push(
+            `duplicate routine name "${result.partialName}" declared by ${existingForPartialName} and ${entry.sourcePath}`
+          );
+        } else {
+          seenNames.set(result.partialName, entry.sourcePath);
+        }
+      }
       continue;
     }
     const routine = result.routine;

@@ -1241,7 +1241,8 @@ config path and points the operator to `symphonika init`.
 - provider commands for Codex and Claude
 - Dispatch Projects: workflow contract path and parse
 - every Routine declaration in the top-level `routines:` block, including unknown target Projects,
-  globally duplicate Routine names, and `kind: git` routines targeting a tracker-less Routine Host
+  a target Project name declared more than once, globally duplicate Routine names, and `kind: git`
+  routines targeting a tracker-less Routine Host
 - database path
 - workspace root
 

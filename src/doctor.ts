@@ -468,15 +468,35 @@ async function validateServiceRoutines(
       hostsByName.set(project.name, project);
     }
   }
+  // A routine's target Project name must be unambiguous: `.find()` below
+  // resolves a duplicated name to the first declared Project, but a
+  // duplicate is itself a config error — mirrors the `projectNameCounts`
+  // guard in `src/reload.ts`, which rejects the same ambiguity before
+  // attaching a routine at runtime.
+  const projectNameCounts = new Map<string, number>();
+  for (const project of declaredProjects) {
+    projectNameCounts.set(
+      project.name,
+      (projectNameCounts.get(project.name) ?? 0) + 1
+    );
+  }
   for (const entry of entries) {
     // Validate the target project independently of whether the declaration
     // itself parses — both come from the top-level `routines:` entry, so a
-    // broken file and an unknown target are independent, simultaneously
-    // diagnosable errors. Checking this first means both surface in the
-    // same `doctor` pass instead of requiring a fix-and-rerun cycle to find
-    // the second one.
-    const declared = declaredProjects.find((p) => p.name === entry.projectName);
-    if (declared === undefined) {
+    // broken file and an unknown/ambiguous target are independent,
+    // simultaneously diagnosable errors. Checking this first means both
+    // surface in the same `doctor` pass instead of requiring a
+    // fix-and-rerun cycle to find the second one.
+    const isDuplicateTarget =
+      (projectNameCounts.get(entry.projectName) ?? 0) > 1;
+    const declared = isDuplicateTarget
+      ? undefined
+      : declaredProjects.find((p) => p.name === entry.projectName);
+    if (isDuplicateTarget) {
+      errors.push(
+        `routines entry targets project "${entry.projectName}" (declared at ${entry.sourcePath}), but "${entry.projectName}" is declared more than once; routine targets require a unique project name`
+      );
+    } else if (declared === undefined) {
       errors.push(
         `routines entry targets project "${entry.projectName}" (declared at ${entry.sourcePath}), but no project with that name is declared`
       );

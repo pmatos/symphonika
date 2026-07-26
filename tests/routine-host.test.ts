@@ -763,6 +763,57 @@ describe("Routine Host doctor (ADR 0062)", () => {
     expect(report.errors.some((e) => e.includes("kind"))).toBe(true);
   });
 
+  it("rejects a routine targeting a duplicated Project name instead of resolving it to an arbitrary duplicate", async () => {
+    const root = await makeTempRoot();
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      path.join(root, "daily-report.md"),
+      [
+        "---",
+        "name: daily-report",
+        "kind: report",
+        "schedule:",
+        "  cron: 0 3 * * *",
+        "  tz: Etc/UTC",
+        "---",
+        "Report."
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "symphonika.yml"),
+      [
+        "state:",
+        "  root: ./.symphonika",
+        "providers:",
+        "  codex:",
+        '    command: "codex -p symphonika"',
+        "  claude:",
+        '    command: "claude -p"',
+        "projects:",
+        ...hostProjectLines("shared-host"),
+        ...hostProjectLines("shared-host"),
+        "routines:",
+        "  - project: shared-host",
+        "    path: ./daily-report.md"
+      ].join("\n")
+    );
+    process.env.GITHUB_TOKEN = "test-token";
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath: path.join(root, "symphonika.yml"),
+      env: process.env,
+      githubApi: githubApiWithLabels([])
+    });
+
+    expect(report.ok).toBe(false);
+    expect(
+      report.errors.some((e) =>
+        e.includes('"shared-host" is declared more than once')
+      )
+    ).toBe(true);
+  });
+
   it("is green with 7 Routine Hosts plus a Dispatch Project (sym:* labels exist only for dispatch)", async () => {
     const root = await makeTempRoot();
     await mkdir(root, { recursive: true });

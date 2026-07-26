@@ -64,8 +64,8 @@ An open issue that matches a Dispatch Project's required labels, avoids excluded
 _Avoid_: active issue unless referring to tracker state
 
 **Dispatch Eligibility**:
-The question "may this Project freshly claim this Issue?", including open state, required labels,
-excluded labels, and blocking operational labels.
+The question "may this Dispatch Project freshly claim this Issue?", including open state, required
+labels, excluded labels, and blocking operational labels.
 _Avoid_: continuation eligibility when referring to first claim selection
 
 **Continuation Eligibility**:

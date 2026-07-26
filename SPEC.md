@@ -257,8 +257,9 @@ writes `$XDG_CONFIG_HOME/symphonika/symphonika.yml` (or the home-directory fallb
 with `projects: []`. `--yes` accepts every displayed default without prompting, and `--force` is
 required to replace an existing user config.
 
-`symphonika init-project` runs inside a GitHub-backed repository and requires an existing selected
-Service Config. It derives repository defaults from `origin`, prompts for the Project name, Agent
+`symphonika init-project` runs inside a Git repository with an `origin` remote and requires an
+existing selected Service Config. It accepts `--mode <dispatch|routine-host>` (default `dispatch`).
+In `dispatch` mode it derives repository defaults from `origin`, prompts for the Project name, Agent
 Provider, base branch, issue-label filters, priority-label mapping, and Workflow Contract path, and
 appends the Project without discarding unrelated Projects or hand-authored config. A duplicate
 Project name is refused unless `--force`, which replaces only that sequence entry. The command
@@ -269,6 +270,11 @@ scaffold a selected path that resolves to the `raw_fsm` format (a `.yaml`, `.yml
 extension, or an explicit `format: raw_fsm`), since writing Markdown prose into a raw FSM file would
 register a Project with a workflow contract that fails to parse. `--yes` accepts Project defaults
 and performs label setup without prompting.
+
+In `routine-host` mode `init-project` prompts only for the Project name, Agent Provider, base
+branch, and workspace root; it does not prompt for issue-label filters, priority-label mapping, or a
+Workflow Contract path, and it creates no Operational or Eligibility Labels. A `tracker` is added
+only when the `origin` remote parses as github.com. See ADR 0062.
 
 Example:
 
@@ -717,9 +723,9 @@ error and makes no state change.
 A Routine with `disabled: true` in its own front matter transitions to `state = disabled`,
 `disabled_reason = "operator"` on the next reload; future scheduling stops but an in-flight firing
 continues to completion under the snapshot it started with — the daemon never cancels it as a side
-effect of the routine becoming disabled. Removing a Routine's path from a still-enabled Project's
-`routines:` list has the same in-flight-continues behavior, with `disabled_reason =
-"removed_from_config"`. Restoring a Routine — removing `disabled: true` or re-adding its path —
+effect of the routine becoming disabled. Removing a Routine's entry from the top-level `routines:`
+block (or its target Project) has the same in-flight-continues behavior, with `disabled_reason =
+"removed_from_config"`. Restoring a Routine — removing `disabled: true` or re-adding its entry —
 un-disables it on the next reload and recomputes `next_fire_at` strictly after the current clock; a
 one-shot Routine whose `at` elapsed while disabled is marked `expired` instead of firing
 retroactively. `catch_up: fire_once_if_missed` does not apply to a routine-level restore — that
@@ -1227,32 +1233,35 @@ config path and points the operator to `symphonika init`.
 `doctor` validates:
 
 - config parse
-- Project shape
-- GitHub auth
-- repository access
-- operational labels
-- configured Required Eligibility Labels (`issue_filters.labels_all`)
+- Project shape, including the declared `mode`
+- Dispatch Projects: GitHub auth, repository access, Operational Labels, and Required Eligibility
+  Labels (`issue_filters.labels_all`)
+- Routine Hosts: provider command + adapter + workspace resolvable (no GitHub access, no label
+  checks); `validForHosting` rather than `validForDispatch`
 - provider commands for Codex and Claude
-- workflow contract path and parse
-- every Routine declaration enumerated by each Project, including duplicate Routine names
+- Dispatch Projects: workflow contract path and parse
+- every Routine declaration in the top-level `routines:` block, including unknown target Projects,
+  globally duplicate Routine names, and `kind: git` routines targeting a tracker-less Routine Host
 - database path
 - workspace root
 
 `init` writes only the user Service Config and never inspects or mutates a repository or GitHub.
-`init-project` registers the current repository, creates a missing starter Workflow Contract, and
-creates missing Operational Labels and configured Required Eligibility Labels after the
-interactive review or explicit `--yes` selection.
+
+`init-project` registers the current repository. In `dispatch` mode it creates a missing starter
+Workflow Contract and creates missing Operational Labels and configured Required Eligibility Labels
+after the interactive review or explicit `--yes` selection. In `routine-host` mode it creates no
+Workflow Contract and no labels. See §5.1 and ADR 0062.
 
 `add-routine` writes `<cwd>/routines/<name>.md` with validated YAML front matter and a placeholder
-prompt, then registers the declaration path in the named Project's `routines` list. It preserves
-the Service Config's YAML comments and key ordering where supported by the YAML document parser,
-refuses missing Projects, unsafe names, duplicate names, invalid schedules, and existing target
-files, and never contacts GitHub or triggers a daemon reload. An unrelated existing Routine
-declaration that cannot be loaded does not block registration. If the loader can recover a
-path-safe name from an otherwise-invalid declaration, that name still participates in the
-duplicate-name check; declarations whose names cannot be recovered remain visible through
-`doctor`. When the generated file is outside the Service Config directory, registration uses its
-absolute path; otherwise it uses a `./`-prefixed path relative to the Service Config.
+prompt, then registers the declaration as a top-level `routines:` block entry targeting the named
+Project. It preserves the Service Config's YAML comments and key ordering where supported by the
+YAML document parser, refuses missing Projects, unsafe names, duplicate names, invalid schedules,
+and existing target files, and never contacts GitHub or triggers a daemon reload. An unrelated
+existing Routine declaration that cannot be loaded does not block registration. If the loader can
+recover a path-safe name from an otherwise-invalid declaration, that name still participates in the
+duplicate-name check; declarations whose names cannot be recovered remain visible through `doctor`.
+When the generated file is outside the Service Config directory, registration uses its absolute
+path; otherwise it uses a `./`-prefixed path relative to the Service Config.
 
 `service install --config <path>` resolves the selected Service Config to an absolute path and
 bakes it into the generated unit as `daemon --config <absolute-path>`. Omitting `--config` keeps the
@@ -1347,13 +1356,13 @@ The bootstrap slice is accepted when:
 - tests pass
 - lint passes
 - `init` can create an empty user Service Config with interactive service-level settings
-- `init-project` can append a Project without losing existing config and create its starter
+- `init-project` can append a Dispatch Project without losing existing config and create its starter
   Workflow Contract
 - `doctor` validates service config, GitHub auth, operational labels, Codex and Claude provider
   commands, workflow file, database path, workspace root, and configured Required Eligibility
-  Labels
-- `init-project` can create missing operational and Required Eligibility Labels after interactive
-  review or `--yes`
+  Labels for Dispatch Projects; Routine Hosts validate provider + workspace only
+- `init-project` can create missing operational and Required Eligibility Labels for a Dispatch
+  Project after interactive review or `--yes`; `init-project --mode routine-host` creates none
 - `daemon` can claim one `agent-ready` issue in this repository
 - daemon prepares the deterministic issue worktree and branch
 - daemon runs the configured provider through either Codex JSON-RPC or Claude stream-json

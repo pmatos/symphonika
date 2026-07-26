@@ -13,8 +13,18 @@ The external system that provides issues, states, and metadata used for dispatch
 _Avoid_: Linear when speaking tracker-generically
 
 **Project**:
-A Symphonika-managed work source with its own tracker configuration, issue filters, priority mapping, workflow contract, workspace root, and agent-provider settings.
+A Symphonika-managed work source with a name, workspace root, and agent-provider settings. A Project
+declares a `mode` of `dispatch` or `routine_host` (ADR 0062); the mode determines which further
+fields (tracker, issue filters, priority, workflow) are required.
 _Avoid_: GitHub Project when referring to a Symphonika Project
+
+**Dispatch Project**:
+A Project with `mode: dispatch` (the default when omitted): polled for issues, requires tracker + issue filters + priority + workflow, and its dispatch validity gates on repo access and Operational/Eligibility Labels.
+_Avoid_: Routine Host when referring to an issue-dispatching Project
+
+**Routine Host**:
+A Project with `mode: routine_host`: never polled for issues, exists only to host Routine Firings. Requires name + workspace + agent (+ tracker only when hosting `kind: git` firings). Owns no routines — Routines target it by name.
+_Avoid_: Dispatch Project when referring to a firing-only Project
 
 **Service Config**:
 The reloadable orchestrator-owned configuration file that lists Projects and service-level runtime settings.
@@ -134,10 +144,11 @@ One orchestrator-managed execution lifecycle for one issue in one workspace.
 _Avoid_: issue when referring to execution status
 
 **Routine**:
-A project-owned scheduled prompt declaration that can launch a Coding Agent without a GitHub Issue.
-When its Project is disabled or omitted from the current valid Service Config snapshot, the Routine
-is inactive: it is hidden from default operator listings while its firing state remains durable for
-later re-enable.
+A service-level scheduled prompt declaration that targets one declared Project by name and can launch
+a Coding Agent without a GitHub Issue. A Routine Host owns no routines — Routines point *at* it.
+When a Routine's target Project is disabled or omitted from the current valid Service Config
+snapshot, the Routine is inactive: it is hidden from default operator listings while its firing
+state remains durable for later re-enable. See ADR 0063.
 _Avoid_: workflow contract when referring to recurring or one-shot scheduled work
 
 **Routine Firing**:
@@ -250,7 +261,7 @@ _Avoid_: chat session
 - A **Normalized Event Log** is derived from a **Provider Event Log**
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
-- A **Routine** belongs to one **Project** and may create zero or more **Routine Firings**
+- A **Routine** targets one declared **Project** by name and may create zero or more **Routine Firings**
 - A **Routine** may record **Routine Skips** without creating Routine Firings
 - A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**

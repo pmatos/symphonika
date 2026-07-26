@@ -54,6 +54,16 @@ Project name, and that name's absence or `disabled: true` drives the cascade. Th
 unchanged; only the source of the `project_name` moves from the enclosing block to the routine's
 `project:` field.
 
+### Supersedes ADR 0060's per-Project removal wording
+
+ADR 0060 describes removal detection as "removing a Routine's path from a still-enabled Project's
+`routines:` list." That wording predates this slice's removal of the per-Project `routines:` key.
+ADR 0060 is preserved as historical; its removal-detection *behavior* (soft-disable with
+`disabled_reason = 'removed_from_config'`, in-flight firing continues) is unchanged — only the
+*source* of the declaration moved from a Project's `routines:` list to the top-level `routines:`
+block. Read 0060's "Project's `routines:` list" as "top-level `routines:` block entry targeting
+that Project."
+
 ## Consequences
 
 - Routines are service-level objects pointing at declared Projects; a Routine Host can be targeted by

@@ -157,11 +157,39 @@ export async function dispatchOneEligibleIssue(
   return controller.dispatchOneFresh(options.issuePollStatus);
 }
 
+// Routine Hosts (ADR 0062) are never dispatch candidates and lack the
+// tracker/issue_filters/priority/workflow fields dispatchProjectSchema
+// requires — drop them from the raw config before validation, mirroring
+// reload.ts's own exclusion of hosts from `snapshot.polling.projects`,
+// rather than letting one host fail the whole array parse.
+function excludeRoutineHostProjects(raw: unknown): unknown {
+  if (
+    raw === null ||
+    typeof raw !== "object" ||
+    !("projects" in raw) ||
+    !Array.isArray(raw.projects)
+  ) {
+    return raw;
+  }
+  const projects = raw.projects.filter(
+    (rawProject: unknown) =>
+      !(
+        rawProject !== null &&
+        typeof rawProject === "object" &&
+        "mode" in rawProject &&
+        rawProject.mode === "routine_host"
+      )
+  );
+  return { ...raw, projects };
+}
+
 async function readDispatchConfig(
   configPath: string
 ): Promise<z.infer<typeof dispatchServiceConfigSchema>> {
   const contents = await readFile(configPath, "utf8");
-  const parsed = dispatchServiceConfigSchema.safeParse(parse(contents) ?? {});
+  const parsed = dispatchServiceConfigSchema.safeParse(
+    excludeRoutineHostProjects(parse(contents) ?? {})
+  );
 
   if (!parsed.success) {
     throw new Error(

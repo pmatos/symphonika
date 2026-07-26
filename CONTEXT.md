@@ -13,8 +13,21 @@ The external system that provides issues, states, and metadata used for dispatch
 _Avoid_: Linear when speaking tracker-generically
 
 **Project**:
-A Symphonika-managed work source with its own tracker configuration, issue filters, priority mapping, workflow contract, workspace root, and agent-provider settings.
+A Symphonika-managed work source with its own workspace root and agent-provider settings, declared in
+the Service Config. Every Project declares whether it is a Dispatch Project or a Routine Host.
 _Avoid_: GitHub Project when referring to a Symphonika Project
+
+**Dispatch Project**:
+A Project that Symphonika polls for Eligible Issues and dispatches Runs against. It additionally
+requires tracker configuration, issue filters, priority mapping, and a Workflow Contract.
+_Avoid_: Project when the distinction from a Routine Host matters
+
+**Routine Host**:
+A Project that is never polled for issues and exists only to give Routine Firings a repository and a
+workspace. It declares a name, workspace root, and agent settings — plus tracker configuration only
+when its `kind: git` firings should get Routine Pull Request discovery. It has no issue filters, no
+priority mapping, no Workflow Contract, and no `sym:*` operational labels.
+_Avoid_: routine-only Project — a Routine Host owns no Routines; Routines target it
 
 **Service Config**:
 The reloadable orchestrator-owned configuration file that lists Projects and service-level runtime settings.
@@ -127,15 +140,29 @@ One orchestrator-managed execution lifecycle for one issue in one workspace.
 _Avoid_: issue when referring to execution status
 
 **Routine**:
-A project-owned scheduled prompt declaration that can launch a Coding Agent without a GitHub Issue.
-When its Project is disabled or omitted from the current valid Service Config snapshot, the Routine
-is inactive: it is hidden from default operator listings while its firing state remains durable for
+A service-level scheduled prompt declaration that can launch a Coding Agent without a GitHub Issue,
+targeting one or more Projects. Its name is unique across the Service Config. When a targeted Project
+is disabled or omitted from the current valid Service Config snapshot, that Routine Target is
+inactive: it is hidden from default operator listings while its firing state remains durable for
 later re-enable.
-_Avoid_: workflow contract when referring to recurring or one-shot scheduled work
+_Avoid_: workflow contract when referring to recurring or one-shot scheduled work; project-owned
+routine — a Routine names its Projects, not the other way round
+
+**Routine Target**:
+One Project named in a Routine's project list. Each Target carries its own schedule state, skip
+counters, and Firing history, so a single Routine can be firing against one Project while skipped
+against another.
+_Avoid_: routine instance
+
+**Routine Fan-out**:
+The expansion of one Routine clock event into one Routine Firing per Routine Target. Sibling Firings
+from a single clock event share a correlation identity so operator surfaces can present them as one
+event.
+_Avoid_: continuation, retry
 
 **Routine Firing**:
-One durable execution attempt of a Routine, with its own workspace, provider logs, prompt evidence,
-and lifecycle state.
+One durable execution attempt of a Routine against one Routine Target, with its own workspace,
+provider logs, prompt evidence, and lifecycle state.
 _Avoid_: run when specifically referring to non-issue scheduled execution
 
 **Routine Skip**:
@@ -214,9 +241,13 @@ _Avoid_: chat session
 
 ## Relationships
 
-- A **Service Config** lists one or more **Projects**
-- A **Project** owns one **Issue Tracker** configuration
-- A **Project** references one **Workflow Contract**
+- A **Service Config** lists one or more **Projects** and zero or more **Routines**
+- Every **Project** is either a **Dispatch Project** or a **Routine Host**
+- A **Dispatch Project** owns one **Issue Tracker** configuration
+- A **Dispatch Project** references one **Workflow Contract**
+- Only **Dispatch Projects** are polled for **Eligible Issues**
+- A **Routine Host** declares an **Issue Tracker** configuration only to enable **Routine Pull
+  Request** discovery for its `kind: git` firings
 - A **Workflow Contract** compiles to an **Expanded Workflow Graph**
 - A **Workflow Template** contributes resolved states to an **Expanded Workflow Graph**
 - An **Autonomous Prompt** is rendered from a **Workflow Contract** or workflow state prompt for one
@@ -242,8 +273,10 @@ _Avoid_: chat session
 - A **Normalized Event Log** is derived from a **Provider Event Log**
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
-- A **Routine** belongs to one **Project** and may create zero or more **Routine Firings**
-- A **Routine** may record **Routine Skips** without creating Routine Firings
+- A **Routine** targets one or more **Projects** of either kind, and its name is unique across the
+  **Service Config**
+- One **Routine** clock event fans out to one **Routine Firing** per **Routine Target**
+- A **Routine Target** may record **Routine Skips** without creating Routine Firings
 - A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
@@ -264,3 +297,5 @@ _Avoid_: chat session
 
 - "Orchestrator" is resolved as a fresh implementation following the Symphony specification, not a modification of the existing Symphony Elixir reference implementation.
 - "Project" is resolved as a Symphonika-managed work source, not a GitHub Projects board.
+- "Job" is deliberately not a Symphonika term. Operator surfaces name a **Run** or a **Routine
+  Firing** explicitly; mixed listings are titled by what they show rather than by an umbrella noun.

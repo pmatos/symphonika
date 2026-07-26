@@ -376,6 +376,53 @@ export async function inspectCurrentGitHubProject(
   };
 }
 
+// Generic git inspection for Routine Hosts (ADR 0062). Unlike
+// inspectCurrentGitHubProject, this does NOT require a github.com origin — a
+// host's contract is name + workspace + agent (tracker optional), so it may
+// target any git remote. It still requires an `origin` remote because the
+// workspace schema requires `git.remote`. Returns remote + base branch + a
+// project name derived from the repo directory (no owner/repo).
+export type GitProjectMetadata = {
+  baseBranch: string;
+  // Present only when the origin remote parses as github.com, so a Routine
+  // Host can auto-declare a tracker when its origin is GitHub and omit it
+  // otherwise. See ADR 0062.
+  githubOwner?: string;
+  githubRepo?: string;
+  projectName: string;
+  projectRoot: string;
+  remote: string;
+};
+
+export async function inspectCurrentGitProject(
+  cwd: string
+): Promise<GitProjectMetadata> {
+  let projectRoot: string;
+  let remote: string;
+  let baseBranch: string;
+  try {
+    projectRoot = await gitOutput(["rev-parse", "--show-toplevel"], cwd);
+    remote = await gitOutput(["remote", "get-url", "origin"], projectRoot);
+    baseBranch = await detectBaseBranch(projectRoot);
+  } catch (error) {
+    throw new Error(
+      `symphonika init-project must run inside a Git repository with an origin remote: ${errorMessage(error)}`,
+      { cause: error }
+    );
+  }
+  const parsedRemote = parseGitHubRemote(remote);
+  const repoName = path.basename(projectRoot);
+  return {
+    baseBranch,
+    ...(parsedRemote === null
+      ? {}
+      : { githubOwner: parsedRemote.owner, githubRepo: parsedRemote.repo }),
+    projectName: sanitizeProjectName(repoName),
+    projectRoot,
+    remote
+  };
+}
+
 async function gitOutput(args: string[], cwd: string): Promise<string> {
   const { stdout } = await execFile("git", args, { cwd });
   return stdout.trim();

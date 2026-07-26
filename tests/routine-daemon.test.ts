@@ -521,7 +521,7 @@ describe("daemon routine firing", () => {
     const seededStore = openRunStore({
       stateRoot: path.join(root, ".symphonika")
     });
-    seededStore.syncRoutines("alpha", [routine], {
+    seededStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
       now: new Date("2020-06-01T00:00:00.000Z")
     });
     expect(seededStore.listRoutines()[0]?.nextFireAt).toBe(
@@ -577,7 +577,7 @@ describe("daemon routine firing", () => {
     const seededStore = openRunStore({
       stateRoot: path.join(root, ".symphonika")
     });
-    seededStore.syncRoutines("alpha", [routine], {
+    seededStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
       now: new Date("2020-06-01T00:00:00.000Z")
     });
     seededStore.close();
@@ -736,17 +736,22 @@ async function writeProjectConfig(
       "    agent:",
       "      provider: codex",
       "    workflow: ./WORKFLOW.md",
-      ...routineLines(routines),
+      ...routineLines(projectName, routines),
       ""
     ].join("\n")
   );
 }
 
-function routineLines(routines: string[]): string[] {
+function routineLines(projectName: string, routines: string[]): string[] {
   if (routines.length === 0) {
     return [];
   }
-  return ["    routines:", ...routines.map((routine) => `      - ${routine}`)];
+  return [
+    "routines:",
+    ...routines.map(
+      (routine) => `  - project: ${projectName}\n    path: ${routine}`
+    )
+  ];
 }
 
 async function waitForProviderInputs(

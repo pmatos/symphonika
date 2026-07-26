@@ -42,7 +42,7 @@ import { prepareIssueWorkspace as defaultPrepareIssueWorkspace } from "../worksp
 import { readFile } from "node:fs/promises";
 
 import type { WorkflowReference } from "../config-schemas.js";
-import type { RoutineDeclaration } from "../routines/types.js";
+import type { TargetedRoutineDeclaration } from "../routines/types.js";
 import {
   expandWorkflowDefinition,
   parseWorkflowContract,
@@ -92,15 +92,23 @@ type LoadedWorkflow = {
   path: string;
 };
 
-export type RunControllerProjectConfig = PollingProjectConfig & {
-  // Names of routines declared for this Project whose current reload is
-  // invalid and has no prior valid snapshot to carry forward. Protects
-  // their store rows (state = 'invalid') from being soft-disabled as
-  // "removed from config" by the next syncRoutines call — see
-  // docs/adr/0060-routine-lifecycle-control.md.
-  invalidRoutineNames?: string[];
-  routines?: RoutineDeclaration[];
-  workflow: WorkflowReference | WorkflowSnapshot;
+export type RunControllerProjectConfig = {
+  mode: "dispatch" | "routine_host";
+  name: string;
+  disabled?: boolean | undefined;
+  weight?: number | undefined;
+  // Per-project concurrency cap. Omitted defaults to 1 at consume-time.
+  // See ADR 0053.
+  max_in_flight?: number | undefined;
+  // Required for Dispatch Projects; optional for Routine Hosts (required when
+  // the host targets kind: git firings — enforced at reload). The issue
+  // dispatch path reads tracker only for projects that produced polling
+  // candidates, which Routine Hosts never do. See ADR 0062.
+  tracker?: PollingProjectConfig["tracker"] | undefined;
+  // Dispatch-only. Routine Hosts have no issue filters, priority, or workflow.
+  issue_filters?: PollingProjectConfig["issue_filters"] | undefined;
+  priority?: PollingProjectConfig["priority"] | undefined;
+  agent: { provider: AgentProviderName } & Record<string, unknown>;
   workspace: {
     git: {
       base_branch: string;
@@ -108,7 +116,43 @@ export type RunControllerProjectConfig = PollingProjectConfig & {
     };
     root: string;
   };
+  // Dispatch-only. A Routine Host has no workflow contract.
+  workflow?: WorkflowReference | WorkflowSnapshot | undefined;
+  // Service-level routines targeting this Project. Present on every Project
+  // entry in the runtime map; empty array when none target it. See ADR 0063.
+  routines?: TargetedRoutineDeclaration[] | undefined;
+  // Names of routines targeting this Project whose current reload is invalid
+  // and has no prior valid snapshot to carry forward. Protects their store
+  // rows (state = 'invalid') from being soft-disabled as "removed from
+  // config" by the next syncRoutines call — see ADR 0060.
+  invalidRoutineNames?: string[] | undefined;
+  watchdog?: { graceMinutes: number } | undefined;
 };
+
+// A Dispatch Project's runtime config: the issue-dispatch fields are required.
+// The issue-dispatch path (dispatchOneFresh, continuation, state advance,
+// review follow-up) only ever sees Dispatch Projects — Routine Hosts produce
+// no polling candidates and own no issues — so entry points narrow to this
+// type before reading tracker/workflow/issue_filters/priority. See ADR 0062.
+export type DispatchProjectConfig = RunControllerProjectConfig & {
+  mode: "dispatch";
+  tracker: NonNullable<RunControllerProjectConfig["tracker"]>;
+  issue_filters: NonNullable<RunControllerProjectConfig["issue_filters"]>;
+  priority: NonNullable<RunControllerProjectConfig["priority"]>;
+  workflow: NonNullable<RunControllerProjectConfig["workflow"]>;
+};
+
+export function isDispatchProject(
+  project: RunControllerProjectConfig
+): project is DispatchProjectConfig {
+  return (
+    project.mode === "dispatch" &&
+    project.tracker !== undefined &&
+    project.issue_filters !== undefined &&
+    project.priority !== undefined &&
+    project.workflow !== undefined
+  );
+}
 
 export type RunControllerProvidersConfig = {
   codex: { command: string };
@@ -355,6 +399,16 @@ export class RunController {
       };
     }
 
+    // Routine Hosts never produce polling candidates, so a selected target
+    // is always a Dispatch Project. The guard is unreachable in practice but
+    // narrows target.project for the tracker/workflow reads below. See ADR 0062.
+    if (!isDispatchProject(target.project)) {
+      return {
+        dispatched: false,
+        reason: `project ${target.project.name} is not a dispatch project`
+      };
+    }
+
     if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
       return {
         dispatched: false,
@@ -537,7 +591,11 @@ export class RunController {
   async executeRetry(payload: RetryPayload): Promise<void> {
     const projects = await this.projectsLoader();
     const project = projects.get(payload.projectName);
-    if (project === undefined || project.disabled === true) {
+    if (
+      project === undefined ||
+      project.disabled === true ||
+      !isDispatchProject(project)
+    ) {
       this.logger?.warn(
         { projectName: payload.projectName, runId: payload.runId },
         "symphonika retry dropped: project disabled or removed"
@@ -788,7 +846,7 @@ export class RunController {
     }
     const projects = await this.projectsLoader();
     const project = projects.get(input.projectName);
-    if (project === undefined) {
+    if (project === undefined || !isDispatchProject(project)) {
       return false;
     }
     let loaded;
@@ -824,7 +882,11 @@ export class RunController {
 
     const projects = await this.projectsLoader();
     const project = projects.get(row.project);
-    if (project === undefined || project.disabled === true) {
+    if (
+      project === undefined ||
+      project.disabled === true ||
+      !isDispatchProject(project)
+    ) {
       return;
     }
 
@@ -1125,7 +1187,11 @@ export class RunController {
   async executeStateAdvance(payload: StateAdvancePayload): Promise<void> {
     const projects = await this.projectsLoader();
     const project = projects.get(payload.projectName);
-    if (project === undefined || project.disabled === true) {
+    if (
+      project === undefined ||
+      project.disabled === true ||
+      !isDispatchProject(project)
+    ) {
       this.logger?.warn(
         { projectName: payload.projectName, parentRunId: payload.parentRunId },
         "symphonika state advance dropped: project disabled or removed"
@@ -1515,7 +1581,11 @@ export class RunController {
   async executeContinuation(payload: ContinuationPayload): Promise<void> {
     const projects = await this.projectsLoader();
     const project = projects.get(payload.projectName);
-    if (project === undefined || project.disabled === true) {
+    if (
+      project === undefined ||
+      project.disabled === true ||
+      !isDispatchProject(project)
+    ) {
       this.logger?.warn(
         { projectName: payload.projectName, parentRunId: payload.parentRunId },
         "symphonika continuation dropped: project disabled or removed"
@@ -1620,7 +1690,11 @@ export class RunController {
   }): Promise<DispatchOneFreshResult> {
     const projects = await this.projectsLoader();
     const project = projects.get(input.projectName);
-    if (project === undefined || project.disabled === true) {
+    if (
+      project === undefined ||
+      project.disabled === true ||
+      !isDispatchProject(project)
+    ) {
       return {
         dispatched: false,
         reason: "project disabled or removed"
@@ -1825,7 +1899,7 @@ export class RunController {
     isContinuation: boolean;
     issue: IssueSnapshot;
     parentRunId: string | null;
-    project: RunControllerProjectConfig;
+    project: DispatchProjectConfig;
     provider: AgentProvider;
     providerCommand: string;
     providerName: AgentProviderName;
@@ -1998,7 +2072,7 @@ export class RunController {
     extraInstructions?: string;
     isContinuation: boolean;
     issue: IssueSnapshot;
-    project: RunControllerProjectConfig;
+    project: DispatchProjectConfig;
     provider: AgentProvider;
     providerCommand: string;
     providerName: AgentProviderName;
@@ -2469,7 +2543,7 @@ export class RunController {
     extraInstructions?: string;
     isContinuation: boolean;
     issue: IssueSnapshot;
-    project: RunControllerProjectConfig;
+    project: DispatchProjectConfig;
     promptTemplate?: string;
     providerCommand: string;
     providerName: AgentProviderName;
@@ -2966,7 +3040,7 @@ export class RunController {
     extraInstructions?: string;
     issue: IssueSnapshot;
     outcome: ClassifiedTerminal;
-    project: RunControllerProjectConfig;
+    project: DispatchProjectConfig;
     providerCommand: string;
     providerName: AgentProviderName;
     repository: GitHubIssueRepositoryInput;
@@ -3250,7 +3324,7 @@ export class RunController {
   }
 
   private async refreshIssue(input: {
-    project: RunControllerProjectConfig;
+    project: DispatchProjectConfig;
     issueNumber: number;
     repository: GitHubIssueRepositoryInput;
   }): Promise<IssueSnapshot | null | undefined> {
@@ -3448,7 +3522,7 @@ async function appendJsonl(filePath: string, value: unknown): Promise<void> {
 
 function normalizeRawIssue(
   raw: import("../issue-polling.js").RawGitHubIssue,
-  project: RunControllerProjectConfig
+  project: DispatchProjectConfig
 ): IssueSnapshot {
   const labels = normalizeLabels(raw.labels ?? []);
   return {
@@ -3486,7 +3560,7 @@ function normalizeLabels(labels: unknown[]): string[] {
 
 function priorityForLabels(
   labels: string[],
-  project: RunControllerProjectConfig
+  project: DispatchProjectConfig
 ): number {
   const priorities = labels.flatMap((label) => {
     const priority = project.priority.labels[label];

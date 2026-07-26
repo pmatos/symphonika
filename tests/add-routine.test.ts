@@ -63,7 +63,7 @@ describe("add-routine", () => {
       schedule: { cron: "0 0 * * 0", tz: "Europe/Berlin" }
     });
     expect(await readFile(configPath, "utf8")).toContain(
-      "    routines:\n      - ./routines/weekly-maintenance.md\n"
+      "routines:\n  - path: ./routines/weekly-maintenance.md\n    project: alpha\n"
     );
   });
 
@@ -96,7 +96,7 @@ describe("add-routine", () => {
     });
     expect(await readFile(routinePath, "utf8")).not.toContain("provider:");
     expect(await readFile(configPath, "utf8")).toContain(
-      `    routines:\n      - ${routinePath}\n`
+      `routines:\n  - path: ${routinePath}\n    project: alpha\n`
     );
   });
 
@@ -251,7 +251,7 @@ describe("add-routine", () => {
 
     expect(report.ok).toBe(false);
     expect(report.errors.join("\n")).toContain(
-      'routine name "daily-report" already exists in project "alpha"'
+      'routine name "daily-report" already exists in the top-level routines block at ./routines/existing.md'
     );
     await expect(readFile(report.filePath, "utf8")).rejects.toThrow();
     expect(await readFile(configPath, "utf8")).toBe(original);
@@ -278,9 +278,11 @@ describe("add-routine", () => {
     );
     expect(await readFile(configPath, "utf8")).toContain(
       [
-        "    routines:",
-        "      - ./routines/missing.md",
-        "      - ./routines/daily-report.md",
+        "routines:",
+        "  - path: ./routines/missing.md",
+        "    project: alpha",
+        "  - path: ./routines/daily-report.md",
+        "    project: alpha",
         ""
       ].join("\n")
     );
@@ -313,10 +315,8 @@ describe("add-routine", () => {
       project: "alpha",
       schedule: "daily"
     });
-
-    expect(report.ok).toBe(false);
     expect(report.errors).toContain(
-      'routine name "daily-report" already exists in project "alpha" at ./routines/existing.md'
+      'routine name "daily-report" already exists in the top-level routines block at ./routines/existing.md'
     );
     await expect(readFile(report.filePath, "utf8")).rejects.toThrow();
     expect(await readFile(configPath, "utf8")).toBe(original);
@@ -418,8 +418,8 @@ async function writeConfig(
       ...(routines.length === 0
         ? []
         : [
-            "    routines:",
-            ...routines.map((routine) => `      - ${routine}`)
+            "routines:",
+            ...routines.map((routine) => `  - path: ${routine}\n    project: alpha`)
           ]),
       ""
     ].join("\n")

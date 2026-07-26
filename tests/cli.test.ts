@@ -488,6 +488,8 @@ describe("CLI", () => {
                 }
               ],
               validForDispatch: true,
+              mode: "dispatch",
+              validForHosting: false,
               workflowPath: "/tmp/WORKFLOW.md"
             }
           ]

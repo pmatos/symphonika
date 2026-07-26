@@ -59,6 +59,7 @@ const providerCommandSchema = z
 const dispatchProjectSchema = z
   .object({
     name: z.string().trim().min(1),
+    mode: z.literal("dispatch").default("dispatch"),
     disabled: z.boolean().optional(),
     weight: z.number().int().positive().optional(),
     // Accept but ignore in the one-shot CLI; preserves parsing parity with

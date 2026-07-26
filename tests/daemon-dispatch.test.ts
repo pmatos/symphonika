@@ -1090,7 +1090,7 @@ describe("daemon dispatch", () => {
       throw new Error("expected reloader to expose symphonika project");
     }
     const snapshot = project.workflow;
-    if (!("expandedWorkflow" in snapshot)) {
+    if (snapshot === undefined || !("expandedWorkflow" in snapshot)) {
       throw new Error("expected reloader to expose a workflow snapshot");
     }
     const sentinelTemplate = "sentinel-only-in-snapshot.txt";

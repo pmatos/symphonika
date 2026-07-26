@@ -5,13 +5,17 @@ import {
   tryGetIssue,
   type GitHubIssuesApi,
   type IssuePollStatus,
-  type IssueSnapshot,
-  type PollingProjectConfig
+  type IssueSnapshot
 } from "../issue-polling.js";
 import type { RunStore } from "../run-store.js";
 
 import { ActiveRunRegistry, CANCEL_REASONS } from "./active-runs.js";
-import type { RunController } from "./run-controller.js";
+import type {
+  DispatchProjectConfig,
+  RunController,
+  RunControllerProjectConfig
+} from "./run-controller.js";
+import { isDispatchProject } from "./run-controller.js";
 import { resolveToken } from "./token.js";
 
 export type ReconcileInput = {
@@ -20,7 +24,7 @@ export type ReconcileInput = {
   githubIssuesApi: GitHubIssuesApi;
   logger: Logger;
   pollStatus: IssuePollStatus;
-  projects: Map<string, PollingProjectConfig>;
+  projects: Map<string, RunControllerProjectConfig>;
   runStore: RunStore;
 };
 
@@ -32,7 +36,7 @@ export async function reconcileActiveRuns(
       continue;
     }
     const project = input.projects.get(entry.projectName);
-    if (project === undefined) {
+    if (project === undefined || !isDispatchProject(project)) {
       continue;
     }
 
@@ -74,7 +78,7 @@ export async function reconcileActiveRuns(
 async function handleMissingFromPoll(
   input: ReconcileInput & {
     entry: ReturnType<ActiveRunRegistry["list"]>[number];
-    project: PollingProjectConfig;
+    project: DispatchProjectConfig;
   }
 ): Promise<void> {
   const token = resolveToken(input.project.tracker.token, input.env);

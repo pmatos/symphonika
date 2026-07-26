@@ -4,9 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   emptyIssuePollStatus,
   type IssuePollStatus,
-  type IssueSnapshot,
-  type PollingProjectConfig
+  type IssueSnapshot
 } from "../src/issue-polling.js";
+import type { RunControllerProjectConfig } from "../src/lifecycle/run-controller.js";
 import {
   ActiveRunRegistry,
   CANCEL_REASONS
@@ -19,13 +19,19 @@ import path from "node:path";
 
 const logger = pino({ enabled: false });
 
-const project: PollingProjectConfig = {
+const project: RunControllerProjectConfig = {
+  mode: "dispatch",
   agent: { provider: "codex" },
   issue_filters: {
     labels_all: ["agent-ready"],
     labels_none: ["blocked", "needs-human"],
     states: ["open"]
   },
+  workspace: {
+    git: { base_branch: "main", remote: "git@github.com:pmatos/symphonika.git" },
+    root: "./.symphonika/workspaces/symphonika"
+  },
+  workflow: { format: "auto", path: "./WORKFLOW.md" },
   name: "symphonika",
   priority: { default: 99, labels: {} },
   tracker: {

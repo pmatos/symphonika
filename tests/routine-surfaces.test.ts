@@ -34,7 +34,6 @@ describe("routine operator surfaces", () => {
     const now = new Date();
     const schedule = { cron: "* * * * *", tz: "Etc/UTC" };
     store.syncRoutines(
-      "alpha",
       [
         {
           kind: "report",
@@ -42,6 +41,7 @@ describe("routine operator surfaces", () => {
           prompt: "Report.",
           provider: null,
           schedule,
+          projectName: "alpha",
           sourcePath: "/tmp/minute-report.md"
         }
       ],
@@ -179,13 +179,14 @@ describe("routine operator surfaces", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: null,
           schedule: { at: "2026-05-22T10:00:00.000Z" },
+          projectName: "alpha",
           sourcePath: "/tmp/daily-report.md"
         }
       ]);
@@ -288,13 +289,14 @@ describe("routine operator surfaces", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: null,
           schedule: { at: "2026-05-22T10:00:00.000Z" },
+          projectName: "alpha",
           sourcePath: "/tmp/daily-report.md",
           disabled: true
         }
@@ -351,13 +353,14 @@ describe("routine operator surfaces", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: null,
           schedule: { at: "2026-05-22T10:00:00.000Z" },
+          projectName: "alpha",
           sourcePath: "/tmp/daily-report.md",
           disabled: true
         }
@@ -452,13 +455,14 @@ describe("routine operator surfaces", () => {
   it("symphonika routines renders the disable reason next to a disabled routine's state", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
-    store.syncRoutines("alpha", [
+    store.syncRoutines([
       {
         kind: "report",
         name: "daily-report",
         prompt: "Report.",
         provider: null,
         schedule: { at: "2026-05-22T10:00:00.000Z" },
+        projectName: "alpha",
         sourcePath: "/tmp/daily-report.md",
         disabled: true
       }
@@ -527,13 +531,14 @@ describe("routine operator surfaces", () => {
 });
 
 function seedRoutine(store: ReturnType<typeof openRunStore>): void {
-  store.syncRoutines("alpha", [
+  store.syncRoutines([
     {
       kind: "git",
       name: "daily-report",
       prompt: "Report.",
       provider: null,
       schedule: { at: "2026-05-22T10:00:00.000Z" },
+      projectName: "alpha",
       sourcePath: "/tmp/daily-report.md"
     }
   ]);

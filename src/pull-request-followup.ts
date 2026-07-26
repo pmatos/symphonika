@@ -448,7 +448,11 @@ function repositoryForProject(
   project: RunControllerProjectConfig | undefined,
   env: NodeJS.ProcessEnv
 ): GitHubIssueRepositoryInput | undefined {
-  if (project === undefined || project.disabled === true) {
+  if (
+    project === undefined ||
+    project.disabled === true ||
+    project.tracker === undefined
+  ) {
     return undefined;
   }
   const token = resolveEnvBackedValue(project.tracker.token, env);

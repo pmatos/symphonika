@@ -272,15 +272,30 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .option("--config <path>", "service config path")
     .option("--force", "replace a Project with the same name")
     .option(
+      "--mode <mode>",
+      "project mode: dispatch (default) or routine-host",
+      "dispatch"
+    )
+    .option(
       "--yes",
       "use defaults and create missing labels without interactive prompts"
     )
     .action(
-      async (options: { config?: string; force?: boolean; yes?: boolean }) => {
+      async (options: {
+        config?: string;
+        force?: boolean;
+        mode?: string;
+        yes?: boolean;
+      }) => {
         const emittedWarnings = new Set<string>();
+        const mode =
+          options.mode === "routine-host" || options.mode === "routine_host"
+            ? "routine_host"
+            : "dispatch";
         const report = await initProject({
           ...withConfigPath(options.config),
           force: options.force === true,
+          mode,
           onWarning: (warning) => {
             emittedWarnings.add(warning);
             writeErr(program, `warning: ${warning}\n`);
@@ -733,9 +748,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             for (const project of report.projects) {
               writeOut(
                 program,
-                `  ${project.name}: ${project.validForDispatch ? "valid" : "invalid"}\n`
+                `  ${project.name}: ${project.mode} ${project.mode === "routine_host" ? (project.validForHosting ? "valid" : "invalid") : (project.validForDispatch ? "valid" : "invalid")}\n`
               );
-              writeOut(program, `    workflow: ${project.workflowPath}\n`);
+              writeOut(
+                program,
+                `    workflow: ${project.workflowPath ?? "(none)"}\n`
+              );
               writeOut(
                 program,
                 `    missing required eligibility labels: ${formatList(project.missingEligibilityLabels)}\n`

@@ -278,6 +278,8 @@ describe("CLI run commands", () => {
               name: "alpha",
               staleIssues: [],
               validForDispatch: true,
+              mode: "dispatch",
+              validForHosting: false,
               workflowPath: "/tmp/WORKFLOW.md"
             }
           ]
@@ -296,7 +298,7 @@ describe("CLI run commands", () => {
 
     expect(output.stdout).toContain("daemon: idle at http://127.0.0.1:3030");
     expect(output.stdout).toContain("Projects:");
-    expect(output.stdout).toContain("alpha: valid");
+    expect(output.stdout).toContain("alpha: dispatch valid");
     expect(output.stdout).toContain("candidate: 1");
     expect(output.stdout).toContain("filtered:  3");
     expect(output.stdout).toContain("running:   1");
@@ -402,6 +404,8 @@ describe("CLI run commands", () => {
               name: "alpha",
               staleIssues: [],
               validForDispatch: true,
+              mode: "dispatch",
+              validForHosting: false,
               workflowPath: "/tmp/WORKFLOW.md"
             }
           ]
@@ -508,6 +512,8 @@ describe("CLI run commands", () => {
               name: "alpha",
               staleIssues: [],
               validForDispatch: true,
+              mode: "dispatch",
+              validForHosting: false,
               workflowPath: "/tmp/WORKFLOW.md"
             }
           ]
@@ -571,6 +577,8 @@ describe("CLI run commands", () => {
               name: "alpha",
               staleIssues: [],
               validForDispatch: true,
+              mode: "dispatch",
+              validForHosting: false,
               workflowPath: "/tmp/WORKFLOW.md"
             }
           ]
@@ -638,6 +646,8 @@ describe("CLI run commands", () => {
               name: "alpha",
               staleIssues: [],
               validForDispatch: true,
+              mode: "dispatch",
+              validForHosting: false,
               workflowPath: "/tmp/WORKFLOW.md"
             }
           ]
@@ -779,6 +789,8 @@ describe("CLI run commands", () => {
                 }
               ],
               validForDispatch: true,
+              mode: "dispatch",
+              validForHosting: false,
               workflowPath: "/tmp/WORKFLOW.md"
             }
           ]

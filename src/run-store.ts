@@ -9,7 +9,6 @@ import { isPathInside } from "./path-safety.js";
 import type { AgentProviderName, NormalizedProviderEvent } from "./provider.js";
 import { nextRecurringFireAt } from "./routines/schedule.js";
 import type {
-  RoutineDeclaration,
   RoutineCatchUpPolicy,
   RoutineDisabledReason,
   RoutineFiringState,
@@ -17,7 +16,8 @@ import type {
   RoutinePullRequestStatus,
   RoutineSkipReason,
   RoutineState,
-  RoutineStatus
+  RoutineStatus,
+  TargetedRoutineDeclaration
 } from "./routines/types.js";
 import type { ExpandedWorkflow } from "./workflow.js";
 
@@ -1176,12 +1176,22 @@ export class RunStore {
     return rows.map((row) => mapProjectStateRow(row));
   }
 
+  // Synchronizes service-level routine declarations into the routines table.
+  // Each routine carries its own target `projectName` (ADR 0063); removal-
+  // detection runs per project so a routine removed from one project's target
+  // set is soft-disabled without touching another project's rows.
+  // `protectedNamesByProject` holds invalid-routine names per project so their
+  // rows are not demoted to removed_from_config (ADR 0060).
   syncRoutines(
-    projectName: string,
-    routines: RoutineDeclaration[],
+    routines: TargetedRoutineDeclaration[],
     options: {
       now?: Date;
-      protectedNames?: string[];
+      // All projects that should run removal-detection this sync, including
+      // projects whose last routine was just removed (zero routines). Without
+      // this, `syncRoutines([])` would never enter the loop and a removed
+      // routine's row would stay active. See ADR 0063.
+      projects?: string[];
+      protectedNamesByProject?: Record<string, string[]>;
       recomputeRecurring?: boolean;
     } = {}
   ): void {
@@ -1242,66 +1252,87 @@ export class RunStore {
         "updated_at = excluded.updated_at"
       ].join(" ")
     );
-    const apply = this.database.transaction(() => {
-      const declaredNames = routines.map((routine) => routine.name);
-      const excludedNames = [
-        ...new Set([...declaredNames, ...(options.protectedNames ?? [])])
-      ];
-      // Excludes only rows already disabled *for this same reason* — an
-      // operator-disabled routine (disabled_reason='operator') whose path is
-      // then also removed from config must be upgraded to
-      // 'removed_from_config', not left with the stale prior reason.
-      if (excludedNames.length === 0) {
-        this.database
-          .prepare(
-            "update routines set state = 'disabled', disabled_reason = 'removed_from_config', updated_at = ? where project_name = ? and not (state = 'disabled' and disabled_reason = 'removed_from_config')"
-          )
-          .run(now, projectName);
+    // Seed the per-project iteration set from BOTH the declared routines AND
+    // `options.projects` — a project whose last routine was just removed has
+    // zero routines but must still run removal-detection (its persisted rows
+    // must be soft-disabled). See ADR 0063.
+    const byProject = new Map<string, TargetedRoutineDeclaration[]>();
+    for (const projectName of options.projects ?? []) {
+      byProject.set(projectName, []);
+    }
+    for (const routine of routines) {
+      const list = byProject.get(routine.projectName);
+      if (list === undefined) {
+        byProject.set(routine.projectName, [routine]);
       } else {
-        const placeholders = excludedNames.map(() => "?").join(", ");
-        this.database
-          .prepare(
-            `update routines set state = 'disabled', disabled_reason = 'removed_from_config', updated_at = ? where project_name = ? and name not in (${placeholders}) and not (state = 'disabled' and disabled_reason = 'removed_from_config')`
-          )
-          .run(now, projectName, ...excludedNames);
+        list.push(routine);
       }
-      for (const routine of routines) {
-        const scheduleValues =
-          "cron" in routine.schedule
-            ? {
-                nextFireAt: nextRecurringFireAt(routine.schedule, scheduleNow),
-                scheduleAt: "",
-                scheduleCron: routine.schedule.cron,
-                scheduleTz: routine.schedule.tz
-              }
-            : {
-                nextFireAt: routine.schedule.at,
-                scheduleAt: routine.schedule.at,
-                scheduleCron: null,
-                scheduleTz: null
-              };
-        upsert.run({
-          allow_overlap: routine.allowOverlap === true ? 1 : 0,
-          catch_up: routine.catchUp ?? "skip",
-          created_at: now,
-          disabled: routine.disabled === true ? 1 : 0,
-          disabled_reason: routine.disabled === true ? "operator" : null,
-          kind: routine.kind,
-          name: routine.name,
-          project_name: projectName,
-          prompt_body: routine.prompt,
-          provider_name: routine.provider,
-          next_fire_at: scheduleValues.nextFireAt,
-          now_iso: nowIso,
-          recompute_recurring: options.recomputeRecurring === true ? 1 : 0,
-          // Existing databases have a NOT NULL schedule_at column. An empty
-          // legacy value identifies recurring rows; schedule_cron is canonical.
-          schedule_at: scheduleValues.scheduleAt,
-          schedule_cron: scheduleValues.scheduleCron,
-          schedule_tz: scheduleValues.scheduleTz,
-          source_path: routine.sourcePath,
-          updated_at: now
-        });
+    }
+    const apply = this.database.transaction(() => {
+      for (const [projectName, projectRoutines] of byProject) {
+        const declaredNames = projectRoutines.map((routine) => routine.name);
+        const excludedNames = [
+          ...new Set([
+            ...declaredNames,
+            ...(options.protectedNamesByProject?.[projectName] ?? [])
+          ])
+        ];
+        // Excludes only rows already disabled *for this same reason* — an
+        // operator-disabled routine (disabled_reason='operator') whose path is
+        // then also removed from config must be upgraded to
+        // 'removed_from_config', not left with the stale prior reason.
+        if (excludedNames.length === 0) {
+          this.database
+            .prepare(
+              "update routines set state = 'disabled', disabled_reason = 'removed_from_config', updated_at = ? where project_name = ? and not (state = 'disabled' and disabled_reason = 'removed_from_config')"
+            )
+            .run(now, projectName);
+        } else {
+          const placeholders = excludedNames.map(() => "?").join(", ");
+          this.database
+            .prepare(
+              `update routines set state = 'disabled', disabled_reason = 'removed_from_config', updated_at = ? where project_name = ? and name not in (${placeholders}) and not (state = 'disabled' and disabled_reason = 'removed_from_config')`
+            )
+            .run(now, projectName, ...excludedNames);
+        }
+        for (const routine of projectRoutines) {
+          const scheduleValues =
+            "cron" in routine.schedule
+              ? {
+                  nextFireAt: nextRecurringFireAt(routine.schedule, scheduleNow),
+                  scheduleAt: "",
+                  scheduleCron: routine.schedule.cron,
+                  scheduleTz: routine.schedule.tz
+                }
+              : {
+                  nextFireAt: routine.schedule.at,
+                  scheduleAt: routine.schedule.at,
+                  scheduleCron: null,
+                  scheduleTz: null
+                };
+          upsert.run({
+            allow_overlap: routine.allowOverlap === true ? 1 : 0,
+            catch_up: routine.catchUp ?? "skip",
+            created_at: now,
+            disabled: routine.disabled === true ? 1 : 0,
+            disabled_reason: routine.disabled === true ? "operator" : null,
+            kind: routine.kind,
+            name: routine.name,
+            project_name: routine.projectName,
+            prompt_body: routine.prompt,
+            provider_name: routine.provider,
+            next_fire_at: scheduleValues.nextFireAt,
+            now_iso: nowIso,
+            recompute_recurring: options.recomputeRecurring === true ? 1 : 0,
+            // Existing databases have a NOT NULL schedule_at column. An empty
+            // legacy value identifies recurring rows; schedule_cron is canonical.
+            schedule_at: scheduleValues.scheduleAt,
+            schedule_cron: scheduleValues.scheduleCron,
+            schedule_tz: scheduleValues.scheduleTz,
+            source_path: routine.sourcePath,
+            updated_at: now
+          });
+        }
       }
     });
     apply();

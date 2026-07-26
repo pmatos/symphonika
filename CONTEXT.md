@@ -164,9 +164,10 @@ against another.
 _Avoid_: routine instance
 
 **Routine Fan-out**:
-The expansion of one Routine clock event into one Routine Firing per Routine Target. Sibling Firings
-from a single clock event share a correlation identity so operator surfaces can present them as one
-event.
+The expansion of one Routine clock event into one clock attempt per Routine Target. Each attempt
+independently yields either a Routine Firing or a Routine Skip, so one clock event can fire against
+some Targets while skipping against others. Siblings from a single clock event share a correlation
+identity so operator surfaces can present them as one event.
 _Avoid_: continuation, retry
 
 **Routine Firing**:
@@ -287,7 +288,8 @@ _Avoid_: chat session
 - A **Run** can succeed even when its **Issue** remains open
 - A **Routine** targets one or more **Projects** of either kind, and its name is unique across the
   **Service Config**
-- One **Routine** clock event fans out to one **Routine Firing** per **Routine Target**
+- One **Routine** clock event is evaluated once per **Routine Target**, yielding either a **Routine
+  Firing** or a **Routine Skip**
 - A **Routine Target** may record **Routine Skips** without creating Routine Firings
 - A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**

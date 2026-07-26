@@ -486,6 +486,56 @@ describe("Project initialization", () => {
     ).rejects.toThrow();
   });
 
+  it("skips required eligibility label creation when operational label creation is declined", async () => {
+    const root = await makeTempRoot();
+    const repositoryRoot = path.join(root, "new-project");
+    const configPath = path.join(root, "config", "symphonika.yml");
+    await createGitHubRepository(
+      repositoryRoot,
+      "https://github.com/acme/new-project.git"
+    );
+    await writeExistingConfig(configPath, root);
+    const originalContents = await readFile(configPath, "utf8");
+    const prompted: string[] = [];
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi.fn().mockResolvedValue([]),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runInitProject({
+      configPath,
+      cwd: repositoryRoot,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      prompt: (input) => {
+        prompted.push(input.key);
+        return Promise.resolve(
+          input.key === "confirmOperationalLabels" ? "no" : ""
+        );
+      }
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.createdWorkflowPath).toBeNull();
+    expect(report.errors).toEqual(["operational label creation was declined"]);
+    expect(report.projects).toEqual([
+      expect.objectContaining({
+        createdEligibilityLabels: [],
+        createdOperationalLabels: [],
+        missingEligibilityLabels: ["agent-ready"],
+        name: "new-project"
+      })
+    ]);
+    expect(prompted).toContain("confirmOperationalLabels");
+    expect(prompted).not.toContain("confirmEligibilityLabels");
+    expect(githubApi.createLabel).not.toHaveBeenCalled();
+    await expect(readFile(configPath, "utf8")).resolves.toBe(originalContents);
+    await expect(
+      readFile(path.join(repositoryRoot, "WORKFLOW.md"), "utf8")
+    ).rejects.toThrow();
+  });
+
   it("does not persist the new Project when operational label creation fails", async () => {
     const root = await makeTempRoot();
     const repositoryRoot = path.join(root, "new-project");
@@ -501,12 +551,9 @@ describe("Project initialization", () => {
       createLabel: vi.fn().mockRejectedValue(new Error("permission denied")),
       listLabels: vi
         .fn()
-        .mockResolvedValue([
-          "agent-ready",
-          ...REQUIRED_OPERATIONAL_LABELS.filter(
-            (label) => label !== missingLabel
-          )
-        ]),
+        .mockResolvedValue(
+          REQUIRED_OPERATIONAL_LABELS.filter((label) => label !== missingLabel)
+        ),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -525,7 +572,9 @@ describe("Project initialization", () => {
     ]);
     expect(report.projects).toEqual([
       expect.objectContaining({
+        createdEligibilityLabels: [],
         createdOperationalLabels: [],
+        missingEligibilityLabels: ["agent-ready"],
         missingOperationalLabels: [missingLabel],
         name: "new-project"
       })

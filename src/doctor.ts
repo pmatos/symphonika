@@ -922,6 +922,7 @@ async function createProjectLabels(input: {
   } = input.validation;
   const createdEligibilityLabels: string[] = [];
   const createdOperationalLabels: string[] = [];
+  const errorsBeforeLabelSetup = input.errors.length;
   if (missingOperationalLabels.length > 0) {
     const warning = `init-project ${input.yes ? "will" : "would"} create operational labels in ${repositoryName}: ${missingOperationalLabels.join(", ")}`;
     input.warnings.push(warning);
@@ -954,7 +955,10 @@ async function createProjectLabels(input: {
       }
     }
   }
-  if (missingEligibilityLabels.length > 0) {
+  if (
+    missingEligibilityLabels.length > 0 &&
+    input.errors.length === errorsBeforeLabelSetup
+  ) {
     const warning = `init-project ${input.yes ? "will" : "would"} create required eligibility labels in ${repositoryName}: ${missingEligibilityLabels.join(", ")}`;
     input.warnings.push(warning);
     input.onWarning?.(warning);

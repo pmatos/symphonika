@@ -1188,9 +1188,12 @@ creates missing Operational Labels after the interactive review or explicit `--y
 prompt, then registers the declaration path in the named Project's `routines` list. It preserves
 the Service Config's YAML comments and key ordering where supported by the YAML document parser,
 refuses missing Projects, unsafe names, duplicate names, invalid schedules, and existing target
-files, and never contacts GitHub or triggers a daemon reload. When the generated file is outside
-the Service Config directory, registration uses its absolute path; otherwise it uses a `./`-prefixed
-path relative to the Service Config.
+files, and never contacts GitHub or triggers a daemon reload. An unrelated existing Routine
+declaration that cannot be loaded does not block registration. If the loader can recover a
+path-safe name from an otherwise-invalid declaration, that name still participates in the
+duplicate-name check; declarations whose names cannot be recovered remain visible through
+`doctor`. When the generated file is outside the Service Config directory, registration uses its
+absolute path; otherwise it uses a `./`-prefixed path relative to the Service Config.
 
 `service install --config <path>` resolves the selected Service Config to an absolute path and
 bakes it into the generated unit as `daemon --config <absolute-path>`. Omitting `--config` keeps the

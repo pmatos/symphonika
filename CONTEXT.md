@@ -24,9 +24,11 @@ _Avoid_: Project when the distinction from a Routine Host matters
 
 **Routine Host**:
 A Project that is never polled for issues and exists only to give Routine Firings a repository and a
-workspace. It declares a name, workspace root, and agent settings — plus tracker configuration only
-when its `kind: git` firings should get Routine Pull Request discovery. It has no issue filters, no
-priority mapping, no Workflow Contract, and no `sym:*` operational labels.
+workspace — including Routines with no natural repo tie (a nightly weather digest, say), since every
+Routine must target at least one Project. It declares a name, workspace root, and agent settings —
+plus tracker configuration only when its `kind: git` firings should get Routine Pull Request
+discovery. It has no issue filters, no priority mapping, no Workflow Contract, and no `sym:*`
+operational labels.
 _Avoid_: routine-only Project — a Routine Host owns no Routines; Routines target it
 
 **Service Config**:
@@ -150,10 +152,12 @@ _Avoid_: issue when referring to execution status
 
 **Routine**:
 A service-level scheduled prompt declaration that can launch a Coding Agent without a GitHub Issue,
-targeting one or more Projects. Its name is unique across the Service Config. When a targeted Project
-is disabled or omitted from the current valid Service Config snapshot, that Routine Target is
-inactive: it is hidden from default operator listings while its firing state remains durable for
-later re-enable.
+targeting one or more Projects — never zero. Symphonika has no project-less Routine: Routine Firing
+capacity caps and skip accounting are tracked per Project, so a Routine with no natural repo tie
+still declares against a minimal Routine Host rather than standing free of any Project. Its name is
+unique across the Service Config. When a targeted Project is disabled or omitted from the current
+valid Service Config snapshot, that Routine Target is inactive: it is hidden from default operator
+listings while its firing state remains durable for later re-enable.
 _Avoid_: workflow contract when referring to recurring or one-shot scheduled work; project-owned
 routine — a Routine names its Projects, not the other way round
 

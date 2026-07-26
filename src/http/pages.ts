@@ -714,18 +714,22 @@ function renderProjectsCard(
   if (snapshot !== undefined && snapshot.projects.length > 0) {
     const rows = snapshot.projects
       .map((project) => {
-        const missing =
+        const missingEligibility =
+          project.missingEligibilityLabels.length === 0
+            ? "&mdash;"
+            : escapeHtml(project.missingEligibilityLabels.join(", "));
+        const missingOperational =
           project.missingOperationalLabels.length === 0
             ? "&mdash;"
             : escapeHtml(project.missingOperationalLabels.join(", "));
         const valid = project.validForDispatch ? "valid" : "invalid";
-        return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(valid)}</td><td><code>${escapeHtml(project.workflowPath)}</code></td><td class="c-detail">${missing}</td></tr>`;
+        return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(valid)}</td><td><code>${escapeHtml(project.workflowPath)}</code></td><td class="c-detail">${missingEligibility}</td><td class="c-detail">${missingOperational}</td></tr>`;
       })
       .join("");
     return tableSection(
       "Projects",
       snapshot.projects.length,
-      "<tr><th>Name</th><th>Validation</th><th>Workflow</th><th>Missing operational labels</th></tr>",
+      "<tr><th>Name</th><th>Validation</th><th>Workflow</th><th>Missing required eligibility labels</th><th>Missing operational labels</th></tr>",
       rows
     );
   }

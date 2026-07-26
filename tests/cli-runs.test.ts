@@ -273,6 +273,7 @@ describe("CLI run commands", () => {
           ok: true,
           projects: [
             {
+              missingEligibilityLabels: [],
               missingOperationalLabels: [],
               name: "alpha",
               staleIssues: [],
@@ -396,6 +397,7 @@ describe("CLI run commands", () => {
           ok: true,
           projects: [
             {
+              missingEligibilityLabels: [],
               missingOperationalLabels: [],
               name: "alpha",
               staleIssues: [],
@@ -501,6 +503,7 @@ describe("CLI run commands", () => {
           ok: true,
           projects: [
             {
+              missingEligibilityLabels: [],
               missingOperationalLabels: [],
               name: "alpha",
               staleIssues: [],
@@ -563,6 +566,7 @@ describe("CLI run commands", () => {
           ok: true,
           projects: [
             {
+              missingEligibilityLabels: [],
               missingOperationalLabels: [],
               name: "alpha",
               staleIssues: [],
@@ -629,6 +633,7 @@ describe("CLI run commands", () => {
           ok: true,
           projects: [
             {
+              missingEligibilityLabels: [],
               missingOperationalLabels: [],
               name: "alpha",
               staleIssues: [],
@@ -763,6 +768,7 @@ describe("CLI run commands", () => {
           ok: true,
           projects: [
             {
+              missingEligibilityLabels: [],
               missingOperationalLabels: [],
               name: "alpha",
               staleIssues: [

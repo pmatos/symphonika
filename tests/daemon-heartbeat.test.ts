@@ -3,14 +3,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   createDaemonHeartbeat,
-  isTickRecentEnoughForWatchdog
+  isTickRecentEnoughForSystemdWatchdog
 } from "../src/lifecycle/daemon-heartbeat.js";
 
 describe("createDaemonHeartbeat", () => {
   // Regression: a rejecting systemd-notify call (missing binary, transient
-  // socket error) used to propagate straight out of notifyReady/notifyWatchdog
+  // socket error) used to propagate straight out of notifyReady/notifySystemdWatchdog
   // -- crashing startDaemon() itself (notifyReady is awaited directly) or
-  // becoming an unhandled promise rejection (notifyWatchdog is void-discarded
+  // becoming an unhandled promise rejection (notifySystemdWatchdog is void-discarded
   // at its call site, with no .catch()), which by default kills the Node
   // process. A liveness mechanism must not be able to crash the daemon it
   // exists to keep alive; a failed notify should degrade gracefully, matching
@@ -24,13 +24,13 @@ describe("createDaemonHeartbeat", () => {
     await expect(heartbeat.notifyReady()).resolves.toBeUndefined();
   });
 
-  it("does not reject when notifyWatchdog's systemd-notify call fails", async () => {
+  it("does not reject when notifySystemdWatchdog's systemd-notify call fails", async () => {
     const heartbeat = createDaemonHeartbeat({
       env: { NOTIFY_SOCKET: "/run/user/1000/systemd/notify" },
       runNotify: () => Promise.reject(new Error("ENOENT: systemd-notify"))
     });
 
-    await expect(heartbeat.notifyWatchdog()).resolves.toBeUndefined();
+    await expect(heartbeat.notifySystemdWatchdog()).resolves.toBeUndefined();
   });
 
   it("logs a warning when a systemd-notify call fails", async () => {
@@ -62,7 +62,7 @@ describe("createDaemonHeartbeat", () => {
     });
 
     await heartbeat.notifyReady();
-    await heartbeat.notifyWatchdog();
+    await heartbeat.notifySystemdWatchdog();
 
     expect(calls).toBe(0);
   });
@@ -92,7 +92,7 @@ describe("createDaemonHeartbeat", () => {
       }
     });
 
-    await heartbeat.notifyWatchdog();
+    await heartbeat.notifySystemdWatchdog();
 
     expect(calls).toEqual([["WATCHDOG=1"]]);
   });
@@ -104,13 +104,13 @@ describe("createDaemonHeartbeat", () => {
   // WATCHDOG_USEC (microseconds, set by systemd alongside NOTIFY_SOCKET
   // whenever WatchdogSec= is configured), at roughly half that window per
   // the conventional sd_watchdog_enabled(3) guidance.
-  describe("watchdogPingIntervalMs", () => {
+  describe("systemdWatchdogPingIntervalMs", () => {
     it("is undefined when NOTIFY_SOCKET is unset", () => {
       const heartbeat = createDaemonHeartbeat({
         env: { WATCHDOG_USEC: "90000000" }
       });
 
-      expect(heartbeat.watchdogPingIntervalMs).toBeUndefined();
+      expect(heartbeat.systemdWatchdogPingIntervalMs).toBeUndefined();
     });
 
     it("is undefined when WATCHDOG_USEC is unset (no WatchdogSec= configured)", () => {
@@ -118,7 +118,7 @@ describe("createDaemonHeartbeat", () => {
         env: { NOTIFY_SOCKET: "/run/user/1000/systemd/notify" }
       });
 
-      expect(heartbeat.watchdogPingIntervalMs).toBeUndefined();
+      expect(heartbeat.systemdWatchdogPingIntervalMs).toBeUndefined();
     });
 
     it("is undefined when WATCHDOG_USEC is not a positive integer", () => {
@@ -129,7 +129,7 @@ describe("createDaemonHeartbeat", () => {
         }
       });
 
-      expect(heartbeat.watchdogPingIntervalMs).toBeUndefined();
+      expect(heartbeat.systemdWatchdogPingIntervalMs).toBeUndefined();
     });
 
     it("derives roughly half of WATCHDOG_USEC, converted to milliseconds", () => {
@@ -140,7 +140,7 @@ describe("createDaemonHeartbeat", () => {
         }
       });
 
-      expect(heartbeat.watchdogPingIntervalMs).toBe(45_000);
+      expect(heartbeat.systemdWatchdogPingIntervalMs).toBe(45_000);
     });
   });
 });
@@ -153,10 +153,10 @@ describe("createDaemonHeartbeat", () => {
 // hang). Deliberately decoupled from any fixed WatchdogSec constant: a
 // long-configured polling interval must not be indistinguishable from a
 // hang, which is the bug this whole feature fixes.
-describe("isTickRecentEnoughForWatchdog", () => {
+describe("isTickRecentEnoughForSystemdWatchdog", () => {
   it("is always alive when no config is loaded (no ticks are ever scheduled)", () => {
     expect(
-      isTickRecentEnoughForWatchdog({
+      isTickRecentEnoughForSystemdWatchdog({
         configExists: false,
         effectiveIntervalMs: 30_000,
         lastTickAtMs: undefined,
@@ -168,7 +168,7 @@ describe("isTickRecentEnoughForWatchdog", () => {
 
   it("is alive shortly after the tick loop starts, before the first tick completes", () => {
     expect(
-      isTickRecentEnoughForWatchdog({
+      isTickRecentEnoughForSystemdWatchdog({
         configExists: true,
         effectiveIntervalMs: 30_000,
         lastTickAtMs: undefined,
@@ -189,7 +189,7 @@ describe("isTickRecentEnoughForWatchdog", () => {
     const intervalMs = 30_000;
 
     expect(
-      isTickRecentEnoughForWatchdog({
+      isTickRecentEnoughForSystemdWatchdog({
         configExists: true,
         effectiveIntervalMs: intervalMs,
         lastTickAtMs: undefined,
@@ -204,7 +204,7 @@ describe("isTickRecentEnoughForWatchdog", () => {
     // under WatchdogSec=90 -- the exact bug this decoupling fixes. A tick
     // completed 45s ago is trivially recent relative to a 300s interval.
     expect(
-      isTickRecentEnoughForWatchdog({
+      isTickRecentEnoughForSystemdWatchdog({
         configExists: true,
         effectiveIntervalMs: 300_000,
         lastTickAtMs: 1_000_000,
@@ -219,7 +219,7 @@ describe("isTickRecentEnoughForWatchdog", () => {
     const lastTickAtMs = 1_000_000;
 
     expect(
-      isTickRecentEnoughForWatchdog({
+      isTickRecentEnoughForSystemdWatchdog({
         configExists: true,
         effectiveIntervalMs: intervalMs,
         lastTickAtMs,
@@ -234,7 +234,7 @@ describe("isTickRecentEnoughForWatchdog", () => {
     const lastTickAtMs = 1_000_000;
 
     expect(
-      isTickRecentEnoughForWatchdog({
+      isTickRecentEnoughForSystemdWatchdog({
         configExists: true,
         effectiveIntervalMs: intervalMs,
         lastTickAtMs,
@@ -249,7 +249,7 @@ describe("isTickRecentEnoughForWatchdog", () => {
     // is always set alongside pollTimer -- but must not false-positive as
     // stale in the absence of any timestamp to compare against.
     expect(
-      isTickRecentEnoughForWatchdog({
+      isTickRecentEnoughForSystemdWatchdog({
         configExists: true,
         effectiveIntervalMs: 30_000,
         lastTickAtMs: undefined,

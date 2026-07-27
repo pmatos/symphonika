@@ -12,7 +12,7 @@ import type { DaemonHeartbeat } from "../src/lifecycle/daemon-heartbeat.js";
 import { openRunStore, RunStore } from "../src/run-store.js";
 
 function recordingDaemonHeartbeat(
-  watchdogPingIntervalMs?: number
+  systemdWatchdogPingIntervalMs?: number
 ): DaemonHeartbeat & {
   readyCalls: number;
   watchdogCalls: number;
@@ -29,11 +29,11 @@ function recordingDaemonHeartbeat(
       state.readyCalls += 1;
       return Promise.resolve();
     },
-    notifyWatchdog: () => {
+    notifySystemdWatchdog: () => {
       state.watchdogCalls += 1;
       return Promise.resolve();
     },
-    watchdogPingIntervalMs
+    systemdWatchdogPingIntervalMs
   };
 }
 
@@ -235,19 +235,20 @@ describe("startDaemon", () => {
     }
   });
 
-  // Regression: a daemonHeartbeat whose notifyReady/notifyWatchdog reject
-  // used to be able to crash the daemon -- notifyReady is awaited directly
-  // by startDaemon() itself, and notifyWatchdog was fired from a bare `void`
-  // with no .catch(), becoming an unhandled promise rejection. daemon.ts now
-  // catches both defensively (createDaemonHeartbeat's own implementation
-  // also swallows, but daemonHeartbeat is injectable, so a caller-supplied
-  // one -- like this test's -- isn't guaranteed to).
+  // Regression: a daemonHeartbeat whose notifyReady/notifySystemdWatchdog
+  // reject used to be able to crash the daemon -- notifyReady is awaited
+  // directly by startDaemon() itself, and notifySystemdWatchdog was fired
+  // from a bare `void` with no .catch(), becoming an unhandled promise
+  // rejection. daemon.ts now catches both defensively
+  // (createDaemonHeartbeat's own implementation also swallows, but
+  // daemonHeartbeat is injectable, so a caller-supplied one -- like this
+  // test's -- isn't guaranteed to).
   it("does not crash when an injected daemonHeartbeat rejects", async () => {
     const cwd = await makeTempRoot();
     const rejectingHeartbeat: DaemonHeartbeat = {
       notifyReady: () => Promise.reject(new Error("boom-ready")),
-      notifyWatchdog: () => Promise.reject(new Error("boom-watchdog")),
-      watchdogPingIntervalMs: 10
+      notifySystemdWatchdog: () => Promise.reject(new Error("boom-watchdog")),
+      systemdWatchdogPingIntervalMs: 10
     };
     const { logger, lines } = createCapturingLogger();
     const daemon = await startDaemon({

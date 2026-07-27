@@ -23,7 +23,7 @@ import { ActiveRunRegistry } from "./lifecycle/active-runs.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
 import {
   createDaemonHeartbeat,
-  isTickRecentEnoughForWatchdog,
+  isTickRecentEnoughForSystemdWatchdog,
   type DaemonHeartbeat
 } from "./lifecycle/daemon-heartbeat.js";
 import {
@@ -328,7 +328,7 @@ export async function startDaemon(
     }
   };
   let pollTimer: ReturnType<typeof setInterval> | undefined;
-  let watchdogTimer: ReturnType<typeof setInterval> | undefined;
+  let systemdWatchdogTimer: ReturnType<typeof setInterval> | undefined;
   let lastTickAtMs: number | undefined;
   let tickLoopStartedAtMs: number | undefined;
   let polling = false;
@@ -675,13 +675,14 @@ export async function startDaemon(
       },
       "symphonika tick"
     );
-    // Reaching here means the event loop is still advancing. The watchdog
-    // ping itself runs on its own independent timer (see watchdogTimer
-    // below), not from here directly -- coupling it to the tick would
-    // either kill a healthy daemon whose configured polling interval
-    // exceeds WatchdogSec, or never ping at all before a config is loaded
-    // (see docs/adr/0065). This timestamp is what that timer's liveness
-    // gate reads to decide whether a hung tick should withhold the ping.
+    // Reaching here means the event loop is still advancing. The systemd
+    // watchdog ping itself runs on its own independent timer (see
+    // systemdWatchdogTimer below), not from here directly -- coupling it to
+    // the tick would either kill a healthy daemon whose configured polling
+    // interval exceeds WatchdogSec, or never ping at all before a config is
+    // loaded (see docs/adr/0065). This timestamp is what that timer's
+    // liveness gate reads to decide whether a hung tick should withhold the
+    // ping.
     lastTickAtMs = Date.now();
   };
   const refreshPollingInterval = (): void => {
@@ -897,7 +898,7 @@ export async function startDaemon(
   // (options.daemonHeartbeat), so a caller-supplied implementation isn't
   // guaranteed to. Either call site rejecting would be severe -- notifyReady
   // is awaited directly, so it would abort startDaemon() itself, and
-  // notifyWatchdog runs from a timer with nothing else to observe a
+  // notifySystemdWatchdog runs from a timer with nothing else to observe a
   // rejection -- so both are caught here too rather than trusting the
   // implementation.
   await daemonHeartbeat.notifyReady().catch((error: unknown) => {
@@ -906,10 +907,10 @@ export async function startDaemon(
       "symphonika systemd-notify readiness call failed"
     );
   });
-  if (daemonHeartbeat.watchdogPingIntervalMs !== undefined) {
-    watchdogTimer = setInterval(() => {
+  if (daemonHeartbeat.systemdWatchdogPingIntervalMs !== undefined) {
+    systemdWatchdogTimer = setInterval(() => {
       if (
-        isTickRecentEnoughForWatchdog({
+        isTickRecentEnoughForSystemdWatchdog({
           configExists: state.configExists,
           effectiveIntervalMs: intervalMs ?? DEFAULT_POLLING_INTERVAL_MS,
           lastTickAtMs,
@@ -917,15 +918,15 @@ export async function startDaemon(
           tickLoopStartedAtMs
         })
       ) {
-        daemonHeartbeat.notifyWatchdog().catch((error: unknown) => {
+        daemonHeartbeat.notifySystemdWatchdog().catch((error: unknown) => {
           logger.warn(
             { err: error },
             "symphonika systemd-notify watchdog call failed"
           );
         });
       }
-    }, daemonHeartbeat.watchdogPingIntervalMs);
-    watchdogTimer.unref?.();
+    }, daemonHeartbeat.systemdWatchdogPingIntervalMs);
+    systemdWatchdogTimer.unref?.();
   }
 
   return {
@@ -937,8 +938,8 @@ export async function startDaemon(
       if (pollTimer !== undefined) {
         clearInterval(pollTimer);
       }
-      if (watchdogTimer !== undefined) {
-        clearInterval(watchdogTimer);
+      if (systemdWatchdogTimer !== undefined) {
+        clearInterval(systemdWatchdogTimer);
       }
       if (legacyRecheckTimer !== undefined) {
         clearTimeout(legacyRecheckTimer);

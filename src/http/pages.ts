@@ -47,7 +47,8 @@ export type RegisterPagesOptions = {
 // longer configured interval would show a permanent false positive.
 const DAEMON_STALE_THRESHOLD_FLOOR_MS = 5 * 60_000;
 
-// Same multiplier isTickRecentEnoughForWatchdog uses for the same reason:
+// Same multiplier isTickRecentEnoughForSystemdWatchdog uses for the same
+// reason:
 // a long-configured polling interval must not be indistinguishable from a
 // genuine stall.
 const DAEMON_STALE_THRESHOLD_INTERVAL_MULTIPLIER = 3;

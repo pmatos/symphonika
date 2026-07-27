@@ -7,14 +7,14 @@ const execFile = promisify(execFileCallback);
 
 export type DaemonHeartbeat = {
   notifyReady: () => Promise<void>;
-  notifyWatchdog: () => Promise<void>;
+  notifySystemdWatchdog: () => Promise<void>;
   // Derived from WATCHDOG_USEC (microseconds), undefined when NOTIFY_SOCKET
   // or WATCHDOG_USEC isn't set. The ping must run on its own timer,
   // independent of the tick loop -- coupling it to the tick would either
   // kill a healthy daemon whose configured polling.interval_ms exceeds
   // WatchdogSec, or never ping at all before a config is loaded (see
   // docs/adr/0065).
-  watchdogPingIntervalMs: number | undefined;
+  systemdWatchdogPingIntervalMs: number | undefined;
 };
 
 export type DaemonHeartbeatOptions = {
@@ -39,10 +39,10 @@ export function createDaemonHeartbeat(
 
   // A failed systemd-notify call (missing binary, transient socket error)
   // must never crash the daemon this heartbeat exists to keep alive:
-  // notifyReady is awaited directly by startDaemon(), and notifyWatchdog is
-  // fired from a bare `void` at its call site with no .catch() -- either a
-  // rejection here would abort startup or become an unhandled promise
-  // rejection that kills the process by default (Node's
+  // notifyReady is awaited directly by startDaemon(), and
+  // notifySystemdWatchdog is fired from a bare `void` at its call site with
+  // no .catch() -- either a rejection here would abort startup or become an
+  // unhandled promise rejection that kills the process by default (Node's
   // --unhandled-rejections=throw). Swallow and log instead, matching the
   // pattern process-scope.ts's own systemd calls already use.
   const notify = async (args: string[]): Promise<void> => {
@@ -58,8 +58,8 @@ export function createDaemonHeartbeat(
 
   return {
     notifyReady: () => notify(["--ready"]),
-    notifyWatchdog: () => notify(["WATCHDOG=1"]),
-    watchdogPingIntervalMs: enabled
+    notifySystemdWatchdog: () => notify(["WATCHDOG=1"]),
+    systemdWatchdogPingIntervalMs: enabled
       ? derivePingIntervalMs(env.WATCHDOG_USEC)
       : undefined
   };
@@ -80,7 +80,7 @@ export function createDaemonHeartbeat(
 // slow reconcile passes without either masking a real hang or reintroducing
 // the tick-coupling bug this decoupling fixes (the bound scales with the
 // live interval, not a fixed constant).
-export function isTickRecentEnoughForWatchdog(input: {
+export function isTickRecentEnoughForSystemdWatchdog(input: {
   configExists: boolean;
   effectiveIntervalMs: number;
   lastTickAtMs: number | undefined;

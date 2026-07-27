@@ -1367,7 +1367,7 @@ describe("HTTP app — runs API and pages", () => {
   // daemon with a longer configured interval would show a permanent false
   // "may be unresponsive" banner between ticks. The threshold now scales
   // with the live polling interval (the same 3x bound already used by
-  // isTickRecentEnoughForWatchdog), floored at the original 5 minutes so a
+  // isTickRecentEnoughForSystemdWatchdog), floored at the original 5 minutes so a
   // fast-polling daemon's grace period doesn't shrink.
   it("shows no daemon-stale banner when tick age is within the scaled polling-interval bound", async () => {
     const test = await setup();

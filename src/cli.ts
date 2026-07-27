@@ -529,6 +529,9 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         for (const file of report.files) {
           writeOut(program, `wrote:  ${file.path}\n`);
         }
+        for (const removedPath of report.removedFiles) {
+          writeOut(program, `removed: ${removedPath}\n`);
+        }
         if (report.reloadError !== null) {
           writeErr(
             program,

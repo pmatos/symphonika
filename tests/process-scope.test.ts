@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  classifyUnitInactiveError,
   createProcessScope,
   probeSystemdRunAvailable,
   scopeUnitName
@@ -28,25 +29,31 @@ describe("probeSystemdRunAvailable", () => {
   it("is false when no systemd --user runtime dir is present", async () => {
     const available = await probeSystemdRunAvailable({
       env: {},
-      runVersionCheck: () => Promise.resolve()
+      runManagerCheck: () => Promise.resolve()
     });
 
     expect(available).toBe(false);
   });
 
-  it("is false when the runtime dir is present but systemd-run itself fails", async () => {
+  // Regression: the runtime dir alone doesn't prove the user manager is
+  // actually reachable (containers, some SSH sessions can set
+  // XDG_RUNTIME_DIR without a live systemd --user session behind it) --
+  // runManagerCheck must be the thing that catches that, not just a
+  // binary-exists check like `systemd-run --version`.
+  it("is false when the runtime dir is present but the user manager is unreachable", async () => {
     const available = await probeSystemdRunAvailable({
       env: { XDG_RUNTIME_DIR: "/run/user/1000" },
-      runVersionCheck: () => Promise.reject(new Error("not found"))
+      runManagerCheck: () =>
+        Promise.reject(new Error("Failed to connect to bus"))
     });
 
     expect(available).toBe(false);
   });
 
-  it("is true when the runtime dir is present and systemd-run responds", async () => {
+  it("is true when the runtime dir is present and the user manager responds", async () => {
     const available = await probeSystemdRunAvailable({
       env: { XDG_RUNTIME_DIR: "/run/user/1000" },
-      runVersionCheck: () => Promise.resolve()
+      runManagerCheck: () => Promise.resolve()
     });
 
     expect(available).toBe(true);
@@ -108,7 +115,16 @@ describe("createProcessScope.wrapForProviderScope", () => {
 });
 
 describe("createProcessScope.stopProviderScope", () => {
-  it("does nothing when systemd-run is unavailable", async () => {
+  // Regression: a scope this daemon instance can no longer see or create
+  // (systemd-run unavailable right now) may still have been created by a
+  // PREVIOUS daemon instance whose own probe succeeded — the cached
+  // isAvailable() result belongs to this process's lifetime, not to
+  // whatever created the scope being cleaned up. Reporting "confirmed"
+  // here would let a genuinely leaked scope from a crashed daemon go
+  // untracked forever the moment this daemon's manager check happens to
+  // fail. "Can't reach the manager" must read as "can't confirm", not
+  // "nothing to do".
+  it("reports unconfirmed without calling runStop when systemd-run is unavailable", async () => {
     let calls = 0;
     const scope = createProcessScope({
       isAvailable: () => Promise.resolve(false),
@@ -118,12 +134,13 @@ describe("createProcessScope.stopProviderScope", () => {
       }
     });
 
-    await scope.stopProviderScope(RUN);
+    const confirmed = await scope.stopProviderScope(RUN);
 
     expect(calls).toBe(0);
+    expect(confirmed).toBe(false);
   });
 
-  it("stops the run's scope unit when available", async () => {
+  it("stops the run's scope unit and reports confirmed-clean when available", async () => {
     const stopped: string[] = [];
     const scope = createProcessScope({
       isAvailable: () => Promise.resolve(true),
@@ -133,17 +150,54 @@ describe("createProcessScope.stopProviderScope", () => {
       }
     });
 
-    await scope.stopProviderScope(RUN);
+    const confirmed = await scope.stopProviderScope(RUN);
 
     expect(stopped).toEqual(["symphonika-run-abc123-attempt-1.scope"]);
+    expect(confirmed).toBe(true);
   });
 
-  it("resolves cleanly when the scope is already gone", async () => {
+  it("reports confirmed-clean when the scope is already gone (is-active confirms inactive)", async () => {
     const scope = createProcessScope({
+      confirmUnitInactive: () => Promise.resolve(true),
       isAvailable: () => Promise.resolve(true),
       runStop: () => Promise.reject(new Error("Unit not loaded."))
     });
 
-    await expect(scope.stopProviderScope(RUN)).resolves.toBeUndefined();
+    await expect(scope.stopProviderScope(RUN)).resolves.toBe(true);
+  });
+
+  it("reports unconfirmed when the stop fails and is-active cannot confirm the unit is gone", async () => {
+    const scope = createProcessScope({
+      confirmUnitInactive: () => Promise.resolve(false),
+      isAvailable: () => Promise.resolve(true),
+      runStop: () => Promise.reject(new Error("systemctl stop timed out"))
+    });
+
+    await expect(scope.stopProviderScope(RUN)).resolves.toBe(false);
+  });
+});
+
+describe("classifyUnitInactiveError", () => {
+  // Empirically verified against a real systemd --user session:
+  // `systemctl --user is-active --quiet <never-existed-unit>` exits 4
+  // ("inactive"/unknown unit); a manager that can't be reached (bad
+  // XDG_RUNTIME_DIR, dead bus) exits 1 with "Failed to connect to bus" —
+  // NOT the same signal, and must not be read as confirmation the scope is
+  // gone. Only the documented "not active" exit code counts as confirmed.
+  it("treats exit code 4 (inactive / unknown unit) as confirmed", () => {
+    expect(classifyUnitInactiveError({ code: 4, killed: false })).toBe(true);
+  });
+
+  it("treats a manager-unreachable failure (exit 1) as unconfirmed", () => {
+    expect(classifyUnitInactiveError({ code: 1, killed: false })).toBe(false);
+  });
+
+  it("treats a timed-out check (killed by execFile's own timeout) as unconfirmed", () => {
+    expect(classifyUnitInactiveError({ code: null, killed: true })).toBe(false);
+  });
+
+  it("treats a non-error-shaped rejection as unconfirmed", () => {
+    expect(classifyUnitInactiveError(new Error("boom"))).toBe(false);
+    expect(classifyUnitInactiveError("boom")).toBe(false);
   });
 });

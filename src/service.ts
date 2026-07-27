@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +32,7 @@ export type ServiceInstallReport = {
   printed: boolean;
   reloaded: boolean;
   reloadError: string | null;
+  removedFiles: string[];
   unitDir: string;
 };
 
@@ -212,6 +213,7 @@ export async function runServiceInstall(
   ];
 
   const errors: string[] = [];
+  const removedFiles: string[] = [];
   const baseReport = (
     overrides: Partial<ServiceInstallReport> = {}
   ): ServiceInstallReport => ({
@@ -221,6 +223,7 @@ export async function runServiceInstall(
     printed: false,
     reloaded: false,
     reloadError: null,
+    removedFiles,
     unitDir,
     ...overrides
   });
@@ -241,6 +244,9 @@ export async function runServiceInstall(
     return baseReport();
   }
 
+  const legacySlicePath = path.join(unitDir, "symphonika.slice");
+  const legacySliceExists = await fileExists(legacySlicePath);
+
   if (options.force !== true) {
     const existing: string[] = [];
     for (const file of files) {
@@ -254,11 +260,38 @@ export async function runServiceInstall(
       }
       return baseReport();
     }
+    // The pre-split README documented symphonika.slice as
+    // operator-customizable, removed only by `--force`. Leaving it in place
+    // while still writing the two new slices would recreate the hierarchy
+    // bug removal fixes (`man systemd.slice`: dash-separated names always
+    // nest under their unhyphenated parent), so a non-force install refuses
+    // outright rather than either destroying a customized file or installing
+    // a still-constrained split.
+    if (legacySliceExists) {
+      errors.push(
+        `${legacySlicePath} is a legacy unit superseded by symphonika-daemon.slice/symphonika-providers.slice; pass --force to remove it and complete the upgrade`
+      );
+      return baseReport();
+    }
   }
 
   await mkdir(unitDir, { recursive: true });
   for (const file of files) {
     await writeFile(file.path, file.content, "utf8");
+  }
+
+  // Superseded by symphonika-daemon.slice / symphonika-providers.slice. Per
+  // `man systemd.slice`, dash-separated slice names encode hierarchy —
+  // "foo-bar.slice is located within foo.slice" — so both new slices are
+  // always children of an (implicit or explicit) symphonika.slice. A
+  // leftover file from before this split would still cap the daemon and
+  // providers jointly under its own MemoryHigh/MemoryMax, defeating the
+  // whole point of the split (docs/adr/0064) for any upgrading operator.
+  // Only reached with force === true or when no legacy file exists, since a
+  // non-force install with one present already returned above.
+  if (legacySliceExists) {
+    await unlink(legacySlicePath);
+    removedFiles.push(legacySlicePath);
   }
 
   if (options.reload === false) {

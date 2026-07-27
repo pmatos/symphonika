@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createCodexProvider } from "../src/providers/codex.js";
 import type { ProviderEvent, ProviderRunInput } from "../src/provider.js";
@@ -13,7 +13,7 @@ import type {
 type RecordingProcessScope = {
   stopCalls: ProviderRunIdentity[];
   wrapCalls: Array<{ command: ProcessCommand; run: ProviderRunIdentity }>;
-  stopProviderScope: (run: ProviderRunIdentity) => Promise<void>;
+  stopProviderScope: (run: ProviderRunIdentity) => Promise<boolean>;
   wrapForProviderScope: (
     run: ProviderRunIdentity,
     command: ProcessCommand
@@ -32,7 +32,7 @@ function noopProcessScope(): RecordingProcessScope {
     stopCalls,
     stopProviderScope: (run) => {
       stopCalls.push(run);
-      return Promise.resolve();
+      return Promise.resolve(true);
     },
     wrapCalls,
     wrapForProviderScope: (run, command) => {
@@ -497,6 +497,76 @@ describe("Codex JSON-RPC provider", () => {
       }
     ]);
     expect(processScope.stopCalls).toEqual([{ attempt: 1, id: "run-issue-9" }]);
+  });
+
+  // Regression: wrapForProviderScope's await (up to probeTimeoutMs on an
+  // uncached probe) sits between RunController's one-shot pre-start
+  // cancellation recheck (ADR 0052) and the point where this provider used
+  // to register a cancellable entry. A cancel arriving in that window must
+  // not be silently swallowed -- it must stop the process from ever being
+  // spawned.
+  it("never spawns the app-server when cancelled while the scope probe is still pending", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+
+    let resolveWrap: ((command: ProcessCommand) => void) | undefined;
+    const wrapPending = new Promise<ProcessCommand>((resolve) => {
+      resolveWrap = resolve;
+    });
+    const processScope = {
+      stopCalls: [] as ProviderRunIdentity[],
+      stopProviderScope: (run: ProviderRunIdentity) => {
+        processScope.stopCalls.push(run);
+        return Promise.resolve(true);
+      },
+      wrapForProviderScope: (
+        _run: ProviderRunIdentity,
+        command: ProcessCommand
+      ) => {
+        void command;
+        return wrapPending;
+      }
+    };
+    const provider = createCodexProvider({ processScope });
+    const iterable = provider.runAttempt({
+      ...providerInputFixture(),
+      provider: {
+        command: `${process.execPath} ${fakeServerPath} app-server`,
+        name: "codex"
+      },
+      workspacePath
+    });
+    const iterator = iterable[Symbol.asyncIterator]();
+    const eventsPromise = collectIteratorEvents(iterator);
+
+    // Regression: the placeholder registered before the wrapForProviderScope
+    // await lives outside the try/finally that owns the only
+    // activeRuns.delete call, so the early return taken on this cancellation
+    // path used to skip cleanup entirely and leak the map entry for the
+    // lifetime of the provider instance.
+    const deleteSpy = vi.spyOn(Map.prototype, "delete");
+    await provider.cancel("run-issue-9");
+    resolveWrap?.({
+      args: [fakeServerPath, "app-server"],
+      executable: process.execPath
+    });
+    const events = await eventsPromise;
+
+    expect(events.map((event) => event.normalized)).toEqual([
+      {
+        cancelled: true,
+        exitCode: null,
+        signal: null,
+        type: "process_exit"
+      }
+    ]);
+    await expect(readFile(transcriptPath, "utf8")).rejects.toThrow();
+    expect(deleteSpy).toHaveBeenCalledWith("run-issue-9");
+    deleteSpy.mockRestore();
   });
 });
 

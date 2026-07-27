@@ -490,8 +490,15 @@ async function checkInstalledUnitDrift(
   }
 
   const warnings: string[] = [];
+  // `--force` only rewrites unit files and runs `systemctl --user
+  // daemon-reload` (see runServiceInstall/defaultReload in service.ts) --
+  // it never restarts an already-running daemon, which keeps its old unit
+  // (and lacks whatever protection this drift check is warning about) until
+  // an operator separately restarts it.
   const reinstallHint =
-    "re-run `symphonika service install --force` to refresh it";
+    "re-run `symphonika service install --force` to refresh it; a running " +
+    "daemon only picks up the change after `systemctl --user restart " +
+    "symphonika.service`";
   if (!serviceContent.includes("Slice=symphonika-daemon.slice")) {
     warnings.push(
       `${servicePath} predates the daemon/provider cgroup split (docs/adr/0064) — ${reinstallHint}`
@@ -499,7 +506,9 @@ async function checkInstalledUnitDrift(
   }
   if (
     !serviceContent.includes("Type=notify") ||
-    !serviceContent.includes("NotifyAccess=all")
+    !serviceContent.includes("NotifyAccess=all") ||
+    !/^WatchdogSec=/m.test(serviceContent) ||
+    !/^TimeoutStartSec=/m.test(serviceContent)
   ) {
     warnings.push(
       `${servicePath} predates the systemd watchdog heartbeat (docs/adr/0065) — ${reinstallHint}`

@@ -100,6 +100,26 @@ describe("renderServiceUnit", () => {
     expect(unit).toContain("NotifyAccess=all");
   });
 
+  // Regression: Type=notify holds the unit "activating" -- gated on READY=1
+  // -- until TimeoutStartSec elapses, which defaults to 90s
+  // (DefaultTimeoutStartSec=) with no override in this unit. startDaemon()
+  // sends READY=1 only after its startup issue poll and reconcile pass
+  // complete, both of which include real network calls; slow/paginated
+  // GitHub polling across several configured projects can plausibly exceed
+  // 90s on an otherwise healthy startup, which would then SIGTERM the unit
+  // and restart-loop it. WatchdogSec= only arms once READY=1 has been sent,
+  // so a generous startup allowance costs nothing in the runtime hang
+  // detection this feature provides.
+  it("sets a generous TimeoutStartSec so slow initial polling isn't mistaken for a hung startup", () => {
+    const unit = renderServiceUnit({
+      execPath: NODE,
+      path: DAEMON_PATH,
+      scriptPath: CLI
+    });
+
+    expect(unit).toContain("TimeoutStartSec=300");
+  });
+
   it("never hardcodes the ~/.npm-global bin path", () => {
     const unit = renderServiceUnit({
       execPath: NODE,

@@ -79,6 +79,7 @@ export type HttpAppOptions = {
   }>;
   getLastTickAt?: () => number | undefined;
   getPollingIntervalMs?: () => number | undefined;
+  getTickLoopStartedAt?: () => number | undefined;
   getPullRequestFollowupPolicy?: () => {
     maxReviewDispatchesPerPr: number;
   };
@@ -409,6 +410,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.getPollingIntervalMs === undefined
         ? {}
         : { getPollingIntervalMs: options.getPollingIntervalMs }),
+      ...(options.getTickLoopStartedAt === undefined
+        ? {}
+        : { getTickLoopStartedAt: options.getTickLoopStartedAt }),
       ...(options.getPullRequestFollowupPolicy === undefined
         ? {}
         : {

@@ -27,6 +27,7 @@ export type RegisterPagesOptions = {
   app: Hono;
   getLastTickAt?: () => number | undefined;
   getPollingIntervalMs?: () => number | undefined;
+  getTickLoopStartedAt?: () => number | undefined;
   getPullRequestFollowupPolicy?: () => {
     maxReviewDispatchesPerPr: number;
   };
@@ -125,8 +126,18 @@ export function registerPages(options: RegisterPagesOptions): void {
     const snapshot = options.getStatusSnapshot?.();
     const recentRuns = options.runStore.listRuns({ limit: 25 });
     const lastTickAt = options.getLastTickAt?.() ?? null;
+    // The banner's own reference point falls back to when the tick loop
+    // started scheduling (mirroring isTickRecentEnoughForSystemdWatchdog's
+    // identical fallback) so a hung first tick isn't indistinguishable from
+    // "nothing has been scheduled yet" -- /api/status's own lastTickAt stays
+    // truthfully null pre-first-tick; only this banner's age uses the
+    // fallback.
+    const bannerReferenceAt =
+      lastTickAt ?? options.getTickLoopStartedAt?.() ?? null;
     const tickAgeMs =
-      lastTickAt === null ? null : (options.now?.() ?? Date.now()) - lastTickAt;
+      bannerReferenceAt === null
+        ? null
+        : (options.now?.() ?? Date.now()) - bannerReferenceAt;
     const pollingIntervalMs =
       options.getPollingIntervalMs?.() ?? DEFAULT_POLLING_INTERVAL_MS;
     const html = layout(

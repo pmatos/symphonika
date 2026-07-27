@@ -13,7 +13,13 @@ the process actually exiting; a hung-but-alive process sits wedged indefinitely.
 Give the daemon a systemd watchdog and a human-visible staleness signal, independent of ADR 0064's
 memory isolation:
 
-- The generated `.service` unit sets `Type=notify` and `WatchdogSec=90`, with `NotifyAccess=all`.
+- The generated `.service` unit sets `Type=notify` and `WatchdogSec=90`, with `NotifyAccess=all` and
+  `TimeoutStartSec=300`. `Type=notify` holds the unit `activating` — gated on `READY=1` — until
+  `TimeoutStartSec` elapses (90s by default, with no override, prior to this addition); startup
+  sends `READY=1` only after an initial issue poll and reconcile pass that make real network calls,
+  which can plausibly exceed 90s with several configured projects. `WatchdogSec=` only arms once
+  `READY=1` has been sent, so a generous startup allowance costs nothing in the runtime hang
+  detection below.
   `NotifyAccess=all` is required, not optional: the daemon's notifications are sent by spawning the
   external `systemd-notify` binary as a child process (`src/lifecycle/daemon-heartbeat.ts`), not by
   the daemon's own Node process signalling the socket directly — Node has no built-in `sd_notify`
@@ -45,13 +51,23 @@ memory isolation:
   unresponsive" banner when the last tick is older than a threshold that scales with the live
   polling interval (`max(5 minutes, 3x polling.interval_ms)`, `src/http/pages.ts`) — the same
   reasoning as the watchdog ping's own liveness gate, so a long-configured polling interval isn't
-  indistinguishable from a genuine stall. A human-visible warning an operator can notice on a
-  dashboard visit, before the systemd watchdog would eventually restart the unit.
+  indistinguishable from a genuine stall. The banner's own reference point falls back to when the
+  tick loop started scheduling whenever no tick has completed yet — the same fallback
+  `isTickRecentEnoughForSystemdWatchdog` uses — so a hung first tick is visible on the dashboard
+  too, not just to the systemd watchdog; `/api/status`'s `lastTickAt`/`tickAgeMs` fields themselves
+  stay truthfully null pre-first-tick, only the banner's own age computation uses the fallback. A
+  human-visible warning an operator can notice on a dashboard visit, before the systemd watchdog
+  would eventually restart the unit.
 - `symphonika doctor` warns (does not fail) when an installed systemd unit predates this change —
-  missing `Type=notify` or `NotifyAccess=all` — pointing the operator at
-  `symphonika service install --force`. It deliberately can't byte-compare the whole `.service` file
-  generically (`ExecStart`/`Environment=PATH` are baked in from the operator's install-time
-  environment); it checks structural markers instead. The two `.slice` files carry no
+  missing `Type=notify`, `NotifyAccess=all`, a `WatchdogSec=` directive, or a `TimeoutStartSec=`
+  directive — pointing the operator at `symphonika service install --force`, and noting that a
+  running daemon only picks up the change after an explicit `systemctl --user restart
+  symphonika.service` (`--force` only rewrites unit files and reloads systemd's manager
+  configuration; it does not restart the unit). It deliberately can't byte-compare the whole
+  `.service` file generically (`ExecStart`/`Environment=PATH` are baked in from the operator's
+  install-time environment); it checks structural markers instead — `WatchdogSec=`/
+  `TimeoutStartSec=` are matched as line-anchored directives (not substring `.includes()`) so an
+  operator's own hand-tuned values aren't misreported as drift. The two `.slice` files carry no
   install-specific content, so those are compared byte-for-byte against the current generator
   output, same as ADR 0064's own drift concern.
 

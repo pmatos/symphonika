@@ -500,6 +500,34 @@ describe("doctor", () => {
       ).toBe(true);
     });
 
+    // Regression: `symphonika service install --force` only rewrites unit
+    // files and runs `systemctl --user daemon-reload` -- it never restarts
+    // an already-running daemon, so that daemon keeps its old unit (and
+    // lacks the watchdog/cgroup protections this drift check exists to
+    // surface) until an operator separately restarts it. The remediation
+    // hint must say so, not just "re-run install".
+    it("tells the operator a running daemon needs an explicit restart, not just re-install", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        "[Service]\nType=simple\nSlice=symphonika.slice\n",
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      expect(
+        report.warnings.some((warning) => warning.includes("restart"))
+      ).toBe(true);
+    });
+
     it("warns when the installed unit predates the systemd watchdog heartbeat", async () => {
       const root = await makeTempRoot();
       const homeDir = await makeTempRoot();
@@ -556,6 +584,93 @@ describe("doctor", () => {
       ).toBe(true);
     });
 
+    // Regression: Type=notify and NotifyAccess=all alone don't guarantee a
+    // working watchdog -- without WatchdogSec=, systemd never sets
+    // WATCHDOG_USEC in the daemon's environment, so
+    // systemdWatchdogPingIntervalMs stays undefined and the ping timer never
+    // starts, silently, with no other symptom. The check must require
+    // WatchdogSec= too, not just the notify-transport markers.
+    it("warns when the installed unit has Type=notify and NotifyAccess=all but no WatchdogSec=", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        "[Service]\nType=notify\nNotifyAccess=all\nSlice=symphonika-daemon.slice\n",
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      expect(
+        report.warnings.some(
+          (warning) =>
+            warning.includes("watchdog") && warning.includes("service install")
+        )
+      ).toBe(true);
+    });
+
+    // Regression: the check must match the WatchdogSec= directive, not any
+    // occurrence of the substring -- the unit template's own comment above
+    // it ("WatchdogSec= requires a periodic...") contains the literal text
+    // "WatchdogSec=", and an operator's hand-tuned WatchdogSec=120 must not
+    // be flagged as stale just because it isn't the default 90.
+    it("does not warn about an operator's hand-tuned WatchdogSec= value", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        "[Service]\nType=notify\nWatchdogSec=120\nNotifyAccess=all\nTimeoutStartSec=300\nSlice=symphonika-daemon.slice\n",
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      expect(
+        report.warnings.some((warning) => warning.includes("watchdog"))
+      ).toBe(false);
+    });
+
+    // Regression: a unit installed before TimeoutStartSec= was added has no
+    // startup-timeout override, leaving it exposed to the default
+    // DefaultTimeoutStartSec=90s -- slow initial GitHub polling can then
+    // restart-loop an otherwise healthy daemon before it ever sends READY=1.
+    it("warns when the installed unit predates TimeoutStartSec=", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nSlice=symphonika-daemon.slice\n",
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      expect(
+        report.warnings.some(
+          (warning) =>
+            warning.includes("watchdog") && warning.includes("service install")
+        )
+      ).toBe(true);
+    });
+
     it("warns when an installed slice file's content has drifted from the generator", async () => {
       const root = await makeTempRoot();
       const homeDir = await makeTempRoot();
@@ -594,7 +709,7 @@ describe("doctor", () => {
       await mkdir(unitDir, { recursive: true });
       await writeFile(
         path.join(unitDir, "symphonika.service"),
-        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nSlice=symphonika-daemon.slice\n",
+        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nSlice=symphonika-daemon.slice\n",
         "utf8"
       );
       await writeFile(

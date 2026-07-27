@@ -451,6 +451,68 @@ describe("Claude stream-json provider", () => {
     ]);
   });
 
+  // Regression: wrapForProviderScope's await (up to probeTimeoutMs on an
+  // uncached probe) sits between RunController's one-shot pre-start
+  // cancellation recheck (ADR 0052) and the point where this provider used
+  // to register a cancellable entry. A cancel arriving in that window must
+  // not be silently swallowed -- it must stop the process from ever being
+  // spawned.
+  it("never spawns claude when cancelled while the scope probe is still pending", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeClaudePath = path.join(root, "fake-claude.mjs");
+    await writeFakeClaudeStreamJson(fakeClaudePath, transcriptPath);
+
+    let resolveWrap: ((command: ProcessCommand) => void) | undefined;
+    const wrapPending = new Promise<ProcessCommand>((resolve) => {
+      resolveWrap = resolve;
+    });
+    const processScope = {
+      stopCalls: [] as ProviderRunIdentity[],
+      stopProviderScope: (run: ProviderRunIdentity) => {
+        processScope.stopCalls.push(run);
+        return Promise.resolve(true);
+      },
+      wrapForProviderScope: (
+        _run: ProviderRunIdentity,
+        command: ProcessCommand
+      ) => {
+        void command;
+        return wrapPending;
+      }
+    };
+    const provider = createClaudeProvider({ processScope });
+    const iterable = provider.runAttempt({
+      ...providerInputFixture(),
+      provider: {
+        command: `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
+        name: "claude"
+      },
+      workspacePath
+    });
+    const iterator = iterable[Symbol.asyncIterator]();
+    const eventsPromise = collectIteratorEvents(iterator);
+
+    await provider.cancel("run-issue-10");
+    resolveWrap?.({
+      args: [fakeClaudePath],
+      executable: process.execPath
+    });
+    const events = await eventsPromise;
+
+    expect(events.map((event) => event.normalized)).toEqual([
+      {
+        cancelled: true,
+        exitCode: null,
+        signal: null,
+        type: "process_exit"
+      }
+    ]);
+    await expect(readFile(transcriptPath, "utf8")).rejects.toThrow();
+  });
+
   it("validates the configured full-permission stream-json command", async () => {
     const root = await makeTempRoot();
     const transcriptPath = path.join(root, "requests.jsonl");

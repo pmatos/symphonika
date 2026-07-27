@@ -238,6 +238,9 @@ export async function runServiceInstall(
     return baseReport();
   }
 
+  const legacySlicePath = path.join(unitDir, "symphonika.slice");
+  const legacySliceExists = await fileExists(legacySlicePath);
+
   if (options.force !== true) {
     const existing: string[] = [];
     for (const file of files) {
@@ -249,6 +252,19 @@ export async function runServiceInstall(
       for (const filePath of existing) {
         errors.push(`${filePath} already exists; pass --force to overwrite it`);
       }
+      return baseReport();
+    }
+    // The pre-split README documented symphonika.slice as
+    // operator-customizable, removed only by `--force`. Leaving it in place
+    // while still writing the two new slices would recreate the hierarchy
+    // bug removal fixes (`man systemd.slice`: dash-separated names always
+    // nest under their unhyphenated parent), so a non-force install refuses
+    // outright rather than either destroying a customized file or installing
+    // a still-constrained split.
+    if (legacySliceExists) {
+      errors.push(
+        `${legacySlicePath} is a legacy unit superseded by symphonika-daemon.slice/symphonika-providers.slice; pass --force to remove it and complete the upgrade`
+      );
       return baseReport();
     }
   }
@@ -265,10 +281,9 @@ export async function runServiceInstall(
   // leftover file from before this split would still cap the daemon and
   // providers jointly under its own MemoryHigh/MemoryMax, defeating the
   // whole point of the split (docs/adr/0064) for any upgrading operator.
-  // Safe to always remove: a generated unit, fully reproducible by
-  // re-running `service install`, never user data.
-  const legacySlicePath = path.join(unitDir, "symphonika.slice");
-  if (await fileExists(legacySlicePath)) {
+  // Only reached with force === true or when no legacy file exists, since a
+  // non-force install with one present already returned above.
+  if (legacySliceExists) {
     await unlink(legacySlicePath);
     removedFiles.push(legacySlicePath);
   }

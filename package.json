@@ -30,13 +30,13 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@hono/node-server": "^2.0.10",
+    "@hono/node-server": "^2.0.12",
     "@octokit/rest": "^22.0.1",
     "@types/better-sqlite3": "^7.6.13",
     "better-sqlite3": "^12.11.1",
     "commander": "^15.0.0",
     "cron-parser": "^5.6.2",
-    "hono": "^4.12.31",
+    "hono": "^4.12.32",
     "pino": "^10.3.1",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"

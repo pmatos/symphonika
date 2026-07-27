@@ -55,7 +55,9 @@ describe("probeSystemdRunAvailable", () => {
 
 describe("createProcessScope.wrapForProviderScope", () => {
   it("returns the command unchanged when systemd-run is unavailable", async () => {
-    const scope = createProcessScope({ isAvailable: () => Promise.resolve(false) });
+    const scope = createProcessScope({
+      isAvailable: () => Promise.resolve(false)
+    });
 
     const wrapped = await scope.wrapForProviderScope(RUN, COMMAND);
 
@@ -63,7 +65,9 @@ describe("createProcessScope.wrapForProviderScope", () => {
   });
 
   it("wraps the command in a transient scope in the providers slice when available", async () => {
-    const scope = createProcessScope({ isAvailable: () => Promise.resolve(true) });
+    const scope = createProcessScope({
+      isAvailable: () => Promise.resolve(true)
+    });
 
     const wrapped = await scope.wrapForProviderScope(RUN, COMMAND);
 

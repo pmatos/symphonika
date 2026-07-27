@@ -528,9 +528,7 @@ async function checkSliceDrift(
 ): Promise<string[]> {
   const content = await readFileIfExists(slicePath);
   if (content === undefined) {
-    return [
-      `${slicePath} is missing — ${reinstallHint}`
-    ];
+    return [`${slicePath} is missing — ${reinstallHint}`];
   }
   if (content !== expectedContent) {
     return [

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  classifyUnitInactiveError,
   createProcessScope,
   probeSystemdRunAvailable,
   scopeUnitName
@@ -114,7 +115,16 @@ describe("createProcessScope.wrapForProviderScope", () => {
 });
 
 describe("createProcessScope.stopProviderScope", () => {
-  it("reports confirmed-clean without calling runStop when systemd-run is unavailable", async () => {
+  // Regression: a scope this daemon instance can no longer see or create
+  // (systemd-run unavailable right now) may still have been created by a
+  // PREVIOUS daemon instance whose own probe succeeded — the cached
+  // isAvailable() result belongs to this process's lifetime, not to
+  // whatever created the scope being cleaned up. Reporting "confirmed"
+  // here would let a genuinely leaked scope from a crashed daemon go
+  // untracked forever the moment this daemon's manager check happens to
+  // fail. "Can't reach the manager" must read as "can't confirm", not
+  // "nothing to do".
+  it("reports unconfirmed without calling runStop when systemd-run is unavailable", async () => {
     let calls = 0;
     const scope = createProcessScope({
       isAvailable: () => Promise.resolve(false),
@@ -127,7 +137,7 @@ describe("createProcessScope.stopProviderScope", () => {
     const confirmed = await scope.stopProviderScope(RUN);
 
     expect(calls).toBe(0);
-    expect(confirmed).toBe(true);
+    expect(confirmed).toBe(false);
   });
 
   it("stops the run's scope unit and reports confirmed-clean when available", async () => {
@@ -164,5 +174,30 @@ describe("createProcessScope.stopProviderScope", () => {
     });
 
     await expect(scope.stopProviderScope(RUN)).resolves.toBe(false);
+  });
+});
+
+describe("classifyUnitInactiveError", () => {
+  // Empirically verified against a real systemd --user session:
+  // `systemctl --user is-active --quiet <never-existed-unit>` exits 4
+  // ("inactive"/unknown unit); a manager that can't be reached (bad
+  // XDG_RUNTIME_DIR, dead bus) exits 1 with "Failed to connect to bus" —
+  // NOT the same signal, and must not be read as confirmation the scope is
+  // gone. Only the documented "not active" exit code counts as confirmed.
+  it("treats exit code 4 (inactive / unknown unit) as confirmed", () => {
+    expect(classifyUnitInactiveError({ code: 4, killed: false })).toBe(true);
+  });
+
+  it("treats a manager-unreachable failure (exit 1) as unconfirmed", () => {
+    expect(classifyUnitInactiveError({ code: 1, killed: false })).toBe(false);
+  });
+
+  it("treats a timed-out check (killed by execFile's own timeout) as unconfirmed", () => {
+    expect(classifyUnitInactiveError({ code: null, killed: true })).toBe(false);
+  });
+
+  it("treats a non-error-shaped rejection as unconfirmed", () => {
+    expect(classifyUnitInactiveError(new Error("boom"))).toBe(false);
+    expect(classifyUnitInactiveError("boom")).toBe(false);
   });
 });

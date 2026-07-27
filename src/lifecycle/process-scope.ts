@@ -159,7 +159,13 @@ export function createProcessScope(
     },
     stopProviderScope: async (run) => {
       if (!(await isAvailable())) {
-        return true;
+        // Unavailable here proves nothing about the scope this call is
+        // trying to clean up: isAvailable() is cached for THIS daemon
+        // instance's lifetime, but a leaked scope being reaped by a startup
+        // sweep was created by a PREVIOUS (now-dead) daemon instance with
+        // its own, independent probe. A transient failure to reach the
+        // manager right now is not confirmation that scope is gone.
+        return false;
       }
 
       const unitName = scopeUnitName(run);
@@ -196,12 +202,15 @@ async function defaultRunStop(
 }
 
 // `systemctl --user is-active --quiet <unit>` exits 0 only while the unit is
-// still active, and nonzero for every other case: inactive, failed, or
-// unknown to the manager (empirically verified: a never-existed unit exits 4
-// here vs. 5 from `stop`). That single check is what lets a failed `stop`
-// call be told apart from a stop that genuinely couldn't be confirmed — a
-// timed-out `is-active` (killed by execFile's own timeout) can't answer
-// either way and must not be read as "gone".
+// still active, and exits 4 specifically for "inactive"/unknown to the
+// manager (empirically verified against a real systemd --user session). That
+// is the ONLY exit this reads as confirmation the scope is gone — every
+// other nonzero exit is a manager/command failure, not an answer. Also
+// empirically verified: a manager the client can't reach (dead bus, bad
+// XDG_RUNTIME_DIR) exits 1 with "Failed to connect to bus", the same generic
+// failure code any number of other problems could produce, so it must be
+// classified as unconfirmed rather than assumed to mean the same thing as
+// exit 4.
 async function defaultConfirmUnitInactive(
   unitName: string,
   timeoutMs: number
@@ -212,15 +221,14 @@ async function defaultConfirmUnitInactive(
     });
     return false;
   } catch (error) {
-    return !isTimeoutError(error);
+    return classifyUnitInactiveError(error);
   }
 }
 
-function isTimeoutError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "killed" in error &&
-    (error as { killed?: unknown }).killed === true
-  );
+export function classifyUnitInactiveError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return code === 4;
 }

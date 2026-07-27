@@ -209,7 +209,16 @@ describe("startDaemon orphan sweep logging", () => {
       configPath: "symphonika.yml",
       cwd,
       logger,
-      port: 0
+      port: 0,
+      // These orphans have no attempt row, so stopProviderScope is never
+      // actually reached — but pin it explicitly rather than relying on the
+      // real createProcessScope(), whose isAvailable() now depends on
+      // whether XDG_RUNTIME_DIR happens to be set on the host running this
+      // test (see the "unavailable -> unconfirmed" fix in process-scope.ts).
+      processScope: {
+        stopProviderScope: () => Promise.resolve(true),
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
     });
     try {
       const summaries = lines.filter(
@@ -240,7 +249,11 @@ describe("startDaemon orphan sweep logging", () => {
       configPath: "symphonika.yml",
       cwd,
       logger,
-      port: 0
+      port: 0,
+      processScope: {
+        stopProviderScope: () => Promise.resolve(true),
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
     });
     try {
       const orphanLines = lines.filter(
@@ -728,7 +741,11 @@ describe("startDaemon orphan sweep logging", () => {
       configPath: "symphonika.yml",
       cwd,
       logger,
-      port: 0
+      port: 0,
+      processScope: {
+        stopProviderScope: () => Promise.resolve(true),
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
     });
     let stopped = false;
     try {
@@ -784,7 +801,11 @@ describe("startDaemon orphan sweep logging", () => {
       configPath: "symphonika.yml",
       cwd,
       logger,
-      port: 0
+      port: 0,
+      processScope: {
+        stopProviderScope: () => Promise.resolve(true),
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
     });
     let stopped = false;
     try {

@@ -28,25 +28,31 @@ describe("probeSystemdRunAvailable", () => {
   it("is false when no systemd --user runtime dir is present", async () => {
     const available = await probeSystemdRunAvailable({
       env: {},
-      runVersionCheck: () => Promise.resolve()
+      runManagerCheck: () => Promise.resolve()
     });
 
     expect(available).toBe(false);
   });
 
-  it("is false when the runtime dir is present but systemd-run itself fails", async () => {
+  // Regression: the runtime dir alone doesn't prove the user manager is
+  // actually reachable (containers, some SSH sessions can set
+  // XDG_RUNTIME_DIR without a live systemd --user session behind it) --
+  // runManagerCheck must be the thing that catches that, not just a
+  // binary-exists check like `systemd-run --version`.
+  it("is false when the runtime dir is present but the user manager is unreachable", async () => {
     const available = await probeSystemdRunAvailable({
       env: { XDG_RUNTIME_DIR: "/run/user/1000" },
-      runVersionCheck: () => Promise.reject(new Error("not found"))
+      runManagerCheck: () =>
+        Promise.reject(new Error("Failed to connect to bus"))
     });
 
     expect(available).toBe(false);
   });
 
-  it("is true when the runtime dir is present and systemd-run responds", async () => {
+  it("is true when the runtime dir is present and the user manager responds", async () => {
     const available = await probeSystemdRunAvailable({
       env: { XDG_RUNTIME_DIR: "/run/user/1000" },
-      runVersionCheck: () => Promise.resolve()
+      runManagerCheck: () => Promise.resolve()
     });
 
     expect(available).toBe(true);

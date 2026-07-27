@@ -14,13 +14,21 @@ export function scopeUnitName(run: ProviderRunIdentity): string {
 
 export type ProbeSystemdRunAvailableOptions = {
   env?: NodeJS.ProcessEnv;
-  runVersionCheck?: () => Promise<void>;
+  runManagerCheck?: () => Promise<void>;
 };
 
-// systemd-run --user needs a live user session (the runtime dir systemd-logind
-// creates on login), not just the binary on PATH. `symphonika daemon` must
-// keep working with neither present (non-systemd hosts, containers, CI) — see
+// systemd-run --user needs a live, reachable user manager (the runtime dir
+// systemd-logind creates on login is a prerequisite, not proof by itself —
+// XDG_RUNTIME_DIR can be set with no manager actually listening, e.g. in some
+// containers and minimal SSH sessions). `symphonika daemon` must keep working
+// with neither present (non-systemd hosts, containers, CI) — see
 // docs/adr/0064 — so this is a cheap probe, not a hard requirement.
+//
+// `systemctl --user is-system-running` genuinely round-trips over D-Bus to
+// the manager, unlike `systemd-run --version` (which only reads embedded
+// version metadata and would report available=true even when the manager
+// isn't reachable, causing the real wrapped spawn to fail with a bus/session
+// error instead of taking the unwrapped fallback).
 export async function probeSystemdRunAvailable(
   options: ProbeSystemdRunAvailableOptions = {}
 ): Promise<boolean> {
@@ -32,17 +40,17 @@ export async function probeSystemdRunAvailable(
     return false;
   }
 
-  const runVersionCheck = options.runVersionCheck ?? defaultVersionCheck;
+  const runManagerCheck = options.runManagerCheck ?? defaultManagerCheck;
   try {
-    await runVersionCheck();
+    await runManagerCheck();
     return true;
   } catch {
     return false;
   }
 }
 
-async function defaultVersionCheck(): Promise<void> {
-  await execFile("systemd-run", ["--version"]);
+async function defaultManagerCheck(): Promise<void> {
+  await execFile("systemctl", ["--user", "is-system-running"]);
 }
 
 export type ProcessCommand = {

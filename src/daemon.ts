@@ -23,6 +23,7 @@ import { ActiveRunRegistry } from "./lifecycle/active-runs.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
 import {
   createDaemonHeartbeat,
+  isTickRecentEnoughForWatchdog,
   type DaemonHeartbeat
 } from "./lifecycle/daemon-heartbeat.js";
 import {
@@ -327,6 +328,7 @@ export async function startDaemon(
     }
   };
   let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let watchdogTimer: ReturnType<typeof setInterval> | undefined;
   let lastTickAtMs: number | undefined;
   let polling = false;
   let scheduledWork = Promise.resolve();
@@ -672,12 +674,14 @@ export async function startDaemon(
       },
       "symphonika tick"
     );
+    // Reaching here means the event loop is still advancing. The watchdog
+    // ping itself runs on its own independent timer (see watchdogTimer
+    // below), not from here directly -- coupling it to the tick would
+    // either kill a healthy daemon whose configured polling interval
+    // exceeds WatchdogSec, or never ping at all before a config is loaded
+    // (see docs/adr/0065). This timestamp is what that timer's liveness
+    // gate reads to decide whether a hung tick should withhold the ping.
     lastTickAtMs = Date.now();
-    // Reaching here means the event loop is still advancing, so tell systemd
-    // this run of the daemon is alive. A no-op unless the unit is
-    // Type=notify (see docs/adr/0065); a hung tick — the exact failure mode
-    // this guards against — simply never reaches this call.
-    await daemonHeartbeat.notifyWatchdog();
   };
   const refreshPollingInterval = (): void => {
     if (!state.configExists) {
@@ -885,6 +889,21 @@ export async function startDaemon(
     "symphonika daemon started"
   );
   await daemonHeartbeat.notifyReady();
+  if (daemonHeartbeat.watchdogPingIntervalMs !== undefined) {
+    watchdogTimer = setInterval(() => {
+      if (
+        isTickRecentEnoughForWatchdog({
+          configExists: state.configExists,
+          effectiveIntervalMs: intervalMs ?? DEFAULT_POLLING_INTERVAL_MS,
+          lastTickAtMs,
+          now: Date.now()
+        })
+      ) {
+        void daemonHeartbeat.notifyWatchdog();
+      }
+    }, daemonHeartbeat.watchdogPingIntervalMs);
+    watchdogTimer.unref?.();
+  }
 
   return {
     host,
@@ -894,6 +913,9 @@ export async function startDaemon(
     stop: async () => {
       if (pollTimer !== undefined) {
         clearInterval(pollTimer);
+      }
+      if (watchdogTimer !== undefined) {
+        clearInterval(watchdogTimer);
       }
       if (legacyRecheckTimer !== undefined) {
         clearTimeout(legacyRecheckTimer);

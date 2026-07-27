@@ -11,7 +11,9 @@ import type { IssueSnapshot } from "../src/issue-polling.js";
 import type { DaemonHeartbeat } from "../src/lifecycle/daemon-heartbeat.js";
 import { openRunStore, RunStore } from "../src/run-store.js";
 
-function recordingDaemonHeartbeat(): DaemonHeartbeat & {
+function recordingDaemonHeartbeat(
+  watchdogPingIntervalMs?: number
+): DaemonHeartbeat & {
   readyCalls: number;
   watchdogCalls: number;
 } {
@@ -30,7 +32,8 @@ function recordingDaemonHeartbeat(): DaemonHeartbeat & {
     notifyWatchdog: () => {
       state.watchdogCalls += 1;
       return Promise.resolve();
-    }
+    },
+    watchdogPingIntervalMs
   };
 }
 
@@ -122,7 +125,32 @@ describe("startDaemon", () => {
     }
   });
 
-  it("sends a systemd watchdog ping after each successful tick", async () => {
+  // Regression: the watchdog ping used to fire only from inside tick()'s own
+  // body, coupling it to the polling cadence -- a configured polling
+  // interval longer than WatchdogSec, or no config loaded at all (no ticks
+  // ever scheduled), would starve the ping and get a perfectly healthy
+  // daemon killed. It now runs on its own independent timer, so it pings
+  // even when nothing ever calls /api/poll-now.
+  it("pings the systemd watchdog on its own timer, independent of any tick", async () => {
+    const cwd = await makeTempRoot();
+    const daemonHeartbeat = recordingDaemonHeartbeat(20);
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      daemonHeartbeat,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(daemonHeartbeat.watchdogCalls).toBeGreaterThan(0);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("never pings the systemd watchdog when no watchdog ping interval is configured", async () => {
     const cwd = await makeTempRoot();
     const daemonHeartbeat = recordingDaemonHeartbeat();
     const daemon = await startDaemon({
@@ -134,12 +162,12 @@ describe("startDaemon", () => {
     });
 
     try {
-      const before = daemonHeartbeat.watchdogCalls;
+      await new Promise((resolve) => setTimeout(resolve, 40));
       const response = await fetch(`${daemon.url}/api/poll-now`, {
         method: "POST"
       });
       expect(response.status).toBe(200);
-      expect(daemonHeartbeat.watchdogCalls).toBeGreaterThan(before);
+      expect(daemonHeartbeat.watchdogCalls).toBe(0);
     } finally {
       await daemon.stop();
     }

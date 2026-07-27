@@ -497,7 +497,10 @@ async function checkInstalledUnitDrift(
       `${servicePath} predates the daemon/provider cgroup split (docs/adr/0064) — ${reinstallHint}`
     );
   }
-  if (!serviceContent.includes("Type=notify")) {
+  if (
+    !serviceContent.includes("Type=notify") ||
+    !serviceContent.includes("NotifyAccess=all")
+  ) {
     warnings.push(
       `${servicePath} predates the systemd watchdog heartbeat (docs/adr/0065) — ${reinstallHint}`
     );

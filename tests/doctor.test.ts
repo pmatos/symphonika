@@ -525,6 +525,37 @@ describe("doctor", () => {
       ).toBe(true);
     });
 
+    // Regression: a unit installed from a build between the watchdog
+    // heartbeat landing (Type=notify/WatchdogSec=90) and NotifyAccess=all
+    // being added to fix the child-process-notifier rejection would have
+    // Type=notify but no NotifyAccess=all -- its READY=1/WATCHDOG=1 pings
+    // are silently discarded by systemd, so it must still be flagged as
+    // stale rather than reported current just because Type=notify matches.
+    it("warns when the installed unit has Type=notify but predates NotifyAccess=all", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        "[Service]\nType=notify\nWatchdogSec=90\nSlice=symphonika-daemon.slice\n",
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      expect(
+        report.warnings.some(
+          (warning) =>
+            warning.includes("watchdog") && warning.includes("service install")
+        )
+      ).toBe(true);
+    });
+
     it("warns when an installed slice file's content has drifted from the generator", async () => {
       const root = await makeTempRoot();
       const homeDir = await makeTempRoot();
@@ -563,7 +594,7 @@ describe("doctor", () => {
       await mkdir(unitDir, { recursive: true });
       await writeFile(
         path.join(unitDir, "symphonika.service"),
-        "[Service]\nType=notify\nWatchdogSec=90\nSlice=symphonika-daemon.slice\n",
+        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nSlice=symphonika-daemon.slice\n",
         "utf8"
       );
       await writeFile(

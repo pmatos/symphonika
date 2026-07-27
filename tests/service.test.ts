@@ -80,6 +80,26 @@ describe("renderServiceUnit", () => {
     expect(unit).not.toContain("Type=simple");
   });
 
+  // Regression: createDaemonHeartbeat sends READY=1/WATCHDOG=1 by spawning
+  // systemd-notify as a child process, not from the daemon's own Node PID.
+  // Per `man systemd.service`, Type=notify/WatchdogSec= with no explicit
+  // NotifyAccess= implicitly becomes NotifyAccess=main, which only accepts
+  // notifications from the exact process systemd tracks as MainPID -- a
+  // child process's messages are silently discarded, leaving the unit stuck
+  // "activating" until it restart-loops. Verified empirically against a
+  // real transient --user unit: implicit NotifyAccess=main rejects a
+  // child-process notifier with `result: protocol`; NotifyAccess=all
+  // accepts it.
+  it("sets NotifyAccess=all so a child-process notifier is accepted", () => {
+    const unit = renderServiceUnit({
+      execPath: NODE,
+      path: DAEMON_PATH,
+      scriptPath: CLI
+    });
+
+    expect(unit).toContain("NotifyAccess=all");
+  });
+
   it("never hardcodes the ~/.npm-global bin path", () => {
     const unit = renderServiceUnit({
       execPath: NODE,

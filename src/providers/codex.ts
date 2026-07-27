@@ -122,6 +122,10 @@ export function createCodexProvider(
         parseCommand(input.provider.command)
       );
       if (activeRun.cancelled) {
+        // Outside the try/finally below (which owns the only other
+        // activeRuns.delete call) -- without this, this placeholder would
+        // leak in the map for the lifetime of the provider instance.
+        activeRuns.delete(input.run.id);
         yield {
           normalized: {
             cancelled: true,

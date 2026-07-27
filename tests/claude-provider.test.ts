@@ -8,7 +8,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createClaudeProvider } from "../src/providers/claude.js";
 import type { ProviderEvent, ProviderRunInput } from "../src/provider.js";
@@ -495,6 +495,12 @@ describe("Claude stream-json provider", () => {
     const iterator = iterable[Symbol.asyncIterator]();
     const eventsPromise = collectIteratorEvents(iterator);
 
+    // Regression: the placeholder registered before the wrapForProviderScope
+    // await lives outside the try/finally that owns the only
+    // activeRuns.delete call, so the early return taken on this cancellation
+    // path used to skip cleanup entirely and leak the map entry for the
+    // lifetime of the provider instance.
+    const deleteSpy = vi.spyOn(Map.prototype, "delete");
     await provider.cancel("run-issue-10");
     resolveWrap?.({
       args: [fakeClaudePath],
@@ -511,6 +517,8 @@ describe("Claude stream-json provider", () => {
       }
     ]);
     await expect(readFile(transcriptPath, "utf8")).rejects.toThrow();
+    expect(deleteSpy).toHaveBeenCalledWith("run-issue-10");
+    deleteSpy.mockRestore();
   });
 
   it("validates the configured full-permission stream-json command", async () => {

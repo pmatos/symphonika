@@ -7,6 +7,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import {
+  createProcessScope,
+  type ProcessScope
+} from "../lifecycle/process-scope.js";
 import type {
   AgentProvider,
   ProviderEvent,
@@ -18,10 +22,14 @@ type JsonObject = Record<string, unknown>;
 
 type ActiveCodexRun = {
   cancelled: boolean;
-  child: ChildProcessWithoutNullStreams;
+  child?: ChildProcessWithoutNullStreams;
   nextRequestId: number;
   threadId?: string;
   turnId?: string;
+};
+
+type SpawnedCodexRun = ActiveCodexRun & {
+  child: ChildProcessWithoutNullStreams;
 };
 
 type ProcessQueueItem =
@@ -53,7 +61,14 @@ type ResponseReadResult = {
   stopped: boolean;
 };
 
-export function createCodexProvider(): AgentProvider {
+export type CodexProviderOptions = {
+  processScope?: ProcessScope;
+};
+
+export function createCodexProvider(
+  options: CodexProviderOptions = {}
+): AgentProvider {
+  const processScope = options.processScope ?? createProcessScope();
   const activeRuns = new Map<string, ActiveCodexRun>();
 
   return {
@@ -64,6 +79,11 @@ export function createCodexProvider(): AgentProvider {
       }
 
       activeRun.cancelled = true;
+      if (activeRun.child === undefined) {
+        // Cancelled before the scope probe/spawn finished — runAttempt's own
+        // post-probe recheck (see below) is what stops it from launching.
+        return Promise.resolve();
+      }
       if (activeRun.threadId !== undefined && activeRun.turnId !== undefined) {
         writeJson(activeRun.child, {
           id: activeRun.nextRequestId,
@@ -82,18 +102,53 @@ export function createCodexProvider(): AgentProvider {
     runAttempt: async function* (
       input: ProviderRunInput
     ): AsyncGenerator<ProviderEvent> {
-      const command = parseCommand(input.provider.command);
+      // Registered before the scope-probe await below so a cancel arriving
+      // during that await (up to probeTimeoutMs on the first, uncached
+      // call) has somewhere to land instead of being a silent no-op —
+      // cancel() finds this entry, sets cancelled, and the recheck right
+      // after the await stops the spawn from ever happening. Without this
+      // placeholder, a cancel here would be permanently lost: RunController
+      // only rechecks its own cancellation latch once, before runAttempt is
+      // called (see ADR 0052 at run-controller.ts:2274-2281), and this
+      // await reopens that exact race one level deeper.
+      const activeRun: ActiveCodexRun = {
+        cancelled: false,
+        nextRequestId: 4
+      };
+      activeRuns.set(input.run.id, activeRun);
+
+      const command = await processScope.wrapForProviderScope(
+        input.run,
+        parseCommand(input.provider.command)
+      );
+      if (activeRun.cancelled) {
+        // Outside the try/finally below (which owns the only other
+        // activeRuns.delete call) -- without this, this placeholder would
+        // leak in the map for the lifetime of the provider instance.
+        activeRuns.delete(input.run.id);
+        yield {
+          normalized: {
+            cancelled: true,
+            exitCode: null,
+            signal: null,
+            type: "process_exit"
+          },
+          raw: {
+            cancelled: true,
+            exitCode: null,
+            kind: "process_exit",
+            signal: null
+          }
+        };
+        return;
+      }
       const child = spawn(command.executable, command.args, {
         cwd: input.workspacePath,
         env: process.env,
         stdio: ["pipe", "pipe", "pipe"]
       });
-      const activeRun: ActiveCodexRun = {
-        cancelled: false,
-        child,
-        nextRequestId: 4
-      };
-      activeRuns.set(input.run.id, activeRun);
+      activeRun.child = child;
+      const spawnedRun: SpawnedCodexRun = activeRun as SpawnedCodexRun;
       child.stderr.resume();
       const queue = createProcessQueue(child);
 
@@ -115,7 +170,7 @@ export function createCodexProvider(): AgentProvider {
         const initialized = await readUntilResponse(
           queue,
           1,
-          activeRun,
+          spawnedRun,
           (raw) => ({
             raw
           })
@@ -136,7 +191,7 @@ export function createCodexProvider(): AgentProvider {
         const threadStarted = await readUntilResponse(
           queue,
           2,
-          activeRun,
+          spawnedRun,
           (raw) => {
             const result = objectField(raw, "result");
             const thread = objectField(result, "thread");
@@ -194,7 +249,7 @@ export function createCodexProvider(): AgentProvider {
         const turnStarted = await readUntilResponse(
           queue,
           3,
-          activeRun,
+          spawnedRun,
           (raw) => {
             const result = objectField(raw, "result");
             const turn = objectField(result, "turn");
@@ -236,6 +291,13 @@ export function createCodexProvider(): AgentProvider {
         }
       } finally {
         activeRuns.delete(input.run.id);
+        // Runs unconditionally, not only on cancellation: the `process_exit`
+        // branch above returns directly on ordinary successful completion,
+        // bypassing terminateProcess entirely. A provider-spawned build tool
+        // (cargo, rustc, ...) can outlive that exit as a detached
+        // grandchild; stopping the run's scope here is what actually reaps
+        // it (see docs/adr/0064).
+        await processScope.stopProviderScope(input.run);
       }
     },
     validate: async (command) => {
@@ -254,7 +316,7 @@ export function createCodexProvider(): AgentProvider {
 async function readUntilResponse(
   queue: ProcessQueue,
   requestId: number,
-  activeRun: ActiveCodexRun,
+  activeRun: SpawnedCodexRun,
   mapResponse: (raw: unknown) => ProviderEvent
 ): Promise<ResponseReadResult> {
   const events: ProviderEvent[] = [];

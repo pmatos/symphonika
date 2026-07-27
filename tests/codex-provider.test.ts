@@ -1,10 +1,46 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createCodexProvider } from "../src/providers/codex.js";
 import type { ProviderEvent, ProviderRunInput } from "../src/provider.js";
+import type {
+  ProcessCommand,
+  ProviderRunIdentity
+} from "../src/lifecycle/process-scope.js";
+
+type RecordingProcessScope = {
+  stopCalls: ProviderRunIdentity[];
+  wrapCalls: Array<{ command: ProcessCommand; run: ProviderRunIdentity }>;
+  stopProviderScope: (run: ProviderRunIdentity) => Promise<boolean>;
+  wrapForProviderScope: (
+    run: ProviderRunIdentity,
+    command: ProcessCommand
+  ) => Promise<ProcessCommand>;
+};
+
+// The default processScope probes real systemd-run availability, which is
+// true on a dev box with a live systemd --user session (XDG_RUNTIME_DIR
+// set) — every existing test here injects this no-op bypass so spawned
+// fake-subprocess commands are never actually wrapped in a real transient
+// systemd scope, regardless of the host running the suite.
+function noopProcessScope(): RecordingProcessScope {
+  const wrapCalls: RecordingProcessScope["wrapCalls"] = [];
+  const stopCalls: RecordingProcessScope["stopCalls"] = [];
+  return {
+    stopCalls,
+    stopProviderScope: (run) => {
+      stopCalls.push(run);
+      return Promise.resolve(true);
+    },
+    wrapCalls,
+    wrapForProviderScope: (run, command) => {
+      wrapCalls.push({ command, run });
+      return Promise.resolve(command);
+    }
+  };
+}
 
 const tempRoots: string[] = [];
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
@@ -53,7 +89,7 @@ describe("Codex JSON-RPC provider", () => {
     const transcriptPath = path.join(root, "requests.jsonl");
     const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
     await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
-    const provider = createCodexProvider();
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
 
     const events = await collectProviderEvents(
       provider.runAttempt({
@@ -230,6 +266,41 @@ describe("Codex JSON-RPC provider", () => {
     ]);
   });
 
+  it("wraps the spawned command via the injected process scope and stops the scope when the run completes normally", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+    const processScope = noopProcessScope();
+    const provider = createCodexProvider({ processScope });
+    const command = `${process.execPath} ${fakeServerPath} app-server`;
+
+    await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: { command, name: "codex" },
+        workspacePath
+      })
+    );
+
+    expect(processScope.wrapCalls).toEqual([
+      {
+        command: {
+          args: [fakeServerPath, "app-server"],
+          executable: process.execPath
+        },
+        run: { attempt: 1, id: "run-issue-9" }
+      }
+    ]);
+    // The regression this guards: ordinary successful completion takes the
+    // `process_exit` early-return path, which bypasses terminateProcess
+    // entirely — stopProviderScope must still fire from the unconditional
+    // cleanup path, not only on cancellation.
+    expect(processScope.stopCalls).toEqual([{ attempt: 1, id: "run-issue-9" }]);
+  });
+
   it("maps app-server input requests to input_required and stops the process", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -237,7 +308,7 @@ describe("Codex JSON-RPC provider", () => {
     const transcriptPath = path.join(root, "requests.jsonl");
     const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
     await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
-    const provider = createCodexProvider();
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
 
     const events = await collectProviderEvents(
       provider.runAttempt({
@@ -294,7 +365,7 @@ describe("Codex JSON-RPC provider", () => {
     const transcriptPath = path.join(root, "requests.jsonl");
     const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
     await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
-    const provider = createCodexProvider();
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
 
     const events = await collectProviderEvents(
       provider.runAttempt({
@@ -340,7 +411,7 @@ describe("Codex JSON-RPC provider", () => {
     const transcriptPath = path.join(root, "requests.jsonl");
     const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
     await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
-    const provider = createCodexProvider();
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
 
     const events = await collectProviderEvents(
       provider.runAttempt({
@@ -382,7 +453,8 @@ describe("Codex JSON-RPC provider", () => {
     const transcriptPath = path.join(root, "requests.jsonl");
     const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
     await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
-    const provider = createCodexProvider();
+    const processScope = noopProcessScope();
+    const provider = createCodexProvider({ processScope });
     const iterable = provider.runAttempt({
       ...providerInputFixture(),
       provider: {
@@ -424,6 +496,77 @@ describe("Codex JSON-RPC provider", () => {
         type: "process_exit"
       }
     ]);
+    expect(processScope.stopCalls).toEqual([{ attempt: 1, id: "run-issue-9" }]);
+  });
+
+  // Regression: wrapForProviderScope's await (up to probeTimeoutMs on an
+  // uncached probe) sits between RunController's one-shot pre-start
+  // cancellation recheck (ADR 0052) and the point where this provider used
+  // to register a cancellable entry. A cancel arriving in that window must
+  // not be silently swallowed -- it must stop the process from ever being
+  // spawned.
+  it("never spawns the app-server when cancelled while the scope probe is still pending", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+
+    let resolveWrap: ((command: ProcessCommand) => void) | undefined;
+    const wrapPending = new Promise<ProcessCommand>((resolve) => {
+      resolveWrap = resolve;
+    });
+    const processScope = {
+      stopCalls: [] as ProviderRunIdentity[],
+      stopProviderScope: (run: ProviderRunIdentity) => {
+        processScope.stopCalls.push(run);
+        return Promise.resolve(true);
+      },
+      wrapForProviderScope: (
+        _run: ProviderRunIdentity,
+        command: ProcessCommand
+      ) => {
+        void command;
+        return wrapPending;
+      }
+    };
+    const provider = createCodexProvider({ processScope });
+    const iterable = provider.runAttempt({
+      ...providerInputFixture(),
+      provider: {
+        command: `${process.execPath} ${fakeServerPath} app-server`,
+        name: "codex"
+      },
+      workspacePath
+    });
+    const iterator = iterable[Symbol.asyncIterator]();
+    const eventsPromise = collectIteratorEvents(iterator);
+
+    // Regression: the placeholder registered before the wrapForProviderScope
+    // await lives outside the try/finally that owns the only
+    // activeRuns.delete call, so the early return taken on this cancellation
+    // path used to skip cleanup entirely and leak the map entry for the
+    // lifetime of the provider instance.
+    const deleteSpy = vi.spyOn(Map.prototype, "delete");
+    await provider.cancel("run-issue-9");
+    resolveWrap?.({
+      args: [fakeServerPath, "app-server"],
+      executable: process.execPath
+    });
+    const events = await eventsPromise;
+
+    expect(events.map((event) => event.normalized)).toEqual([
+      {
+        cancelled: true,
+        exitCode: null,
+        signal: null,
+        type: "process_exit"
+      }
+    ]);
+    await expect(readFile(transcriptPath, "utf8")).rejects.toThrow();
+    expect(deleteSpy).toHaveBeenCalledWith("run-issue-9");
+    deleteSpy.mockRestore();
   });
 });
 
@@ -432,7 +575,7 @@ describe("Codex provider validate", () => {
     const root = await makeTempRoot();
     const fakePath = path.join(root, "fake-codex-validate.mjs");
     await writeFakeCodexValidator(fakePath, []);
-    const provider = createCodexProvider();
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
 
     await expect(
       provider.validate(`${process.execPath} ${fakePath} app-server`)
@@ -444,7 +587,7 @@ describe("Codex provider validate", () => {
     const fakePath = path.join(root, "fake-codex-validate.mjs");
     const transcriptPath = path.join(root, "validate-requests.jsonl");
     await writeFakeCodexValidator(fakePath, [], { transcriptPath });
-    const provider = createCodexProvider();
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
 
     await expect(
       provider.validate(`${process.execPath} ${fakePath} app-server`)
@@ -492,7 +635,7 @@ describe("Codex provider validate", () => {
     const transcriptPath = path.join(root, "validate-requests.jsonl");
     await writeFakeCodexValidator(fakePath, [], { transcriptPath });
     process.env.SYMPHONIKA_CODEX_RUNTIME_PROBE_TIMEOUT_MS = "42000";
-    const provider = createCodexProvider();
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
 
     await expect(
       provider.validate(`${process.execPath} ${fakePath} app-server`)
@@ -508,7 +651,7 @@ describe("Codex provider validate", () => {
     const root = await makeTempRoot();
     const fakePath = path.join(root, "fake-codex-validate.mjs");
     await writeFakeCodexValidator(fakePath, [], { sandboxType: "readOnly" });
-    const provider = createCodexProvider();
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
 
     await expect(
       provider.validate(`${process.execPath} ${fakePath} app-server`)
@@ -542,7 +685,9 @@ describe("Codex provider validate", () => {
         commandExitCode: exitCode,
         commandStderr: stderr
       });
-      const provider = createCodexProvider();
+      const provider = createCodexProvider({
+        processScope: noopProcessScope()
+      });
 
       await expect(
         provider.validate(`${process.execPath} ${fakePath} app-server`)
@@ -554,7 +699,7 @@ describe("Codex provider validate", () => {
     const root = await makeTempRoot();
     const fakePath = path.join(root, "fake-codex-validate.mjs");
     await writeFakeCodexValidator(fakePath, ["symphonika"]);
-    const provider = createCodexProvider();
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
 
     await expect(
       provider.validate(
@@ -567,7 +712,7 @@ describe("Codex provider validate", () => {
     const root = await makeTempRoot();
     const fakePath = path.join(root, "fake-codex-validate.mjs");
     await writeFakeCodexValidator(fakePath, []);
-    const provider = createCodexProvider();
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
 
     await expect(
       provider.validate(
@@ -584,7 +729,7 @@ describe("Codex provider validate", () => {
     });
     const previousTimeout = process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS;
     process.env.SYMPHONIKA_CODEX_PROBE_TIMEOUT_MS = "5000";
-    const provider = createCodexProvider();
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
 
     try {
       await expect(

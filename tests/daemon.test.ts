@@ -209,7 +209,16 @@ describe("startDaemon orphan sweep logging", () => {
       configPath: "symphonika.yml",
       cwd,
       logger,
-      port: 0
+      port: 0,
+      // These orphans have no attempt row, so stopProviderScope is never
+      // actually reached — but pin it explicitly rather than relying on the
+      // real createProcessScope(), whose isAvailable() now depends on
+      // whether XDG_RUNTIME_DIR happens to be set on the host running this
+      // test (see the "unavailable -> unconfirmed" fix in process-scope.ts).
+      processScope: {
+        stopProviderScope: () => Promise.resolve(true),
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
     });
     try {
       const summaries = lines.filter(
@@ -240,7 +249,11 @@ describe("startDaemon orphan sweep logging", () => {
       configPath: "symphonika.yml",
       cwd,
       logger,
-      port: 0
+      port: 0,
+      processScope: {
+        stopProviderScope: () => Promise.resolve(true),
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
     });
     try {
       const orphanLines = lines.filter(
@@ -271,6 +284,442 @@ describe("startDaemon orphan sweep logging", () => {
     }
   });
 
+  // Regression: provider processes now run in symphonika-providers.slice, a
+  // SIBLING of the daemon's own service cgroup (see docs/adr/0064) -- a
+  // daemon crash/restart no longer tears down in-flight provider scopes with
+  // it the way it did before that split. The startup orphan sweep must also
+  // reap any lingering scope for a run that was actually running (i.e. had a
+  // provider spawned) when the previous daemon instance died.
+  it("stops the leftover provider scope for a running orphan, using its latest attempt", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "orphan-run",
+      issue: sampleIssue({ number: 55 }),
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    store.createAttempt({
+      attemptNumber: 1,
+      branchName: "sym/symphonika/55-fixture",
+      branchRef: "refs/heads/sym/symphonika/55-fixture",
+      id: "orphan-run-attempt-1",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "orphan-run",
+      state: "running",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    // A retried attempt: the sweep must reap attempt 2 (the latest), not 1.
+    store.createAttempt({
+      attemptNumber: 2,
+      branchName: "sym/symphonika/55-fixture",
+      branchRef: "refs/heads/sym/symphonika/55-fixture",
+      id: "orphan-run-attempt-2",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "orphan-run",
+      state: "running",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    store.updateRunState("orphan-run", "running");
+    store.close();
+
+    const stopCalls: Array<{ attempt: number; id: string }> = [];
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: (run) => {
+          stopCalls.push(run);
+          return Promise.resolve(true);
+        },
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+
+    try {
+      expect(stopCalls).toEqual([{ attempt: 2, id: "orphan-run" }]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("does not attempt to stop a scope for an orphan that never got a provider spawned", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    seedOrphans(stateRoot, [
+      { id: "leaked-queued", issueNumber: 60, state: "queued" },
+      { id: "leaked-preparing", issueNumber: 61, state: "preparing_workspace" }
+    ]);
+
+    const stopCalls: Array<{ attempt: number; id: string }> = [];
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: (run) => {
+          stopCalls.push(run);
+          return Promise.resolve(true);
+        },
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+
+    try {
+      expect(stopCalls).toEqual([]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Routine Firings are a separate subsystem from regular dispatch Runs
+  // (src/routines/dispatcher.ts), but share the same architectural gap: a
+  // crashed daemon leaves its provider's scope alive in the sibling
+  // symphonika-providers.slice. Routine firings never retry, so their
+  // provider is always spawned as attempt 1 (see dispatcher.ts) -- no
+  // listAttempts lookup is needed, unlike the regular-run sweep.
+  it("stops the leftover provider scope for a leaked running routine firing", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    store.syncRoutines([
+      {
+        kind: "report",
+        name: "nightly-report",
+        prompt: "Write a nightly report.",
+        provider: "codex",
+        schedule: { cron: "0 0 * * *", tz: "UTC" },
+        sourcePath: "/tmp/nightly-report.md",
+        projectName: "symphonika"
+      }
+    ]);
+    store.createRoutineFiring({
+      id: "leaked-firing",
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      routineName: "nightly-report"
+    });
+    store.updateRoutineFiringState("leaked-firing", "running");
+    store.close();
+
+    const stopCalls: Array<{ attempt: number; id: string }> = [];
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: (run) => {
+          stopCalls.push(run);
+          return Promise.resolve(true);
+        },
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+
+    try {
+      expect(stopCalls).toEqual([{ attempt: 1, id: "leaked-firing" }]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("does not attempt to stop a scope for a queued routine firing that never got a provider spawned", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    store.syncRoutines([
+      {
+        kind: "report",
+        name: "nightly-report",
+        prompt: "Write a nightly report.",
+        provider: "codex",
+        schedule: { cron: "0 0 * * *", tz: "UTC" },
+        sourcePath: "/tmp/nightly-report.md",
+        projectName: "symphonika"
+      }
+    ]);
+    store.createRoutineFiring({
+      id: "queued-firing",
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      routineName: "nightly-report"
+    });
+    store.close();
+
+    const stopCalls: Array<{ attempt: number; id: string }> = [];
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: (run) => {
+          stopCalls.push(run);
+          return Promise.resolve(true);
+        },
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+
+    try {
+      expect(stopCalls).toEqual([]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Regression: previously the sweep terminalized every orphan to 'stale'
+  // BEFORE attempting scope cleanup, so a transient cleanup failure (manager
+  // unreachable, systemctl stop timed out) had no way to be retried on a
+  // future restart -- see docs/adr/0064. A row whose cleanup could not be
+  // confirmed must get a distinct terminal_reason and stay discoverable
+  // through the store's own detection query.
+  it("leaves an orphaned run's scope cleanup pending for retry when it cannot be confirmed", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "unconfirmed-run",
+      issue: sampleIssue({ number: 70 }),
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    store.createAttempt({
+      attemptNumber: 1,
+      branchName: "sym/symphonika/70-fixture",
+      branchRef: "refs/heads/sym/symphonika/70-fixture",
+      id: "unconfirmed-run-attempt-1",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "unconfirmed-run",
+      state: "running",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    store.updateRunState("unconfirmed-run", "running");
+    store.close();
+
+    const { logger, lines } = createCapturingLogger();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger,
+      port: 0,
+      processScope: {
+        stopProviderScope: () => Promise.resolve(false),
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+    let stopped = false;
+    try {
+      const pendingLines = lines.filter(
+        (line) =>
+          line.msg ===
+          "symphonika startup: orphaned run scope cleanup could not be confirmed"
+      );
+      expect(pendingLines).toHaveLength(1);
+      expect(pendingLines[0]).toMatchObject({
+        level: pino.levels.values.warn,
+        runId: "unconfirmed-run",
+        terminalReason: "leaked_active_run_cleanup_pending"
+      });
+
+      await daemon.stop();
+      stopped = true;
+
+      const verifyStore = openRunStore({ stateRoot });
+      try {
+        expect(verifyStore.getRun("unconfirmed-run")).toMatchObject({
+          state: "stale",
+          terminalReason: "leaked_active_run_cleanup_pending"
+        });
+        expect(
+          verifyStore.findLeakedRuns().map((entry) => entry.runId)
+        ).toEqual(["unconfirmed-run"]);
+      } finally {
+        verifyStore.close();
+      }
+    } finally {
+      if (!stopped) {
+        await daemon.stop();
+      }
+    }
+  });
+
+  it("leaves a leaked routine firing's scope cleanup pending for retry when it cannot be confirmed", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    store.syncRoutines([
+      {
+        kind: "report",
+        name: "nightly-report",
+        prompt: "Write a nightly report.",
+        provider: "codex",
+        schedule: { cron: "0 0 * * *", tz: "UTC" },
+        sourcePath: "/tmp/nightly-report.md",
+        projectName: "symphonika"
+      }
+    ]);
+    store.createRoutineFiring({
+      id: "unconfirmed-firing",
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      routineName: "nightly-report"
+    });
+    store.updateRoutineFiringState("unconfirmed-firing", "running");
+    store.close();
+
+    const { logger, lines } = createCapturingLogger();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger,
+      port: 0,
+      processScope: {
+        stopProviderScope: () => Promise.resolve(false),
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+    let stopped = false;
+    try {
+      const pendingLines = lines.filter(
+        (line) =>
+          line.msg ===
+          "symphonika startup: orphaned routine firing scope cleanup could not be confirmed"
+      );
+      expect(pendingLines).toHaveLength(1);
+      expect(pendingLines[0]).toMatchObject({
+        level: pino.levels.values.warn,
+        firingId: "unconfirmed-firing",
+        terminalReason: "leaked_routine_firing_cleanup_pending"
+      });
+
+      await daemon.stop();
+      stopped = true;
+
+      const verifyStore = openRunStore({ stateRoot });
+      try {
+        expect(verifyStore.listRoutineFirings()).toEqual([
+          expect.objectContaining({
+            id: "unconfirmed-firing",
+            state: "failed",
+            terminalReason: "leaked_routine_firing_cleanup_pending"
+          })
+        ]);
+        expect(
+          verifyStore.findLeakedRoutineFirings().map((entry) => entry.firingId)
+        ).toEqual(["unconfirmed-firing"]);
+      } finally {
+        verifyStore.close();
+      }
+    } finally {
+      if (!stopped) {
+        await daemon.stop();
+      }
+    }
+  });
+
+  // The sweep must not serialize scope-stop calls behind one another --
+  // otherwise N leaked runs each risking up to stopTimeoutMs delays the HTTP
+  // server (serve()) from starting, reintroducing the dashboard-unavailable
+  // symptom this whole change exists to fix (docs/adr/0064).
+  it("stops leaked runs' provider scopes in parallel rather than serially", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    for (const n of [1, 2, 3]) {
+      const runId = `concurrent-run-${n}`;
+      store.createRun({
+        id: runId,
+        issue: sampleIssue({ number: 80 + n }),
+        projectName: "symphonika",
+        providerCommand: "codex fake",
+        providerName: "codex"
+      });
+      store.createAttempt({
+        attemptNumber: 1,
+        branchName: `sym/symphonika/${80 + n}-fixture`,
+        branchRef: `refs/heads/sym/symphonika/${80 + n}-fixture`,
+        id: `${runId}-attempt-1`,
+        issueSnapshotPath: "/tmp/snap.json",
+        metadataPath: "/tmp/meta.json",
+        normalizedLogPath: "/tmp/normalized.jsonl",
+        promptPath: "/tmp/prompt.md",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        rawLogPath: "/tmp/raw.jsonl",
+        runId,
+        state: "running",
+        workflowGraphPath: "",
+        workspacePath: stateRoot
+      });
+      store.updateRunState(runId, "running");
+    }
+    store.close();
+
+    let active = 0;
+    let maxActive = 0;
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: async () => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          active -= 1;
+          return true;
+        },
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+
+    try {
+      expect(maxActive).toBeGreaterThan(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   // ADR 0047 guarantees valid waiting rows (current_state_id set) survive
   // daemon restart so the next tick can re-evaluate them; the startup sweep
   // must leave them alone.
@@ -292,7 +741,11 @@ describe("startDaemon orphan sweep logging", () => {
       configPath: "symphonika.yml",
       cwd,
       logger,
-      port: 0
+      port: 0,
+      processScope: {
+        stopProviderScope: () => Promise.resolve(true),
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
     });
     let stopped = false;
     try {
@@ -348,7 +801,11 @@ describe("startDaemon orphan sweep logging", () => {
       configPath: "symphonika.yml",
       cwd,
       logger,
-      port: 0
+      port: 0,
+      processScope: {
+        stopProviderScope: () => Promise.resolve(true),
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
     });
     let stopped = false;
     try {

@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +32,7 @@ export type ServiceInstallReport = {
   printed: boolean;
   reloaded: boolean;
   reloadError: string | null;
+  removedFiles: string[];
   unitDir: string;
 };
 
@@ -44,14 +45,31 @@ export type ServiceUnitInput = {
 
 const SLICE_UNIT = [
   "[Unit]",
-  "Description=Symphonika slice (daemon + spawned providers and verifiers)",
+  "Description=Symphonika daemon slice (daemon + dashboard only)",
   "",
   "[Slice]",
-  "# Cap the whole daemon tree. Tune to match the host you run on; these",
-  "# defaults assume a workstation with >= 64 GB of RAM. A runaway tool",
-  "# (e.g. an ESBMC verification) will be killed inside this slice",
-  "# instead of triggering a global OOM that tears down terminals or",
-  "# other unrelated cgroups.",
+  "# Small, protected budget for the daemon process itself. Spawned",
+  "# providers and their build tools run in symphonika-providers.slice",
+  "# instead, so a runaway tool there can no longer throttle the daemon's",
+  "# own event loop or dashboard (see docs/adr/0064). Tune to match the",
+  "# host you run on.",
+  "MemoryHigh=4G",
+  "MemoryMax=6G",
+  ""
+].join("\n");
+
+const PROVIDERS_SLICE_UNIT = [
+  "[Unit]",
+  "Description=Symphonika providers slice (spawned providers and verifiers)",
+  "",
+  "[Slice]",
+  "# Cap the whole tree of spawned providers and their build tools. Tune",
+  "# to match the host you run on; these defaults assume a workstation",
+  "# with >= 64 GB of RAM. A runaway tool (e.g. an ESBMC verification)",
+  "# will be killed inside this slice instead of triggering a global OOM",
+  "# that tears down terminals or other unrelated cgroups — and, since",
+  "# this slice is a sibling of symphonika-daemon.slice rather than its",
+  "# parent, it can no longer throttle the daemon itself (docs/adr/0064).",
   "MemoryHigh=24G",
   "MemoryMax=32G",
   "TasksMax=4096",
@@ -103,11 +121,11 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
     "# same positional-argument path.",
     `ExecStart=/bin/sh -c 't=$(gh auth token); [ -n "$t" ] || { echo "ERROR: gh auth token returned empty"; exit 1; }; export GITHUB_TOKEN="$t"; exec "$1" "$2" daemon${daemonConfigOption}' symphonika ${systemdArg(input.execPath)} ${systemdArg(input.scriptPath)}${configArgument}`,
     "",
-    "# Keep the daemon and everything it spawns in its own cgroup slice.",
-    "# A scope-wide OOM in a spawned tool (compiler, verifier, ...) no",
-    "# longer tears down whichever terminal scope you happened to launch",
-    "# the daemon from.",
-    "Slice=symphonika.slice",
+    "# Keep the daemon in its own small, protected cgroup slice, separate",
+    "# from symphonika-providers.slice (where spawned providers and their",
+    "# build tools run). A memory blowup in a provider no longer throttles",
+    "# the daemon's own event loop or dashboard — see docs/adr/0064.",
+    "Slice=symphonika-daemon.slice",
     "",
     "# Journald sees stdout/stderr. View with:",
     "#   journalctl --user -u symphonika -f",
@@ -122,6 +140,10 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
 
 export function renderSliceUnit(): string {
   return SLICE_UNIT;
+}
+
+export function renderProvidersSliceUnit(): string {
+  return PROVIDERS_SLICE_UNIT;
 }
 
 // Bake an absolute PATH into the unit: the node runtime's directory first,
@@ -176,11 +198,16 @@ export async function runServiceInstall(
     },
     {
       content: renderSliceUnit(),
-      path: path.join(unitDir, "symphonika.slice")
+      path: path.join(unitDir, "symphonika-daemon.slice")
+    },
+    {
+      content: renderProvidersSliceUnit(),
+      path: path.join(unitDir, "symphonika-providers.slice")
     }
   ];
 
   const errors: string[] = [];
+  const removedFiles: string[] = [];
   const baseReport = (
     overrides: Partial<ServiceInstallReport> = {}
   ): ServiceInstallReport => ({
@@ -190,6 +217,7 @@ export async function runServiceInstall(
     printed: false,
     reloaded: false,
     reloadError: null,
+    removedFiles,
     unitDir,
     ...overrides
   });
@@ -210,6 +238,9 @@ export async function runServiceInstall(
     return baseReport();
   }
 
+  const legacySlicePath = path.join(unitDir, "symphonika.slice");
+  const legacySliceExists = await fileExists(legacySlicePath);
+
   if (options.force !== true) {
     const existing: string[] = [];
     for (const file of files) {
@@ -223,11 +254,38 @@ export async function runServiceInstall(
       }
       return baseReport();
     }
+    // The pre-split README documented symphonika.slice as
+    // operator-customizable, removed only by `--force`. Leaving it in place
+    // while still writing the two new slices would recreate the hierarchy
+    // bug removal fixes (`man systemd.slice`: dash-separated names always
+    // nest under their unhyphenated parent), so a non-force install refuses
+    // outright rather than either destroying a customized file or installing
+    // a still-constrained split.
+    if (legacySliceExists) {
+      errors.push(
+        `${legacySlicePath} is a legacy unit superseded by symphonika-daemon.slice/symphonika-providers.slice; pass --force to remove it and complete the upgrade`
+      );
+      return baseReport();
+    }
   }
 
   await mkdir(unitDir, { recursive: true });
   for (const file of files) {
     await writeFile(file.path, file.content, "utf8");
+  }
+
+  // Superseded by symphonika-daemon.slice / symphonika-providers.slice. Per
+  // `man systemd.slice`, dash-separated slice names encode hierarchy —
+  // "foo-bar.slice is located within foo.slice" — so both new slices are
+  // always children of an (implicit or explicit) symphonika.slice. A
+  // leftover file from before this split would still cap the daemon and
+  // providers jointly under its own MemoryHigh/MemoryMax, defeating the
+  // whole point of the split (docs/adr/0064) for any upgrading operator.
+  // Only reached with force === true or when no legacy file exists, since a
+  // non-force install with one present already returned above.
+  if (legacySliceExists) {
+    await unlink(legacySlicePath);
+    removedFiles.push(legacySlicePath);
   }
 
   if (options.reload === false) {

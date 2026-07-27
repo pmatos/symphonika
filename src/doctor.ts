@@ -468,8 +468,8 @@ export async function runDoctor(
 }
 
 // Detects an installed unit that predates a systemd-unit-shape change (the
-// daemon/provider cgroup split, or the watchdog heartbeat — see
-// docs/adr/0064) so operators learn to re-run `service install --force`
+// daemon/provider cgroup split, docs/adr/0064; or the watchdog heartbeat,
+// docs/adr/0065) so operators learn to re-run `service install --force`
 // instead of silently running on stale units indefinitely. Skips entirely
 // when no unit is installed at all (`service install` was never run) —
 // that's not a doctor concern. `ExecStart`/`Environment=PATH` are baked in
@@ -499,7 +499,7 @@ async function checkInstalledUnitDrift(
   }
   if (!serviceContent.includes("Type=notify")) {
     warnings.push(
-      `${servicePath} predates the systemd watchdog heartbeat (docs/adr/0064) — ${reinstallHint}`
+      `${servicePath} predates the systemd watchdog heartbeat (docs/adr/0065) — ${reinstallHint}`
     );
   }
 

@@ -567,7 +567,7 @@ export async function startDaemon(
     lastTickAtMs = Date.now();
     // Reaching here means the event loop is still advancing, so tell systemd
     // this run of the daemon is alive. A no-op unless the unit is
-    // Type=notify (see docs/adr/0064); a hung tick — the exact failure mode
+    // Type=notify (see docs/adr/0065); a hung tick — the exact failure mode
     // this guards against — simply never reaches this call.
     await daemonHeartbeat.notifyWatchdog();
   };

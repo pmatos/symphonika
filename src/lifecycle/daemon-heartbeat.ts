@@ -14,7 +14,7 @@ export type DaemonHeartbeatOptions = {
 };
 
 // NOTIFY_SOCKET is only set by systemd when the unit is Type=notify (see
-// docs/adr/0064 and renderServiceUnit in service.ts). Under any other
+// docs/adr/0065 and renderServiceUnit in service.ts). Under any other
 // invocation — symphonika daemon run bare, a non-systemd host, or an
 // installed unit that predates this change — this is a no-op, matching the
 // pattern already established for process-scope.ts's graceful degrade.

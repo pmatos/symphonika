@@ -37,7 +37,7 @@ export type RegisterPagesOptions = {
 
 // Well beyond the daemon's own poll interval (commonly seconds) but far
 // below the multi-hour wedges that motivated this banner (see
-// docs/adr/0064) — an operator should notice within one dashboard visit,
+// docs/adr/0065) — an operator should notice within one dashboard visit,
 // not just after the systemd watchdog eventually restarts the unit.
 const DAEMON_STALE_THRESHOLD_MS = 5 * 60_000;
 

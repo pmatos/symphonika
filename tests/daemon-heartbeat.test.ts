@@ -1,3 +1,4 @@
+import pino from "pino";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -6,6 +7,50 @@ import {
 } from "../src/lifecycle/daemon-heartbeat.js";
 
 describe("createDaemonHeartbeat", () => {
+  // Regression: a rejecting systemd-notify call (missing binary, transient
+  // socket error) used to propagate straight out of notifyReady/notifyWatchdog
+  // -- crashing startDaemon() itself (notifyReady is awaited directly) or
+  // becoming an unhandled promise rejection (notifyWatchdog is void-discarded
+  // at its call site, with no .catch()), which by default kills the Node
+  // process. A liveness mechanism must not be able to crash the daemon it
+  // exists to keep alive; a failed notify should degrade gracefully, matching
+  // the pattern process-scope.ts's own systemd calls already use.
+  it("does not reject when notifyReady's systemd-notify call fails", async () => {
+    const heartbeat = createDaemonHeartbeat({
+      env: { NOTIFY_SOCKET: "/run/user/1000/systemd/notify" },
+      runNotify: () => Promise.reject(new Error("ENOENT: systemd-notify"))
+    });
+
+    await expect(heartbeat.notifyReady()).resolves.toBeUndefined();
+  });
+
+  it("does not reject when notifyWatchdog's systemd-notify call fails", async () => {
+    const heartbeat = createDaemonHeartbeat({
+      env: { NOTIFY_SOCKET: "/run/user/1000/systemd/notify" },
+      runNotify: () => Promise.reject(new Error("ENOENT: systemd-notify"))
+    });
+
+    await expect(heartbeat.notifyWatchdog()).resolves.toBeUndefined();
+  });
+
+  it("logs a warning when a systemd-notify call fails", async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const logger = pino(
+      { level: "warn" },
+      { write: (line: string) => lines.push(JSON.parse(line) as never) }
+    );
+    const heartbeat = createDaemonHeartbeat({
+      env: { NOTIFY_SOCKET: "/run/user/1000/systemd/notify" },
+      logger,
+      runNotify: () => Promise.reject(new Error("ENOENT: systemd-notify"))
+    });
+
+    await heartbeat.notifyReady();
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.level).toBe(pino.levels.values.warn);
+  });
+
   it("does nothing when NOTIFY_SOCKET is unset (no systemd notify contract)", async () => {
     let calls = 0;
     const heartbeat = createDaemonHeartbeat({

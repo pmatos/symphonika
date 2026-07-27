@@ -110,7 +110,7 @@ export async function startDaemon(
   const logger = options.logger ?? pino({ level: resolveLogLevel(env) });
   const processScope = options.processScope ?? createProcessScope();
   const daemonHeartbeat =
-    options.daemonHeartbeat ?? createDaemonHeartbeat({ env });
+    options.daemonHeartbeat ?? createDaemonHeartbeat({ env, logger });
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 3000;
   const stateRootOptions: Parameters<typeof resolveStateRoot>[0] = {};
@@ -891,7 +891,20 @@ export async function startDaemon(
     },
     "symphonika daemon started"
   );
-  await daemonHeartbeat.notifyReady();
+  // Defense in depth: createDaemonHeartbeat's own notify functions already
+  // swallow a failed systemd-notify call, but daemonHeartbeat is injectable
+  // (options.daemonHeartbeat), so a caller-supplied implementation isn't
+  // guaranteed to. Either call site rejecting would be severe -- notifyReady
+  // is awaited directly, so it would abort startDaemon() itself, and
+  // notifyWatchdog runs from a timer with nothing else to observe a
+  // rejection -- so both are caught here too rather than trusting the
+  // implementation.
+  await daemonHeartbeat.notifyReady().catch((error: unknown) => {
+    logger.warn(
+      { err: error },
+      "symphonika systemd-notify readiness call failed"
+    );
+  });
   if (daemonHeartbeat.watchdogPingIntervalMs !== undefined) {
     watchdogTimer = setInterval(() => {
       if (
@@ -903,7 +916,12 @@ export async function startDaemon(
           tickLoopStartedAtMs
         })
       ) {
-        void daemonHeartbeat.notifyWatchdog();
+        daemonHeartbeat.notifyWatchdog().catch((error: unknown) => {
+          logger.warn(
+            { err: error },
+            "symphonika systemd-notify watchdog call failed"
+          );
+        });
       }
     }, daemonHeartbeat.watchdogPingIntervalMs);
     watchdogTimer.unref?.();

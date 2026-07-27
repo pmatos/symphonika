@@ -1,6 +1,8 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 
+import type { Logger } from "pino";
+
 const execFile = promisify(execFileCallback);
 
 export type DaemonHeartbeat = {
@@ -17,6 +19,7 @@ export type DaemonHeartbeat = {
 
 export type DaemonHeartbeatOptions = {
   env?: NodeJS.ProcessEnv;
+  logger?: Logger;
   runNotify?: (args: string[]) => Promise<void>;
 };
 
@@ -30,22 +33,32 @@ export function createDaemonHeartbeat(
 ): DaemonHeartbeat {
   const env = options.env ?? process.env;
   const runNotify = options.runNotify ?? defaultRunNotify;
+  const logger = options.logger;
   const enabled =
     typeof env.NOTIFY_SOCKET === "string" && env.NOTIFY_SOCKET.length > 0;
 
+  // A failed systemd-notify call (missing binary, transient socket error)
+  // must never crash the daemon this heartbeat exists to keep alive:
+  // notifyReady is awaited directly by startDaemon(), and notifyWatchdog is
+  // fired from a bare `void` at its call site with no .catch() -- either a
+  // rejection here would abort startup or become an unhandled promise
+  // rejection that kills the process by default (Node's
+  // --unhandled-rejections=throw). Swallow and log instead, matching the
+  // pattern process-scope.ts's own systemd calls already use.
+  const notify = async (args: string[]): Promise<void> => {
+    if (!enabled) {
+      return;
+    }
+    try {
+      await runNotify(args);
+    } catch (error) {
+      logger?.warn({ args, err: error }, "symphonika systemd-notify failed");
+    }
+  };
+
   return {
-    notifyReady: async () => {
-      if (!enabled) {
-        return;
-      }
-      await runNotify(["--ready"]);
-    },
-    notifyWatchdog: async () => {
-      if (!enabled) {
-        return;
-      }
-      await runNotify(["WATCHDOG=1"]);
-    },
+    notifyReady: () => notify(["--ready"]),
+    notifyWatchdog: () => notify(["WATCHDOG=1"]),
     watchdogPingIntervalMs: enabled
       ? derivePingIntervalMs(env.WATCHDOG_USEC)
       : undefined

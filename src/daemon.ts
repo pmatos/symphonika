@@ -207,6 +207,16 @@ export async function startDaemon(
       },
       "symphonika startup: marked orphaned routine firing as failed"
     );
+    // Same gap as the regular-run sweep above, for the separate Routine
+    // Firing subsystem (src/routines/dispatcher.ts). Firings never retry, so
+    // their provider is always spawned as attempt 1 — no listAttempts lookup
+    // needed here.
+    if (entry.previousState === "running") {
+      await processScope.stopProviderScope({
+        attempt: 1,
+        id: entry.firingId
+      });
+    }
   }
   if (leakedFirings.length > 0) {
     logger.info(

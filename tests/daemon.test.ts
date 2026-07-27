@@ -380,6 +380,107 @@ describe("startDaemon orphan sweep logging", () => {
     }
   });
 
+  // Routine Firings are a separate subsystem from regular dispatch Runs
+  // (src/routines/dispatcher.ts), but share the same architectural gap: a
+  // crashed daemon leaves its provider's scope alive in the sibling
+  // symphonika-providers.slice. Routine firings never retry, so their
+  // provider is always spawned as attempt 1 (see dispatcher.ts) -- no
+  // listAttempts lookup is needed, unlike the regular-run sweep.
+  it("stops the leftover provider scope for a leaked running routine firing", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    store.syncRoutines([
+      {
+        kind: "report",
+        name: "nightly-report",
+        prompt: "Write a nightly report.",
+        provider: "codex",
+        schedule: { cron: "0 0 * * *", tz: "UTC" },
+        sourcePath: "/tmp/nightly-report.md",
+        projectName: "symphonika"
+      }
+    ]);
+    store.createRoutineFiring({
+      id: "leaked-firing",
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      routineName: "nightly-report"
+    });
+    store.updateRoutineFiringState("leaked-firing", "running");
+    store.close();
+
+    const stopCalls: Array<{ attempt: number; id: string }> = [];
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: (run) => {
+          stopCalls.push(run);
+          return Promise.resolve();
+        },
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+
+    try {
+      expect(stopCalls).toEqual([{ attempt: 1, id: "leaked-firing" }]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("does not attempt to stop a scope for a queued routine firing that never got a provider spawned", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    store.syncRoutines([
+      {
+        kind: "report",
+        name: "nightly-report",
+        prompt: "Write a nightly report.",
+        provider: "codex",
+        schedule: { cron: "0 0 * * *", tz: "UTC" },
+        sourcePath: "/tmp/nightly-report.md",
+        projectName: "symphonika"
+      }
+    ]);
+    store.createRoutineFiring({
+      id: "queued-firing",
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      routineName: "nightly-report"
+    });
+    store.close();
+
+    const stopCalls: Array<{ attempt: number; id: string }> = [];
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: (run) => {
+          stopCalls.push(run);
+          return Promise.resolve();
+        },
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+
+    try {
+      expect(stopCalls).toEqual([]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   // ADR 0047 guarantees valid waiting rows (current_state_id set) survive
   // daemon restart so the next tick can re-evaluate them; the startup sweep
   // must leave them alone.

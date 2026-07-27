@@ -18,6 +18,7 @@ import {
   renderServiceUnit,
   renderSliceUnit,
   runServiceInstall,
+  userUnitDir as resolveUserUnitDir,
   type ServiceInstallOptions,
   type ServiceInstallReport
 } from "../src/service.js";
@@ -67,6 +68,18 @@ describe("renderServiceUnit", () => {
     expect(unit).toContain("WantedBy=default.target");
   });
 
+  it("uses Type=notify with a watchdog timeout so a hung-but-alive daemon is restarted", () => {
+    const unit = renderServiceUnit({
+      execPath: NODE,
+      path: DAEMON_PATH,
+      scriptPath: CLI
+    });
+
+    expect(unit).toContain("Type=notify");
+    expect(unit).toContain("WatchdogSec=90");
+    expect(unit).not.toContain("Type=simple");
+  });
+
   it("never hardcodes the ~/.npm-global bin path", () => {
     const unit = renderServiceUnit({
       execPath: NODE,
@@ -99,6 +112,20 @@ describe("renderServiceUnit", () => {
     expect(unit).toContain(
       `Environment="PATH=/home/John Doe/.nvm/bin:/usr/bin"`
     );
+  });
+});
+
+describe("userUnitDir", () => {
+  it("is exported for reuse by other unit-installation-aware code (e.g. doctor)", () => {
+    expect(resolveUserUnitDir("/home/op", {})).toBe(
+      path.join("/home/op", ".config", "systemd", "user")
+    );
+  });
+
+  it("honors an absolute XDG_CONFIG_HOME, matching runServiceInstall's own resolution", () => {
+    expect(
+      resolveUserUnitDir("/home/op", { XDG_CONFIG_HOME: "/custom/config" })
+    ).toBe(path.join("/custom/config", "systemd", "user"));
   });
 });
 

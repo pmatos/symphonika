@@ -11,6 +11,10 @@ import {
 } from "../src/doctor.js";
 import type { AgentProviderRegistry } from "../src/provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "../src/providers/index.js";
+import {
+  renderProvidersSliceUnit,
+  renderSliceUnit
+} from "../src/service.js";
 
 const tempRoots: string[] = [];
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
@@ -269,7 +273,8 @@ describe("doctor", () => {
         }
       },
       configPath,
-      githubApi: successfulGitHubApi()
+      githubApi: successfulGitHubApi(),
+      homeDir: root
     });
 
     expect(report.ok).toBe(false);
@@ -296,7 +301,8 @@ describe("doctor", () => {
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
       configPath,
-      githubApi: successfulGitHubApi()
+      githubApi: successfulGitHubApi(),
+      homeDir: root
     });
 
     expect(report.ok).toBe(false);
@@ -325,7 +331,8 @@ describe("doctor", () => {
 
     const report = await runDoctor({
       configPath,
-      githubApi: successfulGitHubApi()
+      githubApi: successfulGitHubApi(),
+      homeDir: root
     });
 
     expect(DEFAULT_AGENT_PROVIDERS.claude?.name).toBe("claude");
@@ -456,12 +463,199 @@ describe("doctor", () => {
     expect(output.stderr).toContain("prompt not found");
     expect(output.stderr).toContain("planning");
   });
+
+  describe("installed systemd unit drift", () => {
+    it("reports no warnings when no systemd unit has been installed", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        homeDir
+      });
+
+      expect(report.warnings).toEqual([]);
+    });
+
+    it("warns when the installed unit predates the daemon/provider cgroup split", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        "[Service]\nType=simple\nSlice=symphonika.slice\n",
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        homeDir
+      });
+
+      expect(
+        report.warnings.some(
+          (warning) =>
+            warning.includes("cgroup") && warning.includes("service install")
+        )
+      ).toBe(true);
+    });
+
+    it("warns when the installed unit predates the systemd watchdog heartbeat", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        "[Service]\nType=simple\nSlice=symphonika-daemon.slice\n",
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        homeDir
+      });
+
+      expect(
+        report.warnings.some(
+          (warning) =>
+            warning.includes("watchdog") && warning.includes("service install")
+        )
+      ).toBe(true);
+    });
+
+    it("warns when an installed slice file's content has drifted from the generator", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        "[Service]\nType=notify\nSlice=symphonika-daemon.slice\n",
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-daemon.slice"),
+        "[Slice]\nMemoryHigh=999G\n",
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        homeDir
+      });
+
+      expect(
+        report.warnings.some(
+          (warning) =>
+            warning.includes("symphonika-daemon.slice") &&
+            warning.includes("service install")
+        )
+      ).toBe(true);
+    });
+
+    it("reports no warnings when the installed units match the current generator output", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        "[Service]\nType=notify\nWatchdogSec=90\nSlice=symphonika-daemon.slice\n",
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-daemon.slice"),
+        renderSliceUnit(),
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-providers.slice"),
+        renderProvidersSliceUnit(),
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        homeDir
+      });
+
+      expect(report.warnings).toEqual([]);
+    });
+
+    it("prints doctor warnings to stdout alongside an ok result", async () => {
+      const output = { stderr: "", stdout: "" };
+      const program = buildCli({
+        registerSignalHandlers: false,
+        runDoctor: () =>
+          Promise.resolve({
+            configPath: "/tmp/symphonika.yml",
+            errors: [],
+            ok: true,
+            projects: [],
+            warnings: ["symphonika.service predates the cgroup split"]
+          })
+      });
+      program.configureOutput({
+        writeErr: (message) => {
+          output.stderr += message;
+        },
+        writeOut: (message) => {
+          output.stdout += message;
+        }
+      });
+
+      await program.parseAsync(["node", "symphonika", "doctor"]);
+
+      expect(output.stdout).toContain("doctor ok");
+      expect(output.stdout).toContain(
+        "symphonika.service predates the cgroup split"
+      );
+    });
+
+    it("prints doctor warnings alongside a failed result", async () => {
+      const output = { stderr: "", stdout: "" };
+      const program = buildCli({
+        registerSignalHandlers: false,
+        runDoctor: () =>
+          Promise.resolve({
+            configPath: "/tmp/symphonika.yml",
+            errors: ["projects is required"],
+            ok: false,
+            projects: [],
+            warnings: ["symphonika.service predates the cgroup split"]
+          })
+      });
+      program.configureOutput({
+        writeErr: (message) => {
+          output.stderr += message;
+        },
+        writeOut: (message) => {
+          output.stdout += message;
+        }
+      });
+
+      await program.parseAsync(["node", "symphonika", "doctor"]);
+
+      expect(output.stderr).toContain("doctor failed");
+      expect(output.stdout).toContain(
+        "symphonika.service predates the cgroup split"
+      );
+    });
+  });
 });
 
 async function runDoctorCommand(
   configPath: string,
   githubApi: GitHubApi = successfulGitHubApi()
 ): Promise<{ stderr: string; stdout: string }> {
+  // Isolated, unit-free homeDir: without this, the installed-unit-drift
+  // check (see checkInstalledUnitDrift in doctor.ts) would default to the
+  // real homedir() and pick up whatever systemd unit happens to be
+  // installed on the machine running the suite, making these tests
+  // non-hermetic.
+  const homeDir = await makeTempRoot();
   const output = { stderr: "", stdout: "" };
   const program = buildCli({
     registerSignalHandlers: false,
@@ -469,7 +663,8 @@ async function runDoctorCommand(
       runDoctor({
         ...options,
         agentProviders: fakeAgentProviders(),
-        githubApi
+        githubApi,
+        homeDir
       })
   });
   program.configureOutput({

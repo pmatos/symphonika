@@ -21,6 +21,10 @@ import {
 } from "./issue-polling.js";
 import { ActiveRunRegistry } from "./lifecycle/active-runs.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
+import {
+  createDaemonHeartbeat,
+  type DaemonHeartbeat
+} from "./lifecycle/daemon-heartbeat.js";
 import type {
   LifecyclePolicy,
   ScheduledWorkInput
@@ -68,6 +72,7 @@ export type StartDaemonOptions = {
   configPath?: string;
   createRunId?: () => string;
   cwd?: string;
+  daemonHeartbeat?: DaemonHeartbeat;
   env?: NodeJS.ProcessEnv;
   githubIssuesApi?: GitHubIssuesApi;
   host?: string;
@@ -97,6 +102,8 @@ export async function startDaemon(
 ): Promise<DaemonHandle> {
   const env = options.env ?? process.env;
   const logger = options.logger ?? pino({ level: resolveLogLevel(env) });
+  const daemonHeartbeat =
+    options.daemonHeartbeat ?? createDaemonHeartbeat({ env });
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 3000;
   const stateRootOptions: Parameters<typeof resolveStateRoot>[0] = {};
@@ -212,6 +219,7 @@ export async function startDaemon(
     }
   };
   let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let lastTickAtMs: number | undefined;
   let polling = false;
   let scheduledWork = Promise.resolve();
   let lastPollErrorsKey = "";
@@ -556,6 +564,12 @@ export async function startDaemon(
       },
       "symphonika tick"
     );
+    lastTickAtMs = Date.now();
+    // Reaching here means the event loop is still advancing, so tell systemd
+    // this run of the daemon is alive. A no-op unless the unit is
+    // Type=notify (see docs/adr/0064); a hung tick — the exact failure mode
+    // this guards against — simply never reaches this call.
+    await daemonHeartbeat.notifyWatchdog();
   };
   const refreshPollingInterval = (): void => {
     if (!state.configExists) {
@@ -679,6 +693,7 @@ export async function startDaemon(
         projectName: entry.projectName,
         runId: entry.runId
       })),
+    getLastTickAt: () => lastTickAtMs,
     getConcurrency: () => {
       const { maxInFlight } = runtimeConfig.globalConcurrency();
       const perProject: Array<{
@@ -761,6 +776,7 @@ export async function startDaemon(
     },
     "symphonika daemon started"
   );
+  await daemonHeartbeat.notifyReady();
 
   return {
     host,

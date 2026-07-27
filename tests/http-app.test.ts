@@ -124,6 +124,7 @@ describe("HTTP app", () => {
         ok: true,
         usingLastKnownGood: false
       },
+      lastTickAt: null,
       routines: [],
       runs: [],
       scheduled: [],
@@ -131,8 +132,46 @@ describe("HTTP app", () => {
       staleIssues: [],
       state: "idle",
       stateRoot: "/tmp/symphonika-state",
+      tickAgeMs: null,
       uptimeMs: 100
     });
+  });
+
+  it("reports how long ago the daemon's last successful tick was", async () => {
+    const app = createHttpApp({
+      getLastTickAt: () => 1_000,
+      now: () => 1_450,
+      stateRoot: "/tmp/symphonika-state",
+      startedAtMs: 1_000,
+      version: "0.1.0"
+    });
+
+    const response = await app.request("/api/status");
+    const body = (await response.json()) as {
+      lastTickAt: number | null;
+      tickAgeMs: number | null;
+    };
+
+    expect(body.lastTickAt).toBe(1_000);
+    expect(body.tickAgeMs).toBe(450);
+  });
+
+  it("reports null tick liveness before the daemon has completed a first tick", async () => {
+    const app = createHttpApp({
+      now: () => 1_450,
+      stateRoot: "/tmp/symphonika-state",
+      startedAtMs: 1_000,
+      version: "0.1.0"
+    });
+
+    const response = await app.request("/api/status");
+    const body = (await response.json()) as {
+      lastTickAt: number | null;
+      tickAgeMs: number | null;
+    };
+
+    expect(body.lastTickAt).toBeNull();
+    expect(body.tickAgeMs).toBeNull();
   });
 
   it("exposes durable project cursor state in status", async () => {

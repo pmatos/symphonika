@@ -1302,6 +1302,66 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("shows a daemon-stale banner on the dashboard when the last tick is too old", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        getLastTickAt: () => 0,
+        now: () => 10 * 60_000, // 10 minutes since the last tick
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(body).toContain("banner--attention");
+      expect(body).toMatch(/daemon.*(stopped ticking|stale|unresponsive)/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows no daemon-stale banner when the last tick is recent", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        getLastTickAt: () => 0,
+        now: () => 5_000, // 5 seconds since the last tick
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(body).not.toMatch(/daemon.*(stopped ticking|stale|unresponsive)/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows no daemon-stale banner before the daemon has completed a first tick", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        now: () => 10 * 60_000,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(body).not.toMatch(/daemon.*(stopped ticking|stale|unresponsive)/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("renders a blocked run with the calmer blocked pill and banner, not the failed styling", async () => {
     const test = await setup();
     try {

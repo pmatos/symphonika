@@ -505,6 +505,7 @@ describe("CLI", () => {
           configPath: "/tmp/symphonika.yml",
           errors: [],
           ok: true,
+          warnings: [],
           projects: [
             {
               missingEligibilityLabels: [],

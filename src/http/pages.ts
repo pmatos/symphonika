@@ -24,14 +24,22 @@ import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 
 export type RegisterPagesOptions = {
   app: Hono;
+  getLastTickAt?: () => number | undefined;
   getPullRequestFollowupPolicy?: () => {
     maxReviewDispatchesPerPr: number;
   };
   getStatusSnapshot?: () => StatusSnapshot;
   issuePollStatus?: IssuePollStatus;
+  now?: () => number;
   runStore: RunStore;
   version: string;
 };
+
+// Well beyond the daemon's own poll interval (commonly seconds) but far
+// below the multi-hour wedges that motivated this banner (see
+// docs/adr/0064) — an operator should notice within one dashboard visit,
+// not just after the systemd watchdog eventually restarts the unit.
+const DAEMON_STALE_THRESHOLD_MS = 5 * 60_000;
 
 export type PullRequestFollowupAttention = {
   attention: "cap_reached";
@@ -104,10 +112,14 @@ export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/", (context) => {
     const snapshot = options.getStatusSnapshot?.();
     const recentRuns = options.runStore.listRuns({ limit: 25 });
+    const lastTickAt = options.getLastTickAt?.() ?? null;
+    const tickAgeMs =
+      lastTickAt === null ? null : (options.now?.() ?? Date.now()) - lastTickAt;
     const html = layout(
       "Symphonika",
       [
         `<h1 class="page-title">Dashboard</h1>`,
+        renderDaemonStaleBanner(tickAgeMs),
         renderHeader(options.version, snapshot),
         renderProjectsCard(snapshot, options.issuePollStatus),
         renderRoutinesTable(
@@ -902,6 +914,14 @@ export function buildPullRequestFollowupAttention(input: {
     prNumber: tracked.prNumber,
     prUrl: tracked.prUrl
   };
+}
+
+function renderDaemonStaleBanner(tickAgeMs: number | null): string {
+  if (tickAgeMs === null || tickAgeMs < DAEMON_STALE_THRESHOLD_MS) {
+    return "";
+  }
+  const minutes = Math.floor(tickAgeMs / 60_000);
+  return `<section class="banner banner--attention"><p class="banner-title">Daemon may be unresponsive</p><p class="banner-reason">The daemon has stopped ticking — its last successful poll/reconcile cycle was ${minutes} minute${minutes === 1 ? "" : "s"} ago. Issue polling and run dispatch are likely stalled. If a systemd watchdog is configured, it will restart the daemon automatically; otherwise restart it manually.</p></section>`;
 }
 
 function renderPullRequestFollowupAttention(

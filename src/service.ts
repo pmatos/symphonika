@@ -92,8 +92,14 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
     "Wants=network-online.target",
     "",
     "[Service]",
-    "Type=simple",
+    "Type=notify",
     "WorkingDirectory=%h",
+    "",
+    "# A hung-but-alive daemon (e.g. a stuck event loop) never exits, so",
+    "# Restart=on-failure alone can't catch it. WatchdogSec= requires a",
+    "# periodic WATCHDOG=1 notify ping (see daemon.ts's tick loop); systemd",
+    "# kills and restarts the unit if none arrives within the window.",
+    "WatchdogSec=90",
     "Restart=on-failure",
     "RestartSec=5s",
     "",
@@ -271,7 +277,7 @@ export async function runServiceInstall(
 // systemd --user reads units from $XDG_CONFIG_HOME/systemd/user, falling back
 // to ~/.config/systemd/user when XDG_CONFIG_HOME is unset. systemd only honors
 // an absolute XDG_CONFIG_HOME, so a relative value is ignored here too.
-function userUnitDir(homeDir: string, env: NodeJS.ProcessEnv): string {
+export function userUnitDir(homeDir: string, env: NodeJS.ProcessEnv): string {
   const xdg =
     typeof env.XDG_CONFIG_HOME === "string" ? env.XDG_CONFIG_HOME.trim() : "";
   const configHome =

@@ -8,7 +8,31 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resolveLogLevel, startDaemon } from "../src/daemon.js";
 import type { IssueSnapshot } from "../src/issue-polling.js";
+import type { DaemonHeartbeat } from "../src/lifecycle/daemon-heartbeat.js";
 import { openRunStore, RunStore } from "../src/run-store.js";
+
+function recordingDaemonHeartbeat(): DaemonHeartbeat & {
+  readyCalls: number;
+  watchdogCalls: number;
+} {
+  const state = { readyCalls: 0, watchdogCalls: 0 };
+  return {
+    get readyCalls() {
+      return state.readyCalls;
+    },
+    get watchdogCalls() {
+      return state.watchdogCalls;
+    },
+    notifyReady: () => {
+      state.readyCalls += 1;
+      return Promise.resolve();
+    },
+    notifyWatchdog: () => {
+      state.watchdogCalls += 1;
+      return Promise.resolve();
+    }
+  };
+}
 
 const tempRoots: string[] = [];
 
@@ -78,6 +102,75 @@ describe("startDaemon", () => {
       await daemon.stop();
     }
     await expect(readFile(endpointPath, "utf8")).rejects.toThrow();
+  });
+
+  it("sends the systemd ready notification once startup completes", async () => {
+    const cwd = await makeTempRoot();
+    const daemonHeartbeat = recordingDaemonHeartbeat();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      daemonHeartbeat,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      expect(daemonHeartbeat.readyCalls).toBe(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("sends a systemd watchdog ping after each successful tick", async () => {
+    const cwd = await makeTempRoot();
+    const daemonHeartbeat = recordingDaemonHeartbeat();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      daemonHeartbeat,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const before = daemonHeartbeat.watchdogCalls;
+      const response = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(response.status).toBe(200);
+      expect(daemonHeartbeat.watchdogCalls).toBeGreaterThan(before);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("surfaces tick liveness via /api/status", async () => {
+    const cwd = await makeTempRoot();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const before = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as { lastTickAt: number | null };
+      expect(before.lastTickAt).toBeNull();
+
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+
+      const after = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as { lastTickAt: number | null; tickAgeMs: number | null };
+      expect(after.lastTickAt).not.toBeNull();
+      expect(after.tickAgeMs).not.toBeNull();
+      expect(after.tickAgeMs).toBeGreaterThanOrEqual(0);
+    } finally {
+      await daemon.stop();
+    }
   });
 
   it("preserves a blocked run's terminal verdict when cancel is attempted (issue #271)", async () => {

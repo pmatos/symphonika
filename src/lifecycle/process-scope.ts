@@ -14,8 +14,11 @@ export function scopeUnitName(run: ProviderRunIdentity): string {
 
 export type ProbeSystemdRunAvailableOptions = {
   env?: NodeJS.ProcessEnv;
+  probeTimeoutMs?: number;
   runManagerCheck?: () => Promise<void>;
 };
+
+const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
 
 // systemd-run --user needs a live, reachable user manager (the runtime dir
 // systemd-logind creates on login is a prerequisite, not proof by itself —
@@ -24,11 +27,23 @@ export type ProbeSystemdRunAvailableOptions = {
 // with neither present (non-systemd hosts, containers, CI) — see
 // docs/adr/0064 — so this is a cheap probe, not a hard requirement.
 //
-// `systemctl --user is-system-running` genuinely round-trips over D-Bus to
-// the manager, unlike `systemd-run --version` (which only reads embedded
-// version metadata and would report available=true even when the manager
-// isn't reachable, causing the real wrapped spawn to fail with a bus/session
-// error instead of taking the unwrapped fallback).
+// `systemctl --user list-units` genuinely round-trips over D-Bus to the
+// manager, unlike `systemd-run --version` (which only reads embedded version
+// metadata and would report available=true even when the manager isn't
+// reachable, causing the real wrapped spawn to fail with a bus/session error
+// instead of taking the unwrapped fallback). `is-system-running` was tried
+// first and rejected: its exit status encodes overall session health
+// ("degraded" — any unrelated failed unit — exits nonzero), not manager
+// reachability, so one unrelated failed unit would permanently disable
+// isolation for the daemon's whole lifetime (the probe result is cached).
+// `list-units` only fails when the manager itself can't be reached.
+//
+// This result is cached by createProcessScope for the process lifetime
+// (`cachedAvailable`), so the check itself must never hang: a bounded
+// timeout is required, not just good practice — otherwise a slow/wedged
+// manager at daemon startup (the orphan-scope sweep runs this before the
+// HTTP server starts listening) would hang startDaemon() forever, exactly
+// the class of wedge this whole change exists to eliminate.
 export async function probeSystemdRunAvailable(
   options: ProbeSystemdRunAvailableOptions = {}
 ): Promise<boolean> {
@@ -40,7 +55,9 @@ export async function probeSystemdRunAvailable(
     return false;
   }
 
-  const runManagerCheck = options.runManagerCheck ?? defaultManagerCheck;
+  const probeTimeoutMs = options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+  const runManagerCheck =
+    options.runManagerCheck ?? (() => defaultManagerCheck(probeTimeoutMs));
   try {
     await runManagerCheck();
     return true;
@@ -49,8 +66,10 @@ export async function probeSystemdRunAvailable(
   }
 }
 
-async function defaultManagerCheck(): Promise<void> {
-  await execFile("systemctl", ["--user", "is-system-running"]);
+async function defaultManagerCheck(timeoutMs: number): Promise<void> {
+  await execFile("systemctl", ["--user", "list-units", "--no-pager"], {
+    timeout: timeoutMs
+  });
 }
 
 export type ProcessCommand = {
@@ -62,6 +81,7 @@ export type ProcessScopeOptions = {
   isAvailable?: () => Promise<boolean>;
   memoryHigh?: string;
   memoryMax?: string;
+  probeTimeoutMs?: number;
   runStop?: (unitName: string) => Promise<void>;
   slice?: string;
   stopTimeoutMs?: number;
@@ -96,7 +116,11 @@ export function createProcessScope(
       return options.isAvailable();
     }
     if (cachedAvailable === undefined) {
-      cachedAvailable = probeSystemdRunAvailable();
+      cachedAvailable = probeSystemdRunAvailable(
+        options.probeTimeoutMs === undefined
+          ? {}
+          : { probeTimeoutMs: options.probeTimeoutMs }
+      );
     }
     return cachedAvailable;
   };

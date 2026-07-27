@@ -64,6 +64,7 @@ export type ProcessScopeOptions = {
   memoryMax?: string;
   runStop?: (unitName: string) => Promise<void>;
   slice?: string;
+  stopTimeoutMs?: number;
 };
 
 export type ProcessScope = {
@@ -77,6 +78,7 @@ export type ProcessScope = {
 const DEFAULT_PROVIDERS_SLICE = "symphonika-providers.slice";
 const DEFAULT_MEMORY_HIGH = "24G";
 const DEFAULT_MEMORY_MAX = "32G";
+const DEFAULT_STOP_TIMEOUT_MS = 10_000;
 
 export function createProcessScope(
   options: ProcessScopeOptions = {}
@@ -84,7 +86,9 @@ export function createProcessScope(
   const slice = options.slice ?? DEFAULT_PROVIDERS_SLICE;
   const memoryHigh = options.memoryHigh ?? DEFAULT_MEMORY_HIGH;
   const memoryMax = options.memoryMax ?? DEFAULT_MEMORY_MAX;
-  const runStop = options.runStop ?? defaultRunStop;
+  const stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
+  const runStop =
+    options.runStop ?? ((unitName) => defaultRunStop(unitName, stopTimeoutMs));
   let cachedAvailable: Promise<boolean> | undefined;
 
   const isAvailable = (): Promise<boolean> => {
@@ -137,6 +141,19 @@ export function createProcessScope(
   };
 }
 
-async function defaultRunStop(unitName: string): Promise<void> {
-  await execFile("systemctl", ["--user", "stop", unitName]);
+// Runs unconditionally from every runAttempt's finally block (see
+// codex.ts/claude.ts), so a systemctl call that never returns — D-Bus/systemd
+// unresponsive, cgroup teardown stuck behind an uninterruptible process —
+// would otherwise block that Run's completion forever, reintroducing a hang
+// on the run-lifecycle axis instead of the memory-cgroup axis this module
+// exists to fix. execFile's timeout SIGTERMs the child and rejects the
+// promise, which stopProviderScope's caller already treats as a no-op (the
+// scope may simply already be gone).
+async function defaultRunStop(
+  unitName: string,
+  timeoutMs: number
+): Promise<void> {
+  await execFile("systemctl", ["--user", "stop", unitName], {
+    timeout: timeoutMs
+  });
 }

@@ -65,10 +65,12 @@ memory isolation:
   "re-run install after upgrading" precedent; `doctor` surfaces this as a warning rather than
   silently leaving the operator on a stale, watchdog-less unit.
 - The liveness gate on the watchdog ping (recent tick progress relative to the live polling
-  interval, or unconditional when unconfigured) is intentionally more complex than "always ping
-  every `WATCHDOG_USEC` window" — the simpler approach would mask the exact hang this ADR exists to
-  catch. This is judged worth the added complexity given the failure mode is a silent,
-  multi-hour wedge with no other detection today.
+  interval, falling back to time-since-tick-loop-started before the first tick completes, or
+  unconditional only when no config is loaded at all) is intentionally more complex than "always
+  ping every `WATCHDOG_USEC` window" — the simpler approach would mask the exact hang this ADR
+  exists to catch, including a hang in the very first scheduled tick. This is judged worth the
+  added complexity given the failure mode is a silent, multi-hour wedge with no other detection
+  today.
 
 ## Numbering
 

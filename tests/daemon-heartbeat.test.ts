@@ -115,20 +115,43 @@ describe("isTickRecentEnoughForWatchdog", () => {
         configExists: false,
         effectiveIntervalMs: 30_000,
         lastTickAtMs: undefined,
-        now: 10_000_000
+        now: 10_000_000,
+        tickLoopStartedAtMs: undefined
       })
     ).toBe(true);
   });
 
-  it("is alive before the first tick has ever completed", () => {
+  it("is alive shortly after the tick loop starts, before the first tick completes", () => {
     expect(
       isTickRecentEnoughForWatchdog({
         configExists: true,
         effectiveIntervalMs: 30_000,
         lastTickAtMs: undefined,
-        now: 1_000
+        now: 1_000,
+        tickLoopStartedAtMs: 0
       })
     ).toBe(true);
+  });
+
+  // Regression: lastTickAtMs === undefined used to be treated as "always
+  // alive" unconditionally -- correct while no config is loaded (nothing is
+  // scheduled), but wrong once a config exists: if the very first scheduled
+  // tick hangs, lastTickAtMs never gets set and the ping would fire forever,
+  // masking a startup hang exactly like the one this feature exists to
+  // catch. It must fall back to tickLoopStartedAtMs and apply the same
+  // staleness bound.
+  it("is stale if the first tick never completes past the derived bound", () => {
+    const intervalMs = 30_000;
+
+    expect(
+      isTickRecentEnoughForWatchdog({
+        configExists: true,
+        effectiveIntervalMs: intervalMs,
+        lastTickAtMs: undefined,
+        now: intervalMs * 3 + 1,
+        tickLoopStartedAtMs: 0
+      })
+    ).toBe(false);
   });
 
   it("stays alive with a polling interval far larger than a typical watchdog window", () => {
@@ -140,7 +163,8 @@ describe("isTickRecentEnoughForWatchdog", () => {
         configExists: true,
         effectiveIntervalMs: 300_000,
         lastTickAtMs: 1_000_000,
-        now: 1_045_000
+        now: 1_045_000,
+        tickLoopStartedAtMs: 0
       })
     ).toBe(true);
   });
@@ -154,7 +178,8 @@ describe("isTickRecentEnoughForWatchdog", () => {
         configExists: true,
         effectiveIntervalMs: intervalMs,
         lastTickAtMs,
-        now: lastTickAtMs + intervalMs * 3 + 1
+        now: lastTickAtMs + intervalMs * 3 + 1,
+        tickLoopStartedAtMs: 0
       })
     ).toBe(false);
   });
@@ -168,7 +193,23 @@ describe("isTickRecentEnoughForWatchdog", () => {
         configExists: true,
         effectiveIntervalMs: intervalMs,
         lastTickAtMs,
-        now: lastTickAtMs + intervalMs * 3
+        now: lastTickAtMs + intervalMs * 3,
+        tickLoopStartedAtMs: 0
+      })
+    ).toBe(true);
+  });
+
+  it("is alive with no reference point at all (defensive default)", () => {
+    // Shouldn't happen in practice once config exists -- tickLoopStartedAtMs
+    // is always set alongside pollTimer -- but must not false-positive as
+    // stale in the absence of any timestamp to compare against.
+    expect(
+      isTickRecentEnoughForWatchdog({
+        configExists: true,
+        effectiveIntervalMs: 30_000,
+        lastTickAtMs: undefined,
+        now: 999_999_999,
+        tickLoopStartedAtMs: undefined
       })
     ).toBe(true);
   });

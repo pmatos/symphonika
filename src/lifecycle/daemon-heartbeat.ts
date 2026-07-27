@@ -56,22 +56,32 @@ export function createDaemonHeartbeat(
 // consider it alive, gating the independent watchdog ping. Deliberately not
 // "always ping on schedule" -- that would mask the exact hang this feature
 // exists to catch. No config loaded means no ticks are scheduled by design
-// (nothing can hang), so that case is unconditionally alive. Otherwise a
-// tick more than 3x the live polling interval old is considered stale,
-// tolerating normal per-tick timing jitter and occasional slow reconcile
-// passes without either masking a real hang or reintroducing the
-// tick-coupling bug this decoupling fixes (the bound scales with the live
-// interval, not a fixed constant).
+// (nothing can hang), so that case is unconditionally alive. Once a config
+// is loaded, lastTickAtMs === undefined no longer means "nothing can hang"
+// -- it means the first scheduled tick hasn't completed yet, and that tick
+// can hang just like any later one. tickLoopStartedAtMs is the fallback
+// reference for that pre-first-tick window, subject to the same staleness
+// bound, so a hung first tick doesn't ping forever. Otherwise a tick (or the
+// tick loop's start) more than 3x the live polling interval old is
+// considered stale, tolerating normal per-tick timing jitter and occasional
+// slow reconcile passes without either masking a real hang or reintroducing
+// the tick-coupling bug this decoupling fixes (the bound scales with the
+// live interval, not a fixed constant).
 export function isTickRecentEnoughForWatchdog(input: {
   configExists: boolean;
   effectiveIntervalMs: number;
   lastTickAtMs: number | undefined;
   now: number;
+  tickLoopStartedAtMs: number | undefined;
 }): boolean {
-  if (!input.configExists || input.lastTickAtMs === undefined) {
+  if (!input.configExists) {
     return true;
   }
-  return input.now - input.lastTickAtMs <= input.effectiveIntervalMs * 3;
+  const referenceAtMs = input.lastTickAtMs ?? input.tickLoopStartedAtMs;
+  if (referenceAtMs === undefined) {
+    return true;
+  }
+  return input.now - referenceAtMs <= input.effectiveIntervalMs * 3;
 }
 
 // Half the watchdog window, per the conventional sd_watchdog_enabled(3)

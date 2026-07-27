@@ -330,6 +330,7 @@ export async function startDaemon(
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let watchdogTimer: ReturnType<typeof setInterval> | undefined;
   let lastTickAtMs: number | undefined;
+  let tickLoopStartedAtMs: number | undefined;
   let polling = false;
   let scheduledWork = Promise.resolve();
   let lastPollErrorsKey = "";
@@ -700,6 +701,7 @@ export async function startDaemon(
     }
     pollTimer = setInterval(scheduleTick, intervalMs);
     pollTimer.unref?.();
+    tickLoopStartedAtMs ??= Date.now();
     logger.info(
       { pollingIntervalMs: intervalMs },
       "symphonika polling interval reloaded"
@@ -876,6 +878,7 @@ export async function startDaemon(
     if (intervalMs !== undefined) {
       pollTimer = setInterval(scheduleTick, intervalMs);
       pollTimer.unref?.();
+      tickLoopStartedAtMs = Date.now();
     }
   }
 
@@ -896,7 +899,8 @@ export async function startDaemon(
           configExists: state.configExists,
           effectiveIntervalMs: intervalMs ?? DEFAULT_POLLING_INTERVAL_MS,
           lastTickAtMs,
-          now: Date.now()
+          now: Date.now(),
+          tickLoopStartedAtMs
         })
       ) {
         void daemonHeartbeat.notifyWatchdog();

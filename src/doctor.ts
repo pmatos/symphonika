@@ -1,5 +1,6 @@
 import { constants } from "node:fs";
 import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
@@ -33,6 +34,11 @@ import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
+import {
+  renderProvidersSliceUnit,
+  renderSliceUnit,
+  userUnitDir
+} from "./service.js";
 import { resolveStateRoot } from "./state.js";
 import {
   loadExpandedWorkflow,
@@ -49,6 +55,7 @@ export type DoctorOptions = {
   env?: NodeJS.ProcessEnv;
   githubApi?: GitHubApi;
   githubIssuesApi?: GitHubIssuesApi;
+  homeDir?: string;
 };
 
 type StaleIssueSummary = {
@@ -78,6 +85,7 @@ export type DoctorReport = {
   errors: string[];
   ok: boolean;
   projects: DoctorProjectReport[];
+  warnings: string[];
 };
 
 export type InitProjectOptions = DoctorOptions & {
@@ -382,18 +390,22 @@ export async function runDoctor(
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const errors: string[] = [];
   const projects: DoctorProjectReport[] = [];
+  const warnings = await checkInstalledUnitDrift(
+    options.homeDir ?? homedir(),
+    env
+  );
   const rawConfig = await readConfig(configPath, errors);
 
   if (rawConfig === undefined) {
     if (resolvedConfig.source === "user" && !resolvedConfig.configExists) {
       errors.push(missingUserConfigHint(configPath));
     }
-    return report(configPath, errors, projects);
+    return report(configPath, errors, projects, warnings);
   }
 
   const parsedConfig = parseServiceConfig(rawConfig, errors);
   if (parsedConfig === undefined) {
-    return report(configPath, errors, projects);
+    return report(configPath, errors, projects, warnings);
   }
 
   for (const project of parsedConfig.projects) {
@@ -452,7 +464,98 @@ export async function runDoctor(
     ))
   );
 
-  return report(configPath, errors, projects);
+  return report(configPath, errors, projects, warnings);
+}
+
+// Detects an installed unit that predates a systemd-unit-shape change (the
+// daemon/provider cgroup split, docs/adr/0064; or the watchdog heartbeat,
+// docs/adr/0065) so operators learn to re-run `service install --force`
+// instead of silently running on stale units indefinitely. Skips entirely
+// when no unit is installed at all (`service install` was never run) —
+// that's not a doctor concern. `ExecStart`/`Environment=PATH` are baked in
+// at install time from the operator's own environment, so the `.service`
+// file can't be regenerated and byte-compared generically; only structural
+// markers (Slice=, Type=notify) are checked there. The two `.slice` files
+// carry no install-specific content, so they're compared byte-for-byte
+// against the current generator output.
+async function checkInstalledUnitDrift(
+  homeDir: string,
+  env: NodeJS.ProcessEnv
+): Promise<string[]> {
+  const unitDir = userUnitDir(homeDir, env);
+  const servicePath = path.join(unitDir, "symphonika.service");
+  const serviceContent = await readFileIfExists(servicePath);
+  if (serviceContent === undefined) {
+    return [];
+  }
+
+  const warnings: string[] = [];
+  // `--force` only rewrites unit files and runs `systemctl --user
+  // daemon-reload` (see runServiceInstall/defaultReload in service.ts) --
+  // it never restarts an already-running daemon, which keeps its old unit
+  // (and lacks whatever protection this drift check is warning about) until
+  // an operator separately restarts it.
+  const reinstallHint =
+    "re-run `symphonika service install --force` to refresh it; a running " +
+    "daemon only picks up the change after `systemctl --user restart " +
+    "symphonika.service`";
+  if (!serviceContent.includes("Slice=symphonika-daemon.slice")) {
+    warnings.push(
+      `${servicePath} predates the daemon/provider cgroup split (docs/adr/0064) — ${reinstallHint}`
+    );
+  }
+  if (
+    !serviceContent.includes("Type=notify") ||
+    !serviceContent.includes("NotifyAccess=all") ||
+    !/^WatchdogSec=/m.test(serviceContent) ||
+    !/^TimeoutStartSec=/m.test(serviceContent)
+  ) {
+    warnings.push(
+      `${servicePath} predates the systemd watchdog heartbeat (docs/adr/0065) — ${reinstallHint}`
+    );
+  }
+
+  warnings.push(
+    ...(await checkSliceDrift(
+      path.join(unitDir, "symphonika-daemon.slice"),
+      renderSliceUnit(),
+      reinstallHint
+    ))
+  );
+  warnings.push(
+    ...(await checkSliceDrift(
+      path.join(unitDir, "symphonika-providers.slice"),
+      renderProvidersSliceUnit(),
+      reinstallHint
+    ))
+  );
+
+  return warnings;
+}
+
+async function checkSliceDrift(
+  slicePath: string,
+  expectedContent: string,
+  reinstallHint: string
+): Promise<string[]> {
+  const content = await readFileIfExists(slicePath);
+  if (content === undefined) {
+    return [`${slicePath} is missing — ${reinstallHint}`];
+  }
+  if (content !== expectedContent) {
+    return [
+      `${slicePath} content differs from the current generator output — ${reinstallHint}`
+    ];
+  }
+  return [];
+}
+
+async function readFileIfExists(filePath: string): Promise<string | undefined> {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch {
+    return undefined;
+  }
 }
 
 async function validateServiceRoutines(
@@ -1833,13 +1936,15 @@ function envReferenceName(input: string): string | undefined {
 function report(
   configPath: string,
   errors: string[],
-  projects: DoctorProjectReport[]
+  projects: DoctorProjectReport[],
+  warnings: string[] = []
 ): DoctorReport {
   return {
     configPath,
     errors,
     ok: errors.length === 0,
-    projects
+    projects,
+    warnings
   };
 }
 

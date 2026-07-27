@@ -271,6 +271,7 @@ describe("CLI run commands", () => {
           configPath: "/tmp/symphonika.yml",
           errors: [],
           ok: true,
+          warnings: [],
           projects: [
             {
               missingEligibilityLabels: [],
@@ -397,6 +398,7 @@ describe("CLI run commands", () => {
           configPath: "/tmp/symphonika.yml",
           errors: [],
           ok: true,
+          warnings: [],
           projects: [
             {
               missingEligibilityLabels: [],
@@ -505,6 +507,7 @@ describe("CLI run commands", () => {
           configPath: "/tmp/symphonika.yml",
           errors: [],
           ok: true,
+          warnings: [],
           projects: [
             {
               missingEligibilityLabels: [],
@@ -570,6 +573,7 @@ describe("CLI run commands", () => {
           configPath: "/tmp/symphonika.yml",
           errors: [],
           ok: true,
+          warnings: [],
           projects: [
             {
               missingEligibilityLabels: [],
@@ -639,6 +643,7 @@ describe("CLI run commands", () => {
           configPath: "/tmp/symphonika.yml",
           errors: [],
           ok: true,
+          warnings: [],
           projects: [
             {
               missingEligibilityLabels: [],
@@ -711,6 +716,7 @@ describe("CLI run commands", () => {
           configPath: "/tmp/symphonika.yml",
           errors: [],
           ok: true,
+          warnings: [],
           projects: []
         } satisfies DoctorReport)
     });
@@ -740,6 +746,7 @@ describe("CLI run commands", () => {
           configPath: "/tmp/symphonika.yml",
           errors: [],
           ok: true,
+          warnings: [],
           projects: []
         } satisfies DoctorReport)
     });
@@ -776,6 +783,7 @@ describe("CLI run commands", () => {
           configPath: "/tmp/symphonika.yml",
           errors: [],
           ok: true,
+          warnings: [],
           projects: [
             {
               missingEligibilityLabels: [],

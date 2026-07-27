@@ -1302,6 +1302,169 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("shows a daemon-stale banner on the dashboard when the last tick is too old", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        getLastTickAt: () => 0,
+        now: () => 10 * 60_000, // 10 minutes since the last tick
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(body).toContain("banner--attention");
+      expect(body).toMatch(/daemon.*(stopped ticking|stale|unresponsive)/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows no daemon-stale banner when the last tick is recent", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        getLastTickAt: () => 0,
+        now: () => 5_000, // 5 seconds since the last tick
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(body).not.toMatch(/daemon.*(stopped ticking|stale|unresponsive)/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows no daemon-stale banner before the daemon has completed a first tick", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        now: () => 10 * 60_000,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(body).not.toMatch(/daemon.*(stopped ticking|stale|unresponsive)/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  // Regression: if the very first scheduled tick hangs (e.g. stuck in issue
+  // polling or reconciliation), lastTickAtMs never gets set -- the dashboard
+  // saw only that field and suppressed the banner indefinitely, even though
+  // the systemd watchdog's own liveness gate (isTickRecentEnoughForSystemd-
+  // Watchdog) already treats this exact case as eventually stale via a
+  // getTickLoopStartedAt fallback. The dashboard must use the same fallback
+  // so this failure mode is visible before the systemd watchdog eventually
+  // restarts the unit, not just after.
+  it("shows a daemon-stale banner when the tick loop started but the first tick never completed", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        getPollingIntervalMs: () => 10 * 60_000,
+        getTickLoopStartedAt: () => 0,
+        now: () => 31 * 60_000, // past 3x the 10-minute interval
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(body).toContain("banner--attention");
+      expect(body).toMatch(/daemon.*(stopped ticking|stale|unresponsive)/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows no daemon-stale banner while the first tick is still within its grace window", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        getPollingIntervalMs: () => 10 * 60_000,
+        getTickLoopStartedAt: () => 0,
+        now: () => 8 * 60_000, // within 3x the 10-minute interval
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(body).not.toMatch(/daemon.*(stopped ticking|stale|unresponsive)/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  // Regression: polling.interval_ms has no configured upper bound, but the
+  // stale banner's threshold used to be a fixed 5 minutes -- a healthy
+  // daemon with a longer configured interval would show a permanent false
+  // "may be unresponsive" banner between ticks. The threshold now scales
+  // with the live polling interval (the same 3x bound already used by
+  // isTickRecentEnoughForSystemdWatchdog), floored at the original 5 minutes so a
+  // fast-polling daemon's grace period doesn't shrink.
+  it("shows no daemon-stale banner when tick age is within the scaled polling-interval bound", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        getLastTickAt: () => 0,
+        getPollingIntervalMs: () => 10 * 60_000,
+        // 8 minutes: past the fixed 5-minute floor, but well within 3x a
+        // 10-minute interval (30 minutes) -- a healthy daemon on this config.
+        now: () => 8 * 60_000,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(body).not.toMatch(/daemon.*(stopped ticking|stale|unresponsive)/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows a daemon-stale banner once tick age exceeds the scaled polling-interval bound", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        getLastTickAt: () => 0,
+        getPollingIntervalMs: () => 10 * 60_000,
+        now: () => 31 * 60_000, // past 3x the 10-minute interval
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(body).toContain("banner--attention");
+      expect(body).toMatch(/daemon.*(stopped ticking|stale|unresponsive)/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("renders a blocked run with the calmer blocked pill and banner, not the failed styling", async () => {
     const test = await setup();
     try {

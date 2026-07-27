@@ -167,6 +167,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           `doctor ok: ${report.projects.length} ${pluralize("project", report.projects.length)} valid\n`
         );
         printStaleSection(program, report.projects);
+        printWarningsSection(program, report.warnings);
         return;
       }
 
@@ -175,6 +176,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         writeErr(program, `- ${error}\n`);
       }
       printStaleSection(program, report.projects);
+      printWarningsSection(program, report.warnings);
       process.exitCode = 1;
     });
 
@@ -2017,6 +2019,16 @@ function parseProjectMode(value: string): "dispatch" | "routine_host" {
 
 function pluralize(word: string, count: number): string {
   return count === 1 ? word : `${word}s`;
+}
+
+function printWarningsSection(program: Command, warnings: string[]): void {
+  if (warnings.length === 0) {
+    return;
+  }
+  writeOut(program, "warnings:\n");
+  for (const warning of warnings) {
+    writeOut(program, `- ${warning}\n`);
+  }
 }
 
 function printStaleSection(

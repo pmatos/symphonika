@@ -18,6 +18,7 @@ import {
   renderServiceUnit,
   renderSliceUnit,
   runServiceInstall,
+  userUnitDir as resolveUserUnitDir,
   type ServiceInstallOptions,
   type ServiceInstallReport
 } from "../src/service.js";
@@ -67,6 +68,58 @@ describe("renderServiceUnit", () => {
     expect(unit).toContain("WantedBy=default.target");
   });
 
+  it("uses Type=notify with a watchdog timeout so a hung-but-alive daemon is restarted", () => {
+    const unit = renderServiceUnit({
+      execPath: NODE,
+      path: DAEMON_PATH,
+      scriptPath: CLI
+    });
+
+    expect(unit).toContain("Type=notify");
+    expect(unit).toContain("WatchdogSec=90");
+    expect(unit).not.toContain("Type=simple");
+  });
+
+  // Regression: createDaemonHeartbeat sends READY=1/WATCHDOG=1 by spawning
+  // systemd-notify as a child process, not from the daemon's own Node PID.
+  // Per `man systemd.service`, Type=notify/WatchdogSec= with no explicit
+  // NotifyAccess= implicitly becomes NotifyAccess=main, which only accepts
+  // notifications from the exact process systemd tracks as MainPID -- a
+  // child process's messages are silently discarded, leaving the unit stuck
+  // "activating" until it restart-loops. Verified empirically against a
+  // real transient --user unit: implicit NotifyAccess=main rejects a
+  // child-process notifier with `result: protocol`; NotifyAccess=all
+  // accepts it.
+  it("sets NotifyAccess=all so a child-process notifier is accepted", () => {
+    const unit = renderServiceUnit({
+      execPath: NODE,
+      path: DAEMON_PATH,
+      scriptPath: CLI
+    });
+
+    expect(unit).toContain("NotifyAccess=all");
+  });
+
+  // Regression: Type=notify holds the unit "activating" -- gated on READY=1
+  // -- until TimeoutStartSec elapses, which defaults to 90s
+  // (DefaultTimeoutStartSec=) with no override in this unit. startDaemon()
+  // sends READY=1 only after its startup issue poll and reconcile pass
+  // complete, both of which include real network calls; slow/paginated
+  // GitHub polling across several configured projects can plausibly exceed
+  // 90s on an otherwise healthy startup, which would then SIGTERM the unit
+  // and restart-loop it. WatchdogSec= only arms once READY=1 has been sent,
+  // so a generous startup allowance costs nothing in the runtime hang
+  // detection this feature provides.
+  it("sets a generous TimeoutStartSec so slow initial polling isn't mistaken for a hung startup", () => {
+    const unit = renderServiceUnit({
+      execPath: NODE,
+      path: DAEMON_PATH,
+      scriptPath: CLI
+    });
+
+    expect(unit).toContain("TimeoutStartSec=300");
+  });
+
   it("never hardcodes the ~/.npm-global bin path", () => {
     const unit = renderServiceUnit({
       execPath: NODE,
@@ -99,6 +152,20 @@ describe("renderServiceUnit", () => {
     expect(unit).toContain(
       `Environment="PATH=/home/John Doe/.nvm/bin:/usr/bin"`
     );
+  });
+});
+
+describe("userUnitDir", () => {
+  it("is exported for reuse by other unit-installation-aware code (e.g. doctor)", () => {
+    expect(resolveUserUnitDir("/home/op", {})).toBe(
+      path.join("/home/op", ".config", "systemd", "user")
+    );
+  });
+
+  it("honors an absolute XDG_CONFIG_HOME, matching runServiceInstall's own resolution", () => {
+    expect(
+      resolveUserUnitDir("/home/op", { XDG_CONFIG_HOME: "/custom/config" })
+    ).toBe(path.join("/custom/config", "systemd", "user"));
   });
 });
 

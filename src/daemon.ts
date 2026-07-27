@@ -22,6 +22,11 @@ import {
 import { ActiveRunRegistry } from "./lifecycle/active-runs.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
 import {
+  createDaemonHeartbeat,
+  isTickRecentEnoughForSystemdWatchdog,
+  type DaemonHeartbeat
+} from "./lifecycle/daemon-heartbeat.js";
+import {
   createProcessScope,
   type ProcessScope
 } from "./lifecycle/process-scope.js";
@@ -72,6 +77,7 @@ export type StartDaemonOptions = {
   configPath?: string;
   createRunId?: () => string;
   cwd?: string;
+  daemonHeartbeat?: DaemonHeartbeat;
   env?: NodeJS.ProcessEnv;
   githubIssuesApi?: GitHubIssuesApi;
   host?: string;
@@ -103,6 +109,8 @@ export async function startDaemon(
   const env = options.env ?? process.env;
   const logger = options.logger ?? pino({ level: resolveLogLevel(env) });
   const processScope = options.processScope ?? createProcessScope();
+  const daemonHeartbeat =
+    options.daemonHeartbeat ?? createDaemonHeartbeat({ env, logger });
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 3000;
   const stateRootOptions: Parameters<typeof resolveStateRoot>[0] = {};
@@ -320,6 +328,9 @@ export async function startDaemon(
     }
   };
   let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let systemdWatchdogTimer: ReturnType<typeof setInterval> | undefined;
+  let lastTickAtMs: number | undefined;
+  let tickLoopStartedAtMs: number | undefined;
   let polling = false;
   let scheduledWork = Promise.resolve();
   let lastPollErrorsKey = "";
@@ -664,6 +675,15 @@ export async function startDaemon(
       },
       "symphonika tick"
     );
+    // Reaching here means the event loop is still advancing. The systemd
+    // watchdog ping itself runs on its own independent timer (see
+    // systemdWatchdogTimer below), not from here directly -- coupling it to
+    // the tick would either kill a healthy daemon whose configured polling
+    // interval exceeds WatchdogSec, or never ping at all before a config is
+    // loaded (see docs/adr/0065). This timestamp is what that timer's
+    // liveness gate reads to decide whether a hung tick should withhold the
+    // ping.
+    lastTickAtMs = Date.now();
   };
   const refreshPollingInterval = (): void => {
     if (!state.configExists) {
@@ -682,6 +702,7 @@ export async function startDaemon(
     }
     pollTimer = setInterval(scheduleTick, intervalMs);
     pollTimer.unref?.();
+    tickLoopStartedAtMs ??= Date.now();
     logger.info(
       { pollingIntervalMs: intervalMs },
       "symphonika polling interval reloaded"
@@ -787,6 +808,9 @@ export async function startDaemon(
         projectName: entry.projectName,
         runId: entry.runId
       })),
+    getLastTickAt: () => lastTickAtMs,
+    getPollingIntervalMs: () => intervalMs,
+    getTickLoopStartedAt: () => tickLoopStartedAtMs,
     getConcurrency: () => {
       const { maxInFlight } = runtimeConfig.globalConcurrency();
       const perProject: Array<{
@@ -857,6 +881,7 @@ export async function startDaemon(
     if (intervalMs !== undefined) {
       pollTimer = setInterval(scheduleTick, intervalMs);
       pollTimer.unref?.();
+      tickLoopStartedAtMs = Date.now();
     }
   }
 
@@ -869,6 +894,41 @@ export async function startDaemon(
     },
     "symphonika daemon started"
   );
+  // Defense in depth: createDaemonHeartbeat's own notify functions already
+  // swallow a failed systemd-notify call, but daemonHeartbeat is injectable
+  // (options.daemonHeartbeat), so a caller-supplied implementation isn't
+  // guaranteed to. Either call site rejecting would be severe -- notifyReady
+  // is awaited directly, so it would abort startDaemon() itself, and
+  // notifySystemdWatchdog runs from a timer with nothing else to observe a
+  // rejection -- so both are caught here too rather than trusting the
+  // implementation.
+  await daemonHeartbeat.notifyReady().catch((error: unknown) => {
+    logger.warn(
+      { err: error },
+      "symphonika systemd-notify readiness call failed"
+    );
+  });
+  if (daemonHeartbeat.systemdWatchdogPingIntervalMs !== undefined) {
+    systemdWatchdogTimer = setInterval(() => {
+      if (
+        isTickRecentEnoughForSystemdWatchdog({
+          configExists: state.configExists,
+          effectiveIntervalMs: intervalMs ?? DEFAULT_POLLING_INTERVAL_MS,
+          lastTickAtMs,
+          now: Date.now(),
+          tickLoopStartedAtMs
+        })
+      ) {
+        daemonHeartbeat.notifySystemdWatchdog().catch((error: unknown) => {
+          logger.warn(
+            { err: error },
+            "symphonika systemd-notify watchdog call failed"
+          );
+        });
+      }
+    }, daemonHeartbeat.systemdWatchdogPingIntervalMs);
+    systemdWatchdogTimer.unref?.();
+  }
 
   return {
     host,
@@ -878,6 +938,9 @@ export async function startDaemon(
     stop: async () => {
       if (pollTimer !== undefined) {
         clearInterval(pollTimer);
+      }
+      if (systemdWatchdogTimer !== undefined) {
+        clearInterval(systemdWatchdogTimer);
       }
       if (legacyRecheckTimer !== undefined) {
         clearTimeout(legacyRecheckTimer);

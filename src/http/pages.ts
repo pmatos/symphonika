@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 
-import type {
-  FilteredProjectIssueSnapshot,
-  IssuePollStatus
+import {
+  DEFAULT_POLLING_INTERVAL_MS,
+  type FilteredProjectIssueSnapshot,
+  type IssuePollStatus
 } from "../issue-polling.js";
 import {
   formatCapReachedReason,
@@ -24,14 +25,34 @@ import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 
 export type RegisterPagesOptions = {
   app: Hono;
+  getLastTickAt?: () => number | undefined;
+  getPollingIntervalMs?: () => number | undefined;
+  getTickLoopStartedAt?: () => number | undefined;
   getPullRequestFollowupPolicy?: () => {
     maxReviewDispatchesPerPr: number;
   };
   getStatusSnapshot?: () => StatusSnapshot;
   issuePollStatus?: IssuePollStatus;
+  now?: () => number;
   runStore: RunStore;
   version: string;
 };
+
+// Floor for the banner's threshold, well beyond a typical polling interval
+// but far below the multi-hour wedges that motivated this banner (see
+// docs/adr/0065) — an operator should notice within one dashboard visit,
+// not just after the systemd watchdog eventually restarts the unit.
+// polling.interval_ms has no configured upper bound, though, so the actual
+// threshold scales with the live interval (see renderDaemonStaleBanner)
+// rather than using this floor alone — otherwise a healthy daemon with a
+// longer configured interval would show a permanent false positive.
+const DAEMON_STALE_THRESHOLD_FLOOR_MS = 5 * 60_000;
+
+// Same multiplier isTickRecentEnoughForSystemdWatchdog uses for the same
+// reason:
+// a long-configured polling interval must not be indistinguishable from a
+// genuine stall.
+const DAEMON_STALE_THRESHOLD_INTERVAL_MULTIPLIER = 3;
 
 export type PullRequestFollowupAttention = {
   attention: "cap_reached";
@@ -104,10 +125,26 @@ export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/", (context) => {
     const snapshot = options.getStatusSnapshot?.();
     const recentRuns = options.runStore.listRuns({ limit: 25 });
+    const lastTickAt = options.getLastTickAt?.() ?? null;
+    // The banner's own reference point falls back to when the tick loop
+    // started scheduling (mirroring isTickRecentEnoughForSystemdWatchdog's
+    // identical fallback) so a hung first tick isn't indistinguishable from
+    // "nothing has been scheduled yet" -- /api/status's own lastTickAt stays
+    // truthfully null pre-first-tick; only this banner's age uses the
+    // fallback.
+    const bannerReferenceAt =
+      lastTickAt ?? options.getTickLoopStartedAt?.() ?? null;
+    const tickAgeMs =
+      bannerReferenceAt === null
+        ? null
+        : (options.now?.() ?? Date.now()) - bannerReferenceAt;
+    const pollingIntervalMs =
+      options.getPollingIntervalMs?.() ?? DEFAULT_POLLING_INTERVAL_MS;
     const html = layout(
       "Symphonika",
       [
         `<h1 class="page-title">Dashboard</h1>`,
+        renderDaemonStaleBanner(tickAgeMs, pollingIntervalMs),
         renderHeader(options.version, snapshot),
         renderProjectsCard(snapshot, options.issuePollStatus),
         renderRoutinesTable(
@@ -902,6 +939,21 @@ export function buildPullRequestFollowupAttention(input: {
     prNumber: tracked.prNumber,
     prUrl: tracked.prUrl
   };
+}
+
+function renderDaemonStaleBanner(
+  tickAgeMs: number | null,
+  pollingIntervalMs: number
+): string {
+  const threshold = Math.max(
+    DAEMON_STALE_THRESHOLD_FLOOR_MS,
+    pollingIntervalMs * DAEMON_STALE_THRESHOLD_INTERVAL_MULTIPLIER
+  );
+  if (tickAgeMs === null || tickAgeMs < threshold) {
+    return "";
+  }
+  const minutes = Math.floor(tickAgeMs / 60_000);
+  return `<section class="banner banner--attention"><p class="banner-title">Daemon may be unresponsive</p><p class="banner-reason">The daemon has stopped ticking — its last successful poll/reconcile cycle was ${minutes} minute${minutes === 1 ? "" : "s"} ago. Issue polling and run dispatch are likely stalled. If a systemd watchdog is configured, it will restart the daemon automatically; otherwise restart it manually.</p></section>`;
 }
 
 function renderPullRequestFollowupAttention(

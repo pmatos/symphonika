@@ -77,6 +77,9 @@ export type HttpAppOptions = {
     projectName: string;
     runId: string;
   }>;
+  getLastTickAt?: () => number | undefined;
+  getPollingIntervalMs?: () => number | undefined;
+  getTickLoopStartedAt?: () => number | undefined;
   getPullRequestFollowupPolicy?: () => {
     maxReviewDispatchesPerPr: number;
   };
@@ -163,8 +166,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     })
   );
 
-  app.get("/api/status", (context) =>
-    context.json({
+  app.get("/api/status", (context) => {
+    const lastTickAt = options.getLastTickAt?.() ?? null;
+    return context.json({
       active: getActiveRuns().map((run) =>
         runStore === undefined
           ? run
@@ -186,6 +190,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         errors: issuePollStatus.errors,
         projects: issuePollStatus.projects
       },
+      lastTickAt,
       projectStates: runStore?.listProjectStates() ?? [],
       reload: options.getReloadStatus?.() ?? emptyReloadStatus(),
       routines: runStore?.listRoutines() ?? [],
@@ -203,9 +208,10 @@ export function createHttpApp(options: HttpAppOptions): Hono {
           ? undefined
           : options.getConcurrency(),
       stateRoot: options.stateRoot,
+      tickAgeMs: lastTickAt === null ? null : now() - lastTickAt,
       uptimeMs: uptimeMs(startedAtMs, now)
-    })
-  );
+    });
+  });
 
   app.post("/api/poll-now", async (context) => {
     if (options.pollNow === undefined) {
@@ -398,6 +404,15 @@ export function createHttpApp(options: HttpAppOptions): Hono {
 
     registerPages({
       app,
+      ...(options.getLastTickAt === undefined
+        ? {}
+        : { getLastTickAt: options.getLastTickAt }),
+      ...(options.getPollingIntervalMs === undefined
+        ? {}
+        : { getPollingIntervalMs: options.getPollingIntervalMs }),
+      ...(options.getTickLoopStartedAt === undefined
+        ? {}
+        : { getTickLoopStartedAt: options.getTickLoopStartedAt }),
       ...(options.getPullRequestFollowupPolicy === undefined
         ? {}
         : {
@@ -407,6 +422,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         ? {}
         : { getStatusSnapshot: options.getStatusSnapshot }),
       issuePollStatus,
+      now,
       runStore,
       version: options.version
     });

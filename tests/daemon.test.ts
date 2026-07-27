@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -7,8 +7,35 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resolveLogLevel, startDaemon } from "../src/daemon.js";
-import type { IssueSnapshot } from "../src/issue-polling.js";
+import type { GitHubIssuesApi, IssueSnapshot } from "../src/issue-polling.js";
+import type { DaemonHeartbeat } from "../src/lifecycle/daemon-heartbeat.js";
 import { openRunStore, RunStore } from "../src/run-store.js";
+
+function recordingDaemonHeartbeat(
+  systemdWatchdogPingIntervalMs?: number
+): DaemonHeartbeat & {
+  readyCalls: number;
+  watchdogCalls: number;
+} {
+  const state = { readyCalls: 0, watchdogCalls: 0 };
+  return {
+    get readyCalls() {
+      return state.readyCalls;
+    },
+    get watchdogCalls() {
+      return state.watchdogCalls;
+    },
+    notifyReady: () => {
+      state.readyCalls += 1;
+      return Promise.resolve();
+    },
+    notifySystemdWatchdog: () => {
+      state.watchdogCalls += 1;
+      return Promise.resolve();
+    },
+    systemdWatchdogPingIntervalMs
+  };
+}
 
 const tempRoots: string[] = [];
 
@@ -41,6 +68,68 @@ afterEach(async () => {
       .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
+
+async function writeMinimalProject(
+  root: string,
+  options: { pollingIntervalMs?: number } = {}
+): Promise<void> {
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "polling:",
+      `  interval_ms: ${options.pollingIntervalMs ?? 30000}`,
+      "providers:",
+      "  codex:",
+      `    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"`,
+      "  claude:",
+      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      "projects:",
+      "  - name: symphonika",
+      "    disabled: false",
+      "    weight: 1",
+      "    tracker:",
+      "      kind: github",
+      "      owner: pmatos",
+      "      repo: symphonika",
+      '      token: "$GITHUB_TOKEN"',
+      "    issue_filters:",
+      '      states: ["open"]',
+      '      labels_all: ["agent-ready"]',
+      '      labels_none: ["blocked", "needs-human"]',
+      "    priority:",
+      "      labels:",
+      '        "priority:critical": 0',
+      '        "priority:high": 1',
+      '        "priority:medium": 2',
+      '        "priority:low": 3',
+      "      default: 99",
+      "    workspace:",
+      "      root: ./.symphonika/workspaces/symphonika",
+      "      git:",
+      "        remote: git@github.com:pmatos/symphonika.git",
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      "    workflow: ./WORKFLOW.md",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "WORKFLOW.md"),
+    [
+      "---",
+      "autonomy:",
+      "  max_turns: 8",
+      "---",
+      "Work on #{{issue.number}}: {{issue.title}}.",
+      "Use {{workspace.path}} on {{branch.name}}.",
+      "Provider {{provider.name}} is running {{provider.command}}.",
+      ""
+    ].join("\n")
+  );
+}
 
 describe("startDaemon", () => {
   it("starts a non-dispatching local HTTP daemon", async () => {
@@ -78,6 +167,207 @@ describe("startDaemon", () => {
       await daemon.stop();
     }
     await expect(readFile(endpointPath, "utf8")).rejects.toThrow();
+  });
+
+  it("sends the systemd ready notification once startup completes", async () => {
+    const cwd = await makeTempRoot();
+    const daemonHeartbeat = recordingDaemonHeartbeat();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      daemonHeartbeat,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      expect(daemonHeartbeat.readyCalls).toBe(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Regression: the watchdog ping used to fire only from inside tick()'s own
+  // body, coupling it to the polling cadence -- a configured polling
+  // interval longer than WatchdogSec, or no config loaded at all (no ticks
+  // ever scheduled), would starve the ping and get a perfectly healthy
+  // daemon killed. It now runs on its own independent timer, so it pings
+  // even when nothing ever calls /api/poll-now.
+  it("pings the systemd watchdog on its own timer, independent of any tick", async () => {
+    const cwd = await makeTempRoot();
+    const daemonHeartbeat = recordingDaemonHeartbeat(20);
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      daemonHeartbeat,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(daemonHeartbeat.watchdogCalls).toBeGreaterThan(0);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("never pings the systemd watchdog when no watchdog ping interval is configured", async () => {
+    const cwd = await makeTempRoot();
+    const daemonHeartbeat = recordingDaemonHeartbeat();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      daemonHeartbeat,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const response = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(response.status).toBe(200);
+      expect(daemonHeartbeat.watchdogCalls).toBe(0);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Regression: a daemonHeartbeat whose notifyReady/notifySystemdWatchdog
+  // reject used to be able to crash the daemon -- notifyReady is awaited
+  // directly by startDaemon() itself, and notifySystemdWatchdog was fired
+  // from a bare `void` with no .catch(), becoming an unhandled promise
+  // rejection. daemon.ts now catches both defensively
+  // (createDaemonHeartbeat's own implementation also swallows, but
+  // daemonHeartbeat is injectable, so a caller-supplied one -- like this
+  // test's -- isn't guaranteed to).
+  it("does not crash when an injected daemonHeartbeat rejects", async () => {
+    const cwd = await makeTempRoot();
+    const rejectingHeartbeat: DaemonHeartbeat = {
+      notifyReady: () => Promise.reject(new Error("boom-ready")),
+      notifySystemdWatchdog: () => Promise.reject(new Error("boom-watchdog")),
+      systemdWatchdogPingIntervalMs: 10
+    };
+    const { logger, lines } = createCapturingLogger();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      daemonHeartbeat: rejectingHeartbeat,
+      logger,
+      port: 0
+    });
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const response = await fetch(`${daemon.url}/health`);
+      expect(response.status).toBe(200);
+      expect(
+        lines.some(
+          (line) =>
+            typeof line.msg === "string" &&
+            line.msg.includes("systemd-notify readiness call failed")
+        )
+      ).toBe(true);
+      expect(
+        lines.some(
+          (line) =>
+            typeof line.msg === "string" &&
+            line.msg.includes("systemd-notify watchdog call failed")
+        )
+      ).toBe(true);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Regression: lastTickAtMs === undefined used to make the watchdog gate
+  // unconditionally alive, which was correct only for "no config loaded, no
+  // ticks ever scheduled" but also silently covered "config loaded, but the
+  // very first scheduled tick hung" -- the exact startup-hang failure mode
+  // this feature exists to catch. It must fall back to when the tick loop
+  // started and eventually go stale.
+  it("stops pinging the watchdog if the first scheduled tick hangs", async () => {
+    const cwd = await makeTempRoot();
+    await writeMinimalProject(cwd, { pollingIntervalMs: 30 });
+    let listOpenIssuesCalls = 0;
+    let releaseHang: (() => void) | undefined;
+    // Held open for the duration of the observation window below, then
+    // released before daemon.stop() so the scheduled-work chain (and every
+    // tick queued behind the hung one) can drain instead of blocking stop()
+    // forever -- this stands in for a tick that hangs indefinitely without
+    // actually hanging the test.
+    const hangGate = new Promise<void>((resolve) => {
+      releaseHang = resolve;
+    });
+    const githubIssuesApi: GitHubIssuesApi = {
+      addLabelsToIssue: () => Promise.resolve(),
+      listOpenIssues: () => {
+        listOpenIssuesCalls += 1;
+        // First call: the startup-time refreshIssuePollStatus(), called
+        // directly (not via tick()) before notifyReady() -- must resolve so
+        // startDaemon() itself returns. Every later call -- i.e. the first
+        // pollTimer-scheduled tick() -- hangs until the gate is released.
+        return listOpenIssuesCalls === 1
+          ? Promise.resolve([])
+          : hangGate.then(() => []);
+      },
+      removeLabelsFromIssue: () => Promise.resolve()
+    };
+    const daemonHeartbeat = recordingDaemonHeartbeat(10);
+    const daemon = await startDaemon({
+      agentProviders: {},
+      configPath: "symphonika.yml",
+      cwd,
+      daemonHeartbeat,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(daemonHeartbeat.watchdogCalls).toBeGreaterThan(0);
+
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const staleCount = daemonHeartbeat.watchdogCalls;
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(daemonHeartbeat.watchdogCalls).toBe(staleCount);
+    } finally {
+      releaseHang?.();
+      await daemon.stop();
+    }
+  });
+
+  it("surfaces tick liveness via /api/status", async () => {
+    const cwd = await makeTempRoot();
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const before = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as { lastTickAt: number | null };
+      expect(before.lastTickAt).toBeNull();
+
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+
+      const after = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as { lastTickAt: number | null; tickAgeMs: number | null };
+      expect(after.lastTickAt).not.toBeNull();
+      expect(after.tickAgeMs).not.toBeNull();
+      expect(after.tickAgeMs).toBeGreaterThanOrEqual(0);
+    } finally {
+      await daemon.stop();
+    }
   });
 
   it("preserves a blocked run's terminal verdict when cancel is attempted (issue #271)", async () => {

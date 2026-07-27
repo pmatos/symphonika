@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 
-import type {
-  FilteredProjectIssueSnapshot,
-  IssuePollStatus
+import {
+  DEFAULT_POLLING_INTERVAL_MS,
+  type FilteredProjectIssueSnapshot,
+  type IssuePollStatus
 } from "../issue-polling.js";
 import {
   formatCapReachedReason,
@@ -25,6 +26,7 @@ import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 export type RegisterPagesOptions = {
   app: Hono;
   getLastTickAt?: () => number | undefined;
+  getPollingIntervalMs?: () => number | undefined;
   getPullRequestFollowupPolicy?: () => {
     maxReviewDispatchesPerPr: number;
   };
@@ -35,11 +37,20 @@ export type RegisterPagesOptions = {
   version: string;
 };
 
-// Well beyond the daemon's own poll interval (commonly seconds) but far
-// below the multi-hour wedges that motivated this banner (see
+// Floor for the banner's threshold, well beyond a typical polling interval
+// but far below the multi-hour wedges that motivated this banner (see
 // docs/adr/0065) — an operator should notice within one dashboard visit,
 // not just after the systemd watchdog eventually restarts the unit.
-const DAEMON_STALE_THRESHOLD_MS = 5 * 60_000;
+// polling.interval_ms has no configured upper bound, though, so the actual
+// threshold scales with the live interval (see renderDaemonStaleBanner)
+// rather than using this floor alone — otherwise a healthy daemon with a
+// longer configured interval would show a permanent false positive.
+const DAEMON_STALE_THRESHOLD_FLOOR_MS = 5 * 60_000;
+
+// Same multiplier isTickRecentEnoughForWatchdog uses for the same reason:
+// a long-configured polling interval must not be indistinguishable from a
+// genuine stall.
+const DAEMON_STALE_THRESHOLD_INTERVAL_MULTIPLIER = 3;
 
 export type PullRequestFollowupAttention = {
   attention: "cap_reached";
@@ -115,11 +126,13 @@ export function registerPages(options: RegisterPagesOptions): void {
     const lastTickAt = options.getLastTickAt?.() ?? null;
     const tickAgeMs =
       lastTickAt === null ? null : (options.now?.() ?? Date.now()) - lastTickAt;
+    const pollingIntervalMs =
+      options.getPollingIntervalMs?.() ?? DEFAULT_POLLING_INTERVAL_MS;
     const html = layout(
       "Symphonika",
       [
         `<h1 class="page-title">Dashboard</h1>`,
-        renderDaemonStaleBanner(tickAgeMs),
+        renderDaemonStaleBanner(tickAgeMs, pollingIntervalMs),
         renderHeader(options.version, snapshot),
         renderProjectsCard(snapshot, options.issuePollStatus),
         renderRoutinesTable(
@@ -916,8 +929,15 @@ export function buildPullRequestFollowupAttention(input: {
   };
 }
 
-function renderDaemonStaleBanner(tickAgeMs: number | null): string {
-  if (tickAgeMs === null || tickAgeMs < DAEMON_STALE_THRESHOLD_MS) {
+function renderDaemonStaleBanner(
+  tickAgeMs: number | null,
+  pollingIntervalMs: number
+): string {
+  const threshold = Math.max(
+    DAEMON_STALE_THRESHOLD_FLOOR_MS,
+    pollingIntervalMs * DAEMON_STALE_THRESHOLD_INTERVAL_MULTIPLIER
+  );
+  if (tickAgeMs === null || tickAgeMs < threshold) {
     return "";
   }
   const minutes = Math.floor(tickAgeMs / 60_000);

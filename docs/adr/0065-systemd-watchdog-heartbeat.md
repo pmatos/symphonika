@@ -42,9 +42,11 @@ memory isolation:
   daemon is killed for having no ticks at all, or a long-configured polling interval is
   indistinguishable from a hang.
 - `/api/status` gains `lastTickAt`/`tickAgeMs`, and the dashboard shows a "daemon may be
-  unresponsive" banner when the last tick is older than `DAEMON_STALE_THRESHOLD_MS`
-  (`src/http/pages.ts`) — a human-visible warning an operator can notice on a dashboard visit,
-  before the systemd watchdog would eventually restart the unit.
+  unresponsive" banner when the last tick is older than a threshold that scales with the live
+  polling interval (`max(5 minutes, 3x polling.interval_ms)`, `src/http/pages.ts`) — the same
+  reasoning as the watchdog ping's own liveness gate, so a long-configured polling interval isn't
+  indistinguishable from a genuine stall. A human-visible warning an operator can notice on a
+  dashboard visit, before the systemd watchdog would eventually restart the unit.
 - `symphonika doctor` warns (does not fail) when an installed systemd unit predates this change —
   missing `Type=notify` or `NotifyAccess=all` — pointing the operator at
   `symphonika service install --force`. It deliberately can't byte-compare the whole `.service` file

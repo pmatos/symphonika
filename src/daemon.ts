@@ -808,6 +808,7 @@ export async function startDaemon(
         runId: entry.runId
       })),
     getLastTickAt: () => lastTickAtMs,
+    getPollingIntervalMs: () => intervalMs,
     getConcurrency: () => {
       const { maxInFlight } = runtimeConfig.globalConcurrency();
       const perProject: Array<{

@@ -1362,6 +1362,58 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  // Regression: polling.interval_ms has no configured upper bound, but the
+  // stale banner's threshold used to be a fixed 5 minutes -- a healthy
+  // daemon with a longer configured interval would show a permanent false
+  // "may be unresponsive" banner between ticks. The threshold now scales
+  // with the live polling interval (the same 3x bound already used by
+  // isTickRecentEnoughForWatchdog), floored at the original 5 minutes so a
+  // fast-polling daemon's grace period doesn't shrink.
+  it("shows no daemon-stale banner when tick age is within the scaled polling-interval bound", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        getLastTickAt: () => 0,
+        getPollingIntervalMs: () => 10 * 60_000,
+        // 8 minutes: past the fixed 5-minute floor, but well within 3x a
+        // 10-minute interval (30 minutes) -- a healthy daemon on this config.
+        now: () => 8 * 60_000,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(body).not.toMatch(/daemon.*(stopped ticking|stale|unresponsive)/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows a daemon-stale banner once tick age exceeds the scaled polling-interval bound", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        getLastTickAt: () => 0,
+        getPollingIntervalMs: () => 10 * 60_000,
+        now: () => 31 * 60_000, // past 3x the 10-minute interval
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(body).toContain("banner--attention");
+      expect(body).toMatch(/daemon.*(stopped ticking|stale|unresponsive)/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("renders a blocked run with the calmer blocked pill and banner, not the failed styling", async () => {
     const test = await setup();
     try {

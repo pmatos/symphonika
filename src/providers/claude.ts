@@ -4,6 +4,10 @@ import {
   type ChildProcessWithoutNullStreams
 } from "node:child_process";
 
+import {
+  createProcessScope,
+  type ProcessScope
+} from "../lifecycle/process-scope.js";
 import type {
   AgentProvider,
   ProviderEvent,
@@ -42,7 +46,14 @@ type ProcessQueue = {
   next: () => Promise<ProcessQueueItem>;
 };
 
-export function createClaudeProvider(): AgentProvider {
+export type ClaudeProviderOptions = {
+  processScope?: ProcessScope;
+};
+
+export function createClaudeProvider(
+  options: ClaudeProviderOptions = {}
+): AgentProvider {
+  const processScope = options.processScope ?? createProcessScope();
   const activeRuns = new Map<string, ActiveClaudeRun>();
 
   return {
@@ -60,7 +71,10 @@ export function createClaudeProvider(): AgentProvider {
     runAttempt: async function* (
       input: ProviderRunInput
     ): AsyncGenerator<ProviderEvent> {
-      const command = parseCommand(input.provider.command);
+      const command = await processScope.wrapForProviderScope(
+        input.run,
+        parseCommand(input.provider.command)
+      );
       const child = spawn(command.executable, command.args, {
         cwd: input.workspacePath,
         env: process.env,
@@ -98,6 +112,12 @@ export function createClaudeProvider(): AgentProvider {
         }
       } finally {
         activeRuns.delete(input.run.id);
+        // Runs unconditionally, not only on cancellation: the `process_exit`
+        // branch above returns directly on ordinary successful completion,
+        // bypassing terminateProcess entirely. A provider-spawned build tool
+        // can outlive that exit as a detached grandchild; stopping the
+        // run's scope here is what actually reaps it (see docs/adr/0064).
+        await processScope.stopProviderScope(input.run);
       }
     },
     validate: async (command) => {

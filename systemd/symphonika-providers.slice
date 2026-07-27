@@ -1,0 +1,14 @@
+[Unit]
+Description=Symphonika providers slice (spawned providers and verifiers)
+
+[Slice]
+# Cap the whole tree of spawned providers and their build tools. Tune
+# to match the host you run on; these defaults assume a workstation
+# with >= 64 GB of RAM. A runaway tool (e.g. an ESBMC verification)
+# will be killed inside this slice instead of triggering a global OOM
+# that tears down terminals or other unrelated cgroups — and, since
+# this slice is a sibling of symphonika-daemon.slice rather than its
+# parent, it can no longer throttle the daemon itself (docs/adr/0064).
+MemoryHigh=24G
+MemoryMax=32G
+TasksMax=4096

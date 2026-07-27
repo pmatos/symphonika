@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildCli } from "../src/cli.js";
 import {
   buildDaemonPath,
+  renderProvidersSliceUnit,
   renderServiceUnit,
   renderSliceUnit,
   runServiceInstall,
@@ -62,7 +63,7 @@ describe("renderServiceUnit", () => {
     expect(unit).toContain(`"${CLI}"`);
     expect(unit).toContain(`Environment="PATH=${DAEMON_PATH}"`);
     expect(unit).toContain("t=$(gh auth token)");
-    expect(unit).toContain("Slice=symphonika.slice");
+    expect(unit).toContain("Slice=symphonika-daemon.slice");
     expect(unit).toContain("WantedBy=default.target");
   });
 
@@ -125,13 +126,35 @@ describe("buildDaemonPath", () => {
 });
 
 describe("renderSliceUnit", () => {
-  it("stays in sync with systemd/symphonika.slice on disk", async () => {
+  it("stays in sync with systemd/symphonika-daemon.slice on disk", async () => {
     const onDisk = await readFile(
-      path.join(repoRoot, "systemd", "symphonika.slice"),
+      path.join(repoRoot, "systemd", "symphonika-daemon.slice"),
       "utf8"
     );
 
     expect(renderSliceUnit()).toBe(onDisk);
+  });
+
+  it("caps the daemon's own slice well below the providers slice", () => {
+    expect(renderSliceUnit()).toContain("MemoryHigh=4G");
+    expect(renderSliceUnit()).toContain("MemoryMax=6G");
+  });
+});
+
+describe("renderProvidersSliceUnit", () => {
+  it("stays in sync with systemd/symphonika-providers.slice on disk", async () => {
+    const onDisk = await readFile(
+      path.join(repoRoot, "systemd", "symphonika-providers.slice"),
+      "utf8"
+    );
+
+    expect(renderProvidersSliceUnit()).toBe(onDisk);
+  });
+
+  it("keeps the previously shared budget for spawned providers", () => {
+    expect(renderProvidersSliceUnit()).toContain("MemoryHigh=24G");
+    expect(renderProvidersSliceUnit()).toContain("MemoryMax=32G");
+    expect(renderProvidersSliceUnit()).toContain("TasksMax=4096");
   });
 });
 
@@ -142,7 +165,7 @@ describe("runServiceInstall", () => {
     scriptPath: "/opt/symphonika/dist/cli.js"
   };
 
-  it("writes both unit files under ~/.config/systemd/user and reloads", async () => {
+  it("writes all three unit files under ~/.config/systemd/user and reloads", async () => {
     const home = await makeTempHome();
     let reloadCalls = 0;
     const report = await runServiceInstall({
@@ -158,21 +181,27 @@ describe("runServiceInstall", () => {
     expect(report.reloaded).toBe(true);
     expect(report.reloadError).toBeNull();
     expect(reloadCalls).toBe(1);
+    expect(report.files).toHaveLength(3);
 
     const unitDir = userUnitDir(home);
     const service = await readFile(
       path.join(unitDir, "symphonika.service"),
       "utf8"
     );
-    const slice = await readFile(
-      path.join(unitDir, "symphonika.slice"),
+    const daemonSlice = await readFile(
+      path.join(unitDir, "symphonika-daemon.slice"),
+      "utf8"
+    );
+    const providersSlice = await readFile(
+      path.join(unitDir, "symphonika-providers.slice"),
       "utf8"
     );
     expect(service).toContain(`exec "$1" "$2" daemon`);
     expect(service).toContain(`"/opt/node/bin/node"`);
     expect(service).toContain(`"/opt/symphonika/dist/cli.js"`);
     expect(service).not.toContain(".npm-global");
-    expect(slice).toBe(renderSliceUnit());
+    expect(daemonSlice).toBe(renderSliceUnit());
+    expect(providersSlice).toBe(renderProvidersSliceUnit());
   });
 
   it("honors an absolute XDG_CONFIG_HOME for the unit directory", async () => {
@@ -289,7 +318,7 @@ describe("runServiceInstall", () => {
 
     expect(report.printed).toBe(true);
     expect(report.ok).toBe(true);
-    expect(report.files).toHaveLength(2);
+    expect(report.files).toHaveLength(3);
     expect(reloadCalls).toBe(0);
     await expect(access(path.join(home, ".config"))).rejects.toThrow();
   });
@@ -361,8 +390,12 @@ describe("CLI service install", () => {
           path: "/home/u/.config/systemd/user/symphonika.service"
         },
         {
-          content: "slc",
-          path: "/home/u/.config/systemd/user/symphonika.slice"
+          content: "dslc",
+          path: "/home/u/.config/systemd/user/symphonika-daemon.slice"
+        },
+        {
+          content: "pslc",
+          path: "/home/u/.config/systemd/user/symphonika-providers.slice"
         }
       ],
       ok: true,

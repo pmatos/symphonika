@@ -7,6 +7,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import {
+  createProcessScope,
+  type ProcessScope
+} from "../lifecycle/process-scope.js";
 import type {
   AgentProvider,
   ProviderEvent,
@@ -53,7 +57,14 @@ type ResponseReadResult = {
   stopped: boolean;
 };
 
-export function createCodexProvider(): AgentProvider {
+export type CodexProviderOptions = {
+  processScope?: ProcessScope;
+};
+
+export function createCodexProvider(
+  options: CodexProviderOptions = {}
+): AgentProvider {
+  const processScope = options.processScope ?? createProcessScope();
   const activeRuns = new Map<string, ActiveCodexRun>();
 
   return {
@@ -82,7 +93,10 @@ export function createCodexProvider(): AgentProvider {
     runAttempt: async function* (
       input: ProviderRunInput
     ): AsyncGenerator<ProviderEvent> {
-      const command = parseCommand(input.provider.command);
+      const command = await processScope.wrapForProviderScope(
+        input.run,
+        parseCommand(input.provider.command)
+      );
       const child = spawn(command.executable, command.args, {
         cwd: input.workspacePath,
         env: process.env,
@@ -236,6 +250,13 @@ export function createCodexProvider(): AgentProvider {
         }
       } finally {
         activeRuns.delete(input.run.id);
+        // Runs unconditionally, not only on cancellation: the `process_exit`
+        // branch above returns directly on ordinary successful completion,
+        // bypassing terminateProcess entirely. A provider-spawned build tool
+        // (cargo, rustc, ...) can outlive that exit as a detached
+        // grandchild; stopping the run's scope here is what actually reaps
+        // it (see docs/adr/0064).
+        await processScope.stopProviderScope(input.run);
       }
     },
     validate: async (command) => {

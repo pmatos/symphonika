@@ -12,6 +12,42 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createClaudeProvider } from "../src/providers/claude.js";
 import type { ProviderEvent, ProviderRunInput } from "../src/provider.js";
+import type {
+  ProcessCommand,
+  ProviderRunIdentity
+} from "../src/lifecycle/process-scope.js";
+
+type RecordingProcessScope = {
+  stopCalls: ProviderRunIdentity[];
+  wrapCalls: Array<{ command: ProcessCommand; run: ProviderRunIdentity }>;
+  stopProviderScope: (run: ProviderRunIdentity) => Promise<void>;
+  wrapForProviderScope: (
+    run: ProviderRunIdentity,
+    command: ProcessCommand
+  ) => Promise<ProcessCommand>;
+};
+
+// The default processScope probes real systemd-run availability, which is
+// true on a dev box with a live systemd --user session (XDG_RUNTIME_DIR
+// set) — every existing test here injects this no-op bypass so spawned
+// fake-subprocess commands are never actually wrapped in a real transient
+// systemd scope, regardless of the host running the suite.
+function noopProcessScope(): RecordingProcessScope {
+  const wrapCalls: RecordingProcessScope["wrapCalls"] = [];
+  const stopCalls: RecordingProcessScope["stopCalls"] = [];
+  return {
+    stopCalls,
+    stopProviderScope: (run) => {
+      stopCalls.push(run);
+      return Promise.resolve();
+    },
+    wrapCalls,
+    wrapForProviderScope: (run, command) => {
+      wrapCalls.push({ command, run });
+      return Promise.resolve(command);
+    }
+  };
+}
 
 const tempRoots: string[] = [];
 const originalFakeClaudeTranscript =
@@ -46,7 +82,7 @@ describe("Claude stream-json provider", () => {
     const transcriptPath = path.join(root, "requests.jsonl");
     const fakeClaudePath = path.join(root, "fake-claude.mjs");
     await writeFakeClaudeStreamJson(fakeClaudePath, transcriptPath);
-    const provider = createClaudeProvider();
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
 
     const events = await collectProviderEvents(
       provider.runAttempt({
@@ -181,6 +217,52 @@ describe("Claude stream-json provider", () => {
     ]);
   });
 
+  it("wraps the spawned command via the injected process scope and stops the scope when the run completes normally", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeClaudePath = path.join(root, "fake-claude.mjs");
+    await writeFakeClaudeStreamJson(fakeClaudePath, transcriptPath);
+    const processScope = noopProcessScope();
+    const provider = createClaudeProvider({ processScope });
+    const command = `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`;
+
+    await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: { command, name: "claude" },
+        workspacePath
+      })
+    );
+
+    expect(processScope.wrapCalls).toEqual([
+      {
+        command: {
+          args: [
+            fakeClaudePath,
+            "-p",
+            "--dangerously-skip-permissions",
+            "--verbose",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json"
+          ],
+          executable: process.execPath
+        },
+        run: { attempt: 1, id: "run-issue-10" }
+      }
+    ]);
+    // The regression this guards: ordinary successful completion takes the
+    // `process_exit` early-return path, which bypasses terminateProcess
+    // entirely — stopProviderScope must still fire from the unconditional
+    // cleanup path, not only on cancellation.
+    expect(processScope.stopCalls).toEqual([
+      { attempt: 1, id: "run-issue-10" }
+    ]);
+  });
+
   it("maps AskUserQuestion tool use to input_required and stops the process", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -188,7 +270,7 @@ describe("Claude stream-json provider", () => {
     const transcriptPath = path.join(root, "requests.jsonl");
     const fakeClaudePath = path.join(root, "fake-claude.mjs");
     await writeFakeClaudeStreamJson(fakeClaudePath, transcriptPath);
-    const provider = createClaudeProvider();
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
 
     const events = await collectProviderEvents(
       provider.runAttempt({
@@ -246,7 +328,7 @@ describe("Claude stream-json provider", () => {
     const transcriptPath = path.join(root, "requests.jsonl");
     const fakeClaudePath = path.join(root, "fake-claude.mjs");
     await writeFakeClaudeStreamJson(fakeClaudePath, transcriptPath);
-    const provider = createClaudeProvider();
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
 
     const events = await collectProviderEvents(
       provider.runAttempt({
@@ -289,7 +371,7 @@ describe("Claude stream-json provider", () => {
     const transcriptPath = path.join(root, "requests.jsonl");
     const fakeClaudePath = path.join(root, "fake-claude.mjs");
     await writeFakeClaudeStreamJson(fakeClaudePath, transcriptPath);
-    const provider = createClaudeProvider();
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
 
     const events = await collectProviderEvents(
       provider.runAttempt({
@@ -334,7 +416,8 @@ describe("Claude stream-json provider", () => {
     const transcriptPath = path.join(root, "requests.jsonl");
     const fakeClaudePath = path.join(root, "fake-claude.mjs");
     await writeFakeClaudeStreamJson(fakeClaudePath, transcriptPath);
-    const provider = createClaudeProvider();
+    const processScope = noopProcessScope();
+    const provider = createClaudeProvider({ processScope });
     const iterable = provider.runAttempt({
       ...providerInputFixture(),
       provider: {
@@ -363,6 +446,9 @@ describe("Claude stream-json provider", () => {
       cancelled: true,
       type: "process_exit"
     });
+    expect(processScope.stopCalls).toEqual([
+      { attempt: 1, id: "run-issue-10" }
+    ]);
   });
 
   it("validates the configured full-permission stream-json command", async () => {
@@ -370,7 +456,7 @@ describe("Claude stream-json provider", () => {
     const transcriptPath = path.join(root, "requests.jsonl");
     const fakeClaudePath = path.join(root, "fake-claude.mjs");
     await writeFakeClaudeStreamJson(fakeClaudePath, transcriptPath);
-    const provider = createClaudeProvider();
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
 
     await expect(
       provider.validate(
@@ -385,7 +471,7 @@ describe("Claude stream-json provider", () => {
     await mkdir(fakeClaudeDir, { recursive: true });
     const fakeClaudePath = path.join(fakeClaudeDir, "fake\\claude");
     await writeFakeClaudeHelpExecutable(fakeClaudePath);
-    const provider = createClaudeProvider();
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
 
     await expect(
       provider.validate(
@@ -400,7 +486,7 @@ describe("Claude stream-json provider", () => {
     await mkdir(fakeClaudeDir, { recursive: true });
     const fakeClaudePath = path.join(fakeClaudeDir, "claude\\bin");
     await writeFakeClaudeHelpExecutable(fakeClaudePath);
-    const provider = createClaudeProvider();
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
 
     await expect(
       provider.validate(
@@ -414,7 +500,7 @@ describe("Claude stream-json provider", () => {
     const fakeClaudePath = path.join(root, "fake-claude-argv.mjs");
     const settingsJson = '{"permissions":{"allow":["Read"]}}';
     await writeFakeClaudeArgvValidator(fakeClaudePath, settingsJson);
-    const provider = createClaudeProvider();
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
 
     await expect(
       provider.validate(
@@ -424,7 +510,7 @@ describe("Claude stream-json provider", () => {
   });
 
   it("rejects Claude commands that do not speak stream-json", async () => {
-    const provider = createClaudeProvider();
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
 
     await expect(
       provider.validate("claude -p --dangerously-skip-permissions")
@@ -432,7 +518,7 @@ describe("Claude stream-json provider", () => {
   });
 
   it("rejects Claude commands missing --verbose", async () => {
-    const provider = createClaudeProvider();
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
 
     await expect(
       provider.validate(

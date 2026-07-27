@@ -44,14 +44,31 @@ export type ServiceUnitInput = {
 
 const SLICE_UNIT = [
   "[Unit]",
-  "Description=Symphonika slice (daemon + spawned providers and verifiers)",
+  "Description=Symphonika daemon slice (daemon + dashboard only)",
   "",
   "[Slice]",
-  "# Cap the whole daemon tree. Tune to match the host you run on; these",
-  "# defaults assume a workstation with >= 64 GB of RAM. A runaway tool",
-  "# (e.g. an ESBMC verification) will be killed inside this slice",
-  "# instead of triggering a global OOM that tears down terminals or",
-  "# other unrelated cgroups.",
+  "# Small, protected budget for the daemon process itself. Spawned",
+  "# providers and their build tools run in symphonika-providers.slice",
+  "# instead, so a runaway tool there can no longer throttle the daemon's",
+  "# own event loop or dashboard (see docs/adr/0064). Tune to match the",
+  "# host you run on.",
+  "MemoryHigh=4G",
+  "MemoryMax=6G",
+  ""
+].join("\n");
+
+const PROVIDERS_SLICE_UNIT = [
+  "[Unit]",
+  "Description=Symphonika providers slice (spawned providers and verifiers)",
+  "",
+  "[Slice]",
+  "# Cap the whole tree of spawned providers and their build tools. Tune",
+  "# to match the host you run on; these defaults assume a workstation",
+  "# with >= 64 GB of RAM. A runaway tool (e.g. an ESBMC verification)",
+  "# will be killed inside this slice instead of triggering a global OOM",
+  "# that tears down terminals or other unrelated cgroups — and, since",
+  "# this slice is a sibling of symphonika-daemon.slice rather than its",
+  "# parent, it can no longer throttle the daemon itself (docs/adr/0064).",
   "MemoryHigh=24G",
   "MemoryMax=32G",
   "TasksMax=4096",
@@ -103,11 +120,11 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
     "# same positional-argument path.",
     `ExecStart=/bin/sh -c 't=$(gh auth token); [ -n "$t" ] || { echo "ERROR: gh auth token returned empty"; exit 1; }; export GITHUB_TOKEN="$t"; exec "$1" "$2" daemon${daemonConfigOption}' symphonika ${systemdArg(input.execPath)} ${systemdArg(input.scriptPath)}${configArgument}`,
     "",
-    "# Keep the daemon and everything it spawns in its own cgroup slice.",
-    "# A scope-wide OOM in a spawned tool (compiler, verifier, ...) no",
-    "# longer tears down whichever terminal scope you happened to launch",
-    "# the daemon from.",
-    "Slice=symphonika.slice",
+    "# Keep the daemon in its own small, protected cgroup slice, separate",
+    "# from symphonika-providers.slice (where spawned providers and their",
+    "# build tools run). A memory blowup in a provider no longer throttles",
+    "# the daemon's own event loop or dashboard — see docs/adr/0064.",
+    "Slice=symphonika-daemon.slice",
     "",
     "# Journald sees stdout/stderr. View with:",
     "#   journalctl --user -u symphonika -f",
@@ -122,6 +139,10 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
 
 export function renderSliceUnit(): string {
   return SLICE_UNIT;
+}
+
+export function renderProvidersSliceUnit(): string {
+  return PROVIDERS_SLICE_UNIT;
 }
 
 // Bake an absolute PATH into the unit: the node runtime's directory first,
@@ -176,7 +197,11 @@ export async function runServiceInstall(
     },
     {
       content: renderSliceUnit(),
-      path: path.join(unitDir, "symphonika.slice")
+      path: path.join(unitDir, "symphonika-daemon.slice")
+    },
+    {
+      content: renderProvidersSliceUnit(),
+      path: path.join(unitDir, "symphonika-providers.slice")
     }
   ];
 

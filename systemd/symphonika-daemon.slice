@@ -1,0 +1,11 @@
+[Unit]
+Description=Symphonika daemon slice (daemon + dashboard only)
+
+[Slice]
+# Small, protected budget for the daemon process itself. Spawned
+# providers and their build tools run in symphonika-providers.slice
+# instead, so a runaway tool there can no longer throttle the daemon's
+# own event loop or dashboard (see docs/adr/0064). Tune to match the
+# host you run on.
+MemoryHigh=4G
+MemoryMax=6G

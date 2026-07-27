@@ -21,6 +21,10 @@ import {
 } from "./issue-polling.js";
 import { ActiveRunRegistry } from "./lifecycle/active-runs.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
+import {
+  createProcessScope,
+  type ProcessScope
+} from "./lifecycle/process-scope.js";
 import type {
   LifecyclePolicy,
   ScheduledWorkInput
@@ -75,6 +79,7 @@ export type StartDaemonOptions = {
   lifecyclePolicy?: LifecyclePolicy;
   logger?: Logger;
   port?: number;
+  processScope?: ProcessScope;
   prepareIssueWorkspace?: (
     input: PrepareIssueWorkspaceInput
   ) => Promise<PreparedIssueWorkspace>;
@@ -97,6 +102,7 @@ export async function startDaemon(
 ): Promise<DaemonHandle> {
   const env = options.env ?? process.env;
   const logger = options.logger ?? pino({ level: resolveLogLevel(env) });
+  const processScope = options.processScope ?? createProcessScope();
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 3000;
   const stateRootOptions: Parameters<typeof resolveStateRoot>[0] = {};
@@ -158,6 +164,24 @@ export async function startDaemon(
       },
       "symphonika startup: marked orphaned run as stale"
     );
+    // Provider processes run in symphonika-providers.slice, a sibling of the
+    // daemon's own service cgroup (docs/adr/0064), so a previous daemon
+    // instance dying no longer tears its in-flight provider scopes down with
+    // it. Only a run that reached "running" ever had a provider spawned —
+    // queued/preparing_workspace orphans have no attempt, and therefore no
+    // scope, to reap. Attempts are ordered by attempt_number ascending, so
+    // the last one is the attempt that was actually live when this daemon's
+    // predecessor died.
+    if (entry.previousState === "running") {
+      const attempts = runStore.listAttempts(entry.runId);
+      const latestAttempt = attempts[attempts.length - 1];
+      if (latestAttempt !== undefined) {
+        await processScope.stopProviderScope({
+          attempt: latestAttempt.attemptNumber,
+          id: entry.runId
+        });
+      }
+    }
   }
   if (sweptOnStartup.length === 0) {
     logger.info({ count: 0 }, "symphonika startup: no orphaned runs found");

@@ -271,6 +271,115 @@ describe("startDaemon orphan sweep logging", () => {
     }
   });
 
+  // Regression: provider processes now run in symphonika-providers.slice, a
+  // SIBLING of the daemon's own service cgroup (see docs/adr/0064) -- a
+  // daemon crash/restart no longer tears down in-flight provider scopes with
+  // it the way it did before that split. The startup orphan sweep must also
+  // reap any lingering scope for a run that was actually running (i.e. had a
+  // provider spawned) when the previous daemon instance died.
+  it("stops the leftover provider scope for a running orphan, using its latest attempt", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "orphan-run",
+      issue: sampleIssue({ number: 55 }),
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    store.createAttempt({
+      attemptNumber: 1,
+      branchName: "sym/symphonika/55-fixture",
+      branchRef: "refs/heads/sym/symphonika/55-fixture",
+      id: "orphan-run-attempt-1",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "orphan-run",
+      state: "running",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    // A retried attempt: the sweep must reap attempt 2 (the latest), not 1.
+    store.createAttempt({
+      attemptNumber: 2,
+      branchName: "sym/symphonika/55-fixture",
+      branchRef: "refs/heads/sym/symphonika/55-fixture",
+      id: "orphan-run-attempt-2",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "orphan-run",
+      state: "running",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    store.updateRunState("orphan-run", "running");
+    store.close();
+
+    const stopCalls: Array<{ attempt: number; id: string }> = [];
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: (run) => {
+          stopCalls.push(run);
+          return Promise.resolve();
+        },
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+
+    try {
+      expect(stopCalls).toEqual([{ attempt: 2, id: "orphan-run" }]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("does not attempt to stop a scope for an orphan that never got a provider spawned", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    seedOrphans(stateRoot, [
+      { id: "leaked-queued", issueNumber: 60, state: "queued" },
+      { id: "leaked-preparing", issueNumber: 61, state: "preparing_workspace" }
+    ]);
+
+    const stopCalls: Array<{ attempt: number; id: string }> = [];
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: (run) => {
+          stopCalls.push(run);
+          return Promise.resolve();
+        },
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+
+    try {
+      expect(stopCalls).toEqual([]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   // ADR 0047 guarantees valid waiting rows (current_state_id set) survive
   // daemon restart so the next tick can re-evaluate them; the startup sweep
   // must leave them alone.

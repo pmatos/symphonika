@@ -2591,11 +2591,12 @@ export class RunStore {
       .run(reason, timestamp(), runId);
   }
 
-  markLeakedRunsAsStale(reason = "leaked_active_run"): {
+  findLeakedRuns(): {
     runId: string;
     projectName: string;
     issueNumber: number;
     previousState: RunState;
+    previousTerminalReason: string | null;
   }[] {
     // Sweeps three classes of orphaned rows:
     // - queued / preparing_workspace / running: their in-memory scheduler
@@ -2606,12 +2607,20 @@ export class RunStore {
     //   transaction wrapper); listWaitingRuns filters these out so
     //   reconcileWaitingRuns can never re-evaluate them. Valid durable waits
     //   (current_state_id set) are intentionally preserved per ADR 0047.
+    // - stale with terminal_reason = 'leaked_active_run_cleanup_pending': a
+    //   prior sweep terminalized the row but could not confirm its provider
+    //   scope was actually stopped. Read-only re-detection here (see
+    //   markRunsStale below) is what makes that retry durable across
+    //   restarts without ever re-exposing the row as 'running' — see
+    //   docs/adr/0064.
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, issue_number, state from runs",
+          "select id, project_name, issue_number, state, terminal_reason",
+          "from runs",
           "where state in ('queued','preparing_workspace','running')",
-          "or (state = 'waiting' and current_state_id is null)"
+          "or (state = 'waiting' and current_state_id is null)",
+          "or (state = 'stale' and terminal_reason = 'leaked_active_run_cleanup_pending')"
         ].join(" ")
       )
       .all() as {
@@ -2619,13 +2628,18 @@ export class RunStore {
       project_name: string;
       issue_number: number;
       state: RunState;
+      terminal_reason: string | null;
     }[];
-    const swept = rows.map((row) => ({
+    return rows.map((row) => ({
       issueNumber: row.issue_number,
       previousState: row.state,
+      previousTerminalReason: row.terminal_reason,
       projectName: row.project_name,
       runId: row.id
     }));
+  }
+
+  markRunsStale(entries: { runId: string; reason: string }[]): void {
     const update = this.database.prepare(
       [
         "update runs set",
@@ -2636,34 +2650,39 @@ export class RunStore {
       ].join(" ")
     );
     const apply = this.database.transaction(() => {
-      for (const entry of swept) {
+      for (const entry of entries) {
         const updatedAt = timestamp();
-        update.run(reason, updatedAt, entry.runId);
+        update.run(entry.reason, updatedAt, entry.runId);
         this.recordRunTransition(entry.runId, "stale", updatedAt);
       }
     });
     apply();
-    return swept;
   }
 
-  reconcileLeakedRoutineFirings(reason = "leaked_routine_firing"): {
+  findLeakedRoutineFirings(): {
     firingId: string;
     projectName: string;
     routineName: string;
     previousState: RoutineFiringState;
+    previousTerminalReason: string | null;
   }[] {
     // A daemon crash or kill can leave a routine firing durably in queued,
-    // preparing_workspace, or running. markLeakedRunsAsStale only sweeps the
-    // runs table, so without this reconciliation the orphaned firing keeps
+    // preparing_workspace, or running. findLeakedRuns only sweeps the runs
+    // table, so without this reconciliation the orphaned firing keeps
     // hasActiveRoutineFiring returning true forever, permanently skipping every
     // future recurring tick for that routine. routine_firings has no 'stale'
     // state, so leaked rows are settled as 'failed' with a distinct
-    // terminal_reason to remove them from the active set.
+    // terminal_reason to remove them from the active set. A row already
+    // 'failed' with terminal_reason = 'leaked_routine_firing_cleanup_pending'
+    // is re-detected the same way findLeakedRuns re-detects its own pending
+    // rows — see docs/adr/0064.
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state from routine_firings",
-          "where state in ('queued','preparing_workspace','running')"
+          "select id, project_name, routine_name, state, terminal_reason",
+          "from routine_firings",
+          "where state in ('queued','preparing_workspace','running')",
+          "or (state = 'failed' and terminal_reason = 'leaked_routine_firing_cleanup_pending')"
         ].join(" ")
       )
       .all() as {
@@ -2671,13 +2690,20 @@ export class RunStore {
       project_name: string;
       routine_name: string;
       state: RoutineFiringState;
+      terminal_reason: string | null;
     }[];
-    const swept = rows.map((row) => ({
+    return rows.map((row) => ({
       firingId: row.id,
       previousState: row.state,
+      previousTerminalReason: row.terminal_reason,
       projectName: row.project_name,
       routineName: row.routine_name
     }));
+  }
+
+  markRoutineFiringsFailed(
+    entries: { firingId: string; reason: string }[]
+  ): void {
     const update = this.database.prepare(
       [
         "update routine_firings set",
@@ -2688,14 +2714,13 @@ export class RunStore {
       ].join(" ")
     );
     const apply = this.database.transaction(() => {
-      for (const entry of swept) {
+      for (const entry of entries) {
         const updatedAt = timestamp();
-        update.run(reason, updatedAt, entry.firingId);
+        update.run(entry.reason, updatedAt, entry.firingId);
         this.recordRoutineFiringTransition(entry.firingId, "failed", updatedAt);
       }
     });
     apply();
-    return swept;
   }
 
   failLegacyInputRequiredRuns(

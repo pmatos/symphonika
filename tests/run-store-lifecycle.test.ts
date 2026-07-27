@@ -520,7 +520,7 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
-  it("markLeakedRunsAsStale transitions non-terminal runs to stale", async () => {
+  it("findLeakedRuns detects non-terminal runs without changing state", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });
     try {
@@ -538,14 +538,14 @@ describe("run-store lifecycle CRUD", () => {
       seedRun(store, { id: "failed", issueNumber: 5 });
       store.updateRunState("failed", "failed");
 
-      const swept = store.markLeakedRunsAsStale();
+      const leaked = store.findLeakedRuns();
 
-      expect(swept.map((entry) => entry.runId).sort()).toEqual([
+      expect(leaked.map((entry) => entry.runId).sort()).toEqual([
         "preparing",
         "queued",
         "running"
       ]);
-      expect(swept).toEqual(
+      expect(leaked).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             runId: "queued",
@@ -565,28 +565,22 @@ describe("run-store lifecycle CRUD", () => {
         ])
       );
 
+      // detection alone must not mutate any row.
       const runsById = new Map(
         store.listRuns().map((entry) => [entry.id, entry])
       );
-      expect(runsById.get("queued")).toMatchObject({
-        state: "stale",
-        terminalReason: "leaked_active_run"
-      });
-      expect(runsById.get("running")?.state).toBe("stale");
-      expect(runsById.get("preparing")?.state).toBe("stale");
-      // valid waiting rows (current_state_id set) are intentionally durable
-      // across daemon restarts (ADR 0047); reconcileWaitingRuns re-evaluates
-      // them on the next tick — the startup sweep must not touch them.
+      expect(runsById.get("queued")?.state).toBe("queued");
+      expect(runsById.get("running")?.state).toBe("running");
+      expect(runsById.get("preparing")?.state).toBe("preparing_workspace");
       expect(runsById.get("waiting")?.state).toBe("waiting");
       expect(runsById.get("succeeded")?.state).toBe("succeeded");
       expect(runsById.get("failed")?.state).toBe("failed");
-      expect(store.listActiveRunIds()).toEqual([]);
     } finally {
       store.close();
     }
   });
 
-  it("markLeakedRunsAsStale sweeps waiting rows missing current_state_id", async () => {
+  it("findLeakedRuns detects waiting rows missing current_state_id", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });
     try {
@@ -599,39 +593,30 @@ describe("run-store lifecycle CRUD", () => {
       seedRun(store, { id: "wait-orphan", issueNumber: 11 });
       store.updateRunState("wait-orphan", "waiting");
 
-      const swept = store.markLeakedRunsAsStale();
+      const leaked = store.findLeakedRuns();
 
-      expect(swept.map((entry) => entry.runId)).toEqual(["wait-orphan"]);
-      expect(swept[0]).toMatchObject({
+      expect(leaked.map((entry) => entry.runId)).toEqual(["wait-orphan"]);
+      expect(leaked[0]).toMatchObject({
         runId: "wait-orphan",
         previousState: "waiting",
         issueNumber: 11
       });
-
-      const runsById = new Map(
-        store.listRuns().map((entry) => [entry.id, entry])
-      );
-      expect(runsById.get("wait-valid")?.state).toBe("waiting");
-      expect(runsById.get("wait-orphan")).toMatchObject({
-        state: "stale",
-        terminalReason: "leaked_active_run"
-      });
     } finally {
       store.close();
     }
   });
 
-  it("markLeakedRunsAsStale is idempotent on a clean database", async () => {
+  it("findLeakedRuns returns nothing on a clean database", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });
     try {
-      expect(store.markLeakedRunsAsStale()).toEqual([]);
+      expect(store.findLeakedRuns()).toEqual([]);
     } finally {
       store.close();
     }
   });
 
-  it("markLeakedRunsAsStale returns previousState per row", async () => {
+  it("findLeakedRuns returns previousState per row", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });
     try {
@@ -641,14 +626,75 @@ describe("run-store lifecycle CRUD", () => {
       seedRun(store, { id: "preparing", issueNumber: 3 });
       store.updateRunState("preparing", "preparing_workspace");
 
-      const swept = store.markLeakedRunsAsStale();
+      const leaked = store.findLeakedRuns();
       const previousByRunId = new Map(
-        swept.map((entry) => [entry.runId, entry.previousState])
+        leaked.map((entry) => [entry.runId, entry.previousState])
       );
 
       expect(previousByRunId.get("queued")).toBe("queued");
       expect(previousByRunId.get("running")).toBe("running");
       expect(previousByRunId.get("preparing")).toBe("preparing_workspace");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("markRunsStale transitions the given rows to stale with a per-row reason", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      seedRun(store, { id: "confirmed", issueNumber: 1 });
+      store.updateRunState("confirmed", "running");
+      seedRun(store, { id: "pending", issueNumber: 2 });
+      store.updateRunState("pending", "running");
+
+      store.markRunsStale([
+        { runId: "confirmed", reason: "leaked_active_run" },
+        { runId: "pending", reason: "leaked_active_run_cleanup_pending" }
+      ]);
+
+      const runsById = new Map(
+        store.listRuns().map((entry) => [entry.id, entry])
+      );
+      expect(runsById.get("confirmed")).toMatchObject({
+        state: "stale",
+        terminalReason: "leaked_active_run"
+      });
+      expect(runsById.get("pending")).toMatchObject({
+        state: "stale",
+        terminalReason: "leaked_active_run_cleanup_pending"
+      });
+      expect(store.listActiveRunIds()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("findLeakedRuns rediscovers a row left with the cleanup-pending reason", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      seedRun(store, { id: "pending", issueNumber: 1 });
+      store.updateRunState("pending", "running");
+      store.markRunsStale([
+        { runId: "pending", reason: "leaked_active_run_cleanup_pending" }
+      ]);
+
+      // a plain 'stale' row from a confirmed sweep must not resurface.
+      seedRun(store, { id: "confirmed", issueNumber: 2 });
+      store.updateRunState("confirmed", "running");
+      store.markRunsStale([
+        { runId: "confirmed", reason: "leaked_active_run" }
+      ]);
+
+      const leaked = store.findLeakedRuns();
+
+      expect(leaked.map((entry) => entry.runId)).toEqual(["pending"]);
+      expect(leaked[0]).toMatchObject({
+        runId: "pending",
+        previousState: "stale",
+        previousTerminalReason: "leaked_active_run_cleanup_pending"
+      });
     } finally {
       store.close();
     }

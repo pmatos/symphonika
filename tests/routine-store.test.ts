@@ -988,7 +988,7 @@ describe("RunStore routines", () => {
     }
   });
 
-  it("reconciles leaked routine firings so the overlap gate is freed", async () => {
+  it("finds leaked routine firings without mutating them", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
@@ -1021,16 +1021,29 @@ describe("RunStore routines", () => {
         })
       ).toBe(true);
 
-      const swept = store.reconcileLeakedRoutineFirings();
+      const leaked = store.findLeakedRoutineFirings();
 
-      expect(swept).toEqual([
+      expect(leaked).toEqual([
         {
           firingId: "leaked-fire",
           previousState: "running",
+          previousTerminalReason: null,
           projectName: "alpha",
           routineName: "daily-report"
         }
       ]);
+      // detection alone must not free the overlap gate.
+      expect(
+        store.hasActiveRoutineFiring({
+          name: "daily-report",
+          projectName: "alpha"
+        })
+      ).toBe(true);
+
+      store.markRoutineFiringsFailed([
+        { firingId: "leaked-fire", reason: "leaked_routine_firing" }
+      ]);
+
       expect(
         store.hasActiveRoutineFiring({
           name: "daily-report",
@@ -1054,7 +1067,56 @@ describe("RunStore routines", () => {
     }
   });
 
-  it("reconcileLeakedRoutineFirings leaves terminal firings untouched", async () => {
+  it("findLeakedRoutineFirings rediscovers a row left with the cleanup-pending reason", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines(
+        [
+          {
+            kind: "report",
+            name: "daily-report",
+            prompt: "Report.",
+            provider: "codex",
+            schedule: { cron: "30 1 * * *", tz: "Europe/Lisbon" },
+            sourcePath: "/tmp/daily-report.md",
+            projectName: "alpha"
+          }
+        ],
+        { now: new Date("2026-03-27T02:00:00.000Z") }
+      );
+      store.createRoutineFiring({
+        id: "pending-fire",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.updateRoutineFiringState("pending-fire", "running");
+      store.markRoutineFiringsFailed([
+        {
+          firingId: "pending-fire",
+          reason: "leaked_routine_firing_cleanup_pending"
+        }
+      ]);
+
+      const leaked = store.findLeakedRoutineFirings();
+
+      expect(leaked).toEqual([
+        {
+          firingId: "pending-fire",
+          previousState: "failed",
+          previousTerminalReason: "leaked_routine_firing_cleanup_pending",
+          projectName: "alpha",
+          routineName: "daily-report"
+        }
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("findLeakedRoutineFirings leaves terminal firings untouched", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
@@ -1078,7 +1140,7 @@ describe("RunStore routines", () => {
       });
       store.completeRoutineFiring({ id: "done-fire", state: "succeeded" });
 
-      expect(store.reconcileLeakedRoutineFirings()).toEqual([]);
+      expect(store.findLeakedRoutineFirings()).toEqual([]);
       expect(store.listRoutineFirings()).toEqual([
         expect.objectContaining({ id: "done-fire", state: "succeeded" })
       ]);

@@ -20,7 +20,7 @@ import type {
 type RecordingProcessScope = {
   stopCalls: ProviderRunIdentity[];
   wrapCalls: Array<{ command: ProcessCommand; run: ProviderRunIdentity }>;
-  stopProviderScope: (run: ProviderRunIdentity) => Promise<void>;
+  stopProviderScope: (run: ProviderRunIdentity) => Promise<boolean>;
   wrapForProviderScope: (
     run: ProviderRunIdentity,
     command: ProcessCommand
@@ -39,7 +39,7 @@ function noopProcessScope(): RecordingProcessScope {
     stopCalls,
     stopProviderScope: (run) => {
       stopCalls.push(run);
-      return Promise.resolve();
+      return Promise.resolve(true);
     },
     wrapCalls,
     wrapForProviderScope: (run, command) => {

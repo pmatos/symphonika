@@ -78,6 +78,10 @@ export type ProcessCommand = {
 };
 
 export type ProcessScopeOptions = {
+  confirmUnitInactive?: (
+    unitName: string,
+    timeoutMs: number
+  ) => Promise<boolean>;
   isAvailable?: () => Promise<boolean>;
   memoryHigh?: string;
   memoryMax?: string;
@@ -88,7 +92,9 @@ export type ProcessScopeOptions = {
 };
 
 export type ProcessScope = {
-  stopProviderScope: (run: ProviderRunIdentity) => Promise<void>;
+  // true: confirmed the scope is stopped (or there was never one to stop).
+  // false: cleanup could not be confirmed and must be retried later.
+  stopProviderScope: (run: ProviderRunIdentity) => Promise<boolean>;
   wrapForProviderScope: (
     run: ProviderRunIdentity,
     command: ProcessCommand
@@ -109,6 +115,8 @@ export function createProcessScope(
   const stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
   const runStop =
     options.runStop ?? ((unitName) => defaultRunStop(unitName, stopTimeoutMs));
+  const confirmUnitInactive =
+    options.confirmUnitInactive ?? defaultConfirmUnitInactive;
   let cachedAvailable: Promise<boolean> | undefined;
 
   const isAvailable = (): Promise<boolean> => {
@@ -151,15 +159,20 @@ export function createProcessScope(
     },
     stopProviderScope: async (run) => {
       if (!(await isAvailable())) {
-        return;
+        return true;
       }
 
+      const unitName = scopeUnitName(run);
       try {
-        await runStop(scopeUnitName(run));
+        await runStop(unitName);
+        return true;
       } catch {
-        // The scope may already be gone — the common case, where the
-        // wrapped process exited cleanly and left nothing behind. Either
-        // way, there's nothing left to stop.
+        // The stop call failing doesn't say why — the scope may already be
+        // gone (the common case, where the wrapped process exited cleanly),
+        // or the stop itself could have genuinely failed (manager
+        // unreachable, timed out). Ask directly instead of guessing: only a
+        // definitive "not active" confirms there's nothing left to retry.
+        return await confirmUnitInactive(unitName, stopTimeoutMs);
       }
     }
   };
@@ -180,4 +193,34 @@ async function defaultRunStop(
   await execFile("systemctl", ["--user", "stop", unitName], {
     timeout: timeoutMs
   });
+}
+
+// `systemctl --user is-active --quiet <unit>` exits 0 only while the unit is
+// still active, and nonzero for every other case: inactive, failed, or
+// unknown to the manager (empirically verified: a never-existed unit exits 4
+// here vs. 5 from `stop`). That single check is what lets a failed `stop`
+// call be told apart from a stop that genuinely couldn't be confirmed — a
+// timed-out `is-active` (killed by execFile's own timeout) can't answer
+// either way and must not be read as "gone".
+async function defaultConfirmUnitInactive(
+  unitName: string,
+  timeoutMs: number
+): Promise<boolean> {
+  try {
+    await execFile("systemctl", ["--user", "is-active", "--quiet", unitName], {
+      timeout: timeoutMs
+    });
+    return false;
+  } catch (error) {
+    return !isTimeoutError(error);
+  }
+}
+
+function isTimeoutError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "killed" in error &&
+    (error as { killed?: unknown }).killed === true
+  );
 }

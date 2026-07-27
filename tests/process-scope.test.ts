@@ -114,7 +114,7 @@ describe("createProcessScope.wrapForProviderScope", () => {
 });
 
 describe("createProcessScope.stopProviderScope", () => {
-  it("does nothing when systemd-run is unavailable", async () => {
+  it("reports confirmed-clean without calling runStop when systemd-run is unavailable", async () => {
     let calls = 0;
     const scope = createProcessScope({
       isAvailable: () => Promise.resolve(false),
@@ -124,12 +124,13 @@ describe("createProcessScope.stopProviderScope", () => {
       }
     });
 
-    await scope.stopProviderScope(RUN);
+    const confirmed = await scope.stopProviderScope(RUN);
 
     expect(calls).toBe(0);
+    expect(confirmed).toBe(true);
   });
 
-  it("stops the run's scope unit when available", async () => {
+  it("stops the run's scope unit and reports confirmed-clean when available", async () => {
     const stopped: string[] = [];
     const scope = createProcessScope({
       isAvailable: () => Promise.resolve(true),
@@ -139,17 +140,29 @@ describe("createProcessScope.stopProviderScope", () => {
       }
     });
 
-    await scope.stopProviderScope(RUN);
+    const confirmed = await scope.stopProviderScope(RUN);
 
     expect(stopped).toEqual(["symphonika-run-abc123-attempt-1.scope"]);
+    expect(confirmed).toBe(true);
   });
 
-  it("resolves cleanly when the scope is already gone", async () => {
+  it("reports confirmed-clean when the scope is already gone (is-active confirms inactive)", async () => {
     const scope = createProcessScope({
+      confirmUnitInactive: () => Promise.resolve(true),
       isAvailable: () => Promise.resolve(true),
       runStop: () => Promise.reject(new Error("Unit not loaded."))
     });
 
-    await expect(scope.stopProviderScope(RUN)).resolves.toBeUndefined();
+    await expect(scope.stopProviderScope(RUN)).resolves.toBe(true);
+  });
+
+  it("reports unconfirmed when the stop fails and is-active cannot confirm the unit is gone", async () => {
+    const scope = createProcessScope({
+      confirmUnitInactive: () => Promise.resolve(false),
+      isAvailable: () => Promise.resolve(true),
+      runStop: () => Promise.reject(new Error("systemctl stop timed out"))
+    });
+
+    await expect(scope.stopProviderScope(RUN)).resolves.toBe(false);
   });
 });

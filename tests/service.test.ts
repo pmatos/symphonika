@@ -302,6 +302,55 @@ describe("runServiceInstall", () => {
     expect(service).toContain("daemon");
   });
 
+  // Regression: systemd's dash-separated slice naming convention means
+  // symphonika-daemon.slice and symphonika-providers.slice are ALWAYS
+  // children of symphonika.slice (see `man systemd.slice`: "foo-bar.slice is
+  // a slice that is located within foo.slice"), whether or not that parent
+  // unit file exists. An operator upgrading from before this split still has
+  // the old symphonika.slice (MemoryHigh=24G/MemoryMax=32G) on disk, which
+  // nothing here removes -- so both new slices remain constrained by that
+  // stale parent's shared budget, defeating the whole point of the split
+  // (docs/adr/0064) for every upgrading operator, not just fresh installs.
+  it("removes a legacy symphonika.slice left over from before the daemon/provider split", async () => {
+    const home = await makeTempHome();
+    const unitDir = userUnitDir(home);
+    await mkdir(unitDir, { recursive: true });
+    await writeFile(path.join(unitDir, "symphonika.service"), "OLD", "utf8");
+    await writeFile(
+      path.join(unitDir, "symphonika.slice"),
+      "OLD-SHARED-SLICE",
+      "utf8"
+    );
+
+    const report = await runServiceInstall({
+      ...baseOptions,
+      force: true,
+      homeDir: home,
+      runReload: () => Promise.resolve()
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.removedFiles).toEqual([
+      path.join(unitDir, "symphonika.slice")
+    ]);
+    await expect(
+      access(path.join(unitDir, "symphonika.slice"))
+    ).rejects.toThrow();
+  });
+
+  it("reports no removed files on a fresh install with no legacy slice", async () => {
+    const home = await makeTempHome();
+
+    const report = await runServiceInstall({
+      ...baseOptions,
+      homeDir: home,
+      runReload: () => Promise.resolve()
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.removedFiles).toEqual([]);
+  });
+
   it("prints without writing or reloading when print is set", async () => {
     const home = await makeTempHome();
     let reloadCalls = 0;
@@ -402,6 +451,7 @@ describe("CLI service install", () => {
       printed: false,
       reloaded: true,
       reloadError: null,
+      removedFiles: [],
       unitDir: "/home/u/.config/systemd/user",
       ...overrides
     };
@@ -431,6 +481,33 @@ describe("CLI service install", () => {
     expect(output.stdout).toContain("systemctl --user daemon-reload");
     expect(output.stdout).toContain(
       "systemctl --user enable --now symphonika.service"
+    );
+  });
+
+  it("reports a removed legacy slice when the daemon/provider split superseded it", async () => {
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({
+      registerSignalHandlers: false,
+      runServiceInstall: () =>
+        Promise.resolve(
+          successReport({
+            removedFiles: ["/home/u/.config/systemd/user/symphonika.slice"]
+          })
+        )
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync(["node", "symphonika", "service", "install"]);
+
+    expect(output.stdout).toContain(
+      "removed: /home/u/.config/systemd/user/symphonika.slice"
     );
   });
 

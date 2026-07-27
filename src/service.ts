@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +32,7 @@ export type ServiceInstallReport = {
   printed: boolean;
   reloaded: boolean;
   reloadError: string | null;
+  removedFiles: string[];
   unitDir: string;
 };
 
@@ -206,6 +207,7 @@ export async function runServiceInstall(
   ];
 
   const errors: string[] = [];
+  const removedFiles: string[] = [];
   const baseReport = (
     overrides: Partial<ServiceInstallReport> = {}
   ): ServiceInstallReport => ({
@@ -215,6 +217,7 @@ export async function runServiceInstall(
     printed: false,
     reloaded: false,
     reloadError: null,
+    removedFiles,
     unitDir,
     ...overrides
   });
@@ -253,6 +256,21 @@ export async function runServiceInstall(
   await mkdir(unitDir, { recursive: true });
   for (const file of files) {
     await writeFile(file.path, file.content, "utf8");
+  }
+
+  // Superseded by symphonika-daemon.slice / symphonika-providers.slice. Per
+  // `man systemd.slice`, dash-separated slice names encode hierarchy —
+  // "foo-bar.slice is located within foo.slice" — so both new slices are
+  // always children of an (implicit or explicit) symphonika.slice. A
+  // leftover file from before this split would still cap the daemon and
+  // providers jointly under its own MemoryHigh/MemoryMax, defeating the
+  // whole point of the split (docs/adr/0064) for any upgrading operator.
+  // Safe to always remove: a generated unit, fully reproducible by
+  // re-running `service install`, never user data.
+  const legacySlicePath = path.join(unitDir, "symphonika.slice");
+  if (await fileExists(legacySlicePath)) {
+    await unlink(legacySlicePath);
+    removedFiles.push(legacySlicePath);
   }
 
   if (options.reload === false) {

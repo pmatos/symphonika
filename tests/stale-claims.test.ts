@@ -8,22 +8,31 @@ import { describe, expect, it, vi } from "vitest";
 import {
   emptyIssuePollStatus,
   type IssuePollStatus,
-  type IssueSnapshot,
-  type PollingProjectConfig
+  type IssueSnapshot
 } from "../src/issue-polling.js";
+import type { RunControllerProjectConfig } from "../src/lifecycle/run-controller.js";
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
 import { detectStaleClaims } from "../src/lifecycle/stale-claims.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
 
 const logger = pino({ enabled: false });
 
-const project: PollingProjectConfig = {
+const project: RunControllerProjectConfig = {
+  mode: "dispatch",
   agent: { provider: "codex" },
   issue_filters: {
     labels_all: ["agent-ready"],
     labels_none: ["blocked", "needs-human"],
     states: ["open"]
   },
+  workspace: {
+    git: {
+      base_branch: "main",
+      remote: "git@github.com:pmatos/symphonika.git"
+    },
+    root: "./.symphonika/workspaces/symphonika"
+  },
+  workflow: { format: "auto", path: "./WORKFLOW.md" },
   name: "symphonika",
   priority: { default: 99, labels: {} },
   tracker: {
@@ -78,11 +87,11 @@ function pollStatusWithFiltered(issues: IssueSnapshot[]): IssuePollStatus {
 describe("detectStaleClaims", () => {
   it("scopes liveness checks per project when issue numbers collide", async () => {
     await withRunStore(async (store) => {
-      const projectB: PollingProjectConfig = {
+      const projectB: RunControllerProjectConfig = {
         ...project,
         name: "other",
         tracker: {
-          ...project.tracker,
+          ...project.tracker!,
           owner: "other-owner",
           repo: "other-repo"
         }

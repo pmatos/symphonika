@@ -26,14 +26,15 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "git",
           name: "dependency-update",
           prompt: "Update dependencies.",
           provider: "codex",
           schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/dependency-update.md"
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
         }
       ]);
       store.createRoutineFiring({
@@ -94,14 +95,15 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: null,
           schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/daily-report.md"
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
         }
       ]);
 
@@ -142,7 +144,6 @@ describe("RunStore routines", () => {
     const store = openRunStore({ stateRoot });
     try {
       store.syncRoutines(
-        "alpha",
         [
           {
             kind: "report",
@@ -153,7 +154,8 @@ describe("RunStore routines", () => {
               cron: "30 1 * * *",
               tz: "Europe/Lisbon"
             },
-            sourcePath: "/tmp/daily-report.md"
+            sourcePath: "/tmp/daily-report.md",
+            projectName: "alpha"
           }
         ],
         { now: new Date("2026-03-27T02:00:00.000Z") }
@@ -196,7 +198,6 @@ describe("RunStore routines", () => {
     const store = openRunStore({ stateRoot });
     try {
       store.syncRoutines(
-        "alpha",
         [
           {
             allowOverlap: true,
@@ -206,7 +207,8 @@ describe("RunStore routines", () => {
             prompt: "Report.",
             provider: null,
             schedule: { cron: "* * * * *", tz: "Etc/UTC" },
-            sourcePath: "/tmp/minute-report.md"
+            sourcePath: "/tmp/minute-report.md",
+            projectName: "alpha"
           }
         ],
         { now: new Date("2026-05-23T09:59:30.000Z") }
@@ -250,14 +252,15 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: "codex",
           schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/daily-report.md"
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
         }
       ]);
 
@@ -319,14 +322,15 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: null,
           schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/daily-report.md"
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
         },
         {
           kind: "report",
@@ -334,18 +338,20 @@ describe("RunStore routines", () => {
           prompt: "Report.",
           provider: null,
           schedule: { at: "2026-05-23T10:00:00.000Z" },
-          sourcePath: "/tmp/weekly-report.md"
+          sourcePath: "/tmp/weekly-report.md",
+          projectName: "alpha"
         }
       ]);
 
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "weekly-report",
           prompt: "Updated report.",
           provider: null,
           schedule: { at: "2026-05-24T10:00:00.000Z" },
-          sourcePath: "/tmp/weekly-report.md"
+          sourcePath: "/tmp/weekly-report.md",
+          projectName: "alpha"
         }
       ]);
 
@@ -363,7 +369,7 @@ describe("RunStore routines", () => {
         expect.objectContaining({ name: "weekly-report", state: "active" })
       );
 
-      store.syncRoutines("alpha", []);
+      store.syncRoutines([], { projects: ["alpha"] });
 
       expect(
         store.listRoutines({ project: "alpha" }).map((routine) => routine.name)
@@ -384,7 +390,7 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
@@ -392,7 +398,8 @@ describe("RunStore routines", () => {
           provider: null,
           schedule: { at: "2026-05-22T10:00:00.000Z" },
           sourcePath: "/tmp/daily-report.md",
-          disabled: true
+          disabled: true,
+          projectName: "alpha"
         }
       ]);
 
@@ -409,19 +416,20 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: null,
           schedule: { cron: "30 1 * * *", tz: "Etc/UTC" },
-          sourcePath: "/tmp/daily-report.md"
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
         }
       ]);
       expect(store.listRoutines()[0]).toMatchObject({ state: "active" });
 
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
@@ -429,7 +437,8 @@ describe("RunStore routines", () => {
           provider: null,
           schedule: { cron: "0 2 * * *", tz: "Etc/UTC" },
           sourcePath: "/tmp/daily-report.md",
-          disabled: true
+          disabled: true,
+          projectName: "alpha"
         }
       ]);
 
@@ -455,7 +464,7 @@ describe("RunStore routines", () => {
         sourcePath: "/tmp/daily-report.md",
         disabled: true
       };
-      store.syncRoutines("alpha", [routine], {
+      store.syncRoutines([{ ...routine, projectName: "alpha" }], {
         now: new Date("2026-03-27T02:00:00.000Z")
       });
       expect(store.listRoutines({ includeInactive: true })[0]).toMatchObject({
@@ -463,9 +472,12 @@ describe("RunStore routines", () => {
         disabledReason: "operator"
       });
 
-      store.syncRoutines("alpha", [{ ...routine, disabled: false }], {
-        now: new Date("2026-03-29T02:00:00.000Z")
-      });
+      store.syncRoutines(
+        [{ ...routine, disabled: false, projectName: "alpha" }],
+        {
+          now: new Date("2026-03-29T02:00:00.000Z")
+        }
+      );
 
       expect(store.listRoutines()[0]).toMatchObject({
         state: "active",
@@ -490,7 +502,7 @@ describe("RunStore routines", () => {
         sourcePath: "/tmp/one-shot-report.md",
         disabled: true
       };
-      store.syncRoutines("alpha", [routine], {
+      store.syncRoutines([{ ...routine, projectName: "alpha" }], {
         now: new Date("2026-05-20T00:00:00.000Z")
       });
       expect(store.listRoutines({ includeInactive: true })[0]).toMatchObject({
@@ -498,9 +510,12 @@ describe("RunStore routines", () => {
         disabledReason: "operator"
       });
 
-      store.syncRoutines("alpha", [{ ...routine, disabled: false }], {
-        now: new Date("2026-05-23T00:00:00.000Z")
-      });
+      store.syncRoutines(
+        [{ ...routine, disabled: false, projectName: "alpha" }],
+        {
+          now: new Date("2026-05-23T00:00:00.000Z")
+        }
+      );
 
       expect(store.listRoutines()[0]).toMatchObject({
         state: "expired",
@@ -523,7 +538,7 @@ describe("RunStore routines", () => {
         schedule: { at: "2026-05-22T10:00:00.000Z" },
         sourcePath: "/tmp/one-shot-report.md"
       };
-      store.syncRoutines("alpha", [routine], {
+      store.syncRoutines([{ ...routine, projectName: "alpha" }], {
         now: new Date("2026-05-20T00:00:00.000Z")
       });
 
@@ -538,7 +553,7 @@ describe("RunStore routines", () => {
       // Project is re-enabled after the one-shot's `at` has elapsed; it
       // never fired while inactive. syncRoutines runs again on the next
       // reload with the same declaration.
-      store.syncRoutines("alpha", [routine], {
+      store.syncRoutines([{ ...routine, projectName: "alpha" }], {
         now: new Date("2026-05-23T00:00:00.000Z")
       });
 
@@ -555,19 +570,20 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: null,
           schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/daily-report.md"
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
         }
       ]);
 
-      store.syncRoutines("alpha", [], {
-        protectedNames: ["daily-report"]
+      store.syncRoutines([], {
+        protectedNamesByProject: { alpha: ["daily-report"] }
       });
 
       expect(store.listRoutines()[0]).toMatchObject({
@@ -583,7 +599,7 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
@@ -591,7 +607,8 @@ describe("RunStore routines", () => {
           provider: null,
           schedule: { at: "2026-05-22T10:00:00.000Z" },
           sourcePath: "/tmp/daily-report.md",
-          disabled: true
+          disabled: true,
+          projectName: "alpha"
         },
         {
           kind: "report",
@@ -599,7 +616,8 @@ describe("RunStore routines", () => {
           prompt: "Report.",
           provider: null,
           schedule: { at: "2026-05-23T10:00:00.000Z" },
-          sourcePath: "/tmp/weekly-report.md"
+          sourcePath: "/tmp/weekly-report.md",
+          projectName: "alpha"
         }
       ]);
       expect(store.listRoutines()).toContainEqual(
@@ -612,14 +630,15 @@ describe("RunStore routines", () => {
 
       // daily-report's path is now removed from symphonika.yml entirely,
       // while weekly-report stays declared.
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "weekly-report",
           prompt: "Report.",
           provider: null,
           schedule: { at: "2026-05-23T10:00:00.000Z" },
-          sourcePath: "/tmp/weekly-report.md"
+          sourcePath: "/tmp/weekly-report.md",
+          projectName: "alpha"
         }
       ]);
 
@@ -639,14 +658,15 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: "codex",
           schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/daily-report.md"
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
         }
       ]);
       store.createRoutineFiring({
@@ -676,7 +696,7 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
@@ -684,7 +704,8 @@ describe("RunStore routines", () => {
           provider: null,
           schedule: { at: "2026-05-22T10:00:00.000Z" },
           sourcePath: "/tmp/daily-report.md",
-          disabled: true
+          disabled: true,
+          projectName: "alpha"
         }
       ]);
       expect(store.listRoutines()).toContainEqual(
@@ -708,7 +729,7 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
@@ -716,7 +737,8 @@ describe("RunStore routines", () => {
           provider: null,
           schedule: { at: "2026-05-22T10:00:00.000Z" },
           sourcePath: "/tmp/daily-report.md",
-          disabled: true
+          disabled: true,
+          projectName: "alpha"
         }
       ]);
       expect(store.listRoutines()).toContainEqual(
@@ -740,14 +762,15 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: "codex",
           schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/daily-report.md"
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
         }
       ]);
       store.createRoutineFiring({
@@ -800,14 +823,15 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: "codex",
           schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/daily-report.md"
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
         }
       ]);
 
@@ -856,7 +880,7 @@ describe("RunStore routines", () => {
         schedule: { cron: "30 1 * * *", tz: "Europe/Lisbon" },
         sourcePath: "/tmp/daily-report.md"
       };
-      store.syncRoutines("alpha", [routine], {
+      store.syncRoutines([{ ...routine, projectName: "alpha" }], {
         now: new Date("2026-03-27T02:00:00.000Z")
       });
 
@@ -907,14 +931,14 @@ describe("RunStore routines", () => {
         schedule: { cron: "30 1 * * *", tz: "Europe/Lisbon" },
         sourcePath: "/tmp/daily-report.md"
       };
-      store.syncRoutines("alpha", [routine], {
+      store.syncRoutines([{ ...routine, projectName: "alpha" }], {
         now: new Date("2026-03-27T02:00:00.000Z")
       });
       expect(store.listRoutines()[0]?.nextFireAt).toBe(
         "2026-03-28T01:30:00.000Z"
       );
 
-      store.syncRoutines("alpha", [routine], {
+      store.syncRoutines([{ ...routine, projectName: "alpha" }], {
         now: new Date("2026-03-29T02:00:00.000Z"),
         recomputeRecurring: true
       });
@@ -931,14 +955,15 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: "codex",
           schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/daily-report.md"
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
         }
       ]);
 
@@ -968,7 +993,6 @@ describe("RunStore routines", () => {
     const store = openRunStore({ stateRoot });
     try {
       store.syncRoutines(
-        "alpha",
         [
           {
             kind: "report",
@@ -976,7 +1000,8 @@ describe("RunStore routines", () => {
             prompt: "Report.",
             provider: "codex",
             schedule: { cron: "30 1 * * *", tz: "Europe/Lisbon" },
-            sourcePath: "/tmp/daily-report.md"
+            sourcePath: "/tmp/daily-report.md",
+            projectName: "alpha"
           }
         ],
         { now: new Date("2026-03-27T02:00:00.000Z") }
@@ -1033,14 +1058,15 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: "codex",
           schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/daily-report.md"
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
         }
       ]);
       store.createRoutineFiring({
@@ -1065,14 +1091,15 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: "codex",
           schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/daily-report.md"
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
         }
       ]);
       store.createRoutineFiring({
@@ -1101,14 +1128,15 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: "codex",
           schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/daily-report.md"
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
         }
       ]);
       store.createRoutineFiring({
@@ -1134,14 +1162,15 @@ describe("RunStore routines", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "daily-report",
           prompt: "Report.",
           provider: "codex",
           schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/daily-report.md"
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
         }
       ]);
       store.createRoutineFiring({
@@ -1187,14 +1216,15 @@ describe("RunStore routines", () => {
 
       // A subsequent stub call for an already-active routine of the same
       // name must never clobber real, valid configuration.
-      store.syncRoutines("alpha", [
+      store.syncRoutines([
         {
           kind: "report",
           name: "broken-routine",
           prompt: "Now valid.",
           provider: null,
           schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/broken-routine.md"
+          sourcePath: "/tmp/broken-routine.md",
+          projectName: "alpha"
         }
       ]);
       store.upsertInvalidRoutineStub({

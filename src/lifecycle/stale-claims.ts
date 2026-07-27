@@ -3,12 +3,13 @@ import type { Logger } from "pino";
 import {
   tryAddLabelsToIssue,
   type GitHubIssuesApi,
-  type IssuePollStatus,
-  type PollingProjectConfig
+  type IssuePollStatus
 } from "../issue-polling.js";
 import type { RunStore } from "../run-store.js";
 
 import type { ActiveRunRegistry } from "./active-runs.js";
+import type { RunControllerProjectConfig } from "./run-controller.js";
+import { isDispatchProject } from "./run-controller.js";
 import { resolveToken } from "./token.js";
 
 export type DetectStaleClaimsInput = {
@@ -17,7 +18,7 @@ export type DetectStaleClaimsInput = {
   githubIssuesApi: GitHubIssuesApi;
   logger: Logger;
   pollStatus: IssuePollStatus;
-  projects: Map<string, PollingProjectConfig>;
+  projects: Map<string, RunControllerProjectConfig>;
   runStore: RunStore;
 };
 
@@ -37,7 +38,7 @@ export async function detectStaleClaims(
 
   for (const filtered of input.pollStatus.filteredIssues) {
     const project = input.projects.get(filtered.project);
-    if (project === undefined) {
+    if (project === undefined || !isDispatchProject(project)) {
       continue;
     }
     const issue = filtered.issue;

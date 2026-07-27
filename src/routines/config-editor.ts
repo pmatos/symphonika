@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { isMap, isScalar, isSeq, parseDocument } from "yaml";
+import { isMap, isSeq, parseDocument, type YAMLMap } from "yaml";
 
 import { loadRoutineDeclaration } from "./declaration-loader.js";
 
@@ -15,6 +15,10 @@ export type AddRoutineConfigResult = {
   routineName: string;
 };
 
+// Writes service-level routine declarations into the top-level `routines:`
+// block of `symphonika.yml`. Each entry is `{ project: <name>, path: <file> }`.
+// The per-project `routines:` key was removed (ADR 0063); routine names are
+// globally unique across the block.
 export class RoutineConfigEditor {
   constructor(private readonly configPath: string) {}
 
@@ -22,9 +26,8 @@ export class RoutineConfigEditor {
     input: AddRoutineConfigInput
   ): Promise<AddRoutineConfigResult> {
     const configDir = path.dirname(this.configPath);
-    const declaration = await loadRoutineDeclaration(
-      path.resolve(configDir, input.routinePath)
-    );
+    const requestedPath = path.resolve(configDir, input.routinePath);
+    const declaration = await loadRoutineDeclaration(requestedPath);
     if (declaration.routine === null) {
       throw new Error(declaration.errors.join("; "));
     }
@@ -40,51 +43,75 @@ export class RoutineConfigEditor {
       throw new Error("service config must be a mapping");
     }
 
+    // Verify the target project exists.
     const projects = document.contents.get("projects", true);
     if (!isSeq(projects)) {
       throw new Error("service config projects must be a sequence");
     }
-    const project = projects.items.find(
+    const projectExists = projects.items.some(
       (candidate) =>
         isMap(candidate) && candidate.get("name") === input.projectName
     );
-    if (!isMap(project)) {
+    if (!projectExists) {
       throw new Error(
         `project "${input.projectName}" not found in service config`
       );
     }
 
-    const routines = project.get("routines", true);
+    const routines = document.contents.get("routines", true);
     if (routines === undefined) {
-      project.set("routines", [input.routinePath]);
-    } else if (!isSeq(routines)) {
-      throw new Error(
-        `project "${input.projectName}" routines must be a sequence`
+      (document.contents as YAMLMap).set(
+        "routines",
+        document.createNode([
+          { path: input.routinePath, project: input.projectName }
+        ])
       );
+    } else if (!isSeq(routines)) {
+      throw new Error("service config routines must be a sequence");
     } else {
-      const requestedPath = path.resolve(configDir, input.routinePath);
       for (const item of routines.items) {
-        if (!isScalar(item) || typeof item.value !== "string") {
-          throw new Error(
-            `project "${input.projectName}" routines entries must be paths`
-          );
+        if (!isMap(item)) {
+          throw new Error("service config routines entries must be mappings");
         }
-        const existingPath = path.resolve(configDir, item.value);
+        const existingPath = path.resolve(configDir, readEntryPath(item));
+        const existingProject = readEntryProject(item);
         if (existingPath === requestedPath) {
-          return { changed: false, routineName: declaration.routine.name };
+          if (existingProject === input.projectName) {
+            return { changed: false, routineName: declaration.routine.name };
+          }
+          // Same file targeted at a different project — refuse rather than
+          // silently leave the wrong target. The operator must edit the block.
+          throw new Error(
+            `routine at ${input.routinePath} is already targeted at project "${existingProject}" in the top-level routines block; remove that entry before targeting "${input.projectName}"`
+          );
         }
         const existing = await loadRoutineDeclaration(existingPath);
         const existingName = existing.routine?.name ?? existing.partialName;
         if (existingName === declaration.routine.name) {
           throw new Error(
-            `routine name "${declaration.routine.name}" already exists in project "${input.projectName}" at ${item.value}`
+            `routine name "${declaration.routine.name}" already exists in the top-level routines block at ${readEntryPath(item)}`
           );
         }
       }
-      routines.add(input.routinePath);
+      routines.add(
+        document.createNode({
+          path: input.routinePath,
+          project: input.projectName
+        })
+      );
     }
     await writeFile(this.configPath, String(document), "utf8");
 
     return { changed: true, routineName: declaration.routine.name };
   }
+}
+
+function readEntryPath(item: YAMLMap): string {
+  const value = item.get("path");
+  return typeof value === "string" ? value : "";
+}
+
+function readEntryProject(item: YAMLMap): string {
+  const value = item.get("project");
+  return typeof value === "string" ? value : "";
 }

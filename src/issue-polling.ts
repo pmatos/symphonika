@@ -170,6 +170,17 @@ export type PollingServiceConfig = {
 
 const providerNameSchema = z.enum(["codex", "claude"]);
 
+// Routine Hosts (ADR 0062) are never polled for issues; check `mode` before
+// this raw entry reaches pollingProjectSchema, which is dispatch-only.
+function isRoutineHostProject(rawProject: unknown): boolean {
+  return (
+    rawProject !== null &&
+    typeof rawProject === "object" &&
+    "mode" in rawProject &&
+    rawProject.mode === "routine_host"
+  );
+}
+
 const pollingProjectSchema = z
   .object({
     name: z.string().trim().min(1),
@@ -834,6 +845,14 @@ async function readPollingConfig(
 
   const projects: PollingProjectConfig[] = [];
   parsed.data.projects.forEach((rawProject, index) => {
+    // Routine Hosts are never polled for issues (ADR 0062) and lack the
+    // dispatch-only fields pollingProjectSchema requires — skip them here
+    // rather than surfacing a spurious "tracker required" error, mirroring
+    // reload.ts's own exclusion of hosts from `snapshot.polling.projects`.
+    if (isRoutineHostProject(rawProject)) {
+      return;
+    }
+
     const parsedProject = pollingProjectSchema.safeParse(rawProject);
     if (parsedProject.success) {
       projects.push(parsedProject.data);

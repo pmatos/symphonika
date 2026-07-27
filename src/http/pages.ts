@@ -722,8 +722,19 @@ function renderProjectsCard(
           project.missingOperationalLabels.length === 0
             ? "&mdash;"
             : escapeHtml(project.missingOperationalLabels.join(", "));
-        const valid = project.validForDispatch ? "valid" : "invalid";
-        return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(valid)}</td><td><code>${escapeHtml(project.workflowPath)}</code></td><td class="c-detail">${missingEligibility}</td><td class="c-detail">${missingOperational}</td></tr>`;
+        const valid =
+          project.mode === "routine_host"
+            ? project.validForHosting
+              ? "valid"
+              : "invalid"
+            : project.validForDispatch
+              ? "valid"
+              : "invalid";
+        const workflowCell =
+          project.workflowPath === undefined
+            ? "&mdash;"
+            : `<code>${escapeHtml(project.workflowPath)}</code>`;
+        return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(valid)}</td><td>${workflowCell}</td><td class="c-detail">${missingEligibility}</td><td class="c-detail">${missingOperational}</td></tr>`;
       })
       .join("");
     return tableSection(

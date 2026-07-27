@@ -7,8 +7,8 @@ import { z } from "zod";
 
 import type { WorkflowFormat } from "./config-schemas.js";
 import {
-  projectWorkspaceSchema,
   pathStringSchema,
+  projectWorkspaceSchema,
   workflowReferenceSchema
 } from "./config-schemas.js";
 import type {
@@ -32,7 +32,7 @@ import {
   validateExpandedWorkflowReferences
 } from "./workflow.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
-import type { RoutineDeclaration } from "./routines/types.js";
+import type { TargetedRoutineDeclaration } from "./routines/types.js";
 
 export type RuntimeConfigSnapshot = {
   configPath: string;
@@ -131,50 +131,125 @@ const projectWatchdogConfigSchema = z
   })
   .strict();
 
+const trackerSchema = z
+  .object({
+    kind: z.literal("github"),
+    owner: z.string().trim().min(1),
+    repo: z.string().trim().min(1),
+    token: z.string().trim().min(1)
+  })
+  .passthrough();
+
+const issueFiltersSchema = z
+  .object({
+    states: z.array(z.literal("open")).min(1),
+    labels_all: z.array(z.string().trim().min(1)),
+    labels_none: z.array(z.string().trim().min(1))
+  })
+  .passthrough();
+
+const prioritySchema = z
+  .object({
+    labels: z.record(z.string(), z.number().int().nonnegative()),
+    default: z.number().int().nonnegative()
+  })
+  .passthrough();
+
+const agentSchema = z
+  .object({
+    provider: providerNameSchema
+  })
+  .passthrough();
+
+// A Dispatch Project: polled for issues, requires tracker + filters + priority.
+// `mode` defaults to "dispatch" when omitted, so existing configs are unchanged.
+// This is the shape `PollingProjectConfig` (issue-polling.ts) infers; Routine
+// Hosts never enter `polling.projects`. See ADR 0062.
 const pollingProjectSchema = z
   .object({
     name: z.string().trim().min(1),
+    mode: z.literal("dispatch").default("dispatch"),
     disabled: z.boolean().optional(),
     weight: z.number().int().positive().optional(),
     // Per-project concurrency cap. Omitted defaults to 1 at consume-time.
     // Zero / negative values are rejected. See ADR 0053.
     max_in_flight: z.number().int().positive().optional(),
-    tracker: z
-      .object({
-        kind: z.literal("github"),
-        owner: z.string().trim().min(1),
-        repo: z.string().trim().min(1),
-        token: z.string().trim().min(1)
-      })
-      .passthrough(),
-    issue_filters: z
-      .object({
-        states: z.array(z.literal("open")).min(1),
-        labels_all: z.array(z.string().trim().min(1)),
-        labels_none: z.array(z.string().trim().min(1))
-      })
-      .passthrough(),
-    priority: z
-      .object({
-        labels: z.record(z.string(), z.number().int().nonnegative()),
-        default: z.number().int().nonnegative()
-      })
-      .passthrough(),
-    agent: z
-      .object({
-        provider: providerNameSchema
-      })
-      .passthrough()
+    tracker: trackerSchema,
+    issue_filters: issueFiltersSchema,
+    priority: prioritySchema,
+    agent: agentSchema
   })
-  .passthrough();
+  .passthrough()
+  .superRefine(rejectPerProjectRoutines);
 
-const runtimeProjectDetailSchema = z
+// A Routine Host has no use for dispatch-only fields — ADR 0062 says they are
+// "unused and rejected", so a stale or copy-pasted dispatch block must be a
+// declaration-time error rather than silently ignored.
+const DISPATCH_ONLY_KEYS = ["issue_filters", "priority", "workflow"] as const;
+
+function rejectDispatchOnlyKeysOnRoutineHost(
+  rawProject: unknown,
+  ctx: z.RefinementCtx
+): void {
+  if (rawProject === null || typeof rawProject !== "object") {
+    return;
+  }
+  for (const key of DISPATCH_ONLY_KEYS) {
+    if (key in rawProject) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `\`${key}\` is a dispatch-only field and is unused and rejected on a Routine Host (mode: routine_host); see ADR 0062`,
+        path: [key]
+      });
+    }
+  }
+}
+
+// A Routine Host: never polled for issues, exists only to host Routine Firings.
+// Requires name + workspace + agent + mode. `tracker` is optional here; the
+// unconditional "kind: git requires tracker" rule is enforced after routine
+// declarations load (see loadRuntimeConfigSnapshot). See ADR 0062.
+const routineHostProjectSchema = z
   .object({
     name: z.string().trim().min(1),
-    routines: z.array(pathStringSchema).optional(),
+    mode: z.literal("routine_host"),
+    disabled: z.boolean().optional(),
+    max_in_flight: z.number().int().positive().optional(),
+    tracker: trackerSchema.optional(),
+    workspace: projectWorkspaceSchema,
+    agent: agentSchema
+  })
+  .passthrough()
+  .superRefine(rejectPerProjectRoutines)
+  .superRefine(rejectDispatchOnlyKeysOnRoutineHost);
+
+// Runtime detail that varies by mode. Dispatch Projects need workspace +
+// workflow; Routine Hosts need workspace only (no workflow, no per-project
+// routines — routines are service-level now; see ADR 0063).
+const runtimeDispatchDetailSchema = z
+  .object({
+    name: z.string().trim().min(1),
     watchdog: projectWatchdogConfigSchema.optional(),
     workspace: projectWorkspaceSchema,
     workflow: workflowReferenceSchema
+  })
+  .passthrough();
+
+const runtimeRoutineHostDetailSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    watchdog: projectWatchdogConfigSchema.optional(),
+    workspace: projectWorkspaceSchema
+  })
+  .passthrough();
+
+// A service-level routine entry: targets one declared Project by name and
+// points at a routine declaration file. Single target only; fan-out is #295.
+// See ADR 0063.
+const serviceRoutineSchema = z
+  .object({
+    project: z.string().trim().min(1),
+    path: pathStringSchema
   })
   .passthrough();
 
@@ -200,6 +275,9 @@ const serviceConfigSchema = z
         claude: providerCommandSchema
       })
       .passthrough(),
+    // Service-level routine declarations targeting declared Projects. See
+    // ADR 0063. Optional; omitted means no routines.
+    routines: z.array(serviceRoutineSchema).optional(),
     projects: z.array(z.unknown()).min(1)
   })
   .passthrough();
@@ -334,93 +412,56 @@ async function loadRuntimeConfigSnapshot(input: {
   const dispatchProjects: RuntimeProjectConfig[] = [];
   const invalidRoutines: RuntimeConfigSnapshot["invalidRoutines"] = [];
 
+  // First pass: validate each Project against its mode-specific schema and
+  // build the runtime map. Dispatch Projects enter both `pollingProjects`
+  // (so issue polling reads them) and `dispatchProjects` (the runtime map the
+  // routine dispatcher and issue dispatch share). Routine Hosts enter only
+  // `dispatchProjects` — they are never polled. See ADR 0062.
   for (const [index, rawProject] of parsed.data.projects.entries()) {
-    const pollingProject = pollingProjectSchema.safeParse(rawProject);
-    if (!pollingProject.success) {
-      errors.push(
-        ...pollingProject.error.issues.map((issue) =>
-          formatZodIssueWithPrefix(issue, ["projects", String(index)])
-        )
-      );
-      continue;
-    }
-    pollingProjects.push(pollingProject.data);
-
-    // SPEC 5.1: an invalid Project watchdog override — a non-positive-integer
-    // grace_minutes or an unknown key — rejects the entire candidate snapshot
-    // for all Projects, even on first load (where there is no last-known-good,
-    // so nothing goes live). This is stricter than the other detail fields
-    // below (workspace, workflow, ...), whose first-load failure only drops the
-    // offending Project from dispatch while valid siblings keep polling.
-    const rawWatchdog = (rawProject as { watchdog?: unknown }).watchdog;
-    if (rawWatchdog !== undefined) {
-      const watchdogOverride =
-        projectWatchdogConfigSchema.safeParse(rawWatchdog);
-      if (!watchdogOverride.success) {
-        errors.push(
-          ...watchdogOverride.error.issues.map((issue) =>
-            formatZodIssueWithPrefix(issue, [
-              "projects",
-              String(index),
-              "watchdog"
-            ])
-          )
-        );
-        return lastKnownGoodOrNothing(input.previous, errors);
-      }
-    }
-
-    const detail = runtimeProjectDetailSchema.safeParse(rawProject);
-    if (!detail.success) {
-      errors.push(
-        ...detail.error.issues.map((issue) =>
-          formatZodIssueWithPrefix(issue, ["projects", String(index)])
-        )
-      );
-      if (input.previous !== undefined) {
+    if (projectModeOf(rawProject) === "routine_host") {
+      if (
+        loadRoutineHostProject({
+          dispatchProjects,
+          errors,
+          index,
+          ...(input.previous === undefined ? {} : { previous: input.previous }),
+          rawProject
+        }) === "fatal"
+      ) {
         return lastKnownGoodOrNothing(input.previous, errors);
       }
       continue;
     }
-
-    if (pollingProject.data.disabled === true) {
-      // Disabling a Project halts new dispatch but does not cancel an active
-      // run, and the Project stays in the runtime map. Carry forward the last
-      // loaded WorkflowSnapshot when one exists so the Watchdog keeps this
-      // Project's evidence.ignore policy for its still-running rows; otherwise
-      // build-output churn would masquerade as progress and keep a wedged run
-      // alive (ADR 0054).
-      const previousWorkflow = input.previous?.projects.find(
-        (project) => project.name === pollingProject.data.name
-      )?.workflow;
-      dispatchProjects.push({
-        ...pollingProject.data,
-        routines: [],
-        ...(detail.data.watchdog === undefined
-          ? {}
-          : {
-              watchdog: {
-                graceMinutes: detail.data.watchdog.grace_minutes
-              }
-            }),
-        workflow:
-          previousWorkflow !== undefined &&
-          "expandedWorkflow" in previousWorkflow
-            ? previousWorkflow
-            : detail.data.workflow,
-        workspace: detail.data.workspace
-      });
-      continue;
+    if (
+      (await loadDispatchProject({
+        configDir: input.configDir,
+        dispatchProjects,
+        errors,
+        index,
+        pollingProjects,
+        ...(input.previous === undefined ? {} : { previous: input.previous }),
+        rawProject
+      })) === "fatal"
+    ) {
+      return lastKnownGoodOrNothing(input.previous, errors);
     }
+  }
 
+  // Second pass: load service-level routine declarations and attach each to
+  // its declared target Project in the runtime map. Enforces the
+  // "kind: git on a Routine Host with no tracker is a declaration-time error"
+  // rule after declarations load, when the routine's kind is known. See
+  // ADR 0062 / 0063.
+  const serviceRoutines = parsed.data.routines ?? [];
+  if (serviceRoutines.length > 0) {
     const previousRoutines =
-      input.previous?.projects.find(
-        (project) => project.name === pollingProject.data.name
-      )?.routines ?? [];
+      input.previous?.projects.flatMap((project) => project.routines ?? []) ??
+      [];
     const routineResult = await readRoutineDeclarations(
-      (detail.data.routines ?? []).map((routinePath) =>
-        path.resolve(input.configDir, routinePath)
-      ),
+      serviceRoutines.map((entry) => ({
+        projectName: entry.project,
+        sourcePath: path.resolve(input.configDir, entry.path)
+      })),
       previousRoutines,
       errors
     );
@@ -428,38 +469,102 @@ async function loadRuntimeConfigSnapshot(input: {
       invalidRoutines.push({
         ...(invalid.name === undefined ? {} : { name: invalid.name }),
         path: invalid.path,
-        projectName: pollingProject.data.name
+        projectName: invalid.projectName
       });
     }
-
-    const workflow = await readWorkflowSnapshot(
-      path.resolve(input.configDir, detail.data.workflow.path),
-      detail.data.workflow.format,
-      errors
-    );
-    if (workflow === undefined) {
-      return lastKnownGoodOrNothing(input.previous, errors);
+    // Group valid routines by target project, enforcing the
+    // kind:git-requires-tracker rule per host (a rejected routine is dropped,
+    // never attached). Invalid names are attached independently below so a
+    // target with ALL-invalid routines still gets invalidRoutineNames —
+    // otherwise syncRoutines would treat them as removed, not state=invalid.
+    const routinesByProject = new Map<string, TargetedRoutineDeclaration[]>();
+    for (const routine of routineResult.routines) {
+      const list = routinesByProject.get(routine.projectName);
+      if (list === undefined) {
+        routinesByProject.set(routine.projectName, [routine]);
+      } else {
+        list.push(routine);
+      }
     }
-    const invalidRoutineNames = routineResult.invalidNew
-      .map((invalid) => invalid.name)
-      .filter((name): name is string => name !== undefined);
-    dispatchProjects.push({
-      ...pollingProject.data,
-      ...(invalidRoutineNames.length === 0 ? {} : { invalidRoutineNames }),
-      routines: routineResult.routines,
-      ...(detail.data.watchdog === undefined
-        ? {}
-        : {
-            watchdog: {
-              graceMinutes: detail.data.watchdog.grace_minutes
-            }
-          }),
-      workflow,
-      workspace: detail.data.workspace
-    });
+    const invalidNamesByProject = new Map<string, string[]>();
+    for (const invalid of routineResult.invalidNew) {
+      if (invalid.name === undefined) {
+        continue;
+      }
+      const list = invalidNamesByProject.get(invalid.projectName);
+      if (list === undefined) {
+        invalidNamesByProject.set(invalid.projectName, [invalid.name]);
+      } else {
+        list.push(invalid.name);
+      }
+    }
+    // Every target project with valid OR invalid routines gets visited, so a
+    // project whose routines are all invalid still receives its
+    // invalidRoutineNames (and an empty routines list).
+    const targetedProjectNames = new Set<string>([
+      ...routinesByProject.keys(),
+      ...invalidNamesByProject.keys()
+    ]);
+    // `.find()` below resolves a duplicated Project name to its first
+    // match, but `projectsByName()` (what the dispatcher and daemon
+    // actually consume) keeps the last Project declared with that name —
+    // so routines attached to the shadowed duplicate would silently never
+    // run. Reject the target instead of guessing which duplicate should
+    // host it.
+    const projectNameCounts = new Map<string, number>();
+    for (const project of dispatchProjects) {
+      projectNameCounts.set(
+        project.name,
+        (projectNameCounts.get(project.name) ?? 0) + 1
+      );
+    }
+    for (const projectName of targetedProjectNames) {
+      const routines = routinesByProject.get(projectName) ?? [];
+      if ((projectNameCounts.get(projectName) ?? 0) > 1) {
+        for (const routine of routines) {
+          errors.push(
+            `routines entry targets project "${projectName}" (routine "${routine.name}" at ${routine.sourcePath}), but "${projectName}" is declared more than once; routine targets require a unique project name`
+          );
+        }
+        continue;
+      }
+      const project = dispatchProjects.find((p) => p.name === projectName);
+      if (project === undefined) {
+        for (const routine of routines) {
+          errors.push(
+            `routines entry targets project "${projectName}" (routine "${routine.name}" at ${routine.sourcePath}), but no project with that name is declared`
+          );
+        }
+        continue;
+      }
+      // A kind: git routine on a tracker-less Routine Host is a declaration-
+      // time error (ADR 0062). Push the error AND drop the offending routine
+      // so it is never attached — a rejected routine must not fire. Report
+      // routines are unaffected (they need no PR discovery).
+      const needsTracker =
+        project.mode === "routine_host" && project.tracker === undefined;
+      const attached: TargetedRoutineDeclaration[] = [];
+      for (const routine of routines) {
+        if (needsTracker && routine.kind === "git") {
+          errors.push(
+            `routine "${routine.name}" (kind: git) targets routine host "${projectName}" which declares no tracker; a kind: git routine requires a tracker for PR discovery`
+          );
+          continue;
+        }
+        attached.push(routine);
+      }
+      project.routines = attached;
+      const invalidNames = invalidNamesByProject.get(projectName) ?? [];
+      if (invalidNames.length > 0) {
+        project.invalidRoutineNames = invalidNames;
+      }
+    }
   }
 
-  if (pollingProjects.length === 0 && input.previous !== undefined) {
+  // Fall back to the last-known-good only when the reload produced NO
+  // runtime projects at all — a genuinely empty/broken config. A host-only
+  // config (zero polling projects by design) must still go live. See ADR 0062.
+  if (dispatchProjects.length === 0 && input.previous !== undefined) {
     return lastKnownGoodOrNothing(input.previous, errors);
   }
 
@@ -494,6 +599,254 @@ async function loadRuntimeConfigSnapshot(input: {
     },
     usingLastKnownGood: false
   };
+}
+
+// Outcome of validating one Project: `"ok"` means the project was loaded (or
+// dropped on first-load detail/workflow failure, leaving siblings polling);
+// `"fatal"` means a whole-snapshot last-known-good revert is required, matching
+// the pre-mode-split semantics (watchdog-override failure always; detail or
+// workflow failure only when a prior snapshot exists). See SPEC §5.1.
+type ProjectLoadOutcome = "ok" | "fatal";
+
+// Reads a raw Project entry's `mode` without an unchecked cast. Omitted mode
+// defaults to "dispatch" (ADR 0062); an explicit non-string or unknown value
+// falls through to the dispatch branch, which will then fail its
+// `z.literal("dispatch")` discriminator and report a precise error.
+function projectModeOf(rawProject: unknown): "dispatch" | "routine_host" {
+  if (
+    rawProject !== null &&
+    typeof rawProject === "object" &&
+    "mode" in rawProject &&
+    rawProject.mode === "routine_host"
+  ) {
+    return "routine_host";
+  }
+  return "dispatch";
+}
+
+// Reads an optional `watchdog` override from a raw Project entry without an
+// unchecked cast. Returns `undefined` when absent.
+function optionalWatchdogOf(rawProject: unknown): unknown {
+  if (
+    rawProject !== null &&
+    typeof rawProject === "object" &&
+    "watchdog" in rawProject
+  ) {
+    return rawProject.watchdog;
+  }
+  return undefined;
+}
+
+// Explicitly reject the removed per-project `routines:` key. The project
+// schemas use `.passthrough()`, so without this a legacy `routines:` list
+// would validate silently and then be ignored — its routines would stop
+// firing with no error. Force a migration error pointing at the top-level
+// block. See ADR 0063.
+function rejectPerProjectRoutines(
+  rawProject: unknown,
+  ctx: z.RefinementCtx
+): void {
+  if (
+    rawProject !== null &&
+    typeof rawProject === "object" &&
+    "routines" in rawProject
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "per-project `routines:` was removed; move routine entries to the top-level `routines:` block with a `project:` target (see ADR 0063)",
+      path: ["routines"]
+    });
+  }
+}
+
+// Validates and loads a Dispatch Project: tracker + issue_filters + priority +
+// workflow are all required. Enters both `pollingProjects` and the runtime map.
+// Returns `"fatal"` when the failure semantics require a whole-snapshot revert.
+async function loadDispatchProject(input: {
+  configDir: string;
+  dispatchProjects: RuntimeProjectConfig[];
+  errors: string[];
+  index: number;
+  pollingProjects: PollingProjectConfig[];
+  previous?: RuntimeConfigSnapshot;
+  rawProject: unknown;
+}): Promise<ProjectLoadOutcome> {
+  const pollingProject = pollingProjectSchema.safeParse(input.rawProject);
+  if (!pollingProject.success) {
+    input.errors.push(
+      ...pollingProject.error.issues.map((issue) =>
+        formatZodIssueWithPrefix(issue, ["projects", String(input.index)])
+      )
+    );
+    return "ok";
+  }
+  input.pollingProjects.push(pollingProject.data);
+
+  // SPEC 5.1: an invalid Project watchdog override — a non-positive-integer
+  // grace_minutes or an unknown key — rejects the entire candidate snapshot
+  // for all Projects, even on first load (where there is no last-known-good,
+  // so nothing goes live). This is stricter than the other detail fields
+  // below (workspace, workflow, ...), whose first-load failure only drops the
+  // offending Project from dispatch while valid siblings keep polling.
+  const rawWatchdog = optionalWatchdogOf(input.rawProject);
+  if (rawWatchdog !== undefined) {
+    const watchdogOverride = projectWatchdogConfigSchema.safeParse(rawWatchdog);
+    if (!watchdogOverride.success) {
+      input.errors.push(
+        ...watchdogOverride.error.issues.map((issue) =>
+          formatZodIssueWithPrefix(issue, [
+            "projects",
+            String(input.index),
+            "watchdog"
+          ])
+        )
+      );
+      return "fatal";
+    }
+  }
+
+  const detail = runtimeDispatchDetailSchema.safeParse(input.rawProject);
+  if (!detail.success) {
+    input.errors.push(
+      ...detail.error.issues.map((issue) =>
+        formatZodIssueWithPrefix(issue, ["projects", String(input.index)])
+      )
+    );
+    // On reload, a detail failure reverts the whole snapshot to LKG; on first
+    // load, drop just this project and keep parsing siblings.
+    return input.previous !== undefined ? "fatal" : "ok";
+  }
+
+  if (pollingProject.data.disabled === true) {
+    // Disabling a Project halts new dispatch but does not cancel an active
+    // run, and the Project stays in the runtime map. Carry forward the last
+    // loaded WorkflowSnapshot when one exists so the Watchdog keeps this
+    // Project's evidence.ignore policy for its still-running rows; otherwise
+    // build-output churn would masquerade as progress and keep a wedged run
+    // alive (ADR 0054).
+    const previousWorkflow = input.previous?.projects.find(
+      (project) => project.name === pollingProject.data.name
+    )?.workflow;
+    input.dispatchProjects.push({
+      ...pollingProject.data,
+      routines: [],
+      ...(detail.data.watchdog === undefined
+        ? {}
+        : {
+            watchdog: {
+              graceMinutes: detail.data.watchdog.grace_minutes
+            }
+          }),
+      workflow:
+        previousWorkflow !== undefined && "expandedWorkflow" in previousWorkflow
+          ? previousWorkflow
+          : detail.data.workflow,
+      workspace: detail.data.workspace
+    });
+    return "ok";
+  }
+
+  const workflow = await readWorkflowSnapshot(
+    path.resolve(input.configDir, detail.data.workflow.path),
+    detail.data.workflow.format,
+    input.errors
+  );
+  if (workflow === undefined) {
+    // A missing/invalid workflow reverts the whole snapshot on reload and
+    // publishes nothing on first load — a Dispatch Project in the polling
+    // list without a runtime workflow would break dispatchOneFresh's
+    // loadWorkflow(target.project.workflow). Unconditional, matching the
+    // pre-mode-split semantics.
+    return "fatal";
+  }
+  input.dispatchProjects.push({
+    ...pollingProject.data,
+    ...(detail.data.watchdog === undefined
+      ? {}
+      : {
+          watchdog: {
+            graceMinutes: detail.data.watchdog.grace_minutes
+          }
+        }),
+    workflow,
+    workspace: detail.data.workspace
+  });
+  return "ok";
+}
+
+// Validates and loads a Routine Host: name + workspace + agent + mode, optional
+// tracker. Enters the runtime map only — never `pollingProjects`. No workflow.
+// Returns `"fatal"` when the failure semantics require a whole-snapshot revert.
+function loadRoutineHostProject(input: {
+  dispatchProjects: RuntimeProjectConfig[];
+  errors: string[];
+  index: number;
+  previous?: RuntimeConfigSnapshot;
+  rawProject: unknown;
+}): ProjectLoadOutcome {
+  const host = routineHostProjectSchema.safeParse(input.rawProject);
+  if (!host.success) {
+    input.errors.push(
+      ...host.error.issues.map((issue) =>
+        formatZodIssueWithPrefix(issue, ["projects", String(input.index)])
+      )
+    );
+    return "ok";
+  }
+
+  // Same watchdog-override whole-snapshot rejection as Dispatch Projects.
+  const rawWatchdog = optionalWatchdogOf(input.rawProject);
+  if (rawWatchdog !== undefined) {
+    const watchdogOverride = projectWatchdogConfigSchema.safeParse(rawWatchdog);
+    if (!watchdogOverride.success) {
+      input.errors.push(
+        ...watchdogOverride.error.issues.map((issue) =>
+          formatZodIssueWithPrefix(issue, [
+            "projects",
+            String(input.index),
+            "watchdog"
+          ])
+        )
+      );
+      return "fatal";
+    }
+  }
+
+  const detail = runtimeRoutineHostDetailSchema.safeParse(input.rawProject);
+  if (!detail.success) {
+    input.errors.push(
+      ...detail.error.issues.map((issue) =>
+        formatZodIssueWithPrefix(issue, ["projects", String(input.index)])
+      )
+    );
+    // On reload, a detail failure reverts the whole snapshot to LKG; on first
+    // load, drop just this host and keep parsing siblings.
+    return input.previous !== undefined ? "fatal" : "ok";
+  }
+
+  input.dispatchProjects.push({
+    ...(host.data.tracker === undefined ? {} : { tracker: host.data.tracker }),
+    ...(host.data.disabled === undefined
+      ? {}
+      : { disabled: host.data.disabled }),
+    ...(host.data.max_in_flight === undefined
+      ? {}
+      : { max_in_flight: host.data.max_in_flight }),
+    agent: host.data.agent,
+    mode: "routine_host",
+    name: host.data.name,
+    routines: [],
+    ...(detail.data.watchdog === undefined
+      ? {}
+      : {
+          watchdog: {
+            graceMinutes: detail.data.watchdog.grace_minutes
+          }
+        }),
+    workspace: detail.data.workspace
+  });
+  return "ok";
 }
 
 function normalizeWatchdogConfig(
@@ -612,21 +965,25 @@ async function readWorkflowSnapshot(
 }
 
 async function readRoutineDeclarations(
-  routinePaths: string[],
-  previousRoutines: RoutineDeclaration[],
+  entries: Array<{ projectName: string; sourcePath: string }>,
+  previousRoutines: TargetedRoutineDeclaration[],
   errors: string[]
 ): Promise<{
-  invalidNew: Array<{ name?: string; path: string }>;
-  routines: RoutineDeclaration[];
+  invalidNew: Array<{ name?: string; path: string; projectName: string }>;
+  routines: TargetedRoutineDeclaration[];
 }> {
-  const routines: RoutineDeclaration[] = [];
-  const invalidNew: Array<{ name?: string; path: string }> = [];
+  const routines: TargetedRoutineDeclaration[] = [];
+  const invalidNew: Array<{
+    name?: string;
+    path: string;
+    projectName: string;
+  }> = [];
   const seenNames = new Map<string, string>();
   const previousBySourcePath = new Map(
     previousRoutines.map((routine) => [routine.sourcePath, routine])
   );
-  for (const routinePath of routinePaths) {
-    const result = await loadRoutineDeclaration(routinePath);
+  for (const entry of entries) {
+    const result = await loadRoutineDeclaration(entry.sourcePath);
     if (result.routine === null) {
       errors.push(...result.errors);
       // Carry-forward is keyed on the file's own path, not on the freshly
@@ -635,7 +992,7 @@ async function readRoutineDeclarations(
       // name would wrongly treat that as "no prior valid declaration" and
       // let the removal-detection path in RunStore.syncRoutines demote a
       // still-configured routine to disabled/removed_from_config.
-      const previous = previousBySourcePath.get(routinePath);
+      const previous = previousBySourcePath.get(entry.sourcePath);
       if (previous !== undefined) {
         // Register the carried-forward name too — otherwise a later file in
         // this same pass that legitimately (re)uses this name slips past
@@ -648,14 +1005,30 @@ async function readRoutineDeclarations(
           );
         } else {
           seenNames.set(previous.name, previous.sourcePath);
-          routines.push(previous);
+          routines.push({ ...previous, projectName: entry.projectName });
         }
       } else {
+        // Reserve a brand-new invalid declaration's recovered name too —
+        // otherwise a later declaration in this same pass (especially one
+        // targeting another Project) can legitimately claim the same name
+        // while this file remains broken, violating the service-level
+        // global-name uniqueness requirement (ADR 0063).
+        if (result.partialName !== undefined) {
+          const existingForPartialName = seenNames.get(result.partialName);
+          if (existingForPartialName !== undefined) {
+            errors.push(
+              `duplicate routine name "${result.partialName}" declared by ${existingForPartialName} and ${entry.sourcePath}`
+            );
+          } else {
+            seenNames.set(result.partialName, entry.sourcePath);
+          }
+        }
         invalidNew.push({
           ...(result.partialName === undefined
             ? {}
             : { name: result.partialName }),
-          path: routinePath
+          path: entry.sourcePath,
+          projectName: entry.projectName
         });
       }
       continue;
@@ -668,7 +1041,7 @@ async function readRoutineDeclarations(
       continue;
     }
     seenNames.set(result.routine.name, result.routine.sourcePath);
-    routines.push(result.routine);
+    routines.push({ ...result.routine, projectName: entry.projectName });
   }
   return { invalidNew, routines };
 }

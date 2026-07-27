@@ -33,9 +33,10 @@ describe("RoutineConfigEditor", () => {
       [
         "projects:",
         "  - name: alpha",
-        "    routines:",
-        "      - ./routines/daily.md",
         "    workflow: ./WORKFLOW.md",
+        "routines:",
+        "  - path: ./routines/daily.md",
+        "    project: alpha",
         ""
       ].join("\n")
     );
@@ -47,7 +48,7 @@ describe("RoutineConfigEditor", () => {
 
     expect(result).toEqual({ changed: true, routineName: "weekly" });
     expect(await readFile(configPath, "utf8")).toContain(
-      "      - ./routines/daily.md\n      - ./routines/weekly.md\n"
+      "  - path: ./routines/daily.md\n    project: alpha\n  - path: ./routines/weekly.md\n    project: alpha\n"
     );
   });
 
@@ -67,9 +68,8 @@ describe("RoutineConfigEditor", () => {
       projectName: "alpha",
       routinePath: "./routines/weekly.md"
     });
-
     expect(await readFile(configPath, "utf8")).toContain(
-      "    workflow: ./WORKFLOW.md\n    routines:\n      - ./routines/weekly.md\n"
+      "routines:\n  - path: ./routines/weekly.md\n    project: alpha\n"
     );
   });
 
@@ -99,8 +99,10 @@ describe("RoutineConfigEditor", () => {
     const original = [
       "projects:",
       "  - name: alpha",
-      "    routines:",
-      "      - ./routines/weekly-old.md",
+      "    workflow: ./WORKFLOW.md",
+      "routines:",
+      "  - path: ./routines/weekly-old.md",
+      "    project: alpha",
       ""
     ].join("\n");
     await writeFile(configPath, original);
@@ -111,7 +113,7 @@ describe("RoutineConfigEditor", () => {
         routinePath: "./routines/weekly-new.md"
       })
     ).rejects.toThrow(
-      'routine name "weekly" already exists in project "alpha" at ./routines/weekly-old.md'
+      'routine name "weekly" already exists in the top-level routines block at ./routines/weekly-old.md'
     );
     expect(await readFile(configPath, "utf8")).toBe(original);
   });
@@ -124,8 +126,10 @@ describe("RoutineConfigEditor", () => {
     const original = [
       "projects:",
       "  - name: alpha",
-      "    routines:",
-      "      - ./routines/weekly.md",
+      "    workflow: ./WORKFLOW.md",
+      "routines:",
+      "  - path: ./routines/weekly.md",
+      "    project: alpha",
       ""
     ].join("\n");
     await writeFile(configPath, original);
@@ -136,6 +140,35 @@ describe("RoutineConfigEditor", () => {
     });
 
     expect(result).toEqual({ changed: false, routineName: "weekly" });
+    expect(await readFile(configPath, "utf8")).toBe(original);
+  });
+
+  it("refuses an identical declaration path already targeted at a different project", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await mkdir(path.join(root, "routines"));
+    await writeRoutine(path.join(root, "routines", "weekly.md"), "weekly");
+    const original = [
+      "projects:",
+      "  - name: alpha",
+      "    workflow: ./WORKFLOW.md",
+      "  - name: beta",
+      "    workflow: ./WORKFLOW.md",
+      "routines:",
+      "  - path: ./routines/weekly.md",
+      "    project: alpha",
+      ""
+    ].join("\n");
+    await writeFile(configPath, original);
+
+    await expect(
+      new RoutineConfigEditor(configPath).addRoutine({
+        projectName: "beta",
+        routinePath: "./routines/weekly.md"
+      })
+    ).rejects.toThrow(
+      'routine at ./routines/weekly.md is already targeted at project "alpha" in the top-level routines block; remove that entry before targeting "beta"'
+    );
     expect(await readFile(configPath, "utf8")).toBe(original);
   });
 
@@ -176,7 +209,7 @@ describe("RoutineConfigEditor", () => {
       edited.indexOf("polling:")
     );
     expect(edited).toContain(
-      "    workflow: ./WORKFLOW.md # workflow comment\n    routines:\n      - ./routines/weekly.md\n"
+      "routines:\n  - path: ./routines/weekly.md\n    project: alpha\n"
     );
   });
 });

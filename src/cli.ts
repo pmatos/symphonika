@@ -272,15 +272,28 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .option("--config <path>", "service config path")
     .option("--force", "replace a Project with the same name")
     .option(
+      "--mode <mode>",
+      "project mode: dispatch (default) or routine-host",
+      parseProjectMode,
+      "dispatch"
+    )
+    .option(
       "--yes",
       "use defaults and create missing labels without interactive prompts"
     )
     .action(
-      async (options: { config?: string; force?: boolean; yes?: boolean }) => {
+      async (options: {
+        config?: string;
+        force?: boolean;
+        mode: "dispatch" | "routine_host";
+        yes?: boolean;
+      }) => {
         const emittedWarnings = new Set<string>();
+        const mode = options.mode;
         const report = await initProject({
           ...withConfigPath(options.config),
           force: options.force === true,
+          mode,
           onWarning: (warning) => {
             emittedWarnings.add(warning);
             writeErr(program, `warning: ${warning}\n`);
@@ -733,9 +746,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             for (const project of report.projects) {
               writeOut(
                 program,
-                `  ${project.name}: ${project.validForDispatch ? "valid" : "invalid"}\n`
+                `  ${project.name}: ${project.mode} ${project.mode === "routine_host" ? (project.validForHosting ? "valid" : "invalid") : project.validForDispatch ? "valid" : "invalid"}\n`
               );
-              writeOut(program, `    workflow: ${project.workflowPath}\n`);
+              writeOut(
+                program,
+                `    workflow: ${project.workflowPath ?? "(none)"}\n`
+              );
               writeOut(
                 program,
                 `    missing required eligibility labels: ${formatList(project.missingEligibilityLabels)}\n`
@@ -1984,6 +2000,16 @@ function parseRoutineKind(value: string): RoutineKind {
     return value;
   }
   throw new InvalidArgumentError("kind must be one of git, report");
+}
+
+function parseProjectMode(value: string): "dispatch" | "routine_host" {
+  if (value === "dispatch") {
+    return "dispatch";
+  }
+  if (value === "routine-host" || value === "routine_host") {
+    return "routine_host";
+  }
+  throw new InvalidArgumentError("mode must be one of dispatch, routine-host");
 }
 
 function pluralize(word: string, count: number): string {

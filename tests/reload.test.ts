@@ -793,8 +793,9 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         "    workflow: ./WORKFLOW.md",
         [
           "    workflow: ./WORKFLOW.md",
-          "    routines:",
-          "      - ./daily-report.md"
+          "routines:",
+          "  - project: symphonika",
+          "    path: ./daily-report.md"
         ].join("\n")
       )
     );
@@ -857,9 +858,11 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         "    workflow: ./WORKFLOW.md",
         [
           "    workflow: ./WORKFLOW.md",
-          "    routines:",
-          "      - ./daily-report.md",
-          "      - ./weekly-report.md"
+          "routines:",
+          "  - project: symphonika",
+          "    path: ./daily-report.md",
+          "  - project: symphonika",
+          "    path: ./weekly-report.md"
         ].join("\n")
       )
     );
@@ -913,8 +916,9 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         "    workflow: ./WORKFLOW.md",
         [
           "    workflow: ./WORKFLOW.md",
-          "    routines:",
-          "      - ./broken-routine.md"
+          "routines:",
+          "  - project: s11",
+          "    path: ./broken-routine.md"
         ].join("\n")
       );
     await writeFile(
@@ -935,7 +939,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
     // valid declaration to fall back on.
     expect(reloader.getStatus().ok).toBe(false);
     expect(reloader.projectsByName().get("vow")).toBeDefined();
-    expect(reloader.projectsByName().get("s11")?.routines).toEqual([]);
+    expect(reloader.projectsByName().get("s11")?.routines ?? []).toEqual([]);
   });
 
   it("records a brand-new invalid routine with a parseable name without blocking the snapshot", async () => {
@@ -950,8 +954,9 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         "    workflow: ./WORKFLOW.md",
         [
           "    workflow: ./WORKFLOW.md",
-          "    routines:",
-          "      - ./new-invalid.md"
+          "routines:",
+          "  - project: symphonika",
+          "    path: ./new-invalid.md"
         ].join("\n")
       )
     );
@@ -988,8 +993,9 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         "    workflow: ./WORKFLOW.md",
         [
           "    workflow: ./WORKFLOW.md",
-          "    routines:",
-          "      - ./unnamed.md"
+          "routines:",
+          "  - project: symphonika",
+          "    path: ./unnamed.md"
         ].join("\n")
       )
     );
@@ -1038,8 +1044,9 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         "    workflow: ./WORKFLOW.md",
         [
           "    workflow: ./WORKFLOW.md",
-          "    routines:",
-          "      - ./routine-a.md"
+          "routines:",
+          "  - project: symphonika",
+          "    path: ./routine-a.md"
         ].join("\n")
       )
     );
@@ -1072,8 +1079,12 @@ describe("RuntimeConfigReloader concurrency caps", () => {
     await writeFile(
       configPath,
       withSecondRoutine.replace(
-        "      - ./routine-a.md",
-        ["      - ./routine-a.md", "      - ./routine-b.md"].join("\n")
+        "    path: ./routine-a.md",
+        [
+          "    path: ./routine-a.md",
+          "  - project: symphonika",
+          "    path: ./routine-b.md"
+        ].join("\n")
       )
     );
     await reloader.reload();
@@ -1115,9 +1126,11 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         "    workflow: ./WORKFLOW.md",
         [
           "    workflow: ./WORKFLOW.md",
-          "    routines:",
-          "      - ./daily-report.md",
-          "      - ./daily-report-2.md"
+          "routines:",
+          "  - project: symphonika",
+          "    path: ./daily-report.md",
+          "  - project: symphonika",
+          "    path: ./daily-report-2.md"
         ].join("\n")
       )
     );
@@ -1146,43 +1159,50 @@ describe("RuntimeConfigReloader concurrency caps", () => {
     const original = await readFile(configPath, "utf8");
     await writeFile(
       configPath,
-      original.replace(
-        "  - name: symphonika",
-        [
-          "  - name: disabled-project",
-          "    disabled: true",
-          "    weight: 1",
-          "    tracker:",
-          "      kind: github",
-          "      owner: pmatos",
-          "      repo: symphonika",
-          '      token: "$GITHUB_TOKEN"',
-          "    issue_filters:",
-          '      states: ["open"]',
-          '      labels_all: ["agent-ready"]',
-          '      labels_none: ["blocked"]',
-          "    priority:",
-          "      labels: {}",
-          "      default: 99",
-          "    workspace:",
-          "      root: ./.symphonika/workspaces/disabled-project",
-          "      git:",
-          "        remote: git@github.com:pmatos/disabled-project.git",
-          "        base_branch: main",
-          "    agent:",
-          "      provider: codex",
-          "    workflow: ./WORKFLOW.md",
-          "    routines:",
-          "      - ./broken-routine.md",
-          "  - name: symphonika"
-        ].join("\n")
-      )
+      original
+        .replace(
+          "  - name: symphonika",
+          [
+            "  - name: disabled-project",
+            "    disabled: true",
+            "    weight: 1",
+            "    tracker:",
+            "      kind: github",
+            "      owner: pmatos",
+            "      repo: symphonika",
+            '      token: "$GITHUB_TOKEN"',
+            "    issue_filters:",
+            '      states: ["open"]',
+            '      labels_all: ["agent-ready"]',
+            '      labels_none: ["blocked"]',
+            "    priority:",
+            "      labels: {}",
+            "      default: 99",
+            "    workspace:",
+            "      root: ./.symphonika/workspaces/disabled-project",
+            "      git:",
+            "        remote: git@github.com:pmatos/disabled-project.git",
+            "        base_branch: main",
+            "    agent:",
+            "      provider: codex",
+            "    workflow: ./WORKFLOW.md",
+            "  - name: symphonika"
+          ].join("\n")
+        )
+        .concat(
+          [
+            "routines:",
+            "  - project: disabled-project",
+            "    path: ./broken-routine.md",
+            ""
+          ].join("\n")
+        )
     );
 
     const reloader = new RuntimeConfigReloader({ configPath });
     await reloader.reload();
 
-    expect(reloader.getStatus().ok).toBe(true);
+    expect(reloader.getStatus().ok).toBe(false);
     expect(reloader.projectsByName().has("symphonika")).toBe(true);
     expect(reloader.projectsByName().get("disabled-project")?.disabled).toBe(
       true

@@ -20,6 +20,9 @@ import {
 import {
   defaultWorkflowContract,
   inspectCurrentGitHubProject,
+  inspectCurrentGitProject,
+  type GitHubProjectMetadata,
+  type GitProjectMetadata,
   type InitProvider
 } from "./init.js";
 import {
@@ -57,10 +60,17 @@ type StaleIssueSummary = {
 export type DoctorProjectReport = {
   missingEligibilityLabels: string[];
   missingOperationalLabels: string[];
+  mode: "dispatch" | "routine_host";
   name: string;
   staleIssues: StaleIssueSummary[];
+  // Dispatch Projects: repo access + Operational Labels + Eligibility Labels
+  // + provider. Routine Hosts: provider + workspace only — no GitHub/label
+  // checks. A host reports validForDispatch=false (it never dispatches) and
+  // validForHosting=true when its provider+workspace resolve. See ADR 0062.
   validForDispatch: boolean;
-  workflowPath: string;
+  validForHosting: boolean;
+  // Dispatch Projects only. A Routine Host has no workflow contract.
+  workflowPath?: string;
 };
 
 export type DoctorReport = {
@@ -72,6 +82,7 @@ export type DoctorReport = {
 
 export type InitProjectOptions = DoctorOptions & {
   force?: boolean;
+  mode?: "dispatch" | "routine_host";
   onWarning?: (warning: string) => void;
   prompt?: InitProjectPrompt;
   yes?: boolean;
@@ -88,6 +99,7 @@ type InitProjectPromptInput = {
     | "confirmEligibilityLabels"
     | "confirmOperationalLabels"
     | "requiredLabels"
+    | "workspaceRoot"
     | "workflowPath";
   message: string;
 };
@@ -156,9 +168,17 @@ export type ClearStaleReport = {
 
 type ServiceConfig = z.infer<typeof serviceConfigSchema>;
 type ProjectConfig = z.infer<typeof projectSchema>;
+type DispatchProjectConfig = Extract<ProjectConfig, { mode: "dispatch" }>;
+type RoutineHostProjectConfig = Extract<
+  ProjectConfig,
+  { mode: "routine_host" }
+>;
 type ProjectValidation = Pick<
   DoctorProjectReport,
-  "missingEligibilityLabels" | "missingOperationalLabels" | "validForDispatch"
+  | "missingEligibilityLabels"
+  | "missingOperationalLabels"
+  | "validForDispatch"
+  | "validForHosting"
 >;
 type LabelDescription = {
   color: string;
@@ -205,41 +225,119 @@ const providerCommandSchema = z
     command: z.string().trim().min(1)
   })
   .passthrough();
+const trackerSchema = z
+  .object({
+    kind: z.literal("github"),
+    owner: z.string().trim().min(1),
+    repo: z.string().trim().min(1),
+    token: z.string().trim().min(1)
+  })
+  .passthrough();
 
-const projectSchema = z
+const issueFiltersSchema = z
+  .object({
+    states: z.array(z.literal("open")).min(1),
+    labels_all: z.array(z.string().trim().min(1)),
+    labels_none: z.array(z.string().trim().min(1))
+  })
+  .passthrough();
+
+const prioritySchema = z
+  .object({
+    labels: z.record(z.string(), z.number().int().nonnegative()),
+    default: z.number().int().nonnegative()
+  })
+  .passthrough();
+
+const agentSchema = z
+  .object({
+    provider: providerNameSchema
+  })
+  .passthrough();
+
+// Explicitly reject the removed per-project `routines:` key so a legacy config
+// fails loudly with a migration pointer instead of silently stopping firing.
+// See ADR 0063.
+function rejectPerProjectRoutines(
+  rawProject: unknown,
+  ctx: z.RefinementCtx
+): void {
+  if (
+    rawProject !== null &&
+    typeof rawProject === "object" &&
+    "routines" in rawProject
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "per-project `routines:` was removed; move routine entries to the top-level `routines:` block with a `project:` target (see ADR 0063)",
+      path: ["routines"]
+    });
+  }
+}
+
+const dispatchProjectSchema = z
   .object({
     name: z.string().trim().min(1),
+    mode: z.literal("dispatch").default("dispatch"),
     disabled: z.boolean().optional(),
     weight: z.number().int().positive().optional(),
-    tracker: z
-      .object({
-        kind: z.literal("github"),
-        owner: z.string().trim().min(1),
-        repo: z.string().trim().min(1),
-        token: z.string().trim().min(1)
-      })
-      .passthrough(),
-    issue_filters: z
-      .object({
-        states: z.array(z.literal("open")).min(1),
-        labels_all: z.array(z.string().trim().min(1)),
-        labels_none: z.array(z.string().trim().min(1))
-      })
-      .passthrough(),
-    priority: z
-      .object({
-        labels: z.record(z.string(), z.number().int().nonnegative()),
-        default: z.number().int().nonnegative()
-      })
-      .passthrough(),
+    tracker: trackerSchema,
+    issue_filters: issueFiltersSchema,
+    priority: prioritySchema,
     workspace: projectWorkspaceSchema,
-    agent: z
-      .object({
-        provider: providerNameSchema
-      })
-      .passthrough(),
-    routines: z.array(pathStringSchema).optional(),
+    agent: agentSchema,
     workflow: workflowReferenceSchema
+  })
+  .passthrough()
+  .superRefine(rejectPerProjectRoutines);
+
+// A Routine Host has no use for dispatch-only fields — ADR 0062 says they are
+// "unused and rejected", so a stale or copy-pasted dispatch block must be a
+// declaration-time error rather than silently ignored.
+const DISPATCH_ONLY_KEYS = ["issue_filters", "priority", "workflow"] as const;
+
+function rejectDispatchOnlyKeysOnRoutineHost(
+  rawProject: unknown,
+  ctx: z.RefinementCtx
+): void {
+  if (rawProject === null || typeof rawProject !== "object") {
+    return;
+  }
+  for (const key of DISPATCH_ONLY_KEYS) {
+    if (key in rawProject) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `\`${key}\` is a dispatch-only field and is unused and rejected on a Routine Host (mode: routine_host); see ADR 0062`,
+        path: [key]
+      });
+    }
+  }
+}
+
+const routineHostProjectSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    mode: z.literal("routine_host"),
+    disabled: z.boolean().optional(),
+    max_in_flight: z.number().int().positive().optional(),
+    tracker: trackerSchema.optional(),
+    workspace: projectWorkspaceSchema,
+    agent: agentSchema
+  })
+  .passthrough()
+  .superRefine(rejectPerProjectRoutines)
+  .superRefine(rejectDispatchOnlyKeysOnRoutineHost);
+
+const projectSchema = z.union([
+  dispatchProjectSchema,
+  routineHostProjectSchema
+]);
+
+const serviceRoutineSchema = z
+  .object({
+    project: z.string().trim().min(1),
+    path: pathStringSchema
   })
   .passthrough();
 
@@ -263,6 +361,7 @@ const serviceConfigSchema = z
         claude: providerCommandSchema
       })
       .passthrough(),
+    routines: z.array(serviceRoutineSchema).optional(),
     projects: z.array(projectSchema).min(1)
   })
   .passthrough();
@@ -306,6 +405,18 @@ export async function runDoctor(
       errors,
       githubApi
     );
+    if (project.mode === "routine_host") {
+      // A Routine Host has no workflow, no issue polling, no sym:* label
+      // requirements. Only provider + workspace checks apply (see
+      // validateProject). No stale issues — it owns no issues.
+      projects.push({
+        ...validation,
+        mode: "routine_host",
+        name: project.name,
+        staleIssues: []
+      });
+      continue;
+    }
     const workflowPath = path.resolve(
       path.dirname(configPath),
       project.workflow.path
@@ -315,42 +426,134 @@ export async function runDoctor(
       project.workflow.format
     );
     errors.push(...workflowErrors);
-    errors.push(
-      ...(await collectRoutineErrors(
-        (project.routines ?? []).map((routinePath) =>
-          path.resolve(path.dirname(configPath), routinePath)
-        )
-      ))
-    );
     const staleIssues = await fetchStaleIssues(project, env, githubIssuesApi);
     projects.push({
       ...validation,
+      mode: "dispatch",
       name: project.name,
       staleIssues,
       workflowPath
     });
   }
 
+  // Service-level routine declarations (top-level `routines:` block). Replaces
+  // the removed per-project `routines:` key. Validates each declaration with
+  // its target: global name uniqueness, known target project, and the
+  // kind:git+tracker-less-host invariant (which flips the host's
+  // validForHosting false, not just report.ok). See ADR 0062 / 0063.
+  errors.push(
+    ...(await validateServiceRoutines(
+      (parsedConfig.routines ?? []).map((entry) => ({
+        projectName: entry.project,
+        sourcePath: path.resolve(path.dirname(configPath), entry.path)
+      })),
+      parsedConfig.projects,
+      projects
+    ))
+  );
+
   return report(configPath, errors, projects);
 }
 
-async function collectRoutineErrors(routinePaths: string[]): Promise<string[]> {
+async function validateServiceRoutines(
+  entries: Array<{ projectName: string; sourcePath: string }>,
+  declaredProjects: ProjectConfig[],
+  projectReports: DoctorProjectReport[]
+): Promise<string[]> {
   const errors: string[] = [];
   const seenNames = new Map<string, string>();
-  for (const routinePath of routinePaths) {
-    const result = await loadRoutineDeclaration(routinePath);
+  const hostsByName = new Map<string, RoutineHostProjectConfig>();
+  for (const project of declaredProjects) {
+    if (project.mode === "routine_host") {
+      hostsByName.set(project.name, project);
+    }
+  }
+  // A routine's target Project name must be unambiguous: `.find()` below
+  // resolves a duplicated name to the first declared Project, but a
+  // duplicate is itself a config error — mirrors the `projectNameCounts`
+  // guard in `src/reload.ts`, which rejects the same ambiguity before
+  // attaching a routine at runtime.
+  const projectNameCounts = new Map<string, number>();
+  for (const project of declaredProjects) {
+    projectNameCounts.set(
+      project.name,
+      (projectNameCounts.get(project.name) ?? 0) + 1
+    );
+  }
+  for (const entry of entries) {
+    // Validate the target project independently of whether the declaration
+    // itself parses — both come from the top-level `routines:` entry, so a
+    // broken file and an unknown/ambiguous target are independent,
+    // simultaneously diagnosable errors. Checking this first means both
+    // surface in the same `doctor` pass instead of requiring a
+    // fix-and-rerun cycle to find the second one.
+    const isDuplicateTarget =
+      (projectNameCounts.get(entry.projectName) ?? 0) > 1;
+    const declared = isDuplicateTarget
+      ? undefined
+      : declaredProjects.find((p) => p.name === entry.projectName);
+    if (isDuplicateTarget) {
+      errors.push(
+        `routines entry targets project "${entry.projectName}" (declared at ${entry.sourcePath}), but "${entry.projectName}" is declared more than once; routine targets require a unique project name`
+      );
+    } else if (declared === undefined) {
+      errors.push(
+        `routines entry targets project "${entry.projectName}" (declared at ${entry.sourcePath}), but no project with that name is declared`
+      );
+    }
+
+    const result = await loadRoutineDeclaration(entry.sourcePath);
     if (result.routine === null) {
       errors.push(...result.errors);
+      // Reserve an invalid declaration's recovered name too — otherwise a
+      // later declaration in this pass can legitimately claim the same name
+      // while this file remains broken, violating the service-level
+      // global-name uniqueness requirement (ADR 0063).
+      if (result.partialName !== undefined) {
+        const existingForPartialName = seenNames.get(result.partialName);
+        if (existingForPartialName !== undefined) {
+          errors.push(
+            `duplicate routine name "${result.partialName}" declared by ${existingForPartialName} and ${entry.sourcePath}`
+          );
+        } else {
+          seenNames.set(result.partialName, entry.sourcePath);
+        }
+      }
       continue;
     }
-    const existing = seenNames.get(result.routine.name);
+    const routine = result.routine;
+    const existing = seenNames.get(routine.name);
     if (existing !== undefined) {
       errors.push(
-        `duplicate routine name "${result.routine.name}" declared by ${existing} and ${result.routine.sourcePath}`
+        `duplicate routine name "${routine.name}" declared by ${existing} and ${routine.sourcePath}`
       );
       continue;
     }
-    seenNames.set(result.routine.name, result.routine.sourcePath);
+    seenNames.set(routine.name, routine.sourcePath);
+
+    if (declared === undefined) {
+      continue;
+    }
+
+    // kind: git on a tracker-less Routine Host is a declaration-time error
+    // (ADR 0062). Flip the host's validForHosting false so the report is not
+    // self-contradictory.
+    const host = hostsByName.get(entry.projectName);
+    if (
+      routine.kind === "git" &&
+      host !== undefined &&
+      host.tracker === undefined
+    ) {
+      errors.push(
+        `routine "${routine.name}" (kind: git) targets routine host "${entry.projectName}" which declares no tracker; a kind: git routine requires a tracker for PR discovery`
+      );
+      const reportEntry = projectReports.find(
+        (p) => p.name === entry.projectName
+      );
+      if (reportEntry !== undefined) {
+        reportEntry.validForHosting = false;
+      }
+    }
   }
   return errors;
 }
@@ -372,7 +575,7 @@ async function collectWorkflowErrors(
 }
 
 async function fetchStaleIssues(
-  project: ProjectConfig,
+  project: DispatchProjectConfig,
   env: NodeJS.ProcessEnv,
   githubIssuesApi: GitHubIssuesApi
 ): Promise<StaleIssueSummary[]> {
@@ -484,9 +687,13 @@ export async function runInitProject(
     return initProjectReport(configPath, errors, warnings, projects);
   }
 
-  let metadata: Awaited<ReturnType<typeof inspectCurrentGitHubProject>>;
+  const mode = options.mode ?? "dispatch";
+  let metadata: GitHubProjectMetadata | GitProjectMetadata;
   try {
-    metadata = await inspectCurrentGitHubProject(cwd);
+    metadata =
+      mode === "routine_host"
+        ? await inspectCurrentGitProject(cwd)
+        : await inspectCurrentGitHubProject(cwd);
   } catch (error) {
     errors.push(errorMessage(error));
     return initProjectReport(configPath, errors, warnings, projects);
@@ -496,6 +703,7 @@ export async function runInitProject(
   try {
     settings = await collectProjectSettings({
       metadata,
+      mode,
       ...(options.prompt === undefined ? {} : { prompt: options.prompt }),
       yes: options.yes === true
     });
@@ -562,12 +770,44 @@ export async function runInitProject(
     return initProjectReport(configPath, errors, warnings, projects);
   }
 
+  if (settings.mode === "routine_host") {
+    // A Routine Host has no workflow, no GitHub access check, no sym:*
+    // labels. Write the config directly. See ADR 0062.
+    try {
+      await writeFile(configPath, document.toString(), "utf8");
+    } catch (error) {
+      errors.push(
+        `service config could not be written at ${configPath}: ${errorMessage(error)}`
+      );
+    }
+    const github = asGitHubMetadata(metadata);
+    projects.push({
+      createdEligibilityLabels: [],
+      createdOperationalLabels: [],
+      missingEligibilityLabels: [],
+      missingOperationalLabels: [],
+      name: settings.projectName,
+      repository:
+        github === undefined
+          ? metadata.remote
+          : `${github.owner}/${github.repo}`
+    });
+    return initProjectReport(configPath, errors, warnings, projects);
+  }
+  if (registeredProject.mode !== "dispatch") {
+    errors.push(
+      `registered Project ${settings.projectName} is not a dispatch project; dispatch init requires mode: dispatch`
+    );
+    return initProjectReport(configPath, errors, warnings, projects);
+  }
+  const dispatchProject: DispatchProjectConfig = registeredProject;
+
   const githubApi = options.githubApi ?? DEFAULT_GITHUB_API;
   const accessValidation = await validateProjectGitHubAccess({
     env,
     errors,
     githubApi,
-    project: registeredProject
+    project: dispatchProject
   });
   if (accessValidation === undefined) {
     return initProjectReport(configPath, errors, warnings, projects);
@@ -576,7 +816,7 @@ export async function runInitProject(
   let createdWorkflow = false;
   if (!(await fileExists(settings.workflowPath))) {
     const resolvedFormat = resolveWorkflowFormat(
-      registeredProject.workflow.format,
+      dispatchProject.workflow.format,
       settings.workflowPath
     );
     if (resolvedFormat.kind !== "markdown") {
@@ -607,7 +847,7 @@ export async function runInitProject(
         ? {}
         : { onWarning: options.onWarning }),
       ...(options.prompt === undefined ? {} : { prompt: options.prompt }),
-      project: registeredProject,
+      project: dispatchProject,
       validation: accessValidation,
       warnings,
       yes: options.yes === true
@@ -639,22 +879,22 @@ export async function runInitProject(
 type ProjectInitSettings = {
   baseBranch: string;
   excludedLabels: string[];
+  mode: "dispatch" | "routine_host";
   priorityLabels: Record<string, number>;
   projectName: string;
   provider: InitProvider;
   requiredLabels: string[];
+  // Host-only: the operator-chosen workspace root. Dispatch projects derive
+  // workspace from stateRoot + projectName (unchanged).
+  workspaceRoot?: string;
   workflowPath: string;
 };
-
 async function collectProjectSettings(input: {
-  metadata: Awaited<ReturnType<typeof inspectCurrentGitHubProject>>;
+  metadata: GitHubProjectMetadata | GitProjectMetadata;
+  mode: "dispatch" | "routine_host";
   prompt?: InitProjectPrompt;
   yes: boolean;
 }): Promise<ProjectInitSettings> {
-  const defaultWorkflowPath = path.join(
-    input.metadata.projectRoot,
-    "WORKFLOW.md"
-  );
   const promptController = createInitProjectPromptController(
     input.prompt,
     input.yes
@@ -678,6 +918,48 @@ async function collectProjectSettings(input: {
       key: "baseBranch",
       message: "Base branch"
     });
+
+    if (projectName.trim().length === 0) {
+      throw new Error("Project name must not be empty");
+    }
+    if (baseBranch.trim().length === 0) {
+      throw new Error("base branch must not be empty");
+    }
+
+    if (input.mode === "routine_host") {
+      // A Routine Host has no issue filters, priority labels, or workflow
+      // contract. Prompts: name + provider + base branch + workspace root.
+      // See ADR 0062.
+      const defaultWorkspaceRoot = path.join(
+        ".symphonika",
+        "workspaces",
+        projectName
+      );
+      const workspaceRoot = await promptController.ask({
+        defaultValue: defaultWorkspaceRoot,
+        key: "workspaceRoot",
+        message: "Workspace root"
+      });
+      if (workspaceRoot.trim().length === 0) {
+        throw new Error("workspace root must not be empty");
+      }
+      return {
+        baseBranch,
+        excludedLabels: [],
+        mode: "routine_host",
+        priorityLabels: {},
+        projectName,
+        provider,
+        requiredLabels: [],
+        workspaceRoot,
+        workflowPath: ""
+      };
+    }
+
+    const defaultWorkflowPath = path.join(
+      input.metadata.projectRoot,
+      "WORKFLOW.md"
+    );
     const requiredLabels = parseLabelList(
       await promptController.ask({
         defaultValue: "agent-ready",
@@ -708,12 +990,6 @@ async function collectProjectSettings(input: {
       message: "Workflow Contract path"
     });
 
-    if (projectName.trim().length === 0) {
-      throw new Error("Project name must not be empty");
-    }
-    if (baseBranch.trim().length === 0) {
-      throw new Error("base branch must not be empty");
-    }
     if (workflowAnswer.trim().length === 0) {
       throw new Error("Workflow Contract path must not be empty");
     }
@@ -721,6 +997,7 @@ async function collectProjectSettings(input: {
     return {
       baseBranch,
       excludedLabels,
+      mode: "dispatch",
       priorityLabels,
       projectName,
       provider,
@@ -799,18 +1076,64 @@ function parsePriorityLabels(value: string): Record<string, number> {
 }
 
 function buildProjectConfig(input: {
-  metadata: Awaited<ReturnType<typeof inspectCurrentGitHubProject>>;
+  metadata: GitHubProjectMetadata | GitProjectMetadata;
   settings: ProjectInitSettings;
   stateRoot: string;
 }): unknown {
+  const workspace = {
+    root:
+      input.settings.mode === "routine_host" &&
+      input.settings.workspaceRoot !== undefined
+        ? input.settings.workspaceRoot
+        : path.join(input.stateRoot, "workspaces", input.settings.projectName),
+    git: {
+      remote: input.metadata.remote,
+      base_branch: input.settings.baseBranch
+    }
+  };
+  const agent = { provider: input.settings.provider };
+
+  if (input.settings.mode === "routine_host") {
+    // A Routine Host: name + workspace + agent + mode. tracker only if the
+    // origin is a GitHub remote (parsed into owner/repo); a non-GitHub remote
+    // gets no tracker, and kind:git routines targeting it are rejected at
+    // reload/doctor. See ADR 0062.
+    const github = asGitHubMetadata(input.metadata);
+    return {
+      ...(github === undefined
+        ? {}
+        : {
+            tracker: {
+              kind: "github",
+              owner: github.owner,
+              repo: github.repo,
+              token: "$GITHUB_TOKEN"
+            }
+          }),
+      agent,
+      mode: "routine_host",
+      name: input.settings.projectName,
+      workspace
+    };
+  }
+
+  const github = asGitHubMetadata(input.metadata);
+  if (github === undefined) {
+    // Dispatch mode runs from inspectCurrentGitHubProject, which throws on a
+    // non-GitHub origin, so this is unreachable. Throw rather than serialize a
+    // knowingly-invalid empty tracker that would hide a control-flow bug.
+    throw new Error(
+      `dispatch Project ${input.settings.projectName} requires a GitHub origin remote, but none was detected`
+    );
+  }
   return {
     name: input.settings.projectName,
     disabled: false,
     weight: 1,
     tracker: {
       kind: "github",
-      owner: input.metadata.owner,
-      repo: input.metadata.repo,
+      owner: github.owner,
+      repo: github.repo,
       token: "$GITHUB_TOKEN"
     },
     issue_filters: {
@@ -822,22 +1145,32 @@ function buildProjectConfig(input: {
       labels: input.settings.priorityLabels,
       default: 99
     },
-    workspace: {
-      root: path.join(
-        input.stateRoot,
-        "workspaces",
-        input.settings.projectName
-      ),
-      git: {
-        remote: input.metadata.remote,
-        base_branch: input.settings.baseBranch
-      }
-    },
-    agent: {
-      provider: input.settings.provider
-    },
+    workspace,
+    agent,
     workflow: input.settings.workflowPath
   };
+}
+
+// Returns GitHub owner/repo from either metadata variant: the dispatch
+// inspector carries them directly; the host inspector carries them as
+// optional githubOwner/githubRepo only when the origin parsed as github.com.
+// Dispatch mode always has them (inspectCurrentGitHubProject throws on a
+// non-GitHub origin); host mode has them only for a GitHub origin.
+function asGitHubMetadata(
+  metadata: GitHubProjectMetadata | GitProjectMetadata
+): { owner: string; repo: string } | undefined {
+  if ("owner" in metadata && "repo" in metadata) {
+    return { owner: metadata.owner, repo: metadata.repo };
+  }
+  if (
+    "githubOwner" in metadata &&
+    "githubRepo" in metadata &&
+    metadata.githubOwner !== undefined &&
+    metadata.githubRepo !== undefined
+  ) {
+    return { owner: metadata.githubOwner, repo: metadata.githubRepo };
+  }
+  return undefined;
 }
 
 type ProjectGitHubAccessValidation = {
@@ -851,7 +1184,7 @@ async function validateProjectGitHubAccess(input: {
   env: NodeJS.ProcessEnv;
   errors: string[];
   githubApi: GitHubApi;
-  project: ProjectConfig;
+  project: DispatchProjectConfig;
 }): Promise<ProjectGitHubAccessValidation | undefined> {
   const token = resolveEnvBackedValue(input.project.tracker.token, input.env);
   if (token === undefined) {
@@ -909,7 +1242,7 @@ async function createProjectLabels(input: {
   githubApi: GitHubApi;
   onWarning?: (warning: string) => void;
   prompt?: InitProjectPrompt;
-  project: ProjectConfig;
+  project: DispatchProjectConfig;
   validation: ProjectGitHubAccessValidation;
   warnings: string[];
   yes: boolean;
@@ -1131,23 +1464,30 @@ export async function runClearStale(
     errors.push(`projects.${options.project} not found in config`);
     return result("");
   }
+  if (project.mode !== "dispatch") {
+    errors.push(
+      `projects.${options.project} is a ${project.mode} project; clear-stale only applies to dispatch projects with sym:* labels`
+    );
+    return result("");
+  }
+  const dispatchProject: DispatchProjectConfig = project;
 
-  const repositoryName = `${project.tracker.owner}/${project.tracker.repo}`;
-  const token = resolveEnvBackedValue(project.tracker.token, env);
+  const repositoryName = `${dispatchProject.tracker.owner}/${dispatchProject.tracker.repo}`;
+  const token = resolveEnvBackedValue(dispatchProject.tracker.token, env);
   if (token === undefined) {
-    const variableName = envReferenceName(project.tracker.token);
+    const variableName = envReferenceName(dispatchProject.tracker.token);
     errors.push(
       variableName === undefined
-        ? `projects.${project.name}.tracker.token must reference an environment variable like $GITHUB_TOKEN`
-        : `projects.${project.name}.tracker.token references unset environment variable $${variableName}`
+        ? `projects.${dispatchProject.name}.tracker.token must reference an environment variable like $GITHUB_TOKEN`
+        : `projects.${dispatchProject.name}.tracker.token references unset environment variable $${variableName}`
     );
     return result(repositoryName);
   }
 
   const githubApi = options.githubApi ?? DEFAULT_GITHUB_API;
   const repository = {
-    owner: project.tracker.owner,
-    repo: project.tracker.repo,
+    owner: dispatchProject.tracker.owner,
+    repo: dispatchProject.tracker.repo,
     token
   };
   const access = await githubApi.validateRepositoryAccess(repository);
@@ -1328,21 +1668,21 @@ async function validateProject(
   errors: string[],
   githubApi: GitHubApi | undefined
 ): Promise<ProjectValidation> {
+  // Provider command + adapter checks are shared by both modes.
   const provider = config.providers[project.agent.provider];
-  let validForDispatch = true;
-
+  let providerOk = true;
   if (provider.command.trim().length === 0) {
     errors.push(
       `projects.${project.name}.agent.provider references ${project.agent.provider}, but its command is empty`
     );
-    validForDispatch = false;
+    providerOk = false;
   }
   const providerAdapter = agentProviders[project.agent.provider];
   if (providerAdapter === undefined) {
     errors.push(
       `projects.${project.name}.agent.provider references ${project.agent.provider}, but no adapter is registered`
     );
-    validForDispatch = false;
+    providerOk = false;
   } else {
     try {
       await providerAdapter.validate(provider.command);
@@ -1350,10 +1690,27 @@ async function validateProject(
       errors.push(
         `projects.${project.name}.providers.${project.agent.provider}.command is invalid: ${errorMessage(error)}`
       );
-      validForDispatch = false;
+      providerOk = false;
     }
   }
 
+  if (project.mode === "routine_host") {
+    // A Routine Host needs only a resolvable provider + workspace. No GitHub
+    // access, no Operational/Eligibility Labels. It never dispatches, so
+    // validForDispatch is false by construction; validForHosting reflects the
+    // provider check. The kind:git+tracker invariant is enforced in
+    // runDoctor's routine-validation pass (it needs the loaded declarations).
+    // See ADR 0062.
+    return {
+      missingEligibilityLabels: [],
+      missingOperationalLabels: [],
+      validForDispatch: false,
+      validForHosting: providerOk
+    };
+  }
+
+  // Dispatch Project: repo access + Operational Labels + Eligibility Labels.
+  const validForDispatch = providerOk;
   const token = resolveEnvBackedValue(project.tracker.token, env);
   if (token === undefined) {
     const variableName = envReferenceName(project.tracker.token);
@@ -1369,7 +1726,8 @@ async function validateProject(
     return {
       missingEligibilityLabels: [],
       missingOperationalLabels: [],
-      validForDispatch: false
+      validForDispatch: false,
+      validForHosting: false
     };
   }
 
@@ -1377,7 +1735,8 @@ async function validateProject(
     return {
       missingEligibilityLabels: [],
       missingOperationalLabels: [],
-      validForDispatch
+      validForDispatch,
+      validForHosting: false
     };
   }
 
@@ -1394,7 +1753,8 @@ async function validateProject(
     return {
       missingEligibilityLabels: [],
       missingOperationalLabels: [],
-      validForDispatch: false
+      validForDispatch: false,
+      validForHosting: false
     };
   }
 
@@ -1408,7 +1768,8 @@ async function validateProject(
     return {
       missingEligibilityLabels: [],
       missingOperationalLabels: [],
-      validForDispatch: false
+      validForDispatch: false,
+      validForHosting: false
     };
   }
 
@@ -1437,7 +1798,8 @@ async function validateProject(
     validForDispatch:
       validForDispatch &&
       missingEligibilityLabels.length === 0 &&
-      missingOperationalLabels.length === 0
+      missingOperationalLabels.length === 0,
+    validForHosting: false
   };
 }
 
@@ -1455,7 +1817,7 @@ function resolveEnvBackedValue(
 }
 
 function findMissingEligibilityLabels(
-  project: ProjectConfig,
+  project: DispatchProjectConfig,
   repositoryLabels: ReadonlySet<string>
 ): string[] {
   return [...new Set(project.issue_filters.labels_all)].filter(

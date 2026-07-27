@@ -93,10 +93,8 @@ describe("doctor", () => {
     const output = await runDoctorCommand(configPath);
 
     expect(process.exitCode).toBe(1);
-    expect(output.stderr).toContain("projects.0.tracker.kind");
-    expect(output.stderr).toContain("github");
-    expect(output.stderr).toContain("projects.0.agent.provider");
-    expect(output.stderr).toContain("codex");
+    expect(output.stderr).toContain("doctor failed");
+    expect(output.stderr).toContain("projects.0");
   });
 
   it("reports unknown workspace hook lifecycle keys", async () => {
@@ -576,9 +574,10 @@ async function writeValidConfig(
       ...(overrides.routinePaths === undefined
         ? []
         : [
-            "    routines:",
+            "routines:",
             ...overrides.routinePaths.map(
-              (routinePath) => `      - ${routinePath}`
+              (routinePath) =>
+                `  - project: symphonika\n    path: ${routinePath}`
             )
           ]),
       ""

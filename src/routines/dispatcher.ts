@@ -31,7 +31,11 @@ import {
   renderRoutinePrompt,
   RoutinePromptRenderError
 } from "./prompt-renderer.js";
-import type { RoutineSchedule, RoutineStatus } from "./types.js";
+import type {
+  RoutineSchedule,
+  RoutineStatus,
+  TargetedRoutineDeclaration
+} from "./types.js";
 import { createUlid } from "./ulid.js";
 import {
   prepareRoutineWorkspace as defaultPrepareRoutineWorkspace,
@@ -128,12 +132,33 @@ export async function dispatchDueRoutines(
         }
       }
     }
-    input.runStore.syncRoutines(project.name, project.routines ?? [], {
-      now,
-      protectedNames: project.invalidRoutineNames ?? [],
-      recomputeRecurring: input.recomputeSchedulesFromNow === true
-    });
   }
+  // Service-level routines: one sync call with all targeted routines across
+  // projects, each carrying its own projectName. protectedNamesByProject
+  // holds invalid-routine names per project (ADR 0060/0063).
+  const allRoutines: TargetedRoutineDeclaration[] = [];
+  const protectedNamesByProject: Record<string, string[]> = {};
+  const syncedProjects: string[] = [];
+  for (const project of projects) {
+    if (project.disabled === true) {
+      continue;
+    }
+    syncedProjects.push(project.name);
+    for (const routine of project.routines ?? []) {
+      allRoutines.push(routine);
+    }
+    if ((project.invalidRoutineNames ?? []).length > 0) {
+      protectedNamesByProject[project.name] = project.invalidRoutineNames ?? [];
+    }
+  }
+  input.runStore.syncRoutines(allRoutines, {
+    now,
+    // Include projects with zero routines so removal-detection runs for a
+    // project whose last routine was just removed (ADR 0063).
+    projects: syncedProjects,
+    protectedNamesByProject,
+    recomputeRecurring: input.recomputeSchedulesFromNow === true
+  });
   input.runStore.pruneRoutinesForUnknownProjects(
     projects.map((project) => project.name)
   );
@@ -673,7 +698,10 @@ async function discoverRoutinePullRequests(input: {
   routineName: string;
   runStore: RunStore;
 }): Promise<void> {
-  if (input.githubIssuesApi === undefined) {
+  if (
+    input.githubIssuesApi === undefined ||
+    input.project.tracker === undefined
+  ) {
     return;
   }
   const token = resolveEnvBackedValue(input.project.tracker.token, input.env);

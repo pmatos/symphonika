@@ -999,6 +999,7 @@ function providersConfig(): RunControllerProvidersConfig {
 
 function projectConfig(): RunControllerProjectConfig {
   return {
+    mode: "dispatch",
     agent: { provider: "codex" },
     issue_filters: {
       labels_all: ["agent-ready"],

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -61,6 +61,48 @@ describe("runSmoke", () => {
     expect(report.skipReason).toBeDefined();
     expect(report.skipReason).toMatch(/no eligible/i);
     expect(report.errors).toEqual([]);
+  });
+
+  it("succeeds when the config also declares a Routine Host (ADR 0062 mode split)", async () => {
+    const root = await makeTempRoot();
+    await writeBootstrapProject(root);
+    const configPath = path.join(root, "symphonika.yml");
+    const config = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      config +
+        [
+          "  - name: audit-host",
+          "    mode: routine_host",
+          "    workspace:",
+          "      root: ./.symphonika/workspaces/audit-host",
+          "      git:",
+          "        remote: git@github.com:pmatos/audit-host.git",
+          "        base_branch: main",
+          "    agent:",
+          "      provider: codex",
+          ""
+        ].join("\n")
+    );
+
+    const githubApi = successfulGitHubApi();
+    const githubIssuesApi: GitHubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([])
+    };
+
+    const report = await runSmoke({
+      agentProviders: { codex: fakeCodexProvider() },
+      configPath,
+      cwd: root,
+      env: { GITHUB_TOKEN: "test-token" },
+      githubApi,
+      githubIssuesApi
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.errors).toEqual([]);
+    expect(report.dispatched).toBe(false);
+    expect(report.skipReason).toMatch(/no eligible/i);
   });
 
   it("warns when a claimed issue blocks smoke without a live local run", async () => {
@@ -260,6 +302,118 @@ describe("runSmoke", () => {
     } finally {
       store.close();
     }
+  });
+
+  it("dispatches an eligible issue when the config also declares a Routine Host", async () => {
+    const root = await makeTempRoot();
+    await writeBootstrapProject(root);
+    const configPath = path.join(root, "symphonika.yml");
+    const config = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      config +
+        [
+          "  - name: audit-host",
+          "    mode: routine_host",
+          "    workspace:",
+          "      root: ./.symphonika/workspaces/audit-host",
+          "      git:",
+          "        remote: git@github.com:pmatos/audit-host.git",
+          "        base_branch: main",
+          "    agent:",
+          "      provider: codex",
+          ""
+        ].join("\n")
+    );
+
+    const issueNumber = 43;
+    const issueDirectory = `${issueNumber}-host-coexistence`;
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "symphonika",
+      "issues",
+      issueDirectory
+    );
+
+    const githubApi = successfulGitHubApi();
+    const githubIssuesApi: GitHubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        {
+          body: "Body of issue 43",
+          created_at: "2026-04-20T10:00:00Z",
+          html_url: `https://github.com/pmatos/symphonika/issues/${issueNumber}`,
+          id: 5043,
+          labels: [{ name: "agent-ready" }],
+          number: issueNumber,
+          state: "open",
+          title: "Host coexistence",
+          updated_at: "2026-04-21T11:00:00Z"
+        }
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codex: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { sessionId: "fake-session", type: "session_started" },
+          raw: { id: "fake-session", kind: "session" }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const prepareIssueWorkspace = vi.fn(
+      (input: PrepareIssueWorkspaceInput): Promise<PreparedIssueWorkspace> => {
+        void input;
+        return Promise.resolve({
+          branchName: `sym/symphonika/${issueDirectory}`,
+          branchRef: `refs/heads/sym/symphonika/${issueDirectory}`,
+          cachePath: path.join(
+            root,
+            ".symphonika",
+            "workspaces",
+            "symphonika",
+            ".cache",
+            "repo.git"
+          ),
+          issueDirectoryName: issueDirectory,
+          reused: false,
+          workspacePath
+        });
+      }
+    );
+    await createGitWorkspaceAhead({
+      branchName: `sym/symphonika/${issueDirectory}`,
+      workspacePath
+    });
+
+    const report = await runSmoke({
+      agentProviders: { codex },
+      configPath,
+      cwd: root,
+      env: { GITHUB_TOKEN: "test-token" },
+      githubApi,
+      githubIssuesApi,
+      prepareIssueWorkspace
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.dispatched).toBe(true);
+    expect(report.errors).toEqual([]);
+    expect(report.runDetail).toMatchObject({
+      issueNumber,
+      project: "symphonika",
+      state: "succeeded"
+    });
   });
 
   it("surfaces no_workspace_changes when an exit-0 provider leaves the issue branch at base", async () => {

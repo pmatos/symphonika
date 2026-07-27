@@ -2,12 +2,13 @@
 
 Symphonika is a fresh orchestrator for turning tracked project work into isolated coding-agent runs.
 
-> **Prospective model:** The **Dispatch Project** / **Routine Host** split and service-level
-> **Routine** / **Routine Target** / **Routine Fan-out** definitions are target-state vocabulary
-> for [#290](https://github.com/pmatos/symphonika/issues/290) and
-> [#295](https://github.com/pmatos/symphonika/issues/295), not the current implementation
-> contract. Until those issues land, `SPEC.md`, ADR-0060, and the Service Config loader remain
-> authoritative for the implemented flat **Project**, project-owned **Routine** model.
+> **Prospective model:** Service-level Routine **Fan-out** — a Routine targeting more than one
+> Project via a `projects:` list (or wildcard), with per-Project **Routine Target** state and
+> per-clock-event **Routine Fan-out** — is target-state vocabulary for
+> [#295](https://github.com/pmatos/symphonika/issues/295), not the current implementation contract.
+> The **Dispatch Project** / **Routine Host** mode split (ADR 0062) and single-target service-level
+> **Routine** declarations (ADR 0063) below are implemented: a Routine currently targets exactly one
+> declared Project by name.
 
 ## Language
 
@@ -20,23 +21,18 @@ The external system that provides issues, states, and metadata used for dispatch
 _Avoid_: Linear when speaking tracker-generically
 
 **Project**:
-A Symphonika-managed work source with its own workspace root and agent-provider settings, declared in
-the Service Config. Every Project declares whether it is a Dispatch Project or a Routine Host.
+A Symphonika-managed work source with a name, workspace root, and agent-provider settings. A Project
+declares a `mode` of `dispatch` or `routine_host` (ADR 0062); the mode determines which further
+fields (tracker, issue filters, priority, workflow) are required.
 _Avoid_: GitHub Project when referring to a Symphonika Project
 
 **Dispatch Project**:
-A Project that Symphonika polls for Eligible Issues and dispatches Runs against. It additionally
-requires tracker configuration, issue filters, priority mapping, and a Workflow Contract.
-_Avoid_: Project when the distinction from a Routine Host matters
+A Project with `mode: dispatch` (the default when omitted): polled for issues, requires tracker + issue filters + priority + workflow, and its dispatch validity gates on repo access and Operational/Eligibility Labels.
+_Avoid_: Routine Host when referring to an issue-dispatching Project
 
 **Routine Host**:
-A Project that is never polled for issues and exists only to give Routine Firings a repository and a
-workspace — including Routines with no natural repo tie (a nightly weather digest, say), since every
-Routine must target at least one Project. It declares a name, workspace root, and agent settings —
-plus tracker configuration only when its `kind: git` firings should get Routine Pull Request
-discovery. It has no issue filters, no priority mapping, no Workflow Contract, and no `sym:*`
-operational labels.
-_Avoid_: routine-only Project — a Routine Host owns no Routines; Routines target it
+A Project with `mode: routine_host`: never polled for issues, exists only to host Routine Firings. Requires name + workspace + agent (+ tracker only when hosting `kind: git` firings). Owns no routines — Routines target it by name.
+_Avoid_: Dispatch Project when referring to a firing-only Project
 
 **Service Config**:
 The reloadable orchestrator-owned configuration file that lists Projects, Routines, and service-level
@@ -158,40 +154,22 @@ One orchestrator-managed execution lifecycle for one issue in one workspace.
 _Avoid_: issue when referring to execution status
 
 **Routine**:
-A service-level scheduled prompt declaration that can launch a Coding Agent without a GitHub Issue,
-targeting one or more Projects — never zero. Symphonika has no project-less Routine: Routine Firing
-capacity caps and skip accounting are tracked per Project, so a Routine with no natural repo tie
-still declares against a minimal Routine Host rather than standing free of any Project. Its name is
-unique across the Service Config. When a targeted Project is disabled or omitted from the current
-valid Service Config snapshot, that Routine Target is inactive: it is hidden from default operator
-listings while its firing state remains durable for later re-enable.
-_Avoid_: workflow contract when referring to recurring or one-shot scheduled work; project-owned
-routine — a Routine names its Projects, not the other way round
-
-**Routine Target**:
-One Project named in a Routine's project list. Each Target carries its own schedule state, skip
-counters, and Firing history, so a single Routine can be firing against one Project while skipped
-against another.
-_Avoid_: routine instance
-
-**Routine Fan-out**:
-The expansion of one Routine clock event into one clock attempt per active Routine Target. Each
-attempt independently yields either a Routine Firing or a Routine Skip, so one clock event can fire
-against some Targets while skipping against others. Inactive Targets are excluded from the fan-out
-entirely: they are neither attempted nor recorded as a Skip. Siblings from a single clock event
-share a correlation identity so operator surfaces can present them as one event.
-_Avoid_: continuation, retry
+A service-level scheduled prompt declaration that targets one declared Project by name and can launch
+a Coding Agent without a GitHub Issue. A Routine Host owns no routines — Routines point *at* it.
+When a Routine's target Project is disabled or omitted from the current valid Service Config
+snapshot, the Routine is inactive: it is hidden from default operator listings while its firing
+state remains durable for later re-enable. See ADR 0063.
+_Avoid_: workflow contract when referring to recurring or one-shot scheduled work
 
 **Routine Firing**:
-One durable execution attempt of a Routine against one Routine Target, with its own workspace,
-provider logs, prompt evidence, and lifecycle state.
+One durable execution attempt of a Routine, with its own workspace, provider logs, prompt evidence,
+and lifecycle state.
 _Avoid_: run when specifically referring to non-issue scheduled execution
 
 **Routine Skip**:
 An operator-visible clock attempt that did not create a Routine Firing because of a catch-up window,
-an overlapping non-terminal firing, or a concurrency cap. It updates that Routine Target's latest
-skip evidence and rolling counters but creates no `routine_firings` row; a Routine can be skipped
-against one Target while firing normally against its others.
+an overlapping non-terminal firing, or a concurrency cap. It updates the Routine's latest skip
+evidence and rolling counters but creates no `routine_firings` row.
 _Avoid_: Routine Firing when no provider execution was launched
 
 **Routine Pull Request**:
@@ -298,11 +276,8 @@ _Avoid_: chat session
 - A **Normalized Event Log** is derived from a **Provider Event Log**
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
-- A **Routine** targets one or more **Projects** of either kind, and its name is unique across the
-  **Service Config**
-- One **Routine** clock event is evaluated once per active **Routine Target**, yielding either a
-  **Routine Firing** or a **Routine Skip**; inactive Targets are not evaluated
-- A **Routine Target** may record **Routine Skips** without creating Routine Firings
+- A **Routine** targets one declared **Project** by name and may create zero or more **Routine Firings**
+- A **Routine** may record **Routine Skips** without creating Routine Firings
 - A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**

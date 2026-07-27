@@ -108,6 +108,7 @@ function prState(
 
 function projectFixture(workflowPath: string): RunControllerProjectConfig {
   return {
+    mode: "dispatch",
     agent: { provider: "codex" },
     issue_filters: {
       labels_all: ["agent-ready"],

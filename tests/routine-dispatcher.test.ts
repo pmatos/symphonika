@@ -119,7 +119,8 @@ describe("RoutineFiringDispatcher", () => {
                   prompt: "Commit on {{branch.name}} ({{branch.ref}}).",
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
-                  sourcePath: path.join(root, "dependency-update.md")
+                  sourcePath: path.join(root, "dependency-update.md"),
+                  projectName: "alpha"
                 }
               ]
             }
@@ -221,7 +222,8 @@ describe("RoutineFiringDispatcher", () => {
                   prompt: "Update dependencies.",
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
-                  sourcePath: path.join(root, "dependency-update.md")
+                  sourcePath: path.join(root, "dependency-update.md"),
+                  projectName: "alpha"
                 }
               ]
             }
@@ -318,6 +320,7 @@ describe("RoutineFiringDispatcher", () => {
                 states: ["open"]
               },
               name: "alpha",
+              mode: "dispatch" as const,
               priority: { default: 99, labels: {} },
               routines: [
                 {
@@ -326,7 +329,8 @@ describe("RoutineFiringDispatcher", () => {
                   prompt: "Routine {{routine.name}} for {{project.name}}.",
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
-                  sourcePath: path.join(root, "daily-report.md")
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
                 }
               ],
               tracker: {
@@ -416,7 +420,8 @@ describe("RoutineFiringDispatcher", () => {
                   prompt: "Routine {{routine.name}} for {{project.name}}.",
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
-                  sourcePath: path.join(root, "daily-report.md")
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
                 }
               ]
             }
@@ -493,7 +498,8 @@ describe("RoutineFiringDispatcher", () => {
                   prompt: "Report.",
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
-                  sourcePath: path.join(root, "daily-report.md")
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
                 }
               ]
             }
@@ -571,7 +577,8 @@ describe("RoutineFiringDispatcher", () => {
                   prompt: "Report.",
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
-                  sourcePath: path.join(root, "daily-report.md")
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
                 }
               ]
             }
@@ -654,7 +661,8 @@ describe("RoutineFiringDispatcher", () => {
                   prompt: "Report.",
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
-                  sourcePath: path.join(root, "daily-report.md")
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
                 }
               ]
             }
@@ -709,7 +717,10 @@ describe("RoutineFiringDispatcher", () => {
       schedule: { cron: "* * * * *", tz: "Etc/UTC" },
       sourcePath: path.join(root, "minute-report.md")
     };
-    const project = { ...runStoreProjectFixture(), routines: [routine] };
+    const project = {
+      ...runStoreProjectFixture(),
+      routines: [{ ...routine, projectName: "alpha" }]
+    };
     const baseInput = {
       activeRuns,
       agentProviders: { codex: provider },
@@ -735,7 +746,7 @@ describe("RoutineFiringDispatcher", () => {
     };
 
     try {
-      runStore.syncRoutines("alpha", [routine], {
+      runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
         now: new Date("2026-05-22T09:59:30.000Z")
       });
 
@@ -793,7 +804,7 @@ describe("RoutineFiringDispatcher", () => {
         ...minuteRoutine(root),
         catchUp: "fire_once_if_missed" as const
       };
-      runStore.syncRoutines("alpha", [routine], {
+      runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
         now: new Date("2026-05-22T09:59:30.000Z")
       });
       expect(
@@ -844,7 +855,7 @@ describe("RoutineFiringDispatcher", () => {
       ...minuteRoutine(root),
       catchUp: "fire_once_if_missed" as const
     };
-    runStore.syncRoutines("alpha", [routine], {
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
       now: new Date("2026-05-22T09:59:30.000Z")
     });
     expect(
@@ -908,7 +919,7 @@ describe("RoutineFiringDispatcher", () => {
     const routine = minuteRoutine(root);
     const logger = pino({ enabled: false });
     const logInfo = vi.spyOn(logger, "info");
-    runStore.syncRoutines("alpha", [routine], {
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
       now: new Date("2026-05-22T09:59:30.000Z")
     });
     expect(
@@ -990,7 +1001,7 @@ describe("RoutineFiringDispatcher", () => {
     const routine = minuteRoutine(root);
     const logger = pino({ enabled: false });
     const logInfo = vi.spyOn(logger, "info");
-    runStore.syncRoutines("alpha", [routine], {
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
       now: new Date("2026-05-22T09:59:30.000Z")
     });
 
@@ -1048,7 +1059,7 @@ describe("RoutineFiringDispatcher", () => {
     const routine = minuteRoutine(root);
     const logger = pino({ enabled: false });
     const logInfo = vi.spyOn(logger, "info");
-    runStore.syncRoutines("alpha", [routine], {
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
       now: new Date("2026-05-22T09:59:30.000Z")
     });
     runStore.createRoutineFiring({
@@ -1146,7 +1157,7 @@ describe("RoutineFiringDispatcher", () => {
       respectsIssueLabels: false,
       runId: "previous-fire"
     });
-    runStore.syncRoutines("alpha", [routine], {
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
       now: new Date("2026-05-22T09:59:30.000Z")
     });
     runStore.createRoutineFiring({
@@ -1230,7 +1241,8 @@ describe("RoutineFiringDispatcher", () => {
                   prompt: "Bad {{issue.title}} {{run.id}} {{branch.name}}.",
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
-                  sourcePath: path.join(root, "daily-report.md")
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
                 }
               ]
             }
@@ -1375,7 +1387,8 @@ describe("RoutineFiringDispatcher", () => {
                   prompt: "Report.",
                   provider: null,
                   schedule: { at: "2026-05-22T10:00:00.000Z" },
-                  sourcePath: path.join(root, "daily-report.md")
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
                 }
               ]
             }
@@ -1409,7 +1422,8 @@ function dueRoutineProjectFixture(root: string, provider: "codex" | "claude") {
         prompt: "Routine {{routine.name}} for {{project.name}}.",
         provider,
         schedule: { at: "2026-05-22T10:00:00.000Z" },
-        sourcePath: path.join(root, "daily-report.md")
+        sourcePath: path.join(root, "daily-report.md"),
+        projectName: "alpha"
       }
     ]
   };
@@ -1424,6 +1438,7 @@ function runStoreProjectFixture() {
       labels_none: ["blocked"],
       states: ["open" as const]
     },
+    mode: "dispatch" as const,
     name: "alpha",
     priority: { default: 99, labels: {} },
     tracker: {
@@ -1496,7 +1511,13 @@ function recurringDispatchInput(input: {
         workspacePath: path.join(input.root, "workspace")
       }),
     projects: new Map([
-      ["alpha", { ...runStoreProjectFixture(), routines: [input.routine] }]
+      [
+        "alpha",
+        {
+          ...runStoreProjectFixture(),
+          routines: [{ ...input.routine, projectName: "alpha" }]
+        }
+      ]
     ]),
     providersConfig: {
       claude: { command: "claude fake" },

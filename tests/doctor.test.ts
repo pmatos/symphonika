@@ -11,10 +11,7 @@ import {
 } from "../src/doctor.js";
 import type { AgentProviderRegistry } from "../src/provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "../src/providers/index.js";
-import {
-  renderProvidersSliceUnit,
-  renderSliceUnit
-} from "../src/service.js";
+import { renderProvidersSliceUnit, renderSliceUnit } from "../src/service.js";
 
 const tempRoots: string[] = [];
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
@@ -471,6 +468,7 @@ describe("doctor", () => {
 
       const report = await runDoctor({
         configPath: path.join(root, "nonexistent.yml"),
+        env: {},
         homeDir
       });
 
@@ -490,6 +488,7 @@ describe("doctor", () => {
 
       const report = await runDoctor({
         configPath: path.join(root, "nonexistent.yml"),
+        env: {},
         homeDir
       });
 
@@ -514,6 +513,7 @@ describe("doctor", () => {
 
       const report = await runDoctor({
         configPath: path.join(root, "nonexistent.yml"),
+        env: {},
         homeDir
       });
 
@@ -543,6 +543,7 @@ describe("doctor", () => {
 
       const report = await runDoctor({
         configPath: path.join(root, "nonexistent.yml"),
+        env: {},
         homeDir
       });
 
@@ -578,6 +579,7 @@ describe("doctor", () => {
 
       const report = await runDoctor({
         configPath: path.join(root, "nonexistent.yml"),
+        env: {},
         homeDir
       });
 

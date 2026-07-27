@@ -1041,7 +1041,11 @@ describe("RunStore routines", () => {
       ).toBe(true);
 
       store.markRoutineFiringsFailed([
-        { firingId: "leaked-fire", reason: "leaked_routine_firing" }
+        {
+          firingId: "leaked-fire",
+          previousState: "running",
+          reason: "leaked_routine_firing"
+        }
       ]);
 
       expect(
@@ -1096,6 +1100,7 @@ describe("RunStore routines", () => {
       store.markRoutineFiringsFailed([
         {
           firingId: "pending-fire",
+          previousState: "running",
           reason: "leaked_routine_firing_cleanup_pending"
         }
       ]);
@@ -1144,6 +1149,68 @@ describe("RunStore routines", () => {
       expect(store.listRoutineFirings()).toEqual([
         expect.objectContaining({ id: "done-fire", state: "succeeded" })
       ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  // Regression: a host where systemd-run --user stays unavailable across
+  // every restart has findLeakedRoutineFirings() re-surface the same
+  // leaked_routine_firing_cleanup_pending row on every sweep. Recording a
+  // fresh "failed" transition on each re-sweep -- even though the row was
+  // already failed -- would grow routine_firing_state_transitions
+  // unboundedly for a row that never actually changed state.
+  it("markRoutineFiringsFailed does not record a duplicate transition when re-sweeping an already-failed row", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "pending-fire",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.updateRoutineFiringState("pending-fire", "running");
+
+      store.markRoutineFiringsFailed([
+        {
+          firingId: "pending-fire",
+          previousState: "running",
+          reason: "leaked_routine_firing_cleanup_pending"
+        }
+      ]);
+      // A later restart re-detects the same still-pending row;
+      // findLeakedRoutineFirings now reports its previousState as 'failed'.
+      store.markRoutineFiringsFailed([
+        {
+          firingId: "pending-fire",
+          previousState: "failed",
+          reason: "leaked_routine_firing_cleanup_pending"
+        }
+      ]);
+
+      const states = store
+        .listRoutineFiringTransitions("pending-fire")
+        .map((entry) => entry.state);
+      expect(states.filter((state) => state === "failed")).toHaveLength(1);
+      expect(
+        store.listRoutineFirings().find((entry) => entry.id === "pending-fire")
+      ).toMatchObject({
+        state: "failed",
+        terminalReason: "leaked_routine_firing_cleanup_pending"
+      });
     } finally {
       store.close();
     }

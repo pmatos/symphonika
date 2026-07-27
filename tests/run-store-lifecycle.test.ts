@@ -649,8 +649,16 @@ describe("run-store lifecycle CRUD", () => {
       store.updateRunState("pending", "running");
 
       store.markRunsStale([
-        { runId: "confirmed", reason: "leaked_active_run" },
-        { runId: "pending", reason: "leaked_active_run_cleanup_pending" }
+        {
+          previousState: "running",
+          reason: "leaked_active_run",
+          runId: "confirmed"
+        },
+        {
+          previousState: "running",
+          reason: "leaked_active_run_cleanup_pending",
+          runId: "pending"
+        }
       ]);
 
       const runsById = new Map(
@@ -677,14 +685,22 @@ describe("run-store lifecycle CRUD", () => {
       seedRun(store, { id: "pending", issueNumber: 1 });
       store.updateRunState("pending", "running");
       store.markRunsStale([
-        { runId: "pending", reason: "leaked_active_run_cleanup_pending" }
+        {
+          previousState: "running",
+          reason: "leaked_active_run_cleanup_pending",
+          runId: "pending"
+        }
       ]);
 
       // a plain 'stale' row from a confirmed sweep must not resurface.
       seedRun(store, { id: "confirmed", issueNumber: 2 });
       store.updateRunState("confirmed", "running");
       store.markRunsStale([
-        { runId: "confirmed", reason: "leaked_active_run" }
+        {
+          previousState: "running",
+          reason: "leaked_active_run",
+          runId: "confirmed"
+        }
       ]);
 
       const leaked = store.findLeakedRuns();
@@ -694,6 +710,52 @@ describe("run-store lifecycle CRUD", () => {
         runId: "pending",
         previousState: "stale",
         previousTerminalReason: "leaked_active_run_cleanup_pending"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  // Regression: a host where systemd-run --user stays unavailable across
+  // every restart has findLeakedRuns() re-surface the same
+  // leaked_active_run_cleanup_pending row on every sweep. Recording a fresh
+  // "stale" transition on each re-sweep -- even though the row was already
+  // stale -- would grow run_state_transitions unboundedly with duplicate
+  // entries for a row that never actually changed state, and that table
+  // renders verbatim in the dashboard's "State transitions" section.
+  it("markRunsStale does not record a duplicate transition when re-sweeping an already-stale row", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      seedRun(store, { id: "pending", issueNumber: 1 });
+      store.updateRunState("pending", "running");
+
+      store.markRunsStale([
+        {
+          previousState: "running",
+          reason: "leaked_active_run_cleanup_pending",
+          runId: "pending"
+        }
+      ]);
+      // A later restart re-detects the same still-pending row; findLeakedRuns
+      // now reports its previousState as 'stale', not 'running'.
+      store.markRunsStale([
+        {
+          previousState: "stale",
+          reason: "leaked_active_run_cleanup_pending",
+          runId: "pending"
+        }
+      ]);
+
+      const states = store
+        .listRunStateTransitions("pending")
+        .map((entry) => entry.state);
+      expect(states.filter((state) => state === "stale")).toHaveLength(1);
+      expect(
+        store.listRuns().find((entry) => entry.id === "pending")
+      ).toMatchObject({
+        state: "stale",
+        terminalReason: "leaked_active_run_cleanup_pending"
       });
     } finally {
       store.close();

@@ -220,6 +220,7 @@ export async function startDaemon(
   }
   runStore.markRunsStale(
     runOutcomes.map(({ confirmed, entry }) => ({
+      previousState: entry.previousState,
       reason: confirmed ? "leaked_active_run" : RUN_CLEANUP_PENDING_REASON,
       runId: entry.runId
     }))
@@ -285,6 +286,7 @@ export async function startDaemon(
   runStore.markRoutineFiringsFailed(
     firingOutcomes.map(({ confirmed, entry }) => ({
       firingId: entry.firingId,
+      previousState: entry.previousState,
       reason: confirmed
         ? "leaked_routine_firing"
         : FIRING_CLEANUP_PENDING_REASON

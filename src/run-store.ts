@@ -2639,7 +2639,9 @@ export class RunStore {
     }));
   }
 
-  markRunsStale(entries: { runId: string; reason: string }[]): void {
+  markRunsStale(
+    entries: { runId: string; reason: string; previousState: RunState }[]
+  ): void {
     const update = this.database.prepare(
       [
         "update runs set",
@@ -2653,7 +2655,15 @@ export class RunStore {
       for (const entry of entries) {
         const updatedAt = timestamp();
         update.run(entry.reason, updatedAt, entry.runId);
-        this.recordRunTransition(entry.runId, "stale", updatedAt);
+        // A re-swept row (previousState already 'stale') isn't changing
+        // state -- only its terminal_reason may bump between pending and
+        // confirmed -- so recording another "stale" transition here would
+        // duplicate an entry every restart for as long as cleanup stays
+        // unconfirmed, unboundedly, in a table rendered verbatim on the
+        // dashboard.
+        if (entry.previousState !== "stale") {
+          this.recordRunTransition(entry.runId, "stale", updatedAt);
+        }
       }
     });
     apply();
@@ -2702,7 +2712,11 @@ export class RunStore {
   }
 
   markRoutineFiringsFailed(
-    entries: { firingId: string; reason: string }[]
+    entries: {
+      firingId: string;
+      reason: string;
+      previousState: RoutineFiringState;
+    }[]
   ): void {
     const update = this.database.prepare(
       [
@@ -2717,7 +2731,16 @@ export class RunStore {
       for (const entry of entries) {
         const updatedAt = timestamp();
         update.run(entry.reason, updatedAt, entry.firingId);
-        this.recordRoutineFiringTransition(entry.firingId, "failed", updatedAt);
+        // See markRunsStale's identical guard: a re-swept row (previousState
+        // already 'failed') isn't changing state, so skip the duplicate
+        // transition record.
+        if (entry.previousState !== "failed") {
+          this.recordRoutineFiringTransition(
+            entry.firingId,
+            "failed",
+            updatedAt
+          );
+        }
       }
     });
     apply();

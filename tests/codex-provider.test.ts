@@ -615,7 +615,9 @@ describe("Codex provider validate", () => {
         commandExitCode: exitCode,
         commandStderr: stderr
       });
-      const provider = createCodexProvider({ processScope: noopProcessScope() });
+      const provider = createCodexProvider({
+        processScope: noopProcessScope()
+      });
 
       await expect(
         provider.validate(`${process.execPath} ${fakePath} app-server`)

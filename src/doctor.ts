@@ -505,7 +505,7 @@ async function checkInstalledUnitDrift(
     );
   }
   if (
-    !serviceContent.includes("Type=notify") ||
+    !/^Type=notify$/m.test(serviceContent) ||
     !serviceContent.includes("NotifyAccess=all") ||
     !/^WatchdogSec=/m.test(serviceContent) ||
     !/^TimeoutStartSec=/m.test(serviceContent)

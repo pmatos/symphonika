@@ -590,6 +590,39 @@ describe("doctor", () => {
       ).toBe(true);
     });
 
+    it("accepts systemd-valid whitespace around an active Type=notify directive", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        [
+          "[Service]",
+          "  Type = notify  ",
+          "WatchdogSec=90",
+          "TimeoutStartSec=300",
+          "NotifyAccess=all",
+          "Slice=symphonika-daemon.slice",
+          ""
+        ].join("\n"),
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      expect(
+        report.warnings.some(
+          (warning) =>
+            warning.includes("watchdog") && warning.includes("service install")
+        )
+      ).toBe(false);
+    });
+
     // Regression: a unit installed from a build between the watchdog
     // heartbeat landing (Type=notify/WatchdogSec=90) and NotifyAccess=all
     // being added to fix the child-process-notifier rejection would have

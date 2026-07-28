@@ -235,6 +235,106 @@ describe("daemon routine firing", () => {
     }
   });
 
+  it("records daemon_shutdown while graceful stop cancels a live routine firing", async () => {
+    const root = await makeTempRoot();
+    const fireAt = new Date(Date.now() + 50).toISOString();
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "alpha",
+      "routines",
+      "daily-report",
+      "routine-fire-daemon-shutdown"
+    );
+    await writeRoutineProject(root, fireAt);
+    let releaseProvider: (() => void) | undefined;
+    const providerStopped = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const provider = {
+      cancel: vi.fn(() => {
+        releaseProvider?.();
+        return Promise.resolve();
+      }),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        await providerStopped;
+        yield {
+          normalized: {
+            cancelled: true,
+            exitCode: 143,
+            type: "process_exit"
+          },
+          raw: { code: 143, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName: "main",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRoutineFiringId: () => "routine-fire-daemon-shutdown",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareRoutineWorkspace
+    });
+    let stopPromise: Promise<void> | undefined;
+
+    try {
+      await waitForFiringState(daemon.url, "daily-report", "alpha", "running");
+
+      stopPromise = daemon.stop();
+      await vi.waitFor(
+        () => {
+          expect(provider.cancel).toHaveBeenCalledWith(
+            "routine-fire-daemon-shutdown"
+          );
+        },
+        { timeout: 500 }
+      );
+      await stopPromise;
+
+      const store = openRunStore({
+        stateRoot: path.join(root, ".symphonika")
+      });
+      try {
+        expect(
+          store.getRoutineFiring("routine-fire-daemon-shutdown")
+        ).toMatchObject({
+          cancelReason: "daemon_shutdown",
+          cancelRequested: true,
+          state: "cancelled"
+        });
+      } finally {
+        store.close();
+      }
+    } finally {
+      releaseProvider?.();
+      await (stopPromise ?? daemon.stop());
+    }
+  });
+
   it("keeps a last-known-good Routine live when its declaration reload becomes invalid", async () => {
     const root = await makeTempRoot();
     const fireAt = new Date(Date.now() + 1_000).toISOString();

@@ -19,7 +19,10 @@ import {
   readConfiguredPollingIntervalMs,
   replaceIssuePollStatus
 } from "./issue-polling.js";
-import { ActiveRunRegistry } from "./lifecycle/active-runs.js";
+import {
+  ActiveRunRegistry,
+  CANCEL_REASONS
+} from "./lifecycle/active-runs.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
 import {
   createDaemonHeartbeat,
@@ -946,7 +949,22 @@ export async function startDaemon(
         clearTimeout(legacyRecheckTimer);
         legacyRecheckTimer = undefined;
       }
-      activeRuns.cancelAll();
+      for (const entry of activeRuns.list()) {
+        if (runStore.getRun(entry.runId) !== undefined) {
+          runStore.markCancelRequested(
+            entry.runId,
+            CANCEL_REASONS.DAEMON_SHUTDOWN
+          );
+          continue;
+        }
+        if (runStore.getRoutineFiring(entry.runId) !== undefined) {
+          runStore.markRoutineFiringCancelRequested(
+            entry.runId,
+            CANCEL_REASONS.DAEMON_SHUTDOWN
+          );
+        }
+      }
+      await activeRuns.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
       await scheduledWork;
       await Promise.allSettled(Array.from(inflightDispatches));
       try {

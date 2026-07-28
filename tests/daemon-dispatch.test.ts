@@ -371,6 +371,103 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("cancels a live provider with daemon_shutdown before graceful stop waits for it", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await mkdir(preparedWorkspace.workspacePath, { recursive: true });
+
+    let releaseProvider: (() => void) | undefined;
+    const providerStopped = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const codexProvider = {
+      cancel: vi.fn(() => {
+        releaseProvider?.();
+        return Promise.resolve();
+      }),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: {
+            sessionId: "shutdown-session",
+            type: "session_started"
+          },
+          raw: {
+            id: "shutdown-session",
+            kind: "session"
+          }
+        };
+        await providerStopped;
+        yield {
+          normalized: {
+            cancelled: true,
+            exitCode: 143,
+            type: "process_exit"
+          },
+          raw: {
+            code: 143,
+            kind: "exit"
+          }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 8,
+          title: "Cancel this run during daemon shutdown"
+        })
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => "run-daemon-shutdown",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+    let stopPromise: Promise<void> | undefined;
+
+    try {
+      await waitForRun(daemon.url, "running");
+
+      stopPromise = daemon.stop();
+      await vi.waitFor(
+        () => {
+          expect(codexProvider.cancel).toHaveBeenCalledWith(
+            "run-daemon-shutdown"
+          );
+        },
+        { timeout: 500 }
+      );
+      await stopPromise;
+
+      const store = openRunStore({
+        stateRoot: path.join(root, ".symphonika")
+      });
+      try {
+        expect(store.getRun("run-daemon-shutdown")).toMatchObject({
+          cancelReason: "daemon_shutdown",
+          cancelRequested: true,
+          state: "cancelled"
+        });
+      } finally {
+        store.close();
+      }
+    } finally {
+      releaseProvider?.();
+      await (stopPromise ?? daemon.stop());
+    }
+  });
+
   it("dispatches an issue that becomes eligible on a later poll interval", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(

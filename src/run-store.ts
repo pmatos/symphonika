@@ -37,7 +37,11 @@ export type FailureClassification =
   "transient" | "deterministic" | "input_required";
 
 export type CancelReason =
-  "closed_issue" | "eligibility_loss" | "no_progress" | "operator";
+  | "closed_issue"
+  | "daemon_shutdown"
+  | "eligibility_loss"
+  | "no_progress"
+  | "operator";
 
 export type RunStatus = {
   branchName: string;

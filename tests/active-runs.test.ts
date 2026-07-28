@@ -119,7 +119,7 @@ describe("ActiveRunRegistry", () => {
         projectName: "p",
         runId: "run-a"
       });
-      registry.cancelAll();
+      await registry.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
       await vi.advanceTimersByTimeAsync(100);
 
       expect(fire).not.toHaveBeenCalled();

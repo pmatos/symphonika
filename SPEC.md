@@ -720,6 +720,11 @@ workspace and logs are preserved, matching issue Run cancellation. Cancelling an
 Routine Firing already in a terminal state (`succeeded`, `failed`, `cancelled`) returns a clear
 error and makes no state change.
 
+Graceful daemon shutdown cancels every in-flight Routine Firing through the same provider
+cancellation path before waiting for dispatch work to drain, recording
+`cancel_reason = "daemon_shutdown"`. This is distinct from disabling or removing a Routine while
+the daemon remains active, which does not cancel its in-flight firing.
+
 A Routine with `disabled: true` in its own front matter transitions to `state = disabled`,
 `disabled_reason = "operator"` on the next reload; future scheduling stops but an in-flight firing
 continues to completion under the snapshot it started with — the daemon never cancels it as a side
@@ -1040,8 +1045,15 @@ Cancel active provider process when:
 - issue is closed
 - issue loses eligibility
 - operator cancels through CLI or UI
+- the daemon begins graceful shutdown
 
 Cancellation preserves workspace and logs.
+
+On graceful shutdown, the daemon first cancels queued or delayed work, records
+`cancel_reason = "daemon_shutdown"` for every currently in-flight Run and Routine Firing, and
+requests cancellation through each live Agent Provider. Only after those requests have been
+awaited does it wait for in-flight dispatches to unwind. This explicit shutdown path is required
+because provider processes may run in a cgroup outside the daemon's own process tree (ADR 0064).
 
 ### 12.4 Watchdog
 

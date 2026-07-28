@@ -32,6 +32,7 @@ export type {
 
 export const CANCEL_REASONS = {
   CLOSED_ISSUE: "closed_issue",
+  DAEMON_SHUTDOWN: "daemon_shutdown",
   ELIGIBILITY_LOSS: "eligibility_loss",
   NO_PROGRESS: "no_progress",
   OPERATOR: "operator"
@@ -157,7 +158,12 @@ export class ActiveRunRegistry {
     return this.scheduledWork.issueKeys();
   }
 
-  cancelAll(): void {
+  async cancelAll(reason: CancelReason): Promise<void> {
     this.scheduledWork.cancelAll();
+    await Promise.allSettled(
+      this.inFlightRuns
+        .list()
+        .map((entry) => this.inFlightRuns.requestCancel(entry.runId, reason))
+    );
   }
 }

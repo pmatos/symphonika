@@ -43,18 +43,23 @@ export class RoutineConfigEditor {
       throw new Error("service config must be a mapping");
     }
 
-    // Verify the target project exists.
+    // Verify the target project exists and is unambiguous.
     const projects = document.contents.get("projects", true);
     if (!isSeq(projects)) {
       throw new Error("service config projects must be a sequence");
     }
-    const projectExists = projects.items.some(
+    const projectMatchCount = projects.items.filter(
       (candidate) =>
         isMap(candidate) && candidate.get("name") === input.projectName
-    );
-    if (!projectExists) {
+    ).length;
+    if (projectMatchCount === 0) {
       throw new Error(
         `project "${input.projectName}" not found in service config`
+      );
+    }
+    if (projectMatchCount > 1) {
+      throw new Error(
+        `project "${input.projectName}" is declared more than once in service config; routine targets require a unique project name`
       );
     }
 

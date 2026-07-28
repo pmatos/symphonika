@@ -23,10 +23,10 @@ config-relative path. Otherwise it records an absolute path, matching `init`'s e
 repository-owned Workflow Contracts in user-level Service Config.
 
 `RoutineConfigEditor` parses `symphonika.yml` as a YAML document rather than converting it through a
-plain JavaScript object. It locates the named Project, verifies that `routines` is absent or a
-sequence, and loads existing Routine declarations through `RoutineDeclarationLoader`. Re-adding the
-same resolved path is an unchanged, successful operation. A different path whose declaration has
-the requested Routine name is rejected.
+plain JavaScript object. It requires the target Project name to occur exactly once, verifies that
+`routines` is absent or a sequence, and loads existing Routine declarations through
+`RoutineDeclarationLoader`. Re-adding the same resolved path is an unchanged, successful operation.
+A different path whose declaration has the requested Routine name is rejected.
 
 ## Validation and failure handling
 
@@ -57,10 +57,11 @@ operator-authored prompt instructions.
 
 Tests exercise behavior through the four public seams:
 
-1. `RoutineConfigEditor` appends or creates `routines`, rejects missing Projects and name
+1. `RoutineConfigEditor` appends or creates `routines`, rejects missing Projects and Routine name
    collisions, is idempotent by resolved path, and preserves unrelated comments and ordering.
 2. `runAddRoutine`/CLI creates valid cron and one-shot declarations, registers them, rejects invalid
-   flags and collisions without partial writes, and succeeds without GitHub or provider adapters.
+   flags, ambiguous target Projects, and collisions without partial writes, and succeeds without
+   GitHub or provider adapters.
 3. `runDoctor` reports malformed Routine declarations and duplicate Routine names through its
    existing error report and CLI failure output.
 4. Existing reload tests continue to prove that an invalid Routine edit retains the last-known-good

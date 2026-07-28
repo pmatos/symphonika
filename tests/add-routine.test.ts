@@ -226,7 +226,7 @@ describe("add-routine", () => {
       "projects:",
       "  - name: alpha",
       "    workflow: ./WORKFLOW.md",
-      "  - name: alpha",
+      '  - name: " alpha "',
       "    workflow: ./WORKFLOW.md",
       ""
     ].join("\n");

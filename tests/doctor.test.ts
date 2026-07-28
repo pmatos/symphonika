@@ -702,6 +702,41 @@ describe("doctor", () => {
       ).toBe(true);
     });
 
+    it("does not warn about operator-customized slice resource limits", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nSlice=symphonika-daemon.slice\n",
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-daemon.slice"),
+        renderSliceUnit()
+          .replace("MemoryHigh=4G", "MemoryHigh=2G")
+          .replace("MemoryMax=6G", "MemoryMax=3G"),
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-providers.slice"),
+        renderProvidersSliceUnit()
+          .replace("MemoryHigh=24G", "MemoryHigh=8G")
+          .replace("MemoryMax=32G", "MemoryMax=12G")
+          .replace("TasksMax=4096", "TasksMax=2048"),
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      expect(report.warnings).toEqual([]);
+    });
+
     it("reports no warnings when the installed units match the current generator output", async () => {
       const root = await makeTempRoot();
       const homeDir = await makeTempRoot();

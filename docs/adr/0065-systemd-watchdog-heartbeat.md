@@ -67,9 +67,11 @@ memory isolation:
   `.service` file generically (`ExecStart`/`Environment=PATH` are baked in from the operator's
   install-time environment); it checks structural markers instead — `WatchdogSec=`/
   `TimeoutStartSec=` are matched as line-anchored directives (not substring `.includes()`) so an
-  operator's own hand-tuned values aren't misreported as drift. The two `.slice` files carry no
-  install-specific content, so those are compared byte-for-byte against the current generator
-  output, same as ADR 0064's own drift concern.
+  operator's own hand-tuned values aren't misreported as drift. The two `.slice` files are checked
+  structurally too: each must retain its `[Slice]` section and required resource-directive keys,
+  while operator-tuned `MemoryHigh=`, `MemoryMax=`, and `TasksMax=` values are accepted. This keeps
+  `doctor` sensitive to incomplete cgroup-split upgrades without recommending a `--force`
+  remediation that would overwrite the per-host tuning documented in the README.
 
 ## Consequences
 

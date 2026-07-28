@@ -133,33 +133,6 @@ export async function startDaemon(
       "symphonika startup: failed legacy input_required runs"
     );
   }
-  // Rows updated within the grace window at startup are skipped by the
-  // initial sweep, so schedule one more pass after the window elapses to
-  // catch rows that an outgoing daemon wrote moments before restart.
-  const legacyRecheckDelayMs =
-    options.legacyInputRequiredRecheckDelayMs ??
-    INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS * 2;
-  let legacyRecheckTimer: ReturnType<typeof setTimeout> | undefined;
-  if (legacyRecheckDelayMs > 0) {
-    legacyRecheckTimer = setTimeout(() => {
-      legacyRecheckTimer = undefined;
-      try {
-        const migrated = runStore.failLegacyInputRequiredRuns();
-        if (migrated.length > 0) {
-          logger.info(
-            { migrated },
-            "symphonika legacy input_required recheck: failed remaining runs"
-          );
-        }
-      } catch (error) {
-        logger.error(
-          { err: error },
-          "symphonika legacy input_required recheck failed"
-        );
-      }
-    }, legacyRecheckDelayMs);
-    legacyRecheckTimer.unref?.();
-  }
   const RUN_CLEANUP_PENDING_REASON = "leaked_active_run_cleanup_pending";
   const FIRING_CLEANUP_PENDING_REASON = "leaked_routine_firing_cleanup_pending";
 
@@ -928,6 +901,37 @@ export async function startDaemon(
       }
     }, daemonHeartbeat.systemdWatchdogPingIntervalMs);
     systemdWatchdogTimer.unref?.();
+  }
+
+  // Rows updated within the grace window at startup are skipped by the
+  // initial sweep, so schedule one more pass after the window elapses to
+  // catch rows that an outgoing daemon wrote moments before restart. Arm the
+  // timer only now that startup has completed: the delay budget belongs to
+  // the serving daemon, and a slow startup must not consume it and fire the
+  // sweep before the daemon is ready.
+  let legacyRecheckTimer: ReturnType<typeof setTimeout> | undefined;
+  const legacyRecheckDelayMs =
+    options.legacyInputRequiredRecheckDelayMs ??
+    INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS * 2;
+  if (legacyRecheckDelayMs > 0) {
+    legacyRecheckTimer = setTimeout(() => {
+      legacyRecheckTimer = undefined;
+      try {
+        const migrated = runStore.failLegacyInputRequiredRuns();
+        if (migrated.length > 0) {
+          logger.info(
+            { migrated },
+            "symphonika legacy input_required recheck: failed remaining runs"
+          );
+        }
+      } catch (error) {
+        logger.error(
+          { err: error },
+          "symphonika legacy input_required recheck failed"
+        );
+      }
+    }, legacyRecheckDelayMs);
+    legacyRecheckTimer.unref?.();
   }
 
   return {

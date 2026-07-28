@@ -820,9 +820,11 @@ describe("daemon dispatch", () => {
     store.close();
 
     // Age the row to 30s ago: inside the 60s grace window, so the
-    // startup sweep skips it. Then start the daemon with a 300ms recheck
-    // delay and, before that timer fires, age the row past the grace
-    // window. The recheck must observe the new updated_at and reap it.
+    // startup sweep skips it. The recheck timer arms once startup
+    // completes, so with a 1ms delay it fires on the first event-loop turn
+    // after startDaemon resolves. The aging below runs synchronously right
+    // after the await, before any timer callback can fire — the recheck
+    // must observe the new updated_at and reap the row.
     const seeding = new Database(databasePath(stateRoot));
     try {
       seeding
@@ -838,7 +840,7 @@ describe("daemon dispatch", () => {
     const daemon = await startDaemon({
       configPath: path.join(root, "symphonika.yml"),
       cwd: root,
-      legacyInputRequiredRecheckDelayMs: 300,
+      legacyInputRequiredRecheckDelayMs: 1,
       logger: pino({ enabled: false }),
       port: 0
     });

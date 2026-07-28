@@ -411,6 +411,7 @@ async function loadRuntimeConfigSnapshot(input: {
   const pollingProjects: PollingProjectConfig[] = [];
   const dispatchProjects: RuntimeProjectConfig[] = [];
   const invalidRoutines: RuntimeConfigSnapshot["invalidRoutines"] = [];
+  const projectIndexByName = new Map<string, number>();
 
   // First pass: validate each Project against its mode-specific schema and
   // build the runtime map. Dispatch Projects enter both `pollingProjects`
@@ -418,6 +419,15 @@ async function loadRuntimeConfigSnapshot(input: {
   // routine dispatcher and issue dispatch share). Routine Hosts enter only
   // `dispatchProjects` — they are never polled. See ADR 0062.
   for (const [index, rawProject] of parsed.data.projects.entries()) {
+    if (
+      rawProject !== null &&
+      typeof rawProject === "object" &&
+      "name" in rawProject &&
+      typeof rawProject.name === "string" &&
+      !projectIndexByName.has(rawProject.name.trim())
+    ) {
+      projectIndexByName.set(rawProject.name.trim(), index);
+    }
     if (projectModeOf(rawProject) === "routine_host") {
       if (
         loadRoutineHostProject({
@@ -546,8 +556,13 @@ async function loadRuntimeConfigSnapshot(input: {
       const attached: TargetedRoutineDeclaration[] = [];
       for (const routine of routines) {
         if (needsTracker && routine.kind === "git") {
+          const projectIndex = projectIndexByName.get(projectName);
+          const projectPrefix =
+            projectIndex === undefined
+              ? ""
+              : `projects.${projectIndex}.routines: `;
           errors.push(
-            `routine "${routine.name}" (kind: git) targets routine host "${projectName}" which declares no tracker; a kind: git routine requires a tracker for PR discovery`
+            `${projectPrefix}routine "${routine.name}" (kind: git) targets routine host "${projectName}" which declares no tracker; a kind: git routine requires a tracker for PR discovery`
           );
           continue;
         }

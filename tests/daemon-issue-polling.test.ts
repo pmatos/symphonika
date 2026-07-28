@@ -133,6 +133,28 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("shows a tracker-less Routine Host targeted by a git Routine as invalid on the live dashboard", async () => {
+    const root = await makeTempRoot();
+    await writeTrackerLessGitRoutineHost(root);
+
+    const daemon = await startDaemon({
+      cwd: root,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const response = await fetch(daemon.url);
+      const html = await response.text();
+
+      expect(html).toContain(
+        '<tr><td>audit-host</td><td>1</td><td class="c-detail">invalid'
+      );
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("shows filtered snapshots when required, excluded, or operational labels block eligibility", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);
@@ -586,6 +608,48 @@ async function writeValidProject(
     ].join("\n")
   );
   await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+}
+
+async function writeTrackerLessGitRoutineHost(root: string): Promise<void> {
+  await mkdir(root, { recursive: true });
+  await writeFile(
+    path.join(root, "refactor-audit.md"),
+    [
+      "---",
+      "name: refactor-audit",
+      "kind: git",
+      "schedule:",
+      '  cron: "0 1 * * 1-5"',
+      "  tz: Etc/UTC",
+      "---",
+      "Run an audit."
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "providers:",
+      "  codex:",
+      '    command: "codex -p symphonika"',
+      "  claude:",
+      '    command: "claude -p"',
+      "projects:",
+      "  - name: audit-host",
+      "    mode: routine_host",
+      "    workspace:",
+      "      root: ./.symphonika/workspaces/audit-host",
+      "      git:",
+      "        remote: git@github.com:pmatos/audit-host.git",
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      "routines:",
+      "  - project: audit-host",
+      "    path: ./refactor-audit.md"
+    ].join("\n")
+  );
 }
 
 async function writeConfigWithInvalidAndValidProjects(

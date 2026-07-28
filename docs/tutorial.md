@@ -509,6 +509,11 @@ If you flip the *existing* Project from Codex to Claude, finish any in-flight
 runs first — the workspace is reusable, but mid-flight provider events come
 from whichever provider started the attempt.
 
+A third provider, Oh My Pi (`omp`), is proposed in
+[ADR-0066](./adr/0066-oh-my-pi-provider.md) but is not yet implemented. Today
+`agent.provider: omp` fails config validation, and an `omp:` block under
+`providers:` parses but is ignored — so this tutorial does not cover it yet.
+
 ---
 
 ## 15. Where to go next

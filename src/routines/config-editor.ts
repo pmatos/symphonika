@@ -48,10 +48,16 @@ export class RoutineConfigEditor {
     if (!isSeq(projects)) {
       throw new Error("service config projects must be a sequence");
     }
-    const projectMatchCount = projects.items.filter((candidate) => {
-      const candidateName = isMap(candidate)
-        ? candidate.get("name")
-        : undefined;
+    const resolvedProjects = (
+      document.toJS() as { projects: readonly unknown[] }
+    ).projects;
+    const projectMatchCount = resolvedProjects.filter((candidate) => {
+      const candidateName =
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "name" in candidate
+          ? candidate.name
+          : undefined;
       return (
         typeof candidateName === "string" &&
         candidateName.trim() === input.projectName

@@ -22,11 +22,12 @@ the generated file is beneath the Service Config directory, the editor records a
 config-relative path. Otherwise it records an absolute path, matching `init`'s existing handling of
 repository-owned Workflow Contracts in user-level Service Config.
 
-`RoutineConfigEditor` parses `symphonika.yml` as a YAML document rather than converting it through a
-plain JavaScript object. It requires the target Project name to occur exactly once, verifies that
-`routines` is absent or a sequence, and loads existing Routine declarations through
-`RoutineDeclarationLoader`. Re-adding the same resolved path is an unchanged, successful operation.
-A different path whose declaration has the requested Routine name is rejected.
+`RoutineConfigEditor` keeps `symphonika.yml` as a YAML document so edits preserve comments and key
+ordering. It counts target Projects from the document's resolved JavaScript representation, requiring
+the target name to occur exactly once after resolving YAML aliases and applying Project-name
+trimming. It verifies that `routines` is absent or a sequence and loads existing Routine declarations
+through `RoutineDeclarationLoader`. Re-adding the same resolved path is an unchanged, successful
+operation. A different path whose declaration has the requested Routine name is rejected.
 
 ## Validation and failure handling
 

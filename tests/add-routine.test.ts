@@ -249,6 +249,36 @@ describe("add-routine", () => {
     expect(await readFile(configPath, "utf8")).toBe(original);
   });
 
+  it("refuses an aliased duplicate target Project without leaving a Routine file", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const original = [
+      "projects:",
+      "  - &alpha",
+      "    name: alpha",
+      "    workflow: ./WORKFLOW.md",
+      "  - *alpha",
+      ""
+    ].join("\n");
+    await writeFile(configPath, original);
+
+    const report = await runAddRoutine({
+      configPath,
+      cwd: root,
+      kind: "report",
+      name: "aliased-target",
+      project: "alpha",
+      schedule: "daily"
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain(
+      'project "alpha" is declared more than once in service config; routine targets require a unique project name'
+    );
+    await expect(readFile(report.filePath, "utf8")).rejects.toThrow();
+    expect(await readFile(configPath, "utf8")).toBe(original);
+  });
+
   it("refuses a Routine name already registered under another path", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");

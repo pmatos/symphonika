@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { performance } from "node:perf_hooks";
 
 import { serve, type ServerType } from "@hono/node-server";
 import type { Logger } from "pino";
@@ -330,7 +331,8 @@ export async function startDaemon(
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let systemdWatchdogTimer: ReturnType<typeof setInterval> | undefined;
   let lastTickAtMs: number | undefined;
-  let tickLoopStartedAtMs: number | undefined;
+  let lastTickAtMonotonicMs: number | undefined;
+  let tickLoopStartedAtMonotonicMs: number | undefined;
   let polling = false;
   let scheduledWork = Promise.resolve();
   let lastPollErrorsKey = "";
@@ -682,8 +684,10 @@ export async function startDaemon(
     // interval exceeds WatchdogSec, or never ping at all before a config is
     // loaded (see docs/adr/0065). This timestamp is what that timer's
     // liveness gate reads to decide whether a hung tick should withhold the
-    // ping.
+    // ping. Keep the externally exposed epoch timestamp separate from the
+    // monotonic timestamp used for elapsed-time liveness decisions.
     lastTickAtMs = Date.now();
+    lastTickAtMonotonicMs = performance.now();
   };
   const refreshPollingInterval = (): void => {
     if (!state.configExists) {
@@ -702,7 +706,7 @@ export async function startDaemon(
     }
     pollTimer = setInterval(scheduleTick, intervalMs);
     pollTimer.unref?.();
-    tickLoopStartedAtMs ??= Date.now();
+    tickLoopStartedAtMonotonicMs ??= performance.now();
     logger.info(
       { pollingIntervalMs: intervalMs },
       "symphonika polling interval reloaded"
@@ -809,8 +813,10 @@ export async function startDaemon(
         runId: entry.runId
       })),
     getLastTickAt: () => lastTickAtMs,
+    getLastTickAtMonotonic: () => lastTickAtMonotonicMs,
     getPollingIntervalMs: () => intervalMs,
-    getTickLoopStartedAt: () => tickLoopStartedAtMs,
+    getTickLoopStartedAtMonotonic: () => tickLoopStartedAtMonotonicMs,
+    monotonicNow: () => performance.now(),
     getConcurrency: () => {
       const { maxInFlight } = runtimeConfig.globalConcurrency();
       const perProject: Array<{
@@ -881,7 +887,7 @@ export async function startDaemon(
     if (intervalMs !== undefined) {
       pollTimer = setInterval(scheduleTick, intervalMs);
       pollTimer.unref?.();
-      tickLoopStartedAtMs = Date.now();
+      tickLoopStartedAtMonotonicMs = performance.now();
     }
   }
 
@@ -914,9 +920,9 @@ export async function startDaemon(
         isTickRecentEnoughForSystemdWatchdog({
           configExists: state.configExists,
           effectiveIntervalMs: intervalMs ?? DEFAULT_POLLING_INTERVAL_MS,
-          lastTickAtMs,
-          now: Date.now(),
-          tickLoopStartedAtMs
+          lastTickAtMonotonicMs,
+          nowMonotonicMs: performance.now(),
+          tickLoopStartedAtMonotonicMs
         })
       ) {
         daemonHeartbeat.notifySystemdWatchdog().catch((error: unknown) => {

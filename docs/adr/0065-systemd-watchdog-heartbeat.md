@@ -58,6 +58,12 @@ memory isolation:
   stay truthfully null pre-first-tick, only the banner's own age computation uses the fallback. A
   human-visible warning an operator can notice on a dashboard visit, before the systemd watchdog
   would eventually restart the unit.
+- Tick liveness uses a monotonic clock for elapsed-time decisions. The daemon records parallel
+  `performance.now()` values when the tick loop starts and when a tick completes; the systemd
+  watchdog gate and dashboard stale banner compare those values with the same monotonic clock so
+  NTP corrections, VM snapshot restores, and manual wall-clock changes cannot mask a real stall or
+  create a false one. The epoch-valued `Date.now()` timestamp remains separate and continues to
+  back `/api/status`'s human/API-facing `lastTickAt` and `tickAgeMs` fields.
 - `symphonika doctor` warns (does not fail) when an installed systemd unit predates this change —
   missing `Type=notify`, `NotifyAccess=all`, a `WatchdogSec=` directive, or a `TimeoutStartSec=`
   directive — pointing the operator at `symphonika service install --force`, and noting that a

@@ -282,13 +282,13 @@ describe("startDaemon", () => {
     }
   });
 
-  // Regression: lastTickAtMs === undefined used to make the watchdog gate
+  // Regression: a missing last-tick timestamp used to make the watchdog gate
   // unconditionally alive, which was correct only for "no config loaded, no
   // ticks ever scheduled" but also silently covered "config loaded, but the
   // very first scheduled tick hung" -- the exact startup-hang failure mode
   // this feature exists to catch. It must fall back to when the tick loop
   // started and eventually go stale.
-  it("stops pinging the watchdog if the first scheduled tick hangs", async () => {
+  it("stops pinging the watchdog if the first scheduled tick hangs after the wall clock steps backward", async () => {
     const cwd = await makeTempRoot();
     await writeMinimalProject(cwd, { pollingIntervalMs: 30 });
     let listOpenIssuesCalls = 0;
@@ -326,6 +326,10 @@ describe("startDaemon", () => {
       logger: pino({ enabled: false }),
       port: 0
     });
+    const wallNow = Date.now();
+    const dateNow = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(wallNow - 60 * 60_000);
 
     try {
       await new Promise((resolve) => setTimeout(resolve, 60));
@@ -337,6 +341,7 @@ describe("startDaemon", () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
       expect(daemonHeartbeat.watchdogCalls).toBe(staleCount);
     } finally {
+      dateNow.mockRestore();
       releaseHang?.();
       await daemon.stop();
     }

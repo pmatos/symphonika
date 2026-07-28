@@ -303,6 +303,105 @@ describe("Routine Host reload (ADR 0062)", () => {
     expect(host?.routines ?? []).toEqual([]);
   });
 
+  it("soft-disables a persisted kind: git routine rejected by a tracker-less host and restores it when the tracker returns", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const configPath = path.join(root, "symphonika.yml");
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      path.join(root, "refactor-audit.md"),
+      [
+        "---",
+        "name: refactor-audit",
+        "kind: git",
+        "schedule:",
+        '  cron: "0 1 * * *"',
+        "  tz: Etc/UTC",
+        "---",
+        "Run an audit."
+      ].join("\n")
+    );
+    const writeConfig = (tracker: boolean): Promise<void> =>
+      writeFile(
+        configPath,
+        [
+          "state:",
+          "  root: ./.symphonika",
+          "providers:",
+          "  codex:",
+          '    command: "codex -p symphonika"',
+          "  claude:",
+          '    command: "claude -p"',
+          "projects:",
+          ...hostProjectLines("audit-host", { tracker }),
+          "routines:",
+          "  - project: audit-host",
+          "    path: ./refactor-audit.md"
+        ].join("\n")
+      );
+
+    await writeConfig(true);
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+    const runStore = openRunStore({ stateRoot });
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.reject(
+          new Error("rejected routine must not prepare a workspace")
+        )
+    );
+    const dispatch = (now: Date) =>
+      dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: fakeAgentProviders(),
+        configDir: root,
+        globalConcurrency: { maxInFlight: undefined },
+        now,
+        prepareRoutineWorkspace,
+        projects: reloader.projectsByName(),
+        providersConfig: reloader.providersConfig(),
+        runStore,
+        stateRoot
+      });
+
+    try {
+      await dispatch(new Date("2026-07-27T00:00:00.000Z"));
+      expect(runStore.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          name: "refactor-audit",
+          state: "active"
+        })
+      );
+
+      await writeConfig(false);
+      await reloader.reload();
+      const rejected = await dispatch(new Date("2026-07-27T02:00:00.000Z"));
+
+      expect(rejected.fired).toEqual([]);
+      expect(prepareRoutineWorkspace).not.toHaveBeenCalled();
+      expect(runStore.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: "rejected_tracker_less_host",
+          name: "refactor-audit",
+          state: "disabled"
+        })
+      );
+
+      await writeConfig(true);
+      await reloader.reload();
+      await dispatch(new Date("2026-07-27T02:00:00.000Z"));
+      expect(runStore.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          name: "refactor-audit",
+          state: "active"
+        })
+      );
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("rejects the removed per-project routines: key with a migration error", async () => {
     const root = await makeTempRoot();
     await mkdir(root, { recursive: true });

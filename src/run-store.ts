@@ -1182,6 +1182,8 @@ export class RunStore {
   // set is soft-disabled without touching another project's rows.
   // `protectedNamesByProject` holds invalid-routine names per project so their
   // rows are not demoted to removed_from_config (ADR 0060).
+  // `trackerlessGitNamesByProject` identifies declarations rejected by ADR
+  // 0062 so persisted rows are safely disabled with their precise cause.
   syncRoutines(
     routines: TargetedRoutineDeclaration[],
     options: {
@@ -1193,6 +1195,7 @@ export class RunStore {
       projects?: string[];
       protectedNamesByProject?: Record<string, string[]>;
       recomputeRecurring?: boolean;
+      trackerlessGitNamesByProject?: Record<string, string[]>;
     } = {}
   ): void {
     const now = timestamp();
@@ -1271,10 +1274,13 @@ export class RunStore {
     const apply = this.database.transaction(() => {
       for (const [projectName, projectRoutines] of byProject) {
         const declaredNames = projectRoutines.map((routine) => routine.name);
+        const trackerlessGitNames =
+          options.trackerlessGitNamesByProject?.[projectName] ?? [];
         const excludedNames = [
           ...new Set([
             ...declaredNames,
-            ...(options.protectedNamesByProject?.[projectName] ?? [])
+            ...(options.protectedNamesByProject?.[projectName] ?? []),
+            ...trackerlessGitNames
           ])
         ];
         // Excludes only rows already disabled *for this same reason* — an
@@ -1294,6 +1300,14 @@ export class RunStore {
               `update routines set state = 'disabled', disabled_reason = 'removed_from_config', updated_at = ? where project_name = ? and name not in (${placeholders}) and not (state = 'disabled' and disabled_reason = 'removed_from_config')`
             )
             .run(now, projectName, ...excludedNames);
+        }
+        if (trackerlessGitNames.length > 0) {
+          const placeholders = trackerlessGitNames.map(() => "?").join(", ");
+          this.database
+            .prepare(
+              `update routines set state = 'disabled', disabled_reason = 'rejected_tracker_less_host', updated_at = ? where project_name = ? and name in (${placeholders}) and not (state = 'disabled' and disabled_reason = 'rejected_tracker_less_host')`
+            )
+            .run(now, projectName, ...trackerlessGitNames);
         }
         for (const routine of projectRoutines) {
           const scheduleValues =

@@ -135,9 +135,12 @@ export async function dispatchDueRoutines(
   }
   // Service-level routines: one sync call with all targeted routines across
   // projects, each carrying its own projectName. protectedNamesByProject
-  // holds invalid-routine names per project (ADR 0060/0063).
+  // holds invalid-routine names per project (ADR 0060/0063), while the
+  // tracker-less set identifies valid files rejected by host compatibility
+  // for a precise soft-disable (ADR 0066).
   const allRoutines: TargetedRoutineDeclaration[] = [];
   const protectedNamesByProject: Record<string, string[]> = {};
+  const trackerlessGitNamesByProject: Record<string, string[]> = {};
   const syncedProjects: string[] = [];
   for (const project of projects) {
     if (project.disabled === true) {
@@ -150,6 +153,10 @@ export async function dispatchDueRoutines(
     if ((project.invalidRoutineNames ?? []).length > 0) {
       protectedNamesByProject[project.name] = project.invalidRoutineNames ?? [];
     }
+    if ((project.trackerlessGitRoutineNames ?? []).length > 0) {
+      trackerlessGitNamesByProject[project.name] =
+        project.trackerlessGitRoutineNames ?? [];
+    }
   }
   input.runStore.syncRoutines(allRoutines, {
     now,
@@ -157,6 +164,7 @@ export async function dispatchDueRoutines(
     // project whose last routine was just removed (ADR 0063).
     projects: syncedProjects,
     protectedNamesByProject,
+    trackerlessGitNamesByProject,
     recomputeRecurring: input.recomputeSchedulesFromNow === true
   });
   input.runStore.pruneRoutinesForUnknownProjects(

@@ -1126,6 +1126,59 @@ describe("Oh My Pi RPC provider", () => {
     await waitForProcessExit(Number(await waitForFileContent(pidPath)));
   });
 
+  it("streams handshake events while awaiting a correlated response", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const triggerPath = path.join(root, "resume");
+    const fakeOmpPath = path.join(root, "fake-delayed-response-omp.mjs");
+    await writeFakeDelayedResponseOmp(fakeOmpPath, triggerPath);
+    // fs.watch throws on a missing path; the fake only reacts to changes.
+    await writeFile(triggerPath, "");
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+    const input: ProviderRunInput = {
+      ...providerInputFixture(),
+      provider: {
+        command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+        name: "omp"
+      },
+      workspacePath
+    };
+
+    const iterator = provider.runAttempt(input)[Symbol.asyncIterator]();
+    // The prompt response is withheld until the trigger file appears, but
+    // the deltas streamed before it must arrive incrementally rather than
+    // being retained for a later batch.
+    const earlyDeltas: string[] = [];
+    while (earlyDeltas.length < 3) {
+      const next = await iterator.next();
+      expect(next.done).toBe(false);
+      const event = next.value as ProviderEvent;
+      const normalized = event.normalized;
+      if (
+        normalized?.type === "message" &&
+        typeof normalized.message === "string"
+      ) {
+        earlyDeltas.push(normalized.message);
+      }
+    }
+    expect(earlyDeltas).toEqual(["early-1", "early-2", "early-3"]);
+
+    await writeFile(triggerPath, "resume\n");
+    const remaining: ProviderEvent[] = [];
+    while (true) {
+      const next = await iterator.next();
+      if (next.done === true) {
+        break;
+      }
+      remaining.push(next.value);
+    }
+    expect(remaining.at(-1)?.normalized).toMatchObject({
+      exitCode: 0,
+      type: "process_exit"
+    });
+  });
+
   it("fails the turn when OMP accepts the prompt without invoking an agent", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -1961,6 +2014,44 @@ async function writeFakeInputOmp(filePath: string): Promise<void> {
       "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
       "    send({ type: 'extension_ui_request', id: 'ui-1', method: 'input', title: 'Choose a release channel', placeholder: 'stable' });",
       "    process.exit(0);",
+      "  }",
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakeDelayedResponseOmp(
+  filePath: string,
+  triggerPath: string
+): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "import { watch } from 'node:fs';",
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "function sendDelta(delta) {",
+      "  send({ type: 'message_update', message: { role: 'assistant' }, assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta, partial: { role: 'assistant' } } });",
+      "}",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
+      "let promptId;",
+      `watch(${JSON.stringify(triggerPath)}, () => {`,
+      "  if (promptId === undefined) return;",
+      "  send({ id: promptId, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
+      "  send({ type: 'agent_end', isTerminal: true, messages: [] });",
+      "  process.exit(0);",
+      "});",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-335', model: { provider: 'openai', id: 'gpt-5.4' } } });",
+      "  if (command.type === 'prompt') {",
+      "    promptId = command.id;",
+      "    sendDelta('early-1');",
+      "    sendDelta('early-2');",
+      "    sendDelta('early-3');",
       "  }",
       "}",
       ""

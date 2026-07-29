@@ -62,7 +62,6 @@ type PendingRpcChunks = {
 };
 
 type ResponseReadResult = {
-  events: ProviderEvent[];
   response?: unknown;
   stopped: boolean;
 };
@@ -132,12 +131,11 @@ export function createOmpProvider(
       activeRun.queue = queue;
 
       try {
-        const ready = await readUntilFrame(
+        const ready = yield* readUntilFrame(
           queue,
           activeRun,
           (raw) => stringField(raw, "type") === "ready"
         );
-        yield* ready.events;
         if (ready.stopped) {
           return;
         }
@@ -176,13 +174,12 @@ export function createOmpProvider(
             protocolVersion: 2,
             type: "negotiate_protocol"
           });
-          const negotiated = await readUntilResponse(
+          const negotiated = yield* readUntilResponse(
             queue,
             id,
             activeRun,
             mapNegotiationResponse
           );
-          yield* negotiated.events;
           if (
             negotiated.stopped ||
             !negotiatedV2Response(negotiated.response)
@@ -196,13 +193,12 @@ export function createOmpProvider(
 
         const stateId = requestId(activeRun);
         writeJson(child, { id: stateId, type: "get_state" });
-        const state = await readUntilResponse(
+        const state = yield* readUntilResponse(
           queue,
           stateId,
           activeRun,
           (raw) => mapStateResponse(raw, activeRun)
         );
-        yield* state.events;
         if (state.stopped || !successfulResponse(state.response)) {
           shutdownProcess(child);
           yield* drainUntilExit(queue, activeRun);
@@ -215,13 +211,12 @@ export function createOmpProvider(
           message: input.prompt,
           type: "prompt"
         });
-        const prompt = await readUntilResponse(
+        const prompt = yield* readUntilResponse(
           queue,
           promptId,
           activeRun,
           mapPromptResponse
         );
-        yield* prompt.events;
         if (prompt.stopped || !agentInvokedResponse(prompt.response)) {
           shutdownProcess(child);
           yield* drainUntilExit(queue, activeRun);
@@ -509,52 +504,50 @@ function mapNegotiationResponse(raw: unknown): ProviderEvent {
   return { raw };
 }
 
-async function readUntilFrame(
+async function* readUntilFrame(
   queue: ProcessQueue,
   activeRun: ActiveOmpRun,
   predicate: (raw: unknown) => boolean
-): Promise<ResponseReadResult> {
-  const events: ProviderEvent[] = [];
+): AsyncGenerator<ProviderEvent, ResponseReadResult> {
   while (true) {
     const item = await queue.next();
     const event = providerEventFromQueueItem(item, activeRun);
-    events.push(event);
+    yield event;
     if (item.kind === "message" && predicate(item.raw)) {
-      return { events, response: item.raw, stopped: false };
+      return { response: item.raw, stopped: false };
     }
     if (event.normalized?.type === "process_exit") {
-      return { events, stopped: true };
+      return { stopped: true };
     }
     if (isTerminalFailure(event.normalized?.type)) {
-      return { events, stopped: false };
+      return { stopped: false };
     }
   }
 }
 
-async function readUntilResponse(
+async function* readUntilResponse(
   queue: ProcessQueue,
   id: string,
   activeRun: ActiveOmpRun,
   mapResponse: (raw: unknown, activeRun: ActiveOmpRun) => ProviderEvent = (
     raw
   ) => (successfulResponse(raw) ? { raw } : mapFailedResponse(raw))
-): Promise<ResponseReadResult> {
-  const events: ProviderEvent[] = [];
+): AsyncGenerator<ProviderEvent, ResponseReadResult> {
   while (true) {
     const item = await queue.next();
     const event =
       item.kind === "message" && stringField(item.raw, "id") === id
         ? mapResponse(item.raw, activeRun)
         : providerEventFromQueueItem(item, activeRun);
-    events.push(event);
+    yield event;
     if (item.kind === "message" && stringField(item.raw, "id") === id) {
-      return { events, response: item.raw, stopped: false };
+      return { response: item.raw, stopped: false };
     }
     if (event.normalized?.type === "process_exit") {
-      return { events, stopped: true };
+      return { stopped: true };
     }
     if (isTerminalFailure(event.normalized?.type)) {
-      return { events, stopped: false };
+      return { stopped: false };
     }
   }
 }

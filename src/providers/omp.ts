@@ -653,6 +653,14 @@ export function createProcessQueue(
 
     push({ kind: "message", raw });
     if (stringField(raw, "type") !== "rpc_chunk") {
+      if (frameDecoder.interrupt()) {
+        push({
+          kind: "malformed",
+          line,
+          message:
+            "Oh My Pi RPC chunk sequence interrupted by a non-chunk frame"
+        });
+      }
       return;
     }
 
@@ -755,6 +763,14 @@ class RpcChunkDecoder {
     }
     this.maxFrameBytes = maxFrameBytes;
     this.maxReassembledBytes = maxReassembledBytes;
+  }
+
+  interrupt(): boolean {
+    if (this.pending === undefined) {
+      return false;
+    }
+    this.pending = undefined;
+    return true;
   }
 
   push(raw: unknown): unknown {

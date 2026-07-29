@@ -361,6 +361,51 @@ describe("Oh My Pi RPC provider", () => {
     });
   });
 
+  it("rejects a non-chunk frame that interrupts a pending chunk sequence", async () => {
+    const stdout = new PassThrough();
+    const child = {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      once: () => child
+    } as unknown as ChildProcessWithoutNullStreams;
+    const queue = createProcessQueue(child);
+    queue.setFrameLimits(1024, 8192);
+
+    const payload = JSON.stringify({
+      message: "x".repeat(1100),
+      type: "notice"
+    });
+    const payloadBytes = Buffer.from(payload, "utf8");
+    const half = Math.ceil(payloadBytes.byteLength / 2);
+    const chunk = (index: number): string =>
+      JSON.stringify({
+        byteLength: payloadBytes.byteLength,
+        chunkId: "chunk-1",
+        count: 2,
+        data: payloadBytes
+          .subarray(index * half, (index + 1) * half)
+          .toString("base64"),
+        index,
+        type: "rpc_chunk"
+      });
+    stdout.write(`${chunk(0)}\n`);
+    stdout.write(`${JSON.stringify({ type: "agent_start" })}\n`);
+    stdout.write(`${chunk(1)}\n`);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC chunk sequence interrupted by a non-chunk frame"
+    });
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC chunk sequence must start at index 0"
+    });
+  });
+
   it("fails autonomous execution when OMP requests interactive input", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");

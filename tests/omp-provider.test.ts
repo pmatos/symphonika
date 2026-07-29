@@ -406,6 +406,42 @@ describe("Oh My Pi RPC provider", () => {
     });
   });
 
+  it("rejects a reassembled chunk payload that is not a JSON object", async () => {
+    const stdout = new PassThrough();
+    const child = {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      once: () => child
+    } as unknown as ChildProcessWithoutNullStreams;
+    const queue = createProcessQueue(child);
+    queue.setFrameLimits(1024, 8192);
+
+    const payload = `[${"1,".repeat(600)}1]`;
+    const payloadBytes = Buffer.from(payload, "utf8");
+    const half = Math.ceil(payloadBytes.byteLength / 2);
+    const chunk = (index: number): string =>
+      JSON.stringify({
+        byteLength: payloadBytes.byteLength,
+        chunkId: "chunk-array",
+        count: 2,
+        data: payloadBytes
+          .subarray(index * half, (index + 1) * half)
+          .toString("base64"),
+        index,
+        type: "rpc_chunk"
+      });
+    stdout.write(`${chunk(0)}\n`);
+    stdout.write(`${chunk(1)}\n`);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi logical RPC frame must be an object"
+    });
+  });
+
   it("fails autonomous execution when OMP requests interactive input", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");

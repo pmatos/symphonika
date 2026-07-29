@@ -845,7 +845,11 @@ class RpcChunkDecoder {
       Buffer.concat(pending.chunks)
     );
     const logicalFrame = JSON.parse(decoded) as unknown;
-    if (typeof logicalFrame !== "object" || logicalFrame === null) {
+    if (
+      typeof logicalFrame !== "object" ||
+      logicalFrame === null ||
+      Array.isArray(logicalFrame)
+    ) {
       throw new Error("Oh My Pi logical RPC frame must be an object");
     }
     return logicalFrame;

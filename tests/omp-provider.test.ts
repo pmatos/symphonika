@@ -802,6 +802,21 @@ describe("Oh My Pi RPC provider", () => {
     }
   });
 
+  it("rejects non-object physical RPC frames", async () => {
+    const { queue, stdout } = createQueueHarness({
+      maxFrameBytes: 1024,
+      maxReassembledBytes: 8192
+    });
+    stdout.write(`[]\n`);
+    stdout.write(`${JSON.stringify({ type: "notice" })}\n`);
+
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi physical RPC frame must be an object"
+    });
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+  });
+
   it("measures physical frames before removing the JSONL delimiter", async () => {
     const { queue, stdout } = createQueueHarness({
       maxFrameBytes: 1024,
@@ -897,6 +912,55 @@ describe("Oh My Pi RPC provider", () => {
     expect(types.indexOf("turn_failed")).toBeLessThan(
       types.indexOf("process_exit")
     );
+  });
+
+  it("reports malformed events for non-object frames mid-run", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const fakeOmpPath = path.join(root, "fake-scalar-frame-omp.mjs");
+    await writeFile(
+      fakeOmpPath,
+      [
+        "import readline from 'node:readline';",
+        "const rl = readline.createInterface({ input: process.stdin });",
+        "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+        "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
+        "for await (const line of rl) {",
+        "  const command = JSON.parse(line);",
+        "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-335', model: { provider: 'openai', id: 'gpt-5.4' } } });",
+        "  if (command.type === 'prompt') {",
+        "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
+        "    process.stdout.write('[]\\n');",
+        "    send({ type: 'agent_end', isTerminal: true, messages: [] });",
+        "    process.stdout.write('', () => process.exit(0));",
+        "  }",
+        "}",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+    );
+
+    expect(
+      events
+        .map((event) => event.normalized)
+        .find((event) => event?.type === "malformed_event")
+    ).toMatchObject({
+      message: "Oh My Pi physical RPC frame must be an object",
+      type: "malformed_event"
+    });
   });
 
   it("escalates shutdown when OMP hangs after a terminal agent_end", async () => {

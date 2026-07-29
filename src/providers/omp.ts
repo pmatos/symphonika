@@ -727,6 +727,20 @@ export function createProcessQueue(
       );
       return;
     }
+    // Every protocol frame is a JSON object with a type field (ADR 0066);
+    // arrays, null, and scalars are not valid frames.
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      frameDecoder.interrupt();
+      push(
+        {
+          kind: "malformed",
+          line,
+          message: "Oh My Pi physical RPC frame must be an object"
+        },
+        lineBytes
+      );
+      return;
+    }
 
     push({ kind: "message", raw }, lineBytes);
     const frameType = stringField(raw, "type");

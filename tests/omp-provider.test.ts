@@ -499,6 +499,42 @@ describe("Oh My Pi RPC provider", () => {
     });
   });
 
+  it("reassembles a logical frame from more than two chunks", async () => {
+    const { queue, stdout } = createQueueHarness({
+      maxFrameBytes: 1024,
+      maxReassembledBytes: 8192
+    });
+    const payload = JSON.stringify({
+      message: "x".repeat(1100),
+      type: "notice"
+    });
+    const payloadBytes = Buffer.from(payload, "utf8");
+    const chunkCount = 4;
+    const sliceSize = Math.ceil(payloadBytes.byteLength / chunkCount);
+    for (let index = 0; index < chunkCount; index += 1) {
+      stdout.write(
+        `${JSON.stringify({
+          byteLength: payloadBytes.byteLength,
+          chunkId: "chunk-multi",
+          count: chunkCount,
+          data: payloadBytes
+            .subarray(index * sliceSize, (index + 1) * sliceSize)
+            .toString("base64"),
+          index,
+          type: "rpc_chunk"
+        })}\n`
+      );
+    }
+
+    for (let index = 0; index < chunkCount; index += 1) {
+      expect(await queue.next()).toMatchObject({ kind: "message" });
+    }
+    expect(await queue.next()).toMatchObject({
+      kind: "message",
+      raw: { message: "x".repeat(1100), type: "notice" }
+    });
+  });
+
   it("does not complete a chunk sequence after a mismatched chunk", async () => {
     const { queue, stdout } = createQueueHarness({
       maxFrameBytes: 1024,

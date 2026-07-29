@@ -53,9 +53,9 @@ export type ProcessQueue = {
 };
 
 type PendingRpcChunks = {
+  buffer: Buffer;
   byteLength: number;
   chunkId: string;
-  chunks: Buffer[];
   count: number;
   nextIndex: number;
   receivedBytes: number;
@@ -1059,10 +1059,13 @@ class RpcChunkDecoder {
         if (index !== 0) {
           throw new Error("Oh My Pi RPC chunk sequence must start at index 0");
         }
+        // Reassemble into one bounded preallocated buffer: retaining a
+        // separate Buffer per chunk lets a child with a legal declared
+        // length pin millions of tiny allocations until the daemon OOMs.
         this.pending = {
+          buffer: Buffer.alloc(byteLength),
           byteLength,
           chunkId,
-          chunks: [],
           count,
           nextIndex: 0,
           receivedBytes: 0
@@ -1078,12 +1081,12 @@ class RpcChunkDecoder {
         throw new Error("Oh My Pi RPC chunk sequence mismatch");
       }
 
-      pending.chunks.push(bytes);
-      pending.receivedBytes += bytes.byteLength;
-      pending.nextIndex += 1;
-      if (pending.receivedBytes > pending.byteLength) {
+      if (pending.receivedBytes + bytes.byteLength > pending.byteLength) {
         throw new Error("Oh My Pi RPC chunks exceed their declared length");
       }
+      pending.buffer.set(bytes, pending.receivedBytes);
+      pending.receivedBytes += bytes.byteLength;
+      pending.nextIndex += 1;
       if (pending.nextIndex < pending.count) {
         return undefined;
       }
@@ -1093,7 +1096,7 @@ class RpcChunkDecoder {
 
       this.pending = undefined;
       const decoded = new TextDecoder("utf-8", { fatal: true }).decode(
-        Buffer.concat(pending.chunks)
+        pending.buffer
       );
       const logicalFrame = JSON.parse(decoded) as unknown;
       if (

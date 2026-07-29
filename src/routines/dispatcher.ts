@@ -86,7 +86,10 @@ export async function dispatchDueRoutines(
 
   for (const project of projects) {
     if (project.disabled === true) {
-      input.runStore.markRoutinesInactiveForProject(project.name);
+      input.runStore.markRoutinesInactiveForProject(project.name, {
+        now,
+        trackerlessGitRoutines: project.trackerlessGitRoutines ?? []
+      });
       continue;
     }
     if (input.recomputeSchedulesFromNow === true) {

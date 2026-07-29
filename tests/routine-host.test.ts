@@ -66,11 +66,12 @@ async function createGitRepo(root: string, remote: string): Promise<void> {
 // tracker, no tracker/filters/priority/workflow.
 function hostProjectLines(
   name: string,
-  options: { tracker?: boolean } = {}
+  options: { disabled?: boolean; tracker?: boolean } = {}
 ): string[] {
   return [
     `  - name: ${name}`,
     "    mode: routine_host",
+    ...(options.disabled ? ["    disabled: true"] : []),
     "    workspace:",
     "      root: ./.symphonika/workspaces/" + name,
     "      git:",
@@ -666,6 +667,110 @@ describe("Routine Host reload (ADR 0062)", () => {
       await dispatch(new Date("2026-07-27T01:00:00.000Z"));
 
       await writeConfig(true);
+      await reloader.reload();
+      const restored = await dispatch(new Date("2026-07-27T02:00:00.000Z"));
+
+      expect(restored.fired).toEqual([]);
+      expect(prepareRoutineWorkspace).not.toHaveBeenCalled();
+      expect(runStore.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          lastFiredAt: null,
+          name: "audit-fix",
+          scheduleAt: "2026-07-27T01:30:00.000Z",
+          state: "expired"
+        })
+      );
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("expires an elapsed first-seen rejection when a disabled host and its tracker are restored together", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const configPath = path.join(root, "symphonika.yml");
+    await mkdir(root, { recursive: true });
+    const writeRoutine = (at: string): Promise<void> =>
+      writeFile(
+        path.join(root, "audit-fix.md"),
+        [
+          "---",
+          "name: audit-fix",
+          "kind: git",
+          "schedule:",
+          `  at: "${at}"`,
+          "---",
+          "Fix the audit."
+        ].join("\n")
+      );
+    const writeConfig = (options: {
+      disabled: boolean;
+      tracker: boolean;
+    }): Promise<void> =>
+      writeFile(
+        configPath,
+        [
+          "state:",
+          "  root: ./.symphonika",
+          "providers:",
+          "  codex:",
+          '    command: "codex -p symphonika"',
+          "  claude:",
+          '    command: "claude -p"',
+          "projects:",
+          ...hostProjectLines("audit-host", options),
+          "routines:",
+          "  - project: audit-host",
+          "    path: ./audit-fix.md"
+        ].join("\n")
+      );
+
+    await writeRoutine("2026-07-27T01:00:00.000Z");
+    await writeConfig({ disabled: true, tracker: false });
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+    const runStore = openRunStore({ stateRoot });
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.reject(
+          new Error("expired one-shot must not prepare a workspace")
+        )
+    );
+    const dispatch = (now: Date) =>
+      dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: fakeAgentProviders(),
+        configDir: root,
+        globalConcurrency: { maxInFlight: undefined },
+        now,
+        prepareRoutineWorkspace,
+        projects: reloader.projectsByName(),
+        providersConfig: reloader.providersConfig(),
+        runStore,
+        stateRoot
+      });
+
+    try {
+      // Project inactivity dominates the routine-level rejection state, but
+      // the first-seen declaration still needs a durable row for restoration.
+      await dispatch(new Date("2026-07-27T00:30:00.000Z"));
+      expect(runStore.listRoutines({ includeInactive: true })).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          name: "audit-fix",
+          scheduleAt: "2026-07-27T01:00:00.000Z",
+          state: "inactive"
+        })
+      );
+
+      // Editing `at` while the host stays disabled must not turn a past
+      // schedule into an immediately fireable declaration when the Project
+      // and tracker are restored in the same reload.
+      await writeRoutine("2026-07-27T01:30:00.000Z");
+      await reloader.reload();
+      await dispatch(new Date("2026-07-27T01:00:00.000Z"));
+      await writeConfig({ disabled: false, tracker: true });
       await reloader.reload();
       const restored = await dispatch(new Date("2026-07-27T02:00:00.000Z"));
 

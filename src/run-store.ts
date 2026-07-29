@@ -1251,18 +1251,12 @@ export class RunStore {
         "state = case",
         "when @disabled = 1 then 'disabled'",
         "when excluded.schedule_cron is not null then 'active'",
-        // A tracker-less-host rejection doubles as durable restore evidence:
-        // the routine never had a chance to fire, so an elapsed one-shot `at`
-        // expires even when the operator edited the schedule while rejected.
-        // This must precede the schedule-change reactivation branch below,
-        // which exists for deliberate operator reschedules of runnable
-        // routines — a meaning a rejected routine's edit cannot carry.
-        "when routines.disabled_reason = 'rejected_tracker_less_host' and @disabled = 0 and excluded.schedule_cron is null and routines.last_fired_at is null and excluded.schedule_at <= @now_iso then 'expired'",
-        "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then 'active'",
-        // Restoring a one-shot whose `at` already elapsed while disabled must
-        // not fire it retroactively — treat it the same as a missed one-shot
-        // without catch-up: expired, never fired.
+        // Restoring a one-shot whose `at` already elapsed while disabled or
+        // inactive must not fire it retroactively, even when its schedule was
+        // edited while stopped. This precedes schedule-change reactivation so
+        // only a future one-shot edit can reactivate a stopped Routine.
         "when (routines.state = 'disabled' or routines.state = 'inactive') and @disabled = 0 and excluded.schedule_cron is null and routines.last_fired_at is null and excluded.schedule_at <= @now_iso then 'expired'",
+        "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then 'active'",
         "when routines.state = 'expired' or routines.last_fired_at is not null then 'expired'",
         "else 'active' end,",
         "disabled_reason = excluded.disabled_reason,",
@@ -1423,15 +1417,72 @@ export class RunStore {
     apply();
   }
 
-  markRoutinesInactiveForProject(projectName: string): void {
-    this.database
-      .prepare(
-        // disabled_reason only means anything on state = 'disabled' — clear
-        // it here so an inactive row never surfaces a stale routine-level
-        // reason left over from before the Project-cascade (ADR-0060).
-        "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name = ? and state != 'inactive'"
-      )
-      .run(timestamp(), projectName);
+  markRoutinesInactiveForProject(
+    projectName: string,
+    options: {
+      now?: Date;
+      trackerlessGitRoutines?: TargetedRoutineDeclaration[];
+    } = {}
+  ): void {
+    const now = timestamp();
+    const scheduleNow = options.now ?? new Date();
+    const insertInactive = this.database.prepare(
+      [
+        "insert into routines (",
+        "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, allow_overlap, catch_up, created_at, updated_at",
+        ") values (",
+        "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'inactive', @allow_overlap, @catch_up, @created_at, @updated_at",
+        ") on conflict(project_name, name) do nothing"
+      ].join(" ")
+    );
+    const apply = this.database.transaction(() => {
+      // A disabled Project still needs identity and schedule evidence for a
+      // first-seen tracker-less kind: git rejection. Without this inactive
+      // row, simultaneously restoring the Project and tracker after `at`
+      // elapsed would look like a brand-new active declaration and fire
+      // retroactively. Existing rows are left intact until the cascade below.
+      for (const routine of options.trackerlessGitRoutines ?? []) {
+        const scheduleValues =
+          "cron" in routine.schedule
+            ? {
+                nextFireAt: nextRecurringFireAt(routine.schedule, scheduleNow),
+                scheduleAt: "",
+                scheduleCron: routine.schedule.cron,
+                scheduleTz: routine.schedule.tz
+              }
+            : {
+                nextFireAt: routine.schedule.at,
+                scheduleAt: routine.schedule.at,
+                scheduleCron: null,
+                scheduleTz: null
+              };
+        insertInactive.run({
+          allow_overlap: routine.allowOverlap === true ? 1 : 0,
+          catch_up: routine.catchUp ?? "skip",
+          created_at: now,
+          kind: routine.kind,
+          name: routine.name,
+          project_name: projectName,
+          prompt_body: routine.prompt,
+          provider_name: routine.provider,
+          next_fire_at: scheduleValues.nextFireAt,
+          schedule_at: scheduleValues.scheduleAt,
+          schedule_cron: scheduleValues.scheduleCron,
+          schedule_tz: scheduleValues.scheduleTz,
+          source_path: routine.sourcePath,
+          updated_at: now
+        });
+      }
+      this.database
+        .prepare(
+          // disabled_reason only means anything on state = 'disabled' — clear
+          // it here so an inactive row never surfaces a stale routine-level
+          // reason left over from before the Project-cascade (ADR-0060).
+          "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name = ? and (state != 'inactive' or disabled_reason is not null)"
+        )
+        .run(now, projectName);
+    });
+    apply();
   }
 
   // Persists identity-only evidence for a routine declaration that has never

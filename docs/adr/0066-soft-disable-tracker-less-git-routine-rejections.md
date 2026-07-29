@@ -28,16 +28,16 @@ Reload carries the rejected Routine name separately from both executable declara
 then applies the precise rejection reason to an existing row. The dispatcher skips the resulting
 non-active row.
 
-A first-appearance rejection — no prior persisted declaration — also persists a disabled row with
-`disabled_reason = 'rejected_tracker_less_host'`, carrying the declared schedule and prompt. Without
-that row, a later tracker restoration would be indistinguishable from a brand-new declaration: the
-normal insert path would create the Routine `active`, and an elapsed one-shot would fire
-retroactively instead of expiring. The persisted reason additionally guards the restore itself: a
-one-shot whose schedule was edited while rejected but is still elapsed expires rather than
-reactivating through the upsert's schedule-change branch, because the durable reason proves the
-Routine never had a chance to fire. The first-appearance failure also remains visible through
-reload errors and `doctor`. The rejection does not cancel an in-flight Routine Firing, which
-continues under the snapshot it started with.
+A first-appearance rejection — no prior persisted declaration — also persists a row carrying the
+declared schedule and prompt. On an enabled host it is `disabled` with `disabled_reason =
+'rejected_tracker_less_host'`; when the host Project is itself disabled, the Project cascade takes
+precedence and the row is `inactive`. Without that row, a later tracker restoration would be
+indistinguishable from a brand-new declaration: the normal insert path would create the Routine
+`active`, and an elapsed one-shot would fire retroactively instead of expiring. On restore, the
+elapsed disabled/inactive one-shot guard precedes schedule-change reactivation, so a one-shot whose
+schedule was edited while stopped but is still elapsed also expires. The first-appearance failure
+remains visible through reload errors and `doctor`. The rejection does not cancel an in-flight
+Routine Firing, which continues under the snapshot it started with.
 
 Restoring the Routine Host's tracker returns the declaration to the normal upsert path. Recurring
 Routines become active with a schedule recomputed from the current tick; elapsed one-shot Routines
@@ -49,9 +49,10 @@ contract.
 - A rejected Routine cannot keep firing from a stale active row.
 - Operator surfaces distinguish an entry that is still configured but incompatible with its host
   from one actually removed from the top-level `routines:` block — for first-appearance rejections
-  too, since they now persist a disabled row.
+  too, since they now persist a durable non-active row.
 - An overdue one-shot rejected on first appearance cannot fire when the tracker returns; it expires
-  like any other elapsed one-shot restore, even if its `at` was edited while rejected.
+  like any other elapsed one-shot restore, even if its `at` was edited while rejected or its host
+  passed through the Project-level inactive cascade.
 - `invalid` remains reserved for a never-valid Routine declaration represented by an identity-only
   stub; host compatibility rejection does not overload that state.
 - Removing the rejected entry later changes the persisted reason to `removed_from_config`, while

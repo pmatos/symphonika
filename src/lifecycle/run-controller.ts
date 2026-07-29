@@ -1545,44 +1545,37 @@ export class RunController {
     }
   }
 
-  // Shutdown gate for the state-advance pre-provider exits. Every call
-  // site returns immediately after these helpers, so a skip here skips the
-  // whole exit. With labelWritten, the sym:claimed written before the gate
-  // closed is rolled back best-effort. See ADR 0052.
-  private async stateAdvanceShutdownSkip(input: {
+  // Rolls back a sym:claimed written before the shutdown gate closed.
+  // Only the shutdown path awaits: the isShuttingDown() check at each call
+  // site and the createContinuationRun below it are synchronous, so stop()
+  // cannot close the gate between check and row creation. See ADR 0052.
+  private async rollbackStateAdvanceClaimLabel(input: {
     issueNumber: number;
-    labelWritten: boolean;
     projectName: string;
     repository: GitHubIssueRepositoryInput;
     runId: string;
-  }): Promise<boolean> {
-    if (!this.activeRuns.isShuttingDown()) {
-      return false;
-    }
-    if (input.labelWritten) {
-      await this.bestEffort(
-        () =>
-          (
-            this.githubIssuesApi as LabelWritingGitHubIssuesApi
-          ).removeLabelsFromIssue({
-            ...input.repository,
-            issueNumber: input.issueNumber,
-            labels: ["sym:claimed"]
-          }),
-        {
+  }): Promise<void> {
+    await this.bestEffort(
+      () =>
+        (
+          this.githubIssuesApi as LabelWritingGitHubIssuesApi
+        ).removeLabelsFromIssue({
+          ...input.repository,
           issueNumber: input.issueNumber,
-          label: "sym:claimed",
-          operation: "removeLabel",
-          project: input.projectName,
-          runId: input.runId
-        }
-      );
-    }
+          labels: ["sym:claimed"]
+        }),
+      {
+        issueNumber: input.issueNumber,
+        label: "sym:claimed",
+        operation: "removeLabel",
+        project: input.projectName,
+        runId: input.runId
+      }
+    );
     this.logger?.debug(
       { issueNumber: input.issueNumber, runId: input.runId },
       "symphonika state advance skipped: daemon shutting down"
     );
-    return true;
   }
 
   private async failStateAdvanceBeforeProvider(input: {
@@ -1595,15 +1588,14 @@ export class RunController {
     repository: GitHubIssueRepositoryInput;
     runId: string;
   }): Promise<void> {
-    if (
-      await this.stateAdvanceShutdownSkip({
-        issueNumber: input.issue.number,
-        labelWritten: false,
-        projectName: input.project.name,
-        repository: input.repository,
-        runId: input.runId
-      })
-    ) {
+    // Shutdown gate: every call site returns immediately after this helper,
+    // so skipping here skips the whole exit. The checks are synchronous
+    // with the row creation below — see rollbackStateAdvanceClaimLabel.
+    if (this.activeRuns.isShuttingDown()) {
+      this.logger?.debug(
+        { issueNumber: input.issue.number, runId: input.runId },
+        "symphonika state advance skipped: daemon shutting down"
+      );
       return;
     }
     await this.bestEffort(
@@ -1622,15 +1614,13 @@ export class RunController {
         runId: input.runId
       }
     );
-    if (
-      await this.stateAdvanceShutdownSkip({
+    if (this.activeRuns.isShuttingDown()) {
+      await this.rollbackStateAdvanceClaimLabel({
         issueNumber: input.issue.number,
-        labelWritten: true,
         projectName: input.project.name,
         repository: input.repository,
         runId: input.runId
-      })
-    ) {
+      });
       return;
     }
     this.runStore.createContinuationRun({
@@ -1681,15 +1671,11 @@ export class RunController {
     runId: string;
     targetState: ExpandedWorkflowState;
   }): Promise<void> {
-    if (
-      await this.stateAdvanceShutdownSkip({
-        issueNumber: input.issue.number,
-        labelWritten: false,
-        projectName: input.project.name,
-        repository: input.repository,
-        runId: input.runId
-      })
-    ) {
+    if (this.activeRuns.isShuttingDown()) {
+      this.logger?.debug(
+        { issueNumber: input.issue.number, runId: input.runId },
+        "symphonika state advance skipped: daemon shutting down"
+      );
       return;
     }
     await this.bestEffort(
@@ -1708,15 +1694,13 @@ export class RunController {
         runId: input.runId
       }
     );
-    if (
-      await this.stateAdvanceShutdownSkip({
+    if (this.activeRuns.isShuttingDown()) {
+      await this.rollbackStateAdvanceClaimLabel({
         issueNumber: input.issue.number,
-        labelWritten: true,
         projectName: input.project.name,
         repository: input.repository,
         runId: input.runId
-      })
-    ) {
+      });
       return;
     }
     this.runStore.createContinuationRun({

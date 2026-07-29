@@ -565,6 +565,109 @@ describe("doctor", () => {
     expect(output.stderr).toContain("planning");
   });
 
+  it("rejects raw FSM workflows referencing an unconfigured provider", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, { workflowPath: "./workflow.yml" });
+    await mkdir(path.join(root, "prompts"), { recursive: true });
+    await writeFile(path.join(root, "prompts", "plan.md"), "Plan.\n");
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: omp_override",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: omp",
+        "        prompt: prompts/plan.md",
+        "      complete_when:",
+        "        artifact_exists: PLAN.md",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const output = await runDoctorCommand(configPath);
+
+    expect(process.exitCode).toBe(1);
+    expect(output.stderr).toContain("providers.omp.command is missing");
+  });
+
+  it("validates a workflow-referenced OMP command through the adapter", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const ompCommand = "omp --mode rpc --auto-approve";
+    await writeValidConfig(configPath, {
+      ompCommand,
+      workflowPath: "./workflow.yml"
+    });
+    await mkdir(path.join(root, "prompts"), { recursive: true });
+    await writeFile(path.join(root, "prompts", "plan.md"), "Plan.\n");
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: omp_override",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: omp",
+        "        prompt: prompts/plan.md",
+        "      complete_when:",
+        "        artifact_exists: PLAN.md",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+    const validatedCommands: string[] = [];
+
+    const report = await runDoctor({
+      agentProviders: {
+        codex: {
+          cancel: () => Promise.resolve(),
+          name: "codex",
+          runAttempt: async function* () {
+            await Promise.resolve();
+            yield* [];
+          },
+          validate: () => Promise.resolve()
+        },
+        omp: {
+          cancel: () => Promise.resolve(),
+          name: "omp",
+          runAttempt: async function* () {
+            await Promise.resolve();
+            yield* [];
+          },
+          validate: (command) => {
+            validatedCommands.push(command);
+            return Promise.resolve();
+          }
+        }
+      },
+      configPath,
+      githubApi: successfulGitHubApi(),
+      homeDir: root
+    });
+
+    expect(validatedCommands).toContain(ompCommand);
+    expect(report.errors).toEqual([]);
+    expect(report.ok).toBe(true);
+  });
+
   describe("installed systemd unit drift", () => {
     it("reports no warnings when no systemd unit has been installed", async () => {
       const root = await makeTempRoot();

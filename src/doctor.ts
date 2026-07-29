@@ -31,7 +31,7 @@ import {
   type GitHubIssuesApi
 } from "./issue-polling.js";
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
-import type { AgentProviderRegistry } from "./provider.js";
+import type { AgentProviderName, AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import {
@@ -40,6 +40,7 @@ import {
   userUnitDir
 } from "./service.js";
 import { resolveStateRoot } from "./state.js";
+import type { ExpandedWorkflow } from "./workflow.js";
 import {
   loadExpandedWorkflow,
   resolveWorkflowFormat,
@@ -436,7 +437,10 @@ export async function runDoctor(
     );
     const workflowErrors = await collectWorkflowErrors(
       workflowPath,
-      project.workflow.format
+      project.workflow.format,
+      project,
+      parsedConfig,
+      agentProviders
     );
     errors.push(...workflowErrors);
     const staleIssues = await fetchStaleIssues(project, env, githubIssuesApi);
@@ -690,18 +694,82 @@ async function validateServiceRoutines(
 
 async function collectWorkflowErrors(
   workflowPath: string,
-  format: WorkflowFormat
+  format: WorkflowFormat,
+  project: ProjectConfig,
+  config: ServiceConfig,
+  agentProviders: AgentProviderRegistry
 ): Promise<string[]> {
   try {
     const expanded = await loadExpandedWorkflow(workflowPath, format);
     if (expanded.errors.length > 0) {
       return expanded.errors;
     }
-    return validateExpandedWorkflowReferences(expanded.workflow, workflowPath);
+    const errors = await validateExpandedWorkflowReferences(
+      expanded.workflow,
+      workflowPath
+    );
+    errors.push(
+      ...(await validateWorkflowProviderReferences(
+        expanded.workflow,
+        project,
+        config,
+        agentProviders
+      ))
+    );
+    return errors;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return [`workflow contract not found at ${workflowPath}: ${message}`];
   }
+}
+
+async function validateWorkflowProviderReferences(
+  workflow: ExpandedWorkflow,
+  project: ProjectConfig,
+  config: ServiceConfig,
+  agentProviders: AgentProviderRegistry
+): Promise<string[]> {
+  const referenced = new Set<AgentProviderName>();
+  for (const state of workflow.states) {
+    const action = state.action;
+    if (action?.kind === "agent" && action.provider !== undefined) {
+      referenced.add(action.provider);
+    }
+  }
+  // The project default provider is already validated by validateProject.
+  referenced.delete(project.agent.provider);
+
+  const errors: string[] = [];
+  for (const providerName of referenced) {
+    const provider = config.providers[providerName];
+    if (provider === undefined) {
+      errors.push(
+        `projects.${project.name} workflow references provider ${providerName}, but providers.${providerName}.command is missing`
+      );
+      continue;
+    }
+    if (provider.command.trim().length === 0) {
+      errors.push(
+        `projects.${project.name} workflow references provider ${providerName}, but its command is empty`
+      );
+      continue;
+    }
+    const adapter = agentProviders[providerName];
+    if (adapter === undefined) {
+      errors.push(
+        `projects.${project.name} workflow references provider ${providerName}, but no adapter is registered`
+      );
+      continue;
+    }
+    try {
+      await adapter.validate(provider.command);
+    } catch (error) {
+      errors.push(
+        `projects.${project.name} providers.${providerName}.command is invalid: ${errorMessage(error)}`
+      );
+    }
+  }
+  return errors;
 }
 
 async function fetchStaleIssues(

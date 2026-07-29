@@ -20,6 +20,7 @@ type ActiveOmpRun = {
   cancelled: boolean;
   child?: ChildProcessWithoutNullStreams;
   nextRequestId: number;
+  queue?: ProcessQueue;
   sessionId: string | undefined;
 };
 
@@ -44,6 +45,7 @@ type ProcessQueueItem =
     };
 
 export type ProcessQueue = {
+  discardBeforeFrameLimits: () => void;
   next: () => Promise<ProcessQueueItem>;
   setFrameLimits: (maxFrameBytes: number, maxReassembledBytes: number) => void;
   readonly size: number;
@@ -86,6 +88,7 @@ export function createOmpProvider(
         return Promise.resolve();
       }
 
+      activeRun.queue?.discardBeforeFrameLimits();
       if (!activeRun.child.stdin.destroyed && activeRun.child.stdin.writable) {
         writeJson(activeRun.child, {
           id: requestId(activeRun),
@@ -125,6 +128,7 @@ export function createOmpProvider(
       activeRun.child = child;
       child.stderr.resume();
       const queue = createProcessQueue(child);
+      activeRun.queue = queue;
 
       try {
         const ready = await readUntilFrame(
@@ -137,6 +141,7 @@ export function createOmpProvider(
           return;
         }
         if (ready.response === undefined) {
+          queue.discardBeforeFrameLimits();
           shutdownProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
@@ -155,6 +160,7 @@ export function createOmpProvider(
             },
             raw: ready.response
           };
+          queue.discardBeforeFrameLimits();
           shutdownProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
@@ -648,6 +654,10 @@ export function createProcessQueue(
   let frameLimitsSet = false;
   let awaitingFrameLimits = false;
   let stdoutEnded = false;
+  let discardingOutput = false;
+  let closeResult:
+    { exitCode: number | null; signal: NodeJS.Signals | null } | undefined;
+  let exitEnqueued = false;
 
   const push = (item: ProcessQueueItem, byteSize = 0): void => {
     if (waiting !== undefined) {
@@ -779,7 +789,7 @@ export function createProcessQueue(
   };
 
   const finishStdout = (): void => {
-    if (!stdoutEnded || awaitingFrameLimits) {
+    if (!stdoutEnded || awaitingFrameLimits || exitEnqueued) {
       return;
     }
     drainStdoutLines();
@@ -803,10 +813,23 @@ export function createProcessQueue(
         message: "Oh My Pi RPC chunk sequence incomplete at end of stream"
       });
     }
+    // The exit event goes last: evidence buffered before the close must be
+    // consumed before runAttempt can see process_exit.
+    if (closeResult !== undefined) {
+      exitEnqueued = true;
+      push({
+        exitCode: closeResult.exitCode,
+        kind: "exit",
+        signal: closeResult.signal
+      });
+    }
   };
 
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
+    if (discardingOutput) {
+      return;
+    }
     let data = chunk;
     if (stdoutOverflowed) {
       const frameEndIndex = data.indexOf("\n");
@@ -843,10 +866,35 @@ export function createProcessQueue(
     push({ error, kind: "error" });
   });
   child.once("close", (exitCode, signal) => {
-    push({ exitCode, kind: "exit", signal });
+    closeResult = { exitCode, signal };
+    // A destroyed stdout never emits 'end'; treat close as terminal either way.
+    stdoutEnded = true;
+    finishStdout();
   });
 
   return {
+    discardBeforeFrameLimits: () => {
+      // Pre-limit failure teardown (e.g. an invalid ready): drop the
+      // deferred output without parsing it, resume the latch-paused stream
+      // so close is not delayed, and let a stored exit enqueue. No-ops once
+      // limits are installed: post-negotiation output is real evidence.
+      if (discardingOutput || frameLimitsSet) {
+        return;
+      }
+      awaitingFrameLimits = false;
+      discardingOutput = true;
+      stdoutBuffer = "";
+      frameDecoder.interrupt();
+      child.stdout.resume();
+      if (closeResult !== undefined && !exitEnqueued) {
+        exitEnqueued = true;
+        push({
+          exitCode: closeResult.exitCode,
+          kind: "exit",
+          signal: closeResult.signal
+        });
+      }
+    },
     get size() {
       return pending.length;
     },
@@ -1262,6 +1310,7 @@ async function validateOmpRpcCommand(command: {
             numberField(item.raw, "maxReassembledFrameBytes") ?? 0
           );
         } catch (error) {
+          queue.discardBeforeFrameLimits();
           settle(() => {
             shutdownProcess(child);
             reject(error instanceof Error ? error : new Error(String(error)));

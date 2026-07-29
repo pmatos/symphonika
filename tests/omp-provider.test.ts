@@ -630,6 +630,47 @@ describe("Oh My Pi RPC provider", () => {
     expect(kinds).toEqual(Array.from({ length: 10 }, () => "message"));
   });
 
+  it("defers process exit until a latched backlog drains", async () => {
+    const { close, queue, stdout } = createQueueHarness(undefined, {
+      maxPendingItems: 3
+    });
+    const frame = JSON.stringify({ type: "notice" });
+    stdout.write(
+      `${JSON.stringify({ type: "ready" })}\n${`${frame}\n`.repeat(5)}`
+    );
+    stdout.end();
+    close(0, null);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    queue.setFrameLimits(1024, 8192);
+    const kinds: string[] = [];
+    for (let index = 0; index < 6; index += 1) {
+      kinds.push((await queue.next()).kind);
+    }
+    expect(kinds).toEqual([
+      "message",
+      "message",
+      "message",
+      "message",
+      "message",
+      "exit"
+    ]);
+  });
+
+  it("enqueues a stored exit after discard when limits never install", async () => {
+    const { close, queue, stdout } = createQueueHarness();
+    stdout.write(
+      `${JSON.stringify({ type: "ready" })}\n${JSON.stringify({ type: "notice" })}\n`
+    );
+    stdout.end();
+    close(0, null);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    queue.discardBeforeFrameLimits();
+    expect(await queue.next()).toMatchObject({ exitCode: 0, kind: "exit" });
+    queue.discardBeforeFrameLimits();
+  });
+
   it("measures physical frames before removing the JSONL delimiter", async () => {
     const { queue, stdout } = createQueueHarness({
       maxFrameBytes: 1024,
@@ -927,6 +968,44 @@ describe("Oh My Pi RPC provider", () => {
       cancelled: true,
       type: "process_exit"
     });
+  });
+
+  it("cancels a run before the ready frame arrives", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const pidPath = path.join(root, "silent.pid");
+    const fakeOmpPath = path.join(root, "fake-silent-omp.mjs");
+    await writeFile(
+      fakeOmpPath,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        `writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));`,
+        "setInterval(() => {}, 1000);",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+    const input: ProviderRunInput = {
+      ...providerInputFixture(),
+      provider: {
+        command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+        name: "omp"
+      },
+      workspacePath
+    };
+
+    const collecting = collectProviderEvents(provider.runAttempt(input));
+    const pid = Number(await waitForFileContent(pidPath));
+    await provider.cancel(input.run.id);
+    const events = await collecting;
+
+    expect(events.at(-1)?.normalized).toMatchObject({
+      cancelled: true,
+      type: "process_exit"
+    });
+    await waitForProcessExit(pid);
   });
 
   it("sends abort and reports a cancelled exit for an active OMP run", async () => {
@@ -1329,20 +1408,44 @@ function createQueueHarness(
     maxPendingFrameBytes?: number;
     maxPendingItems?: number;
   }
-): { queue: ProcessQueue; stdin: PassThrough; stdout: PassThrough } {
+): {
+  close: (exitCode?: number | null, signal?: NodeJS.Signals | null) => void;
+  queue: ProcessQueue;
+  stdin: PassThrough;
+  stdout: PassThrough;
+} {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
+  const handlers: {
+    close?:
+      | ((exitCode: number | null, signal: NodeJS.Signals | null) => void)
+      | undefined;
+    error?: ((error: Error) => void) | undefined;
+  } = {};
   const child = {
     stdin,
     stdout,
     stderr: new PassThrough(),
-    once: () => child
+    once: (event: string, handler: unknown) => {
+      if (event === "close") {
+        handlers.close = handler as typeof handlers.close;
+      } else if (event === "error") {
+        handlers.error = handler as typeof handlers.error;
+      }
+      return child;
+    }
   } as unknown as ChildProcessWithoutNullStreams;
   const queue = createProcessQueue(child, queueOptions);
   if (limits !== undefined) {
     queue.setFrameLimits(limits.maxFrameBytes, limits.maxReassembledBytes);
   }
-  return { queue, stdin, stdout };
+  const close = (
+    exitCode: number | null = 0,
+    signal: NodeJS.Signals | null = null
+  ): void => {
+    handlers.close?.(exitCode, signal);
+  };
+  return { close, queue, stdin, stdout };
 }
 
 function rpcChunkLines(payload: string, chunkId: string): [string, string] {

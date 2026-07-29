@@ -560,6 +560,43 @@ describe("Oh My Pi RPC provider", () => {
     });
   });
 
+  it("rejects a blank line that interrupts a pending chunk sequence", async () => {
+    const { queue, stdout } = createQueueHarness({
+      maxFrameBytes: 1024,
+      maxReassembledBytes: 8192
+    });
+    const [first, second] = rpcChunkLines(
+      JSON.stringify({ message: "x".repeat(1100), type: "notice" }),
+      "chunk-blank"
+    );
+    stdout.write(`${first}\n`);
+    stdout.write("\n");
+    stdout.write(`${second}\n`);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC chunk sequence interrupted by a non-chunk frame"
+    });
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC chunk sequence must start at index 0"
+    });
+  });
+
+  it("tolerates blank lines while no chunk sequence is pending", async () => {
+    const { queue, stdout } = createQueueHarness({
+      maxFrameBytes: 1024,
+      maxReassembledBytes: 8192
+    });
+    stdout.write("\n");
+    stdout.write("   \n");
+    stdout.write(`${JSON.stringify({ type: "notice" })}\n`);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+  });
+
   it("does not complete a chunk sequence after a mismatched chunk", async () => {
     const { queue, stdout } = createQueueHarness({
       maxFrameBytes: 1024,

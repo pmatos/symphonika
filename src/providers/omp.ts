@@ -695,10 +695,23 @@ export function createProcessQueue(
     pendingFrameBytes += byteSize;
   };
   const pushParsedLine = (line: string): void => {
+    const lineBytes = Buffer.byteLength(line, "utf8");
     if (line.trim().length === 0) {
+      // Blank lines are noise-tolerated JSONL, but between chunks they are
+      // an interruption like any other non-chunk frame.
+      if (frameDecoder.interrupt()) {
+        push(
+          {
+            kind: "malformed",
+            line,
+            message:
+              "Oh My Pi RPC chunk sequence interrupted by a non-chunk frame"
+          },
+          lineBytes
+        );
+      }
       return;
     }
-    const lineBytes = Buffer.byteLength(line, "utf8");
     if (lineBytes > maxPhysicalFrameBytes) {
       frameDecoder.interrupt();
       const evidence = boundedMalformedEvidence(line);

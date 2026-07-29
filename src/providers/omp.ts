@@ -1202,6 +1202,9 @@ export class RpcChunkDecoder {
       ) {
         throw new Error("Oh My Pi logical RPC frame must be an object");
       }
+      if (stringField(logicalFrame, "type") === undefined) {
+        throw new Error("Oh My Pi logical RPC frame must have a string type");
+      }
       return { byteLength: pending.byteLength, frame: logicalFrame };
     } catch (error) {
       this.pending = undefined;

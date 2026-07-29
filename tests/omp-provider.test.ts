@@ -603,6 +603,25 @@ describe("Oh My Pi RPC provider", () => {
     expect(await queue.next()).toMatchObject({ kind: "message" });
   });
 
+  it("rejects a reassembled chunk payload without a string type", async () => {
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
+    });
+    const [first, second] = rpcChunkLines(
+      JSON.stringify({ pad: "x".repeat(1100) }),
+      "chunk-typeless"
+    );
+    stdout.write(`${first}\n`);
+    stdout.write(`${second}\n`);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi logical RPC frame must have a string type"
+    });
+  });
+
   it("does not complete a chunk sequence after a mismatched chunk", async () => {
     const { queue, stdout } = await createQueueHarness({
       limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }

@@ -11,6 +11,7 @@ import type {
   ProviderRunIdentity
 } from "../src/lifecycle/process-scope.js";
 import type { ProviderEvent, ProviderRunInput } from "../src/provider.js";
+import type { ProcessQueue } from "../src/providers/omp.js";
 import { createOmpProvider, createProcessQueue } from "../src/providers/omp.js";
 
 type RecordingProcessScope = {
@@ -339,14 +340,7 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("re-checks buffered output when negotiated frame limits tighten", async () => {
-    const stdout = new PassThrough();
-    const child = {
-      stdin: new PassThrough(),
-      stdout,
-      stderr: new PassThrough(),
-      once: () => child
-    } as unknown as ChildProcessWithoutNullStreams;
-    const queue = createProcessQueue(child);
+    const { queue, stdout } = createQueueHarness();
     // One write carries a complete ready frame plus an unterminated
     // remainder that fits the pre-ready 1 MiB default but not the limit the
     // ready frame negotiates down to.
@@ -362,36 +356,17 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("rejects a non-chunk frame that interrupts a pending chunk sequence", async () => {
-    const stdout = new PassThrough();
-    const child = {
-      stdin: new PassThrough(),
-      stdout,
-      stderr: new PassThrough(),
-      once: () => child
-    } as unknown as ChildProcessWithoutNullStreams;
-    const queue = createProcessQueue(child);
-    queue.setFrameLimits(1024, 8192);
-
-    const payload = JSON.stringify({
-      message: "x".repeat(1100),
-      type: "notice"
+    const { queue, stdout } = createQueueHarness({
+      maxFrameBytes: 1024,
+      maxReassembledBytes: 8192
     });
-    const payloadBytes = Buffer.from(payload, "utf8");
-    const half = Math.ceil(payloadBytes.byteLength / 2);
-    const chunk = (index: number): string =>
-      JSON.stringify({
-        byteLength: payloadBytes.byteLength,
-        chunkId: "chunk-1",
-        count: 2,
-        data: payloadBytes
-          .subarray(index * half, (index + 1) * half)
-          .toString("base64"),
-        index,
-        type: "rpc_chunk"
-      });
-    stdout.write(`${chunk(0)}\n`);
+    const [first, second] = rpcChunkLines(
+      JSON.stringify({ message: "x".repeat(1100), type: "notice" }),
+      "chunk-1"
+    );
+    stdout.write(`${first}\n`);
     stdout.write(`${JSON.stringify({ type: "agent_start" })}\n`);
-    stdout.write(`${chunk(1)}\n`);
+    stdout.write(`${second}\n`);
 
     expect(await queue.next()).toMatchObject({ kind: "message" });
     expect(await queue.next()).toMatchObject({ kind: "message" });
@@ -407,38 +382,41 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("rejects a reassembled chunk payload that is not a JSON object", async () => {
-    const stdout = new PassThrough();
-    const child = {
-      stdin: new PassThrough(),
-      stdout,
-      stderr: new PassThrough(),
-      once: () => child
-    } as unknown as ChildProcessWithoutNullStreams;
-    const queue = createProcessQueue(child);
-    queue.setFrameLimits(1024, 8192);
-
-    const payload = `[${"1,".repeat(600)}1]`;
-    const payloadBytes = Buffer.from(payload, "utf8");
-    const half = Math.ceil(payloadBytes.byteLength / 2);
-    const chunk = (index: number): string =>
-      JSON.stringify({
-        byteLength: payloadBytes.byteLength,
-        chunkId: "chunk-array",
-        count: 2,
-        data: payloadBytes
-          .subarray(index * half, (index + 1) * half)
-          .toString("base64"),
-        index,
-        type: "rpc_chunk"
-      });
-    stdout.write(`${chunk(0)}\n`);
-    stdout.write(`${chunk(1)}\n`);
+    const { queue, stdout } = createQueueHarness({
+      maxFrameBytes: 1024,
+      maxReassembledBytes: 8192
+    });
+    const [first, second] = rpcChunkLines(
+      `[${"1,".repeat(600)}1]`,
+      "chunk-array"
+    );
+    stdout.write(`${first}\n`);
+    stdout.write(`${second}\n`);
 
     expect(await queue.next()).toMatchObject({ kind: "message" });
     expect(await queue.next()).toMatchObject({ kind: "message" });
     expect(await queue.next()).toMatchObject({
       kind: "malformed",
       message: "Oh My Pi logical RPC frame must be an object"
+    });
+  });
+
+  it("rejects an incomplete chunk sequence when stdout ends", async () => {
+    const { queue, stdout } = createQueueHarness({
+      maxFrameBytes: 1024,
+      maxReassembledBytes: 8192
+    });
+    const [first] = rpcChunkLines(
+      JSON.stringify({ message: "x".repeat(1100), type: "notice" }),
+      "chunk-truncated"
+    );
+    stdout.write(`${first}\n`);
+    stdout.end();
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC chunk sequence incomplete at end of stream"
     });
   });
 
@@ -999,6 +977,41 @@ async function writeFakeOversizedFrameOmp(filePath: string): Promise<void> {
     ].join("\n"),
     "utf8"
   );
+}
+
+function createQueueHarness(limits?: {
+  maxFrameBytes: number;
+  maxReassembledBytes: number;
+}): { queue: ProcessQueue; stdout: PassThrough } {
+  const stdout = new PassThrough();
+  const child = {
+    stdin: new PassThrough(),
+    stdout,
+    stderr: new PassThrough(),
+    once: () => child
+  } as unknown as ChildProcessWithoutNullStreams;
+  const queue = createProcessQueue(child);
+  if (limits !== undefined) {
+    queue.setFrameLimits(limits.maxFrameBytes, limits.maxReassembledBytes);
+  }
+  return { queue, stdout };
+}
+
+function rpcChunkLines(payload: string, chunkId: string): [string, string] {
+  const payloadBytes = Buffer.from(payload, "utf8");
+  const half = Math.ceil(payloadBytes.byteLength / 2);
+  return [0, 1].map((index) =>
+    JSON.stringify({
+      byteLength: payloadBytes.byteLength,
+      chunkId,
+      count: 2,
+      data: payloadBytes
+        .subarray(index * half, (index + 1) * half)
+        .toString("base64"),
+      index,
+      type: "rpc_chunk"
+    })
+  ) as [string, string];
 }
 
 async function writeFakeEchoOmp(filePath: string): Promise<void> {

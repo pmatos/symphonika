@@ -43,7 +43,7 @@ type ProcessQueueItem =
       raw: unknown;
     };
 
-type ProcessQueue = {
+export type ProcessQueue = {
   next: () => Promise<ProcessQueueItem>;
   setFrameLimits: (maxFrameBytes: number, maxReassembledBytes: number) => void;
 };
@@ -720,6 +720,13 @@ export function createProcessQueue(
     if (stdoutBuffer.length > 0) {
       pushParsedLine(stdoutBuffer.trimEnd());
       stdoutBuffer = "";
+    }
+    if (frameDecoder.interrupt()) {
+      push({
+        kind: "malformed",
+        line: "",
+        message: "Oh My Pi RPC chunk sequence incomplete at end of stream"
+      });
     }
   });
   child.once("error", (error) => {

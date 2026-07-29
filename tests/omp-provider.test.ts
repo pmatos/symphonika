@@ -954,7 +954,9 @@ describe("Oh My Pi RPC provider", () => {
 
     const previousTimeout = process.env.SYMPHONIKA_OMP_PROBE_TIMEOUT_MS;
     const previousKillGrace = process.env.SYMPHONIKA_OMP_KILL_GRACE_MS;
-    process.env.SYMPHONIKA_OMP_PROBE_TIMEOUT_MS = "25";
+    // Generous enough for slow CI runners to boot the child before the
+    // timeout fires; the SIGTERM-immune fixture then survives until SIGKILL.
+    process.env.SYMPHONIKA_OMP_PROBE_TIMEOUT_MS = "200";
     process.env.SYMPHONIKA_OMP_KILL_GRACE_MS = "25";
     let pid: number | undefined;
     try {
@@ -963,7 +965,7 @@ describe("Oh My Pi RPC provider", () => {
           `${process.execPath} ${immunePath} --mode rpc --auto-approve`
         )
       ).rejects.toThrow("validation timed out");
-      pid = Number(await readFile(pidPath, "utf8"));
+      pid = Number(await waitForFileContent(pidPath));
       await waitForProcessExit(pid);
     } finally {
       if (pid !== undefined && Number.isSafeInteger(pid)) {
@@ -1515,6 +1517,18 @@ async function writeFakeCancellableOmp(
     ].join("\n"),
     "utf8"
   );
+}
+
+async function waitForFileContent(filePath: string): Promise<string> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      return await readFile(filePath, "utf8");
+    } catch {
+      // The child process has not created the file yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for file ${filePath}`);
 }
 
 async function waitForProcessExit(pid: number): Promise<void> {

@@ -683,6 +683,42 @@ describe("Oh My Pi RPC provider", () => {
     ]);
   });
 
+  it("skips the abort write when cancellation arrives after stdin closed", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "terminal-requests.jsonl");
+    const fakeOmpPath = path.join(root, "fake-terminal-omp.mjs");
+    await writeFakeTerminalOmp(fakeOmpPath, transcriptPath);
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+    const input: ProviderRunInput = {
+      ...providerInputFixture(),
+      provider: {
+        command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+        name: "omp"
+      },
+      workspacePath
+    };
+
+    const collecting = collectProviderEvents(provider.runAttempt(input));
+    await waitForTranscriptCommand(transcriptPath, "prompt");
+    // The provider's endStdin has reached the child, so the abort write
+    // would target an ended stream.
+    await waitForTranscriptCommand(transcriptPath, "stdin-ended");
+    await provider.cancel(input.run.id);
+    const events = await collecting;
+
+    expect(
+      readJsonl(await readFile(transcriptPath, "utf8")).some(
+        (command) => objectField(command, "type") === "abort"
+      )
+    ).toBe(false);
+    expect(events.at(-1)?.normalized).toMatchObject({
+      cancelled: true,
+      type: "process_exit"
+    });
+  });
+
   it("sends abort and reports a cancelled exit for an active OMP run", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -1217,6 +1253,38 @@ async function writeFakeNoticeOmp(filePath: string): Promise<void> {
       "    send({ type: 'notice', level: 'error', message: 'model request failed' });",
       "    send({ type: 'message_update', message: { role: 'assistant' }, assistantMessageEvent: { type: 'error', reason: 'error', error: { role: 'assistant', errorMessage: 'provider stream failed' } } });",
       "    setTimeout(() => process.exit(0), 10);",
+      "  }",
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakeTerminalOmp(
+  filePath: string,
+  transcriptPath: string
+): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "import { appendFile } from 'node:fs/promises';",
+      "import readline from 'node:readline';",
+      `const transcriptPath = ${JSON.stringify(transcriptPath)};`,
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "async function record(message) { await appendFile(transcriptPath, `${JSON.stringify(message)}\\n`, 'utf8'); }",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
+      "process.stdin.on('end', () => { void record({ type: 'stdin-ended' }); });",
+      "// Keep the event loop alive after stdin closes; the provider kills us.",
+      "setInterval(() => {}, 1000);",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      "  await record(command);",
+      "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-335', model: { provider: 'openai', id: 'gpt-5.4' } } });",
+      "  if (command.type === 'prompt') {",
+      "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
+      "    send({ type: 'agent_end', isTerminal: true, messages: [] });",
       "  }",
       "}",
       ""

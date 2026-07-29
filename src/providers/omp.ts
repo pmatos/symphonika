@@ -85,10 +85,15 @@ export function createOmpProvider(
         return Promise.resolve();
       }
 
-      writeJson(activeRun.child, {
-        id: requestId(activeRun),
-        type: "abort"
-      });
+      if (
+        !activeRun.child.stdin.destroyed &&
+        activeRun.child.stdin.writable
+      ) {
+        writeJson(activeRun.child, {
+          id: requestId(activeRun),
+          type: "abort"
+        });
+      }
       shutdownProcess(activeRun.child);
       return Promise.resolve();
     },

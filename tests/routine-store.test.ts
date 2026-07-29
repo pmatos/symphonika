@@ -1370,6 +1370,55 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("replaces an invalid identity stub with a tracker-less rejection snapshot", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.upsertInvalidRoutineStub({
+        name: "audit-fix",
+        projectName: "alpha",
+        sourcePath: "/tmp/broken-audit-fix.md"
+      });
+
+      store.syncRoutines([], {
+        now: new Date("2026-07-27T00:30:00.000Z"),
+        projects: ["alpha"],
+        trackerlessGitRoutinesByProject: {
+          alpha: [
+            {
+              allowOverlap: true,
+              catchUp: "fire_once_if_missed",
+              kind: "git",
+              name: "audit-fix",
+              prompt: "Fix the audit.",
+              projectName: "alpha",
+              provider: "codex",
+              schedule: { at: "2026-07-27T01:00:00.000Z" },
+              sourcePath: "/tmp/audit-fix.md"
+            }
+          ]
+        }
+      });
+
+      expect(
+        store.getRoutine({ name: "audit-fix", projectName: "alpha" })
+      ).toMatchObject({
+        allowOverlap: true,
+        catchUp: "fire_once_if_missed",
+        disabledReason: "rejected_tracker_less_host",
+        kind: "git",
+        name: "audit-fix",
+        prompt: "Fix the audit.",
+        provider: "codex",
+        scheduleAt: "2026-07-27T01:00:00.000Z",
+        sourcePath: "/tmp/audit-fix.md",
+        state: "disabled"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("restores a dormant invalid stub to state=invalid when its still-broken declaration reappears", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

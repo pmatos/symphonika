@@ -218,7 +218,8 @@ segment because routine firing workspaces live under `<workspace.root>/routines/
 Routine names are globally unique across the `routines:` block. Routine states are `active`,
 `expired`, and `inactive`. `inactive` means the Routine's target Project is disabled or omitted from
 the current valid Service Config snapshot (ADR 0021 cascade); the row remains durable but is hidden
-from default operator listings.
+from default operator listings. Routine-level scheduling control also uses `disabled` and `invalid`
+as defined in §8.5.
 
 ### 4.13 Routine Firing
 
@@ -730,6 +731,19 @@ un-disables it on the next reload and recomputes `next_fire_at` strictly after t
 one-shot Routine whose `at` elapsed while disabled is marked `expired` instead of firing
 retroactively. `catch_up: fire_once_if_missed` does not apply to a routine-level restore — that
 policy is for daemon outage, not deliberate operator disable.
+
+A previously persisted `kind: git` Routine rejected because its Routine Host has no tracker is
+soft-disabled with `disabled_reason = "rejected_tracker_less_host"`. This is distinct from
+`removed_from_config`: the top-level entry is still present but is incompatible with its target
+host. The rejected name must not be folded into the declaration-loader's `invalidRoutineNames`
+protection, because a protected, undeclared persisted row is skipped by both removal detection and
+the valid-declaration upsert and could remain active. A first-appearance rejection persists the
+Routine with its declared schedule and prompt: as `disabled` with the same reason while its host is
+enabled, or as `inactive` when the Project-level disable cascade takes precedence. Restoring the
+host's tracker therefore returns the Routine to the normal upsert path and the existing restore
+rules above in every case: a recurring Routine reactivates, while an elapsed one-shot is marked
+`expired` instead of firing retroactively — even when its schedule was edited while rejected or
+inactive. See ADR 0066.
 
 An invalid Routine declaration on reload does not abort reload for the rest of the fleet (§5.4): the
 daemon logs the error and surfaces it in the operator status surface and `doctor`. A Routine with a

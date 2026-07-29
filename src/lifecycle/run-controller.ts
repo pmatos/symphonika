@@ -126,6 +126,12 @@ export type RunControllerProjectConfig = {
   // rows (state = 'invalid') from being soft-disabled as "removed from
   // config" by the next syncRoutines call — see ADR 0060.
   invalidRoutineNames?: string[] | undefined;
+  // kind: git routines rejected because this Routine Host has no tracker.
+  // Persisted rows are soft-disabled with a precise reason so stale
+  // executable configuration cannot keep firing, and first-seen rejections
+  // persist a disabled row so a later tracker restoration follows the normal
+  // one-shot/cron restore rules. See ADR 0066.
+  trackerlessGitRoutines?: TargetedRoutineDeclaration[] | undefined;
   watchdog?: { graceMinutes: number } | undefined;
 };
 

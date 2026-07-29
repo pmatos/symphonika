@@ -86,7 +86,10 @@ export async function dispatchDueRoutines(
 
   for (const project of projects) {
     if (project.disabled === true) {
-      input.runStore.markRoutinesInactiveForProject(project.name);
+      input.runStore.markRoutinesInactiveForProject(project.name, {
+        now,
+        trackerlessGitRoutines: project.trackerlessGitRoutines ?? []
+      });
       continue;
     }
     if (input.recomputeSchedulesFromNow === true) {
@@ -135,9 +138,15 @@ export async function dispatchDueRoutines(
   }
   // Service-level routines: one sync call with all targeted routines across
   // projects, each carrying its own projectName. protectedNamesByProject
-  // holds invalid-routine names per project (ADR 0060/0063).
+  // holds invalid-routine names per project (ADR 0060/0063), while the
+  // tracker-less set identifies valid files rejected by host compatibility
+  // for a precise soft-disable (ADR 0066).
   const allRoutines: TargetedRoutineDeclaration[] = [];
   const protectedNamesByProject: Record<string, string[]> = {};
+  const trackerlessGitRoutinesByProject: Record<
+    string,
+    TargetedRoutineDeclaration[]
+  > = {};
   const syncedProjects: string[] = [];
   for (const project of projects) {
     if (project.disabled === true) {
@@ -150,6 +159,10 @@ export async function dispatchDueRoutines(
     if ((project.invalidRoutineNames ?? []).length > 0) {
       protectedNamesByProject[project.name] = project.invalidRoutineNames ?? [];
     }
+    if ((project.trackerlessGitRoutines ?? []).length > 0) {
+      trackerlessGitRoutinesByProject[project.name] =
+        project.trackerlessGitRoutines ?? [];
+    }
   }
   input.runStore.syncRoutines(allRoutines, {
     now,
@@ -157,6 +170,7 @@ export async function dispatchDueRoutines(
     // project whose last routine was just removed (ADR 0063).
     projects: syncedProjects,
     protectedNamesByProject,
+    trackerlessGitRoutinesByProject,
     recomputeRecurring: input.recomputeSchedulesFromNow === true
   });
   input.runStore.pruneRoutinesForUnknownProjects(

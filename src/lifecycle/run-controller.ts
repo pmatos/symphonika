@@ -466,34 +466,37 @@ export class RunController {
       providersConfig as Partial<RunControllerProvidersConfig>
     )[providerName]?.command;
 
-    if (providerCommand === undefined || providerCommand.trim().length === 0) {
-      await this.failFreshDispatchBeforeProvider({
-        issue: target.candidate.issue,
-        project: target.project,
-        providerCommand: providerCommand ?? "",
-        providerName,
-        reason: `provider_command_missing: ${providerName}`,
-        repository,
-        runId
-      });
-      return { dispatched: true, runId };
-    }
-
-    const provider = this.agentProviders[providerName];
-    if (provider === undefined) {
-      await this.failFreshDispatchBeforeProvider({
-        issue: target.candidate.issue,
-        project: target.project,
-        providerCommand,
-        providerName,
-        reason: `provider_not_registered: ${providerName}`,
-        repository,
-        runId
-      });
-      return { dispatched: true, runId };
-    }
-
     try {
+      if (
+        providerCommand === undefined ||
+        providerCommand.trim().length === 0
+      ) {
+        await this.failFreshDispatchBeforeProvider({
+          issue: target.candidate.issue,
+          project: target.project,
+          providerCommand: providerCommand ?? "",
+          providerName,
+          reason: `provider_command_missing: ${providerName}`,
+          repository,
+          runId
+        });
+        return { dispatched: true, runId };
+      }
+
+      const provider = this.agentProviders[providerName];
+      if (provider === undefined) {
+        await this.failFreshDispatchBeforeProvider({
+          issue: target.candidate.issue,
+          project: target.project,
+          providerCommand,
+          providerName,
+          reason: `provider_not_registered: ${providerName}`,
+          repository,
+          runId
+        });
+        return { dispatched: true, runId };
+      }
+
       await this.runFreshLifecycle({
         attemptNumber: 1,
         isContinuation: false,
@@ -544,6 +547,11 @@ export class RunController {
     repository: GitHubIssueRepositoryInput;
     runId: string;
   }): Promise<void> {
+    if (this.activeRuns.isShuttingDown()) {
+      throw new RegistryShutdownError(
+        `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
+      );
+    }
     await this.bestEffort(
       () =>
         (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
@@ -560,6 +568,32 @@ export class RunController {
         runId: input.runId
       }
     );
+    if (this.activeRuns.isShuttingDown()) {
+      // The provider-resolution failure path does not reserve an in-flight
+      // slot, so reserveSlot cannot reject a shutdown-racing claim for it.
+      // Roll back the label before skipping row creation. See ADR 0052.
+      await this.bestEffort(
+        () =>
+          (
+            this.githubIssuesApi as LabelWritingGitHubIssuesApi
+          ).removeLabelsFromIssue({
+            ...input.repository,
+            issueNumber: input.issue.number,
+            labels: ["sym:claimed"]
+          }),
+        {
+          issueNumber: input.issue.number,
+          label: "sym:claimed",
+          operation: "removeLabel",
+          phase: "fresh-dispatch-provider-resolution-shutdown",
+          project: input.project.name,
+          runId: input.runId
+        }
+      );
+      throw new RegistryShutdownError(
+        `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
+      );
+    }
     this.runStore.createRun({
       id: input.runId,
       issue: input.issue,

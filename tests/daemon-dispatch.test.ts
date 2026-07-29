@@ -2948,6 +2948,82 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("rolls back a pre-provider failure claim when stop begins during its label write", async () => {
+    const root = await makeTempRoot();
+    await writeInitialStateClaudeRawFsmProject(root);
+
+    let releaseLabelWrite: (() => void) | undefined;
+    const labelWritePending = new Promise<void>((resolve) => {
+      releaseLabelWrite = resolve;
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi
+        .fn()
+        .mockImplementationOnce(() => labelWritePending)
+        .mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValueOnce([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 8,
+          title: "Skip missing provider failure during shutdown"
+        })
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    // The workflow selects unregistered Claude, while the registered Codex
+    // provider keeps the daemon eligible to launch fresh work.
+    const codexProvider = successfulCodexProvider();
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => "run-fsm-missing-provider-shutdown",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+    let stopPromise: Promise<void> | undefined;
+
+    try {
+      await vi.waitFor(() => {
+        expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith(
+          expect.objectContaining({ labels: ["sym:claimed"] })
+        );
+      });
+
+      stopPromise = daemon.stop();
+      releaseLabelWrite?.();
+      await stopPromise;
+
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueNumber: 8,
+          labels: ["sym:claimed"]
+        })
+      );
+      expect(
+        githubIssuesApi.addLabelsToIssue.mock.calls.some(([call]) =>
+          (call as { labels: string[] }).labels.includes("sym:failed")
+        )
+      ).toBe(false);
+      expect(codexProvider.runAttempt).not.toHaveBeenCalled();
+
+      const store = openRunStore({
+        stateRoot: path.join(root, ".symphonika")
+      });
+      try {
+        expect(
+          store.getRun("run-fsm-missing-provider-shutdown")
+        ).toBeUndefined();
+      } finally {
+        store.close();
+      }
+    } finally {
+      releaseLabelWrite?.();
+      await (stopPromise ?? daemon.stop());
+    }
+  });
+
   it("picks the first transition in YAML order when multiple transitions match the observed signals", async () => {
     const root = await makeTempRoot();
     await writeTransitionOrderRawFsmProject(root);

@@ -355,6 +355,67 @@ describe("Oh My Pi RPC provider", () => {
     });
   });
 
+  it("revalidates complete frames queued in the same write as the ready frame", async () => {
+    const { queue, stdout } = createQueueHarness();
+    stdout.write(`${JSON.stringify({ type: "ready" })}\n${"e".repeat(2000)}\n`);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    queue.setFrameLimits(1024, 8192);
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC frame exceeds the physical frame limit"
+    });
+  });
+
+  it("flushes a deferred EOF remainder after limits are installed", async () => {
+    const { queue, stdout } = createQueueHarness();
+    stdout.write(
+      `${JSON.stringify({ type: "ready" })}\n${"f".repeat(2000)}`
+    );
+    stdout.end();
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    queue.setFrameLimits(1024, 8192);
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC frame exceeds the physical frame limit"
+    });
+  });
+
+  it("parses deferred chunk lines before reporting a pending sequence at EOF", async () => {
+    const { queue, stdout } = createQueueHarness();
+    const [first] = rpcChunkLines(
+      JSON.stringify({ message: "x".repeat(1100), type: "notice" }),
+      "chunk-deferred"
+    );
+    stdout.write(`${JSON.stringify({ type: "ready" })}\n${first}\n`);
+    stdout.end();
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    queue.setFrameLimits(1024, 8192);
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC chunk sequence incomplete at end of stream"
+    });
+  });
+
+  it("accepts a coalesced frame that exceeds the default limit but fits the advertised one", async () => {
+    const { queue, stdout } = createQueueHarness();
+    const frame = JSON.stringify({
+      message: "x".repeat(1_100_000),
+      type: "notice"
+    });
+    stdout.write(`${JSON.stringify({ type: "ready" })}\n${frame}\n`);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    queue.setFrameLimits(2 * 1024 * 1024, 4 * 1024 * 1024);
+    expect(await queue.next()).toMatchObject({
+      kind: "message",
+      raw: { message: "x".repeat(1_100_000), type: "notice" }
+    });
+  });
+
   it("rejects a non-chunk frame that interrupts a pending chunk sequence", async () => {
     const { queue, stdout } = createQueueHarness({
       maxFrameBytes: 1024,

@@ -623,6 +623,9 @@ export function createProcessQueue(
   let waiting: ((item: ProcessQueueItem) => void) | undefined;
   let stdoutBuffer = "";
   let stdoutOverflowed = false;
+  let frameLimitsSet = false;
+  let awaitingFrameLimits = false;
+  let stdoutEnded = false;
 
   const push = (item: ProcessQueueItem): void => {
     if (waiting !== undefined) {
@@ -658,7 +661,14 @@ export function createProcessQueue(
     }
 
     push({ kind: "message", raw });
-    if (stringField(raw, "type") !== "rpc_chunk") {
+    const frameType = stringField(raw, "type");
+    // Pause draining after the pre-limit ready frame so later frames are
+    // measured against the negotiated limits once setFrameLimits installs
+    // them, not against the 1 MiB default.
+    if (frameType === "ready" && !frameLimitsSet) {
+      awaitingFrameLimits = true;
+    }
+    if (frameType !== "rpc_chunk") {
       if (frameDecoder.interrupt()) {
         push({
           kind: "malformed",
@@ -701,6 +711,33 @@ export function createProcessQueue(
     });
   };
 
+  const drainStdoutLines = (): void => {
+    let newlineIndex = stdoutBuffer.indexOf("\n");
+    while (!awaitingFrameLimits && newlineIndex >= 0) {
+      const line = stdoutBuffer.slice(0, newlineIndex);
+      stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+      pushParsedLine(line);
+      newlineIndex = stdoutBuffer.indexOf("\n");
+    }
+  };
+
+  const finishStdout = (): void => {
+    if (!stdoutEnded || awaitingFrameLimits) {
+      return;
+    }
+    if (stdoutBuffer.length > 0) {
+      pushParsedLine(stdoutBuffer);
+      stdoutBuffer = "";
+    }
+    if (frameDecoder.interrupt()) {
+      push({
+        kind: "malformed",
+        line: "",
+        message: "Oh My Pi RPC chunk sequence incomplete at end of stream"
+      });
+    }
+  };
+
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
     let data = chunk;
@@ -713,27 +750,18 @@ export function createProcessQueue(
       data = data.slice(frameEndIndex + 1);
     }
     stdoutBuffer += data;
-    let newlineIndex = stdoutBuffer.indexOf("\n");
-    while (newlineIndex >= 0) {
-      const line = stdoutBuffer.slice(0, newlineIndex);
-      stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
-      pushParsedLine(line);
-      newlineIndex = stdoutBuffer.indexOf("\n");
+    drainStdoutLines();
+    // While paused for the ready frame's advertised limits, defer the bound
+    // check too: enforcing the old default here could reject frames that fit
+    // a larger negotiated limit. setFrameLimits runs in the microtask after
+    // the ready callback and re-checks everything deferred.
+    if (!awaitingFrameLimits) {
+      enforceStdoutBound();
     }
-    enforceStdoutBound();
   });
   child.stdout.on("end", () => {
-    if (stdoutBuffer.length > 0) {
-      pushParsedLine(stdoutBuffer);
-      stdoutBuffer = "";
-    }
-    if (frameDecoder.interrupt()) {
-      push({
-        kind: "malformed",
-        line: "",
-        message: "Oh My Pi RPC chunk sequence incomplete at end of stream"
-      });
-    }
+    stdoutEnded = true;
+    finishStdout();
   });
   child.once("error", (error) => {
     push({ error, kind: "error" });
@@ -755,7 +783,14 @@ export function createProcessQueue(
     setFrameLimits: (maxFrameBytes, maxReassembledBytes) => {
       maxPhysicalFrameBytes = maxFrameBytes;
       frameDecoder.setLimits(maxFrameBytes, maxReassembledBytes);
-      enforceStdoutBound();
+      frameLimitsSet = true;
+      awaitingFrameLimits = false;
+      drainStdoutLines();
+      if (stdoutEnded) {
+        finishStdout();
+      } else {
+        enforceStdoutBound();
+      }
     }
   };
 }

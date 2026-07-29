@@ -4,7 +4,8 @@ import {
   ActiveRunRegistry,
   CANCEL_REASONS,
   computeRetryDelayMs,
-  LIFECYCLE_POLICY
+  LIFECYCLE_POLICY,
+  RegistryShutdownError
 } from "../src/lifecycle/active-runs.js";
 
 function entry(
@@ -119,13 +120,68 @@ describe("ActiveRunRegistry", () => {
         projectName: "p",
         runId: "run-a"
       });
-      registry.cancelAll();
+      await registry.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
       await vi.advanceTimersByTimeAsync(100);
 
       expect(fire).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("refuses delayed work scheduled after cancelAll", async () => {
+    vi.useFakeTimers();
+    try {
+      const registry = new ActiveRunRegistry();
+      await registry.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
+
+      const fire = vi.fn().mockResolvedValue(undefined);
+      registry.scheduleDelayed({
+        delayMs: 50,
+        fire,
+        issueNumber: 1,
+        kind: "retry",
+        projectName: "p",
+        runId: "run-a"
+      });
+
+      expect(registry.peekDelayed()).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(fire).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancelAll closes the registry to new claims", async () => {
+    const registry = new ActiveRunRegistry();
+    await registry.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
+
+    expect(registry.isShuttingDown()).toBe(true);
+    expect(() => registry.register(entry({ runId: "run-b" }))).toThrow(
+      RegistryShutdownError
+    );
+    expect(() =>
+      registry.reserveSlot({
+        issueNumber: 8,
+        projectName: "symphonika",
+        runId: "run-c"
+      })
+    ).toThrow(RegistryShutdownError);
+    expect(registry.list()).toHaveLength(0);
+  });
+
+  it("cancelAll supersedes an in-progress cancellation reason without re-invoking cancel", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const registry = new ActiveRunRegistry();
+    registry.register(entry({ cancel, runId: "run-a" }));
+
+    await registry.requestCancel("run-a", CANCEL_REASONS.OPERATOR);
+    await registry.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
+
+    // No re-invoke of the handler, but the recorded reason still flips.
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(registry.get("run-a")?.cancelReason).toBe("daemon_shutdown");
   });
 });
 

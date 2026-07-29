@@ -10,7 +10,10 @@ import type {
   GitHubIssuesApi,
   RawGitHubPullRequestFollowupState
 } from "../src/issue-polling.js";
-import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
+import {
+  ActiveRunRegistry,
+  type ScheduledWorkInput
+} from "../src/lifecycle/active-runs.js";
 import {
   RunController,
   type RunControllerProjectConfig,
@@ -422,14 +425,16 @@ async function waitForTerminalRunDetail(
 }
 
 function buildController(input: {
+  activeRuns?: ActiveRunRegistry;
   githubIssuesApi: GitHubIssuesApi;
   project: RunControllerProjectConfig;
   root: string;
   runStore: ReturnType<typeof openRunStore>;
+  schedule?: (item: ScheduledWorkInput) => void;
 }): RunController {
   let nextRun = 0;
   return new RunController({
-    activeRuns: new ActiveRunRegistry(),
+    activeRuns: input.activeRuns ?? new ActiveRunRegistry(),
     agentProviders: {
       codex: {
         cancel: vi.fn().mockResolvedValue(undefined),
@@ -463,7 +468,7 @@ function buildController(input: {
         codex: { command: DEFAULT_CODEX_COMMAND }
       }),
     runStore: input.runStore,
-    schedule: () => undefined,
+    schedule: input.schedule ?? (() => undefined),
     stateRoot: path.join(input.root, ".symphonika")
   });
 }
@@ -1516,6 +1521,326 @@ describe("wait state lifecycle", () => {
       const after = store.getRun("waiting-run");
       expect(after?.state).toBe("cancelled");
       expect(after?.cancelReason).toBe("closed_issue");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("skips wait re-evaluation mutations once shutdown has begun", async () => {
+    const root = await makeTempRoot();
+    await writeWaitStateProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.createWaitingRun({
+        currentStateId: "holding",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika"
+      });
+      store.trackPullRequest({
+        branchName: "sym/symphonika/8-wait-state-acceptance-fixture",
+        headSha: "deadbeef",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const activeRuns = new ActiveRunRegistry();
+      const schedule = vi.fn();
+      const controller = buildController({
+        activeRuns,
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store,
+        schedule
+      });
+
+      activeRuns.beginShutdown();
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      // No transition, no new waiting row, no armed timer: the durable
+      // waiting row is left for the next daemon's reconciliation.
+      expect(store.getRun("waiting-run")?.state).toBe("waiting");
+      expect(store.listRuns()).toHaveLength(2);
+      expect(schedule).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("skips a state-advance pre-provider claim when shutdown begins mid-write", async () => {
+    const root = await makeTempRoot();
+    await writeWaitStateProject(root);
+    // planning (codex, registered) advances into implementing, whose agent
+    // declares claude — command configured but provider NOT registered, so
+    // the advance exits through failStateAdvanceBeforeProvider.
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: advance_into_unregistered",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: plan-prompt.md",
+        "      complete_when:",
+        "        provider_success: true",
+        "      transitions:",
+        "        - to: implementing",
+        "    implementing:",
+        "      action:",
+        "        kind: agent",
+        "        provider: claude",
+        "        prompt: plan-prompt.md",
+        "      complete_when:",
+        "        provider_success: true",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+
+      const labelWrite = createDeferred();
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi
+          .fn()
+          .mockImplementationOnce(() => labelWrite.promise)
+          .mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const activeRuns = new ActiveRunRegistry();
+      const controller = buildController({
+        activeRuns,
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      const advancePromise = controller.executeStateAdvance({
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika",
+        toStateId: "implementing"
+      });
+      await vi.waitFor(() => {
+        expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalled();
+      });
+
+      activeRuns.beginShutdown();
+      labelWrite.resolve();
+      await advancePromise;
+
+      // The claim is skipped entirely: no continuation row, and the claim
+      // label written before the gate is released again.
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueNumber: issue.number,
+          labels: ["sym:claimed"]
+        })
+      );
+      expect(store.getRun("wait-rerun-1")).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("skips a state-advance terminal target when shutdown begins mid-write", async () => {
+    const root = await makeTempRoot();
+    // done is a terminal state, so the advance exits through
+    // recordStateAdvanceTerminalTarget.
+    await writeWaitStateProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+
+      const labelWrite = createDeferred();
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi
+          .fn()
+          .mockImplementationOnce(() => labelWrite.promise)
+          .mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const activeRuns = new ActiveRunRegistry();
+      const controller = buildController({
+        activeRuns,
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      const advancePromise = controller.executeStateAdvance({
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika",
+        toStateId: "done"
+      });
+      await vi.waitFor(() => {
+        expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalled();
+      });
+
+      activeRuns.beginShutdown();
+      labelWrite.resolve();
+      await advancePromise;
+
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueNumber: issue.number,
+          labels: ["sym:claimed"]
+        })
+      );
+      expect(store.getRun("wait-rerun-1")).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("classifies a cancellation landing during workflow load instead of parking into waiting", async () => {
+    const root = await makeTempRoot();
+    await writeWaitStateProject(root);
+    // The initial state is a parked wait action: the attempt lifecycle
+    // parks into a waiting row instead of launching a provider.
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: initial_parked",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const activeRuns = new ActiveRunRegistry();
+      const schedule = vi.fn();
+      const controller = buildController({
+        activeRuns,
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store,
+        schedule
+      });
+
+      // Defer the SECOND loadWorkflow (the one inside runAttemptLifecycle,
+      // after cancelBeforeAttach was captured; the first is dispatchOneFresh's
+      // initial-action probe) so the shutdown cancel lands mid-load.
+      const loadGate = createDeferred();
+      const internals = controller as unknown as {
+        loadWorkflow: (workflow: unknown) => Promise<unknown>;
+      };
+      const originalLoad = internals.loadWorkflow.bind(controller);
+      let loadCalls = 0;
+      internals.loadWorkflow = async (workflow: unknown) => {
+        loadCalls += 1;
+        if (loadCalls === 2) {
+          await loadGate.promise;
+        }
+        return originalLoad(workflow);
+      };
+
+      const dispatchPromise = controller.dispatchOneFresh({
+        candidateIssues: [{ issue, project: "symphonika" }],
+        errors: [],
+        filteredIssues: [],
+        projects: []
+      });
+      await vi.waitFor(() => {
+        expect(loadCalls).toBe(2);
+      });
+
+      // Mirror stop(): mark the row first, then supersede + cancel the
+      // registry entry.
+      store.markCancelRequested("wait-rerun-1", "daemon_shutdown");
+      await activeRuns.cancelAll("daemon_shutdown");
+      loadGate.resolve();
+      await dispatchPromise;
+
+      // The pre-park recheck classifies the cancellation: the run
+      // terminates instead of flipping to waiting with an armed timer.
+      expect(store.getRun("wait-rerun-1")).toMatchObject({
+        cancelReason: "daemon_shutdown",
+        cancelRequested: true,
+        state: "cancelled"
+      });
+      expect(schedule).not.toHaveBeenCalled();
     } finally {
       store.close();
     }

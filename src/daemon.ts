@@ -20,7 +20,7 @@ import {
   readConfiguredPollingIntervalMs,
   replaceIssuePollStatus
 } from "./issue-polling.js";
-import { ActiveRunRegistry } from "./lifecycle/active-runs.js";
+import { ActiveRunRegistry, CANCEL_REASONS } from "./lifecycle/active-runs.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
 import {
   createDaemonHeartbeat,
@@ -946,6 +946,12 @@ export async function startDaemon(
     stateRoot: state.stateRoot,
     url,
     stop: async () => {
+      // Close the registry to new claims FIRST, synchronously: this must
+      // not wait on the dispatch mutex, because a claim section parked in a
+      // slow GitHub label write must not delay cancellation of already-live
+      // providers. Pre-claim dispatches now hit the gate at reserveSlot and
+      // roll back instead of starting an uncancelled provider. See ADR 0052.
+      activeRuns.beginShutdown();
       if (pollTimer !== undefined) {
         clearInterval(pollTimer);
       }
@@ -956,7 +962,22 @@ export async function startDaemon(
         clearTimeout(legacyRecheckTimer);
         legacyRecheckTimer = undefined;
       }
-      activeRuns.cancelAll();
+      for (const entry of activeRuns.list()) {
+        if (runStore.getRun(entry.runId) !== undefined) {
+          runStore.markCancelRequested(
+            entry.runId,
+            CANCEL_REASONS.DAEMON_SHUTDOWN
+          );
+          continue;
+        }
+        if (runStore.getRoutineFiring(entry.runId) !== undefined) {
+          runStore.markRoutineFiringCancelRequested(
+            entry.runId,
+            CANCEL_REASONS.DAEMON_SHUTDOWN
+          );
+        }
+      }
+      await activeRuns.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
       await scheduledWork;
       await Promise.allSettled(Array.from(inflightDispatches));
       try {

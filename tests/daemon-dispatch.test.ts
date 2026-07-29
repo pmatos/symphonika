@@ -371,6 +371,187 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("cancels a live provider with daemon_shutdown before graceful stop waits for it", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await mkdir(preparedWorkspace.workspacePath, { recursive: true });
+
+    let releaseProvider: (() => void) | undefined;
+    const providerStopped = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const codexProvider = {
+      cancel: vi.fn(() => {
+        releaseProvider?.();
+        return Promise.resolve();
+      }),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: {
+            sessionId: "shutdown-session",
+            type: "session_started"
+          },
+          raw: {
+            id: "shutdown-session",
+            kind: "session"
+          }
+        };
+        await providerStopped;
+        yield {
+          normalized: {
+            cancelled: true,
+            exitCode: 143,
+            type: "process_exit"
+          },
+          raw: {
+            code: 143,
+            kind: "exit"
+          }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 8,
+          title: "Cancel this run during daemon shutdown"
+        })
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => "run-daemon-shutdown",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+    let stopPromise: Promise<void> | undefined;
+
+    try {
+      await waitForRun(daemon.url, "running");
+
+      stopPromise = daemon.stop();
+      await vi.waitFor(
+        () => {
+          expect(codexProvider.cancel).toHaveBeenCalledWith(
+            "run-daemon-shutdown"
+          );
+        },
+        { timeout: 500 }
+      );
+      await stopPromise;
+
+      const store = openRunStore({
+        stateRoot: path.join(root, ".symphonika")
+      });
+      try {
+        expect(store.getRun("run-daemon-shutdown")).toMatchObject({
+          cancelReason: "daemon_shutdown",
+          cancelRequested: true,
+          state: "cancelled"
+        });
+      } finally {
+        store.close();
+      }
+    } finally {
+      releaseProvider?.();
+      await (stopPromise ?? daemon.stop());
+    }
+  });
+
+  it("rolls back a dispatch that claims after stop begins instead of starting its provider", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+
+    let releaseLabelWrite: (() => void) | undefined;
+    const labelWritePending = new Promise<void>((resolve) => {
+      releaseLabelWrite = resolve;
+    });
+    const codexProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: {
+            sessionId: "claim-race-session",
+            type: "session_started"
+          },
+          raw: {
+            id: "claim-race-session",
+            kind: "session"
+          }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const githubIssuesApi = {
+      addLabelsToIssue: vi
+        .fn()
+        .mockImplementationOnce(() => labelWritePending)
+        .mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 9,
+          title: "Claim races daemon shutdown"
+        })
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => "run-shutdown-claim-race",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+    let stopPromise: Promise<void> | undefined;
+
+    try {
+      // Park the dispatch inside claimAndPersistRun's sym:claimed write,
+      // before reserveSlot registers the run.
+      await vi.waitFor(() => {
+        expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalled();
+      });
+
+      stopPromise = daemon.stop();
+      releaseLabelWrite?.();
+      await stopPromise;
+
+      expect(codexProvider.runAttempt).not.toHaveBeenCalled();
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ issueNumber: 9, labels: ["sym:claimed"] })
+      );
+      const store = openRunStore({
+        stateRoot: path.join(root, ".symphonika")
+      });
+      try {
+        expect(store.getRun("run-shutdown-claim-race")).toMatchObject({
+          cancelReason: "daemon_shutdown",
+          cancelRequested: true,
+          state: "cancelled"
+        });
+      } finally {
+        store.close();
+      }
+    } finally {
+      releaseLabelWrite?.();
+      await (stopPromise ?? daemon.stop());
+    }
+  });
+
   it("dispatches an issue that becomes eligible on a later poll interval", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(
@@ -2766,6 +2947,82 @@ describe("daemon dispatch", () => {
       expect(failedLabelCalls.length).toBeGreaterThanOrEqual(1);
     } finally {
       await daemon.stop();
+    }
+  });
+
+  it("rolls back a pre-provider failure claim when stop begins during its label write", async () => {
+    const root = await makeTempRoot();
+    await writeInitialStateClaudeRawFsmProject(root);
+
+    let releaseLabelWrite: (() => void) | undefined;
+    const labelWritePending = new Promise<void>((resolve) => {
+      releaseLabelWrite = resolve;
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi
+        .fn()
+        .mockImplementationOnce(() => labelWritePending)
+        .mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValueOnce([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 8,
+          title: "Skip missing provider failure during shutdown"
+        })
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    // The workflow selects unregistered Claude, while the registered Codex
+    // provider keeps the daemon eligible to launch fresh work.
+    const codexProvider = successfulCodexProvider();
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => "run-fsm-missing-provider-shutdown",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+    let stopPromise: Promise<void> | undefined;
+
+    try {
+      await vi.waitFor(() => {
+        expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith(
+          expect.objectContaining({ labels: ["sym:claimed"] })
+        );
+      });
+
+      stopPromise = daemon.stop();
+      releaseLabelWrite?.();
+      await stopPromise;
+
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueNumber: 8,
+          labels: ["sym:claimed"]
+        })
+      );
+      expect(
+        githubIssuesApi.addLabelsToIssue.mock.calls.some(([call]) =>
+          (call as { labels: string[] }).labels.includes("sym:failed")
+        )
+      ).toBe(false);
+      expect(codexProvider.runAttempt).not.toHaveBeenCalled();
+
+      const store = openRunStore({
+        stateRoot: path.join(root, ".symphonika")
+      });
+      try {
+        expect(
+          store.getRun("run-fsm-missing-provider-shutdown")
+        ).toBeUndefined();
+      } finally {
+        store.close();
+      }
+    } finally {
+      releaseLabelWrite?.();
+      await (stopPromise ?? daemon.stop());
     }
   });
 

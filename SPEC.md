@@ -721,6 +721,11 @@ workspace and logs are preserved, matching issue Run cancellation. Cancelling an
 Routine Firing already in a terminal state (`succeeded`, `failed`, `cancelled`) returns a clear
 error and makes no state change.
 
+Graceful daemon shutdown cancels every in-flight Routine Firing through the same provider
+cancellation path before waiting for dispatch work to drain, recording
+`cancel_reason = "daemon_shutdown"`. This is distinct from disabling or removing a Routine while
+the daemon remains active, which does not cancel its in-flight firing.
+
 A Routine with `disabled: true` in its own front matter transitions to `state = disabled`,
 `disabled_reason = "operator"` on the next reload; future scheduling stops but an in-flight firing
 continues to completion under the snapshot it started with — the daemon never cancels it as a side
@@ -1054,8 +1059,27 @@ Cancel active provider process when:
 - issue is closed
 - issue loses eligibility
 - operator cancels through CLI or UI
+- the daemon begins graceful shutdown
 
 Cancellation preserves workspace and logs.
+
+On graceful shutdown, the daemon first closes the active-run registry to new claims
+synchronously, before snapshotting active runs, so a dispatch still in pre-claim work can never
+reserve a slot after cancellation begins; a claim that raced the gate is rolled back to
+`cancel_reason = "daemon_shutdown"`, and later claims are skipped, not rescheduled. The daemon
+then cancels queued or delayed work, records `cancel_reason = "daemon_shutdown"` for every
+currently in-flight Run and Routine Firing, and requests cancellation through each live Agent
+Provider. The shutdown reason supersedes any cancellation already in progress and is
+sticky in the run store: later cancellation writes — from an in-flight reconcile or a UI
+cancel landing during the drain — cannot overwrite `daemon_shutdown` with another reason.
+Delayed-work registration closes with cancellation: the scheduler refuses timers armed after
+that point, so nothing fires against a store that is closing. A Run that was about to park
+into a wait state when cancellation latched is classified `cancelled` instead of flipping to
+`waiting`, and an in-flight wait re-evaluation stops before mutating rows — durable waiting
+rows are left untouched for the next daemon's reconciliation. Only after those requests have
+been awaited does it wait for in-flight dispatches to unwind. This explicit
+shutdown path is required because provider processes may run in a cgroup outside the daemon's
+own process tree (ADR 0064).
 
 ### 12.4 Watchdog
 

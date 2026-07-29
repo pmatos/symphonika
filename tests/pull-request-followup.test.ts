@@ -9,7 +9,10 @@ import {
   type GitHubIssuesApi,
   type RawGitHubPullRequestFollowupState
 } from "../src/issue-polling.js";
-import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
+import {
+  ActiveRunRegistry,
+  CANCEL_REASONS
+} from "../src/lifecycle/active-runs.js";
 import { reconcileActiveRuns } from "../src/lifecycle/reconcile.js";
 import {
   RunController,
@@ -877,7 +880,7 @@ describe("pull request follow-up", () => {
       expect(result.action).not.toBe("review_dispatch");
       expect(providerInputs).toHaveLength(0);
 
-      activeRuns.cancelAll();
+      await activeRuns.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
     } finally {
       store.close();
     }

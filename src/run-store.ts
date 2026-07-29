@@ -37,7 +37,17 @@ export type FailureClassification =
   "transient" | "deterministic" | "input_required";
 
 export type CancelReason =
-  "closed_issue" | "eligibility_loss" | "no_progress" | "operator";
+  | "closed_issue"
+  | "daemon_shutdown"
+  | "eligibility_loss"
+  | "no_progress"
+  | "operator";
+
+// Once stop() records daemon_shutdown, later cancellation writers (an
+// in-flight reconcile or a UI cancel during the shutdown drain) must not
+// overwrite it — the shutdown contract requires the reason to stick for
+// every row that was live when shutdown began. See SPEC 12.3.
+const SHUTDOWN_PREEMPTIVE_REASON: CancelReason = "daemon_shutdown";
 
 export type RunStatus = {
   branchName: string;
@@ -1874,7 +1884,7 @@ export class RunStore {
           "update routine_firings set",
           "state = @state,",
           "terminal_reason = @terminal_reason,",
-          "cancel_reason = coalesce(@cancel_reason, cancel_reason),",
+          "cancel_reason = case when cancel_reason = @shutdown_preemptive then cancel_reason else coalesce(@cancel_reason, cancel_reason) end,",
           "workspace_path = coalesce(@workspace_path, workspace_path),",
           "updated_at = @updated_at",
           "where id = @id"
@@ -1882,6 +1892,7 @@ export class RunStore {
       )
       .run({
         cancel_reason: input.cancelReason ?? null,
+        shutdown_preemptive: SHUTDOWN_PREEMPTIVE_REASON,
         id: input.id,
         state: input.state,
         terminal_reason: input.terminalReason ?? null,
@@ -1915,9 +1926,9 @@ export class RunStore {
   ): void {
     this.database
       .prepare(
-        "update routine_firings set cancel_requested = 1, cancel_reason = ?, updated_at = ? where id = ?"
+        "update routine_firings set cancel_requested = 1, cancel_reason = case when cancel_reason = ? then cancel_reason else ? end, updated_at = ? where id = ?"
       )
-      .run(reason, timestamp(), firingId);
+      .run(SHUTDOWN_PREEMPTIVE_REASON, reason, timestamp(), firingId);
   }
 
   updateRoutineFiringWorkspace(input: {
@@ -2748,9 +2759,9 @@ export class RunStore {
   markCancelRequested(runId: string, reason: CancelReason): void {
     this.database
       .prepare(
-        "update runs set cancel_requested = 1, cancel_reason = ?, updated_at = ? where id = ?"
+        "update runs set cancel_requested = 1, cancel_reason = case when cancel_reason = ? then cancel_reason else ? end, updated_at = ? where id = ?"
       )
-      .run(reason, timestamp(), runId);
+      .run(SHUTDOWN_PREEMPTIVE_REASON, reason, timestamp(), runId);
   }
 
   findLeakedRuns(): {

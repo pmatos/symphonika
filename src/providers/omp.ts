@@ -587,7 +587,28 @@ function processExitEvent(
   };
 }
 
-function createProcessQueue(
+const MALFORMED_EVIDENCE_MAX_BYTES = 4096;
+
+function boundedMalformedEvidence(line: string): string {
+  if (Buffer.byteLength(line, "utf8") <= MALFORMED_EVIDENCE_MAX_BYTES) {
+    return line;
+  }
+  let byteLength = 0;
+  let endIndex = 0;
+  for (const character of line) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (byteLength + characterBytes > MALFORMED_EVIDENCE_MAX_BYTES) {
+      break;
+    }
+    byteLength += characterBytes;
+    endIndex += character.length;
+  }
+  // Round-trip through a Buffer so the returned string is a fresh allocation
+  // rather than a V8 sliced string that would retain the oversized parent.
+  return Buffer.from(line.slice(0, endIndex), "utf8").toString("utf8");
+}
+
+export function createProcessQueue(
   child: ChildProcessWithoutNullStreams
 ): ProcessQueue {
   const pending: ProcessQueueItem[] = [];
@@ -595,6 +616,7 @@ function createProcessQueue(
   let maxPhysicalFrameBytes = 1024 * 1024;
   let waiting: ((item: ProcessQueueItem) => void) | undefined;
   let stdoutBuffer = "";
+  let stdoutOverflowed = false;
 
   const push = (item: ProcessQueueItem): void => {
     if (waiting !== undefined) {
@@ -612,7 +634,7 @@ function createProcessQueue(
     if (Buffer.byteLength(line, "utf8") > maxPhysicalFrameBytes) {
       push({
         kind: "malformed",
-        line,
+        line: boundedMalformedEvidence(line),
         message: "Oh My Pi RPC frame exceeds the physical frame limit"
       });
       return;
@@ -648,9 +670,35 @@ function createProcessQueue(
     }
   };
 
+  const enforceStdoutBound = (): void => {
+    if (
+      stdoutOverflowed ||
+      Buffer.byteLength(stdoutBuffer, "utf8") <= maxPhysicalFrameBytes
+    ) {
+      return;
+    }
+    stdoutOverflowed = true;
+    const line = stdoutBuffer;
+    stdoutBuffer = "";
+    push({
+      kind: "malformed",
+      line: boundedMalformedEvidence(line),
+      message: "Oh My Pi RPC frame exceeds the physical frame limit"
+    });
+  };
+
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
-    stdoutBuffer += chunk;
+    let data = chunk;
+    if (stdoutOverflowed) {
+      const frameEndIndex = data.indexOf("\n");
+      if (frameEndIndex < 0) {
+        return;
+      }
+      stdoutOverflowed = false;
+      data = data.slice(frameEndIndex + 1);
+    }
+    stdoutBuffer += data;
     let newlineIndex = stdoutBuffer.indexOf("\n");
     while (newlineIndex >= 0) {
       const line = stdoutBuffer.slice(0, newlineIndex).trimEnd();
@@ -658,6 +706,7 @@ function createProcessQueue(
       pushParsedLine(line);
       newlineIndex = stdoutBuffer.indexOf("\n");
     }
+    enforceStdoutBound();
   });
   child.stdout.on("end", () => {
     if (stdoutBuffer.length > 0) {
@@ -685,6 +734,7 @@ function createProcessQueue(
     setFrameLimits: (maxFrameBytes, maxReassembledBytes) => {
       maxPhysicalFrameBytes = maxFrameBytes;
       frameDecoder.setLimits(maxFrameBytes, maxReassembledBytes);
+      enforceStdoutBound();
     }
   };
 }

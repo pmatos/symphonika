@@ -1,6 +1,9 @@
+import { spawn } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type {
@@ -8,7 +11,7 @@ import type {
   ProviderRunIdentity
 } from "../src/lifecycle/process-scope.js";
 import type { ProviderEvent, ProviderRunInput } from "../src/provider.js";
-import { createOmpProvider } from "../src/providers/omp.js";
+import { createOmpProvider, createProcessQueue } from "../src/providers/omp.js";
 
 type RecordingProcessScope = {
   stopCalls: ProviderRunIdentity[];
@@ -213,6 +216,148 @@ describe("Oh My Pi RPC provider", () => {
     ).toMatchObject({
       message: "Oh My Pi RPC frame exceeds the physical frame limit",
       type: "malformed_event"
+    });
+  });
+
+  it("bounds an unterminated frame accumulated across chunks and resumes after it", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const fakeOmpPath = path.join(root, "fake-unterminated-frame-omp.mjs");
+    await writeFakeUnterminatedFrameOmp(fakeOmpPath);
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+    );
+
+    const malformed = events
+      .map((event) => event.normalized)
+      .filter((event) => event?.type === "malformed_event");
+    expect(malformed).toHaveLength(1);
+    expect(malformed[0]).toMatchObject({
+      message: "Oh My Pi RPC frame exceeds the physical frame limit",
+      type: "malformed_event"
+    });
+    expect(events.at(-1)?.normalized).toMatchObject({
+      exitCode: 0,
+      type: "process_exit"
+    });
+  });
+
+  it("enforces the byte limit on unterminated multibyte input and caps evidence", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const fakeOmpPath = path.join(root, "fake-multibyte-overflow-omp.mjs");
+    await writeFakeMultibyteOverflowOmp(fakeOmpPath);
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+    );
+
+    const malformedLines = events
+      .map((event) => event.normalized)
+      .flatMap((event) =>
+        event?.type === "malformed_event" && typeof event.line === "string"
+          ? [event.line]
+          : []
+      );
+    expect(malformedLines).toHaveLength(2);
+    // 600 two-byte characters stay under the limit as characters but exceed
+    // it as UTF-8 bytes, so the small payload is preserved in full.
+    expect(malformedLines[0]).toBe("é".repeat(600));
+    expect(Buffer.byteLength(malformedLines[0] ?? "", "utf8")).toBe(1200);
+    expect(
+      Buffer.byteLength(malformedLines[1] ?? "", "utf8")
+    ).toBeLessThanOrEqual(4096);
+    expect(malformedLines[1]).not.toContain("\uFFFD");
+    expect(events.at(-1)?.normalized).toMatchObject({
+      exitCode: 0,
+      type: "process_exit"
+    });
+  });
+
+  it("bounds an unterminated frame between data callbacks and discards the overflow", async () => {
+    const root = await makeTempRoot();
+    const echoPath = path.join(root, "echo-omp.mjs");
+    await writeFakeEchoOmp(echoPath);
+    const child = spawn(process.execPath, [echoPath], {
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+
+    try {
+      const queue = createProcessQueue(child);
+      queue.setFrameLimits(1024, 8192);
+      const send = (command: unknown): void => {
+        child.stdin.write(`${JSON.stringify(command)}\n`);
+      };
+
+      send({ write: "a".repeat(600) });
+      send({ write: "b".repeat(600) });
+      // Awaiting the overflow item is the acknowledgement that the data
+      // callback latched, so the discarded chunk below cannot coalesce with
+      // the buffered frame.
+      const overflow = await queue.next();
+      expect(overflow).toMatchObject({
+        kind: "malformed",
+        line: "a".repeat(600) + "b".repeat(600),
+        message: "Oh My Pi RPC frame exceeds the physical frame limit"
+      });
+
+      send({ newline: true, write: "c".repeat(600) });
+      send({
+        exit: true,
+        newline: true,
+        write: JSON.stringify({ message: "resumed", type: "notice" })
+      });
+      const resumed = await queue.next();
+      expect(resumed).toMatchObject({
+        kind: "message",
+        raw: { message: "resumed", type: "notice" }
+      });
+    } finally {
+      if (child.exitCode === null) {
+        child.kill();
+      }
+    }
+  });
+
+  it("re-checks buffered output when negotiated frame limits tighten", async () => {
+    const stdout = new PassThrough();
+    const child = {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      once: () => child
+    } as unknown as ChildProcessWithoutNullStreams;
+    const queue = createProcessQueue(child);
+    // One write carries a complete ready frame plus an unterminated
+    // remainder that fits the pre-ready 1 MiB default but not the limit the
+    // ready frame negotiates down to.
+    stdout.write(`${JSON.stringify({ type: "ready" })}\n${"d".repeat(2000)}`);
+    queue.setFrameLimits(1024, 8192);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      line: "d".repeat(2000),
+      message: "Oh My Pi RPC frame exceeds the physical frame limit"
     });
   });
 
@@ -767,6 +912,76 @@ async function writeFakeOversizedFrameOmp(filePath: string): Promise<void> {
       "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
       "    send({ type: 'notice', level: 'info', message: 'x'.repeat(2048) });",
       "    setTimeout(() => process.exit(0), 10);",
+      "  }",
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakeEchoOmp(filePath: string): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      "  if (typeof command.write === 'string') process.stdout.write(command.write);",
+      "  if (command.newline === true) process.stdout.write('\\n');",
+      "  if (command.exit === true) process.stdout.write('', () => process.exit(0));",
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakeUnterminatedFrameOmp(filePath: string): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1024, maxReassembledFrameBytes: 8192 });",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-335', model: { provider: 'openai', id: 'gpt-5.4' } } });",
+      "  if (command.type === 'prompt') {",
+      "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
+      "    process.stdout.write('a'.repeat(600));",
+      "    process.stdout.write('b'.repeat(600));",
+      "    process.stdout.write('c'.repeat(600));",
+      "    process.stdout.write('\\n');",
+      "    process.stdout.write(`${JSON.stringify({ type: 'agent_end', isTerminal: true, messages: [] })}\\n`, () => process.exit(0));",
+      "  }",
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakeMultibyteOverflowOmp(filePath: string): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1024, maxReassembledFrameBytes: 8192 });",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-335', model: { provider: 'openai', id: 'gpt-5.4' } } });",
+      "  if (command.type === 'prompt') {",
+      "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
+      "    process.stdout.write('é'.repeat(600));",
+      "    process.stdout.write('\\n');",
+      "    process.stdout.write('é'.repeat(5000));",
+      "    process.stdout.write('\\n');",
+      "    process.stdout.write(`${JSON.stringify({ type: 'agent_end', isTerminal: true, messages: [] })}\\n`, () => process.exit(0));",
       "  }",
       "}",
       ""

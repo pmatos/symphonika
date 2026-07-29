@@ -140,7 +140,10 @@ export async function dispatchDueRoutines(
   // for a precise soft-disable (ADR 0066).
   const allRoutines: TargetedRoutineDeclaration[] = [];
   const protectedNamesByProject: Record<string, string[]> = {};
-  const trackerlessGitNamesByProject: Record<string, string[]> = {};
+  const trackerlessGitRoutinesByProject: Record<
+    string,
+    TargetedRoutineDeclaration[]
+  > = {};
   const syncedProjects: string[] = [];
   for (const project of projects) {
     if (project.disabled === true) {
@@ -153,9 +156,9 @@ export async function dispatchDueRoutines(
     if ((project.invalidRoutineNames ?? []).length > 0) {
       protectedNamesByProject[project.name] = project.invalidRoutineNames ?? [];
     }
-    if ((project.trackerlessGitRoutineNames ?? []).length > 0) {
-      trackerlessGitNamesByProject[project.name] =
-        project.trackerlessGitRoutineNames ?? [];
+    if ((project.trackerlessGitRoutines ?? []).length > 0) {
+      trackerlessGitRoutinesByProject[project.name] =
+        project.trackerlessGitRoutines ?? [];
     }
   }
   input.runStore.syncRoutines(allRoutines, {
@@ -164,7 +167,7 @@ export async function dispatchDueRoutines(
     // project whose last routine was just removed (ADR 0063).
     projects: syncedProjects,
     protectedNamesByProject,
-    trackerlessGitNamesByProject,
+    trackerlessGitRoutinesByProject,
     recomputeRecurring: input.recomputeSchedulesFromNow === true
   });
   input.runStore.pruneRoutinesForUnknownProjects(

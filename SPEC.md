@@ -737,9 +737,13 @@ soft-disabled with `disabled_reason = "rejected_tracker_less_host"`. This is dis
 `removed_from_config`: the top-level entry is still present but is incompatible with its target
 host. The rejected name must not be folded into the declaration-loader's `invalidRoutineNames`
 protection, because a protected, undeclared persisted row is skipped by both removal detection and
-the valid-declaration upsert and could remain active. A first-appearance rejection with no persisted
-row is reported through reload errors and `doctor`. Restoring the host's tracker returns the Routine
-to the normal upsert path and the existing restore rules above. See ADR 0066.
+the valid-declaration upsert and could remain active. A first-appearance rejection persists the
+Routine as `disabled` with the same reason — carrying its declared schedule and prompt — and is also
+reported through reload errors and `doctor`. Restoring the host's tracker therefore returns the
+Routine to the normal upsert path and the existing restore rules above in every case: a recurring
+Routine reactivates, while an elapsed one-shot is marked `expired` instead of firing retroactively —
+even when its schedule was edited while rejected, since the persisted `rejected_tracker_less_host`
+reason proves it never had a chance to fire. See ADR 0066.
 
 An invalid Routine declaration on reload does not abort reload for the rest of the fleet (§5.4): the
 daemon logs the error and surfaces it in the operator status surface and `doctor`. A Routine with a

@@ -546,20 +546,20 @@ async function loadRuntimeConfigSnapshot(input: {
       const needsTracker =
         project.mode === "routine_host" && project.tracker === undefined;
       const attached: TargetedRoutineDeclaration[] = [];
-      const trackerlessGitRoutineNames: string[] = [];
+      const trackerlessGitRoutines: TargetedRoutineDeclaration[] = [];
       for (const routine of routines) {
         if (needsTracker && routine.kind === "git") {
           errors.push(
             `routine "${routine.name}" (kind: git) targets routine host "${projectName}" which declares no tracker; a kind: git routine requires a tracker for PR discovery`
           );
-          trackerlessGitRoutineNames.push(routine.name);
+          trackerlessGitRoutines.push(routine);
           continue;
         }
         attached.push(routine);
       }
       project.routines = attached;
-      if (trackerlessGitRoutineNames.length > 0) {
-        project.trackerlessGitRoutineNames = trackerlessGitRoutineNames;
+      if (trackerlessGitRoutines.length > 0) {
+        project.trackerlessGitRoutines = trackerlessGitRoutines;
       }
       const invalidNames = invalidNamesByProject.get(projectName) ?? [];
       if (invalidNames.length > 0) {

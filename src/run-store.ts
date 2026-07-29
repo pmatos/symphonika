@@ -1182,8 +1182,12 @@ export class RunStore {
   // set is soft-disabled without touching another project's rows.
   // `protectedNamesByProject` holds invalid-routine names per project so their
   // rows are not demoted to removed_from_config (ADR 0060).
-  // `trackerlessGitNamesByProject` identifies declarations rejected by ADR
-  // 0062 so persisted rows are safely disabled with their precise cause.
+  // `trackerlessGitRoutinesByProject` carries declarations rejected by ADR
+  // 0062 so persisted rows are safely disabled with their precise cause. A
+  // first-seen rejection also persists a disabled row, so a later tracker
+  // restoration re-enters through the normal upsert's restore rules instead
+  // of looking like a brand-new declaration (an elapsed one-shot expires
+  // rather than firing retroactively). See ADR 0066.
   syncRoutines(
     routines: TargetedRoutineDeclaration[],
     options: {
@@ -1195,7 +1199,10 @@ export class RunStore {
       projects?: string[];
       protectedNamesByProject?: Record<string, string[]>;
       recomputeRecurring?: boolean;
-      trackerlessGitNamesByProject?: Record<string, string[]>;
+      trackerlessGitRoutinesByProject?: Record<
+        string,
+        TargetedRoutineDeclaration[]
+      >;
     } = {}
   ): void {
     const now = timestamp();
@@ -1244,6 +1251,13 @@ export class RunStore {
         "state = case",
         "when @disabled = 1 then 'disabled'",
         "when excluded.schedule_cron is not null then 'active'",
+        // A tracker-less-host rejection doubles as durable restore evidence:
+        // the routine never had a chance to fire, so an elapsed one-shot `at`
+        // expires even when the operator edited the schedule while rejected.
+        // This must precede the schedule-change reactivation branch below,
+        // which exists for deliberate operator reschedules of runnable
+        // routines — a meaning a rejected routine's edit cannot carry.
+        "when routines.disabled_reason = 'rejected_tracker_less_host' and @disabled = 0 and excluded.schedule_cron is null and routines.last_fired_at is null and excluded.schedule_at <= @now_iso then 'expired'",
         "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then 'active'",
         // Restoring a one-shot whose `at` already elapsed while disabled must
         // not fire it retroactively — treat it the same as a missed one-shot
@@ -1274,8 +1288,11 @@ export class RunStore {
     const apply = this.database.transaction(() => {
       for (const [projectName, projectRoutines] of byProject) {
         const declaredNames = projectRoutines.map((routine) => routine.name);
-        const trackerlessGitNames =
-          options.trackerlessGitNamesByProject?.[projectName] ?? [];
+        const trackerlessGitRoutines =
+          options.trackerlessGitRoutinesByProject?.[projectName] ?? [];
+        const trackerlessGitNames = trackerlessGitRoutines.map(
+          (routine) => routine.name
+        );
         const excludedNames = [
           ...new Set([
             ...declaredNames,
@@ -1301,13 +1318,64 @@ export class RunStore {
             )
             .run(now, projectName, ...excludedNames);
         }
-        if (trackerlessGitNames.length > 0) {
+        if (trackerlessGitRoutines.length > 0) {
           const placeholders = trackerlessGitNames.map(() => "?").join(", ");
           this.database
             .prepare(
               `update routines set state = 'disabled', disabled_reason = 'rejected_tracker_less_host', updated_at = ? where project_name = ? and name in (${placeholders}) and not (state = 'disabled' and disabled_reason = 'rejected_tracker_less_host')`
             )
             .run(now, projectName, ...trackerlessGitNames);
+          // First-seen rejections have no row to demote — persist one so a
+          // later tracker restoration re-enters through the normal upsert's
+          // restore rules (ADR 0066). The UPDATE above already demoted any
+          // existing row, so this insert only lands for new identities; the
+          // conflict clause targets only the identity key, leaving unrelated
+          // constraint failures visible.
+          for (const routine of trackerlessGitRoutines) {
+            const scheduleValues =
+              "cron" in routine.schedule
+                ? {
+                    nextFireAt: nextRecurringFireAt(
+                      routine.schedule,
+                      scheduleNow
+                    ),
+                    scheduleAt: "",
+                    scheduleCron: routine.schedule.cron,
+                    scheduleTz: routine.schedule.tz
+                  }
+                : {
+                    nextFireAt: routine.schedule.at,
+                    scheduleAt: routine.schedule.at,
+                    scheduleCron: null,
+                    scheduleTz: null
+                  };
+            this.database
+              .prepare(
+                [
+                  "insert into routines (",
+                  "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, catch_up, created_at, updated_at",
+                  ") values (",
+                  "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'disabled', 'rejected_tracker_less_host', @allow_overlap, @catch_up, @created_at, @updated_at",
+                  ") on conflict(project_name, name) do nothing"
+                ].join(" ")
+              )
+              .run({
+                allow_overlap: routine.allowOverlap === true ? 1 : 0,
+                catch_up: routine.catchUp ?? "skip",
+                created_at: now,
+                kind: routine.kind,
+                name: routine.name,
+                project_name: routine.projectName,
+                prompt_body: routine.prompt,
+                provider_name: routine.provider,
+                next_fire_at: scheduleValues.nextFireAt,
+                schedule_at: scheduleValues.scheduleAt,
+                schedule_cron: scheduleValues.scheduleCron,
+                schedule_tz: scheduleValues.scheduleTz,
+                source_path: routine.sourcePath,
+                updated_at: now
+              });
+          }
         }
         for (const routine of projectRoutines) {
           const scheduleValues =

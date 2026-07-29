@@ -763,6 +763,9 @@ export function createProcessQueue(
     stdoutEnded = true;
     finishStdout();
   });
+  child.stdin.on("error", (error: Error) => {
+    push({ error, kind: "error" });
+  });
   child.once("error", (error) => {
     push({ error, kind: "error" });
   });

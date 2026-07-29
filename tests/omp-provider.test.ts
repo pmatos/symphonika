@@ -529,6 +529,18 @@ describe("Oh My Pi RPC provider", () => {
     });
   });
 
+  it("routes stdin write errors through the process queue", async () => {
+    const { queue, stdin } = createQueueHarness({
+      maxFrameBytes: 1024,
+      maxReassembledBytes: 8192
+    });
+
+    stdin.destroy(new Error("write EPIPE"));
+
+    const item = await queue.next();
+    expect(item.kind).toBe("error");
+  });
+
   it("measures physical frames before removing the JSONL delimiter", async () => {
     const { queue, stdout } = createQueueHarness({
       maxFrameBytes: 1024,
@@ -1169,10 +1181,11 @@ async function writeFakeOversizedFrameOmp(filePath: string): Promise<void> {
 function createQueueHarness(limits?: {
   maxFrameBytes: number;
   maxReassembledBytes: number;
-}): { queue: ProcessQueue; stdout: PassThrough } {
+}): { queue: ProcessQueue; stdin: PassThrough; stdout: PassThrough } {
+  const stdin = new PassThrough();
   const stdout = new PassThrough();
   const child = {
-    stdin: new PassThrough(),
+    stdin,
     stdout,
     stderr: new PassThrough(),
     once: () => child
@@ -1181,7 +1194,7 @@ function createQueueHarness(limits?: {
   if (limits !== undefined) {
     queue.setFrameLimits(limits.maxFrameBytes, limits.maxReassembledBytes);
   }
-  return { queue, stdout };
+  return { queue, stdin, stdout };
 }
 
 function rpcChunkLines(payload: string, chunkId: string): [string, string] {

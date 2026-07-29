@@ -790,6 +790,30 @@ describe("Oh My Pi RPC provider", () => {
     ).rejects.toThrow("must select exactly one --mode rpc");
   });
 
+  it("caps the stderr retained by the validation probe", async () => {
+    const root = await makeTempRoot();
+    const spewPath = path.join(root, "stderr-spew.mjs");
+    await writeFile(
+      spewPath,
+      "process.stderr.write('x'.repeat(100000), () => process.exit(3));\n",
+      "utf8"
+    );
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    const failure = await provider
+      .validate(`${process.execPath} ${spewPath} --mode rpc --auto-approve`)
+      .then(
+        () => undefined,
+        (error: unknown) => error
+      );
+
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain("exited before ready with code 3");
+    expect(message.endsWith("x".repeat(100))).toBe(true);
+    expect(message.length).toBeLessThan(8400);
+  });
+
   it("rejects incompatible, early-exit, and timed-out OMP probes", async () => {
     const root = await makeTempRoot();
     const incompatiblePath = path.join(root, "incompatible.mjs");

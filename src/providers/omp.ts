@@ -593,6 +593,7 @@ function processExitEvent(
 }
 
 const MALFORMED_EVIDENCE_MAX_BYTES = 4096;
+const PROBE_STDERR_TAIL_BYTES = 8192;
 
 function boundedMalformedEvidence(line: string): string {
   if (Buffer.byteLength(line, "utf8") <= MALFORMED_EVIDENCE_MAX_BYTES) {
@@ -1034,11 +1035,18 @@ async function validateOmpRpcCommand(command: {
       stdio: ["pipe", "pipe", "pipe"]
     });
     const queue = createProcessQueue(child);
-    let stderr = "";
+    let stderrTail = Buffer.alloc(0);
     let settled = false;
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
+    child.stderr.on("data", (chunk: Buffer) => {
+      const combined = Buffer.concat([stderrTail, chunk]);
+      // Copy on truncation so the retained tail never shares the larger
+      // combined backing store.
+      stderrTail =
+        combined.byteLength > PROBE_STDERR_TAIL_BYTES
+          ? Buffer.from(
+              combined.subarray(combined.byteLength - PROBE_STDERR_TAIL_BYTES)
+            )
+          : combined;
     });
 
     const timer = setTimeout(() => {
@@ -1085,7 +1093,7 @@ async function validateOmpRpcCommand(command: {
           settle(() => {
             reject(
               new Error(
-                `Oh My Pi provider command exited before ready with code ${item.exitCode ?? "unknown"}${stderr.trim().length === 0 ? "" : `: ${stderr.trim()}`}`
+                `Oh My Pi provider command exited before ready with code ${item.exitCode ?? "unknown"}${stderrTail.toString("utf8").trim().length === 0 ? "" : `: ${stderrTail.toString("utf8").trim()}`}`
               )
             );
           });
@@ -1121,7 +1129,7 @@ async function validateOmpRpcCommand(command: {
             } else {
               reject(
                 new Error(
-                  `Oh My Pi provider command validation failed with exit code ${item.exitCode ?? "unknown"}${stderr.trim().length === 0 ? "" : `: ${stderr.trim()}`}`
+                  `Oh My Pi provider command validation failed with exit code ${item.exitCode ?? "unknown"}${stderrTail.toString("utf8").trim().length === 0 ? "" : `: ${stderrTail.toString("utf8").trim()}`}`
                 )
               );
             }

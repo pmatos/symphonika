@@ -1243,8 +1243,24 @@ function shutdownProcess(child: ChildProcessWithoutNullStreams): void {
   endStdin(child);
   const timer = setTimeout(() => {
     terminateProcess(child);
+    const killTimer = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+      // Release the pipes even if the child ignores SIGKILL (or a
+      // grandchild inherited them), so 'close' fires and FDs are freed.
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+    }, ompKillGraceMs());
+    killTimer.unref();
   }, 250);
   timer.unref();
+}
+
+function ompKillGraceMs(): number {
+  const configured = Number(process.env.SYMPHONIKA_OMP_KILL_GRACE_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : 1_000;
 }
 
 function isTerminalFailure(type: string | undefined): boolean {

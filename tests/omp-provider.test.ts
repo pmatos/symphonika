@@ -935,6 +935,57 @@ describe("Oh My Pi RPC provider", () => {
     expect(message.length).toBeLessThan(8400);
   });
 
+  it("escalates an unresponsive validation probe to SIGKILL", async () => {
+    const root = await makeTempRoot();
+    const pidPath = path.join(root, "probe.pid");
+    const immunePath = path.join(root, "sigterm-immune.mjs");
+    await writeFile(
+      immunePath,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        `writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));`,
+        "process.on('SIGTERM', () => {});",
+        "setInterval(() => {}, 1000);",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    const previousTimeout = process.env.SYMPHONIKA_OMP_PROBE_TIMEOUT_MS;
+    const previousKillGrace = process.env.SYMPHONIKA_OMP_KILL_GRACE_MS;
+    process.env.SYMPHONIKA_OMP_PROBE_TIMEOUT_MS = "25";
+    process.env.SYMPHONIKA_OMP_KILL_GRACE_MS = "25";
+    let pid: number | undefined;
+    try {
+      await expect(
+        provider.validate(
+          `${process.execPath} ${immunePath} --mode rpc --auto-approve`
+        )
+      ).rejects.toThrow("validation timed out");
+      pid = Number(await readFile(pidPath, "utf8"));
+      await waitForProcessExit(pid);
+    } finally {
+      if (pid !== undefined && Number.isSafeInteger(pid)) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // The probe already cleaned the process up.
+        }
+      }
+      if (previousTimeout === undefined) {
+        delete process.env.SYMPHONIKA_OMP_PROBE_TIMEOUT_MS;
+      } else {
+        process.env.SYMPHONIKA_OMP_PROBE_TIMEOUT_MS = previousTimeout;
+      }
+      if (previousKillGrace === undefined) {
+        delete process.env.SYMPHONIKA_OMP_KILL_GRACE_MS;
+      } else {
+        process.env.SYMPHONIKA_OMP_KILL_GRACE_MS = previousKillGrace;
+      }
+    }
+  });
+
   it("rejects incompatible, early-exit, and timed-out OMP probes", async () => {
     const root = await makeTempRoot();
     const incompatiblePath = path.join(root, "incompatible.mjs");
@@ -1464,6 +1515,18 @@ async function writeFakeCancellableOmp(
     ].join("\n"),
     "utf8"
   );
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for process ${pid} to exit`);
 }
 
 async function waitForTranscriptCommand(

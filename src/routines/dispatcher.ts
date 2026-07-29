@@ -291,6 +291,18 @@ export async function dispatchDueRoutines(
         continue;
       }
 
+      // The claim below through reserveSlot is await-free, so this check
+      // is race-free: a skipped firing never creates a row that shutdown
+      // would fail to mark daemon_shutdown. See ADR 0052.
+      if (input.activeRuns.isShuttingDown()) {
+        skipped.push({
+          projectName: project.name,
+          reason: "daemon shutting down",
+          routineName: routine.name
+        });
+        continue;
+      }
+
       const firingId = createFiringId();
       const claimed = input.runStore.claimRoutineFiring({
         firedAt: now.toISOString(),

@@ -468,6 +468,90 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("rolls back a dispatch that claims after stop begins instead of starting its provider", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+
+    let releaseLabelWrite: (() => void) | undefined;
+    const labelWritePending = new Promise<void>((resolve) => {
+      releaseLabelWrite = resolve;
+    });
+    const codexProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: {
+            sessionId: "claim-race-session",
+            type: "session_started"
+          },
+          raw: {
+            id: "claim-race-session",
+            kind: "session"
+          }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const githubIssuesApi = {
+      addLabelsToIssue: vi
+        .fn()
+        .mockImplementationOnce(() => labelWritePending)
+        .mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 9,
+          title: "Claim races daemon shutdown"
+        })
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => "run-shutdown-claim-race",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+    let stopPromise: Promise<void> | undefined;
+
+    try {
+      // Park the dispatch inside claimAndPersistRun's sym:claimed write,
+      // before reserveSlot registers the run.
+      await vi.waitFor(() => {
+        expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalled();
+      });
+
+      stopPromise = daemon.stop();
+      releaseLabelWrite?.();
+      await stopPromise;
+
+      expect(codexProvider.runAttempt).not.toHaveBeenCalled();
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ issueNumber: 9, labels: ["sym:claimed"] })
+      );
+      const store = openRunStore({
+        stateRoot: path.join(root, ".symphonika")
+      });
+      try {
+        expect(store.getRun("run-shutdown-claim-race")).toMatchObject({
+          cancelReason: "daemon_shutdown",
+          cancelRequested: true,
+          state: "cancelled"
+        });
+      } finally {
+        store.close();
+      }
+    } finally {
+      releaseLabelWrite?.();
+      await (stopPromise ?? daemon.stop());
+    }
+  });
+
   it("dispatches an issue that becomes eligible on a later poll interval", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(

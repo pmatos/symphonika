@@ -62,6 +62,7 @@ import {
   CANCEL_REASONS,
   computeRetryDelayMs,
   LIFECYCLE_POLICY,
+  RegistryShutdownError,
   type LifecyclePolicy
 } from "./active-runs.js";
 import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
@@ -507,6 +508,13 @@ export class RunController {
         schedulerWeights: target.schedulerWeights
       });
     } catch (error) {
+      if (error instanceof RegistryShutdownError) {
+        this.logger?.debug(
+          { reason: error.message, runId },
+          "symphonika fresh dispatch skipped: daemon shutting down"
+        );
+        return { dispatched: false, reason: error.message };
+      }
       if (
         error instanceof CapBreachedError ||
         error instanceof IssueReservedError
@@ -693,59 +701,93 @@ export class RunController {
     // reservation inside the mutex; on contention, reschedule the retry
     // instead of breaching the cap. See ADR 0053.
     let contention: CapBreachedError | IssueReservedError | undefined;
+    // A retry that arrives after stop() closed the registry must skip —
+    // WITHOUT rescheduling, since the scheduler itself is being torn down.
+    // See ADR 0052.
+    let shuttingDown = false;
     await this.dispatchMutex.acquire();
     try {
-      const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
-      if (
-        globalMax !== undefined &&
-        this.activeRuns.countInFlight() >= globalMax
-      ) {
-        contention = new CapBreachedError(
-          `global max_in_flight (${globalMax}) reached`
-        );
+      if (this.activeRuns.isShuttingDown()) {
+        shuttingDown = true;
       } else {
-        const projectMax = project.max_in_flight ?? 1;
+        const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
         if (
-          this.activeRuns.countInFlightByProject(project.name) >= projectMax
+          globalMax !== undefined &&
+          this.activeRuns.countInFlight() >= globalMax
         ) {
           contention = new CapBreachedError(
-            `project ${project.name} max_in_flight (${projectMax}) reached`
+            `global max_in_flight (${globalMax}) reached`
           );
-        } else if (
-          this.activeRuns.isIssueReserved(project.name, refreshed.number)
-        ) {
-          contention = new IssueReservedError(
-            `issue ${project.name}#${refreshed.number} is already reserved`
-          );
-        }
-      }
-      if (contention === undefined) {
-        await this.bestEffort(
-          () =>
-            this.githubIssuesApi.addLabelsToIssue!({
-              ...repository,
-              issueNumber: refreshed.number,
-              labels: ["sym:claimed"]
-            }),
-          {
-            issueNumber: refreshed.number,
-            label: "sym:claimed",
-            operation: "addLabel",
-            project: project.name,
-            runId: payload.runId
+        } else {
+          const projectMax = project.max_in_flight ?? 1;
+          if (
+            this.activeRuns.countInFlightByProject(project.name) >= projectMax
+          ) {
+            contention = new CapBreachedError(
+              `project ${project.name} max_in_flight (${projectMax}) reached`
+            );
+          } else if (
+            this.activeRuns.isIssueReserved(project.name, refreshed.number)
+          ) {
+            contention = new IssueReservedError(
+              `issue ${project.name}#${refreshed.number} is already reserved`
+            );
           }
-        );
-        this.activeRuns.reserveSlot({
-          issueNumber: refreshed.number,
-          projectName: project.name,
-          ...(payload.respectsIssueLabels === undefined
-            ? {}
-            : { respectsIssueLabels: payload.respectsIssueLabels }),
-          runId: payload.runId
-        });
+        }
+        if (contention === undefined) {
+          // Reserve BEFORE re-asserting the label: when stop() closes the
+          // registry during the loader await above, reserveSlot refuses the
+          // slot here and no stale sym:claimed label is left behind. See
+          // ADR 0052.
+          try {
+            this.activeRuns.reserveSlot({
+              issueNumber: refreshed.number,
+              projectName: project.name,
+              ...(payload.respectsIssueLabels === undefined
+                ? {}
+                : { respectsIssueLabels: payload.respectsIssueLabels }),
+              runId: payload.runId
+            });
+          } catch (error) {
+            if (!(error instanceof RegistryShutdownError)) {
+              throw error;
+            }
+            // The run row keeps its pre-retry state; no provider starts.
+            shuttingDown = true;
+          }
+          if (!shuttingDown) {
+            await this.bestEffort(
+              () =>
+                this.githubIssuesApi.addLabelsToIssue!({
+                  ...repository,
+                  issueNumber: refreshed.number,
+                  labels: ["sym:claimed"]
+                }),
+              {
+                issueNumber: refreshed.number,
+                label: "sym:claimed",
+                operation: "addLabel",
+                project: project.name,
+                runId: payload.runId
+              }
+            );
+          }
+        }
       }
     } finally {
       this.dispatchMutex.release();
+    }
+
+    if (shuttingDown) {
+      this.logger?.debug(
+        {
+          issueNumber: refreshed.number,
+          project: project.name,
+          runId: payload.runId
+        },
+        "symphonika retry skipped: daemon shutting down"
+      );
+      return;
     }
 
     if (contention !== undefined) {
@@ -1417,6 +1459,20 @@ export class RunController {
         runId
       });
     } catch (error) {
+      if (error instanceof RegistryShutdownError) {
+        // Skip WITHOUT rescheduling: a rescheduled timer would keep the
+        // shutdown drain alive past stop().
+        this.logger?.debug(
+          {
+            issueNumber: refreshed.number,
+            project: project.name,
+            reason: error.message,
+            runId
+          },
+          "symphonika state_advance skipped: daemon shutting down"
+        );
+        return;
+      }
       if (
         error instanceof CapBreachedError ||
         error instanceof IssueReservedError
@@ -1655,6 +1711,20 @@ export class RunController {
         runId
       });
     } catch (error) {
+      if (error instanceof RegistryShutdownError) {
+        // Skip WITHOUT rescheduling: a rescheduled timer would keep the
+        // shutdown drain alive past stop().
+        this.logger?.debug(
+          {
+            issueNumber: refreshed.number,
+            project: project.name,
+            reason: error.message,
+            runId
+          },
+          "symphonika continuation skipped: daemon shutting down"
+        );
+        return;
+      }
       if (
         error instanceof CapBreachedError ||
         error instanceof IssueReservedError
@@ -1774,6 +1844,9 @@ export class RunController {
         runId
       });
     } catch (error) {
+      if (error instanceof RegistryShutdownError) {
+        return { dispatched: false, reason: error.message };
+      }
       if (
         error instanceof CapBreachedError ||
         error instanceof IssueReservedError
@@ -1960,6 +2033,14 @@ export class RunController {
       weight: number;
     }>;
   }): Promise<void> {
+    // Shutdown gate, fast path: throwing before any side effect needs no
+    // rollback. The gate can still land during the addLabelsToIssue await
+    // below; the catch then cleans up the partial claim. See ADR 0052.
+    if (this.activeRuns.isShuttingDown()) {
+      throw new RegistryShutdownError(
+        `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
+      );
+    }
     // Re-check concurrency caps inside the mutex. pickTargetFromCandidates
     // ran without the lock, so two concurrent ticks could both observe a
     // below-cap count before either reserves a slot — without this guard,
@@ -2056,7 +2137,31 @@ export class RunController {
         runId: input.runId
       });
     } catch (error) {
-      if (!runCreated && claimed) {
+      if (error instanceof RegistryShutdownError && runCreated) {
+        // The shutdown snapshot in stop() predates this row, so record the
+        // shutdown reason here and release the claim label best-effort.
+        this.runStore.markCancelRequested(
+          input.runId,
+          CANCEL_REASONS.DAEMON_SHUTDOWN
+        );
+        this.runStore.updateRunState(input.runId, "cancelled");
+        const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
+        await this.bestEffort(
+          () =>
+            api.removeLabelsFromIssue({
+              ...input.repository,
+              issueNumber: input.issue.number,
+              labels: ["sym:claimed"]
+            }),
+          {
+            issueNumber: input.issue.number,
+            label: "sym:claimed",
+            operation: "removeLabel",
+            project: input.project.name,
+            runId: input.runId
+          }
+        );
+      } else if (!runCreated && claimed) {
         // Failure between claim and createRun (rare): still mark sym:failed best-effort.
         await this.markIssueFailed({
           issueNumber: input.issue.number,

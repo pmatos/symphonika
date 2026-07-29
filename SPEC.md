@@ -1049,11 +1049,17 @@ Cancel active provider process when:
 
 Cancellation preserves workspace and logs.
 
-On graceful shutdown, the daemon first cancels queued or delayed work, records
-`cancel_reason = "daemon_shutdown"` for every currently in-flight Run and Routine Firing, and
-requests cancellation through each live Agent Provider. Only after those requests have been
-awaited does it wait for in-flight dispatches to unwind. This explicit shutdown path is required
-because provider processes may run in a cgroup outside the daemon's own process tree (ADR 0064).
+On graceful shutdown, the daemon first closes the active-run registry to new claims
+synchronously, before snapshotting active runs, so a dispatch still in pre-claim work can never
+reserve a slot after cancellation begins; a claim that raced the gate is rolled back to
+`cancel_reason = "daemon_shutdown"`, and later claims are skipped, not rescheduled. The daemon
+then cancels queued or delayed work, records `cancel_reason = "daemon_shutdown"` for every
+currently in-flight Run and Routine Firing, and requests cancellation through each live Agent
+Provider. The shutdown reason supersedes any cancellation already in progress, so finalization
+cannot overwrite `daemon_shutdown` with an earlier operator or watchdog reason. Only after
+those requests have been awaited does it wait for in-flight dispatches to unwind. This explicit
+shutdown path is required because provider processes may run in a cgroup outside the daemon's
+own process tree (ADR 0064).
 
 ### 12.4 Watchdog
 

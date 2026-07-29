@@ -1321,10 +1321,10 @@ export class RunStore {
             .run(now, projectName, ...trackerlessGitNames);
           // First-seen rejections have no row to demote — persist one so a
           // later tracker restoration re-enters through the normal upsert's
-          // restore rules (ADR 0066). The UPDATE above already demoted any
-          // existing row, so this insert only lands for new identities; the
-          // conflict clause targets only the identity key, leaving unrelated
-          // constraint failures visible.
+          // restore rules (ADR 0066). The UPDATE above already demoted a real
+          // existing row, so the conflict clause only replaces an
+          // identity-only invalid stub (empty prompt_body) with the rejected
+          // declaration; previously valid configuration stays untouched.
           for (const routine of trackerlessGitRoutines) {
             const scheduleValues =
               "cron" in routine.schedule
@@ -1350,7 +1350,21 @@ export class RunStore {
                   "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, catch_up, created_at, updated_at",
                   ") values (",
                   "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'disabled', 'rejected_tracker_less_host', @allow_overlap, @catch_up, @created_at, @updated_at",
-                  ") on conflict(project_name, name) do nothing"
+                  ") on conflict(project_name, name) do update set",
+                  "source_path = excluded.source_path,",
+                  "kind = excluded.kind,",
+                  "provider_name = excluded.provider_name,",
+                  "schedule_at = excluded.schedule_at,",
+                  "schedule_cron = excluded.schedule_cron,",
+                  "schedule_tz = excluded.schedule_tz,",
+                  "next_fire_at = excluded.next_fire_at,",
+                  "prompt_body = excluded.prompt_body,",
+                  "state = excluded.state,",
+                  "disabled_reason = excluded.disabled_reason,",
+                  "allow_overlap = excluded.allow_overlap,",
+                  "catch_up = excluded.catch_up,",
+                  "updated_at = excluded.updated_at",
+                  "where routines.prompt_body = ''"
                 ].join(" ")
               )
               .run({
@@ -1432,7 +1446,21 @@ export class RunStore {
         "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, allow_overlap, catch_up, created_at, updated_at",
         ") values (",
         "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'inactive', @allow_overlap, @catch_up, @created_at, @updated_at",
-        ") on conflict(project_name, name) do nothing"
+        ") on conflict(project_name, name) do update set",
+        "source_path = excluded.source_path,",
+        "kind = excluded.kind,",
+        "provider_name = excluded.provider_name,",
+        "schedule_at = excluded.schedule_at,",
+        "schedule_cron = excluded.schedule_cron,",
+        "schedule_tz = excluded.schedule_tz,",
+        "next_fire_at = excluded.next_fire_at,",
+        "prompt_body = excluded.prompt_body,",
+        "state = excluded.state,",
+        "disabled_reason = excluded.disabled_reason,",
+        "allow_overlap = excluded.allow_overlap,",
+        "catch_up = excluded.catch_up,",
+        "updated_at = excluded.updated_at",
+        "where routines.prompt_body = ''"
       ].join(" ")
     );
     const apply = this.database.transaction(() => {
@@ -1440,7 +1468,8 @@ export class RunStore {
       // first-seen tracker-less kind: git rejection. Without this inactive
       // row, simultaneously restoring the Project and tracker after `at`
       // elapsed would look like a brand-new active declaration and fire
-      // retroactively. Existing rows are left intact until the cascade below.
+      // retroactively. Only an identity-only invalid stub is reclaimed on
+      // conflict; previously valid rows stay intact until the cascade below.
       for (const routine of options.trackerlessGitRoutines ?? []) {
         const scheduleValues =
           "cron" in routine.schedule

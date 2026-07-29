@@ -26,7 +26,9 @@ A previously persisted Routine rejected by the ADR 0062 tracker requirement is s
 Reload carries the rejected Routine name separately from both executable declarations and
 `invalidRoutineNames`. `RunStore.syncRoutines` excludes that name from generic removal detection,
 then applies the precise rejection reason to an existing row. The dispatcher skips the resulting
-non-active row.
+non-active row. If the identity currently belongs to an invalid stub with an empty prompt, the
+rejected declaration replaces the stub's sentinel kind, schedule, and prompt; a row that ever held
+valid configuration is only demoted and is never overwritten by this reclamation path.
 
 A first-appearance rejection — no prior persisted declaration — also persists a row carrying the
 declared schedule and prompt. On an enabled host it is `disabled` with `disabled_reason =

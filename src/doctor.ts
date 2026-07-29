@@ -568,11 +568,7 @@ function sliceDirectiveNames(content: string): Set<string> | undefined {
       sawSliceSection ||= inSliceSection;
       continue;
     }
-    if (
-      !inSliceSection ||
-      trimmed.startsWith("#") ||
-      trimmed.startsWith(";")
-    ) {
+    if (!inSliceSection || trimmed.startsWith("#") || trimmed.startsWith(";")) {
       continue;
     }
     const equalsIndex = trimmed.indexOf("=");

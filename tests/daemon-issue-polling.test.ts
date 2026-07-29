@@ -155,6 +155,30 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("attributes a git Routine error to the loaded host when an earlier duplicate is invalid", async () => {
+    const root = await makeTempRoot();
+    await writeTrackerLessGitRoutineHost(root, {
+      invalidDuplicateBeforeHost: true
+    });
+
+    const daemon = await startDaemon({
+      cwd: root,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const response = await fetch(daemon.url);
+      const html = await response.text();
+
+      expect(html).toContain(
+        '<tr><td>audit-host</td><td>1</td><td class="c-detail">invalid'
+      );
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("shows filtered snapshots when required, excluded, or operational labels block eligibility", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);
@@ -610,7 +634,10 @@ async function writeValidProject(
   await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
 }
 
-async function writeTrackerLessGitRoutineHost(root: string): Promise<void> {
+async function writeTrackerLessGitRoutineHost(
+  root: string,
+  options: { invalidDuplicateBeforeHost?: boolean } = {}
+): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(
     path.join(root, "refactor-audit.md"),
@@ -636,6 +663,9 @@ async function writeTrackerLessGitRoutineHost(root: string): Promise<void> {
       "  claude:",
       '    command: "claude -p"',
       "projects:",
+      ...(options.invalidDuplicateBeforeHost === true
+        ? ["  - name: audit-host", "    mode: routine_host"]
+        : []),
       "  - name: audit-host",
       "    mode: routine_host",
       "    workspace:",

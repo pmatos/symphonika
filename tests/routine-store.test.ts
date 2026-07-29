@@ -1287,6 +1287,57 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("daemon_shutdown overwrites an earlier firing reason and cannot be overwritten", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-cancel",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+
+      store.markRoutineFiringCancelRequested("fire-cancel", "operator");
+      store.markRoutineFiringCancelRequested("fire-cancel", "daemon_shutdown");
+      expect(store.getRoutineFiring("fire-cancel")).toMatchObject({
+        cancelRequested: true,
+        cancelReason: "daemon_shutdown"
+      });
+
+      store.markRoutineFiringCancelRequested("fire-cancel", "operator");
+      expect(store.getRoutineFiring("fire-cancel")).toMatchObject({
+        cancelRequested: true,
+        cancelReason: "daemon_shutdown"
+      });
+
+      // Finalization with a stale reason cannot overwrite it either.
+      store.completeRoutineFiring({
+        cancelReason: "operator",
+        id: "fire-cancel",
+        state: "cancelled"
+      });
+      expect(store.getRoutineFiring("fire-cancel")).toMatchObject({
+        cancelReason: "daemon_shutdown",
+        state: "cancelled"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("completeRoutineFiring records the cancel reason for a cancelled firing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

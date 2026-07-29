@@ -208,6 +208,29 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("daemon_shutdown overwrites an earlier reason and cannot be overwritten", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const id = seedRun(store);
+      store.markCancelRequested(id, "operator");
+      store.markCancelRequested(id, "daemon_shutdown");
+      expect(store.getRun(id)).toMatchObject({
+        cancelRequested: true,
+        cancelReason: "daemon_shutdown"
+      });
+
+      store.markCancelRequested(id, "closed_issue");
+      store.markCancelRequested(id, "operator");
+      expect(store.getRun(id)).toMatchObject({
+        cancelRequested: true,
+        cancelReason: "daemon_shutdown"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("does not mark cancel-requested runs stale for no progress", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

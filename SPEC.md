@@ -1055,9 +1055,10 @@ reserve a slot after cancellation begins; a claim that raced the gate is rolled 
 `cancel_reason = "daemon_shutdown"`, and later claims are skipped, not rescheduled. The daemon
 then cancels queued or delayed work, records `cancel_reason = "daemon_shutdown"` for every
 currently in-flight Run and Routine Firing, and requests cancellation through each live Agent
-Provider. The shutdown reason supersedes any cancellation already in progress, so finalization
-cannot overwrite `daemon_shutdown` with an earlier operator or watchdog reason. Only after
-those requests have been awaited does it wait for in-flight dispatches to unwind. This explicit
+Provider. The shutdown reason supersedes any cancellation already in progress and is
+sticky in the run store: later cancellation writes — from an in-flight reconcile or a UI
+cancel landing during the drain — cannot overwrite `daemon_shutdown` with another reason.
+Only after those requests have been awaited does it wait for in-flight dispatches to unwind. This explicit
 shutdown path is required because provider processes may run in a cgroup outside the daemon's
 own process tree (ADR 0064).
 

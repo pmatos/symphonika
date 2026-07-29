@@ -369,9 +369,7 @@ describe("Oh My Pi RPC provider", () => {
 
   it("flushes a deferred EOF remainder after limits are installed", async () => {
     const { queue, stdout } = createQueueHarness();
-    stdout.write(
-      `${JSON.stringify({ type: "ready" })}\n${"f".repeat(2000)}`
-    );
+    stdout.write(`${JSON.stringify({ type: "ready" })}\n${"f".repeat(2000)}`);
     stdout.end();
 
     expect(await queue.next()).toMatchObject({ kind: "message" });
@@ -459,6 +457,56 @@ describe("Oh My Pi RPC provider", () => {
     expect(await queue.next()).toMatchObject({
       kind: "malformed",
       message: "Oh My Pi logical RPC frame must be an object"
+    });
+  });
+
+  it("does not complete a chunk sequence after a mismatched chunk", async () => {
+    const { queue, stdout } = createQueueHarness({
+      maxFrameBytes: 1024,
+      maxReassembledBytes: 8192
+    });
+    const payload = JSON.stringify({
+      message: "x".repeat(1100),
+      type: "notice"
+    });
+    const [first, second] = rpcChunkLines(payload, "chunk-mismatch");
+    stdout.write(`${first}\n`);
+    stdout.write(`${second.replace("chunk-mismatch", "chunk-other")}\n`);
+    stdout.write(`${second}\n`);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC chunk sequence mismatch"
+    });
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC chunk sequence must start at index 0"
+    });
+  });
+
+  it("does not complete a chunk sequence after a malformed physical frame", async () => {
+    const { queue, stdout } = createQueueHarness({
+      maxFrameBytes: 1024,
+      maxReassembledBytes: 8192
+    });
+    const payload = JSON.stringify({
+      message: "x".repeat(1100),
+      type: "notice"
+    });
+    const [first, second] = rpcChunkLines(payload, "chunk-garbage");
+    stdout.write(`${first}\n`);
+    stdout.write("not-json\n");
+    stdout.write(`${second}\n`);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({ kind: "malformed" });
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC chunk sequence must start at index 0"
     });
   });
 

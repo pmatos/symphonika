@@ -85,10 +85,7 @@ export function createOmpProvider(
         return Promise.resolve();
       }
 
-      if (
-        !activeRun.child.stdin.destroyed &&
-        activeRun.child.stdin.writable
-      ) {
+      if (!activeRun.child.stdin.destroyed && activeRun.child.stdin.writable) {
         writeJson(activeRun.child, {
           id: requestId(activeRun),
           type: "abort"
@@ -641,6 +638,7 @@ export function createProcessQueue(
       return;
     }
     if (Buffer.byteLength(line, "utf8") > maxPhysicalFrameBytes) {
+      frameDecoder.interrupt();
       push({
         kind: "malformed",
         line: boundedMalformedEvidence(line),
@@ -652,6 +650,7 @@ export function createProcessQueue(
     try {
       raw = JSON.parse(line) as unknown;
     } catch (error) {
+      frameDecoder.interrupt();
       push({
         kind: "malformed",
         line,
@@ -704,6 +703,7 @@ export function createProcessQueue(
     stdoutOverflowed = true;
     const line = stdoutBuffer;
     stdoutBuffer = "";
+    frameDecoder.interrupt();
     push({
       kind: "malformed",
       line: boundedMalformedEvidence(line),
@@ -827,80 +827,87 @@ class RpcChunkDecoder {
     const count = numberField(raw, "count");
     const byteLength = numberField(raw, "byteLength");
     const data = stringField(raw, "data");
-    if (
-      chunkId === undefined ||
-      chunkId.length === 0 ||
-      chunkId.length > 128 ||
-      index === undefined ||
-      count === undefined ||
-      byteLength === undefined ||
-      !Number.isSafeInteger(index) ||
-      !Number.isSafeInteger(count) ||
-      !Number.isSafeInteger(byteLength) ||
-      index < 0 ||
-      count < 2 ||
-      index >= count ||
-      byteLength < this.maxFrameBytes ||
-      byteLength > this.maxReassembledBytes ||
-      data === undefined
-    ) {
-      throw new Error("invalid Oh My Pi RPC chunk metadata");
-    }
-
-    const bytes = decodeBase64(data);
-    if (bytes.byteLength > this.maxFrameBytes) {
-      throw new Error("Oh My Pi RPC chunk exceeds the physical frame limit");
-    }
-
-    if (this.pending === undefined) {
-      if (index !== 0) {
-        throw new Error("Oh My Pi RPC chunk sequence must start at index 0");
+    // Any chunk-validation failure kills the pending sequence: a later chunk
+    // must not complete a sequence that already produced a malformed event.
+    try {
+      if (
+        chunkId === undefined ||
+        chunkId.length === 0 ||
+        chunkId.length > 128 ||
+        index === undefined ||
+        count === undefined ||
+        byteLength === undefined ||
+        !Number.isSafeInteger(index) ||
+        !Number.isSafeInteger(count) ||
+        !Number.isSafeInteger(byteLength) ||
+        index < 0 ||
+        count < 2 ||
+        index >= count ||
+        byteLength < this.maxFrameBytes ||
+        byteLength > this.maxReassembledBytes ||
+        data === undefined
+      ) {
+        throw new Error("invalid Oh My Pi RPC chunk metadata");
       }
-      this.pending = {
-        byteLength,
-        chunkId,
-        chunks: [],
-        count,
-        nextIndex: 0,
-        receivedBytes: 0
-      };
-    }
-    const pending = this.pending;
-    if (
-      pending.chunkId !== chunkId ||
-      pending.count !== count ||
-      pending.byteLength !== byteLength ||
-      pending.nextIndex !== index
-    ) {
-      throw new Error("Oh My Pi RPC chunk sequence mismatch");
-    }
 
-    pending.chunks.push(bytes);
-    pending.receivedBytes += bytes.byteLength;
-    pending.nextIndex += 1;
-    if (pending.receivedBytes > pending.byteLength) {
-      throw new Error("Oh My Pi RPC chunks exceed their declared length");
-    }
-    if (pending.nextIndex < pending.count) {
-      return undefined;
-    }
-    if (pending.receivedBytes !== pending.byteLength) {
-      throw new Error("Oh My Pi RPC chunk sequence length mismatch");
-    }
+      const bytes = decodeBase64(data);
+      if (bytes.byteLength > this.maxFrameBytes) {
+        throw new Error("Oh My Pi RPC chunk exceeds the physical frame limit");
+      }
 
-    this.pending = undefined;
-    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(
-      Buffer.concat(pending.chunks)
-    );
-    const logicalFrame = JSON.parse(decoded) as unknown;
-    if (
-      typeof logicalFrame !== "object" ||
-      logicalFrame === null ||
-      Array.isArray(logicalFrame)
-    ) {
-      throw new Error("Oh My Pi logical RPC frame must be an object");
+      if (this.pending === undefined) {
+        if (index !== 0) {
+          throw new Error("Oh My Pi RPC chunk sequence must start at index 0");
+        }
+        this.pending = {
+          byteLength,
+          chunkId,
+          chunks: [],
+          count,
+          nextIndex: 0,
+          receivedBytes: 0
+        };
+      }
+      const pending = this.pending;
+      if (
+        pending.chunkId !== chunkId ||
+        pending.count !== count ||
+        pending.byteLength !== byteLength ||
+        pending.nextIndex !== index
+      ) {
+        throw new Error("Oh My Pi RPC chunk sequence mismatch");
+      }
+
+      pending.chunks.push(bytes);
+      pending.receivedBytes += bytes.byteLength;
+      pending.nextIndex += 1;
+      if (pending.receivedBytes > pending.byteLength) {
+        throw new Error("Oh My Pi RPC chunks exceed their declared length");
+      }
+      if (pending.nextIndex < pending.count) {
+        return undefined;
+      }
+      if (pending.receivedBytes !== pending.byteLength) {
+        throw new Error("Oh My Pi RPC chunk sequence length mismatch");
+      }
+
+      this.pending = undefined;
+      const decoded = new TextDecoder("utf-8", { fatal: true }).decode(
+        Buffer.concat(pending.chunks)
+      );
+      const logicalFrame = JSON.parse(decoded) as unknown;
+      if (
+        typeof logicalFrame !== "object" ||
+        logicalFrame === null ||
+        Array.isArray(logicalFrame)
+      ) {
+        throw new Error("Oh My Pi logical RPC frame must be an object");
+      }
+      return logicalFrame;
+    } catch (error) {
+      this.pending = undefined;
+      throw error;
     }
-    return logicalFrame;
   }
 }
 

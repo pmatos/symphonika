@@ -854,6 +854,25 @@ describe("Oh My Pi RPC provider", () => {
     expect(await queue.next()).toMatchObject({ kind: "message" });
   });
 
+  it("rejects frames containing invalid UTF-8", async () => {
+    const { queue, stdout } = createQueueHarness({
+      maxFrameBytes: 1024,
+      maxReassembledBytes: 8192
+    });
+    stdout.write(
+      Buffer.concat([
+        Buffer.from('{"type":"notice","message":"', "utf8"),
+        Buffer.from([0xff, 0xfe]),
+        Buffer.from('"}\n', "utf8")
+      ])
+    );
+
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC frame is not valid UTF-8"
+    });
+  });
+
   it("measures physical frames before removing the JSONL delimiter", async () => {
     const { queue, stdout } = createQueueHarness({
       maxFrameBytes: 1024,

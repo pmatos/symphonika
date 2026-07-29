@@ -621,6 +621,7 @@ function processExitEvent(
 }
 
 const MALFORMED_EVIDENCE_MAX_BYTES = 4096;
+const FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const PROBE_STDERR_TAIL_BYTES = 8192;
 const DEFAULT_MAX_PENDING_FRAME_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_PENDING_ITEMS = 4096;
@@ -673,7 +674,7 @@ export function createProcessQueue(
   const frameDecoder = new RpcChunkDecoder();
   let maxPhysicalFrameBytes = 1024 * 1024;
   let waiting: ((item: ProcessQueueItem) => void) | undefined;
-  let stdoutBuffer = "";
+  let stdoutBuffer = Buffer.alloc(0);
   let stdoutOverflowed = false;
   let frameLimitsSet = false;
   let protocolVersion: 1 | 2 = 1;
@@ -694,27 +695,11 @@ export function createProcessQueue(
     pending.push({ byteSize, item });
     pendingFrameBytes += byteSize;
   };
-  const pushParsedLine = (line: string): void => {
-    const lineBytes = Buffer.byteLength(line, "utf8");
-    if (line.trim().length === 0) {
-      // Blank lines are noise-tolerated JSONL, but between chunks they are
-      // an interruption like any other non-chunk frame.
-      if (frameDecoder.interrupt()) {
-        push(
-          {
-            kind: "malformed",
-            line,
-            message:
-              "Oh My Pi RPC chunk sequence interrupted by a non-chunk frame"
-          },
-          lineBytes
-        );
-      }
-      return;
-    }
+  const pushParsedLine = (line: Buffer): void => {
+    const lineBytes = line.byteLength;
     if (lineBytes > maxPhysicalFrameBytes) {
       frameDecoder.interrupt();
-      const evidence = boundedMalformedEvidence(line);
+      const evidence = boundedMalformedEvidence(line.toString("utf8"));
       push(
         {
           kind: "malformed",
@@ -725,15 +710,49 @@ export function createProcessQueue(
       );
       return;
     }
+    // Decode fatally: setEncoding("utf8") would silently substitute U+FFFD
+    // for invalid wire bytes and let fabricated text parse as a valid frame.
+    let text: string;
+    try {
+      text = FATAL_UTF8_DECODER.decode(line);
+    } catch {
+      frameDecoder.interrupt();
+      const evidence = boundedMalformedEvidence(line.toString("utf8"));
+      push(
+        {
+          kind: "malformed",
+          line: evidence,
+          message: "Oh My Pi RPC frame is not valid UTF-8"
+        },
+        Buffer.byteLength(evidence, "utf8")
+      );
+      return;
+    }
+    if (text.trim().length === 0) {
+      // Blank lines are noise-tolerated JSONL, but between chunks they are
+      // an interruption like any other non-chunk frame.
+      if (frameDecoder.interrupt()) {
+        push(
+          {
+            kind: "malformed",
+            line: text,
+            message:
+              "Oh My Pi RPC chunk sequence interrupted by a non-chunk frame"
+          },
+          lineBytes
+        );
+      }
+      return;
+    }
     let raw: unknown;
     try {
-      raw = JSON.parse(line) as unknown;
+      raw = JSON.parse(text) as unknown;
     } catch (error) {
       frameDecoder.interrupt();
       push(
         {
           kind: "malformed",
-          line,
+          line: text,
           message: error instanceof Error ? error.message : String(error)
         },
         lineBytes
@@ -747,7 +766,7 @@ export function createProcessQueue(
       push(
         {
           kind: "malformed",
-          line,
+          line: text,
           message: "Oh My Pi physical RPC frame must be an object"
         },
         lineBytes
@@ -771,7 +790,7 @@ export function createProcessQueue(
         push(
           {
             kind: "malformed",
-            line,
+            line: text,
             message:
               "Oh My Pi RPC chunk sequence interrupted by a non-chunk frame"
           },
@@ -788,7 +807,7 @@ export function createProcessQueue(
       push(
         {
           kind: "malformed",
-          line,
+          line: text,
           message: "Oh My Pi RPC chunk received before protocol v2 negotiation"
         },
         lineBytes
@@ -805,7 +824,7 @@ export function createProcessQueue(
       push(
         {
           kind: "malformed",
-          line,
+          line: text,
           message: error instanceof Error ? error.message : String(error)
         },
         lineBytes
@@ -820,15 +839,15 @@ export function createProcessQueue(
     // Only the unterminated suffix after the last newline is a physical
     // frame in progress; complete queued lines ahead of it are preserved
     // for later draining, not measured here.
-    const suffixStart = stdoutBuffer.lastIndexOf("\n") + 1;
-    const suffix = stdoutBuffer.slice(suffixStart);
-    if (Buffer.byteLength(suffix, "utf8") <= maxPhysicalFrameBytes) {
+    const suffixStart = stdoutBuffer.lastIndexOf(0x0a) + 1;
+    const suffix = stdoutBuffer.subarray(suffixStart);
+    if (suffix.byteLength <= maxPhysicalFrameBytes) {
       return;
     }
     stdoutOverflowed = true;
-    stdoutBuffer = stdoutBuffer.slice(0, suffixStart);
+    stdoutBuffer = stdoutBuffer.subarray(0, suffixStart);
     frameDecoder.interrupt();
-    const evidence = boundedMalformedEvidence(suffix);
+    const evidence = boundedMalformedEvidence(suffix.toString("utf8"));
     push(
       {
         kind: "malformed",
@@ -840,7 +859,7 @@ export function createProcessQueue(
   };
 
   const drainStdoutLines = (): void => {
-    let newlineIndex = stdoutBuffer.indexOf("\n");
+    let newlineIndex = stdoutBuffer.indexOf(0x0a);
     while (!awaitingFrameLimits && newlineIndex >= 0) {
       // Stop before the backlog crosses either high-water mark so a single
       // data callback cannot burst-enqueue past it; the remainder stays
@@ -852,10 +871,10 @@ export function createProcessQueue(
         child.stdout.pause();
         return;
       }
-      const line = stdoutBuffer.slice(0, newlineIndex);
-      stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+      const line = stdoutBuffer.subarray(0, newlineIndex);
+      stdoutBuffer = stdoutBuffer.subarray(newlineIndex + 1);
       pushParsedLine(line);
-      newlineIndex = stdoutBuffer.indexOf("\n");
+      newlineIndex = stdoutBuffer.indexOf(0x0a);
     }
     // Pause even when the remainder has no newline: with the queue full,
     // further chunks would grow the unterminated tail while enforcement is
@@ -884,7 +903,7 @@ export function createProcessQueue(
     }
     if (stdoutBuffer.length > 0) {
       pushParsedLine(stdoutBuffer);
-      stdoutBuffer = "";
+      stdoutBuffer = Buffer.alloc(0);
     }
     if (frameDecoder.interrupt()) {
       push({
@@ -905,21 +924,20 @@ export function createProcessQueue(
     }
   };
 
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
+  child.stdout.on("data", (chunk: Buffer) => {
     if (discardingOutput) {
       return;
     }
     let data = chunk;
     if (stdoutOverflowed) {
-      const frameEndIndex = data.indexOf("\n");
+      const frameEndIndex = data.indexOf(0x0a);
       if (frameEndIndex < 0) {
         return;
       }
       stdoutOverflowed = false;
-      data = data.slice(frameEndIndex + 1);
+      data = data.subarray(frameEndIndex + 1);
     }
-    stdoutBuffer += data;
+    stdoutBuffer = Buffer.concat([stdoutBuffer, data]);
     drainStdoutLines();
     // While paused for the ready frame's advertised limits, defer the bound
     // check too: enforcing the old default here could reject frames that fit
@@ -957,7 +975,7 @@ export function createProcessQueue(
       }
       awaitingFrameLimits = false;
       discardingOutput = true;
-      stdoutBuffer = "";
+      stdoutBuffer = Buffer.alloc(0);
       frameDecoder.interrupt();
       child.stdout.resume();
       if (closeResult !== undefined && !exitEnqueued) {

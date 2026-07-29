@@ -122,7 +122,10 @@ describe("add-routine", () => {
       schedule: "daily"
     });
 
-    expect(report.ok).toBe(true);
+    expect(report).toMatchObject({
+      ok: true,
+      project: "alpha"
+    });
     expect(await readFile(configPath, "utf8")).toContain(
       "routines:\n  - path: ./routines/normalized-target.md\n    project: alpha\n"
     );

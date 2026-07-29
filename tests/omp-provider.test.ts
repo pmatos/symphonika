@@ -899,6 +899,57 @@ describe("Oh My Pi RPC provider", () => {
     );
   });
 
+  it("escalates shutdown when OMP hangs after a terminal agent_end", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const pidPath = path.join(root, "hang.pid");
+    const fakeOmpPath = path.join(root, "fake-terminal-hang-omp.mjs");
+    await writeFile(
+      fakeOmpPath,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        "import readline from 'node:readline';",
+        `writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));`,
+        "const rl = readline.createInterface({ input: process.stdin });",
+        "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+        "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
+        "for await (const line of rl) {",
+        "  const command = JSON.parse(line);",
+        "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-335', model: { provider: 'openai', id: 'gpt-5.4' } } });",
+        "  if (command.type === 'prompt') {",
+        "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
+        "    send({ type: 'agent_end', isTerminal: true, messages: [] });",
+        "  }",
+        "}",
+        "// Hang after the terminal frame instead of exiting on stdin EOF.",
+        "setInterval(() => {}, 1000);",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+    );
+
+    const types = events.map((event) => event.normalized?.type);
+    expect(types).not.toContain("turn_failed");
+    expect(events.at(-1)?.normalized).toMatchObject({
+      signal: "SIGTERM",
+      type: "process_exit"
+    });
+    await waitForProcessExit(Number(await waitForFileContent(pidPath)));
+  });
+
   it("fails the turn when OMP accepts the prompt without invoking an agent", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");

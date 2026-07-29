@@ -263,6 +263,9 @@ export function createOmpProvider(
           ) {
             terminalEventSeen = true;
             endStdin(child);
+            // Bound the child's exit: a hung child otherwise holds the run
+            // slot and provider scope until an external watchdog cancels.
+            shutdownProcess(child);
           }
 
           if (isTerminalFailure(type)) {

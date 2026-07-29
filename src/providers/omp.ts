@@ -697,9 +697,12 @@ export function createProcessQueue(
     const frameType = stringField(raw, "type");
     // Pause draining after the pre-limit ready frame so later frames are
     // measured against the negotiated limits once setFrameLimits installs
-    // them, not against the 1 MiB default.
+    // them, not against the 1 MiB default. Pausing stdout also stops an
+    // invalid ready from streaming into the deferred buffer during the
+    // shutdown grace period.
     if (frameType === "ready" && !frameLimitsSet) {
       awaitingFrameLimits = true;
+      child.stdout.pause();
     }
     if (frameType !== "rpc_chunk") {
       if (frameDecoder.interrupt()) {
@@ -860,7 +863,10 @@ export function createProcessQueue(
           } else {
             drainStdoutLines();
           }
+          // The ready latch owns its own pause: only setFrameLimits may
+          // resume it, once negotiated limits are installed.
           if (
+            !awaitingFrameLimits &&
             pendingFrameBytes < maxPendingFrameBytes &&
             pending.length < maxPendingItems
           ) {
@@ -888,6 +894,12 @@ export function createProcessQueue(
         // Mirrors the data handler: a backlogged remainder holds valid
         // complete frames, not an unterminated oversized one.
         enforceStdoutBound();
+      }
+      if (
+        pendingFrameBytes < maxPendingFrameBytes &&
+        pending.length < maxPendingItems
+      ) {
+        child.stdout.resume();
       }
     }
   };

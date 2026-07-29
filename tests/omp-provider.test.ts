@@ -359,12 +359,26 @@ describe("Oh My Pi RPC provider", () => {
     const { queue, stdout } = createQueueHarness();
     stdout.write(`${JSON.stringify({ type: "ready" })}\n${"e".repeat(2000)}\n`);
 
+    expect(stdout.isPaused()).toBe(true);
     expect(await queue.next()).toMatchObject({ kind: "message" });
     queue.setFrameLimits(1024, 8192);
+    expect(stdout.isPaused()).toBe(false);
     expect(await queue.next()).toMatchObject({
       kind: "malformed",
       message: "Oh My Pi RPC frame exceeds the physical frame limit"
     });
+  });
+
+  it("keeps stdout paused when no frame limits arrive for a latched ready", async () => {
+    const { queue, stdout } = createQueueHarness();
+    stdout.write(
+      `${JSON.stringify({ type: "ready" })}\n${"g".repeat(2000)}\n${"g".repeat(2000)}\n`
+    );
+
+    expect(queue.size).toBe(1);
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(queue.size).toBe(0);
+    expect(stdout.isPaused()).toBe(true);
   });
 
   it("flushes a deferred EOF remainder after limits are installed", async () => {

@@ -1147,6 +1147,17 @@ export class RunController {
       state: waitState
     });
 
+    // Re-evaluation during shutdown must not mutate rows or arm timers:
+    // the scheduler has been cancelled and stop() is closing the store.
+    // The waiting row stays durable for the next daemon's reconciliation.
+    if (this.activeRuns.isShuttingDown()) {
+      this.logger?.debug(
+        { runId },
+        "symphonika wait re-eval skipped: daemon shutting down"
+      );
+      return;
+    }
+
     if (decision.kind === "stay_waiting") {
       this.logger?.debug(
         { reason: decision.reason, runId },
@@ -1534,6 +1545,46 @@ export class RunController {
     }
   }
 
+  // Shutdown gate for the state-advance pre-provider exits. Every call
+  // site returns immediately after these helpers, so a skip here skips the
+  // whole exit. With labelWritten, the sym:claimed written before the gate
+  // closed is rolled back best-effort. See ADR 0052.
+  private async stateAdvanceShutdownSkip(input: {
+    issueNumber: number;
+    labelWritten: boolean;
+    projectName: string;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<boolean> {
+    if (!this.activeRuns.isShuttingDown()) {
+      return false;
+    }
+    if (input.labelWritten) {
+      await this.bestEffort(
+        () =>
+          (
+            this.githubIssuesApi as LabelWritingGitHubIssuesApi
+          ).removeLabelsFromIssue({
+            ...input.repository,
+            issueNumber: input.issueNumber,
+            labels: ["sym:claimed"]
+          }),
+        {
+          issueNumber: input.issueNumber,
+          label: "sym:claimed",
+          operation: "removeLabel",
+          project: input.projectName,
+          runId: input.runId
+        }
+      );
+    }
+    this.logger?.debug(
+      { issueNumber: input.issueNumber, runId: input.runId },
+      "symphonika state advance skipped: daemon shutting down"
+    );
+    return true;
+  }
+
   private async failStateAdvanceBeforeProvider(input: {
     issue: IssueSnapshot;
     parentRunId: string;
@@ -1544,6 +1595,17 @@ export class RunController {
     repository: GitHubIssueRepositoryInput;
     runId: string;
   }): Promise<void> {
+    if (
+      await this.stateAdvanceShutdownSkip({
+        issueNumber: input.issue.number,
+        labelWritten: false,
+        projectName: input.project.name,
+        repository: input.repository,
+        runId: input.runId
+      })
+    ) {
+      return;
+    }
     await this.bestEffort(
       () =>
         (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
@@ -1560,6 +1622,17 @@ export class RunController {
         runId: input.runId
       }
     );
+    if (
+      await this.stateAdvanceShutdownSkip({
+        issueNumber: input.issue.number,
+        labelWritten: true,
+        projectName: input.project.name,
+        repository: input.repository,
+        runId: input.runId
+      })
+    ) {
+      return;
+    }
     this.runStore.createContinuationRun({
       id: input.runId,
       issue: input.issue,
@@ -1608,6 +1681,17 @@ export class RunController {
     runId: string;
     targetState: ExpandedWorkflowState;
   }): Promise<void> {
+    if (
+      await this.stateAdvanceShutdownSkip({
+        issueNumber: input.issue.number,
+        labelWritten: false,
+        projectName: input.project.name,
+        repository: input.repository,
+        runId: input.runId
+      })
+    ) {
+      return;
+    }
     await this.bestEffort(
       () =>
         (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
@@ -1624,6 +1708,17 @@ export class RunController {
         runId: input.runId
       }
     );
+    if (
+      await this.stateAdvanceShutdownSkip({
+        issueNumber: input.issue.number,
+        labelWritten: true,
+        projectName: input.project.name,
+        repository: input.repository,
+        runId: input.runId
+      })
+    ) {
+      return;
+    }
     this.runStore.createContinuationRun({
       id: input.runId,
       issue: input.issue,
@@ -2304,6 +2399,16 @@ export class RunController {
         currentState !== undefined &&
         isParkedAction(currentState.action?.kind)
       ) {
+        // A cancel (operator or shutdown) can land during loadWorkflow
+        // above, after cancelBeforeAttach was captured. Parking now would
+        // flip the row to waiting and arm a timer after the scheduler was
+        // cancelled. Returning early instead: the finally sees the latched
+        // cancelRequested and classifies the run cancelled — no error
+        // escapes to be logged as a dispatch failure. See ADR 0052.
+        const cancelBeforePark = this.activeRuns.getInFlight(input.runId);
+        if (cancelBeforePark?.cancelRequested === true) {
+          return;
+        }
         this.runStore.updateRunState(input.runId, "waiting");
         this.schedule({
           delayMs: this.lifecyclePolicy.continuation.delayMs,

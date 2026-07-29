@@ -129,6 +129,30 @@ describe("ActiveRunRegistry", () => {
     }
   });
 
+  it("refuses delayed work scheduled after cancelAll", async () => {
+    vi.useFakeTimers();
+    try {
+      const registry = new ActiveRunRegistry();
+      await registry.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
+
+      const fire = vi.fn().mockResolvedValue(undefined);
+      registry.scheduleDelayed({
+        delayMs: 50,
+        fire,
+        issueNumber: 1,
+        kind: "retry",
+        projectName: "p",
+        runId: "run-a"
+      });
+
+      expect(registry.peekDelayed()).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(fire).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("cancelAll closes the registry to new claims", async () => {
     const registry = new ActiveRunRegistry();
     await registry.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);

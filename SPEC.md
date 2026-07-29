@@ -1058,7 +1058,12 @@ currently in-flight Run and Routine Firing, and requests cancellation through ea
 Provider. The shutdown reason supersedes any cancellation already in progress and is
 sticky in the run store: later cancellation writes — from an in-flight reconcile or a UI
 cancel landing during the drain — cannot overwrite `daemon_shutdown` with another reason.
-Only after those requests have been awaited does it wait for in-flight dispatches to unwind. This explicit
+Delayed-work registration closes with cancellation: the scheduler refuses timers armed after
+that point, so nothing fires against a store that is closing. A Run that was about to park
+into a wait state when cancellation latched is classified `cancelled` instead of flipping to
+`waiting`, and an in-flight wait re-evaluation stops before mutating rows — durable waiting
+rows are left untouched for the next daemon's reconciliation. Only after those requests have
+been awaited does it wait for in-flight dispatches to unwind. This explicit
 shutdown path is required because provider processes may run in a cgroup outside the daemon's
 own process tree (ADR 0064).
 

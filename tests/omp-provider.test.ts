@@ -1270,6 +1270,40 @@ describe("Oh My Pi RPC provider", () => {
     ).toMatchObject({ type: "malformed_event" });
   });
 
+  it("does not drain when the child exits before negotiating", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const fakeOmpPath = path.join(root, "fake-exit-after-ready-omp.mjs");
+    await writeFile(
+      fakeOmpPath,
+      [
+        `process.stdout.write(JSON.stringify({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1, 2], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 }) + '\\n', () => process.exit(0));`,
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    // The sole process_exit item is consumed by the negotiation read; a
+    // following drainUntilExit would wait forever for a second one.
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+    );
+
+    expect(events.at(-1)?.normalized).toMatchObject({
+      exitCode: 0,
+      type: "process_exit"
+    });
+  });
+
   it("requires OMP to confirm protocol v2 negotiation", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");

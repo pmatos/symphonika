@@ -180,10 +180,10 @@ export function createOmpProvider(
             activeRun,
             mapNegotiationResponse
           );
-          if (
-            negotiated.stopped ||
-            !negotiatedV2Response(negotiated.response)
-          ) {
+          if (negotiated.stopped) {
+            return;
+          }
+          if (!negotiatedV2Response(negotiated.response)) {
             shutdownProcess(child);
             yield* drainUntilExit(queue, activeRun);
             return;
@@ -199,7 +199,10 @@ export function createOmpProvider(
           activeRun,
           (raw) => mapStateResponse(raw, activeRun)
         );
-        if (state.stopped || !successfulResponse(state.response)) {
+        if (state.stopped) {
+          return;
+        }
+        if (!successfulResponse(state.response)) {
           shutdownProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
@@ -217,7 +220,10 @@ export function createOmpProvider(
           activeRun,
           mapPromptResponse
         );
-        if (prompt.stopped || !agentInvokedResponse(prompt.response)) {
+        if (prompt.stopped) {
+          return;
+        }
+        if (!agentInvokedResponse(prompt.response)) {
           shutdownProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;

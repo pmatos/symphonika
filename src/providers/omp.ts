@@ -591,6 +591,8 @@ function processExitEvent(
 
 const MALFORMED_EVIDENCE_MAX_BYTES = 4096;
 const PROBE_STDERR_TAIL_BYTES = 8192;
+const DEFAULT_MAX_PENDING_FRAME_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_PENDING_ITEMS = 4096;
 
 function boundedMalformedEvidence(line: string): string {
   if (Buffer.byteLength(line, "utf8") <= MALFORMED_EVIDENCE_MAX_BYTES) {
@@ -611,10 +613,32 @@ function boundedMalformedEvidence(line: string): string {
   return Buffer.from(line.slice(0, endIndex), "utf8").toString("utf8");
 }
 
+export type ProcessQueueOptions = {
+  maxPendingFrameBytes?: number;
+  maxPendingItems?: number;
+};
+
 export function createProcessQueue(
-  child: ChildProcessWithoutNullStreams
+  child: ChildProcessWithoutNullStreams,
+  options: ProcessQueueOptions = {}
 ): ProcessQueue {
-  const pending: ProcessQueueItem[] = [];
+  if (
+    (options.maxPendingFrameBytes !== undefined &&
+      (!Number.isSafeInteger(options.maxPendingFrameBytes) ||
+        options.maxPendingFrameBytes < 1)) ||
+    (options.maxPendingItems !== undefined &&
+      (!Number.isSafeInteger(options.maxPendingItems) ||
+        options.maxPendingItems < 1))
+  ) {
+    throw new Error("invalid Oh My Pi RPC queue limits");
+  }
+  const maxPendingFrameBytes =
+    options.maxPendingFrameBytes ?? DEFAULT_MAX_PENDING_FRAME_BYTES;
+  const maxPendingItems = options.maxPendingItems ?? DEFAULT_MAX_PENDING_ITEMS;
+  const resumePendingFrameBytes = Math.floor(maxPendingFrameBytes / 2);
+  const resumePendingItems = Math.floor(maxPendingItems / 2);
+  const pending: Array<{ byteSize: number; item: ProcessQueueItem }> = [];
+  let pendingFrameBytes = 0;
   const frameDecoder = new RpcChunkDecoder();
   let maxPhysicalFrameBytes = 1024 * 1024;
   let waiting: ((item: ProcessQueueItem) => void) | undefined;
@@ -624,26 +648,32 @@ export function createProcessQueue(
   let awaitingFrameLimits = false;
   let stdoutEnded = false;
 
-  const push = (item: ProcessQueueItem): void => {
+  const push = (item: ProcessQueueItem, byteSize = 0): void => {
     if (waiting !== undefined) {
       const resolve = waiting;
       waiting = undefined;
       resolve(item);
       return;
     }
-    pending.push(item);
+    pending.push({ byteSize, item });
+    pendingFrameBytes += byteSize;
   };
   const pushParsedLine = (line: string): void => {
     if (line.trim().length === 0) {
       return;
     }
-    if (Buffer.byteLength(line, "utf8") > maxPhysicalFrameBytes) {
+    const lineBytes = Buffer.byteLength(line, "utf8");
+    if (lineBytes > maxPhysicalFrameBytes) {
       frameDecoder.interrupt();
-      push({
-        kind: "malformed",
-        line: boundedMalformedEvidence(line),
-        message: "Oh My Pi RPC frame exceeds the physical frame limit"
-      });
+      const evidence = boundedMalformedEvidence(line);
+      push(
+        {
+          kind: "malformed",
+          line: evidence,
+          message: "Oh My Pi RPC frame exceeds the physical frame limit"
+        },
+        Buffer.byteLength(evidence, "utf8")
+      );
       return;
     }
     let raw: unknown;
@@ -651,15 +681,18 @@ export function createProcessQueue(
       raw = JSON.parse(line) as unknown;
     } catch (error) {
       frameDecoder.interrupt();
-      push({
-        kind: "malformed",
-        line,
-        message: error instanceof Error ? error.message : String(error)
-      });
+      push(
+        {
+          kind: "malformed",
+          line,
+          message: error instanceof Error ? error.message : String(error)
+        },
+        lineBytes
+      );
       return;
     }
 
-    push({ kind: "message", raw });
+    push({ kind: "message", raw }, lineBytes);
     const frameType = stringField(raw, "type");
     // Pause draining after the pre-limit ready frame so later frames are
     // measured against the negotiated limits once setFrameLimits installs
@@ -669,27 +702,33 @@ export function createProcessQueue(
     }
     if (frameType !== "rpc_chunk") {
       if (frameDecoder.interrupt()) {
-        push({
-          kind: "malformed",
-          line,
-          message:
-            "Oh My Pi RPC chunk sequence interrupted by a non-chunk frame"
-        });
+        push(
+          {
+            kind: "malformed",
+            line,
+            message:
+              "Oh My Pi RPC chunk sequence interrupted by a non-chunk frame"
+          },
+          lineBytes
+        );
       }
       return;
     }
 
     try {
-      const logicalFrame = frameDecoder.push(raw);
-      if (logicalFrame !== undefined) {
-        push({ kind: "message", raw: logicalFrame });
+      const logical = frameDecoder.push(raw);
+      if (logical !== undefined) {
+        push({ kind: "message", raw: logical.frame }, logical.byteLength);
       }
     } catch (error) {
-      push({
-        kind: "malformed",
-        line,
-        message: error instanceof Error ? error.message : String(error)
-      });
+      push(
+        {
+          kind: "malformed",
+          line,
+          message: error instanceof Error ? error.message : String(error)
+        },
+        lineBytes
+      );
     }
   };
 
@@ -704,16 +743,31 @@ export function createProcessQueue(
     const line = stdoutBuffer;
     stdoutBuffer = "";
     frameDecoder.interrupt();
-    push({
-      kind: "malformed",
-      line: boundedMalformedEvidence(line),
-      message: "Oh My Pi RPC frame exceeds the physical frame limit"
-    });
+    const evidence = boundedMalformedEvidence(line);
+    push(
+      {
+        kind: "malformed",
+        line: evidence,
+        message: "Oh My Pi RPC frame exceeds the physical frame limit"
+      },
+      Buffer.byteLength(evidence, "utf8")
+    );
   };
 
-  const drainStdoutLines = (): void => {
+  const drainStdoutLines = (ignoreBackpressure = false): void => {
     let newlineIndex = stdoutBuffer.indexOf("\n");
     while (!awaitingFrameLimits && newlineIndex >= 0) {
+      // Stop before the backlog crosses either high-water mark so a single
+      // data callback cannot burst-enqueue past it; the remainder stays
+      // buffered until the consumer drains below the low-water marks.
+      if (
+        !ignoreBackpressure &&
+        (pendingFrameBytes >= maxPendingFrameBytes ||
+          pending.length >= maxPendingItems)
+      ) {
+        child.stdout.pause();
+        return;
+      }
       const line = stdoutBuffer.slice(0, newlineIndex);
       stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
       pushParsedLine(line);
@@ -725,6 +779,9 @@ export function createProcessQueue(
     if (!stdoutEnded || awaitingFrameLimits) {
       return;
     }
+    // The producer is done at EOF: drain everything regardless of
+    // backpressure so no complete frame is left behind.
+    drainStdoutLines(true);
     if (stdoutBuffer.length > 0) {
       pushParsedLine(stdoutBuffer);
       stdoutBuffer = "";
@@ -754,8 +811,14 @@ export function createProcessQueue(
     // While paused for the ready frame's advertised limits, defer the bound
     // check too: enforcing the old default here could reject frames that fit
     // a larger negotiated limit. setFrameLimits runs in the microtask after
-    // the ready callback and re-checks everything deferred.
-    if (!awaitingFrameLimits) {
+    // the ready callback and re-checks everything deferred. The same applies
+    // while backpressured: the buffered remainder holds valid complete
+    // frames, not an unterminated oversized one.
+    if (
+      !awaitingFrameLimits &&
+      pendingFrameBytes < maxPendingFrameBytes &&
+      pending.length < maxPendingItems
+    ) {
       enforceStdoutBound();
     }
   });
@@ -775,9 +838,22 @@ export function createProcessQueue(
 
   return {
     next: () => {
-      const item = pending.shift();
-      if (item !== undefined) {
-        return Promise.resolve(item);
+      const entry = pending.shift();
+      if (entry !== undefined) {
+        pendingFrameBytes -= entry.byteSize;
+        if (
+          pendingFrameBytes <= resumePendingFrameBytes &&
+          pending.length <= resumePendingItems
+        ) {
+          drainStdoutLines();
+          if (
+            pendingFrameBytes < maxPendingFrameBytes &&
+            pending.length < maxPendingItems
+          ) {
+            child.stdout.resume();
+          }
+        }
+        return Promise.resolve(entry.item);
       }
       return new Promise<ProcessQueueItem>((resolve) => {
         waiting = resolve;
@@ -824,7 +900,7 @@ class RpcChunkDecoder {
     return true;
   }
 
-  push(raw: unknown): unknown {
+  push(raw: unknown): { byteLength: number; frame: unknown } | undefined {
     const chunkId = stringField(raw, "chunkId");
     const index = numberField(raw, "index");
     const count = numberField(raw, "count");
@@ -906,7 +982,7 @@ class RpcChunkDecoder {
       ) {
         throw new Error("Oh My Pi logical RPC frame must be an object");
       }
-      return logicalFrame;
+      return { byteLength: pending.byteLength, frame: logicalFrame };
     } catch (error) {
       this.pending = undefined;
       throw error;

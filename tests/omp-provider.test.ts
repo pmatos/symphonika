@@ -541,6 +541,37 @@ describe("Oh My Pi RPC provider", () => {
     expect(item.kind).toBe("error");
   });
 
+  it("pauses stdout when queued frame bytes cross the high-water mark", async () => {
+    const { queue, stdout } = createQueueHarness(
+      { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
+      { maxPendingFrameBytes: 2048 }
+    );
+    const frame = JSON.stringify({ message: "x".repeat(560), type: "notice" });
+    // One write, five ~590-byte frames: the drain stops mid-callback once
+    // the backlog crosses the byte high-water mark.
+    stdout.write(`${frame}\n${frame}\n${frame}\n${frame}\n${frame}\n`);
+
+    expect(stdout.isPaused()).toBe(true);
+    for (let index = 0; index < 5; index += 1) {
+      expect(await queue.next()).toMatchObject({ kind: "message" });
+    }
+    expect(stdout.isPaused()).toBe(false);
+  });
+
+  it("pauses stdout when the queued item count crosses the high-water mark", async () => {
+    const { queue, stdout } = createQueueHarness(
+      { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
+      { maxPendingItems: 3 }
+    );
+    stdout.write("{}\n{}\n{}\n{}\n{}\n");
+
+    expect(stdout.isPaused()).toBe(true);
+    for (let index = 0; index < 5; index += 1) {
+      expect(await queue.next()).toMatchObject({ kind: "message" });
+    }
+    expect(stdout.isPaused()).toBe(false);
+  });
+
   it("measures physical frames before removing the JSONL delimiter", async () => {
     const { queue, stdout } = createQueueHarness({
       maxFrameBytes: 1024,
@@ -1231,10 +1262,16 @@ async function writeFakeOversizedFrameOmp(filePath: string): Promise<void> {
   );
 }
 
-function createQueueHarness(limits?: {
-  maxFrameBytes: number;
-  maxReassembledBytes: number;
-}): { queue: ProcessQueue; stdin: PassThrough; stdout: PassThrough } {
+function createQueueHarness(
+  limits?: {
+    maxFrameBytes: number;
+    maxReassembledBytes: number;
+  },
+  queueOptions?: {
+    maxPendingFrameBytes?: number;
+    maxPendingItems?: number;
+  }
+): { queue: ProcessQueue; stdin: PassThrough; stdout: PassThrough } {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const child = {
@@ -1243,7 +1280,7 @@ function createQueueHarness(limits?: {
     stderr: new PassThrough(),
     once: () => child
   } as unknown as ChildProcessWithoutNullStreams;
-  const queue = createProcessQueue(child);
+  const queue = createProcessQueue(child, queueOptions);
   if (limits !== undefined) {
     queue.setFrameLimits(limits.maxFrameBytes, limits.maxReassembledBytes);
   }

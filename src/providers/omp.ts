@@ -46,6 +46,7 @@ type ProcessQueueItem =
 export type ProcessQueue = {
   next: () => Promise<ProcessQueueItem>;
   setFrameLimits: (maxFrameBytes: number, maxReassembledBytes: number) => void;
+  readonly size: number;
 };
 
 type PendingRpcChunks = {
@@ -754,16 +755,15 @@ export function createProcessQueue(
     );
   };
 
-  const drainStdoutLines = (ignoreBackpressure = false): void => {
+  const drainStdoutLines = (): void => {
     let newlineIndex = stdoutBuffer.indexOf("\n");
     while (!awaitingFrameLimits && newlineIndex >= 0) {
       // Stop before the backlog crosses either high-water mark so a single
       // data callback cannot burst-enqueue past it; the remainder stays
       // buffered until the consumer drains below the low-water marks.
       if (
-        !ignoreBackpressure &&
-        (pendingFrameBytes >= maxPendingFrameBytes ||
-          pending.length >= maxPendingItems)
+        pendingFrameBytes >= maxPendingFrameBytes ||
+        pending.length >= maxPendingItems
       ) {
         child.stdout.pause();
         return;
@@ -779,9 +779,16 @@ export function createProcessQueue(
     if (!stdoutEnded || awaitingFrameLimits) {
       return;
     }
-    // The producer is done at EOF: drain everything regardless of
-    // backpressure so no complete frame is left behind.
-    drainStdoutLines(true);
+    drainStdoutLines();
+    // Backpressured even at EOF: leave the buffered backlog intact; next()
+    // re-enters finishStdout as the consumer drains below the low-water
+    // marks until the finish completes.
+    if (
+      pendingFrameBytes >= maxPendingFrameBytes ||
+      pending.length >= maxPendingItems
+    ) {
+      return;
+    }
     if (stdoutBuffer.length > 0) {
       pushParsedLine(stdoutBuffer);
       stdoutBuffer = "";
@@ -837,6 +844,9 @@ export function createProcessQueue(
   });
 
   return {
+    get size() {
+      return pending.length;
+    },
     next: () => {
       const entry = pending.shift();
       if (entry !== undefined) {
@@ -845,7 +855,11 @@ export function createProcessQueue(
           pendingFrameBytes <= resumePendingFrameBytes &&
           pending.length <= resumePendingItems
         ) {
-          drainStdoutLines();
+          if (stdoutEnded) {
+            finishStdout();
+          } else {
+            drainStdoutLines();
+          }
           if (
             pendingFrameBytes < maxPendingFrameBytes &&
             pending.length < maxPendingItems
@@ -867,7 +881,12 @@ export function createProcessQueue(
       drainStdoutLines();
       if (stdoutEnded) {
         finishStdout();
-      } else {
+      } else if (
+        pendingFrameBytes < maxPendingFrameBytes &&
+        pending.length < maxPendingItems
+      ) {
+        // Mirrors the data handler: a backlogged remainder holds valid
+        // complete frames, not an unterminated oversized one.
         enforceStdoutBound();
       }
     }

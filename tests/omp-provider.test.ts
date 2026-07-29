@@ -572,6 +572,50 @@ describe("Oh My Pi RPC provider", () => {
     expect(stdout.isPaused()).toBe(false);
   });
 
+  it("drains a deferred EOF backlog without crossing the high-water marks", async () => {
+    const { queue, stdout } = createQueueHarness(undefined, {
+      maxPendingFrameBytes: 2048,
+      maxPendingItems: 4
+    });
+    // ready latches the drain; the ten tiny frames plus EOF arrive together,
+    // so they can only be enqueued as the consumer drains below the marks.
+    stdout.write(`${JSON.stringify({ type: "ready" })}\n${"{}\n".repeat(10)}`);
+    stdout.end();
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    queue.setFrameLimits(1024, 8192);
+    expect(stdout.isPaused()).toBe(true);
+    // The backlog stops at the item high-water mark even though the
+    // producer has already finished the stream.
+    expect(queue.size).toBe(4);
+    for (let index = 0; index < 10; index += 1) {
+      expect(await queue.next()).toMatchObject({ kind: "message" });
+    }
+    expect(stdout.isPaused()).toBe(false);
+  });
+
+  it("does not discard a deferred backlog as oversized when limits install mid-stream", async () => {
+    const { queue, stdout } = createQueueHarness(undefined, {
+      maxPendingFrameBytes: 2048,
+      maxPendingItems: 4
+    });
+    // The six frames left buffered at the high-water mark total more than
+    // the negotiated physical limit, so an unguarded enforceStdoutBound
+    // would misclassify and discard them as one oversized frame.
+    const frame = JSON.stringify({ message: "x".repeat(180), type: "notice" });
+    stdout.write(
+      `${JSON.stringify({ type: "ready" })}\n${`${frame}\n`.repeat(10)}`
+    );
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    queue.setFrameLimits(1024, 8192);
+    const kinds: string[] = [];
+    for (let index = 0; index < 10; index += 1) {
+      kinds.push((await queue.next()).kind);
+    }
+    expect(kinds).toEqual(Array.from({ length: 10 }, () => "message"));
+  });
+
   it("measures physical frames before removing the JSONL delimiter", async () => {
     const { queue, stdout } = createQueueHarness({
       maxFrameBytes: 1024,

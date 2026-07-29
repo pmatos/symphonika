@@ -989,6 +989,63 @@ describe("Oh My Pi RPC provider", () => {
     ]);
   });
 
+  it("does not report a missing terminal when agent_end precedes the prompt response", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const fakeOmpPath = path.join(root, "fake-early-terminal-exit-omp.mjs");
+    await writeFakeEarlyTerminalOmp(fakeOmpPath, true);
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+    );
+
+    const types = events.map((event) => event.normalized?.type);
+    expect(types).not.toContain("turn_failed");
+    expect(events.at(-1)?.normalized).toMatchObject({
+      exitCode: 0,
+      type: "process_exit"
+    });
+  });
+
+  it("ends stdin and escalates shutdown when agent_end precedes the prompt response", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const fakeOmpPath = path.join(root, "fake-early-terminal-hang-omp.mjs");
+    await writeFakeEarlyTerminalOmp(fakeOmpPath, false);
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    // The fake emits a terminal agent_end instead of the prompt response
+    // and then waits for stdin EOF; without endStdin during the read this
+    // deadlocks until external cancellation.
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+    );
+
+    const types = events.map((event) => event.normalized?.type);
+    expect(types).not.toContain("turn_failed");
+    expect(events.at(-1)?.normalized).toMatchObject({
+      signal: "SIGTERM",
+      type: "process_exit"
+    });
+  });
+
   it("reports a protocol failure when OMP exits before a terminal agent_end", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -2100,6 +2157,38 @@ async function writeFakeDelayedResponseOmp(
       "    sendDelta('early-3');",
       "  }",
       "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakeEarlyTerminalOmp(
+  filePath: string,
+  exitAfterTerminal: boolean
+): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-335', model: { provider: 'openai', id: 'gpt-5.4' } } });",
+      "  if (command.type === 'prompt') {",
+      "    // Terminal agent_end instead of the correlated prompt response.",
+      "    send({ type: 'agent_end', isTerminal: true, messages: [] });",
+      ...(exitAfterTerminal
+        ? ["    process.stdout.write('', () => process.exit(0));"]
+        : [
+            "    // Wait for stdin EOF instead of replying; the readline loop",
+            "    // above ends when the provider closes stdin."
+          ]),
+      "  }",
+      "}",
+      ...(exitAfterTerminal ? [] : ["setInterval(() => {}, 1000);"]),
       ""
     ].join("\n"),
     "utf8"

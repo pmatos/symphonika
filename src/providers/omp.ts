@@ -21,6 +21,7 @@ type ActiveOmpRun = {
   child?: ChildProcessWithoutNullStreams;
   nextRequestId: number;
   queue?: ProcessQueue;
+  terminalEventSeen: boolean;
   sessionId: string | undefined;
 };
 
@@ -105,7 +106,8 @@ export function createOmpProvider(
       const activeRun: ActiveOmpRun = {
         cancelled: false,
         nextRequestId: 1,
-        sessionId: undefined
+        sessionId: undefined,
+        terminalEventSeen: false
       };
       activeRuns.set(input.run.id, activeRun);
 
@@ -229,7 +231,6 @@ export function createOmpProvider(
           return;
         }
 
-        let terminalEventSeen = false;
         while (true) {
           const event = providerEventFromQueueItem(
             await queue.next(),
@@ -242,7 +243,7 @@ export function createOmpProvider(
             // agent_end; a clean exit without one is a protocol failure,
             // not a successful turn. Cancellation and earlier terminal
             // failures are already classified.
-            if (!terminalEventSeen && !activeRun.cancelled) {
+            if (!activeRun.terminalEventSeen && !activeRun.cancelled) {
               yield {
                 normalized: {
                   message:
@@ -258,19 +259,12 @@ export function createOmpProvider(
 
           yield event;
 
-          if (
-            stringField(event.raw, "type") === "agent_end" &&
-            booleanField(event.raw, "isTerminal") !== false
-          ) {
-            terminalEventSeen = true;
-            endStdin(child);
-            // Bound the child's exit: a hung child otherwise holds the run
-            // slot and provider scope until an external watchdog cancels.
-            shutdownProcess(child);
+          if (isTerminalAgentEnd(event.raw)) {
+            markTerminalAgentEnd(activeRun);
           }
 
           if (isTerminalFailure(type)) {
-            terminalEventSeen = true;
+            activeRun.terminalEventSeen = true;
             shutdownProcess(child);
           }
         }
@@ -522,7 +516,7 @@ async function* readUntilFrame(
       // A clean exit while awaiting a required handshake frame is a
       // protocol failure, not a successful attempt (same lifecycle class
       // as exiting mid-turn without a terminal agent_end).
-      if (!activeRun.cancelled) {
+      if (!activeRun.cancelled && !activeRun.terminalEventSeen) {
         yield {
           normalized: {
             message: "Oh My Pi provider exited before a terminal agent_end",
@@ -535,10 +529,14 @@ async function* readUntilFrame(
       return { stopped: true };
     }
     yield event;
+    if (item.kind === "message" && isTerminalAgentEnd(item.raw)) {
+      markTerminalAgentEnd(activeRun);
+    }
     if (item.kind === "message" && predicate(item.raw)) {
       return { response: item.raw, stopped: false };
     }
     if (isTerminalFailure(event.normalized?.type)) {
+      activeRun.terminalEventSeen = true;
       return { stopped: false };
     }
   }
@@ -559,7 +557,7 @@ async function* readUntilResponse(
         ? mapResponse(item.raw, activeRun)
         : providerEventFromQueueItem(item, activeRun);
     if (event.normalized?.type === "process_exit") {
-      if (!activeRun.cancelled) {
+      if (!activeRun.cancelled && !activeRun.terminalEventSeen) {
         yield {
           normalized: {
             message: "Oh My Pi provider exited before a terminal agent_end",
@@ -572,10 +570,14 @@ async function* readUntilResponse(
       return { stopped: true };
     }
     yield event;
+    if (item.kind === "message" && isTerminalAgentEnd(item.raw)) {
+      markTerminalAgentEnd(activeRun);
+    }
     if (item.kind === "message" && stringField(item.raw, "id") === id) {
       return { response: item.raw, stopped: false };
     }
     if (isTerminalFailure(event.normalized?.type)) {
+      activeRun.terminalEventSeen = true;
       return { stopped: false };
     }
   }
@@ -1591,6 +1593,24 @@ function isTerminalFailure(type: string | undefined): boolean {
     type === "malformed_event" ||
     type === "turn_failed"
   );
+}
+
+function isTerminalAgentEnd(raw: unknown): boolean {
+  return (
+    stringField(raw, "type") === "agent_end" &&
+    booleanField(raw, "isTerminal") !== false
+  );
+}
+
+function markTerminalAgentEnd(activeRun: ActiveOmpRun): void {
+  activeRun.terminalEventSeen = true;
+  if (activeRun.child !== undefined) {
+    endStdin(activeRun.child);
+    // Bound the child's exit even when the terminal frame arrives during a
+    // handshake read: a host waiting for stdin EOF must not deadlock the
+    // run, and a hung child gets the bounded SIGTERM→SIGKILL escalation.
+    shutdownProcess(activeRun.child);
+  }
 }
 
 function objectField(value: unknown, key: string): unknown {

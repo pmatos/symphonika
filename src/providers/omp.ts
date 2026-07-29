@@ -48,6 +48,7 @@ export type ProcessQueue = {
   discardBeforeFrameLimits: () => void;
   next: () => Promise<ProcessQueueItem>;
   setFrameLimits: (maxFrameBytes: number, maxReassembledBytes: number) => void;
+  setProtocolVersion: (version: 1 | 2) => void;
   readonly size: number;
 };
 
@@ -190,6 +191,7 @@ export function createOmpProvider(
             yield* drainUntilExit(queue, activeRun);
             return;
           }
+          queue.setProtocolVersion(2);
         }
 
         const stateId = requestId(activeRun);
@@ -671,6 +673,7 @@ export function createProcessQueue(
   let stdoutBuffer = "";
   let stdoutOverflowed = false;
   let frameLimitsSet = false;
+  let protocolVersion: 1 | 2 = 1;
   let awaitingFrameLimits = false;
   let stdoutEnded = false;
   let discardingOutput = false;
@@ -745,6 +748,21 @@ export function createProcessQueue(
           lineBytes
         );
       }
+      return;
+    }
+
+    // rpc_chunk exists only under protocol v2 (ADR 0066); a chunk received
+    // before a successful negotiate_protocol response is malformed.
+    if (protocolVersion !== 2) {
+      frameDecoder.interrupt();
+      push(
+        {
+          kind: "malformed",
+          line,
+          message: "Oh My Pi RPC chunk received before protocol v2 negotiation"
+        },
+        lineBytes
+      );
       return;
     }
 
@@ -952,6 +970,9 @@ export function createProcessQueue(
       return new Promise<ProcessQueueItem>((resolve) => {
         waiting = resolve;
       });
+    },
+    setProtocolVersion: (version) => {
+      protocolVersion = version;
     },
     setFrameLimits: (maxFrameBytes, maxReassembledBytes) => {
       maxPhysicalFrameBytes = maxFrameBytes;

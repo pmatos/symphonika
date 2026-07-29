@@ -474,6 +474,31 @@ describe("Oh My Pi RPC provider", () => {
     });
   });
 
+  it("rejects rpc_chunk frames before protocol v2 is negotiated", async () => {
+    const { queue, stdout } = createQueueHarness(
+      { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
+      undefined,
+      false
+    );
+    const [first, second] = rpcChunkLines(
+      JSON.stringify({ message: "x".repeat(1100), type: "notice" }),
+      "chunk-v1"
+    );
+    stdout.write(`${first}\n`);
+    stdout.write(`${second}\n`);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC chunk received before protocol v2 negotiation"
+    });
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC chunk received before protocol v2 negotiation"
+    });
+  });
+
   it("does not complete a chunk sequence after a mismatched chunk", async () => {
     const { queue, stdout } = createQueueHarness({
       maxFrameBytes: 1024,
@@ -1489,7 +1514,8 @@ function createQueueHarness(
   queueOptions?: {
     maxPendingFrameBytes?: number;
     maxPendingItems?: number;
-  }
+  },
+  protocolV2 = true
 ): {
   close: (exitCode?: number | null, signal?: NodeJS.Signals | null) => void;
   queue: ProcessQueue;
@@ -1520,6 +1546,9 @@ function createQueueHarness(
   const queue = createProcessQueue(child, queueOptions);
   if (limits !== undefined) {
     queue.setFrameLimits(limits.maxFrameBytes, limits.maxReassembledBytes);
+  }
+  if (protocolV2) {
+    queue.setProtocolVersion(2);
   }
   const close = (
     exitCode: number | null = 0,

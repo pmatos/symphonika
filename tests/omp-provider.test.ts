@@ -776,6 +776,43 @@ describe("Oh My Pi RPC provider", () => {
     ]);
   });
 
+  it("reports a protocol failure when OMP exits before a terminal agent_end", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const fakeOmpPath = path.join(root, "fake-premature-exit-omp.mjs");
+    await writeFakePrematureExitOmp(fakeOmpPath);
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+    );
+
+    const types = events.map((event) => event.normalized?.type);
+    expect(
+      events
+        .map((event) => event.normalized)
+        .find((event) => event?.type === "turn_failed")
+    ).toMatchObject({
+      message: "Oh My Pi provider exited before a terminal agent_end",
+      type: "turn_failed"
+    });
+    expect(events.at(-1)?.normalized).toMatchObject({
+      exitCode: 0,
+      type: "process_exit"
+    });
+    expect(types.indexOf("turn_failed")).toBeLessThan(
+      types.indexOf("process_exit")
+    );
+  });
+
   it("fails the turn when OMP accepts the prompt without invoking an agent", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -1595,6 +1632,28 @@ async function writeFakeInputOmp(filePath: string): Promise<void> {
       "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
       "    send({ type: 'extension_ui_request', id: 'ui-1', method: 'input', title: 'Choose a release channel', placeholder: 'stable' });",
       "    process.exit(0);",
+      "  }",
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakePrematureExitOmp(filePath: string): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-335', model: { provider: 'openai', id: 'gpt-5.4' } } });",
+      "  if (command.type === 'prompt') {",
+      "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
+      "    process.stdout.write('', () => process.exit(0));",
       "  }",
       "}",
       ""

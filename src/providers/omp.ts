@@ -226,26 +226,45 @@ export function createOmpProvider(
           return;
         }
 
+        let terminalEventSeen = false;
         while (true) {
           const event = providerEventFromQueueItem(
             await queue.next(),
             activeRun
           );
-          yield event;
           const type = event.normalized?.type;
 
           if (type === "process_exit") {
+            // The OMP lifecycle drains a session through a terminal
+            // agent_end; a clean exit without one is a protocol failure,
+            // not a successful turn. Cancellation and earlier terminal
+            // failures are already classified.
+            if (!terminalEventSeen && !activeRun.cancelled) {
+              yield {
+                normalized: {
+                  message:
+                    "Oh My Pi provider exited before a terminal agent_end",
+                  type: "turn_failed"
+                },
+                raw: { kind: "missing_terminal_agent_end" }
+              };
+            }
+            yield event;
             return;
           }
+
+          yield event;
 
           if (
             stringField(event.raw, "type") === "agent_end" &&
             booleanField(event.raw, "isTerminal") !== false
           ) {
+            terminalEventSeen = true;
             endStdin(child);
           }
 
           if (isTerminalFailure(type)) {
+            terminalEventSeen = true;
             shutdownProcess(child);
           }
         }

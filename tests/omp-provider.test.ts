@@ -12,7 +12,11 @@ import type {
 } from "../src/lifecycle/process-scope.js";
 import type { ProviderEvent, ProviderRunInput } from "../src/provider.js";
 import type { ProcessQueue } from "../src/providers/omp.js";
-import { createOmpProvider, createProcessQueue } from "../src/providers/omp.js";
+import {
+  createOmpProvider,
+  createProcessQueue,
+  RpcChunkDecoder
+} from "../src/providers/omp.js";
 
 type RecordingProcessScope = {
   stopCalls: ProviderRunIdentity[];
@@ -497,6 +501,27 @@ describe("Oh My Pi RPC provider", () => {
       kind: "malformed",
       message: "Oh My Pi RPC chunk received before protocol v2 negotiation"
     });
+  });
+
+  it("grows the chunk buffer with received bytes instead of the declared length", () => {
+    const decoder = new RpcChunkDecoder();
+    decoder.setLimits(1024, 16 * 1024 * 1024);
+    // A 1-byte chunk declaring the maximum logical length: capacity must
+    // track the received byte, not the 16 MiB declaration, across repeated
+    // declare-then-interrupt cycles.
+    const firstChunk = {
+      byteLength: 16 * 1024 * 1024,
+      chunkId: "chunk-grow",
+      count: 16 * 1024 * 1024,
+      data: Buffer.from("a").toString("base64"),
+      index: 0,
+      type: "rpc_chunk"
+    };
+    decoder.push(firstChunk);
+    expect(decoder.pendingBufferBytes).toBe(1);
+    expect(decoder.interrupt()).toBe(true);
+    decoder.push(firstChunk);
+    expect(decoder.pendingBufferBytes).toBe(1);
   });
 
   it("reassembles a logical frame from more than two chunks", async () => {

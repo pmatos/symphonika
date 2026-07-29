@@ -995,10 +995,14 @@ export function createProcessQueue(
   };
 }
 
-class RpcChunkDecoder {
+export class RpcChunkDecoder {
   private maxFrameBytes = 1024 * 1024;
   private maxReassembledBytes = 64 * 1024 * 1024;
   private pending: PendingRpcChunks | undefined = undefined;
+
+  get pendingBufferBytes(): number {
+    return this.pending === undefined ? 0 : this.pending.buffer.byteLength;
+  }
 
   setLimits(maxFrameBytes: number, maxReassembledBytes: number): void {
     if (
@@ -1059,11 +1063,14 @@ class RpcChunkDecoder {
         if (index !== 0) {
           throw new Error("Oh My Pi RPC chunk sequence must start at index 0");
         }
-        // Reassemble into one bounded preallocated buffer: retaining a
-        // separate Buffer per chunk lets a child with a legal declared
-        // length pin millions of tiny allocations until the daemon OOMs.
+        // Reassemble into one contiguous buffer whose capacity tracks bytes
+        // actually received (geometric growth, capped by the declared
+        // length): retaining a Buffer per chunk pins millions of tiny
+        // allocations, while preallocating the declared length lets a tiny
+        // chunk with a max declaration amplify allocations through
+        // declare-interrupt cycles.
         this.pending = {
-          buffer: Buffer.alloc(byteLength),
+          buffer: Buffer.alloc(bytes.byteLength),
           byteLength,
           chunkId,
           count,
@@ -1084,6 +1091,17 @@ class RpcChunkDecoder {
       if (pending.receivedBytes + bytes.byteLength > pending.byteLength) {
         throw new Error("Oh My Pi RPC chunks exceed their declared length");
       }
+      const needed = pending.receivedBytes + bytes.byteLength;
+      if (needed > pending.buffer.byteLength) {
+        const grown = Buffer.alloc(
+          Math.min(
+            Math.max(needed, pending.buffer.byteLength * 2),
+            pending.byteLength
+          )
+        );
+        pending.buffer.copy(grown, 0, 0, pending.receivedBytes);
+        pending.buffer = grown;
+      }
       pending.buffer.set(bytes, pending.receivedBytes);
       pending.receivedBytes += bytes.byteLength;
       pending.nextIndex += 1;
@@ -1096,7 +1114,7 @@ class RpcChunkDecoder {
 
       this.pending = undefined;
       const decoded = new TextDecoder("utf-8", { fatal: true }).decode(
-        pending.buffer
+        pending.buffer.subarray(0, pending.receivedBytes)
       );
       const logicalFrame = JSON.parse(decoded) as unknown;
       if (

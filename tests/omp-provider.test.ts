@@ -420,6 +420,24 @@ describe("Oh My Pi RPC provider", () => {
     });
   });
 
+  it("measures physical frames before removing the JSONL delimiter", async () => {
+    const { queue, stdout } = createQueueHarness({
+      maxFrameBytes: 1024,
+      maxReassembledBytes: 8192
+    });
+    // The JSON alone fits the physical limit; the trailing spaces push the
+    // wire frame over it.
+    const frame = JSON.stringify({ message: "x".repeat(980), type: "notice" });
+    stdout.write(`${frame}${" ".repeat(20)}\n`);
+    stdout.write(`${JSON.stringify({ type: "agent_start" })}\n`);
+
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC frame exceeds the physical frame limit"
+    });
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+  });
+
   it("fails autonomous execution when OMP requests interactive input", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");

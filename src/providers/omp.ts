@@ -709,7 +709,7 @@ export function createProcessQueue(
     stdoutBuffer += data;
     let newlineIndex = stdoutBuffer.indexOf("\n");
     while (newlineIndex >= 0) {
-      const line = stdoutBuffer.slice(0, newlineIndex).trimEnd();
+      const line = stdoutBuffer.slice(0, newlineIndex);
       stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
       pushParsedLine(line);
       newlineIndex = stdoutBuffer.indexOf("\n");
@@ -718,7 +718,7 @@ export function createProcessQueue(
   });
   child.stdout.on("end", () => {
     if (stdoutBuffer.length > 0) {
-      pushParsedLine(stdoutBuffer.trimEnd());
+      pushParsedLine(stdoutBuffer);
       stdoutBuffer = "";
     }
     if (frameDecoder.interrupt()) {

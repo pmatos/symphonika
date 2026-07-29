@@ -518,12 +518,25 @@ async function* readUntilFrame(
   while (true) {
     const item = await queue.next();
     const event = providerEventFromQueueItem(item, activeRun);
+    if (event.normalized?.type === "process_exit") {
+      // A clean exit while awaiting a required handshake frame is a
+      // protocol failure, not a successful attempt (same lifecycle class
+      // as exiting mid-turn without a terminal agent_end).
+      if (!activeRun.cancelled) {
+        yield {
+          normalized: {
+            message: "Oh My Pi provider exited before a terminal agent_end",
+            type: "turn_failed"
+          },
+          raw: { kind: "missing_terminal_agent_end" }
+        };
+      }
+      yield event;
+      return { stopped: true };
+    }
     yield event;
     if (item.kind === "message" && predicate(item.raw)) {
       return { response: item.raw, stopped: false };
-    }
-    if (event.normalized?.type === "process_exit") {
-      return { stopped: true };
     }
     if (isTerminalFailure(event.normalized?.type)) {
       return { stopped: false };
@@ -545,12 +558,22 @@ async function* readUntilResponse(
       item.kind === "message" && stringField(item.raw, "id") === id
         ? mapResponse(item.raw, activeRun)
         : providerEventFromQueueItem(item, activeRun);
+    if (event.normalized?.type === "process_exit") {
+      if (!activeRun.cancelled) {
+        yield {
+          normalized: {
+            message: "Oh My Pi provider exited before a terminal agent_end",
+            type: "turn_failed"
+          },
+          raw: { kind: "missing_terminal_agent_end" }
+        };
+      }
+      yield event;
+      return { stopped: true };
+    }
     yield event;
     if (item.kind === "message" && stringField(item.raw, "id") === id) {
       return { response: item.raw, stopped: false };
-    }
-    if (event.normalized?.type === "process_exit") {
-      return { stopped: true };
     }
     if (isTerminalFailure(event.normalized?.type)) {
       return { stopped: false };

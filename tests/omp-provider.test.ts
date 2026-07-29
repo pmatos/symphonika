@@ -1298,10 +1298,22 @@ describe("Oh My Pi RPC provider", () => {
       })
     );
 
+    const types = events.map((event) => event.normalized?.type);
+    expect(
+      events
+        .map((event) => event.normalized)
+        .find((event) => event?.type === "turn_failed")
+    ).toMatchObject({
+      message: "Oh My Pi provider exited before a terminal agent_end",
+      type: "turn_failed"
+    });
     expect(events.at(-1)?.normalized).toMatchObject({
       exitCode: 0,
       type: "process_exit"
     });
+    expect(types.indexOf("turn_failed")).toBeLessThan(
+      types.indexOf("process_exit")
+    );
   });
 
   it("requires OMP to confirm protocol v2 negotiation", async () => {

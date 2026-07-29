@@ -7,7 +7,8 @@ prefix is `~/.npm-global`. On an nvm-managed host (the common case) global binar
 `~/.nvm/versions/node/<version>/bin`, so the copied unit pointed `ExecStart` at a file that does not
 exist and the daemon restart-looped with `status=127`. Even the "correct" nvm path is version-pinned
 and re-breaks on every `node` upgrade, and `systemd --user` does not inherit the interactive `PATH`,
-so the baked `PATH` also has to carry `node` and the spawned provider CLIs (`claude`, `codex`, `gh`).
+so the baked `PATH` also has to carry `node` and the spawned provider CLIs and tools
+(`claude`, `codex`, `omp`, `gh`).
 A single hardcoded template cannot be correct across npm-global, nvm, pnpm, bun, and source checkouts.
 
 ## Decision

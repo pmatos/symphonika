@@ -1,0 +1,1148 @@
+import {
+  spawn,
+  type ChildProcess,
+  type ChildProcessWithoutNullStreams
+} from "node:child_process";
+
+import {
+  createProcessScope,
+  type ProcessScope
+} from "../lifecycle/process-scope.js";
+import type {
+  AgentProvider,
+  ProviderEvent,
+  ProviderRunInput
+} from "../provider.js";
+
+type JsonObject = Record<string, unknown>;
+
+type ActiveOmpRun = {
+  cancelled: boolean;
+  child?: ChildProcessWithoutNullStreams;
+  nextRequestId: number;
+  sessionId: string | undefined;
+};
+
+type ProcessQueueItem =
+  | {
+      kind: "exit";
+      exitCode: number | null;
+      signal: NodeJS.Signals | null;
+    }
+  | {
+      error: Error;
+      kind: "error";
+    }
+  | {
+      kind: "malformed";
+      line: string;
+      message: string;
+    }
+  | {
+      kind: "message";
+      raw: unknown;
+    };
+
+type ProcessQueue = {
+  next: () => Promise<ProcessQueueItem>;
+  setFrameLimits: (maxFrameBytes: number, maxReassembledBytes: number) => void;
+};
+
+type PendingRpcChunks = {
+  byteLength: number;
+  chunkId: string;
+  chunks: Buffer[];
+  count: number;
+  nextIndex: number;
+  receivedBytes: number;
+};
+
+type ResponseReadResult = {
+  events: ProviderEvent[];
+  response?: unknown;
+  stopped: boolean;
+};
+
+export type OmpProviderOptions = {
+  processScope?: ProcessScope;
+};
+
+export function createOmpProvider(
+  options: OmpProviderOptions = {}
+): AgentProvider {
+  const processScope = options.processScope ?? createProcessScope();
+  const activeRuns = new Map<string, ActiveOmpRun>();
+
+  return {
+    cancel: (runId) => {
+      const activeRun = activeRuns.get(runId);
+      if (activeRun === undefined) {
+        return Promise.resolve();
+      }
+
+      activeRun.cancelled = true;
+      if (activeRun.child === undefined) {
+        return Promise.resolve();
+      }
+
+      writeJson(activeRun.child, {
+        id: requestId(activeRun),
+        type: "abort"
+      });
+      shutdownProcess(activeRun.child);
+      return Promise.resolve();
+    },
+    name: "omp",
+    runAttempt: async function* (
+      input: ProviderRunInput
+    ): AsyncGenerator<ProviderEvent> {
+      const activeRun: ActiveOmpRun = {
+        cancelled: false,
+        nextRequestId: 1,
+        sessionId: undefined
+      };
+      activeRuns.set(input.run.id, activeRun);
+
+      const command = await processScope.wrapForProviderScope(
+        input.run,
+        parseCommand(input.provider.command)
+      );
+      if (activeRun.cancelled) {
+        activeRuns.delete(input.run.id);
+        await processScope.stopProviderScope(input.run);
+        yield processExitEvent(activeRun, null, null);
+        return;
+      }
+
+      const child = spawn(command.executable, command.args, {
+        cwd: input.workspacePath,
+        env: process.env,
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+      activeRun.child = child;
+      child.stderr.resume();
+      const queue = createProcessQueue(child);
+
+      try {
+        const ready = await readUntilFrame(
+          queue,
+          activeRun,
+          (raw) => stringField(raw, "type") === "ready"
+        );
+        yield* ready.events;
+        if (ready.stopped) {
+          return;
+        }
+        if (ready.response === undefined) {
+          shutdownProcess(child);
+          yield* drainUntilExit(queue, activeRun);
+          return;
+        }
+        try {
+          validateReadyFrame(ready.response);
+          queue.setFrameLimits(
+            numberField(ready.response, "maxFrameBytes") ?? 0,
+            numberField(ready.response, "maxReassembledFrameBytes") ?? 0
+          );
+        } catch {
+          yield {
+            normalized: {
+              message: "Oh My Pi provider emitted an incompatible ready frame",
+              type: "turn_failed"
+            },
+            raw: ready.response
+          };
+          shutdownProcess(child);
+          yield* drainUntilExit(queue, activeRun);
+          return;
+        }
+
+        if (
+          arrayField(ready.response, "supportedProtocolVersions").includes(2)
+        ) {
+          const id = requestId(activeRun);
+          writeJson(child, {
+            id,
+            protocolVersion: 2,
+            type: "negotiate_protocol"
+          });
+          const negotiated = await readUntilResponse(
+            queue,
+            id,
+            activeRun,
+            mapNegotiationResponse
+          );
+          yield* negotiated.events;
+          if (
+            negotiated.stopped ||
+            !negotiatedV2Response(negotiated.response)
+          ) {
+            shutdownProcess(child);
+            yield* drainUntilExit(queue, activeRun);
+            return;
+          }
+        }
+
+        const stateId = requestId(activeRun);
+        writeJson(child, { id: stateId, type: "get_state" });
+        const state = await readUntilResponse(
+          queue,
+          stateId,
+          activeRun,
+          (raw) => mapStateResponse(raw, activeRun)
+        );
+        yield* state.events;
+        if (state.stopped || !successfulResponse(state.response)) {
+          shutdownProcess(child);
+          yield* drainUntilExit(queue, activeRun);
+          return;
+        }
+
+        const promptId = requestId(activeRun);
+        writeJson(child, {
+          id: promptId,
+          message: input.prompt,
+          type: "prompt"
+        });
+        const prompt = await readUntilResponse(
+          queue,
+          promptId,
+          activeRun,
+          mapPromptResponse
+        );
+        yield* prompt.events;
+        if (prompt.stopped || !agentInvokedResponse(prompt.response)) {
+          shutdownProcess(child);
+          yield* drainUntilExit(queue, activeRun);
+          return;
+        }
+
+        while (true) {
+          const event = providerEventFromQueueItem(
+            await queue.next(),
+            activeRun
+          );
+          yield event;
+          const type = event.normalized?.type;
+
+          if (type === "process_exit") {
+            return;
+          }
+
+          if (
+            stringField(event.raw, "type") === "agent_end" &&
+            booleanField(event.raw, "isTerminal") !== false
+          ) {
+            endStdin(child);
+          }
+
+          if (isTerminalFailure(type)) {
+            shutdownProcess(child);
+          }
+        }
+      } finally {
+        activeRuns.delete(input.run.id);
+        await processScope.stopProviderScope(input.run);
+      }
+    },
+    validate: async (command) => {
+      const parsed = parseCommand(command);
+      validateOmpProtocolFlags(parsed.args);
+      await validateOmpRpcCommand(parsed);
+    }
+  };
+}
+
+function providerEventFromQueueItem(
+  item: ProcessQueueItem,
+  activeRun: ActiveOmpRun
+): ProviderEvent {
+  switch (item.kind) {
+    case "error":
+      return {
+        normalized: {
+          message: item.error.message,
+          type: "turn_failed"
+        },
+        raw: {
+          kind: "process_error",
+          message: item.error.message
+        }
+      };
+    case "exit":
+      return processExitEvent(activeRun, item.exitCode, item.signal);
+    case "malformed":
+      return {
+        normalized: {
+          line: item.line,
+          message: item.message,
+          type: "malformed_event"
+        },
+        raw: {
+          kind: "malformed_json",
+          line: item.line,
+          message: item.message
+        }
+      };
+    case "message":
+      return mapOmpFrame(item.raw, activeRun);
+  }
+}
+
+function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
+  const type = stringField(raw, "type");
+
+  if (type === "extension_ui_request") {
+    const method = stringField(raw, "method");
+    if (
+      method === "select" ||
+      method === "confirm" ||
+      method === "input" ||
+      method === "editor" ||
+      method === "open_url"
+    ) {
+      return {
+        normalized: {
+          instructions: stringField(raw, "instructions"),
+          message: stringField(raw, "message"),
+          method,
+          requestId: stringField(raw, "id"),
+          sessionId: activeRun.sessionId,
+          title: stringField(raw, "title"),
+          type: "input_required",
+          url: stringField(raw, "url")
+        },
+        raw
+      };
+    }
+  }
+
+  if (type === "message_update") {
+    const update = objectField(raw, "assistantMessageEvent");
+    const updateType = stringField(update, "type");
+    if (updateType === "text_delta" || updateType === "thinking_delta") {
+      return {
+        normalized: {
+          message: stringField(update, "delta") ?? "",
+          messageKind: updateType === "text_delta" ? "text" : "thinking",
+          sessionId: activeRun.sessionId,
+          type: "message"
+        },
+        raw
+      };
+    }
+    if (updateType === "error") {
+      const errorMessage = objectField(update, "error");
+      return {
+        normalized: {
+          message:
+            stringField(errorMessage, "errorMessage") ??
+            "Oh My Pi assistant turn failed",
+          type: "turn_failed"
+        },
+        raw
+      };
+    }
+  }
+
+  if (type === "notice" && stringField(raw, "level") === "error") {
+    return {
+      normalized: {
+        message: stringField(raw, "message") ?? "Oh My Pi reported an error",
+        type: "turn_failed"
+      },
+      raw
+    };
+  }
+
+  if (type === "message_end") {
+    const message = objectField(raw, "message");
+    const usage = objectField(message, "usage");
+    if (stringField(message, "role") === "assistant" && usage !== undefined) {
+      return {
+        normalized: {
+          sessionId: activeRun.sessionId,
+          tokenUsage: {
+            cacheReadTokens: numberField(usage, "cacheRead"),
+            cacheWriteTokens: numberField(usage, "cacheWrite"),
+            inputTokens: numberField(usage, "input"),
+            outputTokens: numberField(usage, "output"),
+            totalTokens: numberField(usage, "totalTokens")
+          },
+          type: "usage_updated"
+        },
+        raw
+      };
+    }
+  }
+
+  if (type === "tool_execution_start") {
+    return {
+      normalized: {
+        input: objectField(raw, "args"),
+        sessionId: activeRun.sessionId,
+        toolCallId: stringField(raw, "toolCallId"),
+        toolName: stringField(raw, "toolName"),
+        type: "tool_call"
+      },
+      raw
+    };
+  }
+
+  if (type === "turn_end") {
+    return {
+      normalized: {
+        sessionId: activeRun.sessionId,
+        type: "turn_completed"
+      },
+      raw
+    };
+  }
+
+  return { raw };
+}
+
+function mapStateResponse(
+  raw: unknown,
+  activeRun: ActiveOmpRun
+): ProviderEvent {
+  if (!successfulResponse(raw)) {
+    return mapFailedResponse(raw);
+  }
+
+  const state = objectField(raw, "data");
+  const sessionId = stringField(state, "sessionId");
+  activeRun.sessionId = sessionId;
+  const model = objectField(state, "model");
+  const modelId = stringField(model, "id");
+  const modelProvider = stringField(model, "provider");
+
+  return {
+    normalized: {
+      model:
+        modelProvider !== undefined && modelId !== undefined
+          ? `${modelProvider}/${modelId}`
+          : modelId,
+      sessionFile: stringField(state, "sessionFile"),
+      sessionId,
+      type: "session_started"
+    },
+    raw
+  };
+}
+
+function mapFailedResponse(raw: unknown): ProviderEvent {
+  return {
+    normalized: {
+      command: stringField(raw, "command"),
+      message: stringField(raw, "error") ?? "Oh My Pi RPC command failed",
+      type: "turn_failed"
+    },
+    raw
+  };
+}
+
+function mapPromptResponse(raw: unknown): ProviderEvent {
+  if (!successfulResponse(raw)) {
+    return mapFailedResponse(raw);
+  }
+  if (booleanField(objectField(raw, "data"), "agentInvoked") !== true) {
+    return {
+      normalized: {
+        command: "prompt",
+        message: "Oh My Pi did not invoke an agent for the prompt",
+        type: "turn_failed"
+      },
+      raw
+    };
+  }
+  return { raw };
+}
+
+function mapNegotiationResponse(raw: unknown): ProviderEvent {
+  if (!successfulResponse(raw)) {
+    return mapFailedResponse(raw);
+  }
+  if (numberField(objectField(raw, "data"), "protocolVersion") !== 2) {
+    return {
+      normalized: {
+        command: "negotiate_protocol",
+        message: "Oh My Pi did not confirm RPC protocol v2",
+        type: "turn_failed"
+      },
+      raw
+    };
+  }
+  return { raw };
+}
+
+async function readUntilFrame(
+  queue: ProcessQueue,
+  activeRun: ActiveOmpRun,
+  predicate: (raw: unknown) => boolean
+): Promise<ResponseReadResult> {
+  const events: ProviderEvent[] = [];
+  while (true) {
+    const item = await queue.next();
+    const event = providerEventFromQueueItem(item, activeRun);
+    events.push(event);
+    if (item.kind === "message" && predicate(item.raw)) {
+      return { events, response: item.raw, stopped: false };
+    }
+    if (event.normalized?.type === "process_exit") {
+      return { events, stopped: true };
+    }
+    if (isTerminalFailure(event.normalized?.type)) {
+      return { events, stopped: false };
+    }
+  }
+}
+
+async function readUntilResponse(
+  queue: ProcessQueue,
+  id: string,
+  activeRun: ActiveOmpRun,
+  mapResponse: (raw: unknown, activeRun: ActiveOmpRun) => ProviderEvent = (
+    raw
+  ) => (successfulResponse(raw) ? { raw } : mapFailedResponse(raw))
+): Promise<ResponseReadResult> {
+  const events: ProviderEvent[] = [];
+  while (true) {
+    const item = await queue.next();
+    const event =
+      item.kind === "message" && stringField(item.raw, "id") === id
+        ? mapResponse(item.raw, activeRun)
+        : providerEventFromQueueItem(item, activeRun);
+    events.push(event);
+    if (item.kind === "message" && stringField(item.raw, "id") === id) {
+      return { events, response: item.raw, stopped: false };
+    }
+    if (event.normalized?.type === "process_exit") {
+      return { events, stopped: true };
+    }
+    if (isTerminalFailure(event.normalized?.type)) {
+      return { events, stopped: false };
+    }
+  }
+}
+
+async function* drainUntilExit(
+  queue: ProcessQueue,
+  activeRun: ActiveOmpRun
+): AsyncGenerator<ProviderEvent> {
+  while (true) {
+    const event = providerEventFromQueueItem(await queue.next(), activeRun);
+    yield event;
+    if (event.normalized?.type === "process_exit") {
+      return;
+    }
+  }
+}
+
+function successfulResponse(raw: unknown): boolean {
+  return (
+    stringField(raw, "type") === "response" &&
+    booleanField(raw, "success") === true
+  );
+}
+
+function agentInvokedResponse(raw: unknown): boolean {
+  return (
+    successfulResponse(raw) &&
+    booleanField(objectField(raw, "data"), "agentInvoked") === true
+  );
+}
+
+function negotiatedV2Response(raw: unknown): boolean {
+  return (
+    successfulResponse(raw) &&
+    numberField(objectField(raw, "data"), "protocolVersion") === 2
+  );
+}
+
+function requestId(activeRun: ActiveOmpRun): string {
+  const id = `symphonika-${activeRun.nextRequestId}`;
+  activeRun.nextRequestId += 1;
+  return id;
+}
+
+function processExitEvent(
+  activeRun: ActiveOmpRun,
+  exitCode: number | null,
+  signal: NodeJS.Signals | null
+): ProviderEvent {
+  return {
+    normalized: {
+      cancelled: activeRun.cancelled,
+      exitCode,
+      signal,
+      type: "process_exit"
+    },
+    raw: {
+      cancelled: activeRun.cancelled,
+      exitCode,
+      kind: "process_exit",
+      signal
+    }
+  };
+}
+
+function createProcessQueue(
+  child: ChildProcessWithoutNullStreams
+): ProcessQueue {
+  const pending: ProcessQueueItem[] = [];
+  const frameDecoder = new RpcChunkDecoder();
+  let maxPhysicalFrameBytes = 1024 * 1024;
+  let waiting: ((item: ProcessQueueItem) => void) | undefined;
+  let stdoutBuffer = "";
+
+  const push = (item: ProcessQueueItem): void => {
+    if (waiting !== undefined) {
+      const resolve = waiting;
+      waiting = undefined;
+      resolve(item);
+      return;
+    }
+    pending.push(item);
+  };
+  const pushParsedLine = (line: string): void => {
+    if (line.trim().length === 0) {
+      return;
+    }
+    if (Buffer.byteLength(line, "utf8") > maxPhysicalFrameBytes) {
+      push({
+        kind: "malformed",
+        line,
+        message: "Oh My Pi RPC frame exceeds the physical frame limit"
+      });
+      return;
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(line) as unknown;
+    } catch (error) {
+      push({
+        kind: "malformed",
+        line,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return;
+    }
+
+    push({ kind: "message", raw });
+    if (stringField(raw, "type") !== "rpc_chunk") {
+      return;
+    }
+
+    try {
+      const logicalFrame = frameDecoder.push(raw);
+      if (logicalFrame !== undefined) {
+        push({ kind: "message", raw: logicalFrame });
+      }
+    } catch (error) {
+      push({
+        kind: "malformed",
+        line,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  };
+
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdoutBuffer += chunk;
+    let newlineIndex = stdoutBuffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = stdoutBuffer.slice(0, newlineIndex).trimEnd();
+      stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+      pushParsedLine(line);
+      newlineIndex = stdoutBuffer.indexOf("\n");
+    }
+  });
+  child.stdout.on("end", () => {
+    if (stdoutBuffer.length > 0) {
+      pushParsedLine(stdoutBuffer.trimEnd());
+      stdoutBuffer = "";
+    }
+  });
+  child.once("error", (error) => {
+    push({ error, kind: "error" });
+  });
+  child.once("close", (exitCode, signal) => {
+    push({ exitCode, kind: "exit", signal });
+  });
+
+  return {
+    next: () => {
+      const item = pending.shift();
+      if (item !== undefined) {
+        return Promise.resolve(item);
+      }
+      return new Promise<ProcessQueueItem>((resolve) => {
+        waiting = resolve;
+      });
+    },
+    setFrameLimits: (maxFrameBytes, maxReassembledBytes) => {
+      maxPhysicalFrameBytes = maxFrameBytes;
+      frameDecoder.setLimits(maxFrameBytes, maxReassembledBytes);
+    }
+  };
+}
+
+class RpcChunkDecoder {
+  private maxFrameBytes = 1024 * 1024;
+  private maxReassembledBytes = 64 * 1024 * 1024;
+  private pending: PendingRpcChunks | undefined = undefined;
+
+  setLimits(maxFrameBytes: number, maxReassembledBytes: number): void {
+    if (
+      !Number.isSafeInteger(maxFrameBytes) ||
+      !Number.isSafeInteger(maxReassembledBytes) ||
+      maxFrameBytes < 1 ||
+      maxReassembledBytes < maxFrameBytes
+    ) {
+      throw new Error("invalid Oh My Pi RPC frame limits");
+    }
+    this.maxFrameBytes = maxFrameBytes;
+    this.maxReassembledBytes = maxReassembledBytes;
+  }
+
+  push(raw: unknown): unknown {
+    const chunkId = stringField(raw, "chunkId");
+    const index = numberField(raw, "index");
+    const count = numberField(raw, "count");
+    const byteLength = numberField(raw, "byteLength");
+    const data = stringField(raw, "data");
+    if (
+      chunkId === undefined ||
+      chunkId.length === 0 ||
+      chunkId.length > 128 ||
+      index === undefined ||
+      count === undefined ||
+      byteLength === undefined ||
+      !Number.isSafeInteger(index) ||
+      !Number.isSafeInteger(count) ||
+      !Number.isSafeInteger(byteLength) ||
+      index < 0 ||
+      count < 2 ||
+      index >= count ||
+      byteLength < this.maxFrameBytes ||
+      byteLength > this.maxReassembledBytes ||
+      data === undefined
+    ) {
+      throw new Error("invalid Oh My Pi RPC chunk metadata");
+    }
+
+    const bytes = decodeBase64(data);
+    if (bytes.byteLength > this.maxFrameBytes) {
+      throw new Error("Oh My Pi RPC chunk exceeds the physical frame limit");
+    }
+
+    if (this.pending === undefined) {
+      if (index !== 0) {
+        throw new Error("Oh My Pi RPC chunk sequence must start at index 0");
+      }
+      this.pending = {
+        byteLength,
+        chunkId,
+        chunks: [],
+        count,
+        nextIndex: 0,
+        receivedBytes: 0
+      };
+    }
+    const pending = this.pending;
+    if (
+      pending.chunkId !== chunkId ||
+      pending.count !== count ||
+      pending.byteLength !== byteLength ||
+      pending.nextIndex !== index
+    ) {
+      throw new Error("Oh My Pi RPC chunk sequence mismatch");
+    }
+
+    pending.chunks.push(bytes);
+    pending.receivedBytes += bytes.byteLength;
+    pending.nextIndex += 1;
+    if (pending.receivedBytes > pending.byteLength) {
+      throw new Error("Oh My Pi RPC chunks exceed their declared length");
+    }
+    if (pending.nextIndex < pending.count) {
+      return undefined;
+    }
+    if (pending.receivedBytes !== pending.byteLength) {
+      throw new Error("Oh My Pi RPC chunk sequence length mismatch");
+    }
+
+    this.pending = undefined;
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(
+      Buffer.concat(pending.chunks)
+    );
+    const logicalFrame = JSON.parse(decoded) as unknown;
+    if (typeof logicalFrame !== "object" || logicalFrame === null) {
+      throw new Error("Oh My Pi logical RPC frame must be an object");
+    }
+    return logicalFrame;
+  }
+}
+
+function decodeBase64(value: string): Buffer {
+  if (
+    value.length === 0 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+      value
+    )
+  ) {
+    throw new Error("invalid Oh My Pi RPC chunk data");
+  }
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.toString("base64") !== value) {
+    throw new Error("invalid Oh My Pi RPC chunk data");
+  }
+  return decoded;
+}
+
+function parseCommand(command: string): {
+  args: string[];
+  executable: string;
+} {
+  const parts = splitCommand(command);
+  const executable = parts[0];
+  if (executable === undefined || executable.length === 0) {
+    throw new Error("Oh My Pi provider command is empty");
+  }
+  return {
+    args: parts.slice(1),
+    executable
+  };
+}
+
+function splitCommand(command: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  let escaping = false;
+  const trimmedCommand = command.trim();
+
+  for (let index = 0; index < trimmedCommand.length; index += 1) {
+    const character = trimmedCommand[index] ?? "";
+    if (escaping) {
+      current += character;
+      escaping = false;
+      continue;
+    }
+
+    if (quote !== undefined) {
+      if (character === "\\") {
+        const nextCharacter = trimmedCommand[index + 1];
+        if (nextCharacter === quote || nextCharacter === "\\") {
+          current += nextCharacter;
+          index += 1;
+        } else {
+          current += character;
+        }
+        continue;
+      }
+      if (character === quote) {
+        quote = undefined;
+      } else {
+        current += character;
+      }
+      continue;
+    }
+
+    if (character === "\\") {
+      const nextCharacter = trimmedCommand[index + 1];
+      if (
+        nextCharacter === "'" ||
+        nextCharacter === '"' ||
+        (nextCharacter !== undefined && /\s/.test(nextCharacter))
+      ) {
+        escaping = true;
+      } else {
+        current += character;
+      }
+      continue;
+    }
+
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+
+    if (/\s/.test(character)) {
+      if (current.length > 0) {
+        parts.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += character;
+  }
+
+  if (escaping) {
+    current += "\\";
+  }
+  if (quote !== undefined) {
+    throw new Error("Oh My Pi provider command has an unterminated quote");
+  }
+  if (current.length > 0) {
+    parts.push(current);
+  }
+  return parts;
+}
+
+function validateOmpProtocolFlags(args: string[]): void {
+  const modeValues = optionValues(args, "--mode");
+  if (modeValues.length === 0) {
+    throw new Error("Oh My Pi provider command must include --mode rpc");
+  }
+  if (modeValues.length !== 1 || modeValues[0] !== "rpc") {
+    throw new Error(
+      "Oh My Pi provider command must select exactly one --mode rpc"
+    );
+  }
+  if (
+    !args.includes("--auto-approve") &&
+    !hasOptionValue(args, "--approval-mode", "yolo")
+  ) {
+    throw new Error(
+      "Oh My Pi provider command must run with full permissions using --auto-approve or --approval-mode yolo"
+    );
+  }
+  if (args.includes("-p") || args.includes("--print")) {
+    throw new Error("Oh My Pi provider command must not use print mode");
+  }
+}
+
+function optionValues(args: string[], option: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === option) {
+      values.push(args[index + 1] ?? "");
+      index += 1;
+    } else if (arg?.startsWith(`${option}=`) === true) {
+      values.push(arg.slice(option.length + 1));
+    }
+  }
+  return values;
+}
+
+function hasOptionValue(
+  args: string[],
+  option: string,
+  expectedValue: string
+): boolean {
+  return args.some((arg, index) => {
+    if (arg === option) {
+      return args[index + 1] === expectedValue;
+    }
+    return arg === `${option}=${expectedValue}`;
+  });
+}
+
+async function validateOmpRpcCommand(command: {
+  args: string[];
+  executable: string;
+}): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command.executable, command.args, {
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    const queue = createProcessQueue(child);
+    let stderr = "";
+    let settled = false;
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+
+    const timer = setTimeout(() => {
+      settle(() => {
+        shutdownProcess(child);
+        reject(new Error("Oh My Pi provider command validation timed out"));
+      });
+    }, ompProbeTimeoutMs());
+
+    const settle = (callback: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+
+    void (async () => {
+      while (true) {
+        const item = await queue.next();
+        if (item.kind === "error") {
+          settle(() => {
+            reject(
+              new Error(
+                `Oh My Pi provider command executable not available: ${command.executable}: ${item.error.message}`
+              )
+            );
+          });
+          return;
+        }
+        if (item.kind === "malformed") {
+          settle(() => {
+            shutdownProcess(child);
+            reject(
+              new Error(
+                `Oh My Pi provider command emitted malformed JSON before ready: ${item.message}`
+              )
+            );
+          });
+          return;
+        }
+        if (item.kind === "exit") {
+          settle(() => {
+            reject(
+              new Error(
+                `Oh My Pi provider command exited before ready with code ${item.exitCode ?? "unknown"}${stderr.trim().length === 0 ? "" : `: ${stderr.trim()}`}`
+              )
+            );
+          });
+          return;
+        }
+        if (stringField(item.raw, "type") !== "ready") {
+          continue;
+        }
+
+        try {
+          validateReadyFrame(item.raw);
+          queue.setFrameLimits(
+            numberField(item.raw, "maxFrameBytes") ?? 0,
+            numberField(item.raw, "maxReassembledFrameBytes") ?? 0
+          );
+        } catch (error) {
+          settle(() => {
+            shutdownProcess(child);
+            reject(error instanceof Error ? error : new Error(String(error)));
+          });
+          return;
+        }
+        endStdin(child);
+        break;
+      }
+
+      while (true) {
+        const item = await queue.next();
+        if (item.kind === "exit") {
+          settle(() => {
+            if (item.exitCode === 0) {
+              resolve();
+            } else {
+              reject(
+                new Error(
+                  `Oh My Pi provider command validation failed with exit code ${item.exitCode ?? "unknown"}${stderr.trim().length === 0 ? "" : `: ${stderr.trim()}`}`
+                )
+              );
+            }
+          });
+          return;
+        }
+        if (item.kind === "error") {
+          settle(() => {
+            reject(
+              new Error(
+                `Oh My Pi provider command validation failed: ${item.error.message}`
+              )
+            );
+          });
+          return;
+        }
+      }
+    })().catch((error: unknown) => {
+      settle(() => {
+        shutdownProcess(child);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  });
+}
+
+function validateReadyFrame(raw: unknown): void {
+  if (
+    numberField(raw, "protocolVersion") !== 1 ||
+    !arrayField(raw, "supportedProtocolVersions").includes(1) ||
+    !Number.isSafeInteger(numberField(raw, "maxFrameBytes")) ||
+    !Number.isSafeInteger(numberField(raw, "maxReassembledFrameBytes"))
+  ) {
+    throw new Error(
+      "Oh My Pi provider command emitted an incompatible ready frame"
+    );
+  }
+}
+
+function ompProbeTimeoutMs(): number {
+  const configured = Number(process.env.SYMPHONIKA_OMP_PROBE_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : 5_000;
+}
+
+function writeJson(
+  child: ChildProcessWithoutNullStreams,
+  value: JsonObject
+): void {
+  child.stdin.write(`${JSON.stringify(value)}\n`);
+}
+
+function endStdin(child: ChildProcessWithoutNullStreams): void {
+  if (!child.stdin.destroyed && child.stdin.writable) {
+    child.stdin.end();
+  }
+}
+
+function terminateProcess(child: ChildProcess): void {
+  if (child.killed || child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  child.kill("SIGTERM");
+}
+
+function shutdownProcess(child: ChildProcessWithoutNullStreams): void {
+  endStdin(child);
+  const timer = setTimeout(() => {
+    terminateProcess(child);
+  }, 250);
+  timer.unref();
+}
+
+function isTerminalFailure(type: string | undefined): boolean {
+  return (
+    type === "input_required" ||
+    type === "malformed_event" ||
+    type === "turn_failed"
+  );
+}
+
+function objectField(value: unknown, key: string): unknown {
+  if (typeof value === "object" && value !== null && key in value) {
+    return value[key as keyof typeof value];
+  }
+  return undefined;
+}
+
+function arrayField(value: unknown, key: string): unknown[] {
+  const field = objectField(value, key);
+  return Array.isArray(field) ? field : [];
+}
+
+function stringField(value: unknown, key: string): string | undefined {
+  const field = objectField(value, key);
+  return typeof field === "string" ? field : undefined;
+}
+
+function numberField(value: unknown, key: string): number | undefined {
+  const field = objectField(value, key);
+  return typeof field === "number" ? field : undefined;
+}
+
+function booleanField(value: unknown, key: string): boolean | undefined {
+  const field = objectField(value, key);
+  return typeof field === "boolean" ? field : undefined;
+}

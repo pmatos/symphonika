@@ -9,8 +9,8 @@ full-permission coding-agent runs. It is inspired by the upstream Symphony speci
 ## 1. Purpose
 
 Symphonika runs as a local daemon. It reads eligible GitHub issues from one or more configured
-Projects, creates deterministic Git workspaces and branches, launches Codex or Claude agents inside
-those workspaces, and records enough evidence to debug and continue the work.
+Projects, creates deterministic Git workspaces and branches, launches Codex, Claude, or Oh My Pi
+agents inside those workspaces, and records enough evidence to debug and continue the work.
 
 The first milestone is a self-hosting bootstrap slice: Symphonika should be able to run this
 repository as one real Project well enough to help implement later Symphonika issues.
@@ -181,10 +181,11 @@ workflow-label drift does not cancel them.
 
 An Agent Provider is a normalized adapter that lets Symphonika run one coding-agent implementation.
 
-v1 supports both:
+v1 supports:
 
 - Codex through JSON-RPC app-server mode
 - Claude through `stream-json` CLI mode
+- Oh My Pi through its native newline-delimited JSON RPC mode
 
 ### 4.11 Event Logs
 
@@ -252,7 +253,7 @@ reload is surfaced in structured logs and operator status while the daemon keeps
 known good effective snapshot.
 
 `symphonika init` initializes Symphonika's user Service Config independently of any repository. It
-prompts for service-level state, polling, pull-request merge policy, and Codex/Claude commands,
+prompts for service-level state, polling, pull-request merge policy, and Codex/Claude/OMP commands,
 writes `$XDG_CONFIG_HOME/symphonika/symphonika.yml` (or the home-directory fallback), and starts
 with `projects: []`. `--yes` accepts every displayed default without prompting, and `--force` is
 required to replace an existing user config.
@@ -306,6 +307,8 @@ providers:
     command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
   claude:
     command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"
+  omp:
+    command: "omp --mode rpc --auto-approve"
 
 projects:
   - name: symphonika
@@ -490,7 +493,7 @@ GitHub credentials are environment-backed.
 - Tokens must not be stored in SQLite
 - Token-like values must be redacted from logs
 
-Codex and Claude use their native local authentication.
+Codex, Claude, and OMP use their native local authentication.
 
 ## 7. State and Logs
 
@@ -878,7 +881,7 @@ Provider adapters expose a normalized interface conceptually equivalent to:
 
 ```ts
 type AgentProvider = {
-  name: "codex" | "claude";
+  name: "codex" | "claude" | "omp";
   validate(command: string): Promise<void>;
   runAttempt(input: ProviderRunInput): AsyncIterable<ProviderEvent>;
   cancel(runId: string): Promise<void>;
@@ -925,6 +928,16 @@ Default Claude command:
 ```text
 claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json
 ```
+
+Default Oh My Pi command:
+
+```text
+omp --mode rpc --auto-approve
+```
+
+The OMP adapter requires RPC mode and full-permission operation through `--auto-approve` or
+`--approval-mode yolo`. It validates the versioned ready frame with a bounded startup probe and
+negotiates protocol v2 chunking when the installed OMP advertises it. See ADR-0066.
 
 Provider commands may be overridden, but the replacement command must speak the provider adapter's
 expected protocol.
@@ -1079,8 +1092,8 @@ A sampled Run is making progress when any one signal advances since the previous
 
 - `last_tool_call_at` increases
 - `workspace_mtime_max` advances by at least one second
-- `turn_id_set_size` increases (only the Codex provider tags events with a `turnId`; Claude emits
-  `sessionId`, so this signal advances for Codex Runs)
+- `turn_id_set_size` increases (only the Codex provider tags events with a `turnId`; Claude and OMP
+  emit session-level identity without a stable turn id, so this signal advances for Codex Runs)
 - `output_tokens_total` increases
 - `last_message_at` increases (a new streamed assistant `message` event arrived — both providers
   normalize their streamed deltas to a `message` event)
@@ -1214,7 +1227,7 @@ states (§12.6).
 Bootstrap CLI commands:
 
 - `symphonika init [--yes] [--force]`
-- `symphonika add-routine <name> --project <project> (--schedule <expr> | --at <iso8601>) --kind <git|report> [--provider <codex|claude>] [--tz <iana>] [--config <path>]`
+- `symphonika add-routine <name> --project <project> (--schedule <expr> | --at <iso8601>) --kind <git|report> [--provider <codex|claude|omp>] [--tz <iana>] [--config <path>]`
 - `symphonika doctor [--config <path>]`
 - `symphonika init-project [--config <path>] [--yes] [--force]`
 - `symphonika daemon [--config <path>] [--port <port>]`
@@ -1238,7 +1251,7 @@ config path and points the operator to `symphonika init`.
   Labels (`issue_filters.labels_all`)
 - Routine Hosts: provider command + adapter + workspace resolvable (no GitHub access, no label
   checks); `validForHosting` rather than `validForDispatch`
-- provider commands for Codex and Claude
+- provider commands for Codex, Claude, and OMP when selected by a Project or Routine
 - Dispatch Projects: workflow contract path and parse
 - every Routine declaration in the top-level `routines:` block, including unknown target Projects,
   a target Project name declared more than once, globally duplicate Routine names, and `kind: git`
@@ -1359,14 +1372,14 @@ The bootstrap slice is accepted when:
 - `init` can create an empty user Service Config with interactive service-level settings
 - `init-project` can append a Dispatch Project without losing existing config and create its starter
   Workflow Contract
-- `doctor` validates service config, GitHub auth, operational labels, Codex and Claude provider
-  commands, workflow file, database path, workspace root, and configured Required Eligibility
-  Labels for Dispatch Projects; Routine Hosts validate provider + workspace only
+- `doctor` validates service config, GitHub auth, operational labels, selected Codex, Claude, and
+  OMP provider commands, workflow file, database path, workspace root, and configured Required
+  Eligibility Labels for Dispatch Projects; Routine Hosts validate provider + workspace only
 - `init-project` can create missing operational and Required Eligibility Labels for a Dispatch
   Project after interactive review or `--yes`; `init-project --mode routine-host` creates none
 - `daemon` can claim one `agent-ready` issue in this repository
 - daemon prepares the deterministic issue worktree and branch
-- daemon runs the configured provider through either Codex JSON-RPC or Claude stream-json
+- daemon runs the configured provider through Codex JSON-RPC, Claude stream-json, or OMP native RPC
 - daemon captures raw logs, normalized events, rendered prompt, issue snapshot, and provider metadata
 - durable run state is updated in SQLite
 - a configured recurring `kind: report` Routine fires on its clock tick, records a Routine Firing,

@@ -49,7 +49,7 @@ export type DispatchIssueResult =
       runId: string;
     };
 
-const providerNameSchema = z.enum(["codex", "claude"]);
+const providerNameSchema = z.enum(["codex", "claude", "omp"]);
 const providerCommandSchema = z
   .object({
     command: z.string().trim().min(1)
@@ -101,7 +101,8 @@ const dispatchServiceConfigSchema = z
     providers: z
       .object({
         codex: providerCommandSchema,
-        claude: providerCommandSchema
+        claude: providerCommandSchema,
+        omp: providerCommandSchema.optional()
       })
       .passthrough(),
     projects: z.array(dispatchProjectSchema).min(1)
@@ -129,7 +130,10 @@ export async function dispatchOneEligibleIssue(
   const providersLoader = (): Promise<RunControllerProvidersConfig> =>
     Promise.resolve({
       claude: { command: config.providers.claude.command },
-      codex: { command: config.providers.codex.command }
+      codex: { command: config.providers.codex.command },
+      ...(config.providers.omp === undefined
+        ? {}
+        : { omp: { command: config.providers.omp.command } })
     });
   const activeRuns = options.activeRuns ?? new ActiveRunRegistry();
   const controllerOptions: ConstructorParameters<typeof RunController>[0] = {

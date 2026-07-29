@@ -16,7 +16,7 @@ not retry, and does not schedule continuations after a successful run.
 3. If at least one eligible issue is found, claims it (adds `sym:claimed`,
    then `sym:running`), prepares a deterministic Git worktree under
    `<state.root>/workspaces/<project>/issues/<n>-<slug>/`, renders the workflow
-   prompt, and launches the configured agent provider (Codex or Claude).
+   prompt, and launches the configured agent provider (Codex, Claude, or OMP).
 4. Persists evidence under `<state.root>/logs/runs/<run-id>/`:
    - `prompt.md`
    - `prompt-metadata.json`
@@ -49,7 +49,9 @@ Exit codes:
    while registering the repository. For this hand-authored example config, verify the labels in
    the repository settings rather than force-replacing the checked-in Project entry.
 4. **Provider binary on `PATH`**: install the binary that matches
-   `agent.provider`. Codex provides `codex`; Claude provides `claude`.
+   `agent.provider`. Codex provides `codex`; Claude provides `claude`; Oh My Pi provides `omp`.
+   Bun commonly installs OMP in `~/.bun/bin`. Verify `command -v omp` in the launching shell and
+   run `service install` from that environment when using the systemd user service.
 5. **At least one issue labeled `agent-ready`** that does not also carry any
    excluded label (`blocked`, `needs-human`, `sym:stale`).
 

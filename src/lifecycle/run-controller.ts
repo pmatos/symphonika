@@ -157,6 +157,7 @@ export function isDispatchProject(
 export type RunControllerProvidersConfig = {
   codex: { command: string };
   claude: { command: string };
+  omp?: { command: string };
 };
 
 export type ScheduleHandler = (input: {
@@ -1599,7 +1600,17 @@ export class RunController {
     }
 
     const providersConfig = await this.providersLoader();
-    const providerCommand = providersConfig[project.agent.provider].command;
+    const providerCommand = providersConfig[project.agent.provider]?.command;
+    if (providerCommand === undefined || providerCommand.trim().length === 0) {
+      this.logger?.warn(
+        {
+          projectName: payload.projectName,
+          provider: project.agent.provider
+        },
+        "symphonika continuation dropped: provider command is not configured"
+      );
+      return;
+    }
 
     if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
       return;
@@ -1717,7 +1728,13 @@ export class RunController {
     }
 
     const providersConfig = await this.providersLoader();
-    const providerCommand = providersConfig[project.agent.provider].command;
+    const providerCommand = providersConfig[project.agent.provider]?.command;
+    if (providerCommand === undefined || providerCommand.trim().length === 0) {
+      return {
+        dispatched: false,
+        reason: `provider command is not configured: ${project.agent.provider}`
+      };
+    }
 
     if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
       return {

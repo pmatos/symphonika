@@ -168,7 +168,7 @@ export type PollingServiceConfig = {
   projects: PollingProjectConfig[];
 };
 
-const providerNameSchema = z.enum(["codex", "claude"]);
+const providerNameSchema = z.enum(["codex", "claude", "omp"]);
 
 // Routine Hosts (ADR 0062) are never polled for issues; check `mode` before
 // this raw entry reaches pollingProjectSchema, which is dispatch-only.

@@ -225,10 +225,18 @@ export async function dispatchDueRoutines(
       const providerCommand = (
         input.providersConfig as Partial<RunControllerProvidersConfig>
       )[providerName]?.command;
-      if (provider === undefined || providerCommand === undefined) {
+      if (provider === undefined) {
         skipped.push({
           projectName: project.name,
           reason: `provider_not_registered: ${providerName}`,
+          routineName: routine.name
+        });
+        continue;
+      }
+      if (providerCommand === undefined) {
+        skipped.push({
+          projectName: project.name,
+          reason: `provider_command_missing: ${providerName}`,
           routineName: routine.name
         });
         continue;

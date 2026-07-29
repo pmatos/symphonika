@@ -1994,10 +1994,10 @@ function parseIssueNumber(value: string): number {
 }
 
 function parseProvider(value: string): InitProvider {
-  if (value === "codex" || value === "claude") {
+  if (value === "codex" || value === "claude" || value === "omp") {
     return value;
   }
-  throw new InvalidArgumentError("provider must be one of codex, claude");
+  throw new InvalidArgumentError("provider must be one of codex, claude, omp");
 }
 
 function parseRoutineKind(value: string): RoutineKind {

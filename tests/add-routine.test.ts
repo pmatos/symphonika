@@ -386,6 +386,8 @@ describe("add-routine", () => {
         "daily",
         "--kind",
         "report",
+        "--provider",
+        "omp",
         "--config",
         configPath
       ]);
@@ -396,6 +398,9 @@ describe("add-routine", () => {
       expect(output.stdout).toContain(
         path.join(root, "routines", "nightly-report.md")
       );
+      await expect(
+        readFile(path.join(root, "routines", "nightly-report.md"), "utf8")
+      ).resolves.toContain("provider: omp");
       expect(networkCalls).toBe(0);
     } finally {
       process.chdir(previousCwd);

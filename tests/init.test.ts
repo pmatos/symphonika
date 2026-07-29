@@ -26,6 +26,7 @@ describe("global initialization", () => {
       codexCommand: "custom-codex app-server",
       mergeEnabled: "yes",
       mergeMethod: "rebase",
+      ompCommand: "custom-omp --mode rpc --auto-approve",
       pollingIntervalMs: "45000",
       requireReviewDecision: "yes",
       requireStatusSuccess: "no",
@@ -62,7 +63,8 @@ describe("global initialization", () => {
       projects: [],
       providers: {
         claude: { command: "custom-claude --stream" },
-        codex: { command: "custom-codex app-server" }
+        codex: { command: "custom-codex app-server" },
+        omp: { command: "custom-omp --mode rpc --auto-approve" }
       },
       pull_requests: {
         merge: {
@@ -82,7 +84,8 @@ describe("global initialization", () => {
       "requireStatusSuccess",
       "requireReviewDecision",
       "codexCommand",
-      "claudeCommand"
+      "claudeCommand",
+      "ompCommand"
     ]);
   });
 });

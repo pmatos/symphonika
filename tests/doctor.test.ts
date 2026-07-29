@@ -333,11 +333,115 @@ describe("doctor", () => {
     });
 
     expect(DEFAULT_AGENT_PROVIDERS.claude?.name).toBe("claude");
+    expect(DEFAULT_AGENT_PROVIDERS.omp?.name).toBe("omp");
     expect(report.errors).toEqual([]);
     expect(report.ok).toBe(true);
     expect(report.projects[0]).toMatchObject({
       validForDispatch: true
     });
+  });
+
+  it("validates OMP Projects through the registered RPC adapter", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const ompCommand = "omp --mode rpc --auto-approve";
+    await writeValidConfig(configPath, {
+      agentProvider: "omp",
+      ompCommand
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work with OMP.\n");
+    process.env.GITHUB_TOKEN = "test-secret-token";
+    const validatedCommands: string[] = [];
+
+    const report = await runDoctor({
+      agentProviders: {
+        omp: {
+          cancel: () => Promise.resolve(),
+          name: "omp",
+          runAttempt: async function* () {
+            await Promise.resolve();
+            yield* [];
+          },
+          validate: (command) => {
+            validatedCommands.push(command);
+            return Promise.resolve();
+          }
+        }
+      },
+      configPath,
+      githubApi: successfulGitHubApi(),
+      homeDir: root
+    });
+
+    expect(validatedCommands).toEqual([ompCommand]);
+    expect(report.errors).toEqual([]);
+    expect(report.ok).toBe(true);
+    expect(report.projects[0]).toMatchObject({
+      validForDispatch: true
+    });
+  });
+
+  it("validates an OMP command selected by a Routine override", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const routinePath = path.join(root, "routines", "weekly-audit.md");
+    const ompCommand = "omp --mode rpc --auto-approve";
+    await writeValidConfig(configPath, {
+      ompCommand,
+      routinePaths: ["./routines/weekly-audit.md"]
+    });
+    await mkdir(path.dirname(routinePath), { recursive: true });
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: weekly-audit",
+        "kind: report",
+        "provider: omp",
+        "schedule:",
+        '  cron: "@weekly"',
+        "---",
+        "Audit this Project.",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work on this issue.\n");
+    process.env.GITHUB_TOKEN = "test-secret-token";
+    const validatedCommands: string[] = [];
+
+    const report = await runDoctor({
+      agentProviders: {
+        codex: {
+          cancel: () => Promise.resolve(),
+          name: "codex",
+          runAttempt: async function* () {
+            await Promise.resolve();
+            yield* [];
+          },
+          validate: () => Promise.resolve()
+        },
+        omp: {
+          cancel: () => Promise.resolve(),
+          name: "omp",
+          runAttempt: async function* () {
+            await Promise.resolve();
+            yield* [];
+          },
+          validate: (command) => {
+            validatedCommands.push(command);
+            return Promise.resolve();
+          }
+        }
+      },
+      configPath,
+      githubApi: successfulGitHubApi(),
+      homeDir: root
+    });
+
+    expect(validatedCommands).toContain(ompCommand);
+    expect(report.errors).toEqual([]);
+    expect(report.ok).toBe(true);
   });
 
   it("accepts workflow front matter for prompt-adjacent policy", async () => {
@@ -934,6 +1038,7 @@ async function writeValidConfig(
     agentProvider?: string;
     claudeCommand?: string;
     codexCommand?: string;
+    ompCommand?: string;
     routinePaths?: string[];
     token?: string;
     trackerKind?: string;
@@ -955,6 +1060,9 @@ async function writeValidConfig(
       `    command: "${overrides.codexCommand ?? DEFAULT_CODEX_COMMAND}"`,
       "  claude:",
       `    command: "${overrides.claudeCommand ?? "claude -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json"}"`,
+      ...(overrides.ompCommand === undefined
+        ? []
+        : ["  omp:", `    command: "${overrides.ompCommand}"`]),
       "projects:",
       "  - name: symphonika",
       "    disabled: false",

@@ -124,7 +124,7 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
     "",
     "# PATH is captured from the environment that ran `symphonika service",
     "# install`, because systemd --user does not inherit your interactive",
-    "# PATH. Spawned providers (claude, codex) and tools (gh, esbmc, cargo,",
+    "# PATH. Spawned providers (claude, codex, omp) and tools (gh, esbmc, cargo,",
     "# ...) must resolve here. The directory holding this node runtime is",
     "# prepended so `node` resolves regardless of version manager (nvm,",
     "# npm-global, pnpm, ...). Re-run `symphonika service install` after a",

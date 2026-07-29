@@ -26,7 +26,9 @@ async function writeProjectConfig(
   root: string,
   workflowFileName: string,
   options: {
+    agentProvider?: string;
     projectLines?: string[];
+    providerLines?: string[];
     serviceLines?: string[];
     workspaceHookLines?: string[];
   } = {}
@@ -45,6 +47,7 @@ async function writeProjectConfig(
       '    command: "codex -p symphonika"',
       "  claude:",
       '    command: "claude -p"',
+      ...(options.providerLines ?? []),
       "projects:",
       "  - name: symphonika",
       "    disabled: false",
@@ -69,7 +72,7 @@ async function writeProjectConfig(
       "        base_branch: main",
       ...(options.workspaceHookLines ?? []),
       "    agent:",
-      "      provider: codex",
+      `      provider: ${options.agentProvider ?? "codex"}`,
       `    workflow: ./${workflowFileName}`,
       ""
     ].join("\n")
@@ -122,6 +125,28 @@ async function writeProjectConfigWithoutWorkspaceRoot(
 }
 
 describe("RuntimeConfigReloader workflow validation", () => {
+  it("loads an OMP Project while keeping the provider command optional globally", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      agentProvider: "omp",
+      providerLines: ["  omp:", '    command: "omp --mode rpc --auto-approve"']
+    });
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getStatus().errors).toEqual([]);
+    expect(reloader.projectsByName().get("symphonika")?.agent.provider).toBe(
+      "omp"
+    );
+    expect(reloader.providersConfig().omp).toEqual({
+      command: "omp --mode rpc --auto-approve"
+    });
+  });
+
   it("rejects unknown workspace hook lifecycle keys during config reload", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "WORKFLOW.md", {

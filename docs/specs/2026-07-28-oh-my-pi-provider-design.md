@@ -1,14 +1,14 @@
 # Oh My Pi provider implementation design
 
-Status: Approved for implementation
+Status: Implemented
 
 ## Context
 
 ADR 0066 selected Oh My Pi (`omp`) as Symphonika's third Agent Provider and selected native RPC mode,
-but PR #335 deliberately stopped at the proposal. The current implementation still closes provider
-types, config schemas, command selection, workflow actions, Routine overrides, prompts, and the
-default adapter registry over Codex and Claude. A configured `providers.omp` entry therefore remains
-inert, and `agent.provider: omp` is rejected.
+but PR #335 deliberately stopped at the proposal. Before this implementation, provider types,
+config schemas, command selection, workflow actions, Routine overrides, prompts, and the default
+adapter registry were closed over Codex and Claude. A configured `providers.omp` entry was therefore
+inert, and `agent.provider: omp` was rejected.
 
 The installed OMP 17.1.8 CLI confirms that `omp --mode rpc --auto-approve` exposes the required
 headless protocol. It starts in protocol v1 with a versioned `ready` frame, advertises supported
@@ -151,7 +151,7 @@ The tutorial explains that a Bun-installed OMP commonly resolves from `~/.bun/bi
 
 ## TDD sequence
 
-Implementation proceeds in vertical red-green slices:
+Implementation proceeded in vertical red-green slices:
 
 1. An OMP provider test drives a successful ready/negotiate/state/prompt/event/exit transcript.
 2. Provider tests drive v1 fallback, v2 chunk reconstruction, malformed frames, failed responses,

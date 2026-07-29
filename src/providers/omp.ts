@@ -678,6 +678,7 @@ export function createProcessQueue(
   let stdoutOverflowed = false;
   let frameLimitsSet = false;
   let protocolVersion: 1 | 2 = 1;
+  let readySeen = false;
   let awaitingFrameLimits = false;
   let stdoutEnded = false;
   let discardingOutput = false;
@@ -776,6 +777,23 @@ export function createProcessQueue(
 
     push({ kind: "message", raw }, lineBytes);
     const frameType = stringField(raw, "type");
+    // The protocol begins with the versioned ready frame (ADR 0066); any
+    // other first nonblank frame is malformed, not evidence to scan past.
+    if (!readySeen && frameType !== "ready") {
+      frameDecoder.interrupt();
+      push(
+        {
+          kind: "malformed",
+          line: text,
+          message: "Oh My Pi RPC protocol must begin with a ready frame"
+        },
+        lineBytes
+      );
+      return;
+    }
+    if (frameType === "ready") {
+      readySeen = true;
+    }
     // Pause draining after the pre-limit ready frame so later frames are
     // measured against the negotiated limits once setFrameLimits installs
     // them, not against the 1 MiB default. Pausing stdout also stops an

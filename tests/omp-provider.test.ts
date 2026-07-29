@@ -344,7 +344,9 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("re-checks buffered output when negotiated frame limits tighten", async () => {
-    const { queue, stdout } = createQueueHarness();
+    const { queue, stdout } = await createQueueHarness({
+      emitReady: false
+    });
     // One write carries a complete ready frame plus an unterminated
     // remainder that fits the pre-ready 1 MiB default but not the limit the
     // ready frame negotiates down to.
@@ -360,7 +362,9 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("revalidates complete frames queued in the same write as the ready frame", async () => {
-    const { queue, stdout } = createQueueHarness();
+    const { queue, stdout } = await createQueueHarness({
+      emitReady: false
+    });
     stdout.write(`${JSON.stringify({ type: "ready" })}\n${"e".repeat(2000)}\n`);
 
     expect(stdout.isPaused()).toBe(true);
@@ -374,7 +378,9 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("keeps stdout paused when no frame limits arrive for a latched ready", async () => {
-    const { queue, stdout } = createQueueHarness();
+    const { queue, stdout } = await createQueueHarness({
+      emitReady: false
+    });
     stdout.write(
       `${JSON.stringify({ type: "ready" })}\n${"g".repeat(2000)}\n${"g".repeat(2000)}\n`
     );
@@ -386,7 +392,9 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("flushes a deferred EOF remainder after limits are installed", async () => {
-    const { queue, stdout } = createQueueHarness();
+    const { queue, stdout } = await createQueueHarness({
+      emitReady: false
+    });
     stdout.write(`${JSON.stringify({ type: "ready" })}\n${"f".repeat(2000)}`);
     stdout.end();
 
@@ -399,7 +407,9 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("parses deferred chunk lines before reporting a pending sequence at EOF", async () => {
-    const { queue, stdout } = createQueueHarness();
+    const { queue, stdout } = await createQueueHarness({
+      emitReady: false
+    });
     const [first] = rpcChunkLines(
       JSON.stringify({ message: "x".repeat(1100), type: "notice" }),
       "chunk-deferred"
@@ -417,7 +427,9 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("accepts a coalesced frame that exceeds the default limit but fits the advertised one", async () => {
-    const { queue, stdout } = createQueueHarness();
+    const { queue, stdout } = await createQueueHarness({
+      emitReady: false
+    });
     const frame = JSON.stringify({
       message: "x".repeat(1_100_000),
       type: "notice"
@@ -433,9 +445,8 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("rejects a non-chunk frame that interrupts a pending chunk sequence", async () => {
-    const { queue, stdout } = createQueueHarness({
-      maxFrameBytes: 1024,
-      maxReassembledBytes: 8192
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
     });
     const [first, second] = rpcChunkLines(
       JSON.stringify({ message: "x".repeat(1100), type: "notice" }),
@@ -459,9 +470,8 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("rejects a reassembled chunk payload that is not a JSON object", async () => {
-    const { queue, stdout } = createQueueHarness({
-      maxFrameBytes: 1024,
-      maxReassembledBytes: 8192
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
     });
     const [first, second] = rpcChunkLines(
       `[${"1,".repeat(600)}1]`,
@@ -479,11 +489,10 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("rejects rpc_chunk frames before protocol v2 is negotiated", async () => {
-    const { queue, stdout } = createQueueHarness(
-      { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
-      undefined,
-      false
-    );
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
+      protocolV2: false
+    });
     const [first, second] = rpcChunkLines(
       JSON.stringify({ message: "x".repeat(1100), type: "notice" }),
       "chunk-v1"
@@ -525,9 +534,8 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("reassembles a logical frame from more than two chunks", async () => {
-    const { queue, stdout } = createQueueHarness({
-      maxFrameBytes: 1024,
-      maxReassembledBytes: 8192
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
     });
     const payload = JSON.stringify({
       message: "x".repeat(1100),
@@ -561,9 +569,8 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("rejects a blank line that interrupts a pending chunk sequence", async () => {
-    const { queue, stdout } = createQueueHarness({
-      maxFrameBytes: 1024,
-      maxReassembledBytes: 8192
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
     });
     const [first, second] = rpcChunkLines(
       JSON.stringify({ message: "x".repeat(1100), type: "notice" }),
@@ -586,9 +593,8 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("tolerates blank lines while no chunk sequence is pending", async () => {
-    const { queue, stdout } = createQueueHarness({
-      maxFrameBytes: 1024,
-      maxReassembledBytes: 8192
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
     });
     stdout.write("\n");
     stdout.write("   \n");
@@ -598,9 +604,8 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("does not complete a chunk sequence after a mismatched chunk", async () => {
-    const { queue, stdout } = createQueueHarness({
-      maxFrameBytes: 1024,
-      maxReassembledBytes: 8192
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
     });
     const payload = JSON.stringify({
       message: "x".repeat(1100),
@@ -625,9 +630,8 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("does not complete a chunk sequence after a malformed physical frame", async () => {
-    const { queue, stdout } = createQueueHarness({
-      maxFrameBytes: 1024,
-      maxReassembledBytes: 8192
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
     });
     const payload = JSON.stringify({
       message: "x".repeat(1100),
@@ -648,9 +652,8 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("rejects an incomplete chunk sequence when stdout ends", async () => {
-    const { queue, stdout } = createQueueHarness({
-      maxFrameBytes: 1024,
-      maxReassembledBytes: 8192
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
     });
     const [first] = rpcChunkLines(
       JSON.stringify({ message: "x".repeat(1100), type: "notice" }),
@@ -667,9 +670,8 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("routes stdin write errors through the process queue", async () => {
-    const { queue, stdin } = createQueueHarness({
-      maxFrameBytes: 1024,
-      maxReassembledBytes: 8192
+    const { queue, stdin } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
     });
 
     stdin.destroy(new Error("write EPIPE"));
@@ -679,10 +681,10 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("pauses stdout when queued frame bytes cross the high-water mark", async () => {
-    const { queue, stdout } = createQueueHarness(
-      { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
-      { maxPendingFrameBytes: 2048 }
-    );
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
+      queueOptions: { maxPendingFrameBytes: 2048 }
+    });
     const frame = JSON.stringify({ message: "x".repeat(560), type: "notice" });
     // One write, five ~590-byte frames: the drain stops mid-callback once
     // the backlog crosses the byte high-water mark.
@@ -696,10 +698,10 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("pauses stdout when the queued item count crosses the high-water mark", async () => {
-    const { queue, stdout } = createQueueHarness(
-      { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
-      { maxPendingItems: 3 }
-    );
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
+      queueOptions: { maxPendingItems: 3 }
+    });
     stdout.write("{}\n{}\n{}\n{}\n{}\n");
 
     expect(stdout.isPaused()).toBe(true);
@@ -710,9 +712,9 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("drains a deferred EOF backlog without crossing the high-water marks", async () => {
-    const { queue, stdout } = createQueueHarness(undefined, {
-      maxPendingFrameBytes: 2048,
-      maxPendingItems: 4
+    const { queue, stdout } = await createQueueHarness({
+      emitReady: false,
+      queueOptions: { maxPendingFrameBytes: 2048, maxPendingItems: 4 }
     });
     // ready latches the drain; the ten tiny frames plus EOF arrive together,
     // so they can only be enqueued as the consumer drains below the marks.
@@ -732,9 +734,9 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("does not discard a deferred backlog as oversized when limits install mid-stream", async () => {
-    const { queue, stdout } = createQueueHarness(undefined, {
-      maxPendingFrameBytes: 2048,
-      maxPendingItems: 4
+    const { queue, stdout } = await createQueueHarness({
+      emitReady: false,
+      queueOptions: { maxPendingFrameBytes: 2048, maxPendingItems: 4 }
     });
     // The six frames left buffered at the high-water mark total more than
     // the negotiated physical limit, so an unguarded enforceStdoutBound
@@ -754,8 +756,9 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("defers process exit until a latched backlog drains", async () => {
-    const { close, queue, stdout } = createQueueHarness(undefined, {
-      maxPendingItems: 3
+    const { close, queue, stdout } = await createQueueHarness({
+      emitReady: false,
+      queueOptions: { maxPendingItems: 3 }
     });
     const frame = JSON.stringify({ type: "notice" });
     stdout.write(
@@ -781,7 +784,9 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("enqueues a stored exit after discard when limits never install", async () => {
-    const { close, queue, stdout } = createQueueHarness();
+    const { close, queue, stdout } = await createQueueHarness({
+      emitReady: false
+    });
     stdout.write(
       `${JSON.stringify({ type: "ready" })}\n${JSON.stringify({ type: "notice" })}\n`
     );
@@ -794,11 +799,11 @@ describe("Oh My Pi RPC provider", () => {
     queue.discardBeforeFrameLimits();
   });
 
-  it("pauses stdout when the queue fills with an unterminated remainder buffered", () => {
-    const { stdout } = createQueueHarness(
-      { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
-      { maxPendingItems: 4 }
-    );
+  it("pauses stdout when the queue fills with an unterminated remainder buffered", async () => {
+    const { stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
+      queueOptions: { maxPendingItems: 4 }
+    });
     const frame = JSON.stringify({ type: "notice" });
     // The fourth frame crosses the item high-water mark and the trailing
     // partial frame has no newline, so the drain loop never reaches its
@@ -809,9 +814,8 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("measures only the unterminated suffix against the physical limit", async () => {
-    const { queue, stdout } = createQueueHarness({
-      maxFrameBytes: 1024,
-      maxReassembledBytes: 8192
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
     });
     const frame = JSON.stringify({ message: "x".repeat(560), type: "notice" });
     // Whole buffer is 1190 bytes, but the unterminated suffix is 600: the
@@ -822,10 +826,10 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("preserves a backpressured complete frame left buffered with a short suffix", async () => {
-    const { queue, stdout } = createQueueHarness(
-      { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
-      { maxPendingItems: 4 }
-    );
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
+      queueOptions: { maxPendingItems: 4 }
+    });
     const frame = JSON.stringify({ type: "notice" });
     // Four frames cross the item high-water mark; the fifth complete frame
     // and a 600-byte suffix stay buffered until the consumer drains.
@@ -839,10 +843,24 @@ describe("Oh My Pi RPC provider", () => {
     }
   });
 
+  it("rejects a non-ready first protocol frame", async () => {
+    const { queue, stdout } = await createQueueHarness({
+      emitReady: false
+    });
+    stdout.write(`${JSON.stringify({ type: "agent_start" })}\n`);
+    stdout.write(`${JSON.stringify({ type: "ready" })}\n`);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi RPC protocol must begin with a ready frame"
+    });
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+  });
+
   it("rejects non-object physical RPC frames", async () => {
-    const { queue, stdout } = createQueueHarness({
-      maxFrameBytes: 1024,
-      maxReassembledBytes: 8192
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
     });
     stdout.write(`[]\n`);
     stdout.write(`${JSON.stringify({ type: "notice" })}\n`);
@@ -855,9 +873,8 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("rejects frames containing invalid UTF-8", async () => {
-    const { queue, stdout } = createQueueHarness({
-      maxFrameBytes: 1024,
-      maxReassembledBytes: 8192
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
     });
     stdout.write(
       Buffer.concat([
@@ -874,9 +891,8 @@ describe("Oh My Pi RPC provider", () => {
   });
 
   it("measures physical frames before removing the JSONL delimiter", async () => {
-    const { queue, stdout } = createQueueHarness({
-      maxFrameBytes: 1024,
-      maxReassembledBytes: 8192
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
     });
     // The JSON alone fits the physical limit; the trailing spaces push the
     // wire frame over it.
@@ -1738,22 +1754,25 @@ async function writeFakeOversizedFrameOmp(filePath: string): Promise<void> {
   );
 }
 
-function createQueueHarness(
-  limits?: {
-    maxFrameBytes: number;
-    maxReassembledBytes: number;
-  },
-  queueOptions?: {
-    maxPendingFrameBytes?: number;
-    maxPendingItems?: number;
-  },
-  protocolV2 = true
-): {
+type QueueHarness = {
   close: (exitCode?: number | null, signal?: NodeJS.Signals | null) => void;
   queue: ProcessQueue;
   stdin: PassThrough;
   stdout: PassThrough;
-} {
+};
+
+async function createQueueHarness(options: {
+  emitReady?: boolean;
+  limits?: {
+    maxFrameBytes: number;
+    maxReassembledBytes: number;
+  },
+  protocolV2?: boolean;
+  queueOptions?: {
+    maxPendingFrameBytes?: number;
+    maxPendingItems?: number;
+  };
+}): Promise<QueueHarness> {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const handlers: {
@@ -1775,12 +1794,21 @@ function createQueueHarness(
       return child;
     }
   } as unknown as ChildProcessWithoutNullStreams;
-  const queue = createProcessQueue(child, queueOptions);
-  if (limits !== undefined) {
-    queue.setFrameLimits(limits.maxFrameBytes, limits.maxReassembledBytes);
+  const queue = createProcessQueue(child, options.queueOptions);
+  if (options.limits !== undefined) {
+    queue.setFrameLimits(
+      options.limits.maxFrameBytes,
+      options.limits.maxReassembledBytes
+    );
   }
-  if (protocolV2) {
+  if (options.protocolV2 !== false) {
     queue.setProtocolVersion(2);
+  }
+  // Production queues begin with a ready frame; drain it here unless the
+  // test drives pre-ready behavior itself.
+  if (options.emitReady !== false) {
+    stdout.write(`${JSON.stringify({ type: "ready" })}\n`);
+    await queue.next();
   }
   const close = (
     exitCode: number | null = 0,

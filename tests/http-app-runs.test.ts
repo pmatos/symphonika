@@ -1306,8 +1306,8 @@ describe("HTTP app — runs API and pages", () => {
     const test = await setup();
     try {
       const app = createHttpApp({
-        getLastTickAt: () => 0,
-        now: () => 10 * 60_000, // 10 minutes since the last tick
+        getLastTickAtMonotonic: () => 0,
+        monotonicNow: () => 10 * 60_000, // 10 minutes since the last tick
         runStore: test.runStore,
         stateRoot: test.stateRoot,
         version: "0.1.0"
@@ -1323,12 +1323,57 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
-  it("shows no daemon-stale banner when the last tick is recent", async () => {
+  it("shows a daemon-stale banner when monotonic time is stale after the wall clock steps backward", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        getLastTickAt: () => 1_000_000,
+        getLastTickAtMonotonic: () => 0,
+        monotonicNow: () => 10 * 60_000,
+        now: () => 500_000,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(body).toContain("banner--attention");
+      expect(body).toMatch(/daemon.*(stopped ticking|stale|unresponsive)/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows no daemon-stale banner when monotonic time is recent after the wall clock steps forward", async () => {
     const test = await setup();
     try {
       const app = createHttpApp({
         getLastTickAt: () => 0,
-        now: () => 5_000, // 5 seconds since the last tick
+        getLastTickAtMonotonic: () => 0,
+        monotonicNow: () => 5_000,
+        now: () => 10 * 60_000,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(body).not.toMatch(/daemon.*(stopped ticking|stale|unresponsive)/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows no daemon-stale banner when the last tick is recent", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        getLastTickAtMonotonic: () => 0,
+        monotonicNow: () => 5_000, // 5 seconds since the last tick
         runStore: test.runStore,
         stateRoot: test.stateRoot,
         version: "0.1.0"
@@ -1347,7 +1392,7 @@ describe("HTTP app — runs API and pages", () => {
     const test = await setup();
     try {
       const app = createHttpApp({
-        now: () => 10 * 60_000,
+        monotonicNow: () => 10 * 60_000,
         runStore: test.runStore,
         stateRoot: test.stateRoot,
         version: "0.1.0"
@@ -1363,11 +1408,12 @@ describe("HTTP app — runs API and pages", () => {
   });
 
   // Regression: if the very first scheduled tick hangs (e.g. stuck in issue
-  // polling or reconciliation), lastTickAtMs never gets set -- the dashboard
+  // polling or reconciliation), the last-tick reference never gets set --
+  // the dashboard
   // saw only that field and suppressed the banner indefinitely, even though
   // the systemd watchdog's own liveness gate (isTickRecentEnoughForSystemd-
   // Watchdog) already treats this exact case as eventually stale via a
-  // getTickLoopStartedAt fallback. The dashboard must use the same fallback
+  // tick-loop-start fallback. The dashboard must use the same fallback
   // so this failure mode is visible before the systemd watchdog eventually
   // restarts the unit, not just after.
   it("shows a daemon-stale banner when the tick loop started but the first tick never completed", async () => {
@@ -1375,8 +1421,8 @@ describe("HTTP app — runs API and pages", () => {
     try {
       const app = createHttpApp({
         getPollingIntervalMs: () => 10 * 60_000,
-        getTickLoopStartedAt: () => 0,
-        now: () => 31 * 60_000, // past 3x the 10-minute interval
+        getTickLoopStartedAtMonotonic: () => 0,
+        monotonicNow: () => 31 * 60_000, // past 3x the 10-minute interval
         runStore: test.runStore,
         stateRoot: test.stateRoot,
         version: "0.1.0"
@@ -1397,8 +1443,8 @@ describe("HTTP app — runs API and pages", () => {
     try {
       const app = createHttpApp({
         getPollingIntervalMs: () => 10 * 60_000,
-        getTickLoopStartedAt: () => 0,
-        now: () => 8 * 60_000, // within 3x the 10-minute interval
+        getTickLoopStartedAtMonotonic: () => 0,
+        monotonicNow: () => 8 * 60_000, // within 3x the 10-minute interval
         runStore: test.runStore,
         stateRoot: test.stateRoot,
         version: "0.1.0"
@@ -1424,11 +1470,11 @@ describe("HTTP app — runs API and pages", () => {
     const test = await setup();
     try {
       const app = createHttpApp({
-        getLastTickAt: () => 0,
+        getLastTickAtMonotonic: () => 0,
         getPollingIntervalMs: () => 10 * 60_000,
         // 8 minutes: past the fixed 5-minute floor, but well within 3x a
         // 10-minute interval (30 minutes) -- a healthy daemon on this config.
-        now: () => 8 * 60_000,
+        monotonicNow: () => 8 * 60_000,
         runStore: test.runStore,
         stateRoot: test.stateRoot,
         version: "0.1.0"
@@ -1447,9 +1493,9 @@ describe("HTTP app — runs API and pages", () => {
     const test = await setup();
     try {
       const app = createHttpApp({
-        getLastTickAt: () => 0,
+        getLastTickAtMonotonic: () => 0,
         getPollingIntervalMs: () => 10 * 60_000,
-        now: () => 31 * 60_000, // past 3x the 10-minute interval
+        monotonicNow: () => 31 * 60_000, // past 3x the 10-minute interval
         runStore: test.runStore,
         stateRoot: test.stateRoot,
         version: "0.1.0"

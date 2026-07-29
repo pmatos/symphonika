@@ -159,9 +159,9 @@ describe("isTickRecentEnoughForSystemdWatchdog", () => {
       isTickRecentEnoughForSystemdWatchdog({
         configExists: false,
         effectiveIntervalMs: 30_000,
-        lastTickAtMs: undefined,
-        now: 10_000_000,
-        tickLoopStartedAtMs: undefined
+        lastTickAtMonotonicMs: undefined,
+        nowMonotonicMs: 10_000_000,
+        tickLoopStartedAtMonotonicMs: undefined
       })
     ).toBe(true);
   });
@@ -171,19 +171,19 @@ describe("isTickRecentEnoughForSystemdWatchdog", () => {
       isTickRecentEnoughForSystemdWatchdog({
         configExists: true,
         effectiveIntervalMs: 30_000,
-        lastTickAtMs: undefined,
-        now: 1_000,
-        tickLoopStartedAtMs: 0
+        lastTickAtMonotonicMs: undefined,
+        nowMonotonicMs: 1_000,
+        tickLoopStartedAtMonotonicMs: 0
       })
     ).toBe(true);
   });
 
-  // Regression: lastTickAtMs === undefined used to be treated as "always
+  // Regression: a missing last-tick monotonic timestamp used to be treated as "always
   // alive" unconditionally -- correct while no config is loaded (nothing is
   // scheduled), but wrong once a config exists: if the very first scheduled
-  // tick hangs, lastTickAtMs never gets set and the ping would fire forever,
+  // tick hangs, the last-tick timestamp never gets set and the ping would fire forever,
   // masking a startup hang exactly like the one this feature exists to
-  // catch. It must fall back to tickLoopStartedAtMs and apply the same
+  // catch. It must fall back to the monotonic tick-loop start and apply the same
   // staleness bound.
   it("is stale if the first tick never completes past the derived bound", () => {
     const intervalMs = 30_000;
@@ -192,9 +192,9 @@ describe("isTickRecentEnoughForSystemdWatchdog", () => {
       isTickRecentEnoughForSystemdWatchdog({
         configExists: true,
         effectiveIntervalMs: intervalMs,
-        lastTickAtMs: undefined,
-        now: intervalMs * 3 + 1,
-        tickLoopStartedAtMs: 0
+        lastTickAtMonotonicMs: undefined,
+        nowMonotonicMs: intervalMs * 3 + 1,
+        tickLoopStartedAtMonotonicMs: 0
       })
     ).toBe(false);
   });
@@ -207,54 +207,54 @@ describe("isTickRecentEnoughForSystemdWatchdog", () => {
       isTickRecentEnoughForSystemdWatchdog({
         configExists: true,
         effectiveIntervalMs: 300_000,
-        lastTickAtMs: 1_000_000,
-        now: 1_045_000,
-        tickLoopStartedAtMs: 0
+        lastTickAtMonotonicMs: 1_000_000,
+        nowMonotonicMs: 1_045_000,
+        tickLoopStartedAtMonotonicMs: 0
       })
     ).toBe(true);
   });
 
   it("is stale once a tick is overdue past the derived bound", () => {
     const intervalMs = 30_000;
-    const lastTickAtMs = 1_000_000;
+    const lastTickAtMonotonicMs = 1_000_000;
 
     expect(
       isTickRecentEnoughForSystemdWatchdog({
         configExists: true,
         effectiveIntervalMs: intervalMs,
-        lastTickAtMs,
-        now: lastTickAtMs + intervalMs * 3 + 1,
-        tickLoopStartedAtMs: 0
+        lastTickAtMonotonicMs,
+        nowMonotonicMs: lastTickAtMonotonicMs + intervalMs * 3 + 1,
+        tickLoopStartedAtMonotonicMs: 0
       })
     ).toBe(false);
   });
 
   it("is still alive exactly at the staleness boundary", () => {
     const intervalMs = 30_000;
-    const lastTickAtMs = 1_000_000;
+    const lastTickAtMonotonicMs = 1_000_000;
 
     expect(
       isTickRecentEnoughForSystemdWatchdog({
         configExists: true,
         effectiveIntervalMs: intervalMs,
-        lastTickAtMs,
-        now: lastTickAtMs + intervalMs * 3,
-        tickLoopStartedAtMs: 0
+        lastTickAtMonotonicMs,
+        nowMonotonicMs: lastTickAtMonotonicMs + intervalMs * 3,
+        tickLoopStartedAtMonotonicMs: 0
       })
     ).toBe(true);
   });
 
   it("is alive with no reference point at all (defensive default)", () => {
-    // Shouldn't happen in practice once config exists -- tickLoopStartedAtMs
+    // Shouldn't happen in practice once config exists -- the monotonic tick-loop start
     // is always set alongside pollTimer -- but must not false-positive as
     // stale in the absence of any timestamp to compare against.
     expect(
       isTickRecentEnoughForSystemdWatchdog({
         configExists: true,
         effectiveIntervalMs: 30_000,
-        lastTickAtMs: undefined,
-        now: 999_999_999,
-        tickLoopStartedAtMs: undefined
+        lastTickAtMonotonicMs: undefined,
+        nowMonotonicMs: 999_999_999,
+        tickLoopStartedAtMonotonicMs: undefined
       })
     ).toBe(true);
   });

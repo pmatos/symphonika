@@ -747,17 +747,21 @@ export function createProcessQueue(
   };
 
   const enforceStdoutBound = (): void => {
-    if (
-      stdoutOverflowed ||
-      Buffer.byteLength(stdoutBuffer, "utf8") <= maxPhysicalFrameBytes
-    ) {
+    if (stdoutOverflowed) {
+      return;
+    }
+    // Only the unterminated suffix after the last newline is a physical
+    // frame in progress; complete queued lines ahead of it are preserved
+    // for later draining, not measured here.
+    const suffixStart = stdoutBuffer.lastIndexOf("\n") + 1;
+    const suffix = stdoutBuffer.slice(suffixStart);
+    if (Buffer.byteLength(suffix, "utf8") <= maxPhysicalFrameBytes) {
       return;
     }
     stdoutOverflowed = true;
-    const line = stdoutBuffer;
-    stdoutBuffer = "";
+    stdoutBuffer = stdoutBuffer.slice(0, suffixStart);
     frameDecoder.interrupt();
-    const evidence = boundedMalformedEvidence(line);
+    const evidence = boundedMalformedEvidence(suffix);
     push(
       {
         kind: "malformed",
@@ -785,6 +789,15 @@ export function createProcessQueue(
       stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
       pushParsedLine(line);
       newlineIndex = stdoutBuffer.indexOf("\n");
+    }
+    // Pause even when the remainder has no newline: with the queue full,
+    // further chunks would grow the unterminated tail while enforcement is
+    // deferred to the consumer.
+    if (
+      pendingFrameBytes >= maxPendingFrameBytes ||
+      pending.length >= maxPendingItems
+    ) {
+      child.stdout.pause();
     }
   };
 
@@ -844,14 +857,8 @@ export function createProcessQueue(
     // While paused for the ready frame's advertised limits, defer the bound
     // check too: enforcing the old default here could reject frames that fit
     // a larger negotiated limit. setFrameLimits runs in the microtask after
-    // the ready callback and re-checks everything deferred. The same applies
-    // while backpressured: the buffered remainder holds valid complete
-    // frames, not an unterminated oversized one.
-    if (
-      !awaitingFrameLimits &&
-      pendingFrameBytes < maxPendingFrameBytes &&
-      pending.length < maxPendingItems
-    ) {
+    // the ready callback and re-checks everything deferred.
+    if (!awaitingFrameLimits) {
       enforceStdoutBound();
     }
   });
@@ -935,12 +942,7 @@ export function createProcessQueue(
       drainStdoutLines();
       if (stdoutEnded) {
         finishStdout();
-      } else if (
-        pendingFrameBytes < maxPendingFrameBytes &&
-        pending.length < maxPendingItems
-      ) {
-        // Mirrors the data handler: a backlogged remainder holds valid
-        // complete frames, not an unterminated oversized one.
+      } else {
         enforceStdoutBound();
       }
       if (

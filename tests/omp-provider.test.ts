@@ -671,6 +671,51 @@ describe("Oh My Pi RPC provider", () => {
     queue.discardBeforeFrameLimits();
   });
 
+  it("pauses stdout when the queue fills with an unterminated remainder buffered", () => {
+    const { stdout } = createQueueHarness(
+      { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
+      { maxPendingItems: 4 }
+    );
+    const frame = JSON.stringify({ type: "notice" });
+    // The fourth frame crosses the item high-water mark and the trailing
+    // partial frame has no newline, so the drain loop never reaches its
+    // in-loop pause check.
+    stdout.write(`${frame}\n${frame}\n${frame}\n${frame}\npartial`);
+
+    expect(stdout.isPaused()).toBe(true);
+  });
+
+  it("measures only the unterminated suffix against the physical limit", async () => {
+    const { queue, stdout } = createQueueHarness({
+      maxFrameBytes: 1024,
+      maxReassembledBytes: 8192
+    });
+    const frame = JSON.stringify({ message: "x".repeat(560), type: "notice" });
+    // Whole buffer is 1190 bytes, but the unterminated suffix is 600: the
+    // complete frame must still be parsed, not discarded as oversized.
+    stdout.write(`${frame}\n${"z".repeat(600)}`);
+
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+  });
+
+  it("preserves a backpressured complete frame left buffered with a short suffix", async () => {
+    const { queue, stdout } = createQueueHarness(
+      { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
+      { maxPendingItems: 4 }
+    );
+    const frame = JSON.stringify({ type: "notice" });
+    // Four frames cross the item high-water mark; the fifth complete frame
+    // and a 600-byte suffix stay buffered until the consumer drains.
+    stdout.write(
+      `${frame}\n${frame}\n${frame}\n${frame}\n${frame}\n${"z".repeat(600)}`
+    );
+    expect(stdout.isPaused()).toBe(true);
+
+    for (let index = 0; index < 5; index += 1) {
+      expect(await queue.next()).toMatchObject({ kind: "message" });
+    }
+  });
+
   it("measures physical frames before removing the JSONL delimiter", async () => {
     const { queue, stdout } = createQueueHarness({
       maxFrameBytes: 1024,

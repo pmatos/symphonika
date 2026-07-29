@@ -774,9 +774,21 @@ export function createProcessQueue(
       );
       return;
     }
+    const frameType = stringField(raw, "type");
+    if (frameType === undefined) {
+      frameDecoder.interrupt();
+      push(
+        {
+          kind: "malformed",
+          line: text,
+          message: "Oh My Pi physical RPC frame must have a string type"
+        },
+        lineBytes
+      );
+      return;
+    }
 
     push({ kind: "message", raw }, lineBytes);
-    const frameType = stringField(raw, "type");
     // The protocol begins with the versioned ready frame (ADR 0066); any
     // other first nonblank frame is malformed, not evidence to scan past.
     if (!readySeen && frameType !== "ready") {

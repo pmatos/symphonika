@@ -702,7 +702,8 @@ describe("Oh My Pi RPC provider", () => {
       limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
       queueOptions: { maxPendingItems: 3 }
     });
-    stdout.write("{}\n{}\n{}\n{}\n{}\n");
+    const frame = `${JSON.stringify({ type: "notice" })}\n`;
+    stdout.write(frame.repeat(5));
 
     expect(stdout.isPaused()).toBe(true);
     for (let index = 0; index < 5; index += 1) {
@@ -718,7 +719,8 @@ describe("Oh My Pi RPC provider", () => {
     });
     // ready latches the drain; the ten tiny frames plus EOF arrive together,
     // so they can only be enqueued as the consumer drains below the marks.
-    stdout.write(`${JSON.stringify({ type: "ready" })}\n${"{}\n".repeat(10)}`);
+    const frame = `${JSON.stringify({ type: "notice" })}\n`;
+    stdout.write(`${JSON.stringify({ type: "ready" })}\n${frame.repeat(10)}`);
     stdout.end();
 
     expect(await queue.next()).toMatchObject({ kind: "message" });
@@ -868,6 +870,25 @@ describe("Oh My Pi RPC provider", () => {
     expect(await queue.next()).toMatchObject({
       kind: "malformed",
       message: "Oh My Pi physical RPC frame must be an object"
+    });
+    expect(await queue.next()).toMatchObject({ kind: "message" });
+  });
+
+  it("rejects physical frames without a string type field", async () => {
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 }
+    });
+    stdout.write("{}\n");
+    stdout.write('{"type":1}\n');
+    stdout.write(`${JSON.stringify({ type: "notice" })}\n`);
+
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi physical RPC frame must have a string type"
+    });
+    expect(await queue.next()).toMatchObject({
+      kind: "malformed",
+      message: "Oh My Pi physical RPC frame must have a string type"
     });
     expect(await queue.next()).toMatchObject({ kind: "message" });
   });
@@ -1766,7 +1787,7 @@ async function createQueueHarness(options: {
   limits?: {
     maxFrameBytes: number;
     maxReassembledBytes: number;
-  },
+  };
   protocolV2?: boolean;
   queueOptions?: {
     maxPendingFrameBytes?: number;

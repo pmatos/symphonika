@@ -26,6 +26,7 @@ export class RoutineConfigEditor {
     input: AddRoutineConfigInput
   ): Promise<AddRoutineConfigResult> {
     const configDir = path.dirname(this.configPath);
+    const projectName = input.projectName.trim();
     const requestedPath = path.resolve(configDir, input.routinePath);
     const declaration = await loadRoutineDeclaration(requestedPath);
     if (declaration.routine === null) {
@@ -51,26 +52,27 @@ export class RoutineConfigEditor {
     const resolvedProjects = (
       document.toJS() as { projects: readonly unknown[] }
     ).projects;
-    const projectMatchCount = resolvedProjects.filter((candidate) => {
-      const candidateName =
-        typeof candidate === "object" &&
-        candidate !== null &&
-        "name" in candidate
-          ? candidate.name
-          : undefined;
-      return (
-        typeof candidateName === "string" &&
-        candidateName.trim() === input.projectName
-      );
-    }).length;
+    const projectMatchCount =
+      projectName.length === 0
+        ? 0
+        : resolvedProjects.filter((candidate) => {
+            const candidateName =
+              typeof candidate === "object" &&
+              candidate !== null &&
+              "name" in candidate
+                ? candidate.name
+                : undefined;
+            return (
+              typeof candidateName === "string" &&
+              candidateName.trim() === projectName
+            );
+          }).length;
     if (projectMatchCount === 0) {
-      throw new Error(
-        `project "${input.projectName}" not found in service config`
-      );
+      throw new Error(`project "${projectName}" not found in service config`);
     }
     if (projectMatchCount > 1) {
       throw new Error(
-        `project "${input.projectName}" is declared more than once in service config; routine targets require a unique project name`
+        `project "${projectName}" is declared more than once in service config; routine targets require a unique project name`
       );
     }
 
@@ -78,9 +80,7 @@ export class RoutineConfigEditor {
     if (routines === undefined) {
       (document.contents as YAMLMap).set(
         "routines",
-        document.createNode([
-          { path: input.routinePath, project: input.projectName }
-        ])
+        document.createNode([{ path: input.routinePath, project: projectName }])
       );
     } else if (!isSeq(routines)) {
       throw new Error("service config routines must be a sequence");
@@ -92,13 +92,13 @@ export class RoutineConfigEditor {
         const existingPath = path.resolve(configDir, readEntryPath(item));
         const existingProject = readEntryProject(item);
         if (existingPath === requestedPath) {
-          if (existingProject === input.projectName) {
+          if (existingProject === projectName) {
             return { changed: false, routineName: declaration.routine.name };
           }
           // Same file targeted at a different project — refuse rather than
           // silently leave the wrong target. The operator must edit the block.
           throw new Error(
-            `routine at ${input.routinePath} is already targeted at project "${existingProject}" in the top-level routines block; remove that entry before targeting "${input.projectName}"`
+            `routine at ${input.routinePath} is already targeted at project "${existingProject}" in the top-level routines block; remove that entry before targeting "${projectName}"`
           );
         }
         const existing = await loadRoutineDeclaration(existingPath);
@@ -112,7 +112,7 @@ export class RoutineConfigEditor {
       routines.add(
         document.createNode({
           path: input.routinePath,
-          project: input.projectName
+          project: projectName
         })
       );
     }
@@ -129,5 +129,5 @@ function readEntryPath(item: YAMLMap): string {
 
 function readEntryProject(item: YAMLMap): string {
   const value = item.get("project");
-  return typeof value === "string" ? value : "";
+  return typeof value === "string" ? value.trim() : "";
 }

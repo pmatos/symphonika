@@ -299,6 +299,151 @@ describe("pull request follow-up", () => {
     }
   });
 
+  it("resolves the raw-FSM initial state's declared provider for review-followup dispatch, not just the project default", async () => {
+    // Regression for the codex review on #360: dispatchReviewFollowup now
+    // launches the initial state (see the test above), but until it resolves
+    // that state's own action.provider it always used project.agent.provider
+    // — silently launching the wrong provider whenever the initial state
+    // declares a different one, exactly like dispatchOneFresh/executeStateAdvance
+    // already handle for their own initial/target states.
+    const root = await makeTempRoot();
+    await writeRawFsmReviewFollowupProjectWithClaudeInitial(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-review-followup";
+      const workspacePath = path.join(
+        root,
+        ".symphonika",
+        "workspaces",
+        "symphonika",
+        "issues",
+        "54-review-followup"
+      );
+      await createGitWorkspaceAhead({ branchName, workspacePath });
+
+      seedWaitingParentRun(store, {
+        branchName,
+        currentStateId: "wait_for_pr",
+        runId: "parent-run",
+        workspacePath
+      });
+      store.trackPullRequest({
+        branchName,
+        headSha: "abc123",
+        issueNumber: 54,
+        prNumber: 81,
+        prUrl: "https://example.test/pr/81",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const codexInputs: ProviderRunInput[] = [];
+      const claudeInputs: ProviderRunInput[] = [];
+      const codexProvider = fakeProvider(codexInputs);
+      const claudeProvider: AgentProvider = {
+        ...fakeProvider(claudeInputs),
+        name: "claude"
+      };
+      // projectConfig()'s agent.provider is "codex" — the project default —
+      // while the workflow's initial state (above) declares "claude".
+      const project = rawFsmReviewFollowupProjectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue(issueFixture()),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(
+          prState({
+            reviewDecision: "CHANGES_REQUESTED",
+            unresolvedReviewThreads: [
+              {
+                comments: [
+                  {
+                    author: "reviewer",
+                    body: "Please wire this into the daemon poll loop.",
+                    createdAt: "2026-05-04T10:00:00Z",
+                    line: 24,
+                    path: "src/daemon.ts",
+                    url: "https://github.com/pmatos/symphonika/pull/81#discussion_r1"
+                  }
+                ],
+                id: "PRRT_kwDO",
+                isResolved: false,
+                line: 24,
+                path: "src/daemon.ts"
+              }
+            ]
+          })
+        ),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+
+      let nextRun = 0;
+      const controller = new RunController({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { claude: claudeProvider, codex: codexProvider },
+        configDir: root,
+        createRunId: () => {
+          nextRun += 1;
+          return `review-run-${nextRun}`;
+        },
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        prepareIssueWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".symphonika", "workspaces", ".cache"),
+            issueDirectoryName: "54-review-followup",
+            reused: true,
+            workspacePath
+          }),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        providersLoader: () => Promise.resolve(providersConfig()),
+        runStore: store,
+        schedule: () => undefined,
+        stateRoot: path.join(root, ".symphonika")
+      });
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        logger: pino({ enabled: false }),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      expect(result).toEqual({
+        action: "review_dispatch",
+        prNumber: 81,
+        runId: "review-run-1"
+      });
+
+      // The initial state's own declared provider (claude) must run — not
+      // the project default (codex).
+      expect(claudeInputs).toHaveLength(1);
+      expect(codexInputs).toHaveLength(0);
+      expect(claudeInputs[0]!.provider).toEqual({
+        command: providersConfig().claude.command,
+        name: "claude"
+      });
+
+      const reviewRun = store.getRun("review-run-1");
+      expect(reviewRun).toMatchObject({
+        continuationParentRunId: "parent-run",
+        isContinuation: true,
+        provider: "claude",
+        state: "succeeded"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("keeps a markdown PR follow-up retry label-immune across the retry handoff", async () => {
     const root = await makeTempRoot();
     // writeProject writes a markdown (non-raw_fsm) WORKFLOW.md. The label-
@@ -1280,6 +1425,72 @@ function rawFsmReviewFollowupProjectConfig(): RunControllerProjectConfig {
     ...projectConfig(),
     workflow: { format: "auto", path: "./workflow.yml" }
   };
+}
+
+// Same shape as writeRawFsmReviewFollowupProject, except the initial state
+// declares provider: claude while the project default (projectConfig()) is
+// codex — this is the divergence the two-outcome routing bug needs to bite.
+async function writeRawFsmReviewFollowupProjectWithClaudeInitial(
+  root: string
+): Promise<void> {
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "providers:",
+      "  codex:",
+      `    command: "${DEFAULT_CODEX_COMMAND}"`,
+      "  claude:",
+      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      "projects: []",
+      ""
+    ].join("\n")
+  );
+  await mkdir(path.join(root, "prompts"), { recursive: true });
+  await writeFile(
+    path.join(root, "prompts", "implement.md"),
+    [
+      "# Issue #{{issue.number}}",
+      "",
+      "{{issue.body}}",
+      "",
+      "Branch: {{branch.name}}",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: review_followup_provider_routing",
+      "  initial: implement",
+      "  states:",
+      "    implement:",
+      "      action:",
+      "        kind: agent",
+      "        provider: claude",
+      "        prompt: prompts/implement.md",
+      "      transitions:",
+      "        - to: wait_for_pr",
+      "          when:",
+      "            provider_success: true",
+      "            branch_ahead_of_base: true",
+      "        - to: failed",
+      "    wait_for_pr:",
+      "      action:",
+      "        kind: wait",
+      "      transitions:",
+      "        - to: merged",
+      "          when:",
+      "            pr_merged: true",
+      "    merged:",
+      "      terminal: success",
+      "    failed:",
+      "      terminal: blocked",
+      ""
+    ].join("\n")
+  );
 }
 
 async function writeProject(root: string): Promise<void> {

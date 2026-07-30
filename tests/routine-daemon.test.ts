@@ -132,6 +132,107 @@ describe("daemon routine firing", () => {
     }
   });
 
+  it("runs automatic Routine Firing workspace retention with the effective service policy", async () => {
+    const root = await makeTempRoot();
+    await writeRoutineProject(
+      root,
+      new Date(Date.now() + 60 * 60_000).toISOString()
+    );
+    const pruneRoutineWorkspaces = vi.fn().mockResolvedValue({
+      candidates: [],
+      failures: [],
+      pruned: []
+    });
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: quietProvider() },
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      pruneRoutineWorkspaces
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(pruneRoutineWorkspaces).toHaveBeenCalled();
+      });
+      expect(pruneRoutineWorkspaces).toHaveBeenCalledWith(
+        expect.objectContaining({
+          policy: {
+            cancelledDays: 14,
+            enabled: true,
+            failedDays: 14,
+            succeededDays: 1
+          }
+        })
+      );
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("serializes automatic Routine Firing workspace retention against re-entrant ticks", async () => {
+    const root = await makeTempRoot();
+    await writeRoutineProject(
+      root,
+      new Date(Date.now() + 60 * 60_000).toISOString()
+    );
+    let releaseFirstPrune: (() => void) | undefined;
+    const holdFirstPrune = new Promise<void>((resolve) => {
+      releaseFirstPrune = resolve;
+    });
+    const pruneRoutineWorkspaces = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        await holdFirstPrune;
+        return { candidates: [], failures: [], pruned: [] };
+      })
+      .mockResolvedValue({ candidates: [], failures: [], pruned: [] });
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: quietProvider() },
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      pruneRoutineWorkspaces
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(pruneRoutineWorkspaces).toHaveBeenCalledTimes(1);
+      });
+
+      // polling.interval_ms is 25 (see writeProjectConfig), so several more
+      // ticks fire while the first retention pass is still held open. A
+      // re-entrant launchWork must skip starting an overlapping pass rather
+      // than calling pruneRoutineWorkspaces again.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(pruneRoutineWorkspaces).toHaveBeenCalledTimes(1);
+
+      releaseFirstPrune?.();
+      await vi.waitFor(() => {
+        expect(pruneRoutineWorkspaces.mock.calls.length).toBeGreaterThanOrEqual(
+          2
+        );
+      });
+    } finally {
+      releaseFirstPrune?.();
+      await daemon.stop();
+    }
+  });
+
   it("fires a one-shot kind: report routine once after the scheduled time", async () => {
     const root = await makeTempRoot();
     const fireAt = new Date(Date.now() + 50).toISOString();

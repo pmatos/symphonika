@@ -25,6 +25,7 @@ import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
 import { formatRoutineOutcomeLine } from "./routines/outcome.js";
 import type { RoutineKind, RoutineStatus } from "./routines/types.js";
+import { pruneRoutineWorkspaces } from "./routines/workspace-retention.js";
 import {
   resolveWatchdogConfig,
   RuntimeConfigReloader,
@@ -1110,6 +1111,61 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
               formatRoutinePullRequestNumbers(routine.pullRequestNumbers)
             ].join("  ") + "\n"
           );
+        }
+      } finally {
+        store.close();
+      }
+    });
+
+  program
+    .command("prune-workspaces")
+    .description(
+      "reclaim terminal Routine Firing workspaces eligible under the retention policy"
+    )
+    .option("--config <path>", "service config path")
+    .option("--dry-run", "list eligible workspaces without reclaiming them")
+    .action(async (options: { config?: string; dryRun?: boolean }) => {
+      const state = resolveStateRoot(withConfigPath(options.config));
+      const reloader = new RuntimeConfigReloader({
+        configPath: state.configPath
+      });
+      const snapshot = await reloader.reload();
+      if (snapshot === undefined) {
+        const errors = reloader.getStatus().errors;
+        writeErr(program, "prune-workspaces failed:\n");
+        for (const error of errors) {
+          writeErr(program, `- ${error}\n`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      const store = openRunStore({ stateRoot: state.stateRoot });
+      try {
+        const report = await pruneRoutineWorkspaces({
+          dryRun: options.dryRun === true,
+          policy: snapshot.routineWorkspaceRetention,
+          runStore: store
+        });
+        const entries =
+          options.dryRun === true ? report.candidates : report.pruned;
+        for (const entry of entries) {
+          writeOut(
+            program,
+            `${options.dryRun === true ? "would prune" : "pruned"}: ${entry.firingId}  ${entry.workspacePath}\n`
+          );
+        }
+        for (const failure of report.failures) {
+          writeErr(
+            program,
+            `failed: ${failure.firingId}  ${failure.workspacePath}: ${failure.error}\n`
+          );
+        }
+        if (report.candidates.length === 0) {
+          writeOut(program, "(no eligible Routine Firing workspaces)\n");
+        }
+        if (report.failures.length > 0) {
+          process.exitCode = 1;
         }
       } finally {
         store.close();

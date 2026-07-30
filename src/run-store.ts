@@ -163,6 +163,7 @@ export type RoutineFiringStatus = {
   triggerSource: RoutineFiringTriggerSource;
   updatedAt: string;
   workspacePath: string;
+  workspacePrunedAt: string | null;
 };
 
 export type RoutineFiringStateTransition = {
@@ -519,6 +520,7 @@ type RoutineFiringRow = {
   trigger_source: RoutineFiringTriggerSource;
   updated_at: string;
   workspace_path: string | null;
+  workspace_pruned_at: string | null;
 };
 
 type RoutineOutcomeRow = Pick<
@@ -2070,7 +2072,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings where id = ?"
         ].join(" ")
       )
@@ -2154,7 +2156,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           where,
           "order by created_at desc, id desc"
@@ -2167,6 +2169,50 @@ export class RunStore {
       ...mapRoutineFiringRow(row),
       pullRequests: this.listRoutinePullRequests({ firingId: row.id })
     }));
+  }
+
+  listRoutineWorkspacePruneCandidates(input: {
+    cancelledBefore: string;
+    failedBefore: string;
+    succeededBefore: string;
+  }): RoutineFiringStatus[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
+          "from routine_firings",
+          "where workspace_path is not null and workspace_path <> ''",
+          "and workspace_pruned_at is null",
+          "and (",
+          "(state = 'succeeded' and updated_at <= @succeeded_before)",
+          "or (state = 'failed' and updated_at <= @failed_before)",
+          "or (state = 'cancelled' and updated_at <= @cancelled_before)",
+          ")",
+          "order by updated_at asc, id asc"
+        ].join(" ")
+      )
+      .all({
+        cancelled_before: input.cancelledBefore,
+        failed_before: input.failedBefore,
+        succeeded_before: input.succeededBefore
+      }) as RoutineFiringRow[];
+    return rows.map((row) => ({
+      ...mapRoutineFiringRow(row),
+      pullRequests: this.listRoutinePullRequests({ firingId: row.id })
+    }));
+  }
+
+  markRoutineWorkspacePruned(input: { id: string; prunedAt: string }): boolean {
+    const result = this.database
+      .prepare(
+        [
+          "update routine_firings set workspace_pruned_at = @pruned_at",
+          "where id = @id and workspace_pruned_at is null",
+          "and state in ('succeeded', 'failed', 'cancelled')"
+        ].join(" ")
+      )
+      .run({ id: input.id, pruned_at: input.prunedAt });
+    return result.changes > 0;
   }
 
   recordRoutinePullRequest(input: RoutinePullRequestStatus): void {
@@ -3335,6 +3381,7 @@ export class RunStore {
         provider_name text not null,
         provider_command text not null,
         workspace_path text,
+        workspace_pruned_at text,
         prompt_path text,
         raw_log_path text,
         normalized_log_path text,
@@ -3435,7 +3482,8 @@ export class RunStore {
       ["routine_firings", "cancel_requested", "integer not null default 0"],
       ["routine_firings", "cancel_reason", "text"],
       ["routine_firings", "notification_state", "text"],
-      ["routine_firings", "notification_error", "text"]
+      ["routine_firings", "notification_error", "text"],
+      ["routine_firings", "workspace_pruned_at", "text"]
     ];
 
     const apply = this.database.transaction(() => {
@@ -3444,6 +3492,11 @@ export class RunStore {
       }
     });
     apply();
+
+    this.database.exec(`
+      create index if not exists routine_firing_workspace_retention_idx
+      on routine_firings(workspace_pruned_at, state, updated_at);
+    `);
 
     // Runs after the ensureColumn additions above so databases created before
     // watchdog_samples gained normalized_log_path/last_message_at have those
@@ -3933,7 +3986,8 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
     terminalReason: row.terminal_reason ?? null,
     triggerSource: row.trigger_source,
     updatedAt: row.updated_at,
-    workspacePath: row.workspace_path ?? ""
+    workspacePath: row.workspace_path ?? "",
+    workspacePrunedAt: row.workspace_pruned_at ?? null
   };
 }
 

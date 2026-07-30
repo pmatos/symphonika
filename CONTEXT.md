@@ -179,6 +179,11 @@ GitHub and workspace state. It adds `verified` and `source` and remains separate
 Firing lifecycle state and terminal reason.
 _Avoid_: terminal reason, provider final message
 
+**Routine Workspace Retention**:
+The Service Config policy that reclaims terminal Routine Firing worktrees after outcome-specific
+age windows while preserving their Run Store rows and state-root evidence.
+_Avoid_: evidence retention, issue Workspace cleanup
+
 **Routine Firing Deadline**:
 An optional declared absolute wall-clock bound for one Routine Firing. It expires regardless of
 continued provider progress and fails the firing with terminal reason `firing_timeout`.
@@ -322,6 +327,7 @@ _Avoid_: chat session
 - A **Routine Firing** may contain one canonical **Routine Outcome** reconciled from a **Routine
   Outcome Claim** and externally observed state
 - A manual **Routine Firing** leaves the Routine's next scheduled clock event unchanged
+- **Routine Workspace Retention** may reclaim only terminal **Routine Firing** worktrees
 - A **Routine Firing Deadline** terminates an over-time **Routine Firing** independently of the
   **Watchdog**'s progress-liveness decision
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**

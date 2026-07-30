@@ -1036,7 +1036,31 @@ Cancel an active Routine Firing with the same command used for issue Runs:
 symphonika cancel <firing-id>
 ```
 
-Cancellation kills an active provider but preserves its workspace and logs.
+Cancellation kills an active provider and does not immediately delete its workspace or logs.
+
+Routine Firing workspaces use outcome-aware retention by default:
+
+```yaml
+retention:
+  routine_workspaces:
+    enabled: true
+    succeeded_days: 1
+    failed_days: 14
+    cancelled_days: 14
+```
+
+The daemon automatically reclaims eligible terminal workspaces. It never reclaims a queued,
+preparing, or running firing. Preview or run the same policy manually:
+
+```sh
+symphonika prune-workspaces --dry-run
+symphonika prune-workspaces
+```
+
+Reclamation removes only the registered Git worktree. The firing row keeps the historical workspace
+path and records it as pruned. Provider logs, normalized events, and prompt evidence under
+`<state.root>/logs/routines/<firing-id>/` are untouched; their retention is a separate concern.
+Set `enabled: false` to disable automatic reclamation while keeping the manual command available.
 
 # Part IV: operating and extending the setup
 

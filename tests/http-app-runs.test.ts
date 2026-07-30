@@ -1735,13 +1735,22 @@ describe("HTTP app — runs API and pages", () => {
         normalizedLogPath: "terminated-run.ndjson",
         outputTokensTotal: 0,
         runId: "terminated-run",
-        sampledAt: "2026-05-22T09:00:00.000Z",
+        // A real watchdog reconciliation only fires once
+        // `now - idleSince >= graceMinutes`, so a realistic terminal sample's
+        // sampledAt sits just past idleSince + grace (09:30), not at
+        // idleSince itself.
+        sampledAt: "2026-05-22T09:31:00.000Z",
         turnIdSetSize: 1,
         workspaceMtimeMax: Date.parse("2026-05-22T09:00:00.000Z")
       });
+      // updatedAt is deliberately set to a different timestamp than
+      // sampledAt: runs.updated_at is not a safe "as of termination" anchor
+      // (e.g. PR-discovery polling keeps bumping it for succeeded Runs), so
+      // the Progress Signal must freeze at the last persisted watchdog
+      // sample's sampledAt, not at updatedAt. This distinguishes the two.
       test.runStore.markRunNoProgressStale(
         "terminated-run",
-        "2026-05-22T09:35:00.000Z"
+        "2026-05-22T10:15:00.000Z"
       );
 
       const terminatedBody = await (
@@ -1750,20 +1759,36 @@ describe("HTTP app — runs API and pages", () => {
       expect(terminatedBody).toContain(
         "<dt>Terminal reason</dt><dd><code>no_progress</code></dd>"
       );
-      // The Progress Signal must freeze at the run's terminal updatedAt
-      // (09:35) rather than the live app clock (12:00) — otherwise these
-      // values would keep drifting further negative/older on every reload
-      // long after the Run terminated.
+      // The Progress Signal must freeze at the run's last watchdog sample
+      // (09:31) rather than updatedAt (10:15) or the live app clock (12:00)
+      // — otherwise these values would keep drifting on every reload long
+      // after the Run terminated.
       expect(terminatedBody).toContain(
-        "<dt>Last tool_call</dt><dd>35m ago</dd>"
+        "<dt>Last tool_call</dt><dd>31m ago</dd>"
       );
       expect(terminatedBody).toContain(
-        "<dt>Workspace mtime</dt><dd>35m ago</dd>"
+        "<dt>Workspace mtime</dt><dd>31m ago</dd>"
       );
       expect(terminatedBody).toContain(
         "<dt>idle_since</dt><dd><code>2026-05-22T09:00:00.000Z</code></dd>"
       );
-      expect(terminatedBody).toContain("<dt>Grace remaining</dt><dd>-5m</dd>");
+      expect(terminatedBody).toContain("<dt>Grace remaining</dt><dd>-1m</dd>");
+
+      // GET /api/runs/:id must report the exact same frozen watchdog values
+      // as the HTML page for the same terminated Run — the two surfaces
+      // must derive from one effective clock, not disagree with each other.
+      const terminatedApiBody = (await (
+        await app.request("/api/runs/terminated-run")
+      ).json()) as {
+        watchdog: {
+          graceRemainingMs?: number;
+          idleSince?: string;
+        };
+      };
+      expect(terminatedApiBody.watchdog.idleSince).toBe(
+        "2026-05-22T09:00:00.000Z"
+      );
+      expect(terminatedApiBody.watchdog.graceRemainingMs).toBe(-60_000);
 
       const disabledApp = createHttpApp({
         getWatchdogConfig: () => ({ enabled: false, graceMinutes: 30 }),

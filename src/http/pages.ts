@@ -26,6 +26,7 @@ import {
   buildWatchdogStatus,
   formatAge,
   formatWatchdogDuration,
+  resolveWatchdogNowMs,
   type WatchdogIdleStatus,
   type WatchdogStatus
 } from "../watchdog-status.js";
@@ -285,12 +286,12 @@ export function registerPages(options: RegisterPagesOptions): void {
         null,
       runStore: options.runStore
     });
-    // Freeze the clock at the run's last update for terminal states so the
-    // rendered Progress Signal (ages, grace remaining) is a stable snapshot
-    // "as of termination" rather than an ever-more-negative live countdown.
-    const detailNowMs = TERMINAL_STATES.has(detail.state)
-      ? Date.parse(detail.updatedAt)
-      : now();
+    const detailNowMs = resolveWatchdogNowMs({
+      liveNowMs: now(),
+      runId: detail.id,
+      runState: detail.state,
+      runStore: options.runStore
+    });
     const watchdog = buildWatchdogStatus({
       config: getWatchdogConfig(detail.project),
       nowMs: detailNowMs,

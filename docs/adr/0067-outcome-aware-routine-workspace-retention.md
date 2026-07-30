@@ -39,13 +39,18 @@ firings cannot be selected or marked as reclaimed. Reclamation uses
 `git worktree remove --force <path>` and then `git worktree prune` against the Project's shared bare
 cache. Force is required because report firings and failed Coding Agents can legitimately leave
 dirty or untracked files. A locked worktree remains an error and is retried on a later daemon tick;
-the Orchestrator does not bypass the lock or fall back to plain directory deletion.
+the Orchestrator does not bypass the lock or fall back to plain directory deletion. For a `kind: git`
+firing, reclamation also deletes its deterministic local branch (`git branch -D`) from the shared
+bare cache once the worktree is gone, since that branch otherwise has no further purpose and would
+otherwise grow the same shared cache this ADR bounds. A `kind: report` firing was never given a
+branch, so this step is a no-op for it.
 
 The Run Store retains `workspace_path` and records `workspace_pruned_at`. Operator surfaces can
 therefore show the historical path as `pruned` rather than interpreting a missing path as damage.
 Reclamation never deletes the firing row, Routine Pull Requests, or anything under
-`<state.root>/logs/routines/<firing-id>/`. Provider logs, normalized events, and prompt evidence
-remain durable; retention for those state-root artifacts is a separate future policy.
+`<state.root>/logs/routines/<firing-id>/`; it does delete the `kind: git` firing's local branch, as
+described above. Provider logs, normalized events, and prompt evidence remain durable; retention for
+those state-root artifacts is a separate future policy.
 
 ## Consequences
 

@@ -799,7 +799,9 @@ is `(project_name, name)`) and is reported only through the reload-error and `do
 On every daemon tick, enabled Routine Workspace Retention selects only terminal firings whose
 terminal update time has crossed the configured outcome window. Reclamation runs
 `git worktree remove --force` followed by `git worktree prune` against the Project cache, so both
-the checkout and its registration are removed. A failed removal remains unmarked and is retried on
+the checkout and its registration are removed; for a `kind: git` firing, reclamation also deletes
+its deterministic local branch (`git branch -D`) from the Project cache, since that branch has no
+other purpose once the worktree is gone. A failed removal remains unmarked and is retried on
 a later tick. The Run Store preserves `workspace_path` and writes `workspace_pruned_at`; no
 state-root provider log, normalized event, or prompt artifact is removed. The manual
 `symphonika prune-workspaces [--dry-run]` command evaluates the same policy even when automatic

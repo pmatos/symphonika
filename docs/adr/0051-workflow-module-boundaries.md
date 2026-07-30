@@ -32,10 +32,15 @@ they need? Issue #160 tracks this decision.
 
 **Decision: internal callers import directly from the owning submodule** (`workflow/types.ts`,
 `workflow/contract-loading.ts`, `workflow/fsm-expansion.ts`, `workflow/autonomous-prompt.ts`), **and
-`src/workflow.ts` is deleted.** Migrating every internal caller removed the file's only consumers:
-`symphonika` is `"private": true` and ships no `main`/`exports`/`types` field in `package.json`, so
-there was never a mechanism for an external consumer to import it either, even if the package were
-published as-is today. A facade with zero consumers — internal or external — is dead code, not a
+`src/workflow.ts` is deleted.** Migrating every internal TypeScript caller removed nearly all of the
+file's consumers; the one remaining consumer was `fuzz/workflow-parse.fuzz.mjs`, a plain `.mjs` file
+outside `tsconfig.json`'s `include` that imports the *compiled* `dist/workflow.js` rather than the
+TypeScript source, so it wasn't caught by the source-level migration sweep and briefly broke
+`npm run fuzz:workflow`/`:dry` until a follow-up commit repointed it at `dist/workflow/fsm-expansion.js`
+and `dist/workflow/contract-loading.js`. `symphonika` is `"private": true` and ships no
+`main`/`exports`/`types` field in `package.json`, so there was never a mechanism for a genuine
+*external* consumer to import it either, even if the package were published as-is today. A facade
+with no remaining consumers — internal or external — is dead code, not a
 reserved public interface, so keeping it "for if/when the package is published" was Speculative
 Generality: designing for a need that does not exist yet. If symphonika later grows a published,
 importable surface, a facade (or a proper `exports` map) can be added at that point scoped to

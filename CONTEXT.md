@@ -160,8 +160,9 @@ _Avoid_: Routine when referring to one Project-specific leg
 
 **Routine Fan-out**:
 The durable group created when one Routine clock event matches one or more Routine Targets. It has a
-shared correlation id and expected Project membership; each target is completed by either a Routine
-Firing or a recorded Routine Skip before one grouped notification is delivered.
+shared correlation id and immutable expected Project membership captured before work begins; each
+target is completed by either a Routine Firing or a recorded Routine Skip before one grouped
+notification is delivered.
 _Avoid_: Routine Firing when referring to the whole clock event
 
 **Routine Firing**:

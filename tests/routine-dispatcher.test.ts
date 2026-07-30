@@ -676,7 +676,7 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
-  it("reopens a grouped fan-out instead of losing a late target that joins while its notification is in flight", async () => {
+  it("keeps an in-flight summary immutable and catch-up-skips a target configured after fan-out creation", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
@@ -693,9 +693,9 @@ describe("RoutineFiringDispatcher", () => {
       (notification: RoutineFanoutNotification): Promise<void> => {
         notifications.push(notification);
         // Simulate a re-entrant reload (ADR 0052) adding a Project to this
-        // Routine and finishing that Project's firing while this
-        // notification -- already rendered from a snapshot missing it -- is
-        // still in flight (notification_state === 'sending').
+        // Routine while this notification is already in flight. The
+        // original clock event's expected membership is immutable, so beta
+        // must not join this fan-out.
         if (notifications.length === 1) {
           runStore.syncRoutines([
             { ...declaration, projectName: "alpha" },
@@ -708,20 +708,11 @@ describe("RoutineFiringDispatcher", () => {
             scheduledAt: "2026-05-22T10:00:00.000Z"
           });
           expect(
-            runStore.claimRoutineFiring({
-              fanoutId: "fanout-1",
-              firedAt: "2026-05-22T10:00:02.000Z",
-              firingId: "fire-beta",
-              projectName: "beta",
-              providerCommand: "codex fake",
-              providerName: "codex",
-              routineName: "refactor-audit"
+            runStore.hasRoutineFanoutTarget({
+              id: "fanout-1",
+              projectName: "beta"
             })
-          ).toBe(true);
-          runStore.completeRoutineFiring({
-            id: "fire-beta",
-            state: "succeeded"
-          });
+          ).toBe(false);
         }
         return Promise.resolve();
       }
@@ -781,15 +772,75 @@ describe("RoutineFiringDispatcher", () => {
         notifications[0]?.fanout.targets.map((target) => target.projectName)
       ).toEqual(["alpha"]);
 
-      // beta joined and finished while the alpha-only notification above
-      // was in flight, so the fan-out must reopen rather than settle as
-      // 'sent' with beta's result never delivered.
+      // beta was configured after this clock event began, so the alpha-only
+      // fan-out is delivered exactly once and remains immutable.
       expect(runStore.getRoutineFanout("fanout-1")).toMatchObject({
-        notificationState: "pending"
+        notificationState: "sent",
+        targets: [
+          expect.objectContaining({
+            disposition: "firing",
+            projectName: "alpha"
+          })
+        ]
       });
-      expect(runStore.listReadyRoutineFanouts()).toEqual([
-        expect.objectContaining({ id: "fanout-1" })
-      ]);
+
+      // On the next tick the newly configured, already-overdue one-shot is
+      // consumed as an ungrouped catch-up skip rather than firing into the
+      // completed event or remaining due forever.
+      const lateTick = await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-1-unused",
+        createFiringId: () => "fire-beta-must-not-run",
+        globalConcurrency: { maxInFlight: undefined },
+        notifyRoutineFanout,
+        now: new Date("2026-05-22T10:05:00.000Z"),
+        prepareRoutineWorkspace: ({ project }) =>
+          Promise.resolve({
+            branchName: "",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", `${project.name}.git`),
+            reused: false,
+            workspacePath: path.join(root, "workspaces", project.name)
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              name: "alpha",
+              routines: [{ ...declaration, projectName: "alpha" }]
+            }
+          ],
+          [
+            "beta",
+            {
+              ...runStoreProjectFixture(),
+              name: "beta",
+              routines: [{ ...declaration, projectName: "beta" }]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(lateTick.fired).toEqual([]);
+      expect(lateTick.skipped).toContainEqual({
+        projectName: "beta",
+        reason: "catch_up_window",
+        routineName: "refactor-audit"
+      });
+      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
+      expect(runStore.listRoutines({ project: "beta" })[0]).toMatchObject({
+        lastSkipReason: "catch_up_window",
+        state: "expired"
+      });
     } finally {
       runStore.close();
     }

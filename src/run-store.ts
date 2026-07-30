@@ -1550,12 +1550,12 @@ export class RunStore {
       const row = this.database
         .prepare(
           [
-            "select id, notification_state from routine_fanouts",
+            "select id from routine_fanouts",
             "where routine_name = ? and scheduled_at = ?"
           ].join(" ")
         )
         .get(input.routineName, input.scheduledAt) as
-        { id: string; notification_state: string } | undefined;
+        { id: string } | undefined;
       if (row === undefined) {
         throw new Error("routine fan-out identity could not be persisted");
       }
@@ -1567,31 +1567,28 @@ export class RunStore {
           "on conflict(fanout_id, project_name) do nothing"
         ].join(" ")
       );
-      let addedLateTarget = false;
-      for (const projectName of input.projectNames) {
-        const targetInserted = insertTarget.run(row.id, projectName, now, now);
-        if (targetInserted.changes > 0) {
-          addedLateTarget = true;
+      // Expected membership belongs to the clock event snapshot that creates
+      // the fan-out. A later reload may introduce another due one-shot target
+      // with the same scheduled_at, but extending this existing row would
+      // mutate the group after work began and could require a second summary.
+      if (inserted.changes > 0) {
+        for (const projectName of input.projectNames) {
+          insertTarget.run(row.id, projectName, now, now);
         }
-      }
-      // A target added after the fan-out's summary already went out (e.g. a
-      // Project joining a one-shot Routine mid-flight) must reopen delivery,
-      // or listReadyRoutineFanouts() will never revisit an already-'sent'
-      // fan-out and the late target's result is dropped from the summary.
-      if (addedLateTarget && row.notification_state === "sent") {
-        this.database
-          .prepare(
-            [
-              "update routine_fanouts set notification_state = 'pending',",
-              "notification_error = null, updated_at = ?",
-              "where id = ? and notification_state = 'sent'"
-            ].join(" ")
-          )
-          .run(now, row.id);
       }
       return { created: inserted.changes > 0, id: row.id };
     });
     return ensure();
+  }
+
+  hasRoutineFanoutTarget(input: { id: string; projectName: string }): boolean {
+    return (
+      this.database
+        .prepare(
+          "select 1 from routine_fanout_targets where fanout_id = ? and project_name = ?"
+        )
+        .get(input.id, input.projectName) !== undefined
+    );
   }
 
   getRoutineFanout(id: string): RoutineFanoutStatus | undefined {
@@ -1718,51 +1715,19 @@ export class RunStore {
 
   completeRoutineFanoutNotification(input: {
     error?: string;
-    expectedTargetCount?: number;
     id: string;
   }): void {
     const now = timestamp();
     if (input.error === undefined) {
-      const complete = this.database.transaction(() => {
-        // A target can also join while this notification is `sending` (the
-        // claim above only guards the window before the claim). Rather than
-        // deliver a payload that never had that target rendered into it,
-        // reopen the fan-out to `pending` so a follow-up notification with
-        // the full membership goes out; per ADR 0069 the sink must already
-        // be idempotent to duplicates, so a resend here is within contract.
-        const currentTargetCount = (
-          this.database
-            .prepare(
-              "select count(*) as count from routine_fanout_targets where fanout_id = ?"
-            )
-            .get(input.id) as { count: number }
-        ).count;
-        const membershipGrew =
-          input.expectedTargetCount !== undefined &&
-          currentTargetCount > input.expectedTargetCount;
-        if (membershipGrew) {
-          this.database
-            .prepare(
-              [
-                "update routine_fanouts set notification_state = 'pending',",
-                "notification_error = null, updated_at = ?",
-                "where id = ? and notification_state = 'sending'"
-              ].join(" ")
-            )
-            .run(now, input.id);
-          return;
-        }
-        this.database
-          .prepare(
-            [
-              "update routine_fanouts set notification_state = 'sent',",
-              "notification_error = null, notified_at = ?, updated_at = ?",
-              "where id = ? and notification_state = 'sending'"
-            ].join(" ")
-          )
-          .run(now, now, input.id);
-      });
-      complete();
+      this.database
+        .prepare(
+          [
+            "update routine_fanouts set notification_state = 'sent',",
+            "notification_error = null, notified_at = ?, updated_at = ?",
+            "where id = ? and notification_state = 'sending'"
+          ].join(" ")
+        )
+        .run(now, now, input.id);
       return;
     }
     this.database

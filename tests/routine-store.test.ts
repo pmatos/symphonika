@@ -119,7 +119,7 @@ describe("RunStore routines", () => {
     }
   });
 
-  it("adds a target row for a project newly added to an already-pending fan-out, without disturbing existing targets", async () => {
+  it("keeps expected Project membership immutable after a fan-out is created", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
@@ -167,14 +167,22 @@ describe("RunStore routines", () => {
             expect.objectContaining({
               disposition: "firing",
               projectName: "alpha"
-            }),
-            expect.objectContaining({
-              disposition: "pending",
-              projectName: "beta"
             })
           ]
         })
       );
+      expect(
+        store.hasRoutineFanoutTarget({
+          id: "fanout-1",
+          projectName: "alpha"
+        })
+      ).toBe(true);
+      expect(
+        store.hasRoutineFanoutTarget({
+          id: "fanout-1",
+          projectName: "beta"
+        })
+      ).toBe(false);
       expect(
         store.claimRoutineFiring({
           fanoutId: "fanout-1",
@@ -185,13 +193,13 @@ describe("RunStore routines", () => {
           providerName: "codex",
           routineName: "refactor-audit"
         })
-      ).toBe(true);
+      ).toBe(false);
     } finally {
       store.close();
     }
   });
 
-  it("reopens an already-sent fan-out's notification when a late target joins", async () => {
+  it("does not reopen an already-sent fan-out when a late target is configured", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
@@ -243,31 +251,27 @@ describe("RunStore routines", () => {
       });
       expect(expanded).toEqual({ created: false, id: "fanout-1" });
       expect(store.getRoutineFanout("fanout-1")).toMatchObject({
-        notificationState: "pending"
+        notificationState: "sent",
+        targets: [
+          expect.objectContaining({
+            disposition: "firing",
+            projectName: "alpha"
+          })
+        ]
       });
       expect(store.listReadyRoutineFanouts()).toEqual([]);
-
       expect(
-        store.claimRoutineFiring({
-          fanoutId: "fanout-1",
-          firedAt: "2026-05-22T10:00:02.000Z",
-          firingId: "fire-beta",
-          projectName: "beta",
-          providerCommand: "codex fake",
-          providerName: "codex",
-          routineName: "refactor-audit"
+        store.hasRoutineFanoutTarget({
+          id: "fanout-1",
+          projectName: "beta"
         })
-      ).toBe(true);
-      store.completeRoutineFiring({ id: "fire-beta", state: "succeeded" });
-      expect(store.listReadyRoutineFanouts()).toEqual([
-        expect.objectContaining({ id: "fanout-1" })
-      ]);
+      ).toBe(false);
     } finally {
       store.close();
     }
   });
 
-  it("refuses to claim a fan-out notification once a late target joins after the ready snapshot", async () => {
+  it("preserves a ready snapshot when a target is configured after fan-out creation", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
@@ -316,16 +320,28 @@ describe("RunStore routines", () => {
         scheduledAt: "2026-05-22T10:00:00.000Z"
       });
 
-      expect(store.claimRoutineFanoutNotification("fanout-1")).toBe(false);
+      expect(store.claimRoutineFanoutNotification("fanout-1")).toBe(true);
       expect(store.getRoutineFanout("fanout-1")).toMatchObject({
-        notificationState: "pending"
+        notificationState: "sending",
+        targets: [
+          expect.objectContaining({
+            disposition: "firing",
+            projectName: "alpha"
+          })
+        ]
       });
+      expect(
+        store.hasRoutineFanoutTarget({
+          id: "fanout-1",
+          projectName: "beta"
+        })
+      ).toBe(false);
     } finally {
       store.close();
     }
   });
 
-  it("reopens a fan-out to pending, instead of sending, when a late target joins while its notification is in flight", async () => {
+  it("does not extend a fan-out while its immutable notification is in flight", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
@@ -357,14 +373,11 @@ describe("RunStore routines", () => {
       ).toBe(true);
       store.completeRoutineFiring({ id: "fire-alpha", state: "succeeded" });
 
-      const claimedTargetCount =
-        store.getRoutineFanout("fanout-1")?.targets.length ?? 0;
-      expect(claimedTargetCount).toBe(1);
       expect(store.claimRoutineFanoutNotification("fanout-1")).toBe(true);
 
-      // A late target joins while the notification rendered from the
-      // claimed snapshot above is still in flight (notification_state ===
-      // 'sending').
+      // A target is configured while the notification rendered from the
+      // immutable snapshot above is still in flight
+      // (notification_state === 'sending').
       store.syncRoutines([
         { ...declaration, projectName: "alpha" },
         { ...declaration, projectName: "beta" }
@@ -379,31 +392,24 @@ describe("RunStore routines", () => {
         notificationState: "sending"
       });
 
-      store.completeRoutineFanoutNotification({
-        expectedTargetCount: claimedTargetCount,
-        id: "fanout-1"
-      });
+      expect(
+        store.hasRoutineFanoutTarget({
+          id: "fanout-1",
+          projectName: "beta"
+        })
+      ).toBe(false);
+      store.completeRoutineFanoutNotification({ id: "fanout-1" });
 
       expect(store.getRoutineFanout("fanout-1")).toMatchObject({
-        notificationState: "pending"
+        notificationState: "sent",
+        targets: [
+          expect.objectContaining({
+            disposition: "firing",
+            projectName: "alpha"
+          })
+        ]
       });
       expect(store.listReadyRoutineFanouts()).toEqual([]);
-
-      expect(
-        store.claimRoutineFiring({
-          fanoutId: "fanout-1",
-          firedAt: "2026-05-22T10:00:02.000Z",
-          firingId: "fire-beta",
-          projectName: "beta",
-          providerCommand: "codex fake",
-          providerName: "codex",
-          routineName: "refactor-audit"
-        })
-      ).toBe(true);
-      store.completeRoutineFiring({ id: "fire-beta", state: "succeeded" });
-      expect(store.listReadyRoutineFanouts()).toEqual([
-        expect.objectContaining({ id: "fanout-1" })
-      ]);
     } finally {
       store.close();
     }

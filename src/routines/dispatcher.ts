@@ -446,6 +446,38 @@ export async function dispatchDueRoutines(
         }).id;
         fanoutIds.set(fanoutKey, fanoutId);
       }
+      // Fan-out membership is the immutable snapshot captured when this
+      // clock event first began. A one-shot target added by a later reload
+      // can still carry the same due scheduled_at, but must not join the
+      // already-running or delivered event and force a duplicate summary.
+      if (
+        !input.runStore.hasRoutineFanoutTarget({
+          id: fanoutId,
+          projectName: project.name
+        })
+      ) {
+        if (
+          recordDueRoutineSkip(input.runStore, {
+            evaluation,
+            now,
+            projectName: project.name,
+            reason: "catch_up_window",
+            routine
+          })
+        ) {
+          logRoutineSkip(input.logger, {
+            reason: "catch_up_window",
+            routine: routine.name,
+            scheduledAt
+          });
+          skipped.push({
+            projectName: project.name,
+            reason: "catch_up_window",
+            routineName: routine.name
+          });
+        }
+        continue;
+      }
       if (
         !routine.allowOverlap &&
         input.runStore.hasActiveRoutineFiring({
@@ -645,7 +677,6 @@ async function deliverReadyRoutineFanouts(
     try {
       await input.notifyRoutineFanout(renderRoutineFanoutNotification(claimed));
       input.runStore.completeRoutineFanoutNotification({
-        expectedTargetCount: claimed.targets.length,
         id: claimed.id
       });
     } catch (error) {
@@ -1214,7 +1245,7 @@ function recordDueRoutineSkip(
     fanoutId?: string;
     now: Date;
     projectName: string;
-    reason: "overlap" | "concurrency_cap";
+    reason: "overlap" | "concurrency_cap" | "catch_up_window";
     routine: RoutineStatus;
   }
 ): boolean {

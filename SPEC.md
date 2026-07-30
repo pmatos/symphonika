@@ -231,7 +231,10 @@ control also uses `disabled` and `invalid` as defined in §8.5.
 A **Routine Fan-out** is the durable group for one Routine clock event. It stores a shared
 correlation id and the expected Project targets before work begins. Each target is completed by a
 Routine Firing or a Routine Skip, and the group produces one summary only after every target
-completes.
+completes. Expected membership is immutable after the fan-out is created. A Routine Target
+configured only after that clock event began does not join the existing group; an already-due
+one-shot is consumed as an ungrouped `catch_up_window` skip instead of reopening a delivered
+summary, while a recurring target begins with its next future clock event.
 
 A Routine Firing is one durable execution of a Routine Target. It records the Routine, its target
 Project, fan-out id, provider, workspace path, prompt evidence, provider logs, terminal reason,
@@ -753,6 +756,9 @@ supports:
 When one or more targets for a globally named Routine match the same scheduled clock event,
 Symphonika first creates a durable Routine Fan-out with a shared ULID correlation id and expected
 Project membership. It then admits each target independently against overlap and concurrency gates.
+That membership snapshot remains immutable across re-entrant reloads and notification delivery. A
+later target with the same already-due one-shot timestamp is catch-up-skipped without joining the
+existing fan-out, so one clock event still produces at most one grouped summary.
 For every admitted target, Symphonika allocates a ULID firing id and prepares a workspace at
 `<workspace.root>/routines/<routine-name>/<firing-id>/`. A `kind: report` workspace is detached at
 the Project base branch. A `kind: git` workspace is checked out on

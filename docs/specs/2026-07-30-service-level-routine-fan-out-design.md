@@ -55,8 +55,10 @@ The durable per-target approach is selected.
 ## Clock-event dispatch
 
 A Routine Fan-out is identified by a generated correlation id and has a uniqueness guard on
-`(routine_name, scheduled_at)`. It stores the target set before provider work starts. Each target is
-then handled independently:
+`(routine_name, scheduled_at)`. It stores the target set before provider work starts, and that
+membership remains immutable. A target configured later for the same elapsed one-shot event records
+an ungrouped `catch_up_window` skip instead of extending or reopening the existing group. Each
+expected target is then handled independently:
 
 1. overlap or concurrency-cap rejection advances that target's schedule, records its existing skip
    counter, and marks the fan-out target skipped;

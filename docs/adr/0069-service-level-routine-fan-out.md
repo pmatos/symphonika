@@ -71,6 +71,13 @@ Each matched clock event creates one durable **Routine Fan-out**, uniquely ident
 stored before any provider starts. Every admitted Routine Firing carries that id; a skipped target
 is recorded directly on the fan-out without creating a firing row.
 
+Expected membership is immutable after creation. A re-entrant reload can configure a new one-shot
+Routine Target whose elapsed `at` value matches an existing fan-out, but that target does not join
+the clock event after work has begun. Its elapsed occurrence records an ungrouped
+`catch_up_window` skip and expires. A newly configured recurring target naturally begins at its
+next future clock event. This preserves one summary per correlation id instead of reopening a
+`sending` or `sent` fan-out and relying on a sink to interpret a duplicate as an amendment.
+
 Admission is per target, not atomic. Each leg independently contends for the Project and global
 capacity defined by ADR 0053. Admitted siblings start concurrently. A global cap can therefore
 produce a normal partial group: admitted targets run, while capped or overlapping targets are

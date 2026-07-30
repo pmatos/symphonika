@@ -402,4 +402,43 @@ describe("HTTP app", () => {
       state: "idle"
     });
   });
+
+  it("POST /api/routines/:id/fire routes a manual firing request through the daemon", async () => {
+    const requests: unknown[] = [];
+    const app = createHttpApp({
+      fireRoutine: (request) => {
+        requests.push(request);
+        return {
+          firingId: "manual-fire-1",
+          kind: "accepted",
+          projectName: "alpha",
+          routineName: "daily-report",
+          state: "queued"
+        };
+      },
+      stateRoot: "/tmp/symphonika-state",
+      version: "0.1.0"
+    });
+
+    const response = await app.request(
+      "/api/routines/daily-report/fire?project=alpha&force=true",
+      { method: "POST" }
+    );
+
+    expect(response.status).toBe(202);
+    expect(requests).toEqual([
+      {
+        force: true,
+        projectName: "alpha",
+        routineName: "daily-report"
+      }
+    ]);
+    expect(await response.json()).toEqual({
+      firingId: "manual-fire-1",
+      kind: "accepted",
+      projectName: "alpha",
+      routineName: "daily-report",
+      state: "queued"
+    });
+  });
 });

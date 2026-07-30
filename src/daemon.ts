@@ -6,7 +6,11 @@ import type { Logger } from "pino";
 import pino from "pino";
 import { parse } from "yaml";
 
-import { createHttpApp, type PollNowResult } from "./http/app.js";
+import {
+  createHttpApp,
+  type FireRoutineResult,
+  type PollNowResult
+} from "./http/app.js";
 import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
@@ -59,7 +63,7 @@ import {
   type RunState,
   type SyncProjectStateInput
 } from "./run-store.js";
-import { dispatchDueRoutines } from "./routines/dispatcher.js";
+import { dispatchDueRoutines, fireRoutineNow } from "./routines/dispatcher.js";
 import type { RoutineFiringState } from "./routines/types.js";
 import type {
   PreparedRoutineWorkspace,
@@ -777,6 +781,37 @@ export async function startDaemon(
   const app = createHttpApp({
     cancelRun: cancelViaUi,
     dispatchRuntime,
+    fireRoutine: (request): FireRoutineResult => {
+      const result = fireRoutineNow({
+        activeRuns,
+        agentProviders,
+        configDir: state.configDir,
+        ...(options.createRoutineFiringId === undefined
+          ? {}
+          : { createFiringId: options.createRoutineFiringId }),
+        env,
+        globalConcurrency: runtimeConfig.globalConcurrency(),
+        githubIssuesApi,
+        logger,
+        ...(options.prepareRoutineWorkspace === undefined
+          ? {}
+          : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),
+        projects: runtimeConfig.projectsByName(),
+        providersConfig: runtimeConfig.providersConfig(),
+        request,
+        runStore,
+        stateRoot: state.stateRoot
+      });
+      if (result.kind !== "accepted") {
+        return result;
+      }
+      const { completion, ...response } = result;
+      inflightDispatches.add(completion);
+      void completion.finally(() => {
+        inflightDispatches.delete(completion);
+      });
+      return response;
+    },
     getActiveRuns: () =>
       activeRuns.list().map((entry) => ({
         cancelReason: entry.cancelReason ?? null,

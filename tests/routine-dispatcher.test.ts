@@ -11,7 +11,10 @@ import type {
   ProviderEvent,
   ProviderRunInput
 } from "../src/provider.js";
-import { dispatchDueRoutines } from "../src/routines/dispatcher.js";
+import {
+  dispatchDueRoutines,
+  fireRoutineNow
+} from "../src/routines/dispatcher.js";
 import type {
   PreparedRoutineWorkspace,
   PrepareRoutineWorkspaceInput
@@ -41,6 +44,376 @@ afterEach(async () => {
 });
 
 describe("RoutineFiringDispatcher", () => {
+  it("manually fires a not-due Routine through the normal provider lifecycle", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = quietProvider();
+    const routine = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Routine {{routine.name}} for {{project.name}}.",
+      provider: null,
+      schedule: { at: "2026-05-23T10:00:00.000Z" },
+      sourcePath: path.join(root, "daily-report.md"),
+      projectName: "alpha"
+    };
+    runStore.syncRoutines([routine]);
+
+    try {
+      const result = fireRoutineNow({
+        activeRuns,
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "manual-fire",
+        globalConcurrency: { maxInFlight: undefined },
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [routine]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        request: { routineName: "daily-report" },
+        runStore,
+        stateRoot
+      });
+
+      expect(result).toMatchObject({
+        firingId: "manual-fire",
+        kind: "accepted",
+        projectName: "alpha",
+        routineName: "daily-report"
+      });
+      if (result.kind !== "accepted") {
+        throw new Error("manual firing was not accepted");
+      }
+      expect(activeRuns.countInFlight()).toBe(1);
+      await result.completion;
+
+      expect(provider.runAttempt).toHaveBeenCalledOnce();
+      expect(runStore.getRoutineFiring("manual-fire")).toMatchObject({
+        state: "succeeded",
+        triggerSource: "manual",
+        workspacePath
+      });
+      expect(runStore.listRoutines()[0]).toMatchObject({
+        lastFiredAt: null,
+        nextFireAt: "2026-05-23T10:00:00.000Z",
+        state: "active"
+      });
+      expect(activeRuns.countInFlight()).toBe(0);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("refuses a manual firing when its Project concurrency cap is full", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const routine = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-23T10:00:00.000Z" },
+      sourcePath: path.join(root, "daily-report.md"),
+      projectName: "alpha"
+    };
+    runStore.syncRoutines([routine]);
+    activeRuns.reserveSlot({
+      issueNumber: 42,
+      projectName: "alpha",
+      respectsIssueLabels: true,
+      runId: "issue-run"
+    });
+
+    try {
+      const result = fireRoutineNow({
+        activeRuns,
+        agentProviders: { codex: quietProvider() },
+        configDir: root,
+        globalConcurrency: { maxInFlight: undefined },
+        prepareRoutineWorkspace: vi.fn(),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [routine]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        request: { routineName: "daily-report" },
+        runStore,
+        stateRoot
+      });
+
+      expect(result).toEqual({
+        error:
+          "concurrency cap reached: project alpha max_in_flight (1) reached",
+        kind: "refused",
+        reason: "concurrency_cap"
+      });
+      expect(runStore.listRoutineFirings()).toEqual([]);
+      expect(runStore.listRoutines()[0]).toMatchObject({
+        lastAttemptedAt: null,
+        nextFireAt: "2026-05-23T10:00:00.000Z"
+      });
+    } finally {
+      activeRuns.unregister("issue-run");
+      runStore.close();
+    }
+  });
+
+  it("allows --force to override an explicitly operator-disabled Routine", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const routine = {
+      disabled: true,
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-23T10:00:00.000Z" },
+      sourcePath: path.join(root, "daily-report.md"),
+      projectName: "alpha"
+    };
+    runStore.syncRoutines([routine]);
+
+    try {
+      const result = fireRoutineNow({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: quietProvider() },
+        configDir: root,
+        createFiringId: () => "forced-manual-fire",
+        globalConcurrency: { maxInFlight: undefined },
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [routine]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        request: { force: true, routineName: "daily-report" },
+        runStore,
+        stateRoot
+      });
+
+      expect(result).toMatchObject({
+        firingId: "forced-manual-fire",
+        kind: "accepted"
+      });
+      if (result.kind !== "accepted") {
+        throw new Error("forced manual firing was not accepted");
+      }
+      await result.completion;
+      expect(runStore.getRoutineFiring("forced-manual-fire")).toMatchObject({
+        state: "succeeded",
+        triggerSource: "manual"
+      });
+      expect(runStore.listRoutines()[0]).toMatchObject({
+        disabledReason: "operator",
+        state: "disabled"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("returns precise state refusals and does not let --force bypass non-operator stops", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const declaration = (projectName: string) => ({
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-23T10:00:00.000Z" },
+      sourcePath: path.join(root, `${projectName}-daily-report.md`),
+      projectName
+    });
+    runStore.syncRoutines([
+      declaration("removed"),
+      declaration("expired"),
+      declaration("inactive")
+    ]);
+    runStore.syncRoutines([declaration("expired"), declaration("inactive")], {
+      projects: ["removed", "expired", "inactive"]
+    });
+    runStore.upsertInvalidRoutineStub({
+      name: "daily-report",
+      projectName: "invalid",
+      sourcePath: path.join(root, "invalid-daily-report.md")
+    });
+    expect(
+      runStore.claimRoutineFiring({
+        firedAt: "2026-05-23T10:00:00.000Z",
+        firingId: "previous-scheduled-fire",
+        projectName: "expired",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      })
+    ).toBe(true);
+    runStore.completeRoutineFiring({
+      id: "previous-scheduled-fire",
+      state: "succeeded"
+    });
+    runStore.markRoutinesInactiveForProject("inactive");
+    const projects = new Map(
+      ["removed", "expired", "inactive", "invalid"].map((projectName) => [
+        projectName,
+        {
+          ...runStoreProjectFixture(),
+          name: projectName,
+          routines: [declaration(projectName)]
+        }
+      ])
+    );
+
+    try {
+      const fire = (projectName: string) =>
+        fireRoutineNow({
+          activeRuns: new ActiveRunRegistry(),
+          agentProviders: { codex: quietProvider() },
+          configDir: root,
+          globalConcurrency: { maxInFlight: undefined },
+          prepareRoutineWorkspace: vi.fn(),
+          projects,
+          providersConfig: {
+            claude: { command: "claude fake" },
+            codex: { command: "codex fake" }
+          },
+          request: {
+            force: true,
+            projectName,
+            routineName: "daily-report"
+          },
+          runStore,
+          stateRoot
+        });
+
+      expect(fire("removed")).toEqual({
+        error: "routine daily-report is disabled (removed_from_config)",
+        kind: "refused",
+        reason: "disabled"
+      });
+      expect(fire("invalid")).toEqual({
+        error: "routine daily-report is invalid",
+        kind: "refused",
+        reason: "invalid"
+      });
+      expect(fire("expired")).toEqual({
+        error: "routine daily-report is expired",
+        kind: "refused",
+        reason: "expired"
+      });
+      expect(fire("inactive")).toEqual({
+        error: "routine daily-report is inactive",
+        kind: "refused",
+        reason: "inactive"
+      });
+      expect(runStore.listRoutineFirings()).toHaveLength(1);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("rejects an ambiguous Routine name with every Project candidate", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const declaration = (projectName: string) => ({
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-23T10:00:00.000Z" },
+      sourcePath: path.join(root, `${projectName}-daily-report.md`),
+      projectName
+    });
+    runStore.syncRoutines([declaration("alpha"), declaration("beta")]);
+
+    try {
+      const result = fireRoutineNow({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: quietProvider() },
+        configDir: root,
+        globalConcurrency: { maxInFlight: undefined },
+        prepareRoutineWorkspace: vi.fn(),
+        projects: new Map(
+          ["alpha", "beta"].map((projectName) => [
+            projectName,
+            {
+              ...runStoreProjectFixture(),
+              name: projectName,
+              routines: [declaration(projectName)]
+            }
+          ])
+        ),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        request: { routineName: "daily-report" },
+        runStore,
+        stateRoot
+      });
+
+      expect(result).toEqual({
+        candidates: [
+          { projectName: "alpha", routineName: "daily-report" },
+          { projectName: "beta", routineName: "daily-report" }
+        ],
+        error:
+          "routine daily-report is ambiguous; candidates: alpha/daily-report, beta/daily-report; provide --project",
+        kind: "ambiguous"
+      });
+      expect(runStore.listRoutineFirings()).toEqual([]);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("succeeds a kind: git firing with commits ahead and discovers every open PR", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

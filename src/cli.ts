@@ -122,6 +122,26 @@ type PollNowResponse = {
   state: "dispatching" | "idle";
 };
 
+type FireRoutineResponse = {
+  firingId: string;
+  kind: "accepted";
+  projectName: string;
+  routineName: string;
+  state: "queued";
+};
+
+type RoutineFiringWaitStatus = {
+  id: string;
+  state:
+    | "queued"
+    | "preparing_workspace"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "cancelled";
+  terminalReason: string | null;
+};
+
 type RoutinesOptions = {
   config?: string;
   includeInactive?: boolean;
@@ -876,6 +896,100 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     });
 
   program
+    .command("fire-now")
+    .description("fire a Routine immediately through the running daemon")
+    .argument("<routine>", "Routine name")
+    .option("--project <project>", "target Project name")
+    .option("--force", "override an explicitly disabled Routine")
+    .option("--wait", "wait for the firing to reach a terminal state")
+    .option("--config <path>", "service config path")
+    .option("--daemon-url <url>", "local daemon base URL")
+    .action(
+      async (
+        routine: string,
+        options: {
+          config?: string;
+          daemonUrl?: string;
+          force?: boolean;
+          project?: string;
+          wait?: boolean;
+        }
+      ) => {
+        const stateRoot = resolveStateRoot(
+          withConfigPath(options.config)
+        ).stateRoot;
+        const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
+        if (daemonUrl === undefined) {
+          const descriptorPath = daemonEndpointPath(stateRoot);
+          writeErr(
+            program,
+            `fire-now failed: daemon endpoint not found at ${descriptorPath}\n`
+          );
+          program.error("fire-now failed: daemon endpoint not found", {
+            exitCode: 1
+          });
+          return;
+        }
+
+        const daemonStatus = await fetchDaemonStatus(
+          fetcher,
+          daemonUrl,
+          stateRoot
+        );
+        if (daemonStatus.kind === "unavailable") {
+          writeErr(program, `fire-now failed: ${daemonStatus.error}\n`);
+          program.error(`fire-now failed: ${daemonStatus.error}`, {
+            exitCode: 1
+          });
+          return;
+        }
+
+        const outcome = await postFireRoutine(fetcher, daemonUrl, routine, {
+          force: options.force === true,
+          ...(options.project === undefined
+            ? {}
+            : { projectName: options.project })
+        });
+        if (!outcome.ok) {
+          writeErr(program, `fire-now failed: ${outcome.error}\n`);
+          program.error(`fire-now failed: ${outcome.error}`, { exitCode: 1 });
+          return;
+        }
+        writeOut(
+          program,
+          `fired ${outcome.response.routineName} for ${outcome.response.projectName}: ${outcome.response.firingId}\n`
+        );
+        if (options.wait !== true) {
+          return;
+        }
+        const firing = await waitForRoutineFiring(
+          fetcher,
+          daemonUrl,
+          outcome.response
+        );
+        if (!firing.ok) {
+          writeErr(program, `fire-now failed: ${firing.error}\n`);
+          program.error(`fire-now failed: ${firing.error}`, { exitCode: 1 });
+          return;
+        }
+        const reason =
+          firing.status.terminalReason ??
+          (firing.status.state === "cancelled"
+            ? "cancelled"
+            : firing.status.state);
+        writeOut(
+          program,
+          `firing ${firing.status.id} ${firing.status.state}${
+            firing.status.state === "succeeded" ? "" : `: ${reason}`
+          }\n`
+        );
+        if (firing.status.state !== "succeeded") {
+          program.error(`fire-now failed: ${reason}`, { exitCode: 1 });
+        }
+      }
+    );
+
+  program
     .command("runs")
     .description("list runs from the run store")
     .option("--config <path>", "service config path")
@@ -1351,6 +1465,168 @@ async function postPollNow(
     };
   }
   return { ok: true, response: parsed };
+}
+
+async function postFireRoutine(
+  fetcher: FetchFn,
+  daemonUrl: string,
+  routineName: string,
+  options: { force: boolean; projectName?: string }
+): Promise<
+  { ok: false; error: string } | { ok: true; response: FireRoutineResponse }
+> {
+  const query = new URLSearchParams();
+  if (options.projectName !== undefined) {
+    query.set("project", options.projectName);
+  }
+  if (options.force) {
+    query.set("force", "true");
+  }
+  const suffix = query.size === 0 ? "" : `?${query.toString()}`;
+  let response: Response;
+  try {
+    response = await fetcher(
+      `${daemonUrl}/api/routines/${encodeURIComponent(routineName)}/fire${suffix}`,
+      { method: "POST" }
+    );
+  } catch (error) {
+    return { error: errorMessage(error), ok: false };
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    body = undefined;
+  }
+  if (!response.ok) {
+    return {
+      error:
+        isObject(body) && typeof body.error === "string"
+          ? body.error
+          : `daemon returned HTTP ${response.status}`,
+      ok: false
+    };
+  }
+  const parsed = readFireRoutineResponse(body);
+  if (parsed === undefined) {
+    return {
+      error: "daemon returned an unexpected fire-now response",
+      ok: false
+    };
+  }
+  return { ok: true, response: parsed };
+}
+
+async function waitForRoutineFiring(
+  fetcher: FetchFn,
+  daemonUrl: string,
+  firing: FireRoutineResponse
+): Promise<
+  { error: string; ok: false } | { ok: true; status: RoutineFiringWaitStatus }
+> {
+  const query = new URLSearchParams({ project: firing.projectName });
+  const url = `${daemonUrl}/api/routines/${encodeURIComponent(
+    firing.routineName
+  )}/firings?${query.toString()}`;
+  for (;;) {
+    let response: Response;
+    try {
+      response = await fetcher(url);
+    } catch (error) {
+      return { error: errorMessage(error), ok: false };
+    }
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      body = undefined;
+    }
+    if (!response.ok) {
+      return {
+        error:
+          isObject(body) && typeof body.error === "string"
+            ? body.error
+            : `daemon returned HTTP ${response.status}`,
+        ok: false
+      };
+    }
+    const status = readRoutineFiringWaitStatus(body, firing.firingId);
+    if (status === undefined) {
+      return {
+        error: `daemon did not return firing ${firing.firingId}`,
+        ok: false
+      };
+    }
+    if (
+      status.state === "succeeded" ||
+      status.state === "failed" ||
+      status.state === "cancelled"
+    ) {
+      return { ok: true, status };
+    }
+    await sleep(100);
+  }
+}
+
+function readRoutineFiringWaitStatus(
+  value: unknown,
+  firingId: string
+): RoutineFiringWaitStatus | undefined {
+  if (!isObject(value) || !Array.isArray(value.firings)) {
+    return undefined;
+  }
+  const firings = value.firings as unknown[];
+  const firing: unknown = firings.find(
+    (candidate) => isObject(candidate) && candidate.id === firingId
+  );
+  if (
+    !isObject(firing) ||
+    typeof firing.id !== "string" ||
+    !isRoutineFiringState(firing.state)
+  ) {
+    return undefined;
+  }
+  return {
+    id: firing.id,
+    state: firing.state,
+    terminalReason:
+      typeof firing.terminalReason === "string" ? firing.terminalReason : null
+  };
+}
+
+function isRoutineFiringState(
+  value: unknown
+): value is RoutineFiringWaitStatus["state"] {
+  return (
+    value === "queued" ||
+    value === "preparing_workspace" ||
+    value === "running" ||
+    value === "succeeded" ||
+    value === "failed" ||
+    value === "cancelled"
+  );
+}
+
+function readFireRoutineResponse(
+  value: unknown
+): FireRoutineResponse | undefined {
+  if (
+    !isObject(value) ||
+    value.kind !== "accepted" ||
+    typeof value.firingId !== "string" ||
+    typeof value.projectName !== "string" ||
+    typeof value.routineName !== "string" ||
+    value.state !== "queued"
+  ) {
+    return undefined;
+  }
+  return {
+    firingId: value.firingId,
+    kind: "accepted",
+    projectName: value.projectName,
+    routineName: value.routineName,
+    state: "queued"
+  };
 }
 
 function readPollNowResponse(value: unknown): PollNowResponse | undefined {

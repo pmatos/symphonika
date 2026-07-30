@@ -374,6 +374,66 @@ describe("CLI routine firing commands", () => {
     expect(limitedListing.output.stdout).not.toContain("fire-25");
   });
 
+  it("firings requires --project for ambiguous current or historical targets", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.syncRoutines(
+      ["alpha", "beta"].map((projectName) => ({
+        kind: "report" as const,
+        name: "daily-report",
+        prompt: "Report.",
+        projectName,
+        provider: null,
+        schedule: { at: "2026-07-30T08:00:00.000Z" },
+        sourcePath: `/tmp/${projectName}-daily-report.md`
+      }))
+    );
+    for (const projectName of ["alpha", "beta"]) {
+      store.createRoutineFiring({
+        id: `${projectName}-fire`,
+        projectName,
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report",
+        scheduledAt: "2026-07-30T08:00:00.000Z"
+      });
+    }
+    store.pruneRoutinesForUnknownProjects([]);
+    store.close();
+
+    const ambiguous = captureProgram(stateRoot);
+    await expect(
+      ambiguous.program.parseAsync([
+        "node",
+        "symphonika",
+        "firings",
+        "daily-report",
+        "--config",
+        path.join(stateRoot, "symphonika.yml")
+      ])
+    ).rejects.toMatchObject({ exitCode: 1 });
+    expect(ambiguous.output.stderr).toContain(
+      "routine daily-report is ambiguous; candidates: alpha/daily-report, beta/daily-report; provide --project"
+    );
+    expect(ambiguous.output.stdout).toBe("");
+
+    process.exitCode = undefined;
+    const selected = captureProgram(stateRoot);
+    await selected.program.parseAsync([
+      "node",
+      "symphonika",
+      "firings",
+      "daily-report",
+      "--project",
+      "beta",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+    expect(selected.output.stdout).toContain("beta-fire  beta  daily-report");
+    expect(selected.output.stdout).not.toContain("alpha-fire");
+    expect(selected.output.stderr).toBe("");
+  });
+
   it.each([
     "queued",
     "preparing_workspace",

@@ -1210,11 +1210,23 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         ).stateRoot;
         const store = openRunStore({ stateRoot });
         try {
+          const targetProjects =
+            options.project === undefined
+              ? store.listRoutineTargetProjects(routine)
+              : [options.project];
+          if (targetProjects.length > 1) {
+            const candidates = targetProjects
+              .map((projectName) => `${projectName}/${routine}`)
+              .join(", ");
+            const message = `routine ${routine} is ambiguous; candidates: ${candidates}; provide --project`;
+            writeErr(program, `${message}\n`);
+            program.error(message, { exitCode: 1 });
+            return;
+          }
+          const project = targetProjects[0];
           const firings = store.listRoutineFirings({
             limit: options.limit,
-            ...(options.project === undefined
-              ? {}
-              : { project: options.project }),
+            ...(project === undefined ? {} : { project }),
             routineName: routine
           });
           if (firings.length === 0) {

@@ -1590,7 +1590,8 @@ service-level retention policy. `--dry-run` lists candidates without changing Gi
 directories, or Run Store rows. The command remains available when automatic retention is disabled.
 
 `firings <routine>` lists the Routine's firing history newest first, bounded to 25 rows by default.
-`--project` disambiguates a Routine target and `--limit` selects another positive bound.
+When the name matches current or historical targets in multiple Projects, the command lists every
+candidate and requires `--project`; `--limit` selects another positive bound.
 
 `show-firing <firing-id>` renders the Routine Firing's identity, lifecycle timing, workspace and
 branch identity, deterministic prompt and provider-log paths, terminal/cancellation evidence,

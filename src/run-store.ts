@@ -2551,6 +2551,20 @@ export class RunStore {
     }));
   }
 
+  listRoutineTargetProjects(routineName: string): string[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select project_name from routines where name = @routine_name",
+          "union",
+          "select project_name from routine_firings where routine_name = @routine_name",
+          "order by project_name asc"
+        ].join(" ")
+      )
+      .all({ routine_name: routineName }) as Array<{ project_name: string }>;
+    return rows.map((row) => row.project_name);
+  }
+
   listRoutineWorkspacePruneCandidates(input: {
     cancelledBefore: string;
     failedBefore: string;

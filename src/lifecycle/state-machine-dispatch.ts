@@ -4,7 +4,7 @@ import type {
   WorkflowAction,
   WorkflowPredicateMap,
   WorkflowPredicateValue
-} from "../workflow.js";
+} from "../workflow/types.js";
 
 export type StateMachineDecision =
   | { action: WorkflowAction; kind: "execute_action"; stateId: string }

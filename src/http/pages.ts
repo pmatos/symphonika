@@ -20,7 +20,7 @@ import type {
 } from "../run-store.js";
 import type { RoutineStatus } from "../routines/types.js";
 import type { StatusSnapshot } from "../status.js";
-import type { ExpandedWorkflow } from "../workflow.js";
+import type { ExpandedWorkflow } from "../workflow/types.js";
 import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 
 export type RegisterPagesOptions = {

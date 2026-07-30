@@ -12,7 +12,7 @@ import { isPathInside } from "../src/path-safety.js";
 import type {
   ExpandedWorkflowState,
   WorkflowPredicateValue
-} from "../src/workflow.js";
+} from "../src/workflow/types.js";
 
 const predicateKey = fc.constantFrom(
   "branch_ahead_of_base",

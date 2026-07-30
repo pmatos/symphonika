@@ -59,9 +59,9 @@ import {
 import { VERSION } from "./version.js";
 import {
   explainWorkflow,
-  loadProjectWorkflow,
-  type ExpandedWorkflow
-} from "./workflow.js";
+  loadProjectWorkflow
+} from "./workflow/fsm-expansion.js";
+import type { ExpandedWorkflow } from "./workflow/types.js";
 import {
   planWorkspacePaths,
   type WorkspacePathPlan

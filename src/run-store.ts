@@ -161,7 +161,7 @@ export type RoutineFiringStatus = {
   providerCommand: string;
   pullRequests: RoutinePullRequestStatus[];
   routineName: string;
-  scheduledAt: string;
+  scheduledAt: string | null;
   state: RoutineFiringState;
   terminalReason: string | null;
   triggerSource: RoutineFiringTriggerSource;
@@ -2192,6 +2192,8 @@ export class RunStore {
   }
 
   createRoutineFiring(input: {
+    branchName?: string;
+    branchRef?: string;
     fanoutId?: string;
     id: string;
     projectName: string;
@@ -2200,19 +2202,22 @@ export class RunStore {
     routineName: string;
     scheduledAt?: string;
     triggerSource?: RoutineFiringTriggerSource;
+    workspacePath?: string;
   }): void {
     const now = timestamp();
     this.database
       .prepare(
         [
           "insert into routine_firings (",
-          "id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, created_at, updated_at",
+          "id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, branch_name, branch_ref, created_at, updated_at",
           ") values (",
-          "@id, @fanout_id, @project_name, @routine_name, 'queued', @provider_name, @provider_command, @trigger_source, @scheduled_at, @created_at, @updated_at",
+          "@id, @fanout_id, @project_name, @routine_name, 'queued', @provider_name, @provider_command, @trigger_source, @scheduled_at, @workspace_path, @branch_name, @branch_ref, @created_at, @updated_at",
           ")"
         ].join(" ")
       )
       .run({
+        branch_name: input.branchName ?? null,
+        branch_ref: input.branchRef ?? null,
         created_at: now,
         fanout_id: input.fanoutId ?? null,
         id: input.id,
@@ -2222,12 +2227,15 @@ export class RunStore {
         routine_name: input.routineName,
         scheduled_at: input.scheduledAt ?? now,
         trigger_source: input.triggerSource ?? "scheduled",
-        updated_at: now
+        updated_at: now,
+        workspace_path: input.workspacePath ?? null
       });
     this.recordRoutineFiringTransition(input.id, "queued", now);
   }
 
   claimRoutineFiring(input: {
+    branchName?: string;
+    branchRef?: string;
     fanoutId?: string;
     firedAt: string;
     firingId: string;
@@ -2238,9 +2246,16 @@ export class RunStore {
     routineName: string;
     scheduledAt?: string;
     triggerSource?: RoutineFiringTriggerSource;
+    workspacePath?: string;
   }): boolean {
     const claim = this.database.transaction(() => {
       this.createRoutineFiring({
+        ...(input.branchName === undefined
+          ? {}
+          : { branchName: input.branchName }),
+        ...(input.branchRef === undefined
+          ? {}
+          : { branchRef: input.branchRef }),
         ...(input.fanoutId === undefined ? {} : { fanoutId: input.fanoutId }),
         id: input.firingId,
         projectName: input.projectName,
@@ -2252,7 +2267,10 @@ export class RunStore {
           : { scheduledAt: input.scheduledAt }),
         ...(input.triggerSource === undefined
           ? {}
-          : { triggerSource: input.triggerSource })
+          : { triggerSource: input.triggerSource }),
+        ...(input.workspacePath === undefined
+          ? {}
+          : { workspacePath: input.workspacePath })
       });
       const result = this.database
         .prepare(
@@ -2305,12 +2323,15 @@ export class RunStore {
   }
 
   claimManualRoutineFiring(input: {
+    branchName?: string;
+    branchRef?: string;
     firingId: string;
     forceOperatorDisabled?: boolean;
     projectName: string;
     providerCommand: string;
     providerName: AgentProviderName;
     routineName: string;
+    workspacePath?: string;
   }): boolean {
     const claim = this.database.transaction(() => {
       const eligible = this.database
@@ -2331,12 +2352,21 @@ export class RunStore {
         throw new RoutineAlreadyClaimedError();
       }
       this.createRoutineFiring({
+        ...(input.branchName === undefined
+          ? {}
+          : { branchName: input.branchName }),
+        ...(input.branchRef === undefined
+          ? {}
+          : { branchRef: input.branchRef }),
         id: input.firingId,
         projectName: input.projectName,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
         routineName: input.routineName,
-        triggerSource: "manual"
+        triggerSource: "manual",
+        ...(input.workspacePath === undefined
+          ? {}
+          : { workspacePath: input.workspacePath })
       });
     });
     try {
@@ -4375,8 +4405,7 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
     providerCommand: row.provider_command,
     pullRequests: [],
     routineName: row.routine_name,
-    scheduledAt:
-      row.scheduled_at.length === 0 ? row.created_at : row.scheduled_at,
+    scheduledAt: row.scheduled_at.length === 0 ? null : row.scheduled_at,
     state: row.state,
     terminalReason: row.terminal_reason ?? null,
     triggerSource: row.trigger_source,

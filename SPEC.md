@@ -246,7 +246,10 @@ carries the fan-out id of the Routine Fan-out it belongs to, while a manual firi
 Routine Target directly and has no fan-out id. A one-shot `schedule.at` target becomes `expired`
 after its firing is claimed and must not fire again on daemon restart. A recurring target remains
 active and advances to its next clock event after every scheduled firing. A manual firing does not
-consume a scheduled clock event.
+consume a scheduled clock event. New firings persist their deterministic workspace and branch plan
+when claimed, before workspace preparation. Legacy firings that predate scheduled-time or
+branch-identity evidence leave those fields unknown; operator surfaces must not reconstruct
+historical evidence from the claim time or mutable live configuration.
 
 When Routine Workspace Retention reclaims a terminal firing's worktree, the firing keeps its
 historical workspace path and records `workspace_pruned_at`. State-root logs and prompt evidence are

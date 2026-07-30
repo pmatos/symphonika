@@ -56,6 +56,7 @@ import type {
 } from "./types.js";
 import { createUlid } from "./ulid.js";
 import {
+  planRoutineWorkspacePaths,
   prepareRoutineWorkspace as defaultPrepareRoutineWorkspace,
   type PreparedRoutineWorkspace,
   type PrepareRoutineWorkspaceInput
@@ -263,13 +264,23 @@ export function fireRoutineNow(
   }
 
   const firingId = input.createFiringId?.() ?? createUlid();
+  const workspacePlan = planRoutineWorkspacePaths({
+    configDir: input.configDir,
+    firingId,
+    kind: detail.kind,
+    project,
+    routineName: routine.name
+  });
   const claimed = input.runStore.claimManualRoutineFiring({
+    branchName: workspacePlan.branchName,
+    branchRef: workspacePlan.branchRef,
     firingId,
     forceOperatorDisabled,
     projectName: routine.projectName,
     providerCommand,
     providerName,
-    routineName: routine.name
+    routineName: routine.name,
+    workspacePath: workspacePlan.workspacePath
   });
   if (!claimed) {
     return {
@@ -637,7 +648,16 @@ export async function dispatchDueRoutines(
       }
 
       const firingId = createFiringId();
+      const workspacePlan = planRoutineWorkspacePaths({
+        configDir: input.configDir,
+        firingId,
+        kind: routineDetail.kind,
+        project,
+        routineName: routine.name
+      });
       const claimed = input.runStore.claimRoutineFiring({
+        branchName: workspacePlan.branchName,
+        branchRef: workspacePlan.branchRef,
         fanoutId,
         firedAt: now.toISOString(),
         firingId,
@@ -648,7 +668,8 @@ export async function dispatchDueRoutines(
         providerCommand,
         providerName,
         routineName: routine.name,
-        scheduledAt: routineDetail.nextFireAt ?? now.toISOString()
+        scheduledAt: routineDetail.nextFireAt ?? now.toISOString(),
+        workspacePath: workspacePlan.workspacePath
       });
       if (!claimed) {
         skipped.push({

@@ -1,10 +1,11 @@
+import Database from "better-sqlite3";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { buildCli } from "../src/cli.js";
-import { openRunStore } from "../src/run-store.js";
+import { databasePath, openRunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -273,38 +274,56 @@ describe("CLI routine firing commands", () => {
     expect(output.stdout).toContain("trigger:         manual");
   });
 
-  it("show-firing fills missing workspace and branch fields from the deterministic path plan", async () => {
+  it("show-firing preserves unknown legacy schedule and branch evidence", async () => {
     const stateRoot = await makeTempRoot();
-    const configPath = await writeRoutinePlanningConfig(stateRoot);
-    const store = seedRoutine(stateRoot);
-    store.createRoutineFiring({
-      id: "queued-plan",
-      projectName: "alpha",
-      providerCommand: "codex fake",
-      providerName: "codex",
-      routineName: "dependency-update"
-    });
-    store.close();
+    const legacy = new Database(databasePath(stateRoot));
+    try {
+      legacy.exec(`
+        create table routine_firings (
+          id text primary key,
+          project_name text not null,
+          routine_name text not null,
+          state text not null,
+          provider_name text not null,
+          provider_command text not null,
+          workspace_path text,
+          prompt_path text,
+          raw_log_path text,
+          normalized_log_path text,
+          terminal_reason text,
+          trigger_source text not null default 'scheduled',
+          cancel_requested integer not null default 0,
+          cancel_reason text,
+          created_at text not null,
+          updated_at text not null
+        );
+        insert into routine_firings (
+          id, project_name, routine_name, state, provider_name,
+          provider_command, created_at, updated_at
+        ) values (
+          'legacy-fire', 'alpha', 'dependency-update', 'succeeded', 'codex',
+          'codex fake', '2026-07-30T08:05:00.000Z',
+          '2026-07-30T08:10:00.000Z'
+        );
+      `);
+    } finally {
+      legacy.close();
+    }
 
     const { output, program } = captureProgram(stateRoot);
     await program.parseAsync([
       "node",
       "symphonika",
       "show-firing",
-      "queued-plan",
+      "legacy-fire",
       "--config",
-      configPath
+      path.join(stateRoot, "symphonika.yml")
     ]);
 
-    expect(output.stdout).toContain(
-      `workspace:       ${path.join(stateRoot, "workspaces", "alpha", "routines", "dependency-update", "queued-plan")}`
-    );
-    expect(output.stdout).toContain(
-      "branch:          sym/alpha/routine/dependency-update/queued-pla"
-    );
-    expect(output.stdout).toContain(
-      "branch ref:      refs/heads/sym/alpha/routine/dependency-update/queued-pla"
-    );
+    expect(output.stdout).toContain("scheduled:       -");
+    expect(output.stdout).toContain("workspace:       <not yet recorded>");
+    expect(output.stdout).toContain("branch:          <not yet recorded>");
+    expect(output.stdout).toContain("branch ref:      <not yet recorded>");
   });
 
   it("firings lists a routine's newest history with a bounded default", async () => {
@@ -423,67 +442,3 @@ describe("CLI routine firing commands", () => {
     }
   );
 });
-
-async function writeRoutinePlanningConfig(stateRoot: string): Promise<string> {
-  const configPath = path.join(stateRoot, "symphonika.yml");
-  await writeFile(
-    path.join(stateRoot, "WORKFLOW.md"),
-    "Work on {{issue.title}}.\n",
-    "utf8"
-  );
-  await writeFile(
-    path.join(stateRoot, "dependency-update.md"),
-    [
-      "---",
-      "name: dependency-update",
-      "schedule:",
-      '  cron: "0 8 * * *"',
-      "  tz: Etc/UTC",
-      "kind: git",
-      "---",
-      "Update dependencies.",
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-  await writeFile(
-    configPath,
-    [
-      "state:",
-      `  root: ${stateRoot}`,
-      "providers:",
-      "  codex:",
-      '    command: "codex app-server"',
-      "  claude:",
-      '    command: "claude -p"',
-      "projects:",
-      "  - name: alpha",
-      "    tracker:",
-      "      kind: github",
-      "      owner: pmatos",
-      "      repo: symphonika",
-      '      token: "$GITHUB_TOKEN"',
-      "    issue_filters:",
-      '      states: ["open"]',
-      '      labels_all: ["agent-ready"]',
-      '      labels_none: ["blocked"]',
-      "    priority:",
-      "      labels: {}",
-      "      default: 99",
-      "    workspace:",
-      "      root: ./workspaces/alpha",
-      "      git:",
-      "        remote: git@github.com:pmatos/symphonika.git",
-      "        base_branch: main",
-      "    agent:",
-      "      provider: codex",
-      "    workflow: ./WORKFLOW.md",
-      "routines:",
-      "  - project: alpha",
-      "    path: ./dependency-update.md",
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-  return configPath;
-}

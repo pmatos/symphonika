@@ -28,7 +28,6 @@ import { routineEvidencePaths } from "./routines/evidence.js";
 import { formatRoutineOutcomeLine } from "./routines/outcome.js";
 import type { RoutineKind, RoutineStatus } from "./routines/types.js";
 import { pruneRoutineWorkspaces } from "./routines/workspace-retention.js";
-import { planRoutineWorkspacePaths } from "./routines/workspace.js";
 import {
   resolveWatchdogConfig,
   RuntimeConfigReloader,
@@ -39,7 +38,6 @@ import type {
   ListRunsFilter,
   OpenRunStoreOptions,
   ProjectState,
-  RoutineFiringStatus,
   RunDetail,
   RunArtifactDescriptor,
   RunState,
@@ -1245,7 +1243,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
                 firing.routineName,
                 firing.state,
                 firing.provider,
-                firing.scheduledAt,
+                firing.scheduledAt ?? "-",
                 startedAt ?? "-",
                 endedAt ?? "-",
                 formatFiringDuration(startedAt, endedAt, firing.state)
@@ -1413,14 +1411,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             program.error(`routine firing ${id} not found`, { exitCode: 1 });
             return;
           }
-          const displayDetail = await fillMissingRoutineFiringDisplayPaths(
-            detail,
-            store,
-            {
-              configDir: state.configDir,
-              configPath: state.configPath
-            }
-          );
+          const displayDetail = detail;
           const transitions = store.listRoutineFiringTransitions(id);
           const startedAt = transitions.find(
             (transition) => transition.state === "running"
@@ -1438,7 +1429,11 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           writeFiringField(program, "state", displayDetail.state);
           writeFiringField(program, "provider", displayDetail.provider);
           writeFiringField(program, "trigger", displayDetail.triggerSource);
-          writeFiringField(program, "scheduled", displayDetail.scheduledAt);
+          writeFiringField(
+            program,
+            "scheduled",
+            displayDetail.scheduledAt ?? "-"
+          );
           writeFiringField(program, "started", startedAt ?? "-");
           writeFiringField(program, "ended", endedAt ?? "-");
           writeFiringField(
@@ -2561,59 +2556,6 @@ async function fillMissingRunDisplayPaths(
         ? plan.workspacePath
         : detail.workspacePath
   };
-}
-
-async function fillMissingRoutineFiringDisplayPaths(
-  detail: RoutineFiringStatus,
-  store: RunStore,
-  input: { configDir: string; configPath: string }
-): Promise<RoutineFiringStatus> {
-  if (
-    detail.branchName.length > 0 &&
-    detail.branchRef.length > 0 &&
-    detail.workspacePath.length > 0
-  ) {
-    return detail;
-  }
-
-  try {
-    const reloader = new RuntimeConfigReloader({
-      configPath: input.configPath
-    });
-    const snapshot = await reloader.reload();
-    const project = snapshot?.projects.find(
-      (entry) => entry.name === detail.projectName
-    );
-    const routine = store
-      .listRoutines({
-        includeInactive: true,
-        project: detail.projectName
-      })
-      .find((entry) => entry.name === detail.routineName);
-    if (project === undefined || routine === undefined) {
-      return detail;
-    }
-    const plan = planRoutineWorkspacePaths({
-      configDir: input.configDir,
-      firingId: detail.id,
-      kind: routine.kind,
-      project,
-      routineName: detail.routineName
-    });
-    return {
-      ...detail,
-      branchName:
-        detail.branchName.length === 0 ? plan.branchName : detail.branchName,
-      branchRef:
-        detail.branchRef.length === 0 ? plan.branchRef : detail.branchRef,
-      workspacePath:
-        detail.workspacePath.length === 0
-          ? plan.workspacePath
-          : detail.workspacePath
-    };
-  } catch {
-    return detail;
-  }
 }
 
 async function planRunWorkspacePaths(

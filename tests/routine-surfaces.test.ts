@@ -264,6 +264,7 @@ describe("routine operator surfaces", () => {
       const body = (await response.json()) as {
         firings: Array<{ projectName: string }>;
         targets: Array<{ projectName: string }>;
+        routine?: unknown;
       };
 
       expect(response.status).toBe(200);
@@ -275,6 +276,8 @@ describe("routine operator surfaces", () => {
         "alpha",
         "beta"
       ]);
+      // No singular `routine` field: it would misrepresent one target's state as the whole Routine's.
+      expect(body.routine).toBeUndefined();
     } finally {
       store.close();
     }

@@ -1942,7 +1942,40 @@ export class RunController {
       };
     }
 
-    const provider = this.agentProviders[project.agent.provider];
+    const providersConfig = await this.providersLoader();
+
+    // This dispatch starts a fresh continuation at expandedWorkflow.initial
+    // (inheritParentState: false below), so it must honor action.provider on
+    // that raw-FSM initial state the same way dispatchOneFresh and
+    // executeStateAdvance do for their own initial/target states — otherwise
+    // a review-followup on an initial state that declares a non-default
+    // provider would silently launch the wrong one. See issue #358.
+    let initialAction: WorkflowAction | undefined;
+    try {
+      const loaded = await this.loadWorkflow(project.workflow);
+      if (
+        loaded.errors.length === 0 &&
+        loaded.expandedWorkflow.source.kind === "raw_fsm"
+      ) {
+        const initialState = findWorkflowState(
+          loaded.expandedWorkflow,
+          loaded.expandedWorkflow.initial
+        );
+        if (initialState?.action !== undefined) {
+          initialAction = initialState.action;
+        }
+      }
+    } catch {
+      // Workflow load failure falls back to the project default; the same
+      // error surfaces from runAttemptLifecycle's reload during the attempt.
+    }
+
+    const providerName =
+      initialAction?.kind === "agent" && initialAction.provider !== undefined
+        ? initialAction.provider
+        : project.agent.provider;
+
+    const provider = this.agentProviders[providerName];
     if (provider === undefined) {
       return {
         dispatched: false,
@@ -1950,12 +1983,13 @@ export class RunController {
       };
     }
 
-    const providersConfig = await this.providersLoader();
-    const providerCommand = providersConfig[project.agent.provider]?.command;
+    const providerCommand = (
+      providersConfig as Partial<RunControllerProvidersConfig>
+    )[providerName]?.command;
     if (providerCommand === undefined || providerCommand.trim().length === 0) {
       return {
         dispatched: false,
-        reason: `provider command is not configured: ${project.agent.provider}`
+        reason: `provider command is not configured: ${providerName}`
       };
     }
 
@@ -2002,13 +2036,18 @@ export class RunController {
       await this.runFreshLifecycle({
         attemptNumber: 1,
         extraInstructions: renderReviewFollowupInstructions(input.review),
+        // The parent is whatever run is currently tracked against this PR —
+        // by construction that run is parked at a wait/merge_pr state, so its
+        // current_state_id is never a valid start state for this dispatch.
+        // Fall back to expandedWorkflow.initial instead. See issue #358.
+        inheritParentState: false,
         isContinuation: true,
         issue: refreshed,
         parentRunId: input.parentRunId,
         project,
         provider,
         providerCommand,
-        providerName: project.agent.provider,
+        providerName,
         repository,
         respectsIssueLabels: false,
         runId
@@ -2139,6 +2178,7 @@ export class RunController {
   private async runFreshLifecycle(input: {
     attemptNumber: number;
     extraInstructions?: string;
+    inheritParentState?: boolean;
     isContinuation: boolean;
     issue: IssueSnapshot;
     parentRunId: string | null;
@@ -2188,6 +2228,7 @@ export class RunController {
   }
 
   private async claimAndPersistRun(input: {
+    inheritParentState?: boolean;
     isContinuation: boolean;
     issue: IssueSnapshot;
     parentRunId: string | null;
@@ -2288,6 +2329,9 @@ export class RunController {
       if (input.isContinuation && input.parentRunId !== null) {
         this.runStore.createContinuationRun({
           ...createInput,
+          ...(input.inheritParentState === undefined
+            ? {}
+            : { inheritParentState: input.inheritParentState }),
           parentRunId: input.parentRunId
         });
       } else {

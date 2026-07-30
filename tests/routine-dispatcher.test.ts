@@ -923,8 +923,9 @@ describe("RoutineFiringDispatcher", () => {
     await createGitWorkspaceAhead({ branchName, workspacePath });
     const runStore = openRunStore({ stateRoot });
 
-    let releasePullRequests: (pullRequests: RawGitHubPullRequest[]) => void =
-      () => {};
+    let releasePullRequests: (
+      pullRequests: RawGitHubPullRequest[]
+    ) => void = () => {};
     const discoveryGate = new Promise<RawGitHubPullRequest[]>((resolve) => {
       releasePullRequests = resolve;
     });

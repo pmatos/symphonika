@@ -31,12 +31,22 @@ callers keep importing from the facade, or import directly from the submodule th
 they need? Issue #160 tracks this decision.
 
 **Decision: internal callers import directly from the owning submodule** (`workflow/types.ts`,
-`workflow/contract-loading.ts`, `workflow/fsm-expansion.ts`, `workflow/autonomous-prompt.ts`).
-`src/workflow.ts` remains in place and keeps re-exporting every public name unchanged. `symphonika`
-is `"private": true` and not currently published, so the facade is not insulating an existing
-external consumer today; it is retained as the designated surface for if/when the package is
-published, and as the anchor for the facade-integrity tests described below. Internal code no
-longer has a reason to route through it.
+`workflow/contract-loading.ts`, `workflow/fsm-expansion.ts`, `workflow/autonomous-prompt.ts`), **and
+`src/workflow.ts` is deleted.** Migrating every internal caller removed the file's only consumers:
+`symphonika` is `"private": true` and ships no `main`/`exports`/`types` field in `package.json`, so
+there was never a mechanism for an external consumer to import it either, even if the package were
+published as-is today. A facade with zero consumers — internal or external — is dead code, not a
+reserved public interface, so keeping it "for if/when the package is published" was Speculative
+Generality: designing for a need that does not exist yet. If symphonika later grows a published,
+importable surface, a facade (or a proper `exports` map) can be added at that point scoped to
+whatever that surface actually needs; recreating it then is cheap, and carrying it unused in the
+meantime is not free — every export added to a submodule has to be remembered and mirrored into the
+facade, with nothing but a handful of parity tests to catch a miss. This supersedes an earlier draft
+of this addendum, which kept the facade in place; see the git history of this file for that
+reasoning and why it didn't hold up. It also goes beyond issue #160's acceptance criterion "No public
+export disappears from `src/workflow.ts` regardless of choice" — that criterion assumed the file
+would keep existing under both options on offer; deleting it outright is a third option raised and
+approved by the maintainer directly, not a silent deviation.
 
 Two alternatives were weighed:
 
@@ -62,31 +72,36 @@ Two alternatives were weighed:
   header would; the only cost being traded away is import-site traceability, and directness wins
   that trade for internal code.
 
-**Tests keep a deliberate exception.** `tests/workflow-contract-loading.test.ts`,
-`tests/workflow-fsm-expansion.test.ts`, and `tests/workflow-types.test.ts` each import the same
-values or types from both `src/workflow.js` and the owning submodule (aliased, e.g.
-`loadWorkflowContract` vs. `loadWorkflowContractFromFacade`) and assert the two are equal — a direct
-automated guard for this ADR's requirement that no export disappears from `src/workflow.ts`.
-`tests/autonomous-prompt.test.ts` is weaker: it imports `loadExpandedWorkflow`, `persistRunEvidence`,
-and `renderAutonomousPrompt` only from `src/workflow.js` and asserts rendered prompt output is
-"stable through the workflow facade," which exercises the facade path but does not assert
-facade/submodule equality the way the other three do — the Autonomous Prompt module has no parity
-check today. All four files keep their existing facade import and are not part of the migration
-below; every other internal test file migrates to importing only from the submodule it exercises,
-same as `src/`.
+**Tests lose their facade-parity checks along with the facade.**
+`tests/workflow-contract-loading.test.ts` and `tests/workflow-fsm-expansion.test.ts` each carried one
+test importing the same values from both `src/workflow.js` and the owning submodule (aliased, e.g.
+`loadWorkflowContract` vs. `loadWorkflowContractFromFacade`) and asserting the two were equal; those
+tests are removed, since there is nothing left to compare against. `tests/workflow-types.test.ts`
+existed solely to assert the facade's re-exported types were structurally identical to the canonical
+ones in `workflow/types.ts` — deleted outright, since deleting the thing under test leaves nothing
+left to assert. `tests/autonomous-prompt.test.ts` never did the aliased-parity pattern to begin with
+(it only imported `loadExpandedWorkflow`, `persistRunEvidence`, and `renderAutonomousPrompt` through
+the facade for convenience); its import moved to the owning submodules and its one test title's
+stale "through the workflow facade" wording was corrected. Every other internal test file migrates
+to importing only from the submodule it exercises, same as `src/`.
 
-Follow-up, landed in the same change as this addendum: the internal `src/` and `tests/` callers
-previously importing via `./workflow.js` now import from their owning submodule, and `npm run
-quality` was run. `npm run lint`, `npm run typecheck`, `npm run format:check`, `npm run build`, and
-`npm test` (minus one pre-existing, environment-specific `npm link` test failure unrelated to this
-change — reproduces identically against this same commit before the rewrite) all pass:
+Follow-up, landed in the same change as this addendum: every internal `src/` and `tests/` caller
+previously importing via `./workflow.js` now imports from its owning submodule, and `src/workflow.ts`
+plus the now-pointless `tests/workflow-types.test.ts` are deleted. `npm run lint`, `npm run
+typecheck`, `npm run format:check`, `npm run build`, and `npm test` (minus one pre-existing,
+environment-specific `npm link` test failure unrelated to this change — reproduces identically
+against this same commit before the rewrite) all pass:
 
 - `src/`: `cli.ts`, `doctor.ts`, `http/pages.ts`, `lifecycle/pr-signal-projection.ts`,
   `lifecycle/run-controller.ts`, `lifecycle/state-machine-dispatch.ts`, `reload.ts`, `run-store.ts`
 - `tests/`: `daemon-dispatch.test.ts`, `property-invariants.test.ts`,
-  `routine-prompt-renderer.test.ts`, `state-machine-dispatch.test.ts`
+  `routine-prompt-renderer.test.ts`, `state-machine-dispatch.test.ts`,
+  `workflow-contract-loading.test.ts`, `workflow-fsm-expansion.test.ts`,
+  `autonomous-prompt.test.ts`
+- Removed: `src/workflow.ts`, `tests/workflow-types.test.ts`
 
-No export disappears from `src/workflow.ts` (the file has no diff hunk in this change).
+Every export previously available from `src/workflow.ts` is still available from its owning
+submodule; nothing was deleted from the public interface, only relocated.
 
 This ADR's `Status` above is still `Proposed`; whether landing this addendum also promotes it to
 `Accepted` is a separate call left to the maintainer.

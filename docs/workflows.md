@@ -214,7 +214,7 @@ Three action kinds have complete runtime behavior.
 
 ### `agent`
 
-An agent state launches Codex or Claude in the prepared issue workspace:
+An agent state launches Codex, Claude, or Oh My Pi (OMP) in the prepared issue workspace:
 
 ```yaml
 action:
@@ -227,7 +227,7 @@ action:
 | --- | --- | --- |
 | `kind: agent` | yes | Launch an Agent Provider |
 | `prompt` | yes | Markdown prompt path relative to the raw-FSM file |
-| `provider` | no | `codex` or `claude`; defaults to the Project's `agent.provider` |
+| `provider` | no | `codex`, `claude`, or `omp`; defaults to the Project's `agent.provider` |
 
 The prompt file must exist when `doctor` or daemon reload validates Project readiness. It uses the
 same strict variables and autonomy preamble as a Markdown Workflow Contract.
@@ -267,16 +267,25 @@ action:
 `method` is optional and accepts `merge`, `rebase`, or `squash`. When omitted, the state inherits
 `pull_requests.merge.method`.
 
-The state only acts on a PR associated with the Symphonika issue branch. It remains parked when:
+The state only acts on a PR associated with the Symphonika issue branch. On each re-evaluation,
+Symphonika refreshes the PR signals. If merge policy is enabled and the PR satisfies its checks,
+review, and mergeability gates, Symphonika pins the merge to the observed head SHA and attempts the
+merge.
+
+A deferred merge does not skip transition evaluation. When merging is disabled or the PR is not
+ready under policy, the state still evaluates transitions against the refreshed signals. A matching
+transition such as `checks: failure` can therefore advance to a repair or blocked state without a
+merge attempt.
+
+The state remains parked when:
 
 - no tracked PR exists;
-- `pull_requests.merge.enabled` is false;
-- required checks or review decisions are not satisfied;
-- GitHub has not resolved mergeability; or
-- the merge API call fails.
+- PR state cannot be fetched;
+- the tracker does not expose the merge API or a merge attempt fails; or
+- no transition matches the refreshed signals.
 
-When policy is satisfied, Symphonika pins the merge to the observed head SHA, attempts the merge,
-projects the post-merge PR signals, and evaluates transitions.
+After a successful merge, Symphonika projects the post-merge PR signals before evaluating
+transitions.
 
 ## 6. Predicates and signal availability
 
@@ -426,7 +435,7 @@ underscores.
 | --- | --- |
 | `boolean` | YAML boolean |
 | `number` | finite YAML number |
-| `provider` | `codex` or `claude` |
+| `provider` | `codex`, `claude`, or `omp` |
 | `label` | non-empty string |
 | `path` | non-empty string without a NUL character |
 | `string` | non-empty string |
@@ -649,7 +658,7 @@ Common validation failures:
 - Raw FSMs with `agent`, `wait`, and `merge_pr`
 - Ordered strict-equality transitions
 - Supported agent-result and PR predicates from the table above
-- Per-state Codex/Claude routing
+- Per-state Codex/Claude/OMP routing
 - Local templates and all six scalar input types
 - The four built-in templates
 - Poll-driven wait and policy-controlled merge loops

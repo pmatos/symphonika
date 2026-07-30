@@ -62,15 +62,33 @@ page:
 - `--user` is required for this to run unprivileged: the daemon runs as an ordinary user
   (`systemd-run --user`, `XDG_RUNTIME_DIR`-scoped), and a bare `unshare --pid` needs `CAP_SYS_ADMIN`
   in the caller's user namespace. `--user` creates a fresh user namespace in which the calling,
-  unprivileged UID holds full capabilities, which is what makes `--pid`/`--mount-proc` possible
-  without root or a setuid helper.
+  unprivileged UID holds full capabilities *scoped to that namespace* — enough to create the nested
+  PID/mount namespaces above without root or a setuid helper, but not real privilege over host
+  resources outside it (see "Host privilege escalation is not available," below).
 - `--map-current-user` (not `--map-root-user`) maps the daemon's real UID to itself inside the new
   user namespace, so the provider still runs as its normal UID rather than appearing as UID 0. Some
   tools change behavior when they believe they are root (package managers refusing `--unsafe-perm`
   workarounds, build tools dropping privilege-sensitive steps); mapping identity rather than
   granting apparent root avoids that class of surprise. `--map-current-user` requires util-linux
   ≥ 2.38; hosts on an older util-linux fall back to the status-quo (unwrapped) path via the same
-  probe-and-degrade mechanism described below, rather than falling back to `--map-root-user`.
+  probe-and-degrade mechanism described below, rather than falling back to `--map-root-user`. Note
+  that this choice does not affect the boundary described next — `--map-root-user` would not have
+  preserved real host privilege either, since the boundary comes from `--user` itself.
+
+### Host privilege escalation is not available inside the namespace
+
+`--user`'s namespaced capabilities do not extend to the host: a provider (or a build step it shells
+out to) that relies on a setuid helper such as `sudo` to perform a genuinely privileged host
+operation — installing a system package, writing outside the workspace as root, anything that needs
+real host `root` capability — cannot do so once wrapped. Per `user_namespaces(7)`, capabilities
+granted inside a user namespace are confined to resources that namespace governs, not the host's.
+This is not something the Decision's availability probe catches: the probe only proves namespace
+creation succeeds, not that a specific provider's runtime dependencies still function once wrapped,
+so a workflow that depends on real `sudo` escalation would launch successfully isolated and then
+fail mid-Run rather than triggering the graceful-degrade fallback. Detecting or working around this
+for specific workflows is left to the implementation slice (#342); this ADR records the boundary
+rather than resolving it, since Symphonika's full-permission provider execution (ADR 0015) does not
+itself require host-root, but individual project build steps might.
 
 ### Signal delivery to namespace PID 1
 
@@ -212,6 +230,10 @@ In scope: the PID/process visibility isolation decision described above, and its
   visibility and Interaction with ADR 0015, above.
 - Hosts without unprivileged user namespace support silently keep today's shared-PID-namespace
   behavior, surfaced only as a `doctor` warning, not a startup failure.
+- A provider workflow that depends on real host-privileged escalation (e.g. `sudo` performing a
+  genuinely privileged host operation) is not available once wrapped — see "Host privilege
+  escalation is not available inside the namespace," above. The availability probe does not detect
+  this; such a workflow would launch isolated and fail mid-Run rather than falling back.
 - This ADR does not change `src/lifecycle/process-scope.ts` or any other code; implementation is
   tracked in follow-up issue #342 under the parent umbrella (#197 / #199).
 

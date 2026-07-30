@@ -140,12 +140,11 @@ intermediate lifecycle rows.
 mapping. `symphonika routines` renders the latest firing outcome in a compact
 one-line form including action, title, URL, and an `(unverified)` marker.
 
-Slice 3's SMTP sink is being implemented independently. This slice provides a
-shared one-line Routine Outcome formatter so the notification path can consume
-the same rendering without duplicating the marker rules. Slice 3 opened PR #347
-from a sibling issue branch after this design was approved; integrating the
-formatter at that call site requires the branches to share a base. This branch
-does not copy the independently owned notification subsystem.
+Slice 3's SMTP sink was implemented independently in PR #347. This slice stacks
+that prerequisite commit and integrates the shared one-line Routine Outcome
+formatter into its plain-text and escaped HTML bodies. The renderer therefore
+includes action, title, URL, and the unverified marker without duplicating
+reconciliation policy.
 
 ## Test seams
 

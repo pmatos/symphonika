@@ -18,6 +18,7 @@ import type {
   RoutineCatchUpPolicy,
   RoutineDisabledReason,
   RoutineFiringState,
+  RoutineNotificationState,
   RoutineKind,
   RoutinePullRequestStatus,
   RoutineSkipReason,
@@ -148,6 +149,8 @@ export type RoutineFiringStatus = {
   cancelRequested: boolean;
   createdAt: string;
   id: string;
+  notificationError?: string | null;
+  notificationState?: RoutineNotificationState;
   outcome: RoutineOutcome | null;
   projectName: string;
   provider: AgentProviderName;
@@ -476,6 +479,7 @@ type RoutineRow = {
   last_skip_reason: RoutineSkipReason | null;
   name: string;
   next_fire_at: string | null;
+  notify_enabled: number;
   project_name: string;
   provider_name: AgentProviderName | null;
   schedule_at: string;
@@ -491,6 +495,8 @@ type RoutineFiringRow = {
   cancel_requested: number;
   created_at: string;
   id: string;
+  notification_error: string | null;
+  notification_state: RoutineNotificationState | null;
   outcome_action: RoutineOutcomeAction | null;
   outcome_source: RoutineOutcomeSource | null;
   outcome_status: RoutineOutcomeStatus | null;
@@ -1235,11 +1241,11 @@ export class RunStore {
     const upsert = this.database.prepare(
       [
         "insert into routines (",
-        "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, catch_up, created_at, updated_at",
+        "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, catch_up, notify_enabled, created_at, updated_at",
         ") values (",
         "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body,",
         "case when @disabled = 1 then 'disabled' else 'active' end,",
-        "@disabled_reason, @allow_overlap, @catch_up, @created_at, @updated_at",
+        "@disabled_reason, @allow_overlap, @catch_up, @notify_enabled, @created_at, @updated_at",
         ")",
         "on conflict(project_name, name) do update set",
         "source_path = excluded.source_path,",
@@ -1247,6 +1253,7 @@ export class RunStore {
         "provider_name = excluded.provider_name,",
         "allow_overlap = excluded.allow_overlap,",
         "catch_up = excluded.catch_up,",
+        "notify_enabled = excluded.notify_enabled,",
         "schedule_at = excluded.schedule_at,",
         "schedule_cron = excluded.schedule_cron,",
         "schedule_tz = excluded.schedule_tz,",
@@ -1435,6 +1442,7 @@ export class RunStore {
             disabled_reason: routine.disabled === true ? "operator" : null,
             kind: routine.kind,
             name: routine.name,
+            notify_enabled: routine.notify === false ? 0 : 1,
             project_name: routine.projectName,
             prompt_body: routine.prompt,
             provider_name: routine.provider,
@@ -1617,7 +1625,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at",
+          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, notify_enabled, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at",
           "from routines",
           where,
           "order by project_name asc, name asc"
@@ -1678,7 +1686,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at, prompt_body",
+          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, notify_enabled, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at, prompt_body",
           "from routines where project_name = ? and name = ? and state != 'inactive'"
         ].join(" ")
       )
@@ -1950,7 +1958,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings where id = ?"
         ].join(" ")
       )
@@ -1962,6 +1970,18 @@ export class RunStore {
       ...mapRoutineFiringRow(row),
       pullRequests: this.listRoutinePullRequests({ firingId: row.id })
     };
+  }
+
+  recordRoutineFiringNotification(input: {
+    error?: string | null;
+    id: string;
+    state: RoutineNotificationState;
+  }): void {
+    this.database
+      .prepare(
+        "update routine_firings set notification_state = ?, notification_error = ?, updated_at = ? where id = ?"
+      )
+      .run(input.state, input.error ?? null, timestamp(), input.id);
   }
 
   markRoutineFiringCancelRequested(
@@ -2022,7 +2042,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           where,
           "order by created_at desc, id desc"
@@ -3170,6 +3190,7 @@ export class RunStore {
         state text not null,
         allow_overlap integer not null default 0,
         catch_up text not null default 'skip',
+        notify_enabled integer not null default 1,
         last_fired_at text,
         last_attempted_at text,
         last_skip_reason text,
@@ -3209,6 +3230,8 @@ export class RunStore {
         outcome_summary text,
         outcome_verified integer,
         outcome_source text,
+        notification_state text,
+        notification_error text,
         cancel_requested integer not null default 0,
         cancel_reason text,
         created_at text not null,
@@ -3268,6 +3291,7 @@ export class RunStore {
       ["routines", "next_fire_at", "text"],
       ["routines", "allow_overlap", "integer not null default 0"],
       ["routines", "catch_up", "text not null default 'skip'"],
+      ["routines", "notify_enabled", "integer not null default 1"],
       ["routines", "last_attempted_at", "text"],
       ["routines", "last_skip_reason", "text"],
       ["routines", "last_skip_at", "text"],
@@ -3283,7 +3307,9 @@ export class RunStore {
       ["routine_firings", "outcome_verified", "integer"],
       ["routine_firings", "outcome_source", "text"],
       ["routine_firings", "cancel_requested", "integer not null default 0"],
-      ["routine_firings", "cancel_reason", "text"]
+      ["routine_firings", "cancel_reason", "text"],
+      ["routine_firings", "notification_state", "text"],
+      ["routine_firings", "notification_error", "text"]
     ];
 
     const apply = this.database.transaction(() => {
@@ -3734,6 +3760,7 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
     lastSkipReason: row.last_skip_reason ?? null,
     name: row.name,
     nextFireAt: row.state === "active" ? row.next_fire_at : null,
+    ...(row.notify_enabled === 0 ? { notify: false } : {}),
     projectName: row.project_name,
     provider: row.provider_name ?? null,
     pullRequestNumbers: [],
@@ -3756,6 +3783,12 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
     cancelRequested: row.cancel_requested === 1,
     createdAt: row.created_at,
     id: row.id,
+    ...(row.notification_state === null
+      ? {}
+      : {
+          notificationError: row.notification_error ?? null,
+          notificationState: row.notification_state
+        }),
     outcome:
       row.outcome_status === null ||
       row.outcome_action === null ||

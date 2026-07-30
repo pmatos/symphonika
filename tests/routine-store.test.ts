@@ -22,6 +22,54 @@ afterEach(async () => {
 });
 
 describe("RunStore routines", () => {
+  it("records notification failure evidence without changing a successful Routine Firing", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          notify: false,
+          prompt: "Report.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      expect(
+        store.getRoutine({ name: "daily-report", projectName: "alpha" })
+      ).toMatchObject({ notify: false });
+      store.createRoutineFiring({
+        id: "fire-notification-failed",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.completeRoutineFiring({
+        id: "fire-notification-failed",
+        state: "succeeded"
+      });
+
+      store.recordRoutineFiringNotification({
+        error: "SMTP send failed: relay unavailable",
+        id: "fire-notification-failed",
+        state: "failed"
+      });
+
+      expect(store.getRoutineFiring("fire-notification-failed")).toMatchObject({
+        notificationError: "SMTP send failed: relay unavailable",
+        notificationState: "failed",
+        state: "succeeded",
+        terminalReason: null
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("records every pull request discovered for a successful firing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

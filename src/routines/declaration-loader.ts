@@ -133,6 +133,14 @@ export function parseRoutineDeclaration(
     errors.push(`routine at ${routinePath} disabled must be a boolean`);
   }
 
+  const notifyValue = frontMatter.notify;
+  if (
+    Object.hasOwn(frontMatter, "notify") &&
+    typeof notifyValue !== "boolean"
+  ) {
+    errors.push(`routine at ${routinePath} notify must be a boolean`);
+  }
+
   if (prompt.trim().length === 0) {
     errors.push(`routine at ${routinePath} prompt body must not be empty`);
   }
@@ -155,6 +163,7 @@ export function parseRoutineDeclaration(
       disabled: typeof disabledValue === "boolean" ? disabledValue : false,
       kind: kind as RoutineKind,
       name: name!,
+      ...(typeof notifyValue === "boolean" ? { notify: notifyValue } : {}),
       prompt,
       provider,
       schedule: parsedSchedule!,

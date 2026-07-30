@@ -236,6 +236,12 @@ A clock event skipped for catch-up policy, overlap, or a concurrency cap is not 
 no `routine_firings` row is created. The Routine instead records `last_attempted_at`,
 `last_skip_reason`, and `last_skip_at`, together with rolling 24-hour counts for each skip reason.
 
+### 4.14 Notification Sink
+
+A Notification Sink is a transport-neutral delivery boundary for a rendered subject, plain-text
+body, and HTML alternative. SMTP is the first sink. Routine Firing policy and rendering remain
+outside the transport so later issue-Run and daemon-health notification sources can reuse it.
+
 ## 5. Config Files
 
 ### 5.1 Service Config
@@ -492,6 +498,37 @@ boolean. Their omitted defaults are missed-event skip and `false`, respectively.
 present, must be a boolean; omitted defaults to `false`. `disabled: true` stops future scheduling
 for that routine on the next reload without affecting an in-flight firing; see §8.4.
 
+### 5.5 Email Notifications
+
+The optional service-level `email:` block configures SMTP delivery for terminal Routine Firings:
+
+```yaml
+email:
+  from: "symphonika@example.com"
+  to: "operator@example.com"
+  on: changes
+  smtp_host: "smtp.postmarkapp.com"
+  smtp_security: starttls
+  smtp_port: 587
+  smtp_username: "<postmark-server-token>"
+  smtp_password_env: "SYMPHONIKA_SMTP_PASSWORD"
+```
+
+`from`, `to`, and `smtp_host` are required when the block is present. `on` is `always`, `changes`,
+or `failures` and defaults to `always`. `smtp_security` is `starttls`, `ssl`, or `none` and defaults
+to `starttls`; an omitted `smtp_port` defaults respectively to 587, 465, or 25.
+`smtp_password_env` names an environment variable and defaults to
+`SYMPHONIKA_SMTP_PASSWORD`.
+
+An SMTP username over `smtp_security: none` is invalid unless the host is loopback (`localhost`,
+`127.0.0.1`, or `::1`). Project-level email overrides are not supported. Routine front matter may
+set `notify: false` to opt out entirely; omission defaults to enabled.
+
+For terminal Routine Firings, `always` sends every outcome, including cancellation. `changes` sends
+non-empty `kind: report` provider message output and succeeded `kind: git` firings (whose success
+already proves commits ahead of base). `failures` sends only `state = failed`, not cancellation.
+See ADR 0067.
+
 ## 6. Credentials
 
 GitHub credentials are environment-backed.
@@ -501,6 +538,11 @@ GitHub credentials are environment-backed.
 - Literal tokens should not be stored in YAML
 - Tokens must not be stored in SQLite
 - Token-like values must be redacted from logs
+
+SMTP passwords are also environment-backed. Service Config stores only `email.smtp_password_env`,
+never a literal password. The named variable is resolved only for SMTP authentication and its value
+must not be written to SQLite, logs, rendered notification content, or prompt evidence. SMTP
+transport errors are redacted before logging or durable failure recording.
 
 Codex, Claude, and OMP use their native local authentication.
 
@@ -548,6 +590,7 @@ SQLite stores durable orchestration state:
 - routines
 - routine firings
 - canonical Routine Outcomes for terminal firings
+- Routine Notification Delivery state and sanitized delivery error
 - exact-timestamp Routine skip counters used to compute rolling 24-hour per-reason totals
 
 The run store is not a replacement for GitHub as the canonical tracker. It is durable runtime
@@ -735,6 +778,14 @@ Under ADR 0025 a verified commit-only outcome remains successful because its wor
 preserved. Such an outcome is a retention signal: future workspace garbage collection must retain
 the workspace, first establish that the commit was published to durable remote state, or require an
 explicit destructive operator override. It must not silently delete the only copy.
+
+After a Routine Firing reaches a terminal state, Symphonika evaluates its Routine notification
+policy. Delivery occurs after `kind: git` PR discovery, uses both plain text and an escaped HTML
+alternative, and includes the canonical outcome as one ptt-style line with action, title, URL, and
+an unverified marker when applicable. Delivery gets two total attempts. Delivery failure never
+changes the firing state: `notification_state = failed` and the final sanitized
+`notification_error` remain durable. Policy or `notify: false` suppression records
+`notification_state = skipped`; success records `sent`.
 
 On daemon startup, a recurring Routine with `catch_up: fire_once_if_missed` preserves a due
 `next_fire_at` and fires at most once even when the outage spans several clock events. The claim
@@ -1301,6 +1352,7 @@ Bootstrap CLI commands:
 - `symphonika init [--yes] [--force]`
 - `symphonika add-routine <name> --project <project> (--schedule <expr> | --at <iso8601>) --kind <git|report> [--provider <codex|claude|omp>] [--tz <iana>] [--config <path>]`
 - `symphonika doctor [--config <path>]`
+- `symphonika test-email [--config <path>]`
 - `symphonika init-project [--config <path>] [--yes] [--force]`
 - `symphonika daemon [--config <path>] [--port <port>]`
 - `symphonika service install [--config <path>] [--force] [--print] [--no-reload]`
@@ -1330,6 +1382,7 @@ config path and points the operator to `symphonika init`.
   routines targeting a tracker-less Routine Host
 - database path
 - workspace root
+- SMTP password environment-variable availability when authenticated email is configured
 
 `init` writes only the user Service Config and never inspects or mutates a repository or GitHub.
 
@@ -1372,6 +1425,10 @@ rendering includes action, title, URL, and an `(unverified)` marker when applica
 Routines are hidden by default; `--include-inactive` includes them.
 
 `clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
+
+`test-email` renders a representative fake Routine Firing and sends it through the configured
+renderer, retry policy, and SMTP sink. It forces delivery regardless of `email.on`, reports the
+configured recipient on success, and reports the final sanitized SMTP failure on error.
 
 ## 14. Local Web UI and API
 
@@ -1418,9 +1475,10 @@ The HTTP API exposes `GET /api/routines` with the same Routine status shape as t
 dashboard, including `latestOutcome`, latest-attempt/skip fields, and per-reason `skipCounts24h`.
 Inactive Routines are hidden by default; `?include_inactive=true` includes them, and the
 server-rendered dashboard accepts the same query parameter. `GET /api/routines/:id/firings` returns
-firing history with each canonical `outcome` and linked PRs for the named Routine; callers use
-`?project=<name>` to disambiguate the same Routine name across Projects and
-`?include_inactive=true` to resolve an inactive Routine and reach its durable firing history.
+firing history with each canonical `outcome`, linked PRs, and `notificationState` /
+`notificationError` delivery evidence for the named Routine; callers use `?project=<name>` to
+disambiguate the same Routine name across Projects and `?include_inactive=true` to resolve an
+inactive Routine and reach its durable firing history.
 
 `GET /api/runs/:id` exposes the latest sample as a camel-cased top-level `watchdog` object, including
 the effective `graceMs` and server-computed `graceRemainingMs`. `GET /api/status` adds a `watchdog`

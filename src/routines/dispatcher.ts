@@ -23,6 +23,9 @@ import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig
 } from "../lifecycle/run-controller.js";
+import type { EmailNotificationConfig } from "../notifications/config.js";
+import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
+import type { NotificationSink } from "../notifications/types.js";
 import type { RunStore } from "../run-store.js";
 import {
   evaluateRoutineSchedule,
@@ -61,6 +64,10 @@ export type DispatchDueRoutinesInput = {
   globalConcurrency: { maxInFlight: number | undefined };
   githubIssuesApi?: GitHubIssuesApi;
   logger?: Logger;
+  notification?: {
+    config: EmailNotificationConfig;
+    sink: NotificationSink;
+  };
   now?: Date;
   prepareRoutineWorkspace?: (
     input: PrepareRoutineWorkspaceInput
@@ -375,6 +382,7 @@ export async function dispatchDueRoutines(
           env: input.env ?? process.env,
           githubIssuesApi: input.githubIssuesApi,
           logger: input.logger,
+          notification: input.notification,
           prepareRoutineWorkspace,
           project,
           provider,
@@ -402,6 +410,12 @@ async function runRoutineFiring(input: {
   firingId: string;
   githubIssuesApi: GitHubIssuesApi | undefined;
   logger: Logger | undefined;
+  notification:
+    | {
+        config: EmailNotificationConfig;
+        sink: NotificationSink;
+      }
+    | undefined;
   prepareRoutineWorkspace: (
     input: PrepareRoutineWorkspaceInput
   ) => Promise<PreparedRoutineWorkspace>;
@@ -612,6 +626,114 @@ async function runRoutineFiring(input: {
         : { workspacePath: prepared.workspacePath })
     });
   }
+  await recordRoutineFiringNotification(input, events, prepared);
+}
+
+async function recordRoutineFiringNotification(
+  input: {
+    env: NodeJS.ProcessEnv;
+    firingId: string;
+    logger: Logger | undefined;
+    notification:
+      | {
+          config: EmailNotificationConfig;
+          sink: NotificationSink;
+        }
+      | undefined;
+    project: RunControllerProjectConfig;
+    routine: RoutineStatus & { prompt: string };
+    runStore: RunStore;
+  },
+  events: NormalizedProviderEvent[],
+  prepared: PreparedRoutineWorkspace | undefined
+): Promise<void> {
+  if (input.notification === undefined) {
+    return;
+  }
+  const firing = input.runStore.getRoutineFiring(input.firingId);
+  if (
+    firing === undefined ||
+    (firing.state !== "succeeded" &&
+      firing.state !== "failed" &&
+      firing.state !== "cancelled")
+  ) {
+    return;
+  }
+  const outcome = await deliverRoutineFiringNotification({
+    config: input.notification.config,
+    firing: {
+      branchName:
+        prepared?.branchName ?? input.project.workspace.git.base_branch,
+      durationMs: Math.max(
+        0,
+        Date.parse(firing.updatedAt) - Date.parse(firing.createdAt)
+      ),
+      firingId: firing.id,
+      kind: input.routine.kind,
+      outcome: firing.outcome,
+      projectName: input.project.name,
+      pullRequests: firing.pullRequests,
+      reportOutput: reportOutputFromEvents(events),
+      routineName: input.routine.name,
+      state: firing.state,
+      terminalReason: firing.terminalReason,
+      title: `${input.project.name}: ${input.routine.name}`
+    },
+    notifyEnabled: input.routine.notify !== false,
+    sink: input.notification.sink
+  });
+  if (outcome.state === "failed") {
+    const error = redactNotificationError(
+      outcome.error,
+      input.notification.config,
+      input.env
+    );
+    input.runStore.recordRoutineFiringNotification({
+      error,
+      id: input.firingId,
+      state: "failed"
+    });
+    input.logger?.warn(
+      {
+        error,
+        firingId: input.firingId,
+        project: input.project.name,
+        routine: input.routine.name
+      },
+      "symphonika routine notification delivery failed"
+    );
+    return;
+  }
+  input.runStore.recordRoutineFiringNotification({
+    id: input.firingId,
+    state: outcome.state
+  });
+}
+
+function reportOutputFromEvents(events: NormalizedProviderEvent[]): string {
+  return events
+    .filter(
+      (event) =>
+        event.type === "message" &&
+        event.messageKind !== "thinking" &&
+        typeof event.message === "string"
+    )
+    .map((event) => event.message as string)
+    .join("")
+    .trim();
+}
+
+function redactNotificationError(
+  message: string,
+  config: EmailNotificationConfig,
+  env: NodeJS.ProcessEnv
+): string {
+  const secret =
+    config.smtpUsername === undefined ? undefined : env[config.smtpPasswordEnv];
+  if (secret === undefined || secret.length === 0) {
+    return message;
+  }
+  return message.split(secret).join("[REDACTED]");
 }
 
 async function captureRoutineGithubSnapshot(input: {

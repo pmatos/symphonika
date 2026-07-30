@@ -70,7 +70,7 @@ destructive operator override. It must not silently collect the only copy of the
   independently interpreting provider output.
 - Historical and non-terminal firing rows have a null outcome; terminal firings created by the new
   dispatcher have a canonical outcome even when the provider omitted its claim.
-- The notification layer can use the shared one-line formatter for action, title, URL, and the
+- The notification layer uses the shared one-line formatter for action, title, URL, and the
   unverified marker without duplicating reconciliation policy.
 - GitHub observations remain best-effort evidence and never make an otherwise valid firing fail.
 - A future retention implementation must explicitly account for verified commit-only outcomes.

@@ -30,6 +30,7 @@ import {
   DEFAULT_GITHUB_ISSUES_API,
   type GitHubIssuesApi
 } from "./issue-polling.js";
+import { emailNotificationConfigSchema } from "./notifications/config.js";
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 import type { AgentProviderName, AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
@@ -348,6 +349,7 @@ const serviceRoutineSchema = z
 
 const serviceConfigSchema = z
   .object({
+    email: emailNotificationConfigSchema.optional(),
     state: z
       .object({
         root: pathStringSchema.optional()
@@ -404,6 +406,16 @@ export async function runDoctor(
   const parsedConfig = parseServiceConfig(rawConfig, errors);
   if (parsedConfig === undefined) {
     return report(configPath, errors, projects, warnings);
+  }
+
+  const email = parsedConfig.email;
+  if (
+    email?.smtpUsername !== undefined &&
+    (env[email.smtpPasswordEnv]?.trim().length ?? 0) === 0
+  ) {
+    errors.push(
+      `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . /path/to/symphonika.env; set +a)`
+    );
   }
 
   for (const project of parsedConfig.projects) {

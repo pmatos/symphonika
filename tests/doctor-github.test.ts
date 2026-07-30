@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -32,6 +32,56 @@ afterEach(async () => {
 });
 
 describe("GitHub Project validation", () => {
+  it("explains how to load a daemon env file when the SMTP password is absent from a manual doctor run", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const configPath = path.join(root, "symphonika.yml");
+    const config = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      config.replace(
+        "providers:\n",
+        [
+          "email:",
+          '  from: "symphonika@example.com"',
+          '  to: "operator@example.com"',
+          '  smtp_host: "smtp.example.com"',
+          '  smtp_username: "server-token"',
+          '  smtp_password_env: "SMTP_TEST_PASSWORD"',
+          "providers:",
+          ""
+        ].join("\n")
+      )
+    );
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi
+        .fn()
+        .mockResolvedValue([
+          "agent-ready",
+          "sym:claimed",
+          "sym:running",
+          "sym:failed",
+          "sym:blocked",
+          "sym:stale"
+        ]),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain(
+      "email.smtp_password_env references $SMTP_TEST_PASSWORD, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . /path/to/symphonika.env; set +a)"
+    );
+  });
+
   it("marks a Project valid for dispatch when operational and required eligibility labels are present", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);

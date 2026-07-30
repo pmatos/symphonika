@@ -299,6 +299,13 @@ export async function startDaemon(
   });
   const activeRuns = new ActiveRunRegistry();
   const dispatchMutex = createAsyncMutex();
+  // launchWork is explicitly re-entrant per tick (see comment at its
+  // definition), so a retention pass that outlives one polling interval
+  // would otherwise overlap with the next tick's pass, running concurrent
+  // `git worktree remove`/`prune`/branch-delete against the same cache.
+  // Narrow skip-if-in-flight guard, consistent with ADR 0052's per-operation
+  // (not whole-tick) locking scope.
+  const retentionMutex = createAsyncMutex();
   // After Slice 1 narrowing, dispatchMutex is held only during the brief
   // claim section, so consumers that want "is a provider run active" should
   // read inFlight instead. The legacy dispatching boolean is preserved as a
@@ -568,13 +575,20 @@ export async function startDaemon(
     const promise = (async () => {
       try {
         const retentionSnapshot = runtimeConfig.getSnapshot();
-        if (retentionSnapshot?.routineWorkspaceRetention.enabled === true) {
-          await runAutomaticRoutineWorkspaceRetention({
-            logger,
-            policy: retentionSnapshot.routineWorkspaceRetention,
-            pruneRoutineWorkspaces,
-            runStore
-          });
+        if (
+          retentionSnapshot?.routineWorkspaceRetention.enabled === true &&
+          retentionMutex.tryAcquire()
+        ) {
+          try {
+            await runAutomaticRoutineWorkspaceRetention({
+              logger,
+              policy: retentionSnapshot.routineWorkspaceRetention,
+              pruneRoutineWorkspaces,
+              runStore
+            });
+          } finally {
+            retentionMutex.release();
+          }
         }
         const now = Date.now();
         let prResult: Awaited<ReturnType<typeof runPullRequestFollowup>>;

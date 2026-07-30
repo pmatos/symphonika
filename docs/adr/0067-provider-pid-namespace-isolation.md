@@ -54,11 +54,18 @@ page:
   inherited host `/proc`. `--mount-proc` remounts a fresh `/proc` scoped to the new PID namespace,
   which is what actually makes `ps -e` inside the provider report only its own descendants. Measured
   on this host: `ps -e --no-headers | wc -l` inside `unshare --pid --user --fork --mount-proc`
-  reports `1` (itself) versus `5` (through 6, without `--mount-proc`) on the unwrapped host. This
-  implies a private mount namespace, but scoped to remounting `/proc` — the rest of the mount table
-  is inherited unchanged, so filesystem visibility is untouched. Filesystem and network isolation
-  are explicitly out of scope for this ADR (see Scope, below) and this side effect does not
-  introduce either.
+  reports `1` (itself) versus `5` (through 6, without `--mount-proc`) on the unwrapped host.
+  `--mount-proc` implies `--mount` (a new mount namespace), and `man unshare` documents on this host
+  that "unshare since util-linux version 2.27 automatically sets propagation to private in a new
+  mount namespace ... private is the kernel default." The mount table's *contents* at unshare-time
+  are inherited unchanged — the provider starts with the same view of mounted filesystems the host
+  has — but propagation going forward is one-way-closed: a host mount or unmount that happens after
+  the provider starts does not become visible inside the provider, and any mount the provider creates
+  does not propagate back out. This can matter for a long-running provider Run if an automounter,
+  FUSE filesystem, or other tooling mounts/unmounts during the Run's lifetime. Filesystem isolation
+  as a *deliberate* design goal remains explicitly out of scope for this ADR (see Scope, below) —
+  private propagation is a side effect of `--mount-proc`, not a filesystem-isolation feature this ADR
+  is choosing — but the side effect itself is real and worth recording accurately, not "untouched."
 - `--user` is required for this to run unprivileged: the daemon runs as an ordinary user
   (`systemd-run --user`, `XDG_RUNTIME_DIR`-scoped), and a bare `unshare --pid` needs `CAP_SYS_ADMIN`
   in the caller's user namespace. `--user` creates a fresh user namespace in which the calling,
@@ -234,6 +241,11 @@ In scope: the PID/process visibility isolation decision described above, and its
   genuinely privileged host operation) is not available once wrapped — see "Host privilege
   escalation is not available inside the namespace," above. The availability probe does not detect
   this; such a workflow would launch isolated and fail mid-Run rather than falling back.
+- The `--mount-proc`-induced mount namespace has private propagation: a host-side mount/unmount
+  that happens after a provider starts is not visible inside it, and a mount the provider creates
+  does not propagate back to the host. This can affect automounters, FUSE filesystems, or other
+  mount-dependent tooling active during a long-running Run; adopting `--propagation unchanged` or
+  designing around this is left to a future filesystem-isolation ADR, not this one.
 - This ADR does not change `src/lifecycle/process-scope.ts` or any other code; implementation is
   tracked in follow-up issue #342 under the parent umbrella (#197 / #199).
 

@@ -81,27 +81,24 @@ function finish(exitCode, signal) {
   });
 
   setTimeout(() => {
+    const exit = () => {
+      if (signal !== null) {
+        process.removeListener("SIGTERM", handleTerminate);
+        process.kill(process.pid, signal);
+        return;
+      }
+      process.exit(exitCode ?? 1);
+    };
+
     if (groupTerminating || shutdownRequested) {
       if (groupTerminating) {
         process.removeListener("SIGTERM", handleTerminate);
         process.kill(process.pid, "SIGTERM");
         return;
       }
-      if (signal !== null) {
-        process.kill(process.pid, signal);
-        return;
-      }
-      process.exit(exitCode ?? 1);
+      exit();
       return;
     }
-
-    const exit = () => {
-      if (signal !== null) {
-        process.kill(process.pid, signal);
-        return;
-      }
-      process.exit(exitCode ?? 1);
-    };
 
     const releaseGuardian = () => {
       if (guardian.exitCode !== null || guardian.signalCode !== null) {

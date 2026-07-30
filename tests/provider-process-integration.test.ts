@@ -283,6 +283,53 @@ describe("provider process lifecycle", () => {
   );
 
   it.skipIf(process.platform === "win32")(
+    "mirrors a provider SIGTERM after ordinary group release",
+    async () => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "symphonika-provider-process-test-")
+      );
+      tempRoots.push(root);
+      const providerPath = path.join(root, "provider.mjs");
+      await writeFile(
+        providerPath,
+        [
+          'setTimeout(() => process.kill(process.pid, "SIGTERM"), 25);',
+          "setInterval(() => {}, 60_000);",
+          ""
+        ].join("\n"),
+        "utf8"
+      );
+
+      const child = spawnProviderProcess(
+        { args: [providerPath], executable: process.execPath },
+        root
+      );
+      const supervisorPid = child.pid;
+      expect(supervisorPid).toBeDefined();
+      const closed = once(child, "close") as Promise<
+        [number | null, NodeJS.Signals | null]
+      >;
+
+      try {
+        const result = await Promise.race([
+          closed,
+          new Promise<undefined>((resolve) => {
+            setTimeout(resolve, 750);
+          })
+        ]);
+        expect(result).toEqual([null, "SIGTERM"]);
+      } finally {
+        try {
+          process.kill(-supervisorPid!, "SIGKILL");
+        } catch {
+          // Ordinary group release already removed the process group.
+        }
+        await closed;
+      }
+    }
+  );
+
+  it.skipIf(process.platform === "win32")(
     "completes ordinary cleanup promptly after the provider exits on EOF",
     async () => {
       const root = await mkdtemp(

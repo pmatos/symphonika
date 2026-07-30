@@ -9,7 +9,7 @@ import { stringify } from "yaml";
 
 import { defaultUserConfigPath, defaultUserStateRoot } from "./config-paths.js";
 
-export type InitProvider = "codex" | "claude";
+export type InitProvider = "codex" | "claude" | "omp";
 
 type InitPromptInput = {
   defaultValue: string;
@@ -18,6 +18,7 @@ type InitPromptInput = {
     | "codexCommand"
     | "mergeEnabled"
     | "mergeMethod"
+    | "ompCommand"
     | "pollingIntervalMs"
     | "requireReviewDecision"
     | "requireStatusSuccess"
@@ -61,12 +62,14 @@ const DEFAULT_CODEX_COMMAND =
   "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server";
 const DEFAULT_CLAUDE_COMMAND =
   "claude -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json";
+const DEFAULT_OMP_COMMAND = "omp --mode rpc --auto-approve";
 
 type GlobalInitSettings = {
   claudeCommand: string;
   codexCommand: string;
   mergeEnabled: boolean;
   mergeMethod: "merge" | "rebase" | "squash";
+  ompCommand: string;
   pollingIntervalMs: number;
   requireReviewDecision: boolean;
   requireStatusSuccess: boolean;
@@ -148,6 +151,9 @@ function buildServiceConfig(settings: GlobalInitSettings): unknown {
       },
       claude: {
         command: settings.claudeCommand
+      },
+      omp: {
+        command: settings.ompCommand
       }
     },
     projects: []
@@ -164,6 +170,7 @@ async function collectGlobalSettings(input: {
     codexCommand: DEFAULT_CODEX_COMMAND,
     mergeEnabled: "no",
     mergeMethod: "squash",
+    ompCommand: DEFAULT_OMP_COMMAND,
     pollingIntervalMs: "30000",
     requireReviewDecision: "no",
     requireStatusSuccess: "yes",
@@ -226,11 +233,17 @@ async function collectGlobalSettings(input: {
       key: "claudeCommand",
       message: "Claude command"
     });
+    const ompCommand = await promptController.ask({
+      defaultValue: defaults.ompCommand,
+      key: "ompCommand",
+      message: "Oh My Pi command"
+    });
 
     for (const [label, value] of [
       ["state root", stateRoot],
       ["Codex command", codexCommand],
-      ["Claude command", claudeCommand]
+      ["Claude command", claudeCommand],
+      ["Oh My Pi command", ompCommand]
     ] as const) {
       if (value.trim().length === 0) {
         throw new Error(`${label} must not be empty`);
@@ -242,6 +255,7 @@ async function collectGlobalSettings(input: {
       codexCommand,
       mergeEnabled,
       mergeMethod,
+      ompCommand,
       pollingIntervalMs,
       requireReviewDecision,
       requireStatusSuccess,

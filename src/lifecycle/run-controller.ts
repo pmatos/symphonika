@@ -164,6 +164,7 @@ export function isDispatchProject(
 export type RunControllerProvidersConfig = {
   codex: { command: string };
   claude: { command: string };
+  omp?: { command: string };
 };
 
 export type ScheduleHandler = (input: {
@@ -1342,9 +1343,10 @@ export class RunController {
           (providersConfig as Partial<RunControllerProvidersConfig>)[
             providerName
           ]?.command ?? "";
-        await this.failStateAdvanceBeforeProvider({
+        await this.failScheduledRunBeforeProvider({
           issue: refreshed,
           parentRunId: payload.parentRunId,
+          phase: "state-advance",
           project,
           providerCommand,
           providerName,
@@ -1378,9 +1380,10 @@ export class RunController {
           (providersConfig as Partial<RunControllerProvidersConfig>)[
             providerName
           ]?.command ?? "";
-        await this.failStateAdvanceBeforeProvider({
+        await this.failScheduledRunBeforeProvider({
           issue: refreshed,
           parentRunId: payload.parentRunId,
+          phase: "state-advance",
           project,
           providerCommand,
           providerName,
@@ -1412,9 +1415,10 @@ export class RunController {
       const providerCommand =
         (providersConfig as Partial<RunControllerProvidersConfig>)[providerName]
           ?.command ?? "";
-      await this.failStateAdvanceBeforeProvider({
+      await this.failScheduledRunBeforeProvider({
         issue: refreshed,
         parentRunId: payload.parentRunId,
+        phase: "state-advance",
         project,
         providerCommand,
         providerName,
@@ -1459,9 +1463,10 @@ export class RunController {
     const providerCommand = providerConfig?.command;
 
     if (providerCommand === undefined || providerCommand.trim().length === 0) {
-      await this.failStateAdvanceBeforeProvider({
+      await this.failScheduledRunBeforeProvider({
         issue: refreshed,
         parentRunId: payload.parentRunId,
+        phase: "state-advance",
         project,
         providerCommand: providerCommand ?? "",
         providerName,
@@ -1474,9 +1479,10 @@ export class RunController {
 
     const provider = this.agentProviders[providerName];
     if (provider === undefined) {
-      await this.failStateAdvanceBeforeProvider({
+      await this.failScheduledRunBeforeProvider({
         issue: refreshed,
         parentRunId: payload.parentRunId,
+        phase: "state-advance",
         project,
         providerCommand,
         providerName,
@@ -1555,8 +1561,9 @@ export class RunController {
   // Only the shutdown path awaits: the isShuttingDown() check at each call
   // site and the createContinuationRun below it are synchronous, so stop()
   // cannot close the gate between check and row creation. See ADR 0052.
-  private async rollbackStateAdvanceClaimLabel(input: {
+  private async rollbackScheduledRunClaimLabel(input: {
     issueNumber: number;
+    phase: "continuation" | "state-advance";
     projectName: string;
     repository: GitHubIssueRepositoryInput;
     runId: string;
@@ -1580,13 +1587,16 @@ export class RunController {
     );
     this.logger?.debug(
       { issueNumber: input.issueNumber, runId: input.runId },
-      "symphonika state advance skipped: daemon shutting down"
+      `symphonika ${
+        input.phase === "state-advance" ? "state advance" : "continuation"
+      } skipped: daemon shutting down`
     );
   }
 
-  private async failStateAdvanceBeforeProvider(input: {
+  private async failScheduledRunBeforeProvider(input: {
     issue: IssueSnapshot;
     parentRunId: string;
+    phase: "continuation" | "state-advance";
     project: RunControllerProjectConfig;
     providerCommand: string;
     providerName: AgentProviderName;
@@ -1596,11 +1606,13 @@ export class RunController {
   }): Promise<void> {
     // Shutdown gate: every call site returns immediately after this helper,
     // so skipping here skips the whole exit. The checks are synchronous
-    // with the row creation below — see rollbackStateAdvanceClaimLabel.
+    // with the row creation below — see rollbackScheduledRunClaimLabel.
     if (this.activeRuns.isShuttingDown()) {
       this.logger?.debug(
         { issueNumber: input.issue.number, runId: input.runId },
-        "symphonika state advance skipped: daemon shutting down"
+        `symphonika ${
+          input.phase === "state-advance" ? "state advance" : "continuation"
+        } skipped: daemon shutting down`
       );
       return;
     }
@@ -1615,14 +1627,15 @@ export class RunController {
         issueNumber: input.issue.number,
         label: "sym:claimed",
         operation: "addLabel",
-        phase: "state-advance-provider-resolution",
+        phase: `${input.phase}-provider-resolution`,
         project: input.project.name,
         runId: input.runId
       }
     );
     if (this.activeRuns.isShuttingDown()) {
-      await this.rollbackStateAdvanceClaimLabel({
+      await this.rollbackScheduledRunClaimLabel({
         issueNumber: input.issue.number,
+        phase: input.phase,
         projectName: input.project.name,
         repository: input.repository,
         runId: input.runId
@@ -1652,7 +1665,9 @@ export class RunController {
         reason: input.reason,
         runId: input.runId
       },
-      "symphonika state advance failed before provider launch"
+      `symphonika ${
+        input.phase === "state-advance" ? "state advance" : "continuation"
+      } failed before provider launch`
     );
     await this.applyTerminalLabels({
       fsmContinuing: false,
@@ -1701,8 +1716,9 @@ export class RunController {
       }
     );
     if (this.activeRuns.isShuttingDown()) {
-      await this.rollbackStateAdvanceClaimLabel({
+      await this.rollbackScheduledRunClaimLabel({
         issueNumber: input.issue.number,
+        phase: "state-advance",
         projectName: input.project.name,
         repository: input.repository,
         runId: input.runId
@@ -1768,13 +1784,7 @@ export class RunController {
       return;
     }
 
-    const provider = this.agentProviders[project.agent.provider];
-    if (provider === undefined) {
-      return;
-    }
-
     const providersConfig = await this.providersLoader();
-    const providerCommand = providersConfig[project.agent.provider].command;
 
     if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
       return;
@@ -1816,6 +1826,39 @@ export class RunController {
     }
 
     const runId = this.createRunId();
+    const providerName = project.agent.provider;
+    const providerCommand = providersConfig[providerName]?.command;
+    if (providerCommand === undefined || providerCommand.trim().length === 0) {
+      await this.failScheduledRunBeforeProvider({
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        phase: "continuation",
+        project,
+        providerCommand: providerCommand ?? "",
+        providerName,
+        reason: `provider_command_missing: ${providerName}`,
+        repository,
+        runId
+      });
+      return;
+    }
+
+    const provider = this.agentProviders[providerName];
+    if (provider === undefined) {
+      await this.failScheduledRunBeforeProvider({
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        phase: "continuation",
+        project,
+        providerCommand,
+        providerName,
+        reason: `provider_not_registered: ${providerName}`,
+        repository,
+        runId
+      });
+      return;
+    }
+
     try {
       await this.runFreshLifecycle({
         attemptNumber: 1,
@@ -1825,7 +1868,7 @@ export class RunController {
         project,
         provider,
         providerCommand,
-        providerName: project.agent.provider,
+        providerName,
         repository,
         runId
       });
@@ -1906,7 +1949,13 @@ export class RunController {
     }
 
     const providersConfig = await this.providersLoader();
-    const providerCommand = providersConfig[project.agent.provider].command;
+    const providerCommand = providersConfig[project.agent.provider]?.command;
+    if (providerCommand === undefined || providerCommand.trim().length === 0) {
+      return {
+        dispatched: false,
+        reason: `provider command is not configured: ${project.agent.provider}`
+      };
+    }
 
     if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
       return {

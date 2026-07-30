@@ -230,7 +230,7 @@ Routine Hosts are never polled and have no cursor.
 _Avoid_: issue cursor
 
 **Agent Provider**:
-A normalized adapter that lets the orchestrator run a specific coding-agent implementation; v1 supports Codex and Claude.
+A normalized adapter that lets the orchestrator run a specific coding-agent implementation; v1 supports Codex, Claude, and Oh My Pi.
 _Avoid_: agent when referring to the adapter boundary
 
 **Full-Permission Agent Execution**:

@@ -1,6 +1,6 @@
 # Symphonika
 
-Symphonika is a TypeScript/Node orchestrator that turns eligible GitHub issues into autonomous coding-agent runs. It prepares deterministic workspaces and issue branches, dispatches Codex or Claude under operator control, and records enough evidence for debugging, continuation, and review.
+Symphonika is a TypeScript/Node orchestrator that turns eligible GitHub issues into autonomous coding-agent runs. It prepares deterministic workspaces and issue branches, dispatches Codex, Claude, or Oh My Pi under operator control, and records enough evidence for debugging, continuation, and review.
 
 ## Documentation
 
@@ -95,7 +95,7 @@ The generated unit uses the daemon's normal config discovery by default. To run 
 What the generated units give you:
 
 - **`symphonika-daemon.slice`** owns the daemon process and its dashboard only — a small, protected budget (see [`systemd/symphonika-daemon.slice`](systemd/symphonika-daemon.slice)). **`symphonika-providers.slice`** owns every spawned provider (and the build tools they in turn spawn) with the larger budget the two used to share (see [`systemd/symphonika-providers.slice`](systemd/symphonika-providers.slice)). Splitting them means a runaway tool spawned by a provider is killed *inside the providers slice* instead of throttling the daemon's own event loop and dashboard along with it (see `docs/adr/0064`). `MemoryHigh=` / `MemoryMax=` on each slice cap its tree independently. The generated caps assume a large workstation; edit the installed `~/.config/systemd/user/symphonika-*.slice` files to match your host (re-running `service install --force` overwrites them).
-- The daemon's `PATH` is captured from the shell that ran `service install`, with the `node` runtime's directory prepended, so `gh` and the spawned providers (`claude`, `codex`) resolve under `systemd --user` — which does not inherit your interactive `PATH`. Run `service install` from a clean login shell so only real bin directories are baked in.
+- The daemon's `PATH` is captured from the shell that ran `service install`, with the `node` runtime's directory prepended, so `gh` and the spawned providers (`claude`, `codex`, `omp`) resolve under `systemd --user` — which does not inherit your interactive `PATH`. Run `service install` from a clean login shell so only real bin directories are baked in. For a Bun-installed OMP, verify `command -v omp` resolves from `~/.bun/bin` in that shell before installing the service.
 - The daemon's **GitHub auth token** is populated from `gh auth token` at each (re)start, so it picks up rotated tokens automatically. The service fails closed (won't start) if `gh` is logged out.
 - `Restart=on-failure` brings the daemon back, and `After=graphical-session.target` keeps the ordering right so `gh` can read your keyring.
 
@@ -153,6 +153,25 @@ image_generation = false
 ```
 
 Without the profile `doctor` will fail and print this snippet. The command-line `-c` overrides intentionally repeat the sandbox settings so app-server threads are full-permission even when older profile defaults are still present. See [docs/adr/0042-codex-profile-for-headless-runs.md](docs/adr/0042-codex-profile-for-headless-runs.md) for what each feature does and why `multi_agent` stays on.
+
+### Oh My Pi setup
+
+Install OMP and confirm it is visible in the environment that launches Symphonika:
+
+```sh
+command -v omp
+omp --version
+```
+
+The generated provider command is `omp --mode rpc --auto-approve`. Symphonika validates OMP with a
+bounded RPC ready-frame handshake and closes stdin without sending a model prompt. A Project,
+Workflow agent state, Routine Host, or individual Routine can select it with `provider: omp`.
+
+Bun commonly installs the executable under `~/.bun/bin`. Interactive shells may add that directory
+automatically, while `systemd --user` does not. Run `symphonika service install` from a login shell
+where `command -v omp` succeeds so the generated unit captures the correct `PATH`; generated config
+intentionally uses `omp`, not a host-specific absolute path. See
+[ADR-0066](docs/adr/0066-oh-my-pi-provider.md).
 
 ## Status and License
 

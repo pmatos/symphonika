@@ -101,7 +101,7 @@ export const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
   sampleIntervalSeconds: 60
 };
 
-const providerNameSchema = z.enum(["codex", "claude"]);
+const providerNameSchema = z.enum(["codex", "claude", "omp"]);
 const providerCommandSchema = z
   .object({
     command: z.string().trim().min(1)
@@ -272,7 +272,8 @@ const serviceConfigSchema = z
     providers: z
       .object({
         codex: providerCommandSchema,
-        claude: providerCommandSchema
+        claude: providerCommandSchema,
+        omp: providerCommandSchema.optional()
       })
       .passthrough(),
     // Service-level routine declarations targeting declared Projects. See
@@ -612,7 +613,10 @@ async function loadRuntimeConfigSnapshot(input: {
       projects: dispatchProjects,
       providers: {
         claude: { command: parsed.data.providers.claude.command },
-        codex: { command: parsed.data.providers.codex.command }
+        codex: { command: parsed.data.providers.codex.command },
+        ...(parsed.data.providers.omp === undefined
+          ? {}
+          : { omp: { command: parsed.data.providers.omp.command } })
       },
       pullRequestPolicy:
         pullRequestFollowupPolicyFromRaw(raw) ??
@@ -1092,6 +1096,9 @@ function defaultProvidersConfig(): RunControllerProvidersConfig {
     codex: {
       command:
         "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
+    },
+    omp: {
+      command: "omp --mode rpc --auto-approve"
     }
   };
 }

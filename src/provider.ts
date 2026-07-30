@@ -1,6 +1,6 @@
 import type { IssueSnapshot } from "./issue-polling.js";
 
-export type AgentProviderName = "codex" | "claude";
+export type AgentProviderName = "codex" | "claude" | "omp";
 
 type NormalizedProviderEventType =
   | "session_started"

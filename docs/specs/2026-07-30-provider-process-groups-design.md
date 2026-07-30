@@ -46,8 +46,9 @@ The shared shutdown operation is idempotent and performs this sequence:
 
 1. Ask the POSIX supervisor to reserve the process group for shutdown and wait
    for its acknowledgement. Non-POSIX direct-child shutdown skips this step.
-2. Send the provider-specific protocol courtesy when applicable (`turn/interrupt`
-   for Codex, `abort` for OMP).
+2. Send every provider-specific protocol courtesy registered while the shared
+   shutdown is reserving the group (`turn/interrupt` for Codex, `abort` for
+   OMP). A concurrent idempotent shutdown call must not drop its courtesy.
 3. Close the provider's stdin when it is still writable, preserving the
    existing graceful EOF path.
 4. After 250 milliseconds, signal the process group with

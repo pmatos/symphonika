@@ -4,9 +4,15 @@ import type { ProcessCommand } from "../lifecycle/process-scope.js";
 
 const GRACEFUL_EOF_MS = 250;
 const FORCE_KILL_GRACE_MS = 1_000;
+type ProviderShutdownState = {
+  acceptingCourtesies: boolean;
+  courtesies: Array<() => void>;
+  promise: Promise<void>;
+  reserved: boolean;
+};
 const shuttingDown = new WeakMap<
   ChildProcessWithoutNullStreams,
-  Promise<void>
+  ProviderShutdownState
 >();
 // POSIX permits the numeric group ID to be reused once its final member
 // exits. The supervisor's guardian ignores the group SIGTERM so that the
@@ -151,26 +157,42 @@ export function shutdownProviderProcess(
 ): Promise<void> {
   const existing = shuttingDown.get(child);
   if (existing !== undefined) {
-    return existing;
+    if (beforeClose !== undefined) {
+      if (existing.acceptingCourtesies) {
+        existing.courtesies.push(beforeClose);
+      } else if (existing.reserved) {
+        runShutdownCourtesy(beforeClose);
+      }
+    }
+    return existing.promise;
   }
-  const shutdown = beginProviderShutdown(child, beforeClose);
-  shuttingDown.set(child, shutdown);
-  return shutdown;
+  const state: ProviderShutdownState = {
+    acceptingCourtesies: true,
+    courtesies: beforeClose === undefined ? [] : [beforeClose],
+    promise: Promise.resolve(),
+    reserved: false
+  };
+  state.promise = beginProviderShutdown(child, state);
+  shuttingDown.set(child, state);
+  return state.promise;
 }
 
 async function beginProviderShutdown(
   child: ChildProcessWithoutNullStreams,
-  beforeClose?: () => void
+  state: ProviderShutdownState
 ): Promise<void> {
   if (!(await reserveProviderProcessGroup(child))) {
+    state.acceptingCourtesies = false;
+    state.courtesies.length = 0;
     return;
   }
+  state.reserved = true;
 
-  try {
-    beforeClose?.();
-  } catch {
-    // Provider-specific courtesy is best-effort; group shutdown must proceed.
+  for (const courtesy of state.courtesies) {
+    runShutdownCourtesy(courtesy);
   }
+  state.acceptingCourtesies = false;
+  state.courtesies.length = 0;
 
   if (!child.stdin.destroyed && child.stdin.writable) {
     child.stdin.end();
@@ -190,6 +212,14 @@ async function beginProviderShutdown(
     killTimer.unref();
   }, GRACEFUL_EOF_MS);
   terminateTimer.unref();
+}
+
+function runShutdownCourtesy(courtesy: () => void): void {
+  try {
+    courtesy();
+  } catch {
+    // Provider-specific courtesy is best-effort; group shutdown must proceed.
+  }
 }
 
 async function reserveProviderProcessGroup(

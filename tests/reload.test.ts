@@ -1017,7 +1017,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
           [
             "",
             "routines:",
-            "  - project: symphonika",
+            "  - projects: [symphonika]",
             "    path: ./daily-report.md",
             ""
           ].join("\n")

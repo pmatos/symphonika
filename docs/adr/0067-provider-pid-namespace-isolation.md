@@ -20,8 +20,16 @@ Each Agent Provider process (and its full descendant tree) runs inside its own *
 namespace**, created with:
 
 ```
-unshare --pid --user --map-current-user --fork --mount-proc -- <provider command>
+unshare --pid --user --map-current-user --fork --mount-proc -- <init> <provider command>
 ```
+
+where `<init>` is a minimal reaping, signal-forwarding init process that occupies the new
+namespace's PID 1 ahead of the provider. This interposed init is required, not optional — see
+"Signal delivery to namespace PID 1," below, for why the provider itself cannot safely be the
+namespace's PID 1. The exact init binary is an implementation-slice question (#342), not something
+this planning ADR pins down; a purpose-built helper or an existing minimal init (e.g. `tini`,
+`dumb-init`, `catatonit`) are the candidate shapes, whichever the implementation slice finds
+already available or worth adding as a dependency.
 
 This wraps the provider command in `src/lifecycle/process-scope.ts`, composing with the isolation
 that already exists there rather than replacing it:
@@ -31,9 +39,9 @@ that already exists there rather than replacing it:
 - The existing optional `systemd-run --user --scope --slice=symphonika-providers.slice` cgroup
   wrapping (ADR 0064) still owns memory accounting, when a reachable `systemd --user` manager is
   available.
-- `unshare` becomes an additional innermost wrap: `systemd-run` (cgroup, optional) →
-  process-group supervisor/guardian (ADR 0064) → `unshare --pid --user ...` (this ADR) → the
-  provider command.
+- `unshare` and its interposed init become an additional innermost wrap: `systemd-run` (cgroup,
+  optional) → process-group supervisor/guardian (ADR 0064) → `unshare --pid --user ...` + init
+  (this ADR) → the provider command.
 
 Each flag is load-bearing, verified empirically against this repo's actual kernel/util-linux
 version (util-linux 2.42.2) before writing this decision down, not merely asserted from the `man`
@@ -64,6 +72,30 @@ page:
   ≥ 2.38; hosts on an older util-linux fall back to the status-quo (unwrapped) path via the same
   probe-and-degrade mechanism described below, rather than falling back to `--map-root-user`.
 
+### Signal delivery to namespace PID 1
+
+With `unshare --fork`, `unshare` itself does not become the namespace's PID 1: it forks a child,
+which execs the given command and *that child* — not the `unshare` process — becomes PID 1 of the
+new namespace, while the original `unshare` process remains outside the namespace as that child's
+parent, waiting for it to exit. Verified empirically on this host: a process tree started via
+`unshare --pid --user --fork --mount-proc -- bash -c 'sleep 100 & wait'` shows the `unshare`
+invocation itself as a distinct, still-running host process (parent, outside the namespace) with
+`bash` — the executed command — as its child and the namespace's actual PID 1.
+
+This matters because `pid_namespaces(7)` documents that a namespace's PID 1 is special: signals sent
+to it are delivered only for signals it has explicitly installed a handler for, with `SIGKILL` and
+`SIGSTOP` as the only unconditionally-delivered exceptions. If the provider command itself is
+namespace PID 1 (i.e. `<init>` above is omitted and the provider execs directly under `--fork`), a
+`SIGTERM` sent to it — including via ADR 0064's existing group-signal shutdown — is silently dropped
+unless the provider binary happens to install its own `SIGTERM` handler, which none of Codex, Claude,
+or OMP do by default. The provider would then survive ADR 0064's graceful grace period entirely and
+only stop at the unconditional `SIGKILL` escalation, turning every cancellation into a hard kill
+regardless of in-flight writes. This is why the Decision above requires an interposed init ahead of
+the provider: the init occupies PID 1, forwards `SIGTERM` (and other relevant signals) to the
+provider it supervises, and reaps it — restoring the same graceful-then-forced shutdown behavior
+ADR 0064 already relies on. `SIGKILL` needs no such forwarding, since the kernel delivers it to a
+namespace's PID 1 unconditionally.
+
 ## Interaction with ADR 0015 (full-permission agent execution)
 
 ADR 0015 says future sandboxing must be implemented "outside the provider as host, container, VM,
@@ -88,23 +120,30 @@ descendants retain ordinary host-visible PIDs and process-group membership. Veri
 process tree started via `unshare --pid --user --fork --mount-proc` is fully visible in the host's own
 `ps -e -o pid,ppid,pgid,cmd`, under the same PGID as the rest of the Run's detached process group, and
 `kill -KILL -- -<pgid>` (the same negative-PGID group-kill ADR 0064 already relies on for cancellation)
-successfully terminates every process in the namespace, including the `unshare` wrapper itself acting
-as the namespace's PID 1. This means:
+successfully terminates every process in the namespace, including its PID 1. This means:
 
-- **`cancel` / shutdown** — no change to ADR 0064's cancellation path. The existing supervisor/guardian
-  group-signal mechanism (`SIGTERM` then `SIGKILL` escalation) reaches the provider and all of its
-  descendants whether or not they are inside a nested PID namespace, because group signaling operates
-  on the host PGID, which namespacing does not hide or renumber.
+- **`cancel` / shutdown — SIGKILL escalation is unchanged; the graceful SIGTERM step is not, and
+  depends on the interposed init.** The negative-PGID group-kill this ADR verified operates on the
+  host PGID, which namespacing does not hide or renumber, so ADR 0064's final `SIGKILL` escalation
+  reaches every process in the namespace exactly as before — that half of the cancellation path is
+  unchanged. The initial graceful `SIGTERM` step is different: per "Signal delivery to namespace PID
+  1" above, `SIGTERM` sent to a namespace's PID 1 is dropped unless that process installs a handler.
+  With the Decision's interposed init occupying PID 1 and forwarding `SIGTERM` to the provider, the
+  graceful step behaves as ADR 0064 intends; without that init (i.e. if the provider execs directly
+  as PID 1), the graceful step would silently no-op and every cancellation would fall straight through
+  to the `SIGKILL` escalation. The Decision above requires the init specifically so this ADR's
+  cancellation behavior matches ADR 0064's, rather than silently degrading it.
 - **`show-run` process-tree diagnostics** — any future host-side process-tree walk (e.g. for
   diagnostics) continues to work unmodified: it observes host PIDs and the host's own `/proc`, which
   still lists every provider descendant regardless of the namespace boundary. Nothing about this
   decision requires `nsenter` or reading the namespace's private `/proc` from the operator side.
-- Killing the namespace's PID-1 process (the `unshare` wrapper) tears down the entire namespace and
-  every process inside it — the kernel destroys a PID namespace's remaining tasks once its init
-  process exits. This is a strengthening of, not a regression from, the leaked-grandchild problem
-  ADR 0064 documented for `systemd-run --user --scope` (a detached `cargo build &` surviving its
-  wrapped parent): a namespaced grandchild has no path to detach from its PID namespace's init and
-  outlive it.
+- Killing the namespace's PID-1 process (the interposed init, per the Decision above — *not* the
+  `unshare` invocation itself, which remains outside the namespace as that process's parent; see
+  "Signal delivery to namespace PID 1") tears down the entire namespace and every process inside it —
+  the kernel destroys a PID namespace's remaining tasks once its init process exits. This is a
+  strengthening of, not a regression from, the leaked-grandchild problem ADR 0064 documented for
+  `systemd-run --user --scope` (a detached `cargo build &` surviving its wrapped parent): a namespaced
+  grandchild has no path to detach from its PID namespace's init and outlive it.
 
 ## Fallback when the primitive is unavailable
 
@@ -167,8 +206,10 @@ In scope: the PID/process visibility isolation decision described above, and its
 - Once implemented, an Agent Provider process tree for one Run can no longer enumerate or interact
   with PIDs belonging to a different Run's provider tree, closing the specific cross-Run interaction
   the 2026-05-22 incident exposed.
-- No change to operator-facing cancellation, `show-run` diagnostics, or ADR 0015's full-permission
-  posture — see Operator visibility and Interaction with ADR 0015, above.
+- `show-run` diagnostics and ADR 0015's full-permission posture are unchanged. Operator-facing
+  cancellation's `SIGKILL` escalation is unchanged; its graceful `SIGTERM` step depends on the
+  Decision's interposed init and would silently degrade to hard-kill-only without it — see Operator
+  visibility and Interaction with ADR 0015, above.
 - Hosts without unprivileged user namespace support silently keep today's shared-PID-namespace
   behavior, surfaced only as a `doctor` warning, not a startup failure.
 - This ADR does not change `src/lifecycle/process-scope.ts` or any other code; implementation is

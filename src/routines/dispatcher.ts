@@ -736,16 +736,18 @@ async function runRoutineFiring(input: {
       );
     }
 
-    githubBefore = await captureRoutineGithubSnapshot({
-      branchName: prepared.branchName,
-      env: input.env,
-      githubIssuesApi: input.githubIssuesApi,
-      kind: input.routine.kind,
-      logger: input.logger,
-      project: input.project,
-      routineName: input.routine.name,
-      since: githubSnapshotSince
-    });
+    githubBefore = await deadline.race(
+      captureRoutineGithubSnapshot({
+        branchName: prepared.branchName,
+        env: input.env,
+        githubIssuesApi: input.githubIssuesApi,
+        kind: input.routine.kind,
+        logger: input.logger,
+        project: input.project,
+        routineName: input.routine.name,
+        since: githubSnapshotSince
+      })
+    );
 
     // A cancel can also land DURING the snapshot read just above; the
     // cancelDuringPrepare check earlier only covers the window before it.
@@ -815,16 +817,18 @@ async function runRoutineFiring(input: {
     const githubAfter =
       githubBefore === null
         ? null
-        : await captureRoutineGithubSnapshot({
-            branchName: prepared.branchName,
-            env: input.env,
-            githubIssuesApi: input.githubIssuesApi,
-            kind: input.routine.kind,
-            logger: input.logger,
-            project: input.project,
-            routineName: input.routine.name,
-            since: githubSnapshotSince
-          });
+        : await deadline.race(
+            captureRoutineGithubSnapshot({
+              branchName: prepared.branchName,
+              env: input.env,
+              githubIssuesApi: input.githubIssuesApi,
+              kind: input.routine.kind,
+              logger: input.logger,
+              project: input.project,
+              routineName: input.routine.name,
+              since: githubSnapshotSince
+            })
+          );
     // A cancel can also land DURING the snapshot read just above, after
     // `outcome` above was already classified as succeeded/failed. Downgrade
     // here so a `kind: git` firing cancelled in this window cannot still
@@ -903,19 +907,30 @@ async function runRoutineFiring(input: {
         : error instanceof RoutinePromptRenderError
           ? error.terminalReason
           : errorMessage(error);
+    // The deadline may already be expired here (we can be in this catch
+    // block precisely because it expired). deadline.race would then reject
+    // again immediately with the same timeout error, and — unlike the try
+    // block above — there is no outer catch left to route that into; left
+    // unhandled, it would abort runRoutineFiring before completeRoutineFiring
+    // runs, stranding the row in a non-terminal state. Treat that as
+    // "snapshot unavailable" instead.
     const githubAfter =
       githubBefore === null || prepared === undefined
         ? null
-        : await captureRoutineGithubSnapshot({
-            branchName: prepared.branchName,
-            env: input.env,
-            githubIssuesApi: input.githubIssuesApi,
-            kind: input.routine.kind,
-            logger: input.logger,
-            project: input.project,
-            routineName: input.routine.name,
-            since: githubSnapshotSince
-          });
+        : await deadline
+            .race(
+              captureRoutineGithubSnapshot({
+                branchName: prepared.branchName,
+                env: input.env,
+                githubIssuesApi: input.githubIssuesApi,
+                kind: input.routine.kind,
+                logger: input.logger,
+                project: input.project,
+                routineName: input.routine.name,
+                since: githubSnapshotSince
+              })
+            )
+            .catch(() => null);
     // A cancel can also land DURING the snapshot read just above, after
     // `cancelled`/`reason` above were already computed from the pre-await
     // state. Re-check so a cancel arriving in this window doesn't get
@@ -1254,7 +1269,7 @@ function routinePullRequestObservations(
 ): RoutineGithubSnapshot["pullRequests"] {
   const observations: RoutineGithubSnapshot["pullRequests"] = {};
   for (const pullRequest of pullRequests) {
-    if (!isOpenPullRequestForBranch(pullRequest, branchName)) {
+    if (!isPullRequestForBranch(pullRequest, branchName)) {
       continue;
     }
     observations[String(pullRequest.number)] = {
@@ -1551,6 +1566,26 @@ function recordRoutinePullRequests(input: {
       routineName: input.routineName
     });
   }
+}
+
+// Unlike isOpenPullRequestForBranch, this admits a closed/merged PR: outcome
+// observation needs to detect a PR that was opened AND closed within the same
+// firing window, not just associate currently-open ones (see
+// routinePullRequestObservations).
+function isPullRequestForBranch(
+  pullRequest: RawGitHubPullRequest,
+  branchName: string
+): pullRequest is RawGitHubPullRequest & {
+  head: { ref: string; sha: string };
+  number: number;
+} {
+  return (
+    pullRequest.number !== undefined &&
+    pullRequest.number > 0 &&
+    pullRequest.head?.ref === branchName &&
+    pullRequest.head.sha !== undefined &&
+    pullRequest.head.sha.length > 0
+  );
 }
 
 function isOpenPullRequestForBranch(

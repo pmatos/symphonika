@@ -570,6 +570,66 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("terminates a firing at its wall-clock deadline when the pre-run GitHub snapshot read hangs", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const provider = quietProvider();
+    const listIssues = vi.fn(
+      () =>
+        new Promise<never>(() => {
+          // Never resolves: the deadline race, not this call, must end the
+          // firing.
+        })
+    );
+    const project = dueRoutineProjectFixture(root, "codex");
+    project.routines = [
+      {
+        ...project.routines![0]!,
+        timeoutMinutes: 0.001
+      }
+    ];
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-snapshot-timeout",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", project]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(runStore.getRoutineFiring("fire-snapshot-timeout")).toMatchObject({
+        state: "failed",
+        terminalReason: "firing_timeout"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("succeeds a kind: git firing with commits ahead and discovers every open PR", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
@@ -710,6 +770,113 @@ describe("RoutineFiringDispatcher", () => {
       ]);
       expect(runStore.listOpenTrackedPullRequests()).toEqual([]);
       expect(runStore.hasPullRequestFollowupWork()).toBe(false);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("observes a pull request that was opened and closed within the same firing", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/dependency-update/01JCLOSEDPR";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const listPullRequestsForBranch = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          head: { ref: branchName, sha: "abc123" },
+          html_url: "https://github.com/pmatos/alpha/pull/17",
+          number: 17,
+          state: "closed",
+          title: "Extract retry policy"
+        }
+      ]);
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName,
+          branchRef: `refs/heads/${branchName}`,
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-closed-pr-observed",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "dependency-update",
+                  prompt: "Commit on {{branch.name}}.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "dependency-update.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-closed-pr-observed",
+          outcome: {
+            action: "pr",
+            source: "gh",
+            status: "success",
+            summary: "Observed via GitHub state diff.",
+            title: "Extract retry policy",
+            url: "https://github.com/pmatos/alpha/pull/17",
+            verified: true
+          },
+          // The closed PR is observed for the outcome diff above, but a
+          // closed PR is still correctly excluded from the separate
+          // Routine Pull Request follow-up association.
+          pullRequests: [],
+          state: "succeeded"
+        })
+      ]);
     } finally {
       runStore.close();
     }

@@ -56,7 +56,7 @@ export type PollNowResult = {
 
 type PollNowFn = () => PollNowResult | Promise<PollNowResult>;
 
-export type FireRoutineRequest = {
+type FireRoutineRequest = {
   force: boolean;
   projectName?: string;
   routineName: string;

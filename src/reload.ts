@@ -32,7 +32,10 @@ import {
   validateExpandedWorkflowReferences
 } from "./workflow/fsm-expansion.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
-import type { TargetedRoutineDeclaration } from "./routines/types.js";
+import type {
+  RoutineExecutionOverrides,
+  TargetedRoutineDeclaration
+} from "./routines/types.js";
 import {
   DEFAULT_ROUTINE_WORKSPACE_RETENTION,
   MAX_ROUTINE_WORKSPACE_RETENTION_DAYS,
@@ -60,6 +63,7 @@ export type RuntimeConfigSnapshot = {
   projects: RuntimeProjectConfig[];
   providers: RunControllerProvidersConfig;
   pullRequestPolicy: PullRequestFollowupPolicy;
+  routineDefaults?: RoutineExecutionOverrides;
   routineWorkspaceRetention: RoutineWorkspaceRetentionPolicy;
   watchdog: WatchdogConfig;
 };
@@ -113,6 +117,15 @@ const providerCommandSchema = z
     command: z.string().trim().min(1)
   })
   .passthrough();
+
+const routineExecutionDefaultsSchema = z
+  .object({
+    model: z.string().trim().min(1).optional(),
+    effort: z.string().trim().min(1).optional(),
+    permission_mode: z.literal("bypass").optional(),
+    timeout_minutes: z.number().positive().optional()
+  })
+  .strict();
 
 const watchdogConfigSchema = z
   .object({
@@ -312,6 +325,7 @@ const serviceConfigSchema = z
         omp: providerCommandSchema.optional()
       })
       .passthrough(),
+    routine_defaults: routineExecutionDefaultsSchema.optional(),
     // Service-level routine declarations targeting declared Projects. See
     // ADR 0063. Optional; omitted means no routines.
     routines: z.array(serviceRoutineSchema).optional(),
@@ -449,6 +463,9 @@ async function loadRuntimeConfigSnapshot(input: {
   const dispatchProjects: RuntimeProjectConfig[] = [];
   const invalidRoutines: RuntimeConfigSnapshot["invalidRoutines"] = [];
   const projectIndexByProject = new Map<RuntimeProjectConfig, number>();
+  const routineDefaults = normalizeRoutineExecutionDefaults(
+    parsed.data.routine_defaults
+  );
 
   // First pass: validate each Project against its mode-specific schema and
   // build the runtime map. Dispatch Projects enter both `pollingProjects`
@@ -526,7 +543,8 @@ async function loadRuntimeConfigSnapshot(input: {
     // with ALL-invalid routines still gets invalidRoutineNames — otherwise
     // syncRoutines would treat them as removed, not state=invalid.
     const routinesByProject = new Map<string, TargetedRoutineDeclaration[]>();
-    for (const routine of routineResult.routines) {
+    for (const declaration of routineResult.routines) {
+      const routine = { ...routineDefaults, ...declaration };
       const list = routinesByProject.get(routine.projectName);
       if (list === undefined) {
         routinesByProject.set(routine.projectName, [routine]);
@@ -657,6 +675,7 @@ async function loadRuntimeConfigSnapshot(input: {
       pullRequestPolicy:
         pullRequestFollowupPolicyFromRaw(raw) ??
         DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY,
+      routineDefaults,
       routineWorkspaceRetention: normalizeRoutineWorkspaceRetention(
         parsed.data.retention?.routine_workspaces
       ),
@@ -677,6 +696,31 @@ function normalizeRoutineWorkspaceRetention(
     enabled: config.enabled,
     failedDays: config.failed_days,
     succeededDays: config.succeeded_days
+  };
+}
+
+function normalizeRoutineExecutionDefaults(
+  defaults:
+    | {
+        effort?: string | undefined;
+        model?: string | undefined;
+        permission_mode?: "bypass" | undefined;
+        timeout_minutes?: number | undefined;
+      }
+    | undefined
+): RoutineExecutionOverrides {
+  if (defaults === undefined) {
+    return {};
+  }
+  return {
+    ...(defaults.effort === undefined ? {} : { effort: defaults.effort }),
+    ...(defaults.model === undefined ? {} : { model: defaults.model }),
+    ...(defaults.permission_mode === undefined
+      ? {}
+      : { permissionMode: defaults.permission_mode }),
+    ...(defaults.timeout_minutes === undefined
+      ? {}
+      : { timeoutMinutes: defaults.timeout_minutes })
   };
 }
 

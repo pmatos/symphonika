@@ -24,6 +24,14 @@ retention:
 # global:
 #   max_in_flight: 8
 
+# Optional Routine execution defaults. A Routine's Markdown front matter wins;
+# when both levels omit a value, the provider command below stays as authored.
+# routine_defaults:
+#   model: claude-sonnet-5
+#   effort: high
+#   permission_mode: bypass
+#   timeout_minutes: 60
+
 providers:
   codex:
     command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
@@ -79,3 +87,12 @@ projects:
     agent:
       provider: codex
     workflow: ./WORKFLOW.md
+
+# Per-Routine overrides use the same model, effort, permission_mode, and
+# timeout_minutes keys in the referenced Markdown file's YAML front matter.
+# Provider adapters append their native override flags when a firing spawns;
+# the configured commands above do not need template placeholders. Claude
+# Routine Firings also receive the one-shot anti-backgrounding guards.
+# routines:
+#   - project: symphonika
+#     path: ./routines/refactor-audit.md

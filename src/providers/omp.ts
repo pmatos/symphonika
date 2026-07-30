@@ -126,7 +126,10 @@ export function createOmpProvider(
 
       const command = await processScope.wrapForProviderScope(
         input.run,
-        parseCommand(input.provider.command)
+        applyRoutineOverrides(
+          parseCommand(input.provider.command),
+          input.routine
+        )
       );
       if (activeRun.cancelled) {
         activeRuns.delete(input.run.id);
@@ -1307,6 +1310,41 @@ function parseCommand(command: string): {
     args: parts.slice(1),
     executable
   };
+}
+
+function applyRoutineOverrides(
+  command: { args: string[]; executable: string },
+  routine: ProviderRunInput["routine"]
+): { args: string[]; executable: string } {
+  if (routine === undefined) {
+    return command;
+  }
+  let args = command.args.slice();
+  if (routine.model !== undefined) {
+    args = withoutOption(args, "--model");
+    args.push("--model", routine.model);
+  }
+  if (routine.effort !== undefined) {
+    args = withoutOption(args, "--thinking");
+    args.push("--thinking", routine.effort);
+  }
+  return { args, executable: command.executable };
+}
+
+function withoutOption(args: string[], option: string): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === option) {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith(`${option}=`)) {
+      continue;
+    }
+    result.push(arg);
+  }
+  return result;
 }
 
 function splitCommand(command: string): string[] {

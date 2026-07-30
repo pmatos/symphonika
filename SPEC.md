@@ -207,6 +207,9 @@ Symphonika supports hand-authored Markdown routine files with YAML front matter:
 - exactly one schedule shape: `schedule.at` or `schedule.cron` with optional `schedule.tz`
 - `kind: report` or `kind: git`
 - optional `provider`
+- optional `model` and `effort` provider settings
+- optional `permission_mode: bypass`
+- optional positive `timeout_minutes`
 - optional `catch_up: fire_once_if_missed` (omitted means missed clock events are skipped)
 - optional `allow_overlap: true` (omitted means overlapping firings are skipped)
 
@@ -231,6 +234,11 @@ pull requests discovered from a `kind: git` firing branch. Its trigger source is
 and must not fire again on daemon restart. A recurring Routine remains active and advances to its
 next clock event after every scheduled firing. A manual firing does not consume a scheduled clock
 event.
+
+A Routine Firing with an effective `timeout_minutes` has an absolute wall-clock deadline beginning
+when execution of the claimed firing starts. Exceeding it terminates the provider process tree and
+records `state = failed` with `terminal_reason = "firing_timeout"`. This declared deadline is
+independent of Watchdog progress-liveness: useful progress does not extend it.
 
 A clock event skipped for catch-up policy, overlap, or a concurrency cap is not a Routine Firing:
 no `routine_firings` row is created. The Routine instead records `last_attempted_at`,
@@ -304,6 +312,12 @@ pull_requests:
     method: squash
     require_status_success: true
     require_review_decision: false
+
+# Optional defaults inherited by Routine declarations. A front-matter value
+# wins; if both are omitted, the provider command remains operator-authored.
+routine_defaults:
+  permission_mode: bypass
+  timeout_minutes: 60
 
 providers:
   codex:
@@ -435,7 +449,9 @@ Available top-level objects:
 Symphonika prepends a standard autonomy preamble to every rendered workflow prompt.
 
 Routine prompt rendering uses the same strict templating rules and the same standard autonomy
-preamble. For every Routine kind, available top-level objects are:
+preamble, plus a provider-neutral notice that each firing is one-shot, will not be re-invoked, and
+must not schedule background work or depend on a later wake-up. For every Routine kind, available
+top-level objects are:
 
 - `project`
 - `workspace`
@@ -485,6 +501,17 @@ deterministic declaration-load error. `tz` is valid only with `cron` and default
 boolean. Their omitted defaults are missed-event skip and `false`, respectively. `disabled`, when
 present, must be a boolean; omitted defaults to `false`. `disabled: true` stops future scheduling
 for that routine on the next reload without affecting an in-flight firing; see §8.4.
+
+`model` and `effort`, when present, must be non-empty strings. `permission_mode`, when present, must
+be `bypass`, preserving the Full-Permission Agent Execution invariant. `timeout_minutes`, when
+present, must be a finite positive number. Invalid values are deterministic declaration-load
+errors and use the same per-Routine last-known-good reload path as an invalid cron expression.
+
+The Service Config may declare the same optional fields in a top-level `routine_defaults:` mapping.
+Resolution is front matter, then `routine_defaults`, then no override: when neither level supplies a
+value, Symphonika leaves that aspect of the provider command as authored. Defaults are validated as
+Service Config; an invalid defaults mapping rejects the candidate snapshot through the normal
+Service Config last-known-good path.
 
 ## 6. Credentials
 
@@ -699,6 +726,16 @@ row. One-shot Routines become `expired`; recurring Routines remain active and at
 `next_fire_at` before the provider executes, so successful and failed firings both leave the next
 clock event visible. Routine Firings use states `queued`, `preparing_workspace`, `running`,
 `succeeded`, `failed`, and `cancelled`.
+
+When `timeout_minutes` is effective, one absolute deadline bounds how long the dispatcher waits
+on workspace preparation, provider validation, provider streaming, and terminal outcome
+classification, and completes the firing as `failed` with `terminal_reason = "firing_timeout"`
+rather than classifying the cancellation-produced exit event as `process_exit_*` or `cancelled`.
+Once a provider process exists, expiry invokes the provider's cancellation path, which stops the
+full process group (ADR 0064 / #341) and preserves workspace and logs. Expiry during workspace
+preparation does not cancel the in-flight `git` subprocesses: the dispatcher stops waiting on
+`prepareRoutineWorkspace`, but the abandoned clone/fetch keeps running and can delay a later
+firing that shares the same per-project repository cache (tracked in #353).
 
 For `kind: report`, provider exit code 0 succeeds without requiring commits. For `kind: git`, exit
 code 0 applies the same commits-ahead-of-base inspection as §12.1: zero commits fails with
@@ -976,6 +1013,15 @@ negotiates protocol v2 chunking when the installed OMP advertises it. See ADR-00
 
 Provider commands may be overridden, but the replacement command must speak the provider adapter's
 expected protocol.
+
+Routine model and effort overrides use append-at-spawn delivery owned by each adapter; the persisted
+operator command is not rewritten. Claude appends `--model` / `--effort`; Codex inserts
+`-c model=...` / `-c model_reasoning_effort=...` before `app-server`; OMP appends `--model` /
+`--thinking`. `permission_mode: bypass` maps to Claude's
+`--dangerously-skip-permissions`; Codex and OMP retain their already-validated full-permission
+startup posture. Claude Routine Firings additionally append
+`--disallowedTools ScheduleWakeup Monitor CronCreate` and set
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child environment.
 
 Future sandboxing, if added, should be outside the provider through host, container, VM, network, or
 credential isolation.

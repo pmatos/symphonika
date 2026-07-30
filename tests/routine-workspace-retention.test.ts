@@ -319,6 +319,87 @@ describe("routine firing workspace retention", () => {
       store.close();
     }
   });
+
+  it("withholds a verified commit-only outcome from age-based pruning", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const stateRoot = path.join(root, "state");
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const prepared = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId: "fire-commit-only",
+      kind: "git",
+      project: {
+        name: "alpha",
+        workspace: {
+          git: { base_branch: "main", remote: remotePath },
+          root: workspaceRoot
+        }
+      },
+      routineName: "nightly-cleanup"
+    });
+
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "nightly-cleanup",
+          prompt: "Clean up.",
+          projectName: "alpha",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/nightly-cleanup.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-commit-only",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "nightly-cleanup"
+      });
+      store.completeRoutineFiring({
+        id: "fire-commit-only",
+        outcome: {
+          action: "commit",
+          source: "git",
+          status: "success",
+          summary: "Observed commits ahead of the configured base branch.",
+          title: "Commit retained in the Routine Firing workspace",
+          url: null,
+          verified: true
+        },
+        state: "succeeded",
+        workspacePath: prepared.workspacePath
+      });
+
+      // succeededDays: 0 makes every succeeded firing old enough to prune;
+      // only the verified commit-only outcome should withhold this one.
+      const report = await pruneRoutineWorkspaces({
+        policy: {
+          cancelledDays: 14,
+          enabled: true,
+          failedDays: 14,
+          succeededDays: 0
+        },
+        runStore: store
+      });
+
+      expect(report.candidates.map((entry) => entry.firingId)).not.toContain(
+        "fire-commit-only"
+      );
+      expect(report.pruned.map((entry) => entry.firingId)).not.toContain(
+        "fire-commit-only"
+      );
+      await expect(access(prepared.workspacePath)).resolves.toBeUndefined();
+      expect(await worktreePaths(prepared.cachePath)).toContain(
+        prepared.workspacePath
+      );
+    } finally {
+      store.close();
+    }
+  });
 });
 
 async function makeTempRoot(): Promise<string> {

@@ -319,7 +319,8 @@ describe("RoutineFiringDispatcher", () => {
         projectName: "expired",
         providerCommand: "codex fake",
         providerName: "codex",
-        routineName: "daily-report"
+        routineName: "daily-report",
+        scheduledAt: "2026-05-23T10:00:00.000Z"
       })
     ).toBe(true);
     runStore.completeRoutineFiring({
@@ -3006,7 +3007,8 @@ describe("RoutineFiringDispatcher", () => {
           projectName: "alpha",
           providerCommand: "codex fake",
           providerName: "codex",
-          routineName: "minute-report"
+          routineName: "minute-report",
+          scheduledAt: "2026-05-22T10:00:00.000Z"
         })
       ).toBe(true);
       runStore.completeRoutineFiring({
@@ -3057,7 +3059,8 @@ describe("RoutineFiringDispatcher", () => {
         projectName: "alpha",
         providerCommand: "codex fake",
         providerName: "codex",
-        routineName: "minute-report"
+        routineName: "minute-report",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
       })
     ).toBe(true);
     runStore.completeRoutineFiring({
@@ -3121,7 +3124,8 @@ describe("RoutineFiringDispatcher", () => {
         projectName: "alpha",
         providerCommand: "codex fake",
         providerName: "codex",
-        routineName: "minute-report"
+        routineName: "minute-report",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
       })
     ).toBe(true);
     runStore.completeRoutineFiring({

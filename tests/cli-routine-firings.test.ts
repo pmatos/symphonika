@@ -272,6 +272,7 @@ describe("CLI routine firing commands", () => {
     ]);
 
     expect(output.stdout).toContain("trigger:         manual");
+    expect(output.stdout).toContain("scheduled:       -");
   });
 
   it("show-firing preserves unknown legacy schedule and branch evidence", async () => {

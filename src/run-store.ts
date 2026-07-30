@@ -2200,7 +2200,7 @@ export class RunStore {
     providerCommand: string;
     providerName: AgentProviderName;
     routineName: string;
-    scheduledAt?: string;
+    scheduledAt?: string | null;
     triggerSource?: RoutineFiringTriggerSource;
     workspacePath?: string;
   }): void {
@@ -2225,7 +2225,7 @@ export class RunStore {
         provider_command: input.providerCommand,
         provider_name: input.providerName,
         routine_name: input.routineName,
-        scheduled_at: input.scheduledAt ?? now,
+        scheduled_at: input.scheduledAt ?? "",
         trigger_source: input.triggerSource ?? "scheduled",
         updated_at: now,
         workspace_path: input.workspacePath ?? null
@@ -2244,7 +2244,7 @@ export class RunStore {
     providerCommand: string;
     providerName: AgentProviderName;
     routineName: string;
-    scheduledAt?: string;
+    scheduledAt: string;
     triggerSource?: RoutineFiringTriggerSource;
     workspacePath?: string;
   }): boolean {
@@ -2262,9 +2262,7 @@ export class RunStore {
         providerCommand: input.providerCommand,
         providerName: input.providerName,
         routineName: input.routineName,
-        ...(input.scheduledAt === undefined
-          ? {}
-          : { scheduledAt: input.scheduledAt }),
+        scheduledAt: input.scheduledAt,
         ...(input.triggerSource === undefined
           ? {}
           : { triggerSource: input.triggerSource }),
@@ -2363,6 +2361,7 @@ export class RunStore {
         providerCommand: input.providerCommand,
         providerName: input.providerName,
         routineName: input.routineName,
+        scheduledAt: null,
         triggerSource: "manual",
         ...(input.workspacePath === undefined
           ? {}

@@ -1392,6 +1392,24 @@ the effective `graceMs` and server-computed `graceRemainingMs`. `GET /api/status
 object to each active Run with `idleSince` and `graceRemainingMs` when idle. When the effective
 Watchdog policy is disabled, both endpoints return exactly `{ "enabled": false }` for that object.
 
+The server-rendered dashboard and `/runs` list surface the same idle/grace state as a small
+"watchdog idle since X (Y remaining)" badge next to the state pill, shown only for active
+(non-terminal) Runs with `idleSince` set. The Run-detail page gains a Watchdog section directly under
+the run-state summary, rendering `last tool_call age`, `workspace mtime age`, `turn_ids observed`,
+`output tokens / 5m`, and (when set) `idle_since` and `grace remaining` — the same fields `show-run`
+exposes. For any Run not in the `running` state — a terminal state (including `terminal_reason =
+"no_progress"`), `queued`, `preparing_workspace`, or `waiting` — all three Progress Signal surfaces
+— `show-run`, `GET /api/runs/:id`, and the Run-detail page — compute ages and grace remaining
+against the Run's last persisted watchdog sample rather than the live clock. A Run's watchdog sample
+only ever advances while it is `running`, so a live clock against any other state's sample is a
+misleading, ever-drifting countdown for data that no longer describes what the Run is currently
+doing — most visibly for a terminated Run revisited days later (a stable, final signal instead of an
+ever-more-negative live countdown), but equally for a retried Run sitting in `preparing_workspace`
+with the prior failed attempt's sample still on record. (`runs.updated_at` is not used for this:
+it can keep advancing after termination for unrelated reasons, e.g. pull-request-discovery polling
+for succeeded Runs.) Both HTTP surfaces read the same `watchdog` object and render nothing (badge
+absent, section hidden) when the effective Watchdog policy is disabled.
+
 For a waiting Run whose tracked PR has unresolved review feedback after the configured dispatch
 cap, `GET /api/runs/:id` also exposes a top-level `pullRequestFollowup` object with
 `attention = "cap_reached"`, `dispatchCount`, `maxDispatches`, `prNumber`, and `prUrl`; otherwise

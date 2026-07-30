@@ -1204,6 +1204,131 @@ describe("CLI run commands", () => {
     }
   });
 
+  it("show-run's Progress Signal does not drift when viewed long after watchdog termination", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "progress-terminated-stale-view",
+      issue: sampleIssue({
+        number: 213,
+        title: "Watchdog surface, viewed later"
+      }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("progress-terminated-stale-view", "running");
+    store.upsertWatchdogSample({
+      idleSince: "2026-05-22T11:25:30.000Z",
+      lastMessageAt: "2026-05-22T11:25:15.000Z",
+      lastToolCallAt: "2026-05-22T11:25:00.000Z",
+      normalizedLogOffset: 123,
+      normalizedLogPath: "/tmp/provider.normalized.jsonl",
+      outputTokensTotal: 36_365,
+      runId: "progress-terminated-stale-view",
+      sampledAt: "2026-05-22T14:01:00.000Z",
+      turnIdSetSize: 1,
+      workspaceMtimeMax: Date.parse("2026-05-22T11:25:30.000Z")
+    });
+    expect(
+      store.markRunNoProgressStale(
+        "progress-terminated-stale-view",
+        "2026-05-22T14:01:00.000Z"
+      )
+    ).toBe(true);
+    store.close();
+
+    // A week after termination, updated_at could in principle have drifted
+    // (e.g. unrelated bookkeeping), but the Progress Signal must stay pinned
+    // to the run's last watchdog sample — the same values a viewer would
+    // have seen the moment it terminated, not a live countdown that keeps
+    // getting further negative the longer nobody looks at the page.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-29T09:00:00.000Z"));
+    try {
+      const present = captureProgram(stateRoot);
+      await present.program.parseAsync([
+        "node",
+        "symphonika",
+        "show-run",
+        "progress-terminated-stale-view",
+        "--config",
+        path.join(stateRoot, "symphonika.yml")
+      ]);
+
+      expect(present.output.stdout).toContain("terminal:     no_progress");
+      expect(progressSignalBlock(present.output.stdout)).toMatchInlineSnapshot(`
+        "Progress Signal:
+          last tool_call: 2h 36m ago
+          workspace mtime: 2h 35m ago
+          turn_ids observed: 1
+          output tokens / 5m: 0
+          idle_since: 2026-05-22T11:25:30.000Z
+          grace remaining: -2h 5m"
+      `);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("show-run's Progress Signal freezes at the stale sample while a retried Run is preparing_workspace", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "progress-retrying-preparing",
+      issue: sampleIssue({ number: 214, title: "Retrying after failure" }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("progress-retrying-preparing", "preparing_workspace");
+    // Sampling only ever happens in state 'running', so this sample is the
+    // prior (failed) attempt's data: it cannot have advanced since the Run
+    // left 'running' to prepare its retry.
+    store.upsertWatchdogSample({
+      idleSince: "2026-05-22T08:55:00.000Z",
+      lastMessageAt: null,
+      lastToolCallAt: "2026-05-22T08:50:00.000Z",
+      normalizedLogOffset: 0,
+      normalizedLogPath: "/tmp/prior-attempt.normalized.jsonl",
+      outputTokensTotal: 0,
+      runId: "progress-retrying-preparing",
+      sampledAt: "2026-05-22T09:00:00.000Z",
+      turnIdSetSize: 1,
+      workspaceMtimeMax: Date.parse("2026-05-22T08:50:00.000Z")
+    });
+    store.close();
+
+    // Viewed a while after the retry began preparing, the Progress Signal
+    // must stay pinned to the prior attempt's last sample, not compute a
+    // live, misleading countdown for an attempt that hasn't started yet.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-22T12:00:00.000Z"));
+    try {
+      const present = captureProgram(stateRoot);
+      await present.program.parseAsync([
+        "node",
+        "symphonika",
+        "show-run",
+        "progress-retrying-preparing",
+        "--config",
+        path.join(stateRoot, "symphonika.yml")
+      ]);
+
+      expect(progressSignalBlock(present.output.stdout)).toMatchInlineSnapshot(`
+        "Progress Signal:
+          last tool_call: 10m ago
+          workspace mtime: 10m ago
+          turn_ids observed: 1
+          output tokens / 5m: 0
+          idle_since: 2026-05-22T08:55:00.000Z
+          grace remaining: 25m"
+      `);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("show-run fills missing branch and workspace fields from the deterministic path plan", async () => {
     const stateRoot = await makeTempRoot();
     const configDir = await makeTempRoot();

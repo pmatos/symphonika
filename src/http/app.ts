@@ -24,7 +24,8 @@ import type {
 } from "../run-store.js";
 import {
   buildWatchdogIdleStatus,
-  buildWatchdogStatus
+  buildWatchdogStatus,
+  resolveWatchdogNowMs
 } from "../watchdog-status.js";
 import { buildPullRequestFollowupAttention, registerPages } from "./pages.js";
 
@@ -316,7 +317,12 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         watchdog: buildWatchdogStatus({
           config:
             options.getWatchdogConfig?.(run.project) ?? DEFAULT_WATCHDOG_CONFIG,
-          nowMs: now(),
+          nowMs: resolveWatchdogNowMs({
+            liveNowMs: now(),
+            runId: run.id,
+            runState: run.state,
+            runStore
+          }),
           runId: run.id,
           runStore
         })
@@ -430,8 +436,12 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.getStatusSnapshot === undefined
         ? {}
         : { getStatusSnapshot: options.getStatusSnapshot }),
+      ...(options.getWatchdogConfig === undefined
+        ? {}
+        : { getWatchdogConfig: options.getWatchdogConfig }),
       issuePollStatus,
       monotonicNow,
+      now,
       runStore,
       version: options.version
     });

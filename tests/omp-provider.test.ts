@@ -1559,6 +1559,49 @@ describe("Oh My Pi RPC provider", () => {
     await waitForProcessExit(pid);
   });
 
+  it("shuts down the child when the event consumer stops iteration", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const pidPath = path.join(root, "consumer-stopped.pid");
+    const fakeOmpPath = path.join(root, "fake-consumer-stopped-omp.mjs");
+    await writeFile(
+      fakeOmpPath,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        `writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));`,
+        "process.stdout.write(`${JSON.stringify({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 })}\\n`);",
+        "setInterval(() => {}, 1000);",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+    const input: ProviderRunInput = {
+      ...providerInputFixture(),
+      provider: {
+        command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+        name: "omp"
+      },
+      workspacePath
+    };
+    const iterator = provider.runAttempt(input)[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    const pid = Number(await waitForFileContent(pidPath));
+
+    try {
+      expect(first.done).toBe(false);
+      await iterator.return?.();
+      await waitForProcessExit(pid);
+    } finally {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // The provider already cleaned the process up.
+      }
+    }
+  });
+
   it("sends abort and reports a cancelled exit for an active OMP run", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");

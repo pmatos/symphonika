@@ -270,6 +270,7 @@ export function createOmpProvider(
         }
       } finally {
         activeRuns.delete(input.run.id);
+        shutdownProcess(child);
         await processScope.stopProviderScope(input.run);
       }
     },

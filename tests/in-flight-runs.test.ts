@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { InFlightRunRegistry } from "../src/lifecycle/in-flight-runs.js";
+import {
+  InFlightRunRegistry,
+  RegistryShutdownError
+} from "../src/lifecycle/in-flight-runs.js";
 
 describe("InFlightRunRegistry", () => {
   it("rejects a second in-flight run for the same project issue", () => {
@@ -161,5 +164,64 @@ describe("InFlightRunRegistry", () => {
     registry.unregister("run-b");
     expect(registry.count()).toBe(2);
     expect(registry.countByProject("symphonika")).toBe(1);
+  });
+
+  it("reserveSlot and register throw RegistryShutdownError after beginShutdown", () => {
+    const registry = new InFlightRunRegistry();
+    registry.beginShutdown();
+
+    expect(registry.isShuttingDown()).toBe(true);
+    expect(() =>
+      registry.reserveSlot({
+        issueNumber: 7,
+        projectName: "symphonika",
+        runId: "run-a"
+      })
+    ).toThrow(RegistryShutdownError);
+    expect(() =>
+      registry.register({
+        cancel: () => Promise.resolve(),
+        issueNumber: 8,
+        projectName: "symphonika",
+        runId: "run-b"
+      })
+    ).toThrow(RegistryShutdownError);
+    expect(registry.count()).toBe(0);
+  });
+
+  it("requestCancel with supersedeReason updates the reason without re-invoking cancel", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const registry = new InFlightRunRegistry();
+    registry.register({
+      cancel,
+      issueNumber: 7,
+      projectName: "symphonika",
+      runId: "run-a"
+    });
+
+    await registry.requestCancel("run-a", "operator");
+    await registry.requestCancel("run-a", "daemon_shutdown", {
+      supersedeReason: true
+    });
+
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(registry.get("run-a")?.cancelReason).toBe("daemon_shutdown");
+  });
+
+  it("requestCancel without supersedeReason keeps the first reason", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const registry = new InFlightRunRegistry();
+    registry.register({
+      cancel,
+      issueNumber: 7,
+      projectName: "symphonika",
+      runId: "run-a"
+    });
+
+    await registry.requestCancel("run-a", "operator");
+    await registry.requestCancel("run-a", "daemon_shutdown");
+
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(registry.get("run-a")?.cancelReason).toBe("operator");
   });
 });

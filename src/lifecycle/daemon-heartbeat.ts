@@ -70,9 +70,9 @@ export function createDaemonHeartbeat(
 // "always ping on schedule" -- that would mask the exact hang this feature
 // exists to catch. No config loaded means no ticks are scheduled by design
 // (nothing can hang), so that case is unconditionally alive. Once a config
-// is loaded, lastTickAtMs === undefined no longer means "nothing can hang"
+// is loaded, lastTickAtMonotonicMs === undefined no longer means "nothing can hang"
 // -- it means the first scheduled tick hasn't completed yet, and that tick
-// can hang just like any later one. tickLoopStartedAtMs is the fallback
+// can hang just like any later one. tickLoopStartedAtMonotonicMs is the fallback
 // reference for that pre-first-tick window, subject to the same staleness
 // bound, so a hung first tick doesn't ping forever. Otherwise a tick (or the
 // tick loop's start) more than 3x the live polling interval old is
@@ -83,18 +83,19 @@ export function createDaemonHeartbeat(
 export function isTickRecentEnoughForSystemdWatchdog(input: {
   configExists: boolean;
   effectiveIntervalMs: number;
-  lastTickAtMs: number | undefined;
-  now: number;
-  tickLoopStartedAtMs: number | undefined;
+  lastTickAtMonotonicMs: number | undefined;
+  nowMonotonicMs: number;
+  tickLoopStartedAtMonotonicMs: number | undefined;
 }): boolean {
   if (!input.configExists) {
     return true;
   }
-  const referenceAtMs = input.lastTickAtMs ?? input.tickLoopStartedAtMs;
+  const referenceAtMs =
+    input.lastTickAtMonotonicMs ?? input.tickLoopStartedAtMonotonicMs;
   if (referenceAtMs === undefined) {
     return true;
   }
-  return input.now - referenceAtMs <= input.effectiveIntervalMs * 3;
+  return input.nowMonotonicMs - referenceAtMs <= input.effectiveIntervalMs * 3;
 }
 
 // Half the watchdog window, per the conventional sd_watchdog_enabled(3)

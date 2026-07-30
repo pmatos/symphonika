@@ -412,6 +412,7 @@ async function loadRuntimeConfigSnapshot(input: {
   const pollingProjects: PollingProjectConfig[] = [];
   const dispatchProjects: RuntimeProjectConfig[] = [];
   const invalidRoutines: RuntimeConfigSnapshot["invalidRoutines"] = [];
+  const projectIndexByProject = new Map<RuntimeProjectConfig, number>();
 
   // First pass: validate each Project against its mode-specific schema and
   // build the runtime map. Dispatch Projects enter both `pollingProjects`
@@ -419,6 +420,7 @@ async function loadRuntimeConfigSnapshot(input: {
   // routine dispatcher and issue dispatch share). Routine Hosts enter only
   // `dispatchProjects` — they are never polled. See ADR 0062.
   for (const [index, rawProject] of parsed.data.projects.entries()) {
+    const loadedProjectIndex = dispatchProjects.length;
     if (projectModeOf(rawProject) === "routine_host") {
       if (
         loadRoutineHostProject({
@@ -430,6 +432,10 @@ async function loadRuntimeConfigSnapshot(input: {
         }) === "fatal"
       ) {
         return lastKnownGoodOrNothing(input.previous, errors);
+      }
+      const loadedProject = dispatchProjects[loadedProjectIndex];
+      if (loadedProject !== undefined) {
+        projectIndexByProject.set(loadedProject, index);
       }
       continue;
     }
@@ -445,6 +451,10 @@ async function loadRuntimeConfigSnapshot(input: {
       })) === "fatal"
     ) {
       return lastKnownGoodOrNothing(input.previous, errors);
+    }
+    const loadedProject = dispatchProjects[loadedProjectIndex];
+    if (loadedProject !== undefined) {
+      projectIndexByProject.set(loadedProject, index);
     }
   }
 
@@ -475,9 +485,10 @@ async function loadRuntimeConfigSnapshot(input: {
     }
     // Group valid routines by target project, enforcing the
     // kind:git-requires-tracker rule per host (a rejected routine is dropped,
-    // never attached). Invalid names are attached independently below so a
-    // target with ALL-invalid routines still gets invalidRoutineNames —
-    // otherwise syncRoutines would treat them as removed, not state=invalid.
+    // never attached, but its name is carried separately for precise store
+    // demotion). Invalid names are attached independently below so a target
+    // with ALL-invalid routines still gets invalidRoutineNames — otherwise
+    // syncRoutines would treat them as removed, not state=invalid.
     const routinesByProject = new Map<string, TargetedRoutineDeclaration[]>();
     for (const routine of routineResult.routines) {
       const list = routinesByProject.get(routine.projectName);
@@ -539,22 +550,33 @@ async function loadRuntimeConfigSnapshot(input: {
         continue;
       }
       // A kind: git routine on a tracker-less Routine Host is a declaration-
-      // time error (ADR 0062). Push the error AND drop the offending routine
-      // so it is never attached — a rejected routine must not fire. Report
-      // routines are unaffected (they need no PR discovery).
+      // time error (ADR 0062). Push the error, record its rejected identity,
+      // AND drop the offending routine so it is never attached — a rejected
+      // routine must not fire. Report routines are unaffected (they need no
+      // PR discovery).
       const needsTracker =
         project.mode === "routine_host" && project.tracker === undefined;
       const attached: TargetedRoutineDeclaration[] = [];
+      const trackerlessGitRoutines: TargetedRoutineDeclaration[] = [];
       for (const routine of routines) {
         if (needsTracker && routine.kind === "git") {
+          const projectIndex = projectIndexByProject.get(project);
+          const projectPrefix =
+            projectIndex === undefined
+              ? ""
+              : `projects.${projectIndex}.routines: `;
           errors.push(
-            `routine "${routine.name}" (kind: git) targets routine host "${projectName}" which declares no tracker; a kind: git routine requires a tracker for PR discovery`
+            `${projectPrefix}routine "${routine.name}" (kind: git) targets routine host "${projectName}" which declares no tracker; a kind: git routine requires a tracker for PR discovery`
           );
+          trackerlessGitRoutines.push(routine);
           continue;
         }
         attached.push(routine);
       }
       project.routines = attached;
+      if (trackerlessGitRoutines.length > 0) {
+        project.trackerlessGitRoutines = trackerlessGitRoutines;
+      }
       const invalidNames = invalidNamesByProject.get(projectName) ?? [];
       if (invalidNames.length > 0) {
         project.invalidRoutineNames = invalidNames;

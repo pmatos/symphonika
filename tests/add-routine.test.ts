@@ -100,6 +100,37 @@ describe("add-routine", () => {
     );
   });
 
+  it("normalizes a whitespace-bearing requested Project name before registration", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeFile(
+      configPath,
+      [
+        "projects:",
+        '  - name: " alpha "',
+        "    workflow: ./WORKFLOW.md",
+        ""
+      ].join("\n")
+    );
+
+    const report = await runAddRoutine({
+      configPath,
+      cwd: root,
+      kind: "report",
+      name: "normalized-target",
+      project: " alpha ",
+      schedule: "daily"
+    });
+
+    expect(report).toMatchObject({
+      ok: true,
+      project: "alpha"
+    });
+    expect(await readFile(configPath, "utf8")).toContain(
+      "routines:\n  - path: ./routines/normalized-target.md\n    project: alpha\n"
+    );
+  });
+
   it.each([
     {
       label: "unknown alias",
@@ -214,6 +245,66 @@ describe("add-routine", () => {
     expect(report.ok).toBe(false);
     expect(report.errors).toContain(
       'project "missing" not found in service config'
+    );
+    await expect(readFile(report.filePath, "utf8")).rejects.toThrow();
+    expect(await readFile(configPath, "utf8")).toBe(original);
+  });
+
+  it("refuses an ambiguously duplicated target Project without leaving a Routine file", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const original = [
+      "projects:",
+      "  - name: alpha",
+      "    workflow: ./WORKFLOW.md",
+      '  - name: " alpha "',
+      "    workflow: ./WORKFLOW.md",
+      ""
+    ].join("\n");
+    await writeFile(configPath, original);
+
+    const report = await runAddRoutine({
+      configPath,
+      cwd: root,
+      kind: "report",
+      name: "ambiguous-target",
+      project: "alpha",
+      schedule: "daily"
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain(
+      'project "alpha" is declared more than once in service config; routine targets require a unique project name'
+    );
+    await expect(readFile(report.filePath, "utf8")).rejects.toThrow();
+    expect(await readFile(configPath, "utf8")).toBe(original);
+  });
+
+  it("refuses an aliased duplicate target Project without leaving a Routine file", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const original = [
+      "projects:",
+      "  - &alpha",
+      "    name: alpha",
+      "    workflow: ./WORKFLOW.md",
+      "  - *alpha",
+      ""
+    ].join("\n");
+    await writeFile(configPath, original);
+
+    const report = await runAddRoutine({
+      configPath,
+      cwd: root,
+      kind: "report",
+      name: "aliased-target",
+      project: "alpha",
+      schedule: "daily"
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain(
+      'project "alpha" is declared more than once in service config; routine targets require a unique project name'
     );
     await expect(readFile(report.filePath, "utf8")).rejects.toThrow();
     expect(await readFile(configPath, "utf8")).toBe(original);

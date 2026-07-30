@@ -34,11 +34,7 @@ import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 import type { AgentProviderName, AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
-import {
-  renderProvidersSliceUnit,
-  renderSliceUnit,
-  userUnitDir
-} from "./service.js";
+import { userUnitDir } from "./service.js";
 import { resolveStateRoot } from "./state.js";
 import type { ExpandedWorkflow } from "./workflow.js";
 import {
@@ -482,9 +478,9 @@ export async function runDoctor(
 // that's not a doctor concern. `ExecStart`/`Environment=PATH` are baked in
 // at install time from the operator's own environment, so the `.service`
 // file can't be regenerated and byte-compared generically; only structural
-// markers (Slice=, Type=notify) are checked there. The two `.slice` files
-// carry no install-specific content, so they're compared byte-for-byte
-// against the current generator output.
+// markers (Slice=, Type=notify) are checked there. The `.slice` files are
+// also checked structurally because their resource-limit values are
+// operator-customizable (README.md).
 async function checkInstalledUnitDrift(
   homeDir: string,
   env: NodeJS.ProcessEnv
@@ -525,14 +521,14 @@ async function checkInstalledUnitDrift(
   warnings.push(
     ...(await checkSliceDrift(
       path.join(unitDir, "symphonika-daemon.slice"),
-      renderSliceUnit(),
+      ["MemoryHigh", "MemoryMax"],
       reinstallHint
     ))
   );
   warnings.push(
     ...(await checkSliceDrift(
       path.join(unitDir, "symphonika-providers.slice"),
-      renderProvidersSliceUnit(),
+      ["MemoryHigh", "MemoryMax", "TasksMax"],
       reinstallHint
     ))
   );
@@ -542,19 +538,53 @@ async function checkInstalledUnitDrift(
 
 async function checkSliceDrift(
   slicePath: string,
-  expectedContent: string,
+  requiredDirectives: string[],
   reinstallHint: string
 ): Promise<string[]> {
   const content = await readFileIfExists(slicePath);
   if (content === undefined) {
     return [`${slicePath} is missing — ${reinstallHint}`];
   }
-  if (content !== expectedContent) {
+  const directives = sliceDirectiveNames(content);
+  if (directives === undefined) {
+    return [`${slicePath} has no [Slice] section — ${reinstallHint}`];
+  }
+  const missingDirectives = requiredDirectives.filter(
+    (directive) => !directives.has(directive)
+  );
+  if (missingDirectives.length > 0) {
     return [
-      `${slicePath} content differs from the current generator output — ${reinstallHint}`
+      `${slicePath} is missing required [Slice] directives (${missingDirectives
+        .map((directive) => `${directive}=`)
+        .join(", ")}) — ${reinstallHint}`
     ];
   }
   return [];
+}
+
+function sliceDirectiveNames(content: string): Set<string> | undefined {
+  const directives = new Set<string>();
+  let inSliceSection = false;
+  let sawSliceSection = false;
+
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const section = /^\[([^\]]+)\]$/.exec(trimmed);
+    if (section !== null) {
+      inSliceSection = section[1] === "Slice";
+      sawSliceSection ||= inSliceSection;
+      continue;
+    }
+    if (!inSliceSection || trimmed.startsWith("#") || trimmed.startsWith(";")) {
+      continue;
+    }
+    const equalsIndex = trimmed.indexOf("=");
+    if (equalsIndex > 0) {
+      directives.add(trimmed.slice(0, equalsIndex).trim());
+    }
+  }
+
+  return sawSliceSection ? directives : undefined;
 }
 
 async function readFileIfExists(filePath: string): Promise<string | undefined> {

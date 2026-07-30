@@ -339,6 +339,7 @@ describe("dispatch retry policy", () => {
     await writeProject(root);
 
     let attempts = 0;
+    let firstAttemptCompleted = false;
     const provider: AgentProvider = {
       cancel: vi.fn().mockResolvedValue(undefined),
       name: "codex",
@@ -349,6 +350,7 @@ describe("dispatch retry policy", () => {
           normalized: { exitCode: 1, type: "process_exit" },
           raw: { code: 1, kind: "exit" }
         };
+        firstAttemptCompleted = true;
       },
       validate: vi.fn().mockResolvedValue(undefined)
     };
@@ -357,7 +359,13 @@ describe("dispatch retry policy", () => {
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
       // executeRetry calls getIssue: simulate the issue closing during backoff.
-      getIssue: vi.fn().mockResolvedValue(null),
+      getIssue: vi.fn(() =>
+        Promise.resolve(
+          firstAttemptCompleted
+            ? null
+            : { ...baseIssue, labels: ["agent-ready"] }
+        )
+      ),
       listOpenIssues: vi.fn(() => {
         listCalls += 1;
         if (listCalls === 1) {

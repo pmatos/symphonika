@@ -219,7 +219,8 @@ segment because routine firing workspaces live under `<workspace.root>/routines/
 Routine names are globally unique across the `routines:` block. Routine states are `active`,
 `expired`, and `inactive`. `inactive` means the Routine's target Project is disabled or omitted from
 the current valid Service Config snapshot (ADR 0021 cascade); the row remains durable but is hidden
-from default operator listings.
+from default operator listings. Routine-level scheduling control also uses `disabled` and `invalid`
+as defined in §8.5.
 
 ### 4.13 Routine Firing
 
@@ -723,6 +724,11 @@ workspace and logs are preserved, matching issue Run cancellation. Cancelling an
 Routine Firing already in a terminal state (`succeeded`, `failed`, `cancelled`) returns a clear
 error and makes no state change.
 
+Graceful daemon shutdown cancels every in-flight Routine Firing through the same provider
+cancellation path before waiting for dispatch work to drain, recording
+`cancel_reason = "daemon_shutdown"`. This is distinct from disabling or removing a Routine while
+the daemon remains active, which does not cancel its in-flight firing.
+
 A Routine with `disabled: true` in its own front matter transitions to `state = disabled`,
 `disabled_reason = "operator"` on the next reload; future scheduling stops but an in-flight firing
 continues to completion under the snapshot it started with — the daemon never cancels it as a side
@@ -733,6 +739,19 @@ un-disables it on the next reload and recomputes `next_fire_at` strictly after t
 one-shot Routine whose `at` elapsed while disabled is marked `expired` instead of firing
 retroactively. `catch_up: fire_once_if_missed` does not apply to a routine-level restore — that
 policy is for daemon outage, not deliberate operator disable.
+
+A previously persisted `kind: git` Routine rejected because its Routine Host has no tracker is
+soft-disabled with `disabled_reason = "rejected_tracker_less_host"`. This is distinct from
+`removed_from_config`: the top-level entry is still present but is incompatible with its target
+host. The rejected name must not be folded into the declaration-loader's `invalidRoutineNames`
+protection, because a protected, undeclared persisted row is skipped by both removal detection and
+the valid-declaration upsert and could remain active. A first-appearance rejection persists the
+Routine with its declared schedule and prompt: as `disabled` with the same reason while its host is
+enabled, or as `inactive` when the Project-level disable cascade takes precedence. Restoring the
+host's tracker therefore returns the Routine to the normal upsert path and the existing restore
+rules above in every case: a recurring Routine reactivates, while an elapsed one-shot is marked
+`expired` instead of firing retroactively — even when its schedule was edited while rejected or
+inactive. See ADR 0066.
 
 An invalid Routine declaration on reload does not abort reload for the rest of the fleet (§5.4): the
 daemon logs the error and surfaces it in the operator status surface and `doctor`. A Routine with a
@@ -1053,8 +1072,27 @@ Cancel active provider process when:
 - issue is closed
 - issue loses eligibility
 - operator cancels through CLI or UI
+- the daemon begins graceful shutdown
 
 Cancellation preserves workspace and logs.
+
+On graceful shutdown, the daemon first closes the active-run registry to new claims
+synchronously, before snapshotting active runs, so a dispatch still in pre-claim work can never
+reserve a slot after cancellation begins; a claim that raced the gate is rolled back to
+`cancel_reason = "daemon_shutdown"`, and later claims are skipped, not rescheduled. The daemon
+then cancels queued or delayed work, records `cancel_reason = "daemon_shutdown"` for every
+currently in-flight Run and Routine Firing, and requests cancellation through each live Agent
+Provider. The shutdown reason supersedes any cancellation already in progress and is
+sticky in the run store: later cancellation writes — from an in-flight reconcile or a UI
+cancel landing during the drain — cannot overwrite `daemon_shutdown` with another reason.
+Delayed-work registration closes with cancellation: the scheduler refuses timers armed after
+that point, so nothing fires against a store that is closing. A Run that was about to park
+into a wait state when cancellation latched is classified `cancelled` instead of flipping to
+`waiting`, and an in-flight wait re-evaluation stops before mutating rows — durable waiting
+rows are left untouched for the next daemon's reconciliation. Only after those requests have
+been awaited does it wait for in-flight dispatches to unwind. This explicit
+shutdown path is required because provider processes may run in a cgroup outside the daemon's
+own process tree (ADR 0064).
 
 ### 12.4 Watchdog
 

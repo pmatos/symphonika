@@ -105,8 +105,17 @@ against this same commit before the rewrite) all pass:
   `autonomous-prompt.test.ts`
 - Removed: `src/workflow.ts`, `tests/workflow-types.test.ts`
 
-Every export previously available from `src/workflow.ts` is still available from its owning
-submodule; nothing was deleted from the public interface, only relocated.
+Every export previously available from `src/workflow.ts` that has a real caller is still available
+from its owning submodule — nothing load-bearing was deleted, only relocated. The export surface was
+also intentionally *reduced* in two places, by a follow-up commit (`71cb30c`) fixing the Knip CI
+failure this addendum's `src/workflow.ts` deletion caused: `validateWorkflowContract`
+(`workflow/contract-loading.ts`) was deleted outright — it had zero callers anywhere, internal or
+external, superseded by the `loadExpandedWorkflow` + `validateExpandedWorkflowReferences` path the
+CLI's `workflow validate`/`workflow explain` commands actually use — and the five `Prompt*` type
+aliases (`PromptProject`, `PromptWorkspace`, `PromptBranch`, `PromptRun`, `PromptProvider` in
+`workflow/autonomous-prompt.ts`) lost their `export` keyword, since nothing outside that file
+imported them by name; they remain used internally to compose `RenderAutonomousPromptInput` and
+`PersistRunEvidenceInput`, both of which stay exported.
 
 This ADR's `Status` above is still `Proposed`; whether landing this addendum also promotes it to
 `Accepted` is a separate call left to the maintainer.

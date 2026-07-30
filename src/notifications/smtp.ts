@@ -3,7 +3,7 @@ import nodemailer from "nodemailer";
 import type { EmailNotificationConfig } from "./config.js";
 import type { NotificationMessage, NotificationSink } from "./types.js";
 
-export type SmtpTransportOptions = {
+type SmtpTransportOptions = {
   auth?: { pass: string; user: string };
   host: string;
   ignoreTLS?: boolean;
@@ -17,13 +17,11 @@ type SmtpMail = NotificationMessage & {
   to: string;
 };
 
-export type SmtpTransport = {
+type SmtpTransport = {
   sendMail(message: SmtpMail): Promise<unknown>;
 };
 
-export type CreateSmtpTransport = (
-  options: SmtpTransportOptions
-) => SmtpTransport;
+type CreateSmtpTransport = (options: SmtpTransportOptions) => SmtpTransport;
 
 export type CreateSmtpNotificationSinkOptions = {
   createTransport?: CreateSmtpTransport;

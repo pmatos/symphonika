@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export type EmailDeliveryPolicy = "always" | "changes" | "failures";
-export type SmtpSecurity = "starttls" | "ssl" | "none";
+type SmtpSecurity = "starttls" | "ssl" | "none";
 
 export type EmailNotificationConfig = {
   from: string;
@@ -14,7 +14,7 @@ export type EmailNotificationConfig = {
   to: string;
 };
 
-export const DEFAULT_SMTP_PASSWORD_ENV = "SYMPHONIKA_SMTP_PASSWORD";
+const DEFAULT_SMTP_PASSWORD_ENV = "SYMPHONIKA_SMTP_PASSWORD";
 
 const DEFAULT_SMTP_PORT: Record<SmtpSecurity, number> = {
   none: 25,

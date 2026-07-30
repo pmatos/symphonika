@@ -1731,6 +1731,31 @@ export class RunStore {
     return result.changes;
   }
 
+  // Provider/config admission failures deliberately leave the routines row
+  // itself untouched (state, next_fire_at) so the routine stays due and
+  // retries on a later tick once the operator fixes the config — see
+  // dispatchDueRoutines' provider-admission checks. This method only
+  // settles that one fan-out's target row so its grouped summary can still
+  // become ready from its other, successfully admitted siblings;
+  // settleUnavailableRoutineFanoutTargets() can't cover this case because
+  // the routine is still active and due, not unschedulable.
+  skipRoutineFanoutTarget(input: {
+    fanoutId: string;
+    projectName: string;
+    skipReason: string;
+  }): boolean {
+    const result = this.database
+      .prepare(
+        [
+          "update routine_fanout_targets set",
+          "disposition = 'skipped', skip_reason = ?, updated_at = ?",
+          "where fanout_id = ? and project_name = ? and disposition = 'pending'"
+        ].join(" ")
+      )
+      .run(input.skipReason, timestamp(), input.fanoutId, input.projectName);
+    return result.changes > 0;
+  }
+
   markRoutinesInactiveForProject(
     projectName: string,
     options: {

@@ -270,7 +270,7 @@ describe("provider process lifecycle", () => {
           })
         ]);
         expect(outcome).toBe("resolved");
-        expect(await processIsRunning(providerPid)).toBe(false);
+        await waitForProcessStopped(providerPid);
       } finally {
         if (timeout !== undefined) {
           clearTimeout(timeout);

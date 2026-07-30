@@ -5,6 +5,7 @@ import { Writable } from "node:stream";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { RawGitHubPullRequest } from "../src/issue-polling.js";
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
 import type {
   RunControllerProjectConfig,
@@ -21,6 +22,7 @@ import {
   fireRoutineNow
 } from "../src/routines/dispatcher.js";
 import type { TargetedRoutineDeclaration } from "../src/routines/types.js";
+import type { RoutineFanoutNotification } from "../src/routines/fanout-summary.js";
 import type {
   PreparedRoutineWorkspace,
   PrepareRoutineWorkspaceInput
@@ -419,7 +421,6 @@ describe("RoutineFiringDispatcher", () => {
       runStore.close();
     }
   });
-
   it("passes effective execution overrides only on the routine provider input", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
@@ -570,6 +571,569 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("fires every target from one clock event with a shared fan-out id and one grouped notification", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const firingIds = ["fire-alpha", "fire-beta"];
+    const notifications: RoutineFanoutNotification[] = [];
+    const notifyRoutineFanout = vi.fn(
+      (notification: RoutineFanoutNotification): Promise<void> => {
+        notifications.push(notification);
+        return Promise.resolve();
+      }
+    );
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const declaration = {
+      kind: "report" as const,
+      name: "refactor-audit",
+      prompt: "Audit {{project.name}}.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: path.join(root, "refactor-audit.md")
+    };
+
+    try {
+      const result = await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-1",
+        createFiringId: () => firingIds.shift()!,
+        globalConcurrency: { maxInFlight: undefined },
+        notifyRoutineFanout,
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: ({ project }) =>
+          Promise.resolve({
+            branchName: "",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", `${project.name}.git`),
+            reused: false,
+            workspacePath: path.join(root, "workspaces", project.name)
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              name: "alpha",
+              routines: [{ ...declaration, projectName: "alpha" }]
+            }
+          ],
+          [
+            "beta",
+            {
+              ...runStoreProjectFixture(),
+              name: "beta",
+              routines: [{ ...declaration, projectName: "beta" }]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(result.fired).toEqual(["fire-alpha", "fire-beta"]);
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          fanoutId: "fanout-1",
+          id: "fire-beta",
+          projectName: "beta",
+          state: "succeeded"
+        }),
+        expect.objectContaining({
+          fanoutId: "fanout-1",
+          id: "fire-alpha",
+          projectName: "alpha",
+          state: "succeeded"
+        })
+      ]);
+      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
+      expect(notifications[0]?.fanout.id).toBe("fanout-1");
+      expect(notifications[0]?.fanout.routineName).toBe("refactor-audit");
+      expect(
+        notifications[0]?.fanout.targets.map((target) => target.projectName)
+      ).toEqual(["alpha", "beta"]);
+      expect(notifications[0]?.subject).toBe(
+        "[ptt] refactor-audit — 0 PR, 0 issue, 0 failed"
+      );
+      expect(notifications[0]?.text).toContain("- alpha: succeeded");
+      expect(notifications[0]?.text).toContain("- beta: succeeded");
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("keeps an in-flight summary immutable and catch-up-skips a target configured after fan-out creation", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const notifications: RoutineFanoutNotification[] = [];
+    const declaration = {
+      kind: "report" as const,
+      name: "refactor-audit",
+      prompt: "Audit {{project.name}}.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: path.join(root, "refactor-audit.md")
+    };
+    const notifyRoutineFanout = vi.fn(
+      (notification: RoutineFanoutNotification): Promise<void> => {
+        notifications.push(notification);
+        // Simulate a re-entrant reload (ADR 0052) adding a Project to this
+        // Routine while this notification is already in flight. The
+        // original clock event's expected membership is immutable, so beta
+        // must not join this fan-out.
+        if (notifications.length === 1) {
+          runStore.syncRoutines([
+            { ...declaration, projectName: "alpha" },
+            { ...declaration, projectName: "beta" }
+          ]);
+          runStore.ensureRoutineFanout({
+            id: "fanout-1-ignored-because-already-exists",
+            projectNames: ["alpha", "beta"],
+            routineName: "refactor-audit",
+            scheduledAt: "2026-05-22T10:00:00.000Z"
+          });
+          expect(
+            runStore.hasRoutineFanoutTarget({
+              id: "fanout-1",
+              projectName: "beta"
+            })
+          ).toBe(false);
+        }
+        return Promise.resolve();
+      }
+    );
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      const result = await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-1",
+        createFiringId: () => "fire-alpha",
+        globalConcurrency: { maxInFlight: undefined },
+        notifyRoutineFanout,
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: ({ project }) =>
+          Promise.resolve({
+            branchName: "",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", `${project.name}.git`),
+            reused: false,
+            workspacePath: path.join(root, "workspaces", project.name)
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              name: "alpha",
+              routines: [{ ...declaration, projectName: "alpha" }]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(result.fired).toEqual(["fire-alpha"]);
+      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
+      expect(
+        notifications[0]?.fanout.targets.map((target) => target.projectName)
+      ).toEqual(["alpha"]);
+
+      // beta was configured after this clock event began, so the alpha-only
+      // fan-out is delivered exactly once and remains immutable.
+      expect(runStore.getRoutineFanout("fanout-1")).toMatchObject({
+        notificationState: "sent",
+        targets: [
+          expect.objectContaining({
+            disposition: "firing",
+            projectName: "alpha"
+          })
+        ]
+      });
+
+      // On the next tick the newly configured, already-overdue one-shot is
+      // consumed as an ungrouped catch-up skip rather than firing into the
+      // completed event or remaining due forever.
+      const lateTick = await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-1-unused",
+        createFiringId: () => "fire-beta-must-not-run",
+        globalConcurrency: { maxInFlight: undefined },
+        notifyRoutineFanout,
+        now: new Date("2026-05-22T10:05:00.000Z"),
+        prepareRoutineWorkspace: ({ project }) =>
+          Promise.resolve({
+            branchName: "",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", `${project.name}.git`),
+            reused: false,
+            workspacePath: path.join(root, "workspaces", project.name)
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              name: "alpha",
+              routines: [{ ...declaration, projectName: "alpha" }]
+            }
+          ],
+          [
+            "beta",
+            {
+              ...runStoreProjectFixture(),
+              name: "beta",
+              routines: [{ ...declaration, projectName: "beta" }]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(lateTick.fired).toEqual([]);
+      expect(lateTick.skipped).toContainEqual({
+        projectName: "beta",
+        reason: "catch_up_window",
+        routineName: "refactor-audit"
+      });
+      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
+      expect(runStore.listRoutines({ project: "beta" })[0]).toMatchObject({
+        lastSkipReason: "catch_up_window",
+        state: "expired"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("admits fan-out targets independently and includes a global-cap skip in the grouped result", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const notifications: RoutineFanoutNotification[] = [];
+    const notifyRoutineFanout = vi.fn(
+      (notification: RoutineFanoutNotification): Promise<void> => {
+        notifications.push(notification);
+        return Promise.resolve();
+      }
+    );
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const declaration = {
+      kind: "report" as const,
+      name: "refactor-audit",
+      prompt: "Audit.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: path.join(root, "refactor-audit.md")
+    };
+
+    try {
+      const result = await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-cap",
+        createFiringId: () => "fire-alpha",
+        globalConcurrency: { maxInFlight: 1 },
+        notifyRoutineFanout,
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: ({ project }) =>
+          Promise.resolve({
+            branchName: "",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", `${project.name}.git`),
+            reused: false,
+            workspacePath: path.join(root, "workspaces", project.name)
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              name: "alpha",
+              routines: [{ ...declaration, projectName: "alpha" }]
+            }
+          ],
+          [
+            "beta",
+            {
+              ...runStoreProjectFixture(),
+              name: "beta",
+              routines: [{ ...declaration, projectName: "beta" }]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(result.fired).toEqual(["fire-alpha"]);
+      expect(result.skipped).toContainEqual({
+        projectName: "beta",
+        reason: "concurrency_cap",
+        routineName: "refactor-audit"
+      });
+      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
+      expect(
+        notifications[0]?.fanout.targets.map((target) => ({
+          disposition: target.disposition,
+          projectName: target.projectName,
+          skipReason: target.skipReason
+        }))
+      ).toEqual([
+        {
+          disposition: "firing",
+          projectName: "alpha",
+          skipReason: null
+        },
+        {
+          disposition: "skipped",
+          projectName: "beta",
+          skipReason: "concurrency_cap"
+        }
+      ]);
+      expect(notifications[0]?.text).toContain(
+        "- beta: skipped (concurrency_cap)"
+      );
+      expect(runStore.listRoutines({ project: "beta" })[0]).toMatchObject({
+        lastSkipReason: "concurrency_cap",
+        state: "expired"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("leaves a provider-admission-blocked fan-out target pending across ticks, then claims it once the provider is registered", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const notifications: RoutineFanoutNotification[] = [];
+    const notifyRoutineFanout = vi.fn(
+      (notification: RoutineFanoutNotification): Promise<void> => {
+        notifications.push(notification);
+        return Promise.resolve();
+      }
+    );
+    const codexProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const ompProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "omp",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const declaration = {
+      kind: "report" as const,
+      name: "refactor-audit",
+      prompt: "Audit.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: path.join(root, "refactor-audit.md")
+    };
+    const firingIds = ["fire-alpha", "fire-beta"];
+    const projects = new Map([
+      [
+        "alpha",
+        {
+          ...runStoreProjectFixture(),
+          name: "alpha",
+          routines: [{ ...declaration, projectName: "alpha" }]
+        }
+      ],
+      [
+        "beta",
+        {
+          ...runStoreProjectFixture(),
+          name: "beta",
+          routines: [
+            { ...declaration, projectName: "beta", provider: "omp" as const }
+          ]
+        }
+      ]
+    ]);
+
+    try {
+      // Tick 1: "omp" is not registered yet. alpha succeeds; beta's fan-out
+      // target must stay pending rather than being durably skipped, so the
+      // clock event is not lost -- matching the design doc's "provider/
+      // config availability failures leave the target pending and due for
+      // a later daemon tick" and SPEC's one-shot-summary contract (no
+      // partial notification while a target is still legitimately due).
+      const tickOne = await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: codexProvider },
+        configDir: root,
+        createFanoutId: () => "fanout-provider-gap",
+        createFiringId: () => firingIds.shift()!,
+        globalConcurrency: { maxInFlight: undefined },
+        notifyRoutineFanout,
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: ({ project }) =>
+          Promise.resolve({
+            branchName: "",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", `${project.name}.git`),
+            reused: false,
+            workspacePath: path.join(root, "workspaces", project.name)
+          }),
+        projects,
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(tickOne.fired).toEqual(["fire-alpha"]);
+      expect(tickOne.skipped).toContainEqual({
+        projectName: "beta",
+        reason: "provider_not_registered: omp",
+        routineName: "refactor-audit"
+      });
+      expect(notifyRoutineFanout).not.toHaveBeenCalled();
+      expect(runStore.getRoutineFanout("fanout-provider-gap")?.targets).toEqual(
+        [
+          expect.objectContaining({
+            disposition: "firing",
+            projectName: "alpha"
+          }),
+          expect.objectContaining({
+            disposition: "pending",
+            projectName: "beta"
+          })
+        ]
+      );
+      // Untouched: still active and due, so it retries on the next tick.
+      expect(runStore.listRoutines({ project: "beta" })[0]).toMatchObject({
+        lastSkipReason: null,
+        state: "active"
+      });
+
+      // Tick 2: the operator registers "omp". The same fan-out (matched on
+      // routine name + scheduled_at) is reused, beta is finally claimed and
+      // succeeds, and only now does the grouped summary fire once.
+      const tickTwo = await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: codexProvider, omp: ompProvider },
+        configDir: root,
+        createFanoutId: () => "fanout-provider-gap-unused",
+        createFiringId: () => firingIds.shift()!,
+        globalConcurrency: { maxInFlight: undefined },
+        notifyRoutineFanout,
+        now: new Date("2026-05-22T10:05:00.000Z"),
+        prepareRoutineWorkspace: ({ project }) =>
+          Promise.resolve({
+            branchName: "",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", `${project.name}.git`),
+            reused: false,
+            workspacePath: path.join(root, "workspaces", project.name)
+          }),
+        projects,
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" },
+          omp: { command: "omp fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(tickTwo.fired).toEqual(["fire-beta"]);
+      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
+      expect(notifications[0]?.fanout.id).toBe("fanout-provider-gap");
+      expect(
+        notifications[0]?.fanout.targets.map((target) => ({
+          disposition: target.disposition,
+          projectName: target.projectName
+        }))
+      ).toEqual([
+        { disposition: "firing", projectName: "alpha" },
+        { disposition: "firing", projectName: "beta" }
+      ]);
+      expect(notifications[0]?.text).toContain("- alpha: succeeded");
+      expect(notifications[0]?.text).toContain("- beta: succeeded");
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("succeeds a kind: git firing with commits ahead and discovers every open PR", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
@@ -710,6 +1274,129 @@ describe("RoutineFiringDispatcher", () => {
       ]);
       expect(runStore.listOpenTrackedPullRequests()).toEqual([]);
       expect(runStore.hasPullRequestFollowupWork()).toBe(false);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("keeps a succeeded git firing non-terminal until PR discovery finishes, so the fan-out summary is not sent early", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/dependency-update/01JDISCOVERYRACE";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+
+    let releasePullRequests: (
+      pullRequests: RawGitHubPullRequest[]
+    ) => void = () => {};
+    const discoveryGate = new Promise<RawGitHubPullRequest[]>((resolve) => {
+      releasePullRequests = resolve;
+    });
+    const listPullRequestsForBranch = vi.fn(() => discoveryGate);
+
+    const notifications: RoutineFanoutNotification[] = [];
+    const notifyRoutineFanout = vi.fn(
+      (notification: RoutineFanoutNotification): Promise<void> => {
+        notifications.push(notification);
+        return Promise.resolve();
+      }
+    );
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName,
+          branchRef: `refs/heads/${branchName}`,
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      const dispatchPromise = dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-race",
+        createFiringId: () => "fire-race",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        notifyRoutineFanout,
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "dependency-update",
+                  prompt: "Commit on {{branch.name}}.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "dependency-update.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      // The provider has finished and PR discovery has started, but is
+      // blocked on discoveryGate: the firing must not be terminal yet, and
+      // the fan-out (whose only target is this firing) must not be ready.
+      await vi.waitFor(() => {
+        expect(listPullRequestsForBranch).toHaveBeenCalled();
+      });
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({ id: "fire-race", state: "running" })
+      ]);
+      expect(runStore.listReadyRoutineFanouts()).toEqual([]);
+      expect(notifyRoutineFanout).not.toHaveBeenCalled();
+
+      releasePullRequests([
+        { head: { ref: branchName, sha: "abc123" }, number: 42, state: "open" }
+      ]);
+      await dispatchPromise;
+
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-race",
+          pullRequests: [expect.objectContaining({ prNumber: 42 })],
+          state: "succeeded"
+        })
+      ]);
+      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
+      expect(notifications[0]?.subject).toBe(
+        "[ptt] dependency-update — 1 PR, 0 issue, 0 failed"
+      );
     } finally {
       runStore.close();
     }

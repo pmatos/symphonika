@@ -283,7 +283,7 @@ describe("Routine Host reload (ADR 0062)", () => {
         "projects:",
         ...hostProjectLines("audit-host"), // no tracker
         "routines:",
-        "  - project: audit-host",
+        "  - projects: [audit-host]",
         "    path: ./refactor-audit.md"
       ].join("\n")
     );
@@ -336,7 +336,7 @@ describe("Routine Host reload (ADR 0062)", () => {
           "projects:",
           ...hostProjectLines("audit-host", { tracker }),
           "routines:",
-          "  - project: audit-host",
+          "  - projects: [audit-host]",
           "    path: ./refactor-audit.md"
         ].join("\n")
       );
@@ -434,7 +434,7 @@ describe("Routine Host reload (ADR 0062)", () => {
           "projects:",
           ...hostProjectLines("audit-host", { tracker }),
           "routines:",
-          "  - project: audit-host",
+          "  - projects: [audit-host]",
           "    path: ./audit-fix.md"
         ].join("\n")
       );
@@ -534,7 +534,7 @@ describe("Routine Host reload (ADR 0062)", () => {
           "projects:",
           ...hostProjectLines("audit-host", { tracker }),
           "routines:",
-          "  - project: audit-host",
+          "  - projects: [audit-host]",
           "    path: ./audit-fix.md"
         ].join("\n")
       );
@@ -619,7 +619,7 @@ describe("Routine Host reload (ADR 0062)", () => {
           "projects:",
           ...hostProjectLines("audit-host", { tracker }),
           "routines:",
-          "  - project: audit-host",
+          "  - projects: [audit-host]",
           "    path: ./audit-fix.md"
         ].join("\n")
       );
@@ -721,7 +721,7 @@ describe("Routine Host reload (ADR 0062)", () => {
           "projects:",
           ...hostProjectLines("audit-host", options),
           "routines:",
-          "  - project: audit-host",
+          "  - projects: [audit-host]",
           "    path: ./audit-fix.md"
         ].join("\n")
       );
@@ -943,9 +943,9 @@ describe("Routine Host reload (ADR 0062)", () => {
         ...hostProjectLines("host-a"),
         ...hostProjectLines("host-b"),
         "routines:",
-        "  - project: host-a",
+        "  - projects: [host-a]",
         "    path: ./broken-routine.md",
-        "  - project: host-b",
+        "  - projects: [host-b]",
         "    path: ./valid-routine.md"
       ].join("\n")
     );
@@ -996,7 +996,7 @@ describe("Routine Host reload (ADR 0062)", () => {
         ...hostProjectLines("shared-host"),
         ...hostProjectLines("shared-host"),
         "routines:",
-        "  - project: shared-host",
+        "  - projects: [shared-host]",
         "    path: ./daily-report.md"
       ].join("\n")
     );
@@ -1174,9 +1174,9 @@ describe("Routine Host doctor (ADR 0062)", () => {
         ...hostProjectLines("host-a"),
         ...hostProjectLines("host-b"),
         "routines:",
-        "  - project: host-a",
+        "  - projects: [host-a]",
         "    path: ./broken-routine.md",
-        "  - project: host-b",
+        "  - projects: [host-b]",
         "    path: ./valid-routine.md"
       ].join("\n")
     );
@@ -1226,7 +1226,7 @@ describe("Routine Host doctor (ADR 0062)", () => {
         "projects:",
         ...hostProjectLines("host-a"),
         "routines:",
-        "  - project: nonexistent-project",
+        "  - projects: [nonexistent-project]",
         "    path: ./broken-routine.md"
       ].join("\n")
     );
@@ -1280,7 +1280,7 @@ describe("Routine Host doctor (ADR 0062)", () => {
         ...hostProjectLines("shared-host"),
         ...hostProjectLines("shared-host"),
         "routines:",
-        "  - project: shared-host",
+        "  - projects: [shared-host]",
         "    path: ./daily-report.md"
       ].join("\n")
     );
@@ -1405,7 +1405,7 @@ describe("Routine Host doctor (ADR 0062)", () => {
         "projects:",
         ...hostProjectLines("audit-host"), // no tracker
         "routines:",
-        "  - project: audit-host",
+        "  - projects: [audit-host]",
         "    path: ./refactor-audit.md"
       ].join("\n")
     );
@@ -1538,6 +1538,47 @@ describe("init-project --mode routine-host (ADR 0062)", () => {
 });
 
 describe("syncRoutines removal-detection (ADR 0063)", () => {
+  it("soft-disables only the removed target row from a fanned-out Routine", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const store = openRunStore({ stateRoot });
+    const routine = {
+      kind: "report" as const,
+      name: "refactor-audit",
+      prompt: "Audit.",
+      provider: null,
+      schedule: { cron: "0 2 * * *", tz: "Etc/UTC" },
+      sourcePath: "/tmp/refactor-audit.md"
+    };
+    try {
+      store.syncRoutines(
+        [
+          { ...routine, projectName: "alpha" },
+          { ...routine, projectName: "beta" }
+        ],
+        { now: new Date("2026-05-20T00:00:00.000Z") }
+      );
+
+      store.syncRoutines([{ ...routine, projectName: "alpha" }], {
+        now: new Date("2026-05-21T00:00:00.000Z"),
+        projects: ["alpha", "beta"]
+      });
+
+      expect(store.listRoutines({ project: "alpha" })[0]).toMatchObject({
+        disabledReason: null,
+        name: "refactor-audit",
+        state: "active"
+      });
+      expect(store.listRoutines({ project: "beta" })[0]).toMatchObject({
+        disabledReason: "removed_from_config",
+        name: "refactor-audit",
+        state: "disabled"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("soft-disables the last routine when a project's routines go to zero", async () => {
     // Regression: syncRoutines([]) with no `projects` would never enter the
     // per-project loop, leaving a removed routine's row active. The `projects`

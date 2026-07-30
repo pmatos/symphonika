@@ -2,14 +2,6 @@
 
 Symphonika is a fresh orchestrator for turning tracked project work into isolated coding-agent runs.
 
-> **Prospective model:** Service-level Routine **Fan-out** — a Routine targeting more than one
-> Project via a `projects:` list (or wildcard), with per-Project **Routine Target** state and
-> per-clock-event **Routine Fan-out** — is target-state vocabulary for
-> [#295](https://github.com/pmatos/symphonika/issues/295), not the current implementation contract.
-> The **Dispatch Project** / **Routine Host** mode split (ADR 0062) and single-target service-level
-> **Routine** declarations (ADR 0063) below are implemented: a Routine currently targets exactly one
-> declared Project by name.
-
 ## Language
 
 **Orchestrator**:
@@ -154,18 +146,31 @@ One orchestrator-managed execution lifecycle for one issue in one workspace.
 _Avoid_: issue when referring to execution status
 
 **Routine**:
-A service-level scheduled prompt declaration that targets one declared Project by name and can launch
-a Coding Agent without a GitHub Issue. A Routine Host owns no routines — Routines point *at* it.
-When a Routine's target Project is disabled or omitted from the current valid Service Config
-snapshot, the Routine is inactive: it is hidden from default operator listings while its firing
-state remains durable for later re-enable. See ADR 0063.
+A service-level scheduled prompt declaration with a globally unique name that targets an explicit,
+non-empty list of declared Projects and can launch Coding Agents without GitHub Issues. A Routine
+Host owns no routines — Routines point *at* it. There is no target wildcard. See ADR 0069.
 _Avoid_: workflow contract when referring to recurring or one-shot scheduled work
 
+**Routine Target**:
+The materialized per-Project state for one Routine, durably keyed by `(project_name, name)`. Each
+target owns its schedule position, lifecycle state, and skip counters. When its Project is disabled
+or omitted from the current valid Service Config snapshot, only that target becomes inactive while
+sibling targets continue normally.
+_Avoid_: Routine when referring to one Project-specific leg
+
+**Routine Fan-out**:
+The durable group created when one Routine clock event matches one or more Routine Targets. It has a
+shared correlation id and immutable expected Project membership captured before work begins; each
+target is completed by either a Routine Firing or a recorded Routine Skip before one grouped
+notification is delivered.
+_Avoid_: Routine Firing when referring to the whole clock event
+
 **Routine Firing**:
-One durable execution attempt of a Routine, with its own workspace, provider logs, prompt evidence,
-lifecycle state, terminal reason, and optional canonical Routine Outcome. Its trigger source is
-scheduled or manual; a manual firing uses the same execution lifecycle without consuming the
-Routine's next clock event.
+One durable execution attempt for a Routine Target, with its own workspace, provider logs, prompt
+evidence, lifecycle state, terminal reason, and optional canonical Routine Outcome. A scheduled
+firing is correlated to its Routine Fan-out; its trigger source is scheduled or manual, and a
+manual firing targets one Routine Target directly, using the same execution lifecycle without
+consuming the Routine's next clock event or creating a Routine Fan-out.
 _Avoid_: run when specifically referring to non-issue scheduled execution
 
 **Routine Outcome Claim**:
@@ -321,8 +326,12 @@ _Avoid_: chat session
 - A **Normalized Event Log** is derived from a **Provider Event Log**
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
-- A **Routine** targets one declared **Project** by name and may create zero or more **Routine Firings**
-- A **Routine** may record **Routine Skips** without creating Routine Firings
+- A **Routine** targets one or more explicitly named **Projects** and materializes one **Routine
+  Target** for each
+- A matched clock event creates one **Routine Fan-out** across the currently due Routine Targets
+- Each **Routine Target** completes its fan-out leg with either one **Routine Firing** or one
+  **Routine Skip**
+- A **Routine Fan-out** produces one grouped notification after all target legs complete
 - A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
 - A **Routine Firing** may contain one canonical **Routine Outcome** reconciled from a **Routine
   Outcome Claim** and externally observed state

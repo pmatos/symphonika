@@ -51,7 +51,7 @@ export type RoutineDeclaration = {
 // A RoutineDeclaration bound to its declared target Project. The file-level
 // `RoutineDeclaration` has no project target (a file cannot know it); the
 // service-level `routines:` entry supplies `projectName`. Used by reload,
-// the runtime map, and the run store. See ADR 0063.
+// the runtime map, and the run store. See ADR 0069.
 export type TargetedRoutineDeclaration = RoutineDeclaration & {
   projectName: string;
 };

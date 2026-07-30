@@ -28,6 +28,10 @@ import { deliverRoutineFiringNotification } from "../notifications/routine-firin
 import type { NotificationSink } from "../notifications/types.js";
 import type { RunStore } from "../run-store.js";
 import {
+  renderRoutineFanoutNotification,
+  type RoutineFanoutNotification
+} from "./fanout-summary.js";
+import {
   evaluateRoutineSchedule,
   nextRecurringFireAt,
   type RoutineScheduleEvaluation
@@ -60,6 +64,7 @@ export type DispatchDueRoutinesInput = {
   activeRuns: ActiveRunRegistry;
   agentProviders: AgentProviderRegistry;
   configDir: string;
+  createFanoutId?: () => string;
   createFiringId?: () => string;
   env?: NodeJS.ProcessEnv;
   globalConcurrency: { maxInFlight: number | undefined };
@@ -70,6 +75,9 @@ export type DispatchDueRoutinesInput = {
     resolveConfig: () => EmailNotificationConfig | undefined;
     timeoutMs?: number;
   };
+  notifyRoutineFanout?: (
+    notification: RoutineFanoutNotification
+  ) => Promise<void>;
   now?: Date;
   prepareRoutineWorkspace?: (
     input: PrepareRoutineWorkspaceInput
@@ -325,7 +333,10 @@ export async function dispatchDueRoutines(
   const prepareRoutineWorkspace =
     input.prepareRoutineWorkspace ?? defaultPrepareRoutineWorkspace;
   const createFiringId = input.createFiringId ?? (() => createUlid());
+  const createFanoutId = input.createFanoutId ?? (() => createUlid());
   const projects = [...input.projects.values()];
+  const fanoutIds = new Map<string, string>();
+  const firingTasks: Promise<void>[] = [];
 
   for (const project of projects) {
     if (project.disabled === true) {
@@ -419,6 +430,7 @@ export async function dispatchDueRoutines(
   input.runStore.pruneRoutinesForUnknownProjects(
     projects.map((project) => project.name)
   );
+  input.runStore.settleUnavailableRoutineFanoutTargets();
 
   for (const project of projects) {
     if (project.disabled === true) {
@@ -448,6 +460,59 @@ export async function dispatchDueRoutines(
       if (evaluation.kind !== "fire_now") {
         continue;
       }
+      const scheduledAt = routine.nextFireAt ?? now.toISOString();
+      const fanoutKey = `${routine.name}\0${scheduledAt}`;
+      let fanoutId = fanoutIds.get(fanoutKey);
+      if (fanoutId === undefined) {
+        const targetProjectNames = input.runStore
+          .listRoutines()
+          .filter(
+            (target) =>
+              target.name === routine.name &&
+              target.state === "active" &&
+              target.nextFireAt === scheduledAt
+          )
+          .map((target) => target.projectName);
+        fanoutId = input.runStore.ensureRoutineFanout({
+          id: createFanoutId(),
+          projectNames: targetProjectNames,
+          routineName: routine.name,
+          scheduledAt
+        }).id;
+        fanoutIds.set(fanoutKey, fanoutId);
+      }
+      // Fan-out membership is the immutable snapshot captured when this
+      // clock event first began. A one-shot target added by a later reload
+      // can still carry the same due scheduled_at, but must not join the
+      // already-running or delivered event and force a duplicate summary.
+      if (
+        !input.runStore.hasRoutineFanoutTarget({
+          id: fanoutId,
+          projectName: project.name
+        })
+      ) {
+        if (
+          recordDueRoutineSkip(input.runStore, {
+            evaluation,
+            now,
+            projectName: project.name,
+            reason: "catch_up_window",
+            routine
+          })
+        ) {
+          logRoutineSkip(input.logger, {
+            reason: "catch_up_window",
+            routine: routine.name,
+            scheduledAt
+          });
+          skipped.push({
+            projectName: project.name,
+            reason: "catch_up_window",
+            routineName: routine.name
+          });
+        }
+        continue;
+      }
       if (
         !routine.allowOverlap &&
         input.runStore.hasActiveRoutineFiring({
@@ -458,6 +523,7 @@ export async function dispatchDueRoutines(
         if (
           recordDueRoutineSkip(input.runStore, {
             evaluation,
+            fanoutId,
             now,
             projectName: project.name,
             reason: "overlap",
@@ -507,6 +573,7 @@ export async function dispatchDueRoutines(
         if (
           recordDueRoutineSkip(input.runStore, {
             evaluation,
+            fanoutId,
             now,
             projectName: project.name,
             reason: "concurrency_cap",
@@ -570,6 +637,7 @@ export async function dispatchDueRoutines(
 
       const firingId = createFiringId();
       const claimed = input.runStore.claimRoutineFiring({
+        fanoutId,
         firedAt: now.toISOString(),
         firingId,
         ...(reEvaluation.nextAt === undefined
@@ -589,55 +657,58 @@ export async function dispatchDueRoutines(
         continue;
       }
 
-      let firingResult: RoutineFiringResult;
-      try {
-        input.activeRuns.reserveSlot({
-          issueNumber: syntheticRoutineIssueNumber(firingId),
-          projectName: project.name,
-          respectsIssueLabels: false,
-          runId: firingId
-        });
-        fired.push(firingId);
-        firingResult = await runRoutineFiring({
-          firingId,
-          env: input.env ?? process.env,
-          githubIssuesApi: input.githubIssuesApi,
-          logger: input.logger,
-          now,
-          prepareRoutineWorkspace,
-          project,
-          provider,
-          providerCommand,
-          providerName,
-          routine: routineDetail,
-          runStore: input.runStore,
-          stateRoot: input.stateRoot,
-          configDir: input.configDir,
-          activeRuns: input.activeRuns
-        });
-      } finally {
-        input.activeRuns.unregister(firingId);
-      }
-      // Notification delivery is best-effort and can be as slow as the SMTP
-      // server allows (see ADR 0067); it runs after the slot above is
-      // released so a stalled relay does not suppress further dispatch for
-      // this project.
-      await recordRoutineFiringNotification(
-        {
-          env: input.env ?? process.env,
-          firingId,
-          logger: input.logger,
-          notification: input.notification,
-          project,
-          routine: routineDetail,
-          runStore: input.runStore
-        },
-        firingResult.events,
-        firingResult.prepared
-      );
+      input.activeRuns.reserveSlot({
+        issueNumber: syntheticRoutineIssueNumber(firingId),
+        projectName: project.name,
+        respectsIssueLabels: false,
+        runId: firingId
+      });
+      fired.push(firingId);
+      const firingTask = runRoutineFiring({
+        firingId,
+        env: input.env ?? process.env,
+        githubIssuesApi: input.githubIssuesApi,
+        logger: input.logger,
+        now,
+        prepareRoutineWorkspace,
+        project,
+        provider,
+        providerCommand,
+        providerName,
+        routine: routineDetail,
+        runStore: input.runStore,
+        stateRoot: input.stateRoot,
+        configDir: input.configDir,
+        activeRuns: input.activeRuns
+      })
+        .finally(() => {
+          input.activeRuns.unregister(firingId);
+        })
+        .then((firingResult) =>
+          // Notification delivery is best-effort and can be as slow as the
+          // SMTP server allows (see ADR 0067); it runs after the slot above
+          // is released so a stalled relay does not suppress further
+          // dispatch for this project.
+          recordRoutineFiringNotification(
+            {
+              env: input.env ?? process.env,
+              firingId,
+              logger: input.logger,
+              notification: input.notification,
+              project,
+              routine: routineDetail,
+              runStore: input.runStore
+            },
+            firingResult.events,
+            firingResult.prepared
+          )
+        );
+      firingTasks.push(firingTask);
     }
   }
 
+  await Promise.all(firingTasks);
+  await deliverReadyRoutineFanouts(input);
   return { fired, skipped };
 }
 
@@ -645,6 +716,43 @@ type RoutineFiringResult = {
   events: NormalizedProviderEvent[];
   prepared: PreparedRoutineWorkspace | undefined;
 };
+
+async function deliverReadyRoutineFanouts(
+  input: DispatchDueRoutinesInput
+): Promise<void> {
+  if (input.notifyRoutineFanout === undefined) {
+    return;
+  }
+  for (const fanout of input.runStore.listReadyRoutineFanouts()) {
+    if (!input.runStore.claimRoutineFanoutNotification(fanout.id)) {
+      continue;
+    }
+    // Re-fetch rather than reuse the pre-claim snapshot: a re-entrant reload
+    // (ADR 0052) can add and even terminate a new target between the
+    // snapshot above and this claim succeeding, and that target's result
+    // must still make it into the rendered payload.
+    const claimed = input.runStore.getRoutineFanout(fanout.id);
+    if (claimed === undefined) {
+      throw new Error("claimed routine fan-out could not be reloaded");
+    }
+    try {
+      await input.notifyRoutineFanout(renderRoutineFanoutNotification(claimed));
+      input.runStore.completeRoutineFanoutNotification({
+        id: claimed.id
+      });
+    } catch (error) {
+      const message = errorMessage(error);
+      input.runStore.completeRoutineFanoutNotification({
+        error: message,
+        id: claimed.id
+      });
+      input.logger?.warn(
+        { err: error, fanout: claimed.id, routine: claimed.routineName },
+        "symphonika routine fan-out notification failed"
+      );
+    }
+  }
+}
 
 async function runRoutineFiring(input: {
   activeRuns: ActiveRunRegistry;
@@ -802,7 +910,7 @@ async function runRoutineFiring(input: {
     // observed, the firing reports cancelled even if the process happened
     // to exit cleanly in the same race.
     const cancelEntry = input.activeRuns.get(input.firingId);
-    const outcome =
+    let outcome: RoutineTerminalOutcome =
       cancelEntry?.cancelRequested === true
         ? { kind: "cancelled" as const, reason: "cancelled" }
         : await deadline.race(
@@ -831,41 +939,19 @@ async function runRoutineFiring(input: {
     // report commitsAhead and let reconcileRoutineOutcome's git-evidence
     // override mint a verified commit outcome for a cancelled run.
     const cancelAfterGithubAfter = input.activeRuns.get(input.firingId);
-    const finalOutcome =
-      cancelAfterGithubAfter?.cancelRequested === true
-        ? { kind: "cancelled" as const, reason: "cancelled" }
-        : outcome;
-    const githubObservation = routineGithubObservation(
-      githubBefore,
-      githubAfter,
-      input.routine.kind,
-      githubSnapshotSince
-    );
-    input.runStore.completeRoutineFiring({
-      id: input.firingId,
-      outcome: reconcileRoutineOutcome({
-        claim: parseRoutineOutcomeClaim(events),
-        commitsAhead:
-          input.routine.kind === "git" && finalOutcome.kind === "succeeded",
-        githubObservationAvailable: githubObservation.available,
-        observedAction: githubObservation.action,
-        provider: input.providerName,
-        terminalReason:
-          finalOutcome.reason.length === 0 ? null : finalOutcome.reason,
-        terminalState: finalOutcome.kind
-      }),
-      state: finalOutcome.kind,
-      terminalReason:
-        finalOutcome.reason.length === 0 ? null : finalOutcome.reason,
-      ...(cancelAfterGithubAfter?.cancelReason === undefined
-        ? {}
-        : { cancelReason: cancelAfterGithubAfter.cancelReason }),
-      workspacePath: prepared.workspacePath
-    });
-    // The firing is terminal now. PR discovery is post-terminal enrichment,
-    // so it must not let the execution deadline rewrite a completed outcome.
+    if (cancelAfterGithubAfter?.cancelRequested === true) {
+      outcome = { kind: "cancelled", reason: "cancelled" };
+    }
+    // The firing's own execution phase is done. PR discovery is post-terminal
+    // enrichment, so it must not let the execution deadline rewrite a
+    // completed outcome.
     deadline.clear();
-    if (finalOutcome.kind === "succeeded" && input.routine.kind === "git") {
+    // Pull-request discovery must finish before this firing is recorded as
+    // terminal: listReadyRoutineFanouts() only looks at routine_firings.state,
+    // and daemon ticks are explicitly re-entrant (ADR 0052), so a concurrent
+    // tick could otherwise observe "succeeded" and send the grouped summary
+    // with this leg's PRs missing, before discovery has recorded them.
+    if (outcome.kind === "succeeded" && input.routine.kind === "git") {
       if (githubAfter?.pullRequestsAvailable === true) {
         recordRoutinePullRequests({
           branchName: prepared.branchName,
@@ -888,6 +974,37 @@ async function runRoutineFiring(input: {
         });
       }
     }
+    // Re-check for a cancel that landed during discovery: an operator cancel
+    // still wins even though the provider itself already finished (ADR 0060).
+    const completionCancelEntry = input.activeRuns.get(input.firingId);
+    if (completionCancelEntry?.cancelRequested === true) {
+      outcome = { kind: "cancelled", reason: "cancelled" };
+    }
+    const githubObservation = routineGithubObservation(
+      githubBefore,
+      githubAfter,
+      input.routine.kind,
+      githubSnapshotSince
+    );
+    input.runStore.completeRoutineFiring({
+      id: input.firingId,
+      outcome: reconcileRoutineOutcome({
+        claim: parseRoutineOutcomeClaim(events),
+        commitsAhead:
+          input.routine.kind === "git" && outcome.kind === "succeeded",
+        githubObservationAvailable: githubObservation.available,
+        observedAction: githubObservation.action,
+        provider: input.providerName,
+        terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
+        terminalState: outcome.kind
+      }),
+      state: outcome.kind,
+      terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
+      ...(completionCancelEntry?.cancelReason === undefined
+        ? {}
+        : { cancelReason: completionCancelEntry.cancelReason }),
+      workspacePath: prepared.workspacePath
+    });
   } catch (error) {
     const timedOut = error instanceof RoutineFiringTimeoutError;
     if (timedOut) {
@@ -1630,14 +1747,16 @@ function recordDueRoutineSkip(
   runStore: RunStore,
   input: {
     evaluation: Extract<RoutineScheduleEvaluation, { kind: "fire_now" }>;
+    fanoutId?: string;
     now: Date;
     projectName: string;
-    reason: "overlap" | "concurrency_cap";
+    reason: "overlap" | "concurrency_cap" | "catch_up_window";
     routine: RoutineStatus;
   }
 ): boolean {
   return runStore.skipRoutineFiring({
     attemptedAt: input.now.toISOString(),
+    ...(input.fanoutId === undefined ? {} : { fanoutId: input.fanoutId }),
     name: input.routine.name,
     ...(input.evaluation.nextAt === undefined
       ? {}

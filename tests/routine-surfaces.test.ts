@@ -28,6 +28,51 @@ afterEach(async () => {
 });
 
 describe("routine operator surfaces", () => {
+  it("groups fanned-out Routine Targets under one global Routine name in the CLI", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "refactor-audit",
+      prompt: "Audit.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/refactor-audit.md"
+    };
+    store.syncRoutines([
+      { ...declaration, projectName: "alpha" },
+      { ...declaration, projectName: "beta" }
+    ]);
+    store.close();
+
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({
+      openRunStore: () => openRunStore({ stateRoot }),
+      registerSignalHandlers: false
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+    program.exitOverride();
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "routines",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+
+    expect(output.stdout).toContain("refactor-audit  targets=[alpha,beta]");
+    expect(output.stdout).toContain("  alpha  active");
+    expect(output.stdout).toContain("  beta  active");
+    expect(output.stdout.match(/refactor-audit/g)).toHaveLength(1);
+  });
+
   it("shows skip metadata and 24-hour counts on every routine status surface", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -192,38 +237,57 @@ describe("routine operator surfaces", () => {
     }
   });
 
-  it("names every Project candidate when Routine firing history is ambiguous", async () => {
+  it("uses the globally unique Routine name to return firings across every target", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.syncRoutines(
-        ["alpha", "beta"].map((projectName) => ({
-          kind: "report" as const,
-          name: "daily-report",
-          prompt: "Report.",
+      const declaration = {
+        kind: "report" as const,
+        name: "refactor-audit",
+        prompt: "Audit.",
+        provider: null,
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: "/tmp/refactor-audit.md"
+      };
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      for (const projectName of ["alpha", "beta"]) {
+        store.createRoutineFiring({
+          id: `fire-${projectName}`,
           projectName,
-          provider: null,
-          schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: `/tmp/${projectName}-daily-report.md`
-        }))
-      );
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName: "refactor-audit"
+        });
+      }
       const app = createHttpApp({
         runStore: store,
         stateRoot,
         version: "0.1.0"
       });
 
-      const response = await app.request("/api/routines/daily-report/firings");
+      const response = await app.request(
+        "/api/routines/refactor-audit/firings"
+      );
+      const body = (await response.json()) as {
+        firings: Array<{ projectName: string }>;
+        targets: Array<{ projectName: string }>;
+        routine?: unknown;
+      };
 
-      expect(response.status).toBe(409);
-      expect(await response.json()).toEqual({
-        candidates: [
-          { projectName: "alpha", routineName: "daily-report" },
-          { projectName: "beta", routineName: "daily-report" }
-        ],
-        error:
-          "routine daily-report is ambiguous; candidates: alpha/daily-report, beta/daily-report; provide the project query parameter"
-      });
+      expect(response.status).toBe(200);
+      expect(body.targets.map((target) => target.projectName)).toEqual([
+        "alpha",
+        "beta"
+      ]);
+      expect(body.firings.map((firing) => firing.projectName).sort()).toEqual([
+        "alpha",
+        "beta"
+      ]);
+      // No singular `routine` field: it would misrepresent one target's state as the whole Routine's.
+      expect(body.routine).toBeUndefined();
     } finally {
       store.close();
     }
@@ -500,11 +564,12 @@ describe("routine operator surfaces", () => {
       path.join(stateRoot, "symphonika.yml")
     ]);
 
+    expect(output.stdout).toContain("daily-report  targets=[alpha]");
     expect(output.stdout).toContain(
-      "project  routine  state  latest_outcome  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests"
+      "  project  state  latest_outcome  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests"
     );
     expect(output.stdout).toContain(
-      'alpha  daily-report  active  ✅ alpha — pr: "Extract retry policy" https://github.com/pmatos/alpha/pull/42 (unverified)  -  2026-05-22T10:00:00.000Z  -  -  -  -  overlap=0,concurrency_cap=0,catch_up_window=0  #42'
+      '  alpha  active  ✅ alpha — pr: "Extract retry policy" https://github.com/pmatos/alpha/pull/42 (unverified)  -  2026-05-22T10:00:00.000Z  -  -  -  -  overlap=0,concurrency_cap=0,catch_up_window=0  #42'
     );
   });
 
@@ -547,9 +612,7 @@ describe("routine operator surfaces", () => {
       path.join(stateRoot, "symphonika.yml")
     ]);
 
-    expect(output.stdout).toContain(
-      "alpha  daily-report  disabled  -  operator  "
-    );
+    expect(output.stdout).toContain("  alpha  disabled  -  operator  ");
   });
 
   it("symphonika routines can include inactive routines", async () => {
@@ -583,7 +646,7 @@ describe("routine operator surfaces", () => {
     ]);
 
     expect(output.stdout).toContain(
-      'alpha  daily-report  inactive  ✅ alpha — pr: "Extract retry policy"'
+      '  alpha  inactive  ✅ alpha — pr: "Extract retry policy"'
     );
   });
 });

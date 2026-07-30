@@ -430,8 +430,12 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.getStatusSnapshot === undefined
         ? {}
         : { getStatusSnapshot: options.getStatusSnapshot }),
+      ...(options.getWatchdogConfig === undefined
+        ? {}
+        : { getWatchdogConfig: options.getWatchdogConfig }),
       issuePollStatus,
       monotonicNow,
+      now,
       runStore,
       version: options.version
     });

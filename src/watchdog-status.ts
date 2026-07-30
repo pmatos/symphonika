@@ -101,6 +101,19 @@ export function formatWatchdogDuration(durationMs: number): string {
   return `${sign}${parts.length === 0 ? "0s" : parts.join(" ")}`;
 }
 
+export function formatAge(
+  timestamp: string | null | undefined,
+  nowMs: number
+): string {
+  if (timestamp === null || timestamp === undefined) {
+    return "never";
+  }
+  const ageMs = nowMs - Date.parse(timestamp);
+  return ageMs < 0
+    ? `in ${formatWatchdogDuration(-ageMs)}`
+    : `${formatWatchdogDuration(ageMs)} ago`;
+}
+
 function timestampFromEpochMs(value: number): string | null {
   if (!Number.isFinite(value) || value <= 0) {
     return null;

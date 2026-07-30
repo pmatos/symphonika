@@ -1552,4 +1552,200 @@ describe("HTTP app — runs API and pages", () => {
       test.cleanup();
     }
   });
+
+  it("shows the watchdog idle badge on the dashboard and runs list only for idle active runs", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "idle-active",
+        issue: sampleIssue({ number: 202, title: "Idle run" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("idle-active", "running");
+      test.runStore.upsertWatchdogSample({
+        idleSince: "2026-05-22T11:45:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath: "",
+        outputTokensTotal: 0,
+        runId: "idle-active",
+        sampledAt: "2026-05-22T11:45:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: 0
+      });
+
+      test.runStore.createRun({
+        id: "progressing-active",
+        issue: sampleIssue({ number: 203, title: "Still progressing" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("progressing-active", "running");
+
+      const app = createHttpApp({
+        getWatchdogConfig: () => ({ enabled: true, graceMinutes: 30 }),
+        now: () => Date.parse("2026-05-22T12:00:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const dashboardBody = await (await app.request("/")).text();
+      const runsListBody = await (await app.request("/runs")).text();
+      for (const body of [dashboardBody, runsListBody]) {
+        const matches = body.match(/watchdog idle since/g) ?? [];
+        expect(matches).toHaveLength(1);
+        expect(body).toContain(
+          'class="badge badge--watchdog">watchdog idle since 15m ago (15m remaining)</span>'
+        );
+        expect(body).toContain("idle-active");
+        expect(body).toContain("progressing-active");
+      }
+
+      const disabledApp = createHttpApp({
+        getWatchdogConfig: () => ({ enabled: false, graceMinutes: 30 }),
+        now: () => Date.parse("2026-05-22T12:00:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const disabledDashboardBody = await (
+        await disabledApp.request("/")
+      ).text();
+      expect(disabledDashboardBody).not.toContain("watchdog idle since");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("renders the run-detail Watchdog section across not-yet-idle, idle, and terminated states", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "progressing-run",
+        issue: sampleIssue({ number: 210, title: "Progressing" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("progressing-run", "running");
+      test.runStore.upsertWatchdogSample({
+        idleSince: null,
+        lastMessageAt: null,
+        lastToolCallAt: "2026-05-22T11:55:00.000Z",
+        normalizedLogOffset: 0,
+        normalizedLogPath: "progressing-run.ndjson",
+        outputTokensTotal: 120,
+        runId: "progressing-run",
+        sampledAt: "2026-05-22T11:59:00.000Z",
+        turnIdSetSize: 3,
+        workspaceMtimeMax: Date.parse("2026-05-22T11:50:00.000Z")
+      });
+
+      const app = createHttpApp({
+        getWatchdogConfig: () => ({ enabled: true, graceMinutes: 30 }),
+        now: () => Date.parse("2026-05-22T12:00:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const progressingBody = await (
+        await app.request("/runs/progressing-run")
+      ).text();
+      expect(progressingBody).toContain("<h2>Watchdog</h2>");
+      expect(progressingBody).toContain(
+        "<dt>Last tool_call</dt><dd>5m ago</dd>"
+      );
+      expect(progressingBody).toContain(
+        "<dt>Workspace mtime</dt><dd>10m ago</dd>"
+      );
+      expect(progressingBody).toContain("<dt>turn_ids observed</dt><dd>3</dd>");
+      expect(progressingBody).toContain(
+        "<dt>Output tokens / 5m</dt><dd>0</dd>"
+      );
+      expect(progressingBody).not.toContain("idle_since");
+      expect(progressingBody).not.toContain("Grace remaining");
+
+      test.runStore.createRun({
+        id: "idle-run",
+        issue: sampleIssue({ number: 211, title: "Idle within grace" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("idle-run", "running");
+      test.runStore.upsertWatchdogSample({
+        idleSince: "2026-05-22T11:45:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: "2026-05-22T11:45:00.000Z",
+        normalizedLogOffset: 0,
+        normalizedLogPath: "idle-run.ndjson",
+        outputTokensTotal: 0,
+        runId: "idle-run",
+        sampledAt: "2026-05-22T11:45:00.000Z",
+        turnIdSetSize: 1,
+        workspaceMtimeMax: Date.parse("2026-05-22T11:45:00.000Z")
+      });
+
+      const idleBody = await (await app.request("/runs/idle-run")).text();
+      expect(idleBody).toContain(
+        "<dt>idle_since</dt><dd><code>2026-05-22T11:45:00.000Z</code></dd>"
+      );
+      expect(idleBody).toContain("<dt>Grace remaining</dt><dd>15m</dd>");
+
+      test.runStore.createRun({
+        id: "terminated-run",
+        issue: sampleIssue({ number: 212, title: "Terminated by watchdog" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("terminated-run", "running");
+      test.runStore.upsertWatchdogSample({
+        idleSince: "2026-05-22T09:00:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: "2026-05-22T09:00:00.000Z",
+        normalizedLogOffset: 0,
+        normalizedLogPath: "terminated-run.ndjson",
+        outputTokensTotal: 0,
+        runId: "terminated-run",
+        sampledAt: "2026-05-22T09:00:00.000Z",
+        turnIdSetSize: 1,
+        workspaceMtimeMax: Date.parse("2026-05-22T09:00:00.000Z")
+      });
+      test.runStore.markRunNoProgressStale("terminated-run");
+
+      const terminatedBody = await (
+        await app.request("/runs/terminated-run")
+      ).text();
+      expect(terminatedBody).toContain(
+        "<dt>Terminal reason</dt><dd><code>no_progress</code></dd>"
+      );
+      expect(terminatedBody).toContain(
+        "<dt>idle_since</dt><dd><code>2026-05-22T09:00:00.000Z</code></dd>"
+      );
+      expect(terminatedBody).toContain(
+        "<dt>Grace remaining</dt><dd>-2h 30m</dd>"
+      );
+
+      const disabledApp = createHttpApp({
+        getWatchdogConfig: () => ({ enabled: false, graceMinutes: 30 }),
+        now: () => Date.parse("2026-05-22T12:00:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const disabledBody = await (
+        await disabledApp.request("/runs/idle-run")
+      ).text();
+      expect(disabledBody).not.toContain("<h2>Watchdog</h2>");
+    } finally {
+      test.cleanup();
+    }
+  });
 });

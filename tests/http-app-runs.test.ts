@@ -1739,7 +1739,10 @@ describe("HTTP app — runs API and pages", () => {
         turnIdSetSize: 1,
         workspaceMtimeMax: Date.parse("2026-05-22T09:00:00.000Z")
       });
-      test.runStore.markRunNoProgressStale("terminated-run");
+      test.runStore.markRunNoProgressStale(
+        "terminated-run",
+        "2026-05-22T09:35:00.000Z"
+      );
 
       const terminatedBody = await (
         await app.request("/runs/terminated-run")
@@ -1747,12 +1750,20 @@ describe("HTTP app — runs API and pages", () => {
       expect(terminatedBody).toContain(
         "<dt>Terminal reason</dt><dd><code>no_progress</code></dd>"
       );
+      // The Progress Signal must freeze at the run's terminal updatedAt
+      // (09:35) rather than the live app clock (12:00) — otherwise these
+      // values would keep drifting further negative/older on every reload
+      // long after the Run terminated.
+      expect(terminatedBody).toContain(
+        "<dt>Last tool_call</dt><dd>35m ago</dd>"
+      );
+      expect(terminatedBody).toContain(
+        "<dt>Workspace mtime</dt><dd>35m ago</dd>"
+      );
       expect(terminatedBody).toContain(
         "<dt>idle_since</dt><dd><code>2026-05-22T09:00:00.000Z</code></dd>"
       );
-      expect(terminatedBody).toContain(
-        "<dt>Grace remaining</dt><dd>-2h 30m</dd>"
-      );
+      expect(terminatedBody).toContain("<dt>Grace remaining</dt><dd>-5m</dd>");
 
       const disabledApp = createHttpApp({
         getWatchdogConfig: () => ({ enabled: false, graceMinutes: 30 }),

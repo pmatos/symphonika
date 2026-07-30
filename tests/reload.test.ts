@@ -1285,6 +1285,25 @@ describe("RuntimeConfigReloader routine workspace retention", () => {
       succeededDays: 2
     });
   });
+
+  it("rejects a retention window large enough to overflow Date math", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "retention:",
+        "  routine_workspaces:",
+        "    succeeded_days: 1000000000"
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.getStatus().ok).toBe(false);
+  });
 });
 
 describe("RuntimeConfigReloader watchdog config", () => {

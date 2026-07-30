@@ -35,6 +35,7 @@ import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import type { TargetedRoutineDeclaration } from "./routines/types.js";
 import {
   DEFAULT_ROUTINE_WORKSPACE_RETENTION,
+  MAX_ROUTINE_WORKSPACE_RETENTION_DAYS,
   type RoutineWorkspaceRetentionPolicy
 } from "./routines/workspace-retention.js";
 
@@ -143,16 +144,19 @@ const routineWorkspaceRetentionSchema = z
       .number()
       .int()
       .nonnegative()
+      .max(MAX_ROUTINE_WORKSPACE_RETENTION_DAYS)
       .default(DEFAULT_ROUTINE_WORKSPACE_RETENTION.succeededDays),
     failed_days: z
       .number()
       .int()
       .nonnegative()
+      .max(MAX_ROUTINE_WORKSPACE_RETENTION_DAYS)
       .default(DEFAULT_ROUTINE_WORKSPACE_RETENTION.failedDays),
     cancelled_days: z
       .number()
       .int()
       .nonnegative()
+      .max(MAX_ROUTINE_WORKSPACE_RETENTION_DAYS)
       .default(DEFAULT_ROUTINE_WORKSPACE_RETENTION.cancelledDays)
   })
   .passthrough();

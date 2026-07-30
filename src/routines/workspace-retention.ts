@@ -8,6 +8,10 @@ import { routineFiringBranchName } from "./workspace.js";
 
 const execFileAsync = promisify(execFile);
 const DAY_MS = 24 * 60 * 60 * 1000;
+// Well under the ~100,000,000-day ECMAScript Date range on either side of
+// `now`, so `cutoff` never produces an invalid Date/RangeError regardless of
+// `now`'s value, while still comfortably exceeding any real retention need.
+export const MAX_ROUTINE_WORKSPACE_RETENTION_DAYS = 36_500;
 
 export type RoutineWorkspaceRetentionPolicy = {
   cancelledDays: number;

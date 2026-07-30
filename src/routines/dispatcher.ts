@@ -776,7 +776,7 @@ async function runRoutineFiring(input: {
     // observed, the firing reports cancelled even if the process happened
     // to exit cleanly in the same race.
     const cancelEntry = input.activeRuns.get(input.firingId);
-    const outcome =
+    let outcome: RoutineTerminalOutcome =
       cancelEntry?.cancelRequested === true
         ? { kind: "cancelled" as const, reason: "cancelled" }
         : await deadline.race(
@@ -786,18 +786,15 @@ async function runRoutineFiring(input: {
               workspacePath: prepared.workspacePath
             })
           );
-    input.runStore.completeRoutineFiring({
-      id: input.firingId,
-      state: outcome.kind,
-      terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
-      ...(cancelEntry?.cancelReason === undefined
-        ? {}
-        : { cancelReason: cancelEntry.cancelReason }),
-      workspacePath: prepared.workspacePath
-    });
-    // The firing is terminal now. PR discovery is post-terminal enrichment,
-    // so it must not let the execution deadline rewrite a completed outcome.
+    // The firing's own execution phase is done. PR discovery is post-terminal
+    // enrichment, so it must not let the execution deadline rewrite a
+    // completed outcome.
     deadline.clear();
+    // Pull-request discovery must finish before this firing is recorded as
+    // terminal: listReadyRoutineFanouts() only looks at routine_firings.state,
+    // and daemon ticks are explicitly re-entrant (ADR 0052), so a concurrent
+    // tick could otherwise observe "succeeded" and send the grouped summary
+    // with this leg's PRs missing, before discovery has recorded them.
     if (outcome.kind === "succeeded" && input.routine.kind === "git") {
       await discoverRoutinePullRequests({
         branchName: prepared.branchName,
@@ -810,6 +807,21 @@ async function runRoutineFiring(input: {
         runStore: input.runStore
       });
     }
+    // Re-check for a cancel that landed during discovery: an operator cancel
+    // still wins even though the provider itself already finished (ADR 0060).
+    const completionCancelEntry = input.activeRuns.get(input.firingId);
+    if (completionCancelEntry?.cancelRequested === true) {
+      outcome = { kind: "cancelled", reason: "cancelled" };
+    }
+    input.runStore.completeRoutineFiring({
+      id: input.firingId,
+      state: outcome.kind,
+      terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
+      ...(completionCancelEntry?.cancelReason === undefined
+        ? {}
+        : { cancelReason: completionCancelEntry.cancelReason }),
+      workspacePath: prepared.workspacePath
+    });
   } catch (error) {
     const timedOut = error instanceof RoutineFiringTimeoutError;
     if (timedOut) {

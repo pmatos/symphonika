@@ -4,6 +4,7 @@ import path from "node:path";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { RawGitHubPullRequest } from "../src/issue-polling.js";
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
 import type {
   RunControllerProjectConfig,
@@ -909,6 +910,128 @@ describe("RoutineFiringDispatcher", () => {
       ]);
       expect(runStore.listOpenTrackedPullRequests()).toEqual([]);
       expect(runStore.hasPullRequestFollowupWork()).toBe(false);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("keeps a succeeded git firing non-terminal until PR discovery finishes, so the fan-out summary is not sent early", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/dependency-update/01JDISCOVERYRACE";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+
+    let releasePullRequests: (pullRequests: RawGitHubPullRequest[]) => void =
+      () => {};
+    const discoveryGate = new Promise<RawGitHubPullRequest[]>((resolve) => {
+      releasePullRequests = resolve;
+    });
+    const listPullRequestsForBranch = vi.fn(() => discoveryGate);
+
+    const notifications: RoutineFanoutNotification[] = [];
+    const notifyRoutineFanout = vi.fn(
+      (notification: RoutineFanoutNotification): Promise<void> => {
+        notifications.push(notification);
+        return Promise.resolve();
+      }
+    );
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName,
+          branchRef: `refs/heads/${branchName}`,
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      const dispatchPromise = dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-race",
+        createFiringId: () => "fire-race",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        notifyRoutineFanout,
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "dependency-update",
+                  prompt: "Commit on {{branch.name}}.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "dependency-update.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      // The provider has finished and PR discovery has started, but is
+      // blocked on discoveryGate: the firing must not be terminal yet, and
+      // the fan-out (whose only target is this firing) must not be ready.
+      await vi.waitFor(() => {
+        expect(listPullRequestsForBranch).toHaveBeenCalled();
+      });
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({ id: "fire-race", state: "running" })
+      ]);
+      expect(runStore.listReadyRoutineFanouts()).toEqual([]);
+      expect(notifyRoutineFanout).not.toHaveBeenCalled();
+
+      releasePullRequests([
+        { head: { ref: branchName, sha: "abc123" }, number: 42, state: "open" }
+      ]);
+      await dispatchPromise;
+
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-race",
+          pullRequests: [expect.objectContaining({ prNumber: 42 })],
+          state: "succeeded"
+        })
+      ]);
+      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
+      expect(notifications[0]?.subject).toBe(
+        "[ptt] dependency-update — 1 PR, 0 issue, 0 failed"
+      );
     } finally {
       runStore.close();
     }

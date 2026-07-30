@@ -464,20 +464,24 @@ type RoutineRow = {
   catch_up: RoutineCatchUpPolicy;
   created_at: string;
   disabled_reason: RoutineDisabledReason | null;
+  effort: string | null;
   kind: RoutineKind;
   last_attempted_at: string | null;
   last_fired_at: string | null;
   last_skip_at: string | null;
   last_skip_reason: RoutineSkipReason | null;
+  model: string | null;
   name: string;
   next_fire_at: string | null;
   project_name: string;
+  permission_mode: "bypass" | null;
   provider_name: AgentProviderName | null;
   schedule_at: string;
   schedule_cron: string | null;
   schedule_tz: string | null;
   source_path: string;
   state: RoutineState;
+  timeout_minutes: number | null;
   updated_at: string;
 };
 
@@ -1224,9 +1228,9 @@ export class RunStore {
     const upsert = this.database.prepare(
       [
         "insert into routines (",
-        "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, catch_up, created_at, updated_at",
+        "project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, catch_up, created_at, updated_at",
         ") values (",
-        "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body,",
+        "@project_name, @name, @source_path, @kind, @provider_name, @model, @effort, @permission_mode, @timeout_minutes, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body,",
         "case when @disabled = 1 then 'disabled' else 'active' end,",
         "@disabled_reason, @allow_overlap, @catch_up, @created_at, @updated_at",
         ")",
@@ -1234,6 +1238,10 @@ export class RunStore {
         "source_path = excluded.source_path,",
         "kind = excluded.kind,",
         "provider_name = excluded.provider_name,",
+        "model = excluded.model,",
+        "effort = excluded.effort,",
+        "permission_mode = excluded.permission_mode,",
+        "timeout_minutes = excluded.timeout_minutes,",
         "allow_overlap = excluded.allow_overlap,",
         "catch_up = excluded.catch_up,",
         "schedule_at = excluded.schedule_at,",
@@ -1360,13 +1368,17 @@ export class RunStore {
               .prepare(
                 [
                   "insert into routines (",
-                  "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, catch_up, created_at, updated_at",
+                  "project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, catch_up, created_at, updated_at",
                   ") values (",
-                  "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'disabled', 'rejected_tracker_less_host', @allow_overlap, @catch_up, @created_at, @updated_at",
+                  "@project_name, @name, @source_path, @kind, @provider_name, @model, @effort, @permission_mode, @timeout_minutes, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'disabled', 'rejected_tracker_less_host', @allow_overlap, @catch_up, @created_at, @updated_at",
                   ") on conflict(project_name, name) do update set",
                   "source_path = excluded.source_path,",
                   "kind = excluded.kind,",
                   "provider_name = excluded.provider_name,",
+                  "model = excluded.model,",
+                  "effort = excluded.effort,",
+                  "permission_mode = excluded.permission_mode,",
+                  "timeout_minutes = excluded.timeout_minutes,",
                   "schedule_at = excluded.schedule_at,",
                   "schedule_cron = excluded.schedule_cron,",
                   "schedule_tz = excluded.schedule_tz,",
@@ -1384,8 +1396,11 @@ export class RunStore {
                 allow_overlap: routine.allowOverlap === true ? 1 : 0,
                 catch_up: routine.catchUp ?? "skip",
                 created_at: now,
+                effort: routine.effort ?? null,
                 kind: routine.kind,
+                model: routine.model ?? null,
                 name: routine.name,
+                permission_mode: routine.permissionMode ?? null,
                 project_name: routine.projectName,
                 prompt_body: routine.prompt,
                 provider_name: routine.provider,
@@ -1394,6 +1409,7 @@ export class RunStore {
                 schedule_cron: scheduleValues.scheduleCron,
                 schedule_tz: scheduleValues.scheduleTz,
                 source_path: routine.sourcePath,
+                timeout_minutes: routine.timeoutMinutes ?? null,
                 updated_at: now
               });
           }
@@ -1422,8 +1438,11 @@ export class RunStore {
             created_at: now,
             disabled: routine.disabled === true ? 1 : 0,
             disabled_reason: routine.disabled === true ? "operator" : null,
+            effort: routine.effort ?? null,
             kind: routine.kind,
+            model: routine.model ?? null,
             name: routine.name,
+            permission_mode: routine.permissionMode ?? null,
             project_name: routine.projectName,
             prompt_body: routine.prompt,
             provider_name: routine.provider,
@@ -1436,6 +1455,7 @@ export class RunStore {
             schedule_cron: scheduleValues.scheduleCron,
             schedule_tz: scheduleValues.scheduleTz,
             source_path: routine.sourcePath,
+            timeout_minutes: routine.timeoutMinutes ?? null,
             updated_at: now
           });
         }
@@ -1456,13 +1476,17 @@ export class RunStore {
     const insertInactive = this.database.prepare(
       [
         "insert into routines (",
-        "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, allow_overlap, catch_up, created_at, updated_at",
+        "project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, allow_overlap, catch_up, created_at, updated_at",
         ") values (",
-        "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'inactive', @allow_overlap, @catch_up, @created_at, @updated_at",
+        "@project_name, @name, @source_path, @kind, @provider_name, @model, @effort, @permission_mode, @timeout_minutes, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'inactive', @allow_overlap, @catch_up, @created_at, @updated_at",
         ") on conflict(project_name, name) do update set",
         "source_path = excluded.source_path,",
         "kind = excluded.kind,",
         "provider_name = excluded.provider_name,",
+        "model = excluded.model,",
+        "effort = excluded.effort,",
+        "permission_mode = excluded.permission_mode,",
+        "timeout_minutes = excluded.timeout_minutes,",
         "schedule_at = excluded.schedule_at,",
         "schedule_cron = excluded.schedule_cron,",
         "schedule_tz = excluded.schedule_tz,",
@@ -1502,8 +1526,11 @@ export class RunStore {
           allow_overlap: routine.allowOverlap === true ? 1 : 0,
           catch_up: routine.catchUp ?? "skip",
           created_at: now,
+          effort: routine.effort ?? null,
           kind: routine.kind,
+          model: routine.model ?? null,
           name: routine.name,
+          permission_mode: routine.permissionMode ?? null,
           project_name: projectName,
           prompt_body: routine.prompt,
           provider_name: routine.provider,
@@ -1512,6 +1539,7 @@ export class RunStore {
           schedule_cron: scheduleValues.scheduleCron,
           schedule_tz: scheduleValues.scheduleTz,
           source_path: routine.sourcePath,
+          timeout_minutes: routine.timeoutMinutes ?? null,
           updated_at: now
         });
       }
@@ -1606,7 +1634,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at",
+          "select project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at",
           "from routines",
           where,
           "order by project_name asc, name asc"
@@ -1666,7 +1694,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at, prompt_body",
+          "select project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at, prompt_body",
           "from routines where project_name = ? and name = ? and state != 'inactive'"
         ].join(" ")
       )
@@ -3169,6 +3197,10 @@ export class RunStore {
         source_path text not null,
         kind text not null,
         provider_name text,
+        model text,
+        effort text,
+        permission_mode text,
+        timeout_minutes real,
         schedule_at text not null,
         schedule_cron text,
         schedule_tz text,
@@ -3273,6 +3305,10 @@ export class RunStore {
       ["routines", "last_skip_reason", "text"],
       ["routines", "last_skip_at", "text"],
       ["routines", "disabled_reason", "text"],
+      ["routines", "model", "text"],
+      ["routines", "effort", "text"],
+      ["routines", "permission_mode", "text"],
+      ["routines", "timeout_minutes", "real"],
       ["routine_firings", "prompt_path", "text"],
       ["routine_firings", "raw_log_path", "text"],
       ["routine_firings", "normalized_log_path", "text"],
@@ -3725,14 +3761,19 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
     allowOverlap: row.allow_overlap === 1,
     catchUp: row.catch_up,
     disabledReason: row.disabled_reason ?? null,
+    ...(row.effort === null ? {} : { effort: row.effort }),
     kind: row.kind,
     lastAttemptedAt: row.last_attempted_at ?? null,
     lastFiredAt: row.last_fired_at ?? null,
     lastSkipAt: row.last_skip_at ?? null,
     lastSkipReason: row.last_skip_reason ?? null,
+    ...(row.model === null ? {} : { model: row.model }),
     name: row.name,
     nextFireAt: row.state === "active" ? row.next_fire_at : null,
     projectName: row.project_name,
+    ...(row.permission_mode === null
+      ? {}
+      : { permissionMode: row.permission_mode }),
     provider: row.provider_name ?? null,
     pullRequestNumbers: [],
     scheduleAt: row.schedule_at.length === 0 ? null : row.schedule_at,
@@ -3744,7 +3785,10 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
       overlap: 0
     },
     sourcePath: row.source_path,
-    state: row.state
+    state: row.state,
+    ...(row.timeout_minutes === null
+      ? {}
+      : { timeoutMinutes: row.timeout_minutes })
   };
 }
 

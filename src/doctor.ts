@@ -346,6 +346,15 @@ const serviceRoutineSchema = z
   })
   .passthrough();
 
+const routineExecutionDefaultsSchema = z
+  .object({
+    effort: z.string().trim().min(1).optional(),
+    model: z.string().trim().min(1).optional(),
+    permission_mode: z.literal("bypass").optional(),
+    timeout_minutes: z.number().positive().optional()
+  })
+  .strict();
+
 const serviceConfigSchema = z
   .object({
     state: z
@@ -367,6 +376,7 @@ const serviceConfigSchema = z
         omp: providerCommandSchema.optional()
       })
       .passthrough(),
+    routine_defaults: routineExecutionDefaultsSchema.optional(),
     routines: z.array(serviceRoutineSchema).optional(),
     projects: z.array(projectSchema).min(1)
   })

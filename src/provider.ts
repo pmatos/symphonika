@@ -37,6 +37,14 @@ export type ProviderRunInput = {
     attempt: number;
     id: string;
   };
+  // Present only for one-shot Routine Firings. Provider adapters use this
+  // boundary to add routine-only argv/environment guards without changing
+  // the operator-authored base command used by issue Runs.
+  routine?: {
+    effort?: string;
+    model?: string;
+    permissionMode?: "bypass";
+  };
   workspacePath: string;
 };
 

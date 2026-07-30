@@ -272,6 +272,15 @@ export function fireRoutineNow(
   };
 }
 
+class RoutineFiringTimeoutError extends Error {
+  readonly terminalReason = "firing_timeout";
+
+  constructor() {
+    super("routine firing exceeded its declared wall-clock timeout");
+    this.name = "RoutineFiringTimeoutError";
+  }
+}
+
 export async function dispatchDueRoutines(
   input: DispatchDueRoutinesInput
 ): Promise<DispatchDueRoutinesResult> {
@@ -597,7 +606,9 @@ async function runRoutineFiring(input: {
   stateRoot: string;
 }): Promise<void> {
   const events: NormalizedProviderEvent[] = [];
+  const deadline = routineFiringDeadline(input.routine.timeoutMinutes);
   let prepared: PreparedRoutineWorkspace | undefined;
+  let providerAttempt: Promise<void> | undefined;
   let rawLogPath: string | undefined;
   let normalizedLogPath: string | undefined;
   try {
@@ -605,23 +616,27 @@ async function runRoutineFiring(input: {
       input.firingId,
       "preparing_workspace"
     );
-    prepared = await input.prepareRoutineWorkspace({
-      configDir: input.configDir,
-      firingId: input.firingId,
-      kind: input.routine.kind,
-      project: input.project,
-      routineName: input.routine.name
-    });
-    const evidence = await prepareRoutineEvidence({
-      configDir: input.configDir,
-      firingId: input.firingId,
-      prepared,
-      project: input.project,
-      providerCommand: input.providerCommand,
-      providerName: input.providerName,
-      routine: input.routine,
-      stateRoot: input.stateRoot
-    });
+    prepared = await deadline.race(
+      input.prepareRoutineWorkspace({
+        configDir: input.configDir,
+        firingId: input.firingId,
+        kind: input.routine.kind,
+        project: input.project,
+        routineName: input.routine.name
+      })
+    );
+    const evidence = await deadline.race(
+      prepareRoutineEvidence({
+        configDir: input.configDir,
+        firingId: input.firingId,
+        prepared,
+        project: input.project,
+        providerCommand: input.providerCommand,
+        providerName: input.providerName,
+        routine: input.routine,
+        stateRoot: input.stateRoot
+      })
+    );
     rawLogPath = evidence.rawLogPath;
     normalizedLogPath = evidence.normalizedLogPath;
     input.runStore.updateRoutineFiringWorkspace({
@@ -631,7 +646,7 @@ async function runRoutineFiring(input: {
       rawLogPath,
       workspacePath: prepared.workspacePath
     });
-    await input.provider.validate(input.providerCommand);
+    await deadline.race(input.provider.validate(input.providerCommand));
     input.runStore.updateRoutineFiringState(input.firingId, "running");
     input.activeRuns.attachProvider(input.firingId, {
       cancel: () => input.provider.cancel(input.firingId),
@@ -654,30 +669,44 @@ async function runRoutineFiring(input: {
       );
     }
 
-    for await (const event of input.provider.runAttempt({
-      branchName: prepared.branchName,
-      issue: routineIssueSnapshot(input.routine),
-      prompt: evidence.prompt,
-      promptPath: evidence.promptPath,
-      provider: {
-        command: input.providerCommand,
-        name: input.providerName
-      },
-      run: {
-        attempt: 1,
-        id: input.firingId
-      },
-      workspacePath: prepared.workspacePath
-    })) {
-      await appendRoutineEvent({
-        event,
-        normalizedLogPath,
-        rawLogPath
-      });
-      if (event.normalized !== undefined) {
-        events.push(event.normalized);
+    providerAttempt = (async () => {
+      for await (const event of input.provider.runAttempt({
+        branchName: prepared.branchName,
+        issue: routineIssueSnapshot(input.routine),
+        prompt: evidence.prompt,
+        promptPath: evidence.promptPath,
+        provider: {
+          command: input.providerCommand,
+          name: input.providerName
+        },
+        run: {
+          attempt: 1,
+          id: input.firingId
+        },
+        routine: {
+          ...(input.routine.effort === undefined
+            ? {}
+            : { effort: input.routine.effort }),
+          ...(input.routine.model === undefined
+            ? {}
+            : { model: input.routine.model }),
+          ...(input.routine.permissionMode === undefined
+            ? {}
+            : { permissionMode: input.routine.permissionMode })
+        },
+        workspacePath: prepared.workspacePath
+      })) {
+        await appendRoutineEvent({
+          event,
+          normalizedLogPath,
+          rawLogPath
+        });
+        if (event.normalized !== undefined) {
+          events.push(event.normalized);
+        }
       }
-    }
+    })();
+    await deadline.race(providerAttempt);
     // Mirrors classifyFailure's cancelRequested fast path (checked before
     // any exit-code/event inspection there too): once an operator cancel is
     // observed, the firing reports cancelled even if the process happened
@@ -686,11 +715,13 @@ async function runRoutineFiring(input: {
     const outcome =
       cancelEntry?.cancelRequested === true
         ? { kind: "cancelled" as const, reason: "cancelled" }
-        : await classifyRoutineOutcome(events, {
-            baseBranch: input.project.workspace.git.base_branch,
-            kind: input.routine.kind,
-            workspacePath: prepared.workspacePath
-          });
+        : await deadline.race(
+            classifyRoutineOutcome(events, {
+              baseBranch: input.project.workspace.git.base_branch,
+              kind: input.routine.kind,
+              workspacePath: prepared.workspacePath
+            })
+          );
     input.runStore.completeRoutineFiring({
       id: input.firingId,
       state: outcome.kind,
@@ -700,6 +731,9 @@ async function runRoutineFiring(input: {
         : { cancelReason: cancelEntry.cancelReason }),
       workspacePath: prepared.workspacePath
     });
+    // The firing is terminal now. PR discovery is post-terminal enrichment,
+    // so it must not let the execution deadline rewrite a completed outcome.
+    deadline.clear();
     if (outcome.kind === "succeeded" && input.routine.kind === "git") {
       await discoverRoutinePullRequests({
         branchName: prepared.branchName,
@@ -713,13 +747,20 @@ async function runRoutineFiring(input: {
       });
     }
   } catch (error) {
+    const timedOut = error instanceof RoutineFiringTimeoutError;
+    if (timedOut) {
+      await input.provider.cancel(input.firingId).catch(() => undefined);
+      await providerAttempt?.catch(() => undefined);
+    }
     const cancelEntry = input.activeRuns.get(input.firingId);
-    const cancelled = cancelEntry?.cancelRequested === true;
-    const reason = cancelled
-      ? "cancelled"
-      : error instanceof RoutinePromptRenderError
-        ? error.terminalReason
-        : errorMessage(error);
+    const cancelled = !timedOut && cancelEntry?.cancelRequested === true;
+    const reason = timedOut
+      ? error.terminalReason
+      : cancelled
+        ? "cancelled"
+        : error instanceof RoutinePromptRenderError
+          ? error.terminalReason
+          : errorMessage(error);
     input.runStore.completeRoutineFiring({
       id: input.firingId,
       state: cancelled ? "cancelled" : "failed",
@@ -731,7 +772,37 @@ async function runRoutineFiring(input: {
         ? {}
         : { workspacePath: prepared.workspacePath })
     });
+  } finally {
+    deadline.clear();
   }
+}
+
+function routineFiringDeadline(timeoutMinutes: number | undefined): {
+  clear: () => void;
+  race: <T>(operation: Promise<T>) => Promise<T>;
+} {
+  if (timeoutMinutes === undefined) {
+    return {
+      clear: () => undefined,
+      race: (operation) => operation
+    };
+  }
+
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new RoutineFiringTimeoutError());
+    }, timeoutMinutes * 60_000);
+  });
+  return {
+    clear: () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+    },
+    race: (operation) => Promise.race([operation, expired])
+  };
 }
 
 async function prepareRoutineEvidence(input: {

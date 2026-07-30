@@ -69,6 +69,8 @@ const allowedTemplateFields: Record<
 };
 
 const tagPattern = /{{\s*([^{}]+?)\s*}}/g;
+const ROUTINE_ONE_SHOT_NOTICE =
+  "This routine firing is one-shot and will not be re-invoked. Complete all work before returning; do not schedule background work or finish with the expectation of a later wake-up.";
 
 export class RoutinePromptRenderError extends Error {
   readonly terminalReason = "prompt_render_error";
@@ -104,7 +106,7 @@ export function renderRoutinePrompt(
 
   return {
     preambleVersion: AUTONOMY_PREAMBLE_VERSION,
-    prompt: [AUTONOMY_PREAMBLE, rendered].join("\n"),
+    prompt: [AUTONOMY_PREAMBLE, ROUTINE_ONE_SHOT_NOTICE, rendered].join("\n"),
     templateContentHash: contentHash(input.template)
   };
 }

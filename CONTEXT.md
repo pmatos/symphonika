@@ -167,6 +167,11 @@ and lifecycle state. Its trigger source is scheduled or manual; a manual firing 
 execution lifecycle without consuming the Routine's next clock event.
 _Avoid_: run when specifically referring to non-issue scheduled execution
 
+**Routine Firing Deadline**:
+An optional declared absolute wall-clock bound for one Routine Firing. It expires regardless of
+continued provider progress and fails the firing with terminal reason `firing_timeout`.
+_Avoid_: Watchdog timeout, no-progress grace
+
 **Routine Skip**:
 An operator-visible clock attempt that did not create a Routine Firing because of a catch-up window,
 an overlapping non-terminal firing, or a concurrency cap. It updates the Routine's latest skip
@@ -289,6 +294,8 @@ _Avoid_: chat session
 - A **Routine** may record **Routine Skips** without creating Routine Firings
 - A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
 - A manual **Routine Firing** leaves the Routine's next scheduled clock event unchanged
+- A **Routine Firing Deadline** terminates an over-time **Routine Firing** independently of the
+  **Watchdog**'s progress-liveness decision
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
 - A **Watchdog** samples a **Progress Signal** for each active **Run** during daemon reconciliation and may mark no-progress work `stale`, preserving **Workspace** contents

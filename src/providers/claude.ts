@@ -98,7 +98,10 @@ export function createClaudeProvider(
 
       const command = await processScope.wrapForProviderScope(
         input.run,
-        parseCommand(input.provider.command)
+        applyRoutineArguments(
+          parseCommand(input.provider.command),
+          input.routine
+        )
       );
       if (activeRun.cancelled) {
         // Outside the try/finally below (which owns the only other
@@ -121,7 +124,13 @@ export function createClaudeProvider(
         };
         return;
       }
-      const child = spawnProviderProcess(command, input.workspacePath);
+      const child = spawnProviderProcess(
+        command,
+        input.workspacePath,
+        input.routine === undefined
+          ? {}
+          : { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" }
+      );
       activeRun.child = child;
       child.stderr.resume();
       const queue = createProcessQueue(child);
@@ -751,6 +760,50 @@ function parseCommand(command: string): { args: string[]; executable: string } {
     args: parts.slice(1),
     executable
   };
+}
+
+function applyRoutineArguments(
+  command: { args: string[]; executable: string },
+  routine: ProviderRunInput["routine"]
+): { args: string[]; executable: string } {
+  if (routine === undefined) {
+    return command;
+  }
+
+  let args = command.args.slice();
+  if (routine.model !== undefined) {
+    args = withoutOption(args, "--model");
+    args.push("--model", routine.model);
+  }
+  if (routine.effort !== undefined) {
+    args = withoutOption(args, "--effort");
+    args.push("--effort", routine.effort);
+  }
+  if (routine.permissionMode === "bypass") {
+    args = withoutOption(args, "--permission-mode").filter(
+      (arg) => arg !== "--dangerously-skip-permissions"
+    );
+    args.push("--dangerously-skip-permissions");
+  }
+
+  args.push("--disallowedTools", "ScheduleWakeup", "Monitor", "CronCreate");
+  return { args, executable: command.executable };
+}
+
+function withoutOption(args: string[], option: string): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === option) {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith(`${option}=`)) {
+      continue;
+    }
+    result.push(arg);
+  }
+  return result;
 }
 
 function splitCommand(command: string): string[] {

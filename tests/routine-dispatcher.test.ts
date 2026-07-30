@@ -5,7 +5,10 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
-import type { RunControllerProvidersConfig } from "../src/lifecycle/run-controller.js";
+import type {
+  RunControllerProjectConfig,
+  RunControllerProvidersConfig
+} from "../src/lifecycle/run-controller.js";
 import type {
   AgentProvider,
   ProviderEvent,
@@ -410,6 +413,156 @@ describe("RoutineFiringDispatcher", () => {
       });
       expect(runStore.listRoutineFirings()).toEqual([]);
     } finally {
+      runStore.close();
+    }
+  });
+
+  it("passes effective execution overrides only on the routine provider input", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const providerInputs: ProviderRunInput[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "claude",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        providerInputs.push(input);
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const project = dueRoutineProjectFixture(root, "claude");
+    project.routines = [
+      {
+        ...project.routines![0]!,
+        effort: "xhigh",
+        model: "claude-opus-4-8",
+        permissionMode: "bypass",
+        timeoutMinutes: 60
+      }
+    ];
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { claude: provider },
+        configDir: root,
+        createFiringId: () => "fire-overrides",
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", project]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(providerInputs).toHaveLength(1);
+      expect(
+        (
+          providerInputs[0] as ProviderRunInput & {
+            routine?: Record<string, unknown>;
+          }
+        ).routine
+      ).toEqual({
+        effort: "xhigh",
+        model: "claude-opus-4-8",
+        permissionMode: "bypass"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("terminates a firing at its wall-clock deadline and records firing_timeout", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    let releaseProvider!: () => void;
+    let providerCancelled = false;
+    const providerWait = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const fallback = setTimeout(releaseProvider, 500);
+    const provider = {
+      cancel: vi.fn((runId: string) => {
+        expect(runId).toBe("fire-timeout");
+        providerCancelled = true;
+        releaseProvider();
+        return Promise.resolve();
+      }),
+      name: "claude",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await providerWait;
+        yield {
+          normalized: {
+            cancelled: providerCancelled,
+            exitCode: providerCancelled ? null : 0,
+            signal: providerCancelled ? "SIGTERM" : null,
+            type: "process_exit"
+          },
+          raw: { kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const project = dueRoutineProjectFixture(root, "claude");
+    project.routines = [
+      {
+        ...project.routines![0]!,
+        timeoutMinutes: 0.001
+      }
+    ];
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { claude: provider },
+        configDir: root,
+        createFiringId: () => "fire-timeout",
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", project]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(provider.cancel).toHaveBeenCalledOnce();
+      expect(runStore.getRoutineFiring("fire-timeout")).toMatchObject({
+        state: "failed",
+        terminalReason: "firing_timeout"
+      });
+    } finally {
+      clearTimeout(fallback);
+      releaseProvider();
       runStore.close();
     }
   });
@@ -1788,7 +1941,10 @@ describe("RoutineFiringDispatcher", () => {
   });
 });
 
-function dueRoutineProjectFixture(root: string, provider: "codex" | "claude") {
+function dueRoutineProjectFixture(
+  root: string,
+  provider: "codex" | "claude"
+): RunControllerProjectConfig {
   return {
     ...runStoreProjectFixture(),
     routines: [

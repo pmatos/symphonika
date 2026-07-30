@@ -121,11 +121,29 @@ async function deleteRoutineFiringBranch(
     projectName: firing.projectName,
     routineName: firing.routineName
   });
+  if (!(await branchExists(cachePath, branchName))) {
+    return;
+  }
+  await git(["-C", cachePath, "branch", "-D", branchName]);
+}
+
+async function branchExists(
+  cachePath: string,
+  branchName: string
+): Promise<boolean> {
   try {
-    await git(["-C", cachePath, "branch", "-D", branchName]);
+    await git([
+      "-C",
+      cachePath,
+      "show-ref",
+      "--verify",
+      "--quiet",
+      `refs/heads/${branchName}`
+    ]);
+    return true;
   } catch (error) {
-    if (isBranchNotFoundError(error)) {
-      return;
+    if (isGitExitCode(error, 1)) {
+      return false;
     }
     throw error;
   }
@@ -205,6 +223,10 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
 }
 
-function isBranchNotFoundError(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("not found");
+function isGitExitCode(error: unknown, code: number): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as { code?: unknown }).code === code
+  );
 }

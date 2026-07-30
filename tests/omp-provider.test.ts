@@ -1674,6 +1674,66 @@ describe("Oh My Pi RPC provider", () => {
     });
   });
 
+  it.skipIf(process.platform === "win32")(
+    "terminates OMP-spawned grandchildren on cancellation",
+    async () => {
+      const root = await makeTempRoot();
+      const workspacePath = path.join(root, "workspace");
+      await mkdir(workspacePath, { recursive: true });
+      const transcriptPath = path.join(root, "process-tree-requests.jsonl");
+      const grandchildPath = path.join(root, "grandchild.mjs");
+      const grandchildPidPath = path.join(root, "grandchild.pid");
+      const fakeOmpPath = path.join(root, "fake-omp-process-tree.mjs");
+      await writeFakeOmpProcessTree(
+        fakeOmpPath,
+        transcriptPath,
+        grandchildPath,
+        grandchildPidPath
+      );
+      const provider = createOmpProvider({
+        processScope: noopProcessScope()
+      });
+      const input: ProviderRunInput = {
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      };
+      let grandchildPid: number | undefined;
+
+      try {
+        const collecting = collectProviderEvents(provider.runAttempt(input));
+        await waitForTranscriptCommand(transcriptPath, "prompt");
+        grandchildPid = Number(await waitForFileContent(grandchildPidPath));
+
+        await provider.cancel(input.run.id);
+        const events = await collecting;
+
+        expect(events.at(-1)?.normalized).toMatchObject({
+          cancelled: true,
+          type: "process_exit"
+        });
+        await waitForProcessStopped(grandchildPid);
+      } finally {
+        if (
+          grandchildPid !== undefined &&
+          Number.isSafeInteger(grandchildPid)
+        ) {
+          try {
+            process.kill(grandchildPid, "SIGKILL");
+          } catch {
+            // The provider already cleaned the process up.
+          }
+          await waitForProcessStopped(grandchildPid).catch(() => {
+            // Best-effort cleanup after an assertion failure.
+          });
+        }
+      }
+    }
+  );
+
   it("validates a quoted OMP executable with a bounded ready-frame probe", async () => {
     const root = await makeTempRoot();
     const fakeOmpDirectory = path.join(root, "fake omp");
@@ -2480,6 +2540,55 @@ async function writeFakeCancellableOmp(
   );
 }
 
+async function writeFakeOmpProcessTree(
+  filePath: string,
+  transcriptPath: string,
+  grandchildPath: string,
+  grandchildPidPath: string
+): Promise<void> {
+  await writeFile(
+    grandchildPath,
+    [
+      "import { writeFileSync } from 'node:fs';",
+      "process.on('SIGTERM', () => {});",
+      `writeFileSync(${JSON.stringify(grandchildPidPath)}, String(process.pid));`,
+      "setInterval(() => {}, 1000);",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  await writeFile(
+    filePath,
+    [
+      "import { spawn } from 'node:child_process';",
+      "import { appendFile } from 'node:fs/promises';",
+      "import readline from 'node:readline';",
+      `spawn(process.execPath, [${JSON.stringify(grandchildPath)}], { stdio: 'ignore' });`,
+      `const transcriptPath = ${JSON.stringify(transcriptPath)};`,
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "async function record(message) { await appendFile(transcriptPath, `${JSON.stringify(message)}\\n`, 'utf8'); }",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      "  await record(command);",
+      "  if (command.type === 'get_state') {",
+      "    send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-335', model: { provider: 'openai', id: 'gpt-5.4' } } });",
+      "  }",
+      "  if (command.type === 'prompt') {",
+      "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
+      "  }",
+      "  if (command.type === 'abort') {",
+      "    send({ id: command.id, type: 'response', command: 'abort', success: true });",
+      "  }",
+      "}",
+      "await new Promise(() => {});",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
 async function waitForFileContent(filePath: string): Promise<string> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
@@ -2502,6 +2611,45 @@ async function waitForProcessExit(pid: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`timed out waiting for process ${pid} to exit`);
+}
+
+async function waitForProcessStopped(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (!(await processIsRunning(pid))) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for process ${pid} to stop`);
+}
+
+async function processIsRunning(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    return !hasErrorCode(error, "ESRCH");
+  }
+
+  if (process.platform !== "linux") {
+    return true;
+  }
+
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    const commandEnd = stat.lastIndexOf(")");
+    return commandEnd < 0 || stat.slice(commandEnd + 2, commandEnd + 3) !== "Z";
+  } catch (error) {
+    return !hasErrorCode(error, "ENOENT");
+  }
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code
+  );
 }
 
 async function waitForTranscriptCommand(

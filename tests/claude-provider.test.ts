@@ -451,6 +451,68 @@ describe("Claude stream-json provider", () => {
     ]);
   });
 
+  it.skipIf(process.platform === "win32")(
+    "terminates provider-spawned grandchildren on cancellation",
+    async () => {
+      const root = await makeTempRoot();
+      const workspacePath = path.join(root, "workspace");
+      await mkdir(workspacePath, { recursive: true });
+      const grandchildPath = path.join(root, "grandchild.mjs");
+      const grandchildPidPath = path.join(root, "grandchild.pid");
+      const fakeClaudePath = path.join(root, "fake-claude-process-tree.mjs");
+      await writeFakeClaudeProcessTree(
+        fakeClaudePath,
+        grandchildPath,
+        grandchildPidPath
+      );
+      const provider = createClaudeProvider({
+        processScope: noopProcessScope()
+      });
+      const iterator = provider
+        .runAttempt({
+          ...providerInputFixture(),
+          provider: {
+            command: `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
+            name: "claude"
+          },
+          workspacePath
+        })
+        [Symbol.asyncIterator]();
+      let grandchildPid: number | undefined;
+
+      try {
+        const initialEvent = await nextProviderEvent(iterator);
+        grandchildPid = Number(await waitForFileContent(grandchildPidPath));
+
+        await provider.cancel("run-issue-10");
+        const events = [
+          initialEvent,
+          ...(await collectIteratorEvents(iterator))
+        ];
+
+        expect(events.at(-1)?.normalized).toMatchObject({
+          cancelled: true,
+          type: "process_exit"
+        });
+        await waitForProcessStopped(grandchildPid);
+      } finally {
+        if (
+          grandchildPid !== undefined &&
+          Number.isSafeInteger(grandchildPid)
+        ) {
+          try {
+            process.kill(grandchildPid, "SIGKILL");
+          } catch {
+            // The provider already cleaned the process up.
+          }
+          await waitForProcessStopped(grandchildPid).catch(() => {
+            // Best-effort cleanup after an assertion failure.
+          });
+        }
+      }
+    }
+  );
+
   // Regression: wrapForProviderScope's await (up to probeTimeoutMs on an
   // uncached probe) sits between RunController's one-shot pre-start
   // cancellation recheck (ADR 0052) and the point where this provider used
@@ -721,6 +783,91 @@ async function writeFakeClaudeStreamJson(
   );
 
   process.env.SYMPHONIKA_FAKE_CLAUDE_TRANSCRIPT = transcriptPath;
+}
+
+async function writeFakeClaudeProcessTree(
+  filePath: string,
+  grandchildPath: string,
+  grandchildPidPath: string
+): Promise<void> {
+  await writeFile(
+    grandchildPath,
+    [
+      "import { writeFileSync } from 'node:fs';",
+      "process.on('SIGTERM', () => {});",
+      `writeFileSync(${JSON.stringify(grandchildPidPath)}, String(process.pid));`,
+      "setInterval(() => {}, 1000);",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  await writeFile(
+    filePath,
+    [
+      "import { spawn } from 'node:child_process';",
+      "import readline from 'node:readline';",
+      `spawn(process.execPath, [${JSON.stringify(grandchildPath)}], { stdio: 'ignore' });`,
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "for await (const line of rl) {",
+      "  JSON.parse(line);",
+      "  process.stdout.write(`${JSON.stringify({ type: 'system', subtype: 'init', session_id: 'session-10', cwd: process.cwd(), tools: ['Read', 'Bash'], model: 'claude-sonnet-4-6', permissionMode: 'bypassPermissions' })}\\n`);",
+      "  await new Promise(() => {});",
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function waitForFileContent(filePath: string): Promise<string> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      return await readFile(filePath, "utf8");
+    } catch {
+      // The child process has not created the file yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for file ${filePath}`);
+}
+
+async function waitForProcessStopped(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (!(await processIsRunning(pid))) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for process ${pid} to stop`);
+}
+
+async function processIsRunning(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    return !hasErrorCode(error, "ESRCH");
+  }
+
+  if (process.platform !== "linux") {
+    return true;
+  }
+
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    const commandEnd = stat.lastIndexOf(")");
+    return commandEnd < 0 || stat.slice(commandEnd + 2, commandEnd + 3) !== "Z";
+  } catch (error) {
+    return !hasErrorCode(error, "ENOENT");
+  }
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code
+  );
 }
 
 async function writeFakeClaudeHelpExecutable(filePath: string): Promise<void> {

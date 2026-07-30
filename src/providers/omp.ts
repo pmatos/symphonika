@@ -13,6 +13,10 @@ import type {
   ProviderEvent,
   ProviderRunInput
 } from "../provider.js";
+import {
+  shutdownProviderProcess,
+  spawnProviderProcess
+} from "./provider-process.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -98,7 +102,7 @@ export function createOmpProvider(
           type: "abort"
         });
       }
-      shutdownProcess(activeRun.child);
+      shutdownProviderProcess(activeRun.child);
       return Promise.resolve();
     },
     name: "omp",
@@ -125,11 +129,7 @@ export function createOmpProvider(
         return;
       }
 
-      const child = spawn(command.executable, command.args, {
-        cwd: input.workspacePath,
-        env: process.env,
-        stdio: ["pipe", "pipe", "pipe"]
-      });
+      const child = spawnProviderProcess(command, input.workspacePath);
       activeRun.child = child;
       child.stderr.resume();
       const queue = createProcessQueue(child, {
@@ -148,7 +148,7 @@ export function createOmpProvider(
         }
         if (ready.response === undefined) {
           queue.discardBeforeFrameLimits();
-          shutdownProcess(child);
+          shutdownProviderProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
         }
@@ -167,7 +167,7 @@ export function createOmpProvider(
             raw: ready.response
           };
           queue.discardBeforeFrameLimits();
-          shutdownProcess(child);
+          shutdownProviderProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
         }
@@ -191,7 +191,7 @@ export function createOmpProvider(
             return;
           }
           if (!negotiatedV2Response(negotiated.response)) {
-            shutdownProcess(child);
+            shutdownProviderProcess(child);
             yield* drainUntilExit(queue, activeRun);
             return;
           }
@@ -210,7 +210,7 @@ export function createOmpProvider(
           return;
         }
         if (!successfulResponse(state.response)) {
-          shutdownProcess(child);
+          shutdownProviderProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
         }
@@ -232,7 +232,7 @@ export function createOmpProvider(
           return;
         }
         if (!agentInvokedResponse(prompt.response)) {
-          shutdownProcess(child);
+          shutdownProviderProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
         }
@@ -274,12 +274,12 @@ export function createOmpProvider(
 
           if (isTerminalFailure(type)) {
             activeRun.terminalEventSeen = true;
-            shutdownProcess(child);
+            shutdownProviderProcess(child);
           }
         }
       } finally {
         activeRuns.delete(input.run.id);
-        shutdownProcess(child);
+        shutdownProviderProcess(child);
         await processScope.stopProviderScope(input.run);
       }
     },
@@ -1454,7 +1454,7 @@ async function validateOmpRpcCommand(command: {
 
     const timer = setTimeout(() => {
       settle(() => {
-        shutdownProcess(child);
+        shutdownProbeProcess(child);
         reject(new Error("Oh My Pi provider command validation timed out"));
       });
     }, ompProbeTimeoutMs());
@@ -1483,7 +1483,7 @@ async function validateOmpRpcCommand(command: {
         }
         if (item.kind === "malformed") {
           settle(() => {
-            shutdownProcess(child);
+            shutdownProbeProcess(child);
             reject(
               new Error(
                 `Oh My Pi provider command emitted malformed JSON before ready: ${item.message}`
@@ -1515,7 +1515,7 @@ async function validateOmpRpcCommand(command: {
         } catch (error) {
           queue.discardBeforeFrameLimits();
           settle(() => {
-            shutdownProcess(child);
+            shutdownProbeProcess(child);
             reject(error instanceof Error ? error : new Error(String(error)));
           });
           return;
@@ -1553,7 +1553,7 @@ async function validateOmpRpcCommand(command: {
       }
     })().catch((error: unknown) => {
       settle(() => {
-        shutdownProcess(child);
+        shutdownProbeProcess(child);
         reject(error instanceof Error ? error : new Error(String(error)));
       });
     });
@@ -1598,7 +1598,7 @@ function terminateProcess(child: ChildProcess): void {
   child.kill("SIGTERM");
 }
 
-function shutdownProcess(child: ChildProcessWithoutNullStreams): void {
+function shutdownProbeProcess(child: ChildProcessWithoutNullStreams): void {
   endStdin(child);
   const timer = setTimeout(() => {
     terminateProcess(child);
@@ -1665,7 +1665,7 @@ function markTerminalAgentEnd(activeRun: ActiveOmpRun): void {
     // Bound the child's exit even when the terminal frame arrives during a
     // handshake read: a host waiting for stdin EOF must not deadlock the
     // run, and a hung child gets the bounded SIGTERM→SIGKILL escalation.
-    shutdownProcess(activeRun.child);
+    shutdownProviderProcess(activeRun.child);
   }
 }
 

@@ -13,6 +13,10 @@ import type {
   ProviderEvent,
   ProviderRunInput
 } from "../provider.js";
+import {
+  shutdownProviderProcess,
+  spawnProviderProcess
+} from "./provider-process.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -69,7 +73,7 @@ export function createClaudeProvider(
         // post-probe recheck (see below) is what stops it from launching.
         return Promise.resolve();
       }
-      shutdownProcess(activeRun.child);
+      shutdownProviderProcess(activeRun.child);
       return Promise.resolve();
     },
     name: "claude",
@@ -113,11 +117,7 @@ export function createClaudeProvider(
         };
         return;
       }
-      const child = spawn(command.executable, command.args, {
-        cwd: input.workspacePath,
-        env: process.env,
-        stdio: ["pipe", "pipe", "pipe"]
-      });
+      const child = spawnProviderProcess(command, input.workspacePath);
       activeRun.child = child;
       child.stderr.resume();
       const queue = createProcessQueue(child);
@@ -140,7 +140,7 @@ export function createClaudeProvider(
             }
 
             if (isTerminalFailure(type)) {
-              shutdownProcess(child);
+              shutdownProviderProcess(child);
             }
           }
         }
@@ -615,17 +615,6 @@ function terminateProcess(child: ChildProcess): void {
   }
 
   child.kill("SIGTERM");
-}
-
-function shutdownProcess(child: ChildProcessWithoutNullStreams): void {
-  if (!child.stdin.destroyed && child.stdin.writable) {
-    child.stdin.end();
-  }
-
-  const timer = setTimeout(() => {
-    terminateProcess(child);
-  }, 250);
-  timer.unref();
 }
 
 async function validateClaudeStreamJsonCommand(command: {

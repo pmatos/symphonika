@@ -2,7 +2,7 @@ import { once } from "node:events";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   shutdownProviderProcess,
@@ -88,13 +88,65 @@ describe("provider process lifecycle", () => {
         await exited;
         await shutdownProviderProcess(child);
 
-        expect(isProcessRunning(providerPid)).toBe(false);
+        expect(await processIsRunning(providerPid)).toBe(false);
       } finally {
         try {
           process.kill(-supervisorPid!, "SIGKILL");
         } catch {
           // The shutdown escalation already removed the process group.
         }
+      }
+    }
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "rejects shutdown reservation after ordinary group release begins",
+    async () => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "symphonika-provider-process-test-")
+      );
+      tempRoots.push(root);
+      const providerPath = path.join(root, "provider.mjs");
+      await writeFile(providerPath, "process.exit(0);\n", "utf8");
+
+      const child = spawnProviderProcess(
+        { args: [providerPath], executable: process.execPath },
+        root
+      );
+      const supervisorPid = child.pid;
+      expect(supervisorPid).toBeDefined();
+      const realKill = process.kill.bind(process);
+      const signalSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation((targetPid, signal) => {
+          if (targetPid === -supervisorPid!) {
+            return true;
+          }
+          return realKill(targetPid, signal);
+        });
+      let releaseShutdown: Promise<void> | undefined;
+      const releaseSeen = new Promise<void>((resolve) => {
+        child.on("message", (message: unknown) => {
+          if (message === "group-released" && releaseShutdown === undefined) {
+            releaseShutdown = shutdownProviderProcess(child);
+            resolve();
+          }
+        });
+      });
+      const closed = once(child, "close");
+
+      try {
+        await releaseSeen;
+        await releaseShutdown;
+        await closed;
+
+        expect(
+          signalSpy.mock.calls.filter(
+            ([targetPid]) => targetPid === -supervisorPid!
+          )
+        ).toEqual([]);
+      } finally {
+        signalSpy.mockRestore();
       }
     }
   );
@@ -115,11 +167,31 @@ async function waitForFileContent(filePath: string): Promise<string> {
   throw new Error(`Timed out waiting for ${filePath}`);
 }
 
-function isProcessRunning(pid: number): boolean {
+async function processIsRunning(pid: number): Promise<boolean> {
   try {
     process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return !hasErrorCode(error, "ESRCH");
   }
+
+  if (process.platform !== "linux") {
+    return true;
+  }
+
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    const commandEnd = stat.lastIndexOf(")");
+    return commandEnd < 0 || stat.slice(commandEnd + 2, commandEnd + 3) !== "Z";
+  } catch (error) {
+    return !hasErrorCode(error, "ENOENT");
+  }
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code
+  );
 }

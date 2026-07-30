@@ -41,10 +41,13 @@ means the supervisor has latched the shutdown state and will leave the guardian
 in place even if the provider exits immediately. On ordinary provider
 completion without a shutdown request, the supervisor reports group release,
 removes the guardian, and mirrors the provider's exit, so the group ends
-immediately. Once group shutdown begins, the guardian instead keeps the
-original process-group identity reserved through both grace periods. This
-prevents either delayed negative-PID signal from targeting an unrelated group
-after numeric PID reuse.
+immediately. Release and shutdown reservation are mutually exclusive: once
+ordinary completion has settled and release begins, a later preparation
+request is rejected rather than acknowledged against a disappearing group.
+Once group shutdown begins, the guardian instead keeps the original
+process-group identity reserved through both grace periods. This prevents
+either delayed negative-PID signal from targeting an unrelated group after
+numeric PID reuse.
 
 The shared shutdown operation is idempotent and performs this sequence:
 
@@ -191,6 +194,7 @@ The change is complete when:
   supervisor acknowledges that the guardian is reserved.
 - Shutdown acknowledged before guardian readiness never launches the provider,
   and a ready group remains cancellable after unexpected supervisor exit.
+- Ordinary group release and shutdown reservation cannot both succeed.
 - An already-dead group is harmless and repeated cancellation does not arm
   duplicate escalation sequences.
 - Shutdown completion covers the forced-kill grace period, and no courtesy is

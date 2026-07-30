@@ -41,6 +41,10 @@ const handleTerminate = () => {
 process.on("SIGTERM", handleTerminate);
 process.on("message", (message) => {
   if (message === "prepare-shutdown") {
+    if (settled) {
+      process.send?.("shutdown-unavailable");
+      return;
+    }
     shutdownRequested = true;
     process.send?.("shutdown-ready");
   }
@@ -280,6 +284,8 @@ async function reserveProviderProcessGroup(
     const onMessage = (message: unknown): void => {
       if (message === "shutdown-ready") {
         settle(true);
+      } else if (message === "shutdown-unavailable") {
+        settle(false);
       }
     };
     const onDisconnect = (): void => {

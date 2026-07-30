@@ -989,6 +989,41 @@ describe("Oh My Pi RPC provider", () => {
     ]);
   });
 
+  it("rejects terminal agent_end before prompt dispatch", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "pre-prompt-terminal.jsonl");
+    const fakeOmpPath = path.join(root, "fake-pre-prompt-terminal-omp.mjs");
+    await writeFakePrePromptTerminalOmp(fakeOmpPath, transcriptPath);
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+    );
+
+    expect(
+      events
+        .map((event) => event.normalized)
+        .find((event) => event?.type === "turn_failed")
+    ).toMatchObject({
+      message: "Oh My Pi provider emitted terminal agent_end before prompt",
+      type: "turn_failed"
+    });
+    expect(
+      readJsonl(await readFile(transcriptPath, "utf8")).map((command) =>
+        objectField(command, "type")
+      )
+    ).toEqual(["get_state"]);
+  });
+
   it("does not report a missing terminal when agent_end precedes the prompt response", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -2232,6 +2267,32 @@ async function writeFakeEarlyTerminalOmp(
       "  }",
       "}",
       ...(exitAfterTerminal ? [] : ["setInterval(() => {}, 1000);"]),
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakePrePromptTerminalOmp(
+  filePath: string,
+  transcriptPath: string
+): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "import { appendFile } from 'node:fs/promises';",
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      `  await appendFile(${JSON.stringify(transcriptPath)}, \`${"${JSON.stringify(command)}"}\\n\`, 'utf8');`,
+      "  if (command.type === 'get_state') {",
+      "    send({ type: 'agent_end', isTerminal: true, messages: [] });",
+      "    process.stdout.write('', () => process.exit(0));",
+      "  }",
+      "}",
       ""
     ].join("\n"),
     "utf8"

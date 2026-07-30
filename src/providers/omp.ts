@@ -20,6 +20,7 @@ type ActiveOmpRun = {
   cancelled: boolean;
   child?: ChildProcessWithoutNullStreams;
   nextRequestId: number;
+  promptDispatched: boolean;
   queue?: ProcessQueue;
   terminalEventSeen: boolean;
   sessionId: string | undefined;
@@ -42,6 +43,7 @@ type ProcessQueueItem =
     }
   | {
       kind: "message";
+      promptDispatched: boolean;
       raw: unknown;
     };
 
@@ -106,6 +108,7 @@ export function createOmpProvider(
       const activeRun: ActiveOmpRun = {
         cancelled: false,
         nextRequestId: 1,
+        promptDispatched: false,
         sessionId: undefined,
         terminalEventSeen: false
       };
@@ -129,7 +132,9 @@ export function createOmpProvider(
       });
       activeRun.child = child;
       child.stderr.resume();
-      const queue = createProcessQueue(child);
+      const queue = createProcessQueue(child, {
+        isPromptDispatched: () => activeRun.promptDispatched
+      });
       activeRun.queue = queue;
 
       try {
@@ -211,6 +216,7 @@ export function createOmpProvider(
         }
 
         const promptId = requestId(activeRun);
+        activeRun.promptDispatched = true;
         writeJson(child, {
           id: promptId,
           message: input.prompt,
@@ -232,10 +238,8 @@ export function createOmpProvider(
         }
 
         while (true) {
-          const event = providerEventFromQueueItem(
-            await queue.next(),
-            activeRun
-          );
+          const item = await queue.next();
+          const event = providerEventFromQueueItem(item, activeRun);
           const type = event.normalized?.type;
 
           if (type === "process_exit") {
@@ -261,6 +265,11 @@ export function createOmpProvider(
 
           if (isTerminalAgentEnd(event.raw)) {
             markTerminalAgentEnd(activeRun);
+            if (terminalAgentEndBeforePrompt(item)) {
+              yield terminalAgentEndBeforePromptEvent(event.raw);
+              yield* drainUntilExit(queue, activeRun);
+              return;
+            }
           }
 
           if (isTerminalFailure(type)) {
@@ -532,6 +541,11 @@ async function* readUntilFrame(
     yield event;
     if (item.kind === "message" && isTerminalAgentEnd(item.raw)) {
       markTerminalAgentEnd(activeRun);
+      if (terminalAgentEndBeforePrompt(item)) {
+        yield terminalAgentEndBeforePromptEvent(item.raw);
+        yield* drainUntilExit(queue, activeRun);
+        return { stopped: true };
+      }
     }
     if (item.kind === "message" && predicate(item.raw)) {
       return { response: item.raw, stopped: false };
@@ -573,6 +587,11 @@ async function* readUntilResponse(
     yield event;
     if (item.kind === "message" && isTerminalAgentEnd(item.raw)) {
       markTerminalAgentEnd(activeRun);
+      if (terminalAgentEndBeforePrompt(item)) {
+        yield terminalAgentEndBeforePromptEvent(item.raw);
+        yield* drainUntilExit(queue, activeRun);
+        return { stopped: true };
+      }
     }
     if (item.kind === "message" && stringField(item.raw, "id") === id) {
       return { response: item.raw, stopped: false };
@@ -671,6 +690,7 @@ function boundedMalformedEvidence(line: string): string {
 }
 
 export type ProcessQueueOptions = {
+  isPromptDispatched?: () => boolean;
   maxPendingFrameBytes?: number;
   maxPendingItems?: number;
 };
@@ -813,7 +833,14 @@ export function createProcessQueue(
       return;
     }
 
-    push({ kind: "message", raw }, lineBytes);
+    push(
+      {
+        kind: "message",
+        promptDispatched: options.isPromptDispatched?.() === true,
+        raw
+      },
+      lineBytes
+    );
     // The protocol begins with the versioned ready frame (ADR 0066); any
     // other first nonblank frame is malformed, not evidence to scan past.
     if (!readySeen && frameType !== "ready") {
@@ -873,7 +900,14 @@ export function createProcessQueue(
     try {
       const logical = frameDecoder.push(raw);
       if (logical !== undefined) {
-        push({ kind: "message", raw: logical.frame }, logical.byteLength);
+        push(
+          {
+            kind: "message",
+            promptDispatched: options.isPromptDispatched?.() === true,
+            raw: logical.frame
+          },
+          logical.byteLength
+        );
       }
     } catch (error) {
       push(
@@ -1601,6 +1635,27 @@ function isTerminalAgentEnd(raw: unknown): boolean {
     stringField(raw, "type") === "agent_end" &&
     booleanField(raw, "isTerminal") !== false
   );
+}
+
+function terminalAgentEndBeforePrompt(item: ProcessQueueItem): boolean {
+  return (
+    item.kind === "message" &&
+    !item.promptDispatched &&
+    isTerminalAgentEnd(item.raw)
+  );
+}
+
+function terminalAgentEndBeforePromptEvent(raw: unknown): ProviderEvent {
+  return {
+    normalized: {
+      message: "Oh My Pi provider emitted terminal agent_end before prompt",
+      type: "turn_failed"
+    },
+    raw: {
+      event: raw,
+      kind: "terminal_agent_end_before_prompt"
+    }
+  };
 }
 
 function markTerminalAgentEnd(activeRun: ActiveOmpRun): void {

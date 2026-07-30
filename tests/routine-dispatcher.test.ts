@@ -1195,6 +1195,114 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("redacts the SMTP password from persisted provider evidence before it hits disk", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const secret = "smtp-password-leaked-by-a-compromised-provider";
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: {
+            message: `printing inherited env: SMTP_TEST_PASSWORD=${secret}`,
+            type: "message"
+          },
+          raw: { delta: `printing inherited env: SMTP_TEST_PASSWORD=${secret}` }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-persisted-secret",
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver: () => Promise.resolve()
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      const evidenceDir = path.join(
+        stateRoot,
+        "logs",
+        "routines",
+        "fire-persisted-secret"
+      );
+      const rawLog = await readFile(
+        path.join(evidenceDir, "provider.raw.jsonl"),
+        "utf8"
+      );
+      const normalizedLog = await readFile(
+        path.join(evidenceDir, "provider.normalized.jsonl"),
+        "utf8"
+      );
+      expect(rawLog).toContain("[REDACTED]");
+      expect(normalizedLog).toContain("[REDACTED]");
+      expect(rawLog).not.toContain(secret);
+      expect(normalizedLog).not.toContain(secret);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("releases the concurrency slot before notification delivery finishes", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

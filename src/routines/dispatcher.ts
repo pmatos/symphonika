@@ -263,6 +263,10 @@ export function fireRoutineNow(
     provider,
     providerCommand,
     providerName,
+    redactSecrets: resolveRedactSecrets(
+      input.notification,
+      input.env ?? process.env
+    ),
     routine: detail,
     runStore: input.runStore,
     stateRoot: input.stateRoot
@@ -596,6 +600,10 @@ export async function dispatchDueRoutines(
           provider,
           providerCommand,
           providerName,
+          redactSecrets: resolveRedactSecrets(
+            input.notification,
+            input.env ?? process.env
+          ),
           routine: routineDetail,
           runStore: input.runStore,
           stateRoot: input.stateRoot,
@@ -650,6 +658,7 @@ async function runRoutineFiring(input: {
   provider: NonNullable<AgentProviderRegistry[AgentProviderName]>;
   providerCommand: string;
   providerName: AgentProviderName;
+  redactSecrets: string[];
   routine: RoutineStatus & { prompt: string };
   runStore: RunStore;
   stateRoot: string;
@@ -748,7 +757,8 @@ async function runRoutineFiring(input: {
         await appendRoutineEvent({
           event,
           normalizedLogPath,
-          rawLogPath
+          rawLogPath,
+          redactSecrets: input.redactSecrets
         });
         if (event.normalized !== undefined) {
           events.push(event.normalized);
@@ -972,6 +982,25 @@ function routineFiringDeadline(timeoutMinutes: number | undefined): {
   };
 }
 
+// Resolves the SMTP secret(s) that must be scrubbed from persisted provider
+// evidence before it hits disk. A provider process inherits the daemon's
+// full environment (src/providers/provider-process.ts), so a prompt-injected
+// or misbehaving provider can print the configured SMTP password into its
+// own output; that output is durable log evidence (appendRoutineEvent),
+// independent of whether this firing ever sends a notification.
+function resolveRedactSecrets(
+  notification:
+    { resolveConfig: () => EmailNotificationConfig | undefined } | undefined,
+  env: NodeJS.ProcessEnv
+): string[] {
+  const config = notification?.resolveConfig();
+  if (config === undefined) {
+    return [];
+  }
+  const secret = env[config.smtpPasswordEnv];
+  return secret === undefined || secret.length === 0 ? [] : [secret];
+}
+
 async function prepareRoutineEvidence(input: {
   firingId: string;
   configDir: string;
@@ -1081,12 +1110,19 @@ async function appendRoutineEvent(input: {
   event: ProviderEvent;
   normalizedLogPath: string;
   rawLogPath: string;
+  redactSecrets: string[];
 }): Promise<void> {
   await Promise.all([
-    appendJsonl(input.rawLogPath, input.event.raw),
+    appendJsonl(input.rawLogPath, input.event.raw, input.redactSecrets),
     ...(input.event.normalized === undefined
       ? []
-      : [appendJsonl(input.normalizedLogPath, input.event.normalized)])
+      : [
+          appendJsonl(
+            input.normalizedLogPath,
+            input.event.normalized,
+            input.redactSecrets
+          )
+        ])
   ]);
 }
 
@@ -1326,8 +1362,16 @@ function logRoutineSkip(
   );
 }
 
-async function appendJsonl(filePath: string, value: unknown): Promise<void> {
-  await appendFile(filePath, `${JSON.stringify(value)}\n`, "utf8");
+async function appendJsonl(
+  filePath: string,
+  value: unknown,
+  redactSecrets: string[]
+): Promise<void> {
+  const serialized = redactSecrets.reduce(
+    (text, secret) => redactSecret(text, secret),
+    JSON.stringify(value)
+  );
+  await appendFile(filePath, `${serialized}\n`, "utf8");
 }
 
 function stringField(value: unknown, key: string): string | undefined {

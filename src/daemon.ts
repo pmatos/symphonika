@@ -834,6 +834,17 @@ export async function startDaemon(
         globalConcurrency: runtimeConfig.globalConcurrency(),
         githubIssuesApi,
         logger,
+        // Manual fires never send a notification (fireRoutineNow does not
+        // call recordRoutineFiringNotification), but the fired provider
+        // still inherits the daemon's env and can leak the SMTP password
+        // into persisted evidence the same way a scheduled firing can; wire
+        // resolveConfig so runRoutineFiring can redact it either way.
+        notification: {
+          createSink: (config) =>
+            options.notificationSink ??
+            createSmtpNotificationSink(config, { env }),
+          resolveConfig: () => runtimeConfig.emailConfig()
+        },
         ...(options.prepareRoutineWorkspace === undefined
           ? {}
           : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),

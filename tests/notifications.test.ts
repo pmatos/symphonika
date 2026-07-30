@@ -247,7 +247,7 @@ describe("Routine Firing notifications", () => {
     });
   });
 
-  it("bounds a stalled delivery instead of hanging indefinitely", async () => {
+  it("bounds a stalled delivery instead of hanging indefinitely, and does not retry a timeout", async () => {
     const previousTimeout = process.env.SYMPHONIKA_SMTP_DELIVERY_TIMEOUT_MS;
     process.env.SYMPHONIKA_SMTP_DELIVERY_TIMEOUT_MS = "20";
     try {
@@ -268,7 +268,10 @@ describe("Routine Firing notifications", () => {
         sink: { deliver }
       });
 
-      expect(deliver).toHaveBeenCalledTimes(2);
+      // A timeout doesn't cancel the still-running first sink.deliver()
+      // call, so a retry here would race a second delivery against it and
+      // risk sending a duplicate notification. Only one attempt is made.
+      expect(deliver).toHaveBeenCalledTimes(1);
       expect(outcome).toEqual({
         error: "notification delivery timed out after 20ms",
         state: "failed"

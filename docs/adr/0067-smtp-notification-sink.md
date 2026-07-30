@@ -54,10 +54,14 @@ SQLite, and logs; transport errors are redacted before they reach durable eviden
 
 ### Failure policy and visibility
 
-Delivery gets two total attempts (one retry). Exhaustion never changes the Routine Firing's terminal
-state. Instead, `routine_firings.notification_state` records `sent`, `skipped`, or `failed`, and
-`notification_error` stores the final sanitized error for a failure. These fields are returned by
-the Routine Firing API and are durable across restart.
+Delivery gets up to two attempts (one retry) bounded by a per-attempt timeout (`deliverWithTimeout`,
+default 15s). A definite (already-settled) failure is retried once; a timeout is not retried, because
+the underlying send is not cancelled and may still complete after the timeout fires — retrying it
+would race a second delivery against a still-live first attempt and risk sending a duplicate
+notification. Exhaustion never changes the Routine Firing's terminal state. Instead,
+`routine_firings.notification_state` records `sent`, `skipped`, or `failed`, and `notification_error`
+stores the final sanitized error for a failure. These fields are returned by the Routine Firing API
+and are durable across restart.
 
 `doctor` validates configuration and reports a missing configured password variable with a manual
 env-file loading hint. It does not inspect historical delivery outcomes. The dashboard does not yet

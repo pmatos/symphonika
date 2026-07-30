@@ -42,10 +42,21 @@ export async function deliverRoutineFiringNotification(input: {
       return { state: "sent" };
     } catch (error) {
       lastError = errorMessage(error);
+      // A timeout doesn't cancel the underlying sink.deliver() call — it may
+      // still be running and could succeed after we've already given up. A
+      // retry here would race a second delivery against that still-live
+      // first attempt, risking a duplicate notification. Retrying is only
+      // safe for a definite (already-settled) failure, so stop after a
+      // timeout instead of looping again.
+      if (error instanceof NotificationTimeoutError) {
+        break;
+      }
     }
   }
   return { error: lastError, state: "failed" };
 }
+
+class NotificationTimeoutError extends Error {}
 
 // A stalled or unreachable SMTP relay must not hang delivery indefinitely:
 // dispatchDueRoutines awaits this call, and that promise is tracked by the
@@ -64,7 +75,11 @@ function deliverWithTimeout(
         return;
       }
       settled = true;
-      reject(new Error(`notification delivery timed out after ${timeoutMs}ms`));
+      reject(
+        new NotificationTimeoutError(
+          `notification delivery timed out after ${timeoutMs}ms`
+        )
+      );
     }, timeoutMs);
     timer.unref();
 

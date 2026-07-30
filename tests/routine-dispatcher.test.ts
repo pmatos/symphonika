@@ -492,7 +492,15 @@ describe("RoutineFiringDispatcher", () => {
         globalConcurrency: { maxInFlight: undefined },
         logger,
         notification: {
-          config: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.reject(
+                new Error(`relay rejected credentials ${secret}`)
+              );
+            }
+          }),
+          resolveConfig: () => ({
             from: "symphonika@example.com",
             on: "always",
             smtpHost: "smtp.example.com",
@@ -501,15 +509,7 @@ describe("RoutineFiringDispatcher", () => {
             smtpSecurity: "starttls",
             smtpUsername: "server-token",
             to: "operator@example.com"
-          },
-          sink: {
-            deliver(message) {
-              delivered.push(message);
-              return Promise.reject(
-                new Error(`relay rejected credentials ${secret}`)
-              );
-            }
-          }
+          })
         },
         now: new Date("2026-05-22T10:00:01.000Z"),
         prepareRoutineWorkspace: () =>
@@ -562,6 +562,195 @@ describe("RoutineFiringDispatcher", () => {
       expect(logs).not.toContain(secret);
       const database = await readFile(path.join(stateRoot, "symphonika.db"));
       expect(database.includes(Buffer.from(secret))).toBe(false);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("releases the concurrency slot before notification delivery finishes", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    let resolveDelivery: (() => void) | undefined;
+    const delivery = new Promise<void>((resolve) => {
+      resolveDelivery = resolve;
+    });
+    let recordSlotCount: ((count: number) => void) | undefined;
+    const slotCountAtDeliveryStart = new Promise<number>((resolve) => {
+      recordSlotCount = resolve;
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      const dispatched = dispatchDueRoutines({
+        activeRuns,
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-slow-email",
+        env: {},
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            async deliver() {
+              recordSlotCount?.(activeRuns.countInFlightByProject("alpha"));
+              await delivery;
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      // The slot must already be released by the time notification delivery
+      // starts, so a stalled SMTP relay cannot suppress further dispatch for
+      // this project (docs/adr/0067-smtp-notification-sink.md).
+      expect(await slotCountAtDeliveryStart).toBe(0);
+      resolveDelivery?.();
+      await dispatched;
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("resolves the email config at delivery time so a mid-firing reload applies", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const runStore = openRunStore({ stateRoot });
+    const delivered: Array<{ to: string }> = [];
+    let currentTo = "before-reload@example.com";
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        // Simulate a Service Config reload landing while this firing's
+        // provider work is still in flight.
+        currentTo = "after-reload@example.com";
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-reload",
+        env: {},
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: (config) => ({
+            deliver() {
+              delivered.push({ to: config.to });
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: currentTo
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(delivered).toEqual([{ to: "after-reload@example.com" }]);
     } finally {
       runStore.close();
     }

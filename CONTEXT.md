@@ -168,10 +168,10 @@ _Avoid_: Routine Firing when referring to the whole clock event
 **Routine Firing**:
 One durable execution attempt for a Routine Target, with its own workspace, provider logs, prompt
 evidence, lifecycle state, terminal reason, optional canonical Routine Outcome, and an independent
-record of whether successful `kind: git` classification found commits ahead of base. A scheduled
-firing is correlated to its Routine Fan-out; its trigger source is scheduled or manual, and a manual
-firing targets one Routine Target directly, using the same execution lifecycle without consuming
-the Routine's next clock event or creating a Routine Fan-out.
+record of whether its prepared `kind: git` workspace held commits ahead of base at completion. A
+scheduled firing is correlated to its Routine Fan-out; its trigger source is scheduled or manual,
+and a manual firing targets one Routine Target directly, using the same execution lifecycle without
+consuming the Routine's next clock event or creating a Routine Fan-out.
 _Avoid_: run when specifically referring to non-issue scheduled execution
 
 **Routine Outcome Claim**:

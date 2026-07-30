@@ -238,17 +238,18 @@ summary, while a recurring target begins with its next future clock event.
 
 A Routine Firing is one durable execution of a Routine Target. It records the Routine, its target
 Project, fan-out id, provider, workspace path, prompt evidence, provider logs, terminal reason,
-lifecycle state, its canonical Routine Outcome, whether successful `kind: git` classification found
-commits ahead of the configured base branch, and any pull requests discovered from a `kind: git`
-firing branch. The commits-ahead signal is independent of the canonical action: a verified GitHub
-issue or pull-request action may legitimately be the Routine Outcome while the workspace still has
-local commits to protect. The Routine Outcome records `status`, `action`, `url`, `title`, `summary`,
-`verified`, and `source` without replacing lifecycle state or terminal reason; see ADR 0068. Its
-trigger source is `scheduled` or `manual`; a scheduled firing carries the fan-out id of the Routine
-Fan-out it belongs to, while a manual firing targets one Routine Target directly and has no fan-out
-id. A one-shot `schedule.at` target becomes `expired` after its firing is claimed and must not fire
-again on daemon restart. A recurring target remains active and advances to its next clock event
-after every scheduled firing. A manual firing does not consume a scheduled clock event.
+lifecycle state, its canonical Routine Outcome, whether its prepared `kind: git` workspace held
+commits ahead of the configured base branch at completion, and any pull requests discovered from a
+`kind: git` firing branch. The commits-ahead signal is independent of the canonical action: a
+verified GitHub issue or pull-request action may legitimately be the Routine Outcome while the
+workspace still has local commits to protect. The Routine Outcome records `status`, `action`, `url`,
+`title`, `summary`, `verified`, and `source` without replacing lifecycle state or terminal reason;
+see ADR 0068. Its trigger source is `scheduled` or `manual`; a scheduled firing carries the fan-out
+id of the Routine Fan-out it belongs to, while a manual firing targets one Routine Target directly
+and has no fan-out id. A one-shot `schedule.at` target becomes `expired` after its firing is claimed
+and must not fire again on daemon restart. A recurring target remains active and advances to its
+next clock event after every scheduled firing. A manual firing does not consume a scheduled clock
+event.
 
 When Routine Workspace Retention reclaims a terminal firing's worktree, the firing keeps its
 historical workspace path and records `workspace_pruned_at`. State-root logs and prompt evidence are
@@ -872,14 +873,14 @@ suppresses the retention signal below. A successful firing with neither claim no
 otherwise it is unverified and sourced to `symphonika`. Omission alone is not a failure. Failed and
 cancelled firings retain their terminal reason independently of the reconciled outcome.
 
-Successful `kind: git` classification persists commits-ahead evidence independently of the canonical
-Routine Outcome. Under ADR 0025 such a firing remains successful, and Routine Workspace Retention
-withholds it from age-based collection even when reconciliation correctly selects a verified
-`pr`, `issue_opened`, or `issue_closed` action. Symphonika does not yet persist a separate
-durable-publication transition, so the conservative v1 behavior retains every commits-ahead
-workspace indefinitely rather than infer publication from an unrelated canonical action. A future
-publication signal or explicit destructive operator override may release that protection; age
-alone must never delete the only copy.
+Every prepared `kind: git` workspace is inspected for commits ahead independently of terminal
+lifecycle classification and the canonical Routine Outcome. Routine Workspace Retention withholds
+every positive inspection from age-based collection, including failed and cancelled firings and
+succeeded firings whose reconciliation correctly selects a verified `pr`, `issue_opened`, or
+`issue_closed` action. Symphonika does not yet persist a separate durable-publication transition, so
+the conservative v1 behavior retains every commits-ahead workspace indefinitely rather than infer
+publication from an unrelated canonical action. A future publication signal or explicit destructive
+operator override may release that protection; age alone must never delete the only copy.
 
 After a Routine Firing reaches a terminal state, Symphonika evaluates its Routine notification
 policy. Delivery occurs after `kind: git` PR discovery, uses both plain text and an escaped HTML

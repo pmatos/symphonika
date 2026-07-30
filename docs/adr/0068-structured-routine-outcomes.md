@@ -73,11 +73,12 @@ One pure reconciliation function produces the persisted outcome:
 Routine Outcome is evidence alongside lifecycle state and terminal reason; it does not replace or
 rewrite either.
 
-Successful `kind: git` classification persists commits-ahead evidence separately from this canonical
-outcome. Routine Workspace Retention uses that independent signal, so a richer verified GitHub
-action can remain canonical without hiding local commits from the retention guard. Until Symphonika
-persists a verified durable-publication transition, every commits-ahead workspace is retained
-indefinitely rather than collected by age. It must not silently collect the only copy of a commit.
+Every prepared `kind: git` workspace persists commits-ahead evidence separately from its terminal
+lifecycle classification and this canonical outcome. Routine Workspace Retention uses that
+independent signal, so a failure, cancellation, or richer verified GitHub action cannot hide local
+commits from the retention guard. Until Symphonika persists a verified durable-publication
+transition, every commits-ahead workspace is retained indefinitely rather than collected by age. It
+must not silently collect the only copy of a commit.
 
 ## Consequences
 

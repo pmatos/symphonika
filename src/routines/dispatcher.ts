@@ -4,7 +4,10 @@ import path from "node:path";
 import type { Logger } from "pino";
 
 import type { ActiveRunRegistry } from "../lifecycle/active-runs.js";
-import { classifyFailure } from "../lifecycle/classify-failure.js";
+import {
+  classifyFailure,
+  inspectWorkspaceCommitsAhead
+} from "../lifecycle/classify-failure.js";
 import {
   resolveEnvBackedValue,
   tryListIssues,
@@ -939,9 +942,8 @@ async function runRoutineFiring(input: {
           );
     // A cancel can also land DURING the snapshot read just above, after
     // `outcome` above was already classified as succeeded/failed. Downgrade
-    // here so a `kind: git` firing cancelled in this window cannot still
-    // report commitsAhead and let reconcileRoutineOutcome's git-evidence
-    // override mint a verified commit outcome for a cancelled run.
+    // the lifecycle state here; the independent retention inspection below
+    // still protects any commits already created in the workspace.
     const cancelAfterGithubAfter = input.activeRuns.get(input.firingId);
     if (cancelAfterGithubAfter?.cancelRequested === true) {
       outcome = { kind: "cancelled", reason: "cancelled" };
@@ -985,7 +987,15 @@ async function runRoutineFiring(input: {
       outcome = { kind: "cancelled", reason: "cancelled" };
     }
     const commitsAhead =
-      input.routine.kind === "git" && outcome.kind === "succeeded";
+      outcome.kind === "succeeded"
+        ? input.routine.kind === "git"
+        : await inspectRoutineCommitsAhead({
+            baseBranch: input.project.workspace.git.base_branch,
+            kind: input.routine.kind,
+            logger: input.logger,
+            routineName: input.routine.name,
+            workspacePath: prepared.workspacePath
+          });
     const githubObservation = routineGithubObservation(
       githubBefore,
       githubAfter,
@@ -1081,12 +1091,22 @@ async function runRoutineFiring(input: {
       input.routine.kind,
       githubSnapshotSince
     );
+    const commitsAhead =
+      prepared === undefined
+        ? false
+        : await inspectRoutineCommitsAhead({
+            baseBranch: input.project.workspace.git.base_branch,
+            kind: input.routine.kind,
+            logger: input.logger,
+            routineName: input.routine.name,
+            workspacePath: prepared.workspacePath
+          });
     input.runStore.completeRoutineFiring({
-      commitsAhead: false,
+      commitsAhead,
       id: input.firingId,
       outcome: reconcileRoutineOutcome({
         claim: parseRoutineOutcomeClaim(events),
-        commitsAhead: false,
+        commitsAhead,
         githubObservationAvailable: githubObservation.available,
         observedAction: githubObservation.action,
         provider: input.providerName,
@@ -1106,6 +1126,34 @@ async function runRoutineFiring(input: {
     deadline.clear();
   }
   return { events, prepared };
+}
+
+async function inspectRoutineCommitsAhead(input: {
+  baseBranch: string;
+  kind: RoutineStatus["kind"];
+  logger: Logger | undefined;
+  routineName: string;
+  workspacePath: string;
+}): Promise<boolean> {
+  if (input.kind !== "git") {
+    return false;
+  }
+  try {
+    return await inspectWorkspaceCommitsAhead({
+      baseBranch: input.baseBranch,
+      workspacePath: input.workspacePath
+    });
+  } catch (error) {
+    input.logger?.warn(
+      {
+        err: error,
+        routine: input.routineName,
+        workspacePath: input.workspacePath
+      },
+      "symphonika routine commits-ahead inspection failed"
+    );
+    return false;
+  }
 }
 
 async function recordRoutineFiringNotification(

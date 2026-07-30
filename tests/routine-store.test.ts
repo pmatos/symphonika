@@ -1773,6 +1773,52 @@ describe("RunStore routines", () => {
     }
   });
 
+  it.each(["failed", "cancelled"] as const)(
+    "withholds commits ahead from age-based pruning for a %s firing",
+    async (state) => {
+      const stateRoot = await makeTempRoot();
+      const store = openRunStore({ stateRoot });
+      try {
+        store.syncRoutines([
+          {
+            kind: "git",
+            name: "dependency-update",
+            prompt: "Update dependencies.",
+            provider: "codex",
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: "/tmp/dependency-update.md",
+            projectName: "alpha"
+          }
+        ]);
+        store.createRoutineFiring({
+          id: `fire-${state}`,
+          projectName: "alpha",
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName: "dependency-update"
+        });
+        store.completeRoutineFiring({
+          commitsAhead: true,
+          id: `fire-${state}`,
+          state,
+          terminalReason: state,
+          workspacePath: `/tmp/workspace-${state}`
+        });
+
+        const future = "9999-12-31T23:59:59.999Z";
+        expect(
+          store.listRoutineWorkspacePruneCandidates({
+            cancelledBefore: future,
+            failedBefore: future,
+            succeededBefore: future
+          })
+        ).toEqual([]);
+      } finally {
+        store.close();
+      }
+    }
+  );
+
   it("claimRoutineFiring inserts the firing only when the claim wins", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

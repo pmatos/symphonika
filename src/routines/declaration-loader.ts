@@ -163,6 +163,14 @@ export function parseRoutineDeclaration(
     }
   }
 
+  const notifyValue = frontMatter.notify;
+  if (
+    Object.hasOwn(frontMatter, "notify") &&
+    typeof notifyValue !== "boolean"
+  ) {
+    errors.push(`routine at ${routinePath} notify must be a boolean`);
+  }
+
   if (prompt.trim().length === 0) {
     errors.push(`routine at ${routinePath} prompt body must not be empty`);
   }
@@ -187,6 +195,7 @@ export function parseRoutineDeclaration(
       kind: kind as RoutineKind,
       ...(model === undefined ? {} : { model }),
       name: name!,
+      ...(typeof notifyValue === "boolean" ? { notify: notifyValue } : {}),
       ...(permissionModeValue === "bypass"
         ? { permissionMode: permissionModeValue }
         : {}),

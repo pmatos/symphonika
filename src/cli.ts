@@ -46,6 +46,8 @@ import type { ServiceInstallOptions, ServiceInstallReport } from "./service.js";
 import { runServiceInstall as runServiceInstallReal } from "./service.js";
 import type { SmokeOptions, SmokeReport } from "./smoke.js";
 import { runSmoke } from "./smoke.js";
+import type { TestEmailOptions, TestEmailReport } from "./test-email.js";
+import { runTestEmail } from "./test-email.js";
 import {
   formatCapReachedReason,
   parseCapReachedReason
@@ -90,6 +92,7 @@ export type CliDependencies = {
     options: ServiceInstallOptions
   ) => Promise<ServiceInstallReport>;
   runSmoke?: (options: SmokeOptions) => Promise<SmokeReport>;
+  runTestEmail?: (options: TestEmailOptions) => Promise<TestEmailReport>;
   startDaemon?: (options: StartDaemonOptions) => Promise<DaemonHandle>;
 };
 
@@ -162,6 +165,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   const serviceInstall =
     dependencies.runServiceInstall ?? runServiceInstallReal;
   const smoke = dependencies.runSmoke ?? runSmoke;
+  const testEmail = dependencies.runTestEmail ?? runTestEmail;
   const start = dependencies.startDaemon ?? startDaemon;
   const openRunStore = dependencies.openRunStore ?? openRunStoreReal;
   const fetcher = dependencies.fetch ?? fetch;
@@ -201,6 +205,26 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       printStaleSection(program, report.projects);
       printWarningsSection(program, report.warnings);
       process.exitCode = 1;
+    });
+
+  program
+    .command("test-email")
+    .description("send a representative notification through configured SMTP")
+    .option("--config <path>", "service config path")
+    .action(async (options: { config?: string }) => {
+      const result = await testEmail(withConfigPath(options.config));
+      if (!result.ok) {
+        writeErr(
+          program,
+          `test email failed: ${result.error ?? "unknown SMTP failure"}\n`
+        );
+        process.exitCode = 1;
+        return;
+      }
+      writeOut(
+        program,
+        `test email sent to ${result.to ?? "configured recipient"}\n`
+      );
     });
 
   program

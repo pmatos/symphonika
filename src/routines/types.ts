@@ -18,6 +18,8 @@ export type RoutineFiringState =
 
 export type RoutineFiringTriggerSource = "manual" | "scheduled";
 
+export type RoutineNotificationState = "sent" | "skipped" | "failed";
+
 export type RoutineCatchUpPolicy = "skip" | "fire_once_if_missed";
 
 export type RoutineSkipReason =
@@ -38,6 +40,7 @@ export type RoutineDeclaration = {
   disabled?: boolean;
   kind: RoutineKind;
   name: string;
+  notify?: boolean;
   prompt: string;
   provider: AgentProviderName | null;
   schedule: RoutineSchedule;
@@ -71,6 +74,7 @@ export type RoutineStatus = {
   lastSkipReason: RoutineSkipReason | null;
   name: string;
   nextFireAt: string | null;
+  notify?: boolean;
   projectName: string;
   provider: AgentProviderName | null;
   pullRequestNumbers: number[];

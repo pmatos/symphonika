@@ -173,6 +173,7 @@ describe("routine operator surfaces", () => {
       expect(firingsBody.firings).toEqual([
         expect.objectContaining({
           id: "fire-1",
+          notificationState: "sent",
           pullRequests: [expect.objectContaining({ prNumber: 42 })],
           workspacePrunedAt: "2026-05-23T10:00:00.000Z"
         })
@@ -597,6 +598,10 @@ function seedRoutine(store: ReturnType<typeof openRunStore>): void {
     id: "fire-1",
     state: "succeeded",
     workspacePath: "/tmp/workspace"
+  });
+  store.recordRoutineFiringNotification({
+    id: "fire-1",
+    state: "sent"
   });
   store.recordRoutinePullRequest({
     firingId: "fire-1",

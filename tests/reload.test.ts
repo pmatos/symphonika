@@ -125,6 +125,101 @@ async function writeProjectConfigWithoutWorkspaceRoot(
 }
 
 describe("RuntimeConfigReloader workflow validation", () => {
+  it("loads service-level SMTP email configuration with security-specific defaults", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "email:",
+        '  from: "symphonika@example.com"',
+        '  to: "operator@example.com"',
+        "  on: changes",
+        '  smtp_host: "smtp.example.com"',
+        "  smtp_security: ssl",
+        '  smtp_username: "server-token"',
+        '  smtp_password_env: "SYMPHONIKA_SMTP_PASSWORD"'
+      ]
+    });
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getStatus().errors).toEqual([]);
+    expect(reloader.emailConfig()).toEqual({
+      from: "symphonika@example.com",
+      on: "changes",
+      smtpHost: "smtp.example.com",
+      smtpPasswordEnv: "SYMPHONIKA_SMTP_PASSWORD",
+      smtpPort: 465,
+      smtpSecurity: "ssl",
+      smtpUsername: "server-token",
+      to: "operator@example.com"
+    });
+  });
+
+  it("rejects SMTP credentials over an unencrypted non-loopback connection", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "email:",
+        '  from: "symphonika@example.com"',
+        '  to: "operator@example.com"',
+        '  smtp_host: "smtp.example.com"',
+        "  smtp_security: none",
+        '  smtp_username: "server-token"'
+      ]
+    });
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({
+      errors: [
+        expect.stringContaining(
+          "email.smtp_security: refuses credentials over an unencrypted connection"
+        )
+      ],
+      ok: false
+    });
+    expect(reloader.getSnapshot()).toBeUndefined();
+  });
+
+  it.each([
+    [
+      "from",
+      ['  to: "operator@example.com"', '  smtp_host: "smtp.example.com"']
+    ],
+    [
+      "to",
+      ['  from: "symphonika@example.com"', '  smtp_host: "smtp.example.com"']
+    ],
+    [
+      "smtp_host",
+      ['  from: "symphonika@example.com"', '  to: "operator@example.com"']
+    ]
+  ])("rejects an email block missing %s", async (field, emailLines) => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: ["email:", ...emailLines]
+    });
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({
+      errors: [expect.stringContaining(`email.${field}`)],
+      ok: false
+    });
+  });
+
   it("loads an OMP Project while keeping the provider command optional globally", async () => {
     const root = await makeTempRoot();
     await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");

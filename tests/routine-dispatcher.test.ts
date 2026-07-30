@@ -1,6 +1,7 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { Writable } from "node:stream";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -14,6 +15,7 @@ import type {
   ProviderEvent,
   ProviderRunInput
 } from "../src/provider.js";
+import type { NotificationMessage } from "../src/notifications/types.js";
 import {
   dispatchDueRoutines,
   fireRoutineNow
@@ -963,6 +965,129 @@ describe("RoutineFiringDispatcher", () => {
 
       expect(second.fired).toEqual([]);
       expect(providerInputs).toHaveLength(1);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("keeps a successful firing terminal when email fails and persists only sanitized failure evidence", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const secret = "smtp-password-that-must-never-be-persisted";
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    let logs = "";
+    const logger = pino(
+      { level: "trace" },
+      new Writable({
+        write(chunk: unknown, _encoding, callback) {
+          logs += Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk);
+          callback();
+        }
+      })
+    );
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: {
+            message:
+              "## Findings\n\n- **safe**\n- <script>alert('report')</script>",
+            type: "message"
+          },
+          raw: { delta: "report output" }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-email-failed",
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        logger,
+        notification: {
+          config: {
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          },
+          sink: {
+            deliver(message) {
+              delivered.push(message);
+              return Promise.reject(
+                new Error(`relay rejected credentials ${secret}`)
+              );
+            }
+          }
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(delivered).toHaveLength(2);
+      expect(delivered[0]?.text).toContain("## Findings");
+      expect(delivered[0]?.html).toContain(
+        "&lt;script&gt;alert(&#39;report&#39;)&lt;/script&gt;"
+      );
+      expect(JSON.stringify(delivered)).not.toContain(secret);
+      expect(runStore.getRoutineFiring("fire-email-failed")).toMatchObject({
+        notificationError: "relay rejected credentials [REDACTED]",
+        notificationState: "failed",
+        state: "succeeded",
+        terminalReason: null
+      });
+      expect(logs).not.toContain(secret);
+      const database = await readFile(path.join(stateRoot, "symphonika.db"));
+      expect(database.includes(Buffer.from(secret))).toBe(false);
     } finally {
       runStore.close();
     }

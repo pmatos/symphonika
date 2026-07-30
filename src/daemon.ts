@@ -52,6 +52,8 @@ import {
 import { detectStaleClaims } from "./lifecycle/stale-claims.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
+import { createSmtpNotificationSink } from "./notifications/smtp.js";
+import type { NotificationSink } from "./notifications/types.js";
 import {
   runPullRequestFollowup,
   type PullRequestFollowupPolicy
@@ -93,6 +95,7 @@ export type StartDaemonOptions = {
   legacyInputRequiredRecheckDelayMs?: number;
   lifecyclePolicy?: LifecyclePolicy;
   logger?: Logger;
+  notificationSink?: NotificationSink;
   port?: number;
   processScope?: ProcessScope;
   prepareIssueWorkspace?: (
@@ -625,6 +628,7 @@ export async function startDaemon(
         }
         const recomputeSchedulesFromNow = recomputeRoutineSchedulesFromNow;
         recomputeRoutineSchedulesFromNow = false;
+        const emailConfig = runtimeConfig.emailConfig();
         const routineResult = await dispatchDueRoutines({
           activeRuns,
           agentProviders,
@@ -636,6 +640,16 @@ export async function startDaemon(
           globalConcurrency: runtimeConfig.globalConcurrency(),
           githubIssuesApi,
           logger,
+          ...(emailConfig === undefined
+            ? {}
+            : {
+                notification: {
+                  config: emailConfig,
+                  sink:
+                    options.notificationSink ??
+                    createSmtpNotificationSink(emailConfig, { env })
+                }
+              }),
           ...(options.prepareRoutineWorkspace === undefined
             ? {}
             : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),

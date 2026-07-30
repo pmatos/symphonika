@@ -190,6 +190,20 @@ branch. It records the PR number and head SHA but never enters PR Follow-up, rev
 auto-merge.
 _Avoid_: PR Follow-up when referring to Routine-opened pull requests
 
+**Notification Sink**:
+A transport-neutral boundary that delivers a rendered plain-text plus HTML **Notification Message**.
+SMTP is the first implementation; event-specific policy and rendering stay outside the sink.
+_Avoid_: emailer when referring to the provider-neutral boundary
+
+**Notification Message**:
+A rendered delivery payload containing a subject, plain-text body, and escaped HTML alternative.
+_Avoid_: provider output when referring to the operator-facing rendered payload
+
+**Routine Notification Delivery**:
+The best-effort delivery outcome for one terminal **Routine Firing**, recorded as `sent`, `skipped`,
+or `failed` without changing the firing's terminal state.
+_Avoid_: Routine Firing when referring only to delivery state
+
 **Run Lifecycle**:
 The stateful progression of one Run from dispatch selection through provider execution, scheduling,
 waiting, cancellation, or terminal labels.
@@ -303,6 +317,8 @@ _Avoid_: chat session
 - A **Routine Firing Deadline** terminates an over-time **Routine Firing** independently of the
   **Watchdog**'s progress-liveness decision
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
+- A terminal **Routine Firing** may produce one best-effort **Routine Notification Delivery**
+- A **Notification Sink** delivers a rendered message without owning event-specific policy
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
 - A **Watchdog** samples a **Progress Signal** for each active **Run** during daemon reconciliation and may mark no-progress work `stale`, preserving **Workspace** contents
 - A **Continuation** is capped so an eligible issue cannot loop forever

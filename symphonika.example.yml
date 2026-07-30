@@ -32,6 +32,18 @@ retention:
 #   permission_mode: bypass
 #   timeout_minutes: 60
 
+# Optional best-effort Routine Firing notifications (ADR 0067). The password
+# value comes only from the named environment variable.
+# email:
+#   from: "symphonika@example.com"
+#   to: "operator@example.com"
+#   on: changes
+#   smtp_host: "smtp.postmarkapp.com"
+#   smtp_security: starttls
+#   smtp_port: 587
+#   smtp_username: "<postmark-server-token>"
+#   smtp_password_env: "SYMPHONIKA_SMTP_PASSWORD"
+
 providers:
   codex:
     command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"

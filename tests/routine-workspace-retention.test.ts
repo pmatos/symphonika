@@ -10,11 +10,12 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildCli } from "../src/cli.js";
 import { openRunStore } from "../src/run-store.js";
 import { prepareRoutineWorkspace } from "../src/routines/workspace.js";
+import { pruneRoutineWorkspaces } from "../src/routines/workspace-retention.js";
 
 const execFileAsync = promisify(execFile);
 const tempRoots: string[] = [];
@@ -241,6 +242,82 @@ describe("routine firing workspace retention", () => {
     await expect(
       branchExists(prepared.cachePath, prepared.branchName)
     ).resolves.toBe(false);
+  });
+
+  it("reports a firing as pruned when a concurrent pruner already marked it, instead of dropping it silently", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const stateRoot = path.join(root, "state");
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const prepared = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId: "fire-race",
+      kind: "report",
+      project: {
+        name: "alpha",
+        workspace: {
+          git: { base_branch: "main", remote: remotePath },
+          root: workspaceRoot
+        }
+      },
+      routineName: "daily-report"
+    });
+
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          projectName: "alpha",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-race",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.completeRoutineFiring({
+        id: "fire-race",
+        state: "succeeded",
+        workspacePath: prepared.workspacePath
+      });
+
+      // Simulate a concurrent pruner (daemon vs. manual `prune-workspaces`)
+      // winning the database write between this call's candidate read and
+      // its own markRoutineWorkspacePruned write: reclaimRegisteredWorktree
+      // still runs for real (the worktree really gets removed), but the
+      // mark-pruned write reports false, as it would if another process's
+      // write had already flipped workspace_pruned_at.
+      vi.spyOn(store, "markRoutineWorkspacePruned").mockReturnValueOnce(false);
+
+      const report = await pruneRoutineWorkspaces({
+        policy: {
+          cancelledDays: 14,
+          enabled: true,
+          failedDays: 14,
+          succeededDays: 0
+        },
+        runStore: store
+      });
+
+      expect(report.candidates.map((entry) => entry.firingId)).toContain(
+        "fire-race"
+      );
+      expect(report.pruned.map((entry) => entry.firingId)).toContain(
+        "fire-race"
+      );
+      expect(report.failures).toEqual([]);
+      await expect(access(prepared.workspacePath)).rejects.toThrow();
+    } finally {
+      store.close();
+    }
   });
 });
 

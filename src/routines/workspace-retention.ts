@@ -69,14 +69,17 @@ export async function pruneRoutineWorkspaces(input: {
     const entry = pruneEntry(firing);
     try {
       await reclaimRegisteredWorktree(firing);
-      if (
-        input.runStore.markRoutineWorkspacePruned({
-          id: firing.id,
-          prunedAt: now.toISOString()
-        })
-      ) {
-        report.pruned.push(entry);
-      }
+      // A concurrent prune (daemon vs. manual `prune-workspaces`, or vice
+      // versa) may have already reclaimed and marked this firing, so
+      // markRoutineWorkspacePruned's write can no-op (row already has
+      // workspace_pruned_at set). Either way the workspace ends up
+      // reclaimed once reclaimRegisteredWorktree returns without throwing,
+      // so report it as pruned regardless of which process's write won.
+      input.runStore.markRoutineWorkspacePruned({
+        id: firing.id,
+        prunedAt: now.toISOString()
+      });
+      report.pruned.push(entry);
     } catch (error) {
       report.failures.push({
         ...entry,

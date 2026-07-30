@@ -7,7 +7,7 @@ import {
 import type {
   ExpandedWorkflow,
   ExpandedWorkflowState
-} from "../src/workflow.js";
+} from "../src/workflow/types.js";
 
 function makeWorkflow(states: ExpandedWorkflowState[]): ExpandedWorkflow {
   return {

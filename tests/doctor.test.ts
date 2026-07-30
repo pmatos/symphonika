@@ -174,6 +174,29 @@ describe("doctor", () => {
     expect(output.stderr).toContain("schedule.cron is invalid");
   });
 
+  it("reports invalid service-level Routine defaults", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, {
+      routineDefaultLines: [
+        "routine_defaults:",
+        "  permission_mode: ask",
+        "  timeout_minutes: 0"
+      ]
+    });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const output = await runDoctorCommand(configPath);
+
+    expect(process.exitCode).toBe(1);
+    expect(output.stderr).toContain("routine_defaults.permission_mode");
+    expect(output.stderr).toContain("routine_defaults.timeout_minutes");
+  });
+
   it("reports duplicate Routine names within one Project", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");
@@ -1177,6 +1200,7 @@ async function writeValidConfig(
     claudeCommand?: string;
     codexCommand?: string;
     ompCommand?: string;
+    routineDefaultLines?: string[];
     routinePaths?: string[];
     token?: string;
     trackerKind?: string;
@@ -1201,6 +1225,7 @@ async function writeValidConfig(
       ...(overrides.ompCommand === undefined
         ? []
         : ["  omp:", `    command: "${overrides.ompCommand}"`]),
+      ...(overrides.routineDefaultLines ?? []),
       "projects:",
       "  - name: symphonika",
       "    disabled: false",

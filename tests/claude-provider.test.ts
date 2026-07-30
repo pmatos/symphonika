@@ -75,6 +75,66 @@ afterEach(async () => {
 });
 
 describe("Claude stream-json provider", () => {
+  it("applies routine tuning and anti-backgrounding guards at spawn", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const capturePath = path.join(root, "routine-spawn.json");
+    const fakeClaudePath = path.join(root, "fake-routine-claude.mjs");
+    await writeFile(
+      fakeClaudePath,
+      [
+        "import { writeFile } from 'node:fs/promises';",
+        "import readline from 'node:readline';",
+        "if (process.argv.includes('--help')) { process.stdout.write('stream-json'); process.exit(0); }",
+        "for await (const line of readline.createInterface({ input: process.stdin })) {",
+        "  JSON.parse(line);",
+        `  await writeFile(${JSON.stringify(capturePath)}, JSON.stringify({ args: process.argv.slice(2), disableBackgroundTasks: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS }));`,
+        "  process.stdout.write(`${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 'routine-session' })}\\n`);",
+        "  process.exit(0);",
+        "}",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
+
+    await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
+          name: "claude"
+        },
+        routine: {
+          effort: "xhigh",
+          model: "claude-opus-4-8",
+          permissionMode: "bypass"
+        },
+        workspacePath
+      })
+    );
+
+    const capture = JSON.parse(await readFile(capturePath, "utf8")) as {
+      args: string[];
+      disableBackgroundTasks?: string;
+    };
+    expect(capture.args).toEqual(
+      expect.arrayContaining([
+        "--model",
+        "claude-opus-4-8",
+        "--effort",
+        "xhigh",
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        "ScheduleWakeup",
+        "Monitor",
+        "CronCreate"
+      ])
+    );
+    expect(capture.disableBackgroundTasks).toBe("1");
+  });
+
   it("launches the configured command in the workspace and maps a completed turn", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");

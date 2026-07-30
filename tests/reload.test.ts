@@ -935,6 +935,106 @@ describe("RuntimeConfigReloader concurrency caps", () => {
     ]);
   });
 
+  it("resolves omitted routine execution settings from service defaults", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work.\n");
+    const routinePath = path.join(root, "daily-report.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "provider: claude",
+        "model: claude-opus-4-8",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original
+        .replace(
+          "providers:",
+          [
+            "routine_defaults:",
+            "  model: claude-sonnet-5",
+            "  effort: high",
+            "  permission_mode: bypass",
+            "  timeout_minutes: 60",
+            "",
+            "providers:"
+          ].join("\n")
+        )
+        .concat(
+          [
+            "",
+            "routines:",
+            "  - project: symphonika",
+            "    path: ./daily-report.md",
+            ""
+          ].join("\n")
+        )
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    const snapshot = await reloader.reload();
+
+    expect(reloader.getStatus().errors).toEqual([]);
+    expect(snapshot?.routineDefaults).toEqual({
+      effort: "high",
+      model: "claude-sonnet-5",
+      permissionMode: "bypass",
+      timeoutMinutes: 60
+    });
+    expect(reloader.projectsByName().get("symphonika")?.routines).toEqual([
+      expect.objectContaining({
+        effort: "high",
+        model: "claude-opus-4-8",
+        permissionMode: "bypass",
+        timeoutMinutes: 60
+      })
+    ]);
+
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "timeout_minutes: 0",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: false
+    });
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      "timeout_minutes must be a positive number"
+    );
+    expect(reloader.projectsByName().get("symphonika")?.routines).toEqual([
+      expect.objectContaining({
+        effort: "high",
+        model: "claude-opus-4-8",
+        permissionMode: "bypass",
+        timeoutMinutes: 60
+      })
+    ]);
+  });
+
   it("keeps a routine on its last-known-good declaration when a reload edit makes it invalid, without reverting sibling routines or the whole snapshot", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "WORKFLOW.md");

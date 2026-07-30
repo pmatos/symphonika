@@ -46,6 +46,79 @@ describe("RoutineDeclarationLoader", () => {
     expect(result.routine).toMatchObject({ notify: false });
   });
 
+  it("parses per-routine provider tuning and a wall-clock timeout", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "refactor-audit.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: refactor-audit",
+        "schedule:",
+        "  cron: '0 1 * * 1-5'",
+        "kind: git",
+        "provider: claude",
+        "model: claude-opus-4-8",
+        "effort: xhigh",
+        "permission_mode: bypass",
+        "timeout_minutes: 60",
+        "---",
+        "Audit and refactor.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.routine).toMatchObject({
+      effort: "xhigh",
+      model: "claude-opus-4-8",
+      permissionMode: "bypass",
+      timeoutMinutes: 60
+    });
+  });
+
+  it.each([
+    ["model", "model: ''", "model must be a non-empty string"],
+    ["effort", "effort: 42", "effort must be a non-empty string"],
+    [
+      "permission_mode",
+      "permission_mode: acceptEdits",
+      "permission_mode must be bypass"
+    ],
+    [
+      "timeout_minutes",
+      "timeout_minutes: 0",
+      "timeout_minutes must be a positive number"
+    ]
+  ])(
+    "rejects an invalid %s execution override",
+    async (_field, declaration, expectedError) => {
+      const root = await makeTempRoot();
+      const routinePath = path.join(root, "invalid-execution.md");
+      await writeFile(
+        routinePath,
+        [
+          "---",
+          "name: invalid-execution",
+          "schedule:",
+          "  cron: daily",
+          "kind: report",
+          declaration,
+          "---",
+          "Report.",
+          ""
+        ].join("\n")
+      );
+
+      const result = await loadRoutineDeclaration(routinePath);
+
+      expect(result.routine).toBeNull();
+      expect(result.errors.join("\n")).toContain(expectedError);
+    }
+  );
+
   it("parses catch-up and overlap policy opt-ins", async () => {
     const root = await makeTempRoot();
     const routinePath = path.join(root, "catch-up-report.md");

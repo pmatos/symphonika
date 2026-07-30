@@ -42,30 +42,6 @@ export async function loadWorkflowContract(
   return parseWorkflowContract(contents, workflowPath);
 }
 
-export async function validateWorkflowContract(
-  workflowPath: string
-): Promise<string[]> {
-  let contents: string;
-
-  try {
-    contents = await readFile(workflowPath, "utf8");
-  } catch (error) {
-    return [
-      `workflow contract not found at ${workflowPath}: ${errorMessage(error)}`
-    ];
-  }
-
-  const workflow = parseWorkflowContract(contents, workflowPath);
-  const errors = [...workflow.errors];
-
-  if (workflow.body.trim().length === 0) {
-    errors.push(`workflow contract at ${workflowPath} must not be empty`);
-  }
-
-  errors.push(...validateWorkflowTemplate(workflow.body, workflowPath));
-  return errors;
-}
-
 export function parseWorkflowContract(
   contents: string,
   workflowPath: string

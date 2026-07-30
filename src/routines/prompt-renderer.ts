@@ -69,6 +69,8 @@ const allowedTemplateFields: Record<
 };
 
 const tagPattern = /{{\s*([^{}]+?)\s*}}/g;
+const ROUTINE_ONE_SHOT_NOTICE =
+  "This routine firing is one-shot and will not be re-invoked. Complete all work before returning; do not schedule background work or finish with the expectation of a later wake-up.";
 
 const ROUTINE_OUTCOME_INSTRUCTIONS = [
   "## Routine Outcome",
@@ -122,9 +124,12 @@ export function renderRoutinePrompt(
 
   return {
     preambleVersion: AUTONOMY_PREAMBLE_VERSION,
-    prompt: [AUTONOMY_PREAMBLE, rendered, ROUTINE_OUTCOME_INSTRUCTIONS].join(
-      "\n"
-    ),
+    prompt: [
+      AUTONOMY_PREAMBLE,
+      ROUTINE_ONE_SHOT_NOTICE,
+      rendered,
+      ROUTINE_OUTCOME_INSTRUCTIONS
+    ].join("\n"),
     templateContentHash: contentHash(input.template)
   };
 }

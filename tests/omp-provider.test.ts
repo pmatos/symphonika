@@ -39,6 +39,47 @@ afterEach(async () => {
 });
 
 describe("Oh My Pi RPC provider", () => {
+  it("appends routine model and effort as OMP model and thinking flags", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeOmpPath = path.join(root, "fake-omp.mjs");
+    await writeFakeOmp(fakeOmpPath, transcriptPath);
+    const processScope = noopProcessScope();
+    const provider = createOmpProvider({ processScope });
+
+    await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        routine: {
+          effort: "high",
+          model: "anthropic/claude-sonnet-5",
+          permissionMode: "bypass"
+        },
+        workspacePath
+      })
+    );
+
+    expect(processScope.wrapCalls[0]?.command).toEqual({
+      args: [
+        fakeOmpPath,
+        "--mode",
+        "rpc",
+        "--auto-approve",
+        "--model",
+        "anthropic/claude-sonnet-5",
+        "--thinking",
+        "high"
+      ],
+      executable: process.execPath
+    });
+  });
+
   it("negotiates RPC v2 and maps a completed agent turn", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");

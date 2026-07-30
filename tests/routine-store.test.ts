@@ -244,6 +244,42 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("persists effective routine execution settings for later firings", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          effort: "xhigh",
+          kind: "report",
+          model: "claude-opus-4-8",
+          name: "refactor-audit",
+          permissionMode: "bypass",
+          prompt: "Audit.",
+          provider: "claude",
+          schedule: { cron: "0 1 * * 1-5", tz: "Etc/UTC" },
+          sourcePath: "/tmp/refactor-audit.md",
+          projectName: "alpha",
+          timeoutMinutes: 60
+        }
+      ]);
+
+      expect(
+        store.getRoutine({
+          name: "refactor-audit",
+          projectName: "alpha"
+        })
+      ).toMatchObject({
+        effort: "xhigh",
+        model: "claude-opus-4-8",
+        permissionMode: "bypass",
+        timeoutMinutes: 60
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("persists the next clock event for a recurring routine", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

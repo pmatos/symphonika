@@ -141,6 +141,36 @@ export function parseRoutineDeclaration(
     errors.push(`routine at ${routinePath} notify must be a boolean`);
   }
 
+  const model = executionStringField(frontMatter, "model", routinePath, errors);
+  const effort = executionStringField(
+    frontMatter,
+    "effort",
+    routinePath,
+    errors
+  );
+  const permissionModeValue = stringField(frontMatter, "permission_mode");
+  if (
+    Object.hasOwn(frontMatter, "permission_mode") &&
+    permissionModeValue !== "bypass"
+  ) {
+    errors.push(`routine at ${routinePath} permission_mode must be bypass`);
+  }
+  const timeoutMinutesValue = frontMatter.timeout_minutes;
+  let timeoutMinutes: number | undefined;
+  if (Object.hasOwn(frontMatter, "timeout_minutes")) {
+    if (
+      typeof timeoutMinutesValue !== "number" ||
+      !Number.isFinite(timeoutMinutesValue) ||
+      timeoutMinutesValue <= 0
+    ) {
+      errors.push(
+        `routine at ${routinePath} timeout_minutes must be a positive number`
+      );
+    } else {
+      timeoutMinutes = timeoutMinutesValue;
+    }
+  }
+
   if (prompt.trim().length === 0) {
     errors.push(`routine at ${routinePath} prompt body must not be empty`);
   }
@@ -161,15 +191,34 @@ export function parseRoutineDeclaration(
       catchUp:
         catchUpValue === "fire_once_if_missed" ? "fire_once_if_missed" : "skip",
       disabled: typeof disabledValue === "boolean" ? disabledValue : false,
+      ...(effort === undefined ? {} : { effort }),
       kind: kind as RoutineKind,
+      ...(model === undefined ? {} : { model }),
       name: name!,
       ...(typeof notifyValue === "boolean" ? { notify: notifyValue } : {}),
+      ...(permissionModeValue === "bypass"
+        ? { permissionMode: permissionModeValue }
+        : {}),
       prompt,
       provider,
       schedule: parsedSchedule!,
-      sourcePath: routinePath
+      sourcePath: routinePath,
+      ...(timeoutMinutes === undefined ? {} : { timeoutMinutes })
     }
   };
+}
+
+function executionStringField(
+  frontMatter: Record<string, unknown>,
+  key: "effort" | "model",
+  routinePath: string,
+  errors: string[]
+): string | undefined {
+  const value = stringField(frontMatter, key);
+  if (Object.hasOwn(frontMatter, key) && value === undefined) {
+    errors.push(`routine at ${routinePath} ${key} must be a non-empty string`);
+  }
+  return value;
 }
 
 function parseRoutineSchedule(

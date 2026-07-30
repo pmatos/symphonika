@@ -136,7 +136,10 @@ export function createCodexProvider(
 
       const command = await processScope.wrapForProviderScope(
         input.run,
-        parseCommand(input.provider.command)
+        applyRoutineOverrides(
+          parseCommand(input.provider.command),
+          input.routine
+        )
       );
       if (activeRun.cancelled) {
         // Outside the try/finally below (which owns the only other
@@ -1162,6 +1165,34 @@ function parseCommand(command: string): { args: string[]; executable: string } {
     args: parts.slice(1),
     executable
   };
+}
+
+function applyRoutineOverrides(
+  command: { args: string[]; executable: string },
+  routine: ProviderRunInput["routine"]
+): { args: string[]; executable: string } {
+  if (
+    routine === undefined ||
+    (routine.model === undefined && routine.effort === undefined)
+  ) {
+    return command;
+  }
+
+  const overrides: string[] = [];
+  if (routine.model !== undefined) {
+    overrides.push("-c", `model=${routine.model}`);
+  }
+  if (routine.effort !== undefined) {
+    overrides.push("-c", `model_reasoning_effort=${routine.effort}`);
+  }
+  const args = command.args.slice();
+  const appServerIndex = args.lastIndexOf("app-server");
+  args.splice(
+    appServerIndex < 0 ? args.length : appServerIndex,
+    0,
+    ...overrides
+  );
+  return { args, executable: command.executable };
 }
 
 function splitCommand(command: string): string[] {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { renderRoutinePrompt } from "../src/routines/prompt-renderer.js";
-import { renderAutonomousPrompt } from "../src/workflow.js";
+import { renderAutonomousPrompt } from "../src/workflow/autonomous-prompt.js";
 
 const baseInput = {
   firing: {
@@ -78,8 +78,13 @@ describe("RoutinePromptRenderer", () => {
       "Report daily-report for symphonika in /tmp/workspace/routines/daily-report/fire-1 via codex firing fire-1."
     );
     expect(
-      routinePrompt.prompt.slice(0, routinePrompt.prompt.indexOf("Report"))
-    ).toBe(issuePrompt.prompt.slice(0, issuePrompt.prompt.indexOf("Report")));
+      routinePrompt.prompt.startsWith(
+        issuePrompt.prompt.slice(0, issuePrompt.prompt.indexOf("Report"))
+      )
+    ).toBe(true);
+    expect(routinePrompt.prompt).toContain(
+      "This routine firing is one-shot and will not be re-invoked"
+    );
     expect(routinePrompt.prompt).toContain(
       "When you finish, report the Routine Outcome as exactly one JSON object"
     );

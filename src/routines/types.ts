@@ -28,6 +28,13 @@ export type RoutineSkipReason =
 
 export type RoutineSchedule = { at: string } | { cron: string; tz: string };
 
+export type RoutineExecutionOverrides = {
+  effort?: string;
+  model?: string;
+  permissionMode?: "bypass";
+  timeoutMinutes?: number;
+};
+
 export type RoutineDeclaration = {
   allowOverlap?: boolean;
   catchUp?: RoutineCatchUpPolicy;
@@ -39,7 +46,7 @@ export type RoutineDeclaration = {
   provider: AgentProviderName | null;
   schedule: RoutineSchedule;
   sourcePath: string;
-};
+} & RoutineExecutionOverrides;
 
 // A RoutineDeclaration bound to its declared target Project. The file-level
 // `RoutineDeclaration` has no project target (a file cannot know it); the
@@ -79,4 +86,4 @@ export type RoutineStatus = {
   skipCounts24h: Record<RoutineSkipReason, number>;
   sourcePath: string;
   state: RoutineState;
-};
+} & RoutineExecutionOverrides;

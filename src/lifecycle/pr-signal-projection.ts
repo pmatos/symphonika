@@ -1,5 +1,5 @@
 import type { PullRequestState } from "../pull-request-state.js";
-import type { WorkflowPredicateMap } from "../workflow.js";
+import type { WorkflowPredicateMap } from "../workflow/types.js";
 
 export function projectPullRequestSignals(
   state: PullRequestState

@@ -37,12 +37,12 @@ import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import { userUnitDir } from "./service.js";
 import { resolveStateRoot } from "./state.js";
-import type { ExpandedWorkflow } from "./workflow.js";
+import type { ExpandedWorkflow } from "./workflow/types.js";
 import {
   loadExpandedWorkflow,
   resolveWorkflowFormat,
   validateExpandedWorkflowReferences
-} from "./workflow.js";
+} from "./workflow/fsm-expansion.js";
 
 export { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 
@@ -347,6 +347,15 @@ const serviceRoutineSchema = z
   })
   .passthrough();
 
+const routineExecutionDefaultsSchema = z
+  .object({
+    effort: z.string().trim().min(1).optional(),
+    model: z.string().trim().min(1).optional(),
+    permission_mode: z.literal("bypass").optional(),
+    timeout_minutes: z.number().positive().optional()
+  })
+  .strict();
+
 const serviceConfigSchema = z
   .object({
     email: emailNotificationConfigSchema.optional(),
@@ -369,6 +378,7 @@ const serviceConfigSchema = z
         omp: providerCommandSchema.optional()
       })
       .passthrough(),
+    routine_defaults: routineExecutionDefaultsSchema.optional(),
     routines: z.array(serviceRoutineSchema).optional(),
     projects: z.array(projectSchema).min(1)
   })

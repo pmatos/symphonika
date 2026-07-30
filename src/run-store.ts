@@ -1677,34 +1677,92 @@ export class RunStore {
     });
   }
 
+  // A target can be inserted by a re-entrant reload (ADR 0052) between
+  // listReadyRoutineFanouts()'s snapshot and this claim. Rechecking
+  // readiness here, atomically with the state flip, stops the claim from
+  // starting a send for a fan-out that just gained an outstanding target.
+  private routineFanoutHasOutstandingTargets(id: string): boolean {
+    return (
+      this.database
+        .prepare(
+          [
+            "select 1 from routine_fanout_targets t",
+            "left join routine_firings rf on rf.id = t.firing_id",
+            "where t.fanout_id = ?",
+            "and (t.disposition = 'pending'",
+            "or (t.disposition = 'firing' and (rf.id is null or rf.state not in ('succeeded', 'failed', 'cancelled'))))"
+          ].join(" ")
+        )
+        .get(id) !== undefined
+    );
+  }
+
   claimRoutineFanoutNotification(id: string): boolean {
-    const result = this.database
-      .prepare(
-        [
-          "update routine_fanouts set notification_state = 'sending',",
-          "notification_error = null, updated_at = ?",
-          "where id = ? and notification_state = 'pending'"
-        ].join(" ")
-      )
-      .run(timestamp(), id);
-    return result.changes > 0;
+    const claim = this.database.transaction(() => {
+      if (this.routineFanoutHasOutstandingTargets(id)) {
+        return false;
+      }
+      const result = this.database
+        .prepare(
+          [
+            "update routine_fanouts set notification_state = 'sending',",
+            "notification_error = null, updated_at = ?",
+            "where id = ? and notification_state = 'pending'"
+          ].join(" ")
+        )
+        .run(timestamp(), id);
+      return result.changes > 0;
+    });
+    return claim();
   }
 
   completeRoutineFanoutNotification(input: {
     error?: string;
+    expectedTargetCount?: number;
     id: string;
   }): void {
     const now = timestamp();
     if (input.error === undefined) {
-      this.database
-        .prepare(
-          [
-            "update routine_fanouts set notification_state = 'sent',",
-            "notification_error = null, notified_at = ?, updated_at = ?",
-            "where id = ? and notification_state = 'sending'"
-          ].join(" ")
-        )
-        .run(now, now, input.id);
+      const complete = this.database.transaction(() => {
+        // A target can also join while this notification is `sending` (the
+        // claim above only guards the window before the claim). Rather than
+        // deliver a payload that never had that target rendered into it,
+        // reopen the fan-out to `pending` so a follow-up notification with
+        // the full membership goes out; per ADR 0069 the sink must already
+        // be idempotent to duplicates, so a resend here is within contract.
+        const currentTargetCount = (
+          this.database
+            .prepare(
+              "select count(*) as count from routine_fanout_targets where fanout_id = ?"
+            )
+            .get(input.id) as { count: number }
+        ).count;
+        const membershipGrew =
+          input.expectedTargetCount !== undefined &&
+          currentTargetCount > input.expectedTargetCount;
+        if (membershipGrew) {
+          this.database
+            .prepare(
+              [
+                "update routine_fanouts set notification_state = 'pending',",
+                "notification_error = null, updated_at = ?",
+                "where id = ? and notification_state = 'sending'"
+              ].join(" ")
+            )
+            .run(now, input.id);
+          return;
+        }
+        this.database
+          .prepare(
+            [
+              "update routine_fanouts set notification_state = 'sent',",
+              "notification_error = null, notified_at = ?, updated_at = ?",
+              "where id = ? and notification_state = 'sending'"
+            ].join(" ")
+          )
+          .run(now, now, input.id);
+      });
+      complete();
       return;
     }
     this.database

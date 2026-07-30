@@ -676,6 +676,125 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("reopens a grouped fan-out instead of losing a late target that joins while its notification is in flight", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const notifications: RoutineFanoutNotification[] = [];
+    const declaration = {
+      kind: "report" as const,
+      name: "refactor-audit",
+      prompt: "Audit {{project.name}}.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: path.join(root, "refactor-audit.md")
+    };
+    const notifyRoutineFanout = vi.fn(
+      (notification: RoutineFanoutNotification): Promise<void> => {
+        notifications.push(notification);
+        // Simulate a re-entrant reload (ADR 0052) adding a Project to this
+        // Routine and finishing that Project's firing while this
+        // notification -- already rendered from a snapshot missing it -- is
+        // still in flight (notification_state === 'sending').
+        if (notifications.length === 1) {
+          runStore.syncRoutines([
+            { ...declaration, projectName: "alpha" },
+            { ...declaration, projectName: "beta" }
+          ]);
+          runStore.ensureRoutineFanout({
+            id: "fanout-1-ignored-because-already-exists",
+            projectNames: ["alpha", "beta"],
+            routineName: "refactor-audit",
+            scheduledAt: "2026-05-22T10:00:00.000Z"
+          });
+          expect(
+            runStore.claimRoutineFiring({
+              fanoutId: "fanout-1",
+              firedAt: "2026-05-22T10:00:02.000Z",
+              firingId: "fire-beta",
+              projectName: "beta",
+              providerCommand: "codex fake",
+              providerName: "codex",
+              routineName: "refactor-audit"
+            })
+          ).toBe(true);
+          runStore.completeRoutineFiring({
+            id: "fire-beta",
+            state: "succeeded"
+          });
+        }
+        return Promise.resolve();
+      }
+    );
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      const result = await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-1",
+        createFiringId: () => "fire-alpha",
+        globalConcurrency: { maxInFlight: undefined },
+        notifyRoutineFanout,
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: ({ project }) =>
+          Promise.resolve({
+            branchName: "",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", `${project.name}.git`),
+            reused: false,
+            workspacePath: path.join(root, "workspaces", project.name)
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              name: "alpha",
+              routines: [{ ...declaration, projectName: "alpha" }]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(result.fired).toEqual(["fire-alpha"]);
+      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
+      expect(
+        notifications[0]?.fanout.targets.map((target) => target.projectName)
+      ).toEqual(["alpha"]);
+
+      // beta joined and finished while the alpha-only notification above
+      // was in flight, so the fan-out must reopen rather than settle as
+      // 'sent' with beta's result never delivered.
+      expect(runStore.getRoutineFanout("fanout-1")).toMatchObject({
+        notificationState: "pending"
+      });
+      expect(runStore.listReadyRoutineFanouts()).toEqual([
+        expect.objectContaining({ id: "fanout-1" })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("admits fan-out targets independently and includes a global-cap skip in the grouped result", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

@@ -634,17 +634,28 @@ async function deliverReadyRoutineFanouts(
     if (!input.runStore.claimRoutineFanoutNotification(fanout.id)) {
       continue;
     }
+    // Re-fetch rather than reuse the pre-claim snapshot: a re-entrant reload
+    // (ADR 0052) can add and even terminate a new target between the
+    // snapshot above and this claim succeeding, and that target's result
+    // must still make it into the rendered payload.
+    const claimed = input.runStore.getRoutineFanout(fanout.id);
+    if (claimed === undefined) {
+      throw new Error("claimed routine fan-out could not be reloaded");
+    }
     try {
-      await input.notifyRoutineFanout(renderRoutineFanoutNotification(fanout));
-      input.runStore.completeRoutineFanoutNotification({ id: fanout.id });
+      await input.notifyRoutineFanout(renderRoutineFanoutNotification(claimed));
+      input.runStore.completeRoutineFanoutNotification({
+        expectedTargetCount: claimed.targets.length,
+        id: claimed.id
+      });
     } catch (error) {
       const message = errorMessage(error);
       input.runStore.completeRoutineFanoutNotification({
         error: message,
-        id: fanout.id
+        id: claimed.id
       });
       input.logger?.warn(
-        { err: error, fanout: fanout.id, routine: fanout.routineName },
+        { err: error, fanout: claimed.id, routine: claimed.routineName },
         "symphonika routine fan-out notification failed"
       );
     }

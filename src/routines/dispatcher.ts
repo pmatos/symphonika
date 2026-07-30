@@ -673,6 +673,14 @@ async function runRoutineFiring(input: {
             routineName: input.routine.name,
             since: githubSnapshotSince
           });
+    // A cancel can also land DURING the snapshot read just above, after
+    // `cancelled`/`reason` above were already computed from the pre-await
+    // state. Re-check so a cancel arriving in this window doesn't get
+    // persisted as a stale failed/pre-cancellation reason.
+    const cancelAfterFailureSnapshot = input.activeRuns.get(input.firingId);
+    const finalCancelled =
+      cancelled || cancelAfterFailureSnapshot?.cancelRequested === true;
+    const finalReason = finalCancelled ? "cancelled" : reason;
     const githubObservation = routineGithubObservation(
       githubBefore,
       githubAfter,
@@ -687,14 +695,14 @@ async function runRoutineFiring(input: {
         githubObservationAvailable: githubObservation.available,
         observedAction: githubObservation.action,
         provider: input.providerName,
-        terminalReason: reason,
-        terminalState: cancelled ? "cancelled" : "failed"
+        terminalReason: finalReason,
+        terminalState: finalCancelled ? "cancelled" : "failed"
       }),
-      state: cancelled ? "cancelled" : "failed",
-      terminalReason: reason,
-      ...(cancelEntry?.cancelReason === undefined
+      state: finalCancelled ? "cancelled" : "failed",
+      terminalReason: finalReason,
+      ...(cancelAfterFailureSnapshot?.cancelReason === undefined
         ? {}
-        : { cancelReason: cancelEntry.cancelReason }),
+        : { cancelReason: cancelAfterFailureSnapshot.cancelReason }),
       ...(prepared === undefined
         ? {}
         : { workspacePath: prepared.workspacePath })

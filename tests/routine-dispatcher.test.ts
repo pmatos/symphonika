@@ -1354,6 +1354,71 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("reclassifies a failed firing as cancelled when an operator cancel lands during the failure-path GitHub snapshot", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        throw new Error("provider process killed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const listIssues = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(async () => {
+        // Simulates an operator cancel landing while the failure-path
+        // after-snapshot GitHub read is still in flight — after `cancelled`
+        // was already computed as false from the pre-await state.
+        await activeRuns.requestCancel(
+          "fire-cancel-during-failure-snapshot",
+          "operator"
+        );
+        return [];
+      });
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine: {
+            ...minuteRoutine(root),
+            schedule: { at: "2026-05-22T10:00:00.000Z" }
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-cancel-during-failure-snapshot",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        }
+      });
+
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-cancel-during-failure-snapshot",
+          cancelReason: "operator",
+          state: "cancelled",
+          terminalReason: "cancelled"
+        })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("fires every recurring tick and advances next_fire_at after success or failure", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

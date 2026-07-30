@@ -1271,6 +1271,64 @@ describe("CLI run commands", () => {
     }
   });
 
+  it("show-run's Progress Signal freezes at the stale sample while a retried Run is preparing_workspace", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "progress-retrying-preparing",
+      issue: sampleIssue({ number: 214, title: "Retrying after failure" }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("progress-retrying-preparing", "preparing_workspace");
+    // Sampling only ever happens in state 'running', so this sample is the
+    // prior (failed) attempt's data: it cannot have advanced since the Run
+    // left 'running' to prepare its retry.
+    store.upsertWatchdogSample({
+      idleSince: "2026-05-22T08:55:00.000Z",
+      lastMessageAt: null,
+      lastToolCallAt: "2026-05-22T08:50:00.000Z",
+      normalizedLogOffset: 0,
+      normalizedLogPath: "/tmp/prior-attempt.normalized.jsonl",
+      outputTokensTotal: 0,
+      runId: "progress-retrying-preparing",
+      sampledAt: "2026-05-22T09:00:00.000Z",
+      turnIdSetSize: 1,
+      workspaceMtimeMax: Date.parse("2026-05-22T08:50:00.000Z")
+    });
+    store.close();
+
+    // Viewed a while after the retry began preparing, the Progress Signal
+    // must stay pinned to the prior attempt's last sample, not compute a
+    // live, misleading countdown for an attempt that hasn't started yet.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-22T12:00:00.000Z"));
+    try {
+      const present = captureProgram(stateRoot);
+      await present.program.parseAsync([
+        "node",
+        "symphonika",
+        "show-run",
+        "progress-retrying-preparing",
+        "--config",
+        path.join(stateRoot, "symphonika.yml")
+      ]);
+
+      expect(progressSignalBlock(present.output.stdout)).toMatchInlineSnapshot(`
+        "Progress Signal:
+          last tool_call: 10m ago
+          workspace mtime: 10m ago
+          turn_ids observed: 1
+          output tokens / 5m: 0
+          idle_since: 2026-05-22T08:55:00.000Z
+          grace remaining: 25m"
+      `);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("show-run fills missing branch and workspace fields from the deterministic path plan", async () => {
     const stateRoot = await makeTempRoot();
     const configDir = await makeTempRoot();

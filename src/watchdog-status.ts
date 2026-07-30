@@ -1,5 +1,5 @@
 import type { WatchdogConfig } from "./reload.js";
-import type { RunStore } from "./run-store.js";
+import type { RunState, RunStore } from "./run-store.js";
 
 export type WatchdogStatus =
   | { enabled: false }
@@ -77,6 +77,30 @@ export function buildWatchdogIdleStatus(input: {
   };
 }
 
+// Sampling only ever runs against `state = 'running'` Runs (see
+// listWatchdogCandidateRuns) -- every other state (terminal, waiting,
+// queued, or preparing_workspace for a retry) can be carrying a sample from
+// before the Run left 'running', which a live clock would render as a
+// misleading, ever-drifting countdown for data that no longer describes
+// what the Run is currently doing. `runs.updated_at` is not a safe stand-in
+// for "stopped being sampled" either: it can keep advancing for unrelated
+// reasons (e.g. PR-discovery polling bumps it for succeeded Runs). All
+// Progress Signal consumers (CLI show-run, the HTTP API, and the web UI)
+// must derive the same effective clock from the same source so they render
+// the same values for the same Run — see the discussion on PR #344.
+export function resolveWatchdogNowMs(input: {
+  liveNowMs: number;
+  runId: string;
+  runState: RunState;
+  runStore: RunStore;
+}): number {
+  if (input.runState === "running") {
+    return input.liveNowMs;
+  }
+  const sample = input.runStore.getWatchdogSample(input.runId);
+  return sample === undefined ? input.liveNowMs : Date.parse(sample.sampledAt);
+}
+
 export function formatWatchdogDuration(durationMs: number): string {
   const sign = durationMs < 0 ? "-" : "";
   const totalSeconds = Math.floor(Math.abs(durationMs) / 1_000);
@@ -99,6 +123,19 @@ export function formatWatchdogDuration(durationMs: number): string {
     }
   }
   return `${sign}${parts.length === 0 ? "0s" : parts.join(" ")}`;
+}
+
+export function formatAge(
+  timestamp: string | null | undefined,
+  nowMs: number
+): string {
+  if (timestamp === null || timestamp === undefined) {
+    return "never";
+  }
+  const ageMs = nowMs - Date.parse(timestamp);
+  return ageMs < 0
+    ? `in ${formatWatchdogDuration(-ageMs)}`
+    : `${formatWatchdogDuration(ageMs)} ago`;
 }
 
 function timestampFromEpochMs(value: number): string | null {

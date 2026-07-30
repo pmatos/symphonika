@@ -70,6 +70,62 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("claims a manual firing without consuming the pending scheduled clock event", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      const beforeManualFire = store.listRoutines()[0];
+
+      expect(
+        store.claimManualRoutineFiring({
+          firingId: "manual-fire",
+          projectName: "alpha",
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName: "daily-report"
+        })
+      ).toBe(true);
+
+      expect(store.getRoutineFiring("manual-fire")).toMatchObject({
+        id: "manual-fire",
+        triggerSource: "manual"
+      });
+      expect(store.listRoutines()[0]).toEqual(beforeManualFire);
+
+      expect(
+        store.claimRoutineFiring({
+          firedAt: "2026-05-22T10:00:00.000Z",
+          firingId: "scheduled-fire",
+          projectName: "alpha",
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName: "daily-report"
+        })
+      ).toBe(true);
+      expect(store.getRoutineFiring("scheduled-fire")).toMatchObject({
+        id: "scheduled-fire",
+        triggerSource: "scheduled"
+      });
+      expect(store.listRoutines()[0]).toMatchObject({
+        nextFireAt: null,
+        state: "expired"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("records every pull request discovered for a successful firing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

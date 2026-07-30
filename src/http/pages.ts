@@ -9,6 +9,7 @@ import {
   formatCapReachedReason,
   parseCapReachedReason
 } from "../lifecycle/terminal-reason.js";
+import { DEFAULT_WATCHDOG_CONFIG, type WatchdogConfig } from "../reload.js";
 import type {
   ListRunsFilter,
   ProjectState,
@@ -21,6 +22,15 @@ import type {
 import type { RoutineStatus } from "../routines/types.js";
 import { formatRoutineOutcomeLine } from "../routines/outcome.js";
 import type { StatusSnapshot } from "../status.js";
+import {
+  buildWatchdogIdleStatus,
+  buildWatchdogStatus,
+  formatAge,
+  formatWatchdogDuration,
+  resolveWatchdogNowMs,
+  type WatchdogIdleStatus,
+  type WatchdogStatus
+} from "../watchdog-status.js";
 import type { ExpandedWorkflow } from "../workflow.js";
 import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 
@@ -33,11 +43,32 @@ export type RegisterPagesOptions = {
     maxReviewDispatchesPerPr: number;
   };
   getStatusSnapshot?: () => StatusSnapshot;
+  getWatchdogConfig?: (
+    projectName: string
+  ) => Pick<WatchdogConfig, "enabled" | "graceMinutes">;
   issuePollStatus?: IssuePollStatus;
   monotonicNow: () => number;
+  now?: () => number;
   runStore: RunStore;
   version: string;
 };
+
+// Runs whose watchdog idle badge is meaningful on the active-runs list — a
+// terminated Run's last persisted sample can still show idleSince set, but
+// "time remaining before termination" no longer applies once it has already
+// terminated (see the Run-detail page's final-Progress-Signal treatment
+// instead). preparing_workspace is deliberately excluded even though it's
+// "active": runAttemptLifecycle enters it at the start of every attempt,
+// including a retry, but the run's watchdog_samples row is keyed by run_id
+// (not per attempt) and is only reset once the new attempt's first running
+// sample lands. Including preparing_workspace here would surface the prior
+// (failed) attempt's stale idleSince as a live countdown that has nothing to
+// do with the current attempt.
+const ACTIVE_WATCHDOG_STATES: ReadonlySet<RunState> = new Set([
+  "queued",
+  "running",
+  "waiting"
+]);
 
 // Floor for the banner's threshold, well beyond a typical polling interval
 // but far below the multi-hour wedges that motivated this banner (see
@@ -95,6 +126,10 @@ const BLOCKED_STATES: ReadonlySet<RunState> = new Set(["blocked"]);
 const EVENT_TAIL_LIMIT = 500;
 
 export function registerPages(options: RegisterPagesOptions): void {
+  const now = options.now ?? Date.now;
+  const getWatchdogConfig =
+    options.getWatchdogConfig ?? (() => DEFAULT_WATCHDOG_CONFIG);
+
   options.app.get("/assets/fonts/:file", (context) => {
     // The URL carries a per-weight content hash so the immutable one-year cache
     // is safe: regenerating the font changes the hash, which changes the URL.
@@ -126,6 +161,13 @@ export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/", (context) => {
     const snapshot = options.getStatusSnapshot?.();
     const recentRuns = options.runStore.listRuns({ limit: 25 });
+    const nowMs = now();
+    const watchdogByRun = collectActiveWatchdogIdleStatuses(
+      options.runStore,
+      recentRuns,
+      getWatchdogConfig,
+      nowMs
+    );
     const lastTickAtMonotonic = options.getLastTickAtMonotonic?.() ?? null;
     // The banner's own reference point falls back to when the tick loop
     // started scheduling (mirroring isTickRecentEnoughForSystemdWatchdog's
@@ -154,7 +196,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           })
         ),
         renderStaleIssuesCard(options.issuePollStatus?.filteredIssues ?? []),
-        renderRunsTable("Recent runs", recentRuns)
+        renderRunsTable("Recent runs", recentRuns, watchdogByRun, nowMs)
       ].join("")
     );
     return context.html(html);
@@ -174,11 +216,18 @@ export function registerPages(options: RegisterPagesOptions): void {
       filter.project = project;
     }
     const runs = options.runStore.listRuns(filter);
+    const nowMs = now();
+    const watchdogByRun = collectActiveWatchdogIdleStatuses(
+      options.runStore,
+      runs,
+      getWatchdogConfig,
+      nowMs
+    );
     const title =
       filter.state === undefined ? "All runs" : `Runs (${filter.state})`;
     const html = layout(
       title,
-      `<h1 class="page-title">Runs</h1>${renderRunsTable(title, runs)}`
+      `<h1 class="page-title">Runs</h1>${renderRunsTable(title, runs, watchdogByRun, nowMs)}`
     );
     return context.html(html);
   });
@@ -243,11 +292,31 @@ export function registerPages(options: RegisterPagesOptions): void {
         null,
       runStore: options.runStore
     });
+    const detailNowMs = resolveWatchdogNowMs({
+      liveNowMs: now(),
+      runId: detail.id,
+      runState: detail.state,
+      runStore: options.runStore
+    });
+    const watchdog = buildWatchdogStatus({
+      config: getWatchdogConfig(detail.project),
+      nowMs: detailNowMs,
+      runId: detail.id,
+      runStore: options.runStore
+    });
+    const outputTokenGrowth5m =
+      watchdog.enabled && watchdog.sampledAt !== undefined
+        ? options.runStore.watchdogOutputTokenGrowth(
+            detail.id,
+            new Date(Date.parse(watchdog.sampledAt) - 5 * 60_000).toISOString()
+          )
+        : 0;
     const sections = [
       `<h1 class="page-title">Run <code>${escapeHtml(detail.id)}</code></h1>`,
       renderOutcomeBanner(detail, failureEvent, exitEvent),
       renderPullRequestFollowupAttention(pullRequestFollowup),
       renderRunSummary(detail, capContext),
+      renderWatchdogSection(watchdog, outputTokenGrowth5m, detailNowMs),
       renderWorkflowGraphSummary(detail.id, workflowGraph),
       renderCancelForm(detail),
       renderAttemptsTable(detail.attempts),
@@ -514,6 +583,17 @@ td code { color: var(--ink-2); }
 .pill--ok { color: var(--ok-ink); background: var(--ok-bg); border-color: color-mix(in oklch, var(--ok-ink) 22%, transparent); }
 .pill--blocked { color: var(--blocked-ink); background: var(--blocked-bg); border-color: color-mix(in oklch, var(--blocked-ink) 22%, transparent); }
 .pill--neutral { color: var(--ink-muted); background: var(--surface-2); border-color: var(--border); }
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.14rem 0.5rem;
+  border-radius: 999px;
+  font-size: var(--fs-label);
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.badge--watchdog { color: var(--progress-ink); background: var(--progress-bg); border-color: color-mix(in oklch, var(--progress-ink) 22%, transparent); }
 
 .fields {
   display: grid;
@@ -886,7 +966,53 @@ function formatRoutineSkipCounts(
   return `overlap=${counts.overlap},concurrency_cap=${counts.concurrency_cap},catch_up_window=${counts.catch_up_window}`;
 }
 
-function renderRunsTable(title: string, runs: RunStatus[]): string {
+function collectActiveWatchdogIdleStatuses(
+  runStore: RunStore,
+  runs: RunStatus[],
+  getWatchdogConfig: (
+    projectName: string
+  ) => Pick<WatchdogConfig, "enabled" | "graceMinutes">,
+  nowMs: number
+): Map<string, WatchdogIdleStatus> {
+  const statuses = new Map<string, WatchdogIdleStatus>();
+  for (const run of runs) {
+    if (!ACTIVE_WATCHDOG_STATES.has(run.state)) {
+      continue;
+    }
+    statuses.set(
+      run.id,
+      buildWatchdogIdleStatus({
+        config: getWatchdogConfig(run.project),
+        nowMs,
+        runId: run.id,
+        runStore
+      })
+    );
+  }
+  return statuses;
+}
+
+function renderWatchdogIdleBadge(
+  watchdog: WatchdogIdleStatus | undefined,
+  nowMs: number
+): string {
+  if (
+    watchdog === undefined ||
+    !watchdog.enabled ||
+    watchdog.idleSince === undefined ||
+    watchdog.graceRemainingMs === undefined
+  ) {
+    return "";
+  }
+  return ` <span class="badge badge--watchdog">watchdog idle since ${escapeHtml(formatAge(watchdog.idleSince, nowMs))} (${escapeHtml(formatWatchdogDuration(watchdog.graceRemainingMs))} remaining)</span>`;
+}
+
+function renderRunsTable(
+  title: string,
+  runs: RunStatus[],
+  watchdogByRun: Map<string, WatchdogIdleStatus>,
+  nowMs: number
+): string {
   if (runs.length === 0) {
     const message = title.startsWith("Runs (")
       ? "No runs in this state yet."
@@ -897,7 +1023,7 @@ function renderRunsTable(title: string, runs: RunStatus[]): string {
   const rows = runs
     .map(
       (run) =>
-        `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td class="c-title">#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td>${statePill(run.state)}</td><td>${escapeHtml(run.provider)}</td><td><code>${escapeHtml(run.createdAt)}</code></td><td><code>${escapeHtml(run.updatedAt)}</code></td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`
+        `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td class="c-title">#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td>${statePill(run.state)}${renderWatchdogIdleBadge(watchdogByRun.get(run.id), nowMs)}</td><td>${escapeHtml(run.provider)}</td><td><code>${escapeHtml(run.createdAt)}</code></td><td><code>${escapeHtml(run.updatedAt)}</code></td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`
     )
     .join("");
   return tableSection(
@@ -994,6 +1120,35 @@ function renderRunSummary(
   ${terminalRow}
   ${capContextLine}
   ${cancelLine}
+</dl></section>`;
+}
+
+function renderWatchdogSection(
+  watchdog: WatchdogStatus,
+  outputTokenGrowth5m: number,
+  nowMs: number
+): string {
+  if (!watchdog.enabled) {
+    return "";
+  }
+  if (watchdog.sampledAt === undefined) {
+    return `<section>${sectionHead("Watchdog")}<div class="empty"><strong>No sample yet</strong>No Progress Signal has been persisted for this Run.</div></section>`;
+  }
+  const idleRow =
+    watchdog.idleSince !== undefined
+      ? `<dt>idle_since</dt><dd><code>${escapeHtml(watchdog.idleSince)}</code></dd>`
+      : "";
+  const graceRow =
+    watchdog.graceRemainingMs !== undefined
+      ? `<dt>Grace remaining</dt><dd>${escapeHtml(formatWatchdogDuration(watchdog.graceRemainingMs))}</dd>`
+      : "";
+  return `<section>${sectionHead("Watchdog")}<dl class="fields">
+  <dt>Last tool_call</dt><dd>${escapeHtml(formatAge(watchdog.lastToolCallAt, nowMs))}</dd>
+  <dt>Workspace mtime</dt><dd>${escapeHtml(formatAge(watchdog.workspaceMtimeMax, nowMs))}</dd>
+  <dt>turn_ids observed</dt><dd>${watchdog.turnIdSetSize ?? 0}</dd>
+  <dt>Output tokens / 5m</dt><dd>${outputTokenGrowth5m === 0 ? "0" : `+${outputTokenGrowth5m}`}</dd>
+  ${idleRow}
+  ${graceRow}
 </dl></section>`;
 }
 

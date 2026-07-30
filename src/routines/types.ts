@@ -19,6 +19,8 @@ export type RoutineFiringState =
 
 export type RoutineNotificationState = "sent" | "skipped" | "failed";
 
+export type RoutineFiringTriggerSource = "manual" | "scheduled";
+
 export type RoutineCatchUpPolicy = "skip" | "fire_once_if_missed";
 
 export type RoutineSkipReason =

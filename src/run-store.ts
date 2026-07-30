@@ -18,8 +18,9 @@ import type {
   RoutineCatchUpPolicy,
   RoutineDisabledReason,
   RoutineFiringState,
-  RoutineNotificationState,
+  RoutineFiringTriggerSource,
   RoutineKind,
+  RoutineNotificationState,
   RoutinePullRequestStatus,
   RoutineSkipReason,
   RoutineState,
@@ -159,6 +160,7 @@ export type RoutineFiringStatus = {
   routineName: string;
   state: RoutineFiringState;
   terminalReason: string | null;
+  triggerSource: RoutineFiringTriggerSource;
   updatedAt: string;
   workspacePath: string;
 };
@@ -510,6 +512,7 @@ type RoutineFiringRow = {
   routine_name: string;
   state: RoutineFiringState;
   terminal_reason: string | null;
+  trigger_source: RoutineFiringTriggerSource;
   updated_at: string;
   workspace_path: string | null;
 };
@@ -1834,15 +1837,16 @@ export class RunStore {
     providerCommand: string;
     providerName: AgentProviderName;
     routineName: string;
+    triggerSource?: RoutineFiringTriggerSource;
   }): void {
     const now = timestamp();
     this.database
       .prepare(
         [
           "insert into routine_firings (",
-          "id, project_name, routine_name, state, provider_name, provider_command, created_at, updated_at",
+          "id, project_name, routine_name, state, provider_name, provider_command, trigger_source, created_at, updated_at",
           ") values (",
-          "@id, @project_name, @routine_name, 'queued', @provider_name, @provider_command, @created_at, @updated_at",
+          "@id, @project_name, @routine_name, 'queued', @provider_name, @provider_command, @trigger_source, @created_at, @updated_at",
           ")"
         ].join(" ")
       )
@@ -1853,6 +1857,7 @@ export class RunStore {
         provider_command: input.providerCommand,
         provider_name: input.providerName,
         routine_name: input.routineName,
+        trigger_source: input.triggerSource ?? "scheduled",
         updated_at: now
       });
     this.recordRoutineFiringTransition(input.id, "queued", now);
@@ -1899,6 +1904,52 @@ export class RunStore {
       if (result.changes === 0) {
         throw new RoutineAlreadyClaimedError();
       }
+    });
+    try {
+      claim();
+      return true;
+    } catch (error) {
+      if (error instanceof RoutineAlreadyClaimedError) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  claimManualRoutineFiring(input: {
+    firingId: string;
+    forceOperatorDisabled?: boolean;
+    projectName: string;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    routineName: string;
+  }): boolean {
+    const claim = this.database.transaction(() => {
+      const eligible = this.database
+        .prepare(
+          [
+            "select 1 from routines",
+            "where project_name = @project_name and name = @routine_name",
+            "and (state = 'active'",
+            "or (@force_operator_disabled = 1 and state = 'disabled' and disabled_reason = 'operator'))"
+          ].join(" ")
+        )
+        .get({
+          force_operator_disabled: input.forceOperatorDisabled === true ? 1 : 0,
+          project_name: input.projectName,
+          routine_name: input.routineName
+        });
+      if (eligible === undefined) {
+        throw new RoutineAlreadyClaimedError();
+      }
+      this.createRoutineFiring({
+        id: input.firingId,
+        projectName: input.projectName,
+        providerCommand: input.providerCommand,
+        providerName: input.providerName,
+        routineName: input.routineName,
+        triggerSource: "manual"
+      });
     });
     try {
       claim();
@@ -1973,7 +2024,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings where id = ?"
         ].join(" ")
       )
@@ -2057,7 +2108,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           where,
           "order by created_at desc, id desc"
@@ -3247,6 +3298,7 @@ export class RunStore {
         outcome_source text,
         notification_state text,
         notification_error text,
+        trigger_source text not null default 'scheduled',
         cancel_requested integer not null default 0,
         cancel_reason text,
         created_at text not null,
@@ -3321,6 +3373,11 @@ export class RunStore {
       ["routine_firings", "outcome_summary", "text"],
       ["routine_firings", "outcome_verified", "integer"],
       ["routine_firings", "outcome_source", "text"],
+      [
+        "routine_firings",
+        "trigger_source",
+        "text not null default 'scheduled'"
+      ],
       ["routine_firings", "cancel_requested", "integer not null default 0"],
       ["routine_firings", "cancel_reason", "text"],
       ["routine_firings", "notification_state", "text"],
@@ -3812,6 +3869,7 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
     routineName: row.routine_name,
     state: row.state,
     terminalReason: row.terminal_reason ?? null,
+    triggerSource: row.trigger_source,
     updatedAt: row.updated_at,
     workspacePath: row.workspace_path ?? ""
   };

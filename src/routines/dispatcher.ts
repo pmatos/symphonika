@@ -45,6 +45,7 @@ import {
 } from "./prompt-renderer.js";
 import type {
   RoutineSchedule,
+  RoutineState,
   RoutineStatus,
   TargetedRoutineDeclaration
 } from "./types.js";
@@ -85,6 +86,39 @@ export type DispatchDueRoutinesResult = {
   skipped: Array<{ reason: string; routineName: string; projectName: string }>;
 };
 
+export type FireRoutineNowInput = Omit<
+  DispatchDueRoutinesInput,
+  "now" | "recomputeSchedulesFromNow"
+> & {
+  request: {
+    force?: boolean;
+    projectName?: string;
+    routineName: string;
+  };
+};
+
+export type FireRoutineNowResult =
+  | {
+      completion: Promise<void>;
+      firingId: string;
+      kind: "accepted";
+      projectName: string;
+      routineName: string;
+      state: "queued";
+    }
+  | {
+      candidates: Array<{ projectName: string; routineName: string }>;
+      error: string;
+      kind: "ambiguous";
+    }
+  | { error: string; kind: "not_found" }
+  | {
+      error: string;
+      kind: "refused";
+      reason: RoutineState | "concurrency_cap" | "daemon_shutdown" | "overlap";
+    }
+  | { error: string; kind: "unavailable" };
+
 type RoutineTerminalOutcome =
   | { kind: "cancelled"; reason: string }
   | { kind: "failed"; reason: string }
@@ -104,6 +138,174 @@ type CapturedRoutineGithubSnapshot = {
   pullRequestsAvailable: boolean;
   snapshot: RoutineGithubSnapshot;
 };
+
+export function fireRoutineNow(
+  input: FireRoutineNowInput
+): FireRoutineNowResult {
+  const matches = input.runStore
+    .listRoutines({
+      includeInactive: true,
+      ...(input.request.projectName === undefined
+        ? {}
+        : { project: input.request.projectName })
+    })
+    .filter((routine) => routine.name === input.request.routineName);
+  if (matches.length === 0) {
+    return {
+      error: `routine ${input.request.routineName} not found`,
+      kind: "not_found"
+    };
+  }
+  if (matches.length > 1) {
+    const candidates = matches.map((routine) => ({
+      projectName: routine.projectName,
+      routineName: routine.name
+    }));
+    return {
+      candidates,
+      error: `routine ${input.request.routineName} is ambiguous; candidates: ${candidates
+        .map((candidate) => `${candidate.projectName}/${candidate.routineName}`)
+        .join(", ")}; provide --project`,
+      kind: "ambiguous"
+    };
+  }
+  const routine = matches[0]!;
+  const forceOperatorDisabled =
+    input.request.force === true &&
+    routine.state === "disabled" &&
+    routine.disabledReason === "operator";
+  if (routine.state !== "active" && !forceOperatorDisabled) {
+    const disabledDetail =
+      routine.state === "disabled" && routine.disabledReason !== null
+        ? ` (${routine.disabledReason})`
+        : "";
+    return {
+      error: `routine ${routine.name} is ${routine.state}${disabledDetail}`,
+      kind: "refused",
+      reason: routine.state
+    };
+  }
+  const project = input.projects.get(routine.projectName);
+  if (project === undefined || project.disabled === true) {
+    return {
+      error: `routine ${routine.name} is inactive`,
+      kind: "refused",
+      reason: "inactive"
+    };
+  }
+  if (
+    !routine.allowOverlap &&
+    input.runStore.hasActiveRoutineFiring({
+      name: routine.name,
+      projectName: routine.projectName
+    })
+  ) {
+    return {
+      error: `routine ${routine.name} already has an active firing`,
+      kind: "refused",
+      reason: "overlap"
+    };
+  }
+  const providerName = routine.provider ?? project.agent.provider;
+  const provider = input.agentProviders[providerName];
+  const providerCommand = (
+    input.providersConfig as Partial<RunControllerProvidersConfig>
+  )[providerName]?.command;
+  if (provider === undefined) {
+    return {
+      error: `provider not registered: ${providerName}`,
+      kind: "unavailable"
+    };
+  }
+  if (providerCommand === undefined) {
+    return {
+      error: `provider command missing: ${providerName}`,
+      kind: "unavailable"
+    };
+  }
+  const capReason = capSkipReason(
+    input.activeRuns,
+    input.globalConcurrency,
+    project
+  );
+  if (capReason !== null) {
+    return {
+      error: `concurrency cap reached: ${capReason}`,
+      kind: "refused",
+      reason: "concurrency_cap"
+    };
+  }
+  if (input.activeRuns.isShuttingDown()) {
+    return {
+      error: "daemon is shutting down",
+      kind: "refused",
+      reason: "daemon_shutdown"
+    };
+  }
+  const detail = input.runStore.getRoutine({
+    name: routine.name,
+    projectName: routine.projectName
+  });
+  if (detail === undefined) {
+    return {
+      error: `routine ${routine.name} is no longer available`,
+      kind: "not_found"
+    };
+  }
+
+  const firingId = input.createFiringId?.() ?? createUlid();
+  const claimed = input.runStore.claimManualRoutineFiring({
+    firingId,
+    forceOperatorDisabled,
+    projectName: routine.projectName,
+    providerCommand,
+    providerName,
+    routineName: routine.name
+  });
+  if (!claimed) {
+    return {
+      error: `routine ${routine.name} is no longer eligible for manual firing`,
+      kind: "refused",
+      reason: detail.state
+    };
+  }
+  input.activeRuns.reserveSlot({
+    issueNumber: syntheticRoutineIssueNumber(firingId),
+    projectName: routine.projectName,
+    respectsIssueLabels: false,
+    runId: firingId
+  });
+  const completion = runRoutineFiring({
+    activeRuns: input.activeRuns,
+    configDir: input.configDir,
+    env: input.env ?? process.env,
+    firingId,
+    githubIssuesApi: input.githubIssuesApi,
+    logger: input.logger,
+    now: new Date(),
+    prepareRoutineWorkspace:
+      input.prepareRoutineWorkspace ?? defaultPrepareRoutineWorkspace,
+    project,
+    provider,
+    providerCommand,
+    providerName,
+    routine: detail,
+    runStore: input.runStore,
+    stateRoot: input.stateRoot
+  })
+    .then(() => undefined)
+    .finally(() => {
+      input.activeRuns.unregister(firingId);
+    });
+  return {
+    completion,
+    firingId,
+    kind: "accepted",
+    projectName: routine.projectName,
+    routineName: routine.name,
+    state: "queued"
+  };
+}
 
 export async function dispatchDueRoutines(
   input: DispatchDueRoutinesInput

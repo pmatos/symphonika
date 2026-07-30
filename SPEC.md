@@ -228,9 +228,11 @@ A Routine Firing is one durable execution of a Routine. It records the Routine, 
 provider, workspace path, prompt evidence, provider logs, terminal reason, lifecycle state, its
 canonical Routine Outcome, and any pull requests discovered from a `kind: git` firing branch. The
 Routine Outcome records `status`, `action`, `url`, `title`, `summary`, `verified`, and `source`
-without replacing lifecycle state or terminal reason; see ADR 0068. A one-shot `schedule.at`
-Routine becomes `expired` after its firing is claimed and must not fire again on daemon restart. A
-recurring Routine remains active and advances to its next clock event after every firing.
+without replacing lifecycle state or terminal reason; see ADR 0068. Its trigger source is
+`scheduled` or `manual`. A one-shot `schedule.at` Routine becomes `expired` after its scheduled
+firing is claimed and must not fire again on daemon restart. A recurring Routine remains active and
+advances to its next clock event after every scheduled firing. A manual firing does not consume a
+scheduled clock event.
 
 A clock event skipped for catch-up policy, overlap, or a concurrency cap is not a Routine Firing:
 no `routine_firings` row is created. The Routine instead records `last_attempted_at`,
@@ -812,6 +814,20 @@ configured; overlap opt-in does not bypass concurrency caps. Every skip atomical
 clock event, updates the Routine's latest-attempt/skip fields and rolling counter evidence, writes no
 Routine Firing row, and emits `routine.skipped` with `reason`, `routine`, and `scheduled_at` fields.
 
+`symphonika fire-now <routine>` asks the daemon to claim a manual Routine Firing even when the
+Routine is not due. The manual claim records `trigger_source = "manual"` and otherwise uses the
+normal Routine Firing workspace, provider, evidence, cancellation, overlap, and concurrency paths.
+It does not update the Routine's `next_fire_at`, `last_fired_at`, `last_attempted_at`, or state, so a
+future one-shot or recurring clock event still fires normally. A manual overlap or cap refusal
+creates neither a firing row nor Routine Skip evidence because it did not attempt a clock event.
+
+Manual firing accepts active Routines. It refuses `inactive`, `invalid`, and `expired` Routines with
+their specific state. It also refuses `disabled` by default; `--force` overrides only a
+`disabled_reason = "operator"` Routine declared with `disabled: true`, not a removed declaration or
+a tracker-less-host rejection. Ambiguous names return every Project/Routine candidate and require
+`--project`. `--wait` blocks on the accepted firing id until terminal and exits non-zero for
+`failed` or `cancelled`.
+
 `symphonika cancel <id>` accepts a `run_id` or a Routine Firing id. A non-terminal Routine Firing
 transitions to `cancelled` with `cancel_reason = "operator"`; the provider process is killed and the
 workspace and logs are preserved, matching issue Run cancellation. Cancelling an unknown id or a
@@ -1370,6 +1386,7 @@ Bootstrap CLI commands:
 - `symphonika service install [--config <path>] [--force] [--print] [--no-reload]`
 - `symphonika status [--config <path>] [--dashboard] [--watch] [--interval-ms <ms>] [--doctor-ttl-ms <ms>]`
 - `symphonika poll-now [--config <path>]`
+- `symphonika fire-now <routine> [--project <project>] [--force] [--wait] [--config <path>]`
 - `symphonika runs [--config <path>]`
 - `symphonika routines [--config <path>] [--project <project>] [--include-inactive]`
 - `symphonika show-run <run-id> [--config <path>]`
@@ -1480,8 +1497,10 @@ instead of a blank canvas — and must not introduce mutating actions beyond the
 below. This narrows — it does not remove — the §2 non-goal: Symphonika still does not ship a
 separate frontend application. See ADR-0056.
 
-The v1 mutating web actions are explicit active-run cancellation and a manual poll-now trigger that
-uses the normal daemon scheduler path.
+The v1 mutating local HTTP API actions are explicit active-run cancellation, a manual poll-now
+trigger that uses the normal daemon scheduler path, and daemon-owned manual Routine firing. The
+server-rendered dashboard exposes only cancellation and poll-now controls; manual Routine firing is
+a CLI/API action (ADR 0067).
 
 The HTTP API exposes `GET /api/routines` with the same Routine status shape as the CLI and
 dashboard, including `latestOutcome`, latest-attempt/skip fields, and per-reason `skipCounts24h`.
@@ -1492,10 +1511,33 @@ firing history with each canonical `outcome`, linked PRs, and `notificationState
 disambiguate the same Routine name across Projects and `?include_inactive=true` to resolve an
 inactive Routine and reach its durable firing history.
 
+`POST /api/routines/:id/fire` claims a manual Routine Firing. The optional `project` query
+parameter disambiguates a target and `force=true` applies the narrow disabled-Routine override from
+§8.5. An accepted request returns HTTP 202 with the queued firing id. State, overlap, cap,
+ambiguity, and availability refusals return a specific error without advancing the Routine clock.
+
 `GET /api/runs/:id` exposes the latest sample as a camel-cased top-level `watchdog` object, including
 the effective `graceMs` and server-computed `graceRemainingMs`. `GET /api/status` adds a `watchdog`
 object to each active Run with `idleSince` and `graceRemainingMs` when idle. When the effective
 Watchdog policy is disabled, both endpoints return exactly `{ "enabled": false }` for that object.
+
+The server-rendered dashboard and `/runs` list surface the same idle/grace state as a small
+"watchdog idle since X (Y remaining)" badge next to the state pill, shown only for active
+(non-terminal) Runs with `idleSince` set. The Run-detail page gains a Watchdog section directly under
+the run-state summary, rendering `last tool_call age`, `workspace mtime age`, `turn_ids observed`,
+`output tokens / 5m`, and (when set) `idle_since` and `grace remaining` — the same fields `show-run`
+exposes. For any Run not in the `running` state — a terminal state (including `terminal_reason =
+"no_progress"`), `queued`, `preparing_workspace`, or `waiting` — all three Progress Signal surfaces
+— `show-run`, `GET /api/runs/:id`, and the Run-detail page — compute ages and grace remaining
+against the Run's last persisted watchdog sample rather than the live clock. A Run's watchdog sample
+only ever advances while it is `running`, so a live clock against any other state's sample is a
+misleading, ever-drifting countdown for data that no longer describes what the Run is currently
+doing — most visibly for a terminated Run revisited days later (a stable, final signal instead of an
+ever-more-negative live countdown), but equally for a retried Run sitting in `preparing_workspace`
+with the prior failed attempt's sample still on record. (`runs.updated_at` is not used for this:
+it can keep advancing after termination for unrelated reasons, e.g. pull-request-discovery polling
+for succeeded Runs.) Both HTTP surfaces read the same `watchdog` object and render nothing (badge
+absent, section hidden) when the effective Watchdog policy is disabled.
 
 For a waiting Run whose tracked PR has unresolved review feedback after the configured dispatch
 cap, `GET /api/runs/:id` also exposes a top-level `pullRequestFollowup` object with

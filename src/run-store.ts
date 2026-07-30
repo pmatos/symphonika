@@ -2183,6 +2183,13 @@ export class RunStore {
           "from routine_firings",
           "where workspace_path is not null and workspace_path <> ''",
           "and workspace_pruned_at is null",
+          // A verified commit-only outcome is the sole retention signal for that
+          // commit (ADR 0068): pruning its workspace on age alone would delete the
+          // only copy, so it is withheld from age-based candidates entirely.
+          // coalesce guards firings with no recorded outcome (most existing rows):
+          // NULL = 'commit' is NULL in SQLite, and `not (NULL and ...)` is also
+          // NULL, which WHERE treats as excluding the row rather than keeping it.
+          "and not (coalesce(outcome_action, '') = 'commit' and coalesce(outcome_verified, 0) = 1)",
           "and (",
           "(state = 'succeeded' and updated_at <= @succeeded_before)",
           "or (state = 'failed' and updated_at <= @failed_before)",

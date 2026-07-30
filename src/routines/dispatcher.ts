@@ -913,7 +913,12 @@ async function runRoutineFiring(input: {
     // block above — there is no outer catch left to route that into; left
     // unhandled, it would abort runRoutineFiring before completeRoutineFiring
     // runs, stranding the row in a non-terminal state. Treat that as
-    // "snapshot unavailable" instead.
+    // "snapshot unavailable" — but still surface the expiry itself: SPEC.md
+    // §12.2/ADR 0067 make terminal outcome classification part of the raced
+    // scope and require `firing_timeout` to win over whatever reason drove
+    // us into this catch block, the same precedence `timedOut` already
+    // applies to the entry error above.
+    let failureSnapshotTimedOut = false;
     const githubAfter =
       githubBefore === null || prepared === undefined
         ? null
@@ -930,15 +935,27 @@ async function runRoutineFiring(input: {
                 since: githubSnapshotSince
               })
             )
-            .catch(() => null);
+            .catch((snapshotError: unknown) => {
+              if (snapshotError instanceof RoutineFiringTimeoutError) {
+                failureSnapshotTimedOut = true;
+              }
+              return null;
+            });
     // A cancel can also land DURING the snapshot read just above, after
     // `cancelled`/`reason` above were already computed from the pre-await
     // state. Re-check so a cancel arriving in this window doesn't get
-    // persisted as a stale failed/pre-cancellation reason.
+    // persisted as a stale failed/pre-cancellation reason. A timeout newly
+    // discovered by the snapshot race takes precedence over both, matching
+    // `timedOut`'s precedence over `cancelled` above.
     const cancelAfterFailureSnapshot = input.activeRuns.get(input.firingId);
     const finalCancelled =
-      cancelled || cancelAfterFailureSnapshot?.cancelRequested === true;
-    const finalReason = finalCancelled ? "cancelled" : reason;
+      !failureSnapshotTimedOut &&
+      (cancelled || cancelAfterFailureSnapshot?.cancelRequested === true);
+    const finalReason = failureSnapshotTimedOut
+      ? "firing_timeout"
+      : finalCancelled
+        ? "cancelled"
+        : reason;
     const githubObservation = routineGithubObservation(
       githubBefore,
       githubAfter,

@@ -1250,9 +1250,10 @@ export class RunController {
           (providersConfig as Partial<RunControllerProvidersConfig>)[
             providerName
           ]?.command ?? "";
-        await this.failStateAdvanceBeforeProvider({
+        await this.failScheduledRunBeforeProvider({
           issue: refreshed,
           parentRunId: payload.parentRunId,
+          phase: "state-advance",
           project,
           providerCommand,
           providerName,
@@ -1286,9 +1287,10 @@ export class RunController {
           (providersConfig as Partial<RunControllerProvidersConfig>)[
             providerName
           ]?.command ?? "";
-        await this.failStateAdvanceBeforeProvider({
+        await this.failScheduledRunBeforeProvider({
           issue: refreshed,
           parentRunId: payload.parentRunId,
+          phase: "state-advance",
           project,
           providerCommand,
           providerName,
@@ -1320,9 +1322,10 @@ export class RunController {
       const providerCommand =
         (providersConfig as Partial<RunControllerProvidersConfig>)[providerName]
           ?.command ?? "";
-      await this.failStateAdvanceBeforeProvider({
+      await this.failScheduledRunBeforeProvider({
         issue: refreshed,
         parentRunId: payload.parentRunId,
+        phase: "state-advance",
         project,
         providerCommand,
         providerName,
@@ -1367,9 +1370,10 @@ export class RunController {
     const providerCommand = providerConfig?.command;
 
     if (providerCommand === undefined || providerCommand.trim().length === 0) {
-      await this.failStateAdvanceBeforeProvider({
+      await this.failScheduledRunBeforeProvider({
         issue: refreshed,
         parentRunId: payload.parentRunId,
+        phase: "state-advance",
         project,
         providerCommand: providerCommand ?? "",
         providerName,
@@ -1382,9 +1386,10 @@ export class RunController {
 
     const provider = this.agentProviders[providerName];
     if (provider === undefined) {
-      await this.failStateAdvanceBeforeProvider({
+      await this.failScheduledRunBeforeProvider({
         issue: refreshed,
         parentRunId: payload.parentRunId,
+        phase: "state-advance",
         project,
         providerCommand,
         providerName,
@@ -1445,9 +1450,10 @@ export class RunController {
     }
   }
 
-  private async failStateAdvanceBeforeProvider(input: {
+  private async failScheduledRunBeforeProvider(input: {
     issue: IssueSnapshot;
     parentRunId: string;
+    phase: "continuation" | "state-advance";
     project: RunControllerProjectConfig;
     providerCommand: string;
     providerName: AgentProviderName;
@@ -1466,7 +1472,7 @@ export class RunController {
         issueNumber: input.issue.number,
         label: "sym:claimed",
         operation: "addLabel",
-        phase: "state-advance-provider-resolution",
+        phase: `${input.phase}-provider-resolution`,
         project: input.project.name,
         runId: input.runId
       }
@@ -1494,7 +1500,9 @@ export class RunController {
         reason: input.reason,
         runId: input.runId
       },
-      "symphonika state advance failed before provider launch"
+      `symphonika ${
+        input.phase === "state-advance" ? "state advance" : "continuation"
+      } failed before provider launch`
     );
     await this.applyTerminalLabels({
       fsmContinuing: false,
@@ -1594,23 +1602,7 @@ export class RunController {
       return;
     }
 
-    const provider = this.agentProviders[project.agent.provider];
-    if (provider === undefined) {
-      return;
-    }
-
     const providersConfig = await this.providersLoader();
-    const providerCommand = providersConfig[project.agent.provider]?.command;
-    if (providerCommand === undefined || providerCommand.trim().length === 0) {
-      this.logger?.warn(
-        {
-          projectName: payload.projectName,
-          provider: project.agent.provider
-        },
-        "symphonika continuation dropped: provider command is not configured"
-      );
-      return;
-    }
 
     if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
       return;
@@ -1652,6 +1644,39 @@ export class RunController {
     }
 
     const runId = this.createRunId();
+    const providerName = project.agent.provider;
+    const providerCommand = providersConfig[providerName]?.command;
+    if (providerCommand === undefined || providerCommand.trim().length === 0) {
+      await this.failScheduledRunBeforeProvider({
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        phase: "continuation",
+        project,
+        providerCommand: providerCommand ?? "",
+        providerName,
+        reason: `provider_command_missing: ${providerName}`,
+        repository,
+        runId
+      });
+      return;
+    }
+
+    const provider = this.agentProviders[providerName];
+    if (provider === undefined) {
+      await this.failScheduledRunBeforeProvider({
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        phase: "continuation",
+        project,
+        providerCommand,
+        providerName,
+        reason: `provider_not_registered: ${providerName}`,
+        repository,
+        runId
+      });
+      return;
+    }
+
     try {
       await this.runFreshLifecycle({
         attemptNumber: 1,
@@ -1661,7 +1686,7 @@ export class RunController {
         project,
         provider,
         providerCommand,
-        providerName: project.agent.provider,
+        providerName,
         repository,
         runId
       });

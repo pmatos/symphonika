@@ -1765,6 +1765,127 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("reclassifies a provider failure when cancellation lands during commit inspection", async () => {
+    const root = await makeTempRoot();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { code: 1, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const inspectWorkspaceCommitsAhead = vi.fn(async () => {
+      await activeRuns.requestCancel(
+        "fire-cancel-during-classified-inspection",
+        "operator"
+      );
+      return true;
+    });
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine: {
+            kind: "git",
+            name: "dependency-update",
+            prompt: "Update dependencies.",
+            provider: null,
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: path.join(root, "dependency-update.md")
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-cancel-during-classified-inspection",
+        inspectWorkspaceCommitsAhead
+      });
+
+      expect(inspectWorkspaceCommitsAhead).toHaveBeenCalledOnce();
+      expect(
+        runStore.getRoutineFiring("fire-cancel-during-classified-inspection")
+      ).toMatchObject({
+        cancelReason: "operator",
+        commitsAhead: true,
+        state: "cancelled",
+        terminalReason: "cancelled"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("reclassifies a thrown failure when cancellation lands during commit inspection", async () => {
+    const root = await makeTempRoot();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        throw new Error("provider process failed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const inspectWorkspaceCommitsAhead = vi.fn(async () => {
+      await activeRuns.requestCancel(
+        "fire-cancel-during-thrown-inspection",
+        "operator"
+      );
+      return true;
+    });
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine: {
+            kind: "git",
+            name: "dependency-update",
+            prompt: "Update dependencies.",
+            provider: null,
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: path.join(root, "dependency-update.md")
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-cancel-during-thrown-inspection",
+        inspectWorkspaceCommitsAhead
+      });
+
+      expect(inspectWorkspaceCommitsAhead).toHaveBeenCalledOnce();
+      expect(
+        runStore.getRoutineFiring("fire-cancel-during-thrown-inspection")
+      ).toMatchObject({
+        cancelReason: "operator",
+        commitsAhead: true,
+        state: "cancelled",
+        terminalReason: "cancelled"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("fires a due one-shot report routine exactly once", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

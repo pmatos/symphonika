@@ -988,8 +988,8 @@ async function runRoutineFiring(input: {
     }
     // Re-check for a cancel that landed during discovery: an operator cancel
     // still wins even though the provider itself already finished (ADR 0060).
-    const completionCancelEntry = input.activeRuns.get(input.firingId);
-    if (completionCancelEntry?.cancelRequested === true) {
+    const cancelBeforeCommitInspection = input.activeRuns.get(input.firingId);
+    if (cancelBeforeCommitInspection?.cancelRequested === true) {
       outcome = { kind: "cancelled", reason: "cancelled" };
     }
     const commitsAhead =
@@ -1003,6 +1003,13 @@ async function runRoutineFiring(input: {
             inspectWorkspaceCommitsAhead: input.inspectWorkspaceCommitsAhead,
             workspacePath: prepared.workspacePath
           });
+    // The failed/cancelled retention inspection above shells out to Git. A
+    // cancel can land while that subprocess is running, so use a fresh entry
+    // for both lifecycle classification and its matching cancel reason.
+    const completionCancelEntry = input.activeRuns.get(input.firingId);
+    if (completionCancelEntry?.cancelRequested === true) {
+      outcome = { kind: "cancelled", reason: "cancelled" };
+    }
     const githubObservation = routineGithubObservation(
       githubBefore,
       githubAfter,
@@ -1084,14 +1091,6 @@ async function runRoutineFiring(input: {
     // discovered by the snapshot race takes precedence over both, matching
     // `timedOut`'s precedence over `cancelled` above.
     const cancelAfterFailureSnapshot = input.activeRuns.get(input.firingId);
-    const finalCancelled =
-      !failureSnapshotTimedOut &&
-      (cancelled || cancelAfterFailureSnapshot?.cancelRequested === true);
-    const finalReason = failureSnapshotTimedOut
-      ? "firing_timeout"
-      : finalCancelled
-        ? "cancelled"
-        : reason;
     const githubObservation = routineGithubObservation(
       githubBefore,
       githubAfter,
@@ -1109,6 +1108,21 @@ async function runRoutineFiring(input: {
             inspectWorkspaceCommitsAhead: input.inspectWorkspaceCommitsAhead,
             workspacePath: prepared.workspacePath
           });
+    // Re-read after the Git subprocess for the same reason as the try path.
+    // Either timeout signal still wins over a cancellation that arrived
+    // during snapshot capture or commit inspection.
+    const completionCancelEntry = input.activeRuns.get(input.firingId);
+    const timeoutWon = timedOut || failureSnapshotTimedOut;
+    const finalCancelled =
+      !timeoutWon &&
+      (cancelled ||
+        cancelAfterFailureSnapshot?.cancelRequested === true ||
+        completionCancelEntry?.cancelRequested === true);
+    const finalReason = timeoutWon
+      ? "firing_timeout"
+      : finalCancelled
+        ? "cancelled"
+        : reason;
     input.runStore.completeRoutineFiring({
       commitsAhead,
       id: input.firingId,
@@ -1123,9 +1137,9 @@ async function runRoutineFiring(input: {
       }),
       state: finalCancelled ? "cancelled" : "failed",
       terminalReason: finalReason,
-      ...(cancelAfterFailureSnapshot?.cancelReason === undefined
+      ...(completionCancelEntry?.cancelReason === undefined
         ? {}
-        : { cancelReason: cancelAfterFailureSnapshot.cancelReason }),
+        : { cancelReason: completionCancelEntry.cancelReason }),
       ...(prepared === undefined
         ? {}
         : { workspacePath: prepared.workspacePath })

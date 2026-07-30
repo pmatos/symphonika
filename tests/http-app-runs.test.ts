@@ -1672,6 +1672,27 @@ describe("HTTP app — runs API and pages", () => {
       expect(progressingBody).not.toContain("Grace remaining");
 
       test.runStore.createRun({
+        id: "no-sample-run",
+        issue: sampleIssue({ number: 213, title: "No sample yet" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("no-sample-run", "running");
+
+      const noSampleBody = await (
+        await app.request("/runs/no-sample-run")
+      ).text();
+      expect(noSampleBody).toContain("<h2>Watchdog</h2>");
+      expect(noSampleBody).toContain("No sample yet");
+      expect(noSampleBody).not.toContain("idle_since");
+      expect(noSampleBody).not.toContain("Grace remaining");
+
+      const dashboardBody = await (await app.request("/")).text();
+      expect(dashboardBody).toContain("no-sample-run");
+      expect(dashboardBody).not.toContain("watchdog idle since");
+
+      test.runStore.createRun({
         id: "idle-run",
         issue: sampleIssue({ number: 211, title: "Idle within grace" }),
         projectName: "alpha",

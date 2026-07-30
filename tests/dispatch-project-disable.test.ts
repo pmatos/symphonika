@@ -299,12 +299,16 @@ describe("dispatch project disable", () => {
     await writeProject(root);
 
     let runAttemptCount = 0;
+    let releaseProvider: () => void = () => {};
+    const providerCanFinish = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
     const provider: AgentProvider = {
       cancel: vi.fn().mockResolvedValue(undefined),
       name: "codex",
       async *runAttempt(): AsyncGenerator<ProviderEvent> {
         runAttemptCount += 1;
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await providerCanFinish;
         yield {
           normalized: { exitCode: 0, type: "process_exit" },
           raw: { code: 0, kind: "exit" }
@@ -347,6 +351,8 @@ describe("dispatch project disable", () => {
 
       // The original Project disappears from config while another valid Project remains.
       await writeProject(root, { name: "other-project" });
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      releaseProvider();
 
       await waitForCondition(daemon.url, ({ runs }) =>
         runs.some((run) => run["state"] === "succeeded")

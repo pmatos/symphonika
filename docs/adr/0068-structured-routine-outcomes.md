@@ -76,9 +76,11 @@ rewrite either.
 Every prepared `kind: git` workspace persists commits-ahead evidence separately from its terminal
 lifecycle classification and this canonical outcome. Routine Workspace Retention uses that
 independent signal, so a failure, cancellation, or richer verified GitHub action cannot hide local
-commits from the retention guard. Until Symphonika persists a verified durable-publication
-transition, every commits-ahead workspace is retained indefinitely rather than collected by age. It
-must not silently collect the only copy of a commit.
+commits from the retention guard. Only a verified zero-commits inspection permits age-based
+collection; an inspection failure is unknown and conservatively persists the protection signal.
+Until Symphonika persists a verified durable-publication transition, every commits-ahead workspace
+is retained indefinitely rather than collected by age. It must not silently collect the only copy
+of a commit.
 
 ## Consequences
 

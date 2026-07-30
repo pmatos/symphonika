@@ -877,10 +877,12 @@ Every prepared `kind: git` workspace is inspected for commits ahead independentl
 lifecycle classification and the canonical Routine Outcome. Routine Workspace Retention withholds
 every positive inspection from age-based collection, including failed and cancelled firings and
 succeeded firings whose reconciliation correctly selects a verified `pr`, `issue_opened`, or
-`issue_closed` action. Symphonika does not yet persist a separate durable-publication transition, so
-the conservative v1 behavior retains every commits-ahead workspace indefinitely rather than infer
-publication from an unrelated canonical action. A future publication signal or explicit destructive
-operator override may release that protection; age alone must never delete the only copy.
+`issue_closed` action. Only a verified zero-commits inspection permits age-based collection; an
+inspection failure is unknown and conservatively persists the protection signal. Symphonika does
+not yet persist a separate durable-publication transition, so the conservative v1 behavior retains
+every commits-ahead workspace indefinitely rather than infer publication from an unrelated
+canonical action. A future publication signal or explicit destructive operator override may
+release that protection; age alone must never delete the only copy.
 
 After a Routine Firing reaches a terminal state, Symphonika evaluates its Routine notification
 policy. Delivery occurs after `kind: git` PR discovery, uses both plain text and an escaped HTML

@@ -38,11 +38,13 @@ at or before the outcome cutoff are candidates. `queued`, `preparing_workspace`,
 firings cannot be selected or marked as reclaimed. Every prepared `kind: git` workspace is
 inspected for commits ahead before terminal completion, independently of lifecycle classification
 and the canonical Routine Outcome. Every positive inspection persists `commits_ahead = 1` and is
-withheld from age-based candidates, including failed and cancelled firings. A verified `pr`,
-`issue_opened`, or `issue_closed` outcome does not prove that the firing's commits reached durable
-remote state. Symphonika does not yet persist a separate publication transition, so the
-conservative policy retains these workspaces indefinitely; a future verified publication signal or
-explicit destructive override may release the protection.
+withheld from age-based candidates, including failed and cancelled firings. Only a verified
+zero-commits inspection permits age-based collection; an inspection failure is unknown and
+conservatively persists the protection signal. A verified `pr`, `issue_opened`, or `issue_closed`
+outcome does not prove that the firing's commits reached durable remote state. Symphonika does not
+yet persist a separate publication transition, so the conservative policy retains these workspaces
+indefinitely; a future verified publication signal or explicit destructive override may release
+the protection.
 
 Reclamation uses
 `git worktree remove --force <path>` and then `git worktree prune` against the Project's shared bare

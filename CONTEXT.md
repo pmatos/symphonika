@@ -188,7 +188,9 @@ _Avoid_: terminal reason, provider final message
 **Routine Workspace Retention**:
 The Service Config policy that reclaims terminal Routine Firing worktrees after outcome-specific
 age windows while preserving their Run Store rows and state-root evidence. Firings with persisted
-commits-ahead evidence are withheld until a separate durable-publication signal exists.
+commits-ahead evidence are withheld until a separate durable-publication signal exists. Only a
+verified zero-commits inspection permits age-based reclamation; an inspection failure is retained
+conservatively.
 _Avoid_: evidence retention, issue Workspace cleanup
 
 **Routine Firing Deadline**:

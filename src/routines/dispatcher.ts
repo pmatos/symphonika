@@ -72,6 +72,7 @@ export type DispatchDueRoutinesInput = {
   env?: NodeJS.ProcessEnv;
   globalConcurrency: { maxInFlight: number | undefined };
   githubIssuesApi?: GitHubIssuesApi;
+  inspectWorkspaceCommitsAhead?: typeof inspectWorkspaceCommitsAhead;
   logger?: Logger;
   notification?: {
     createSink: (config: EmailNotificationConfig) => NotificationSink;
@@ -292,6 +293,8 @@ export function fireRoutineNow(
     env: input.env ?? process.env,
     firingId,
     githubIssuesApi: input.githubIssuesApi,
+    inspectWorkspaceCommitsAhead:
+      input.inspectWorkspaceCommitsAhead ?? inspectWorkspaceCommitsAhead,
     logger: input.logger,
     now: new Date(),
     prepareRoutineWorkspace:
@@ -671,6 +674,8 @@ export async function dispatchDueRoutines(
         firingId,
         env: input.env ?? process.env,
         githubIssuesApi: input.githubIssuesApi,
+        inspectWorkspaceCommitsAhead:
+          input.inspectWorkspaceCommitsAhead ?? inspectWorkspaceCommitsAhead,
         logger: input.logger,
         now,
         prepareRoutineWorkspace,
@@ -763,6 +768,7 @@ async function runRoutineFiring(input: {
   env: NodeJS.ProcessEnv;
   firingId: string;
   githubIssuesApi: GitHubIssuesApi | undefined;
+  inspectWorkspaceCommitsAhead: typeof inspectWorkspaceCommitsAhead;
   logger: Logger | undefined;
   now: Date;
   prepareRoutineWorkspace: (
@@ -994,6 +1000,7 @@ async function runRoutineFiring(input: {
             kind: input.routine.kind,
             logger: input.logger,
             routineName: input.routine.name,
+            inspectWorkspaceCommitsAhead: input.inspectWorkspaceCommitsAhead,
             workspacePath: prepared.workspacePath
           });
     const githubObservation = routineGithubObservation(
@@ -1099,6 +1106,7 @@ async function runRoutineFiring(input: {
             kind: input.routine.kind,
             logger: input.logger,
             routineName: input.routine.name,
+            inspectWorkspaceCommitsAhead: input.inspectWorkspaceCommitsAhead,
             workspacePath: prepared.workspacePath
           });
     input.runStore.completeRoutineFiring({
@@ -1133,13 +1141,14 @@ async function inspectRoutineCommitsAhead(input: {
   kind: RoutineStatus["kind"];
   logger: Logger | undefined;
   routineName: string;
+  inspectWorkspaceCommitsAhead: typeof inspectWorkspaceCommitsAhead;
   workspacePath: string;
 }): Promise<boolean> {
   if (input.kind !== "git") {
     return false;
   }
   try {
-    return await inspectWorkspaceCommitsAhead({
+    return await input.inspectWorkspaceCommitsAhead({
       baseBranch: input.baseBranch,
       workspacePath: input.workspacePath
     });
@@ -1150,9 +1159,9 @@ async function inspectRoutineCommitsAhead(input: {
         routine: input.routineName,
         workspacePath: input.workspacePath
       },
-      "symphonika routine commits-ahead inspection failed"
+      "symphonika routine commits-ahead inspection failed; retaining workspace conservatively"
     );
-    return false;
+    return true;
   }
 }
 

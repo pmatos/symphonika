@@ -128,8 +128,11 @@ commits-ahead inspection independently of terminal lifecycle classification
 and `action`, because a failed or cancelled firing may hold commits, and a
 genuinely verified GitHub issue or PR action may correctly remain canonical
 while the firing also created local commits. Workspace GC must key protection
-on that dedicated signal, retain the workspace until durable publication is
-separately verified, or require an explicit destructive operator override.
+on that dedicated signal. Only a verified zero-commits inspection permits
+age-based collection; an inspection failure is unknown and conservatively
+persists the protection signal. GC must retain protected workspaces until
+durable publication is separately verified, or require an explicit destructive
+operator override.
 
 This chooses preservation over ptt's rule because ptt's clone is ephemeral at
 the moment reconciliation runs, while Symphonika's workspace is durable.

@@ -1707,6 +1707,64 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("retains a failed kind: git workspace when commits-ahead inspection fails", async () => {
+    const root = await makeTempRoot();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        throw new Error("provider process failed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const inspectWorkspaceCommitsAhead = vi
+      .fn()
+      .mockRejectedValue(new Error("git rev-list failed"));
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns: new ActiveRunRegistry(),
+          provider,
+          root,
+          routine: {
+            kind: "git",
+            name: "dependency-update",
+            prompt: "Update dependencies.",
+            provider: null,
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: path.join(root, "dependency-update.md")
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-inspection-failed",
+        inspectWorkspaceCommitsAhead
+      });
+
+      expect(inspectWorkspaceCommitsAhead).toHaveBeenCalledWith({
+        baseBranch: "main",
+        workspacePath: path.join(root, "workspace")
+      });
+      expect(runStore.getRoutineFiring("fire-inspection-failed")).toMatchObject(
+        {
+          commitsAhead: true,
+          state: "failed",
+          terminalReason: "provider process failed"
+        }
+      );
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("fires a due one-shot report routine exactly once", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

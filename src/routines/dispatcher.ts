@@ -482,29 +482,17 @@ export async function dispatchDueRoutines(
         input.providersConfig as Partial<RunControllerProvidersConfig>
       )[providerName]?.command;
       if (provider === undefined) {
-        const reason = `provider_not_registered: ${providerName}`;
-        input.runStore.skipRoutineFanoutTarget({
-          fanoutId,
-          projectName: project.name,
-          skipReason: reason
-        });
         skipped.push({
           projectName: project.name,
-          reason,
+          reason: `provider_not_registered: ${providerName}`,
           routineName: routine.name
         });
         continue;
       }
       if (providerCommand === undefined) {
-        const reason = `provider_command_missing: ${providerName}`;
-        input.runStore.skipRoutineFanoutTarget({
-          fanoutId,
-          projectName: project.name,
-          skipReason: reason
-        });
         skipped.push({
           projectName: project.name,
-          reason,
+          reason: `provider_command_missing: ${providerName}`,
           routineName: routine.name
         });
         continue;

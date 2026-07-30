@@ -8,7 +8,6 @@ type ProviderShutdownState = {
   acceptingCourtesies: boolean;
   courtesies: Array<() => void>;
   promise: Promise<void>;
-  reserved: boolean;
 };
 type ProviderProcessGroupState = {
   reserved: boolean;
@@ -197,8 +196,6 @@ export function shutdownProviderProcess(
     if (beforeClose !== undefined) {
       if (existing.acceptingCourtesies) {
         existing.courtesies.push(beforeClose);
-      } else if (existing.reserved) {
-        runShutdownCourtesy(beforeClose);
       }
     }
     return existing.promise;
@@ -206,8 +203,7 @@ export function shutdownProviderProcess(
   const state: ProviderShutdownState = {
     acceptingCourtesies: true,
     courtesies: beforeClose === undefined ? [] : [beforeClose],
-    promise: Promise.resolve(),
-    reserved: false
+    promise: Promise.resolve()
   };
   state.promise = beginProviderShutdown(child, state);
   shuttingDown.set(child, state);
@@ -223,8 +219,6 @@ async function beginProviderShutdown(
     state.courtesies.length = 0;
     return;
   }
-  state.reserved = true;
-
   for (const courtesy of state.courtesies) {
     runShutdownCourtesy(courtesy);
   }
@@ -235,20 +229,16 @@ async function beginProviderShutdown(
     child.stdin.end();
   }
 
-  const terminateTimer = setTimeout(() => {
-    if (!signalProviderProcess(child, "SIGTERM")) {
-      return;
-    }
+  await shutdownDelay(GRACEFUL_EOF_MS);
+  if (!signalProviderProcess(child, "SIGTERM")) {
+    return;
+  }
 
-    const killTimer = setTimeout(() => {
-      signalProviderProcess(child, "SIGKILL");
-      child.stdin.destroy();
-      child.stdout.destroy();
-      child.stderr.destroy();
-    }, FORCE_KILL_GRACE_MS);
-    killTimer.unref();
-  }, GRACEFUL_EOF_MS);
-  terminateTimer.unref();
+  await shutdownDelay(FORCE_KILL_GRACE_MS);
+  signalProviderProcess(child, "SIGKILL");
+  child.stdin.destroy();
+  child.stdout.destroy();
+  child.stderr.destroy();
 }
 
 function runShutdownCourtesy(courtesy: () => void): void {
@@ -257,6 +247,12 @@ function runShutdownCourtesy(courtesy: () => void): void {
   } catch {
     // Provider-specific courtesy is best-effort; group shutdown must proceed.
   }
+}
+
+async function shutdownDelay(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
 }
 
 async function reserveProviderProcessGroup(

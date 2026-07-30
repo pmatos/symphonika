@@ -67,7 +67,11 @@ The shared shutdown operation is idempotent and performs this sequence:
 The escalation is keyed on the process group rather than the direct child's
 exit state because a cooperative parent can exit on `SIGTERM` while an
 uncooperative grandchild remains alive. Repeated shutdown requests reuse the
-same escalation rather than arming competing timers.
+same escalation rather than arming competing timers. The returned shutdown
+promise remains pending until the group is found absent or the `SIGKILL`
+escalation completes, so daemon shutdown cannot exit while the final cleanup
+timer is still outstanding. A courtesy registered after stdin EOF is skipped;
+it is no longer safe or useful to write a protocol frame to the ended stream.
 
 The orchestrator records the interval between the supervisor's group-ready and
 group-released messages. If the supervisor's IPC channel dies unexpectedly
@@ -189,6 +193,8 @@ The change is complete when:
   and a ready group remains cancellable after unexpected supervisor exit.
 - An already-dead group is harmless and repeated cancellation does not arm
   duplicate escalation sequences.
+- Shutdown completion covers the forced-kill grace period, and no courtesy is
+  written after stdin EOF.
 - Provider-level regressions prove a forked grandchild exits after
   cancellation for all three providers.
 - Existing daemon-shutdown and Watchdog tests still prove that their

@@ -87,7 +87,6 @@ describe("provider process lifecycle", () => {
         process.kill(supervisorPid!, "SIGKILL");
         await exited;
         await shutdownProviderProcess(child);
-        await new Promise((resolve) => setTimeout(resolve, 1_350));
 
         expect(isProcessRunning(providerPid)).toBe(false);
       } finally {

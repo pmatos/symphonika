@@ -199,7 +199,8 @@ describe("RunStore routines", () => {
           projectName: "alpha",
           providerCommand: "codex fake",
           providerName: "codex",
-          routineName: "refactor-audit"
+          routineName: "refactor-audit",
+          scheduledAt: "2026-05-22T10:00:00.000Z"
         })
       ).toBe(true);
 
@@ -241,7 +242,8 @@ describe("RunStore routines", () => {
           projectName: "beta",
           providerCommand: "codex fake",
           providerName: "codex",
-          routineName: "refactor-audit"
+          routineName: "refactor-audit",
+          scheduledAt: "2026-05-22T10:00:00.000Z"
         })
       ).toBe(false);
     } finally {
@@ -276,7 +278,8 @@ describe("RunStore routines", () => {
           projectName: "alpha",
           providerCommand: "codex fake",
           providerName: "codex",
-          routineName: "refactor-audit"
+          routineName: "refactor-audit",
+          scheduledAt: "2026-05-22T10:00:00.000Z"
         })
       ).toBe(true);
       store.completeRoutineFiring({ id: "fire-alpha", state: "succeeded" });
@@ -348,7 +351,8 @@ describe("RunStore routines", () => {
           projectName: "alpha",
           providerCommand: "codex fake",
           providerName: "codex",
-          routineName: "refactor-audit"
+          routineName: "refactor-audit",
+          scheduledAt: "2026-05-22T10:00:00.000Z"
         })
       ).toBe(true);
       store.completeRoutineFiring({ id: "fire-alpha", state: "succeeded" });
@@ -418,7 +422,8 @@ describe("RunStore routines", () => {
           projectName: "alpha",
           providerCommand: "codex fake",
           providerName: "codex",
-          routineName: "refactor-audit"
+          routineName: "refactor-audit",
+          scheduledAt: "2026-05-22T10:00:00.000Z"
         })
       ).toBe(true);
       store.completeRoutineFiring({ id: "fire-alpha", state: "succeeded" });
@@ -496,7 +501,8 @@ describe("RunStore routines", () => {
           projectName: "alpha",
           providerCommand: "codex fake",
           providerName: "codex",
-          routineName: "refactor-audit"
+          routineName: "refactor-audit",
+          scheduledAt: "2026-05-22T10:00:00.000Z"
         })
       ).toBe(true);
       expect(store.listReadyRoutineFanouts()).toEqual([]);
@@ -616,7 +622,8 @@ describe("RunStore routines", () => {
           projectName: "alpha",
           providerCommand: "codex fake",
           providerName: "codex",
-          routineName: "refactor-audit"
+          routineName: "refactor-audit",
+          scheduledAt: "2026-05-22T10:00:00.000Z"
         })
       ).toBe(true);
       store.completeRoutineFiring({
@@ -679,7 +686,8 @@ describe("RunStore routines", () => {
             projectName,
             providerCommand: "codex fake",
             providerName: "codex",
-            routineName: "refactor-audit"
+            routineName: "refactor-audit",
+            scheduledAt: "2026-05-22T10:00:00.000Z"
           })
         ).toBe(true);
       }

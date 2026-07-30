@@ -2000,6 +2000,11 @@ export class RunController {
       await this.runFreshLifecycle({
         attemptNumber: 1,
         extraInstructions: renderReviewFollowupInstructions(input.review),
+        // The parent is whatever run is currently tracked against this PR —
+        // by construction that run is parked at a wait/merge_pr state, so its
+        // current_state_id is never a valid start state for this dispatch.
+        // Fall back to expandedWorkflow.initial instead. See issue #358.
+        inheritParentState: false,
         isContinuation: true,
         issue: refreshed,
         parentRunId: input.parentRunId,
@@ -2137,6 +2142,7 @@ export class RunController {
   private async runFreshLifecycle(input: {
     attemptNumber: number;
     extraInstructions?: string;
+    inheritParentState?: boolean;
     isContinuation: boolean;
     issue: IssueSnapshot;
     parentRunId: string | null;
@@ -2186,6 +2192,7 @@ export class RunController {
   }
 
   private async claimAndPersistRun(input: {
+    inheritParentState?: boolean;
     isContinuation: boolean;
     issue: IssueSnapshot;
     parentRunId: string | null;
@@ -2286,6 +2293,9 @@ export class RunController {
       if (input.isContinuation && input.parentRunId !== null) {
         this.runStore.createContinuationRun({
           ...createInput,
+          ...(input.inheritParentState === undefined
+            ? {}
+            : { inheritParentState: input.inheritParentState }),
           parentRunId: input.parentRunId
         });
       } else {

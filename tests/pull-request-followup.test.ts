@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -163,6 +163,136 @@ describe("pull request follow-up", () => {
         lastFollowupRunId: "review-run-1",
         prNumber: 81,
         reviewDispatchCount: 1
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("actually runs the review-followup agent when the tracked PR's run is parked at a raw_fsm wait state", async () => {
+    // Regression for #358: dispatchReviewFollowup's parentRunId always points
+    // at whichever run is currently associated with the tracked PR — which,
+    // for a PR under active follow-up, is always parked at a `kind: wait`
+    // state (that's why it's being followed up on). createContinuationRun's
+    // parent-state inheritance is only valid when the parent's current state
+    // was just forward-stamped as a target for this exact continuation
+    // (state-advance, wait-park-advance); here it's stale, and inheriting it
+    // used to trip the parked-action guard and silently no-op the dispatch.
+    const root = await makeTempRoot();
+    await writeRawFsmReviewFollowupProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-review-followup";
+      const workspacePath = path.join(
+        root,
+        ".symphonika",
+        "workspaces",
+        "symphonika",
+        "issues",
+        "54-review-followup"
+      );
+      // The branch is already ahead of main, mirroring an open PR's branch —
+      // the follow-up run's transition back to wait_for_pr requires
+      // branch_ahead_of_base, which classifyFailure verifies against the
+      // real git state of this workspace.
+      await createGitWorkspaceAhead({ branchName, workspacePath });
+
+      // The run associated with the tracked PR sits parked at wait_for_pr —
+      // exactly where every tracked PR's run is while it's being polled.
+      seedWaitingParentRun(store, {
+        branchName,
+        currentStateId: "wait_for_pr",
+        runId: "parent-run",
+        workspacePath
+      });
+      store.trackPullRequest({
+        branchName,
+        headSha: "abc123",
+        issueNumber: 54,
+        prNumber: 81,
+        prUrl: "https://example.test/pr/81",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const providerInputs: ProviderRunInput[] = [];
+      const provider = fakeProvider(providerInputs);
+      const project = rawFsmReviewFollowupProjectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue(issueFixture()),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(
+          prState({
+            reviewDecision: "CHANGES_REQUESTED",
+            unresolvedReviewThreads: [
+              {
+                comments: [
+                  {
+                    author: "reviewer",
+                    body: "Please wire this into the daemon poll loop.",
+                    createdAt: "2026-05-04T10:00:00Z",
+                    line: 24,
+                    path: "src/daemon.ts",
+                    url: "https://github.com/pmatos/symphonika/pull/81#discussion_r1"
+                  }
+                ],
+                id: "PRRT_kwDO",
+                isResolved: false,
+                line: 24,
+                path: "src/daemon.ts"
+              }
+            ]
+          })
+        ),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider,
+        root,
+        runStore: store,
+        workspacePath
+      });
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        logger: pino({ enabled: false }),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      expect(result).toEqual({
+        action: "review_dispatch",
+        prNumber: 81,
+        runId: "review-run-1"
+      });
+
+      // The core bug: dispatch was recorded as successful, but the agent
+      // that was supposed to read the review feedback never launched.
+      expect(providerInputs).toHaveLength(1);
+      expect(providerInputs[0]!.prompt).toContain(
+        "Pull request review follow-up"
+      );
+      expect(providerInputs[0]!.prompt).toContain(
+        "Please wire this into the daemon poll loop."
+      );
+
+      // Not just "did it launch" — it must also complete successfully and
+      // re-advance the FSM (implement's transition requires
+      // branch_ahead_of_base as well as provider_success), not land on the
+      // `to: failed` catch-all.
+      const reviewRun = store.getRun("review-run-1");
+      expect(reviewRun).toMatchObject({
+        continuationParentRunId: "parent-run",
+        isContinuation: true,
+        state: "succeeded"
       });
     } finally {
       store.close();
@@ -1051,6 +1181,105 @@ function seedSucceededRun(
     workspacePath: input.workspacePath
   });
   store.updateRunState(input.runId, "succeeded");
+}
+
+function seedWaitingParentRun(
+  store: RunStore,
+  input: {
+    branchName: string;
+    currentStateId: string;
+    runId: string;
+    workspacePath: string;
+  }
+): void {
+  store.createRun({
+    id: input.runId,
+    issue: normalizedIssue(),
+    projectName: "symphonika",
+    providerCommand: DEFAULT_CODEX_COMMAND,
+    providerName: "codex"
+  });
+  store.updateRunEvidence(input.runId, {
+    branchName: input.branchName,
+    branchRef: `refs/heads/${input.branchName}`,
+    issueSnapshotPath: "/tmp/issue-snapshot.json",
+    metadataPath: "/tmp/prompt-metadata.json",
+    normalizedLogPath: "/tmp/provider.normalized.jsonl",
+    promptPath: "/tmp/prompt.md",
+    rawLogPath: "/tmp/provider.raw.jsonl",
+    workflowGraphPath: "/tmp/workflow-graph.json",
+    workspacePath: input.workspacePath
+  });
+  store.setRunCurrentState(input.runId, input.currentStateId);
+  store.updateRunState(input.runId, "waiting");
+}
+
+async function writeRawFsmReviewFollowupProject(root: string): Promise<void> {
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "providers:",
+      "  codex:",
+      `    command: "${DEFAULT_CODEX_COMMAND}"`,
+      "  claude:",
+      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      "projects: []",
+      ""
+    ].join("\n")
+  );
+  await mkdir(path.join(root, "prompts"), { recursive: true });
+  await writeFile(
+    path.join(root, "prompts", "implement.md"),
+    [
+      "# Issue #{{issue.number}}",
+      "",
+      "{{issue.body}}",
+      "",
+      "Branch: {{branch.name}}",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: review_followup_regression",
+      "  initial: implement",
+      "  states:",
+      "    implement:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: prompts/implement.md",
+      "      transitions:",
+      "        - to: wait_for_pr",
+      "          when:",
+      "            provider_success: true",
+      "            branch_ahead_of_base: true",
+      "        - to: failed",
+      "    wait_for_pr:",
+      "      action:",
+      "        kind: wait",
+      "      transitions:",
+      "        - to: merged",
+      "          when:",
+      "            pr_merged: true",
+      "    merged:",
+      "      terminal: success",
+      "    failed:",
+      "      terminal: blocked",
+      ""
+    ].join("\n")
+  );
+}
+
+function rawFsmReviewFollowupProjectConfig(): RunControllerProjectConfig {
+  return {
+    ...projectConfig(),
+    workflow: { format: "auto", path: "./workflow.yml" }
+  };
 }
 
 async function writeProject(root: string): Promise<void> {

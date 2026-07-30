@@ -23,12 +23,12 @@ export const DEFAULT_ROUTINE_WORKSPACE_RETENTION: RoutineWorkspaceRetentionPolic
     succeededDays: 1
   };
 
-export type RoutineWorkspacePruneEntry = {
+type RoutineWorkspacePruneEntry = {
   firingId: string;
   workspacePath: string;
 };
 
-export type RoutineWorkspacePruneFailure = RoutineWorkspacePruneEntry & {
+type RoutineWorkspacePruneFailure = RoutineWorkspacePruneEntry & {
   error: string;
 };
 

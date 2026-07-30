@@ -4,6 +4,7 @@ import type { ProcessCommand } from "../lifecycle/process-scope.js";
 
 const GRACEFUL_EOF_MS = 250;
 const FORCE_KILL_GRACE_MS = 1_000;
+const SHUTDOWN_PREPARATION_TIMEOUT_MS = 250;
 type ProviderShutdownState = {
   acceptingCourtesies: boolean;
   courtesies: Array<() => void>;
@@ -112,9 +113,14 @@ function fail(message) {
     return;
   }
   settled = true;
-  provider?.kill("SIGKILL");
-  guardian.kill("SIGKILL");
   process.stderr.write(\`\${message}\\n\`);
+  try {
+    process.kill(-process.pid, "SIGKILL");
+    return;
+  } catch {
+    provider?.kill("SIGKILL");
+    guardian.kill("SIGKILL");
+  }
   process.exit(127);
 }
 
@@ -276,6 +282,7 @@ async function reserveProviderProcessGroup(
         return;
       }
       settled = true;
+      clearTimeout(preparationTimer);
       child.off("message", onMessage);
       child.off("disconnect", onDisconnect);
       child.off("exit", onExit);
@@ -294,6 +301,9 @@ async function reserveProviderProcessGroup(
     const onExit = (): void => {
       settle(isProviderProcessGroupReserved(child));
     };
+    const preparationTimer = setTimeout(() => {
+      settle(isProviderProcessGroupReserved(child));
+    }, SHUTDOWN_PREPARATION_TIMEOUT_MS);
 
     child.on("message", onMessage);
     child.once("disconnect", onDisconnect);

@@ -84,7 +84,15 @@ group-released messages. If the supervisor's IPC channel dies unexpectedly
 during that interval, the known-live guardian still reserves the original PGID,
 so shutdown safely falls back to the same group signal sequence. A disconnect
 before readiness cannot strand provider work because the provider is not
-launched until readiness has been reported.
+launched until readiness has been reported. The preparation handshake is
+bounded to 250 milliseconds; a timeout falls back only when that recorded
+guardian reservation is live, so a stopped supervisor cannot block
+cancellation without allowing an unverified bare-PGID signal.
+
+The supervisor treats unexpected guardian exit as a failure of the entire Run
+boundary. It signals its own process group with `SIGKILL` before exiting, so the
+provider and any descendants cannot survive the loss of the process that
+preserved their group identity.
 
 `ESRCH` means the process group is already gone and is treated as successful
 cleanup at either signal step. Other synchronous group-signal failures must not
@@ -152,7 +160,9 @@ Implementation proceeds in vertical red-green slices:
 7. Add shared lifecycle regressions proving shutdown preparation preempts
    provider launch and a recorded group remains cancellable after unexpected
    supervisor IPC loss.
-8. Re-run existing daemon-shutdown and Watchdog cancellation tests to confirm
+8. Add failure regressions proving guardian loss terminates the whole group and
+   a stopped supervisor cannot hold shutdown preparation open indefinitely.
+9. Re-run existing daemon-shutdown and Watchdog cancellation tests to confirm
    those callers still converge on `provider.cancel`.
 
 The subprocess regressions are POSIX-only because negative-PID process groups
@@ -197,6 +207,8 @@ The change is complete when:
   supervisor acknowledges that the guardian is reserved.
 - Shutdown acknowledged before guardian readiness never launches the provider,
   and a ready group remains cancellable after unexpected supervisor exit.
+- Guardian failure terminates the entire group, and shutdown preparation has a
+  bounded fallback for an already-recorded group.
 - Ordinary group release and shutdown reservation cannot both succeed.
 - An already-dead group is harmless and repeated cancellation does not arm
   duplicate escalation sequences.

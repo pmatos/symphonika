@@ -24,8 +24,14 @@ export type ProviderEvent = {
   raw: unknown;
 };
 
+type ProviderExecutionOptions = {
+  disableBackgroundTasks?: boolean;
+  disallowedTools?: readonly string[];
+};
+
 export type ProviderRunInput = {
   branchName: string;
+  executionOptions?: ProviderExecutionOptions;
   issue: IssueSnapshot;
   prompt: string;
   promptPath: string;

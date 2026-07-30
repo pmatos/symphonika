@@ -32,7 +32,13 @@ import {
   validateExpandedWorkflowReferences
 } from "./workflow.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
-import type { TargetedRoutineDeclaration } from "./routines/types.js";
+import { renderProviderCommandTemplate } from "./provider-command-template.js";
+import type {
+  RoutineEffort,
+  RoutinePermissionMode,
+  RoutineStatus,
+  TargetedRoutineDeclaration
+} from "./routines/types.js";
 
 export type RuntimeConfigSnapshot = {
   configPath: string;
@@ -55,6 +61,7 @@ export type RuntimeConfigSnapshot = {
   projects: RuntimeProjectConfig[];
   providers: RunControllerProvidersConfig;
   pullRequestPolicy: PullRequestFollowupPolicy;
+  routineDefaults: RoutineDefaultsConfig;
   watchdog: WatchdogConfig;
 };
 
@@ -130,6 +137,18 @@ const projectWatchdogConfigSchema = z
     grace_minutes: z.number().int().positive()
   })
   .strict();
+
+// Service-level fallback for per-routine model/effort/permission_mode/
+// timeout_minutes (issue #291): a routine's own front-matter value wins,
+// else this block, else the provider command as authored (no timeout).
+const routineDefaultsSchema = z
+  .object({
+    model: z.string().trim().min(1).optional(),
+    effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+    permission_mode: z.literal("bypass").optional(),
+    timeout_minutes: z.number().int().positive().optional()
+  })
+  .passthrough();
 
 const trackerSchema = z
   .object({
@@ -269,6 +288,7 @@ const serviceConfigSchema = z
       .passthrough()
       .optional(),
     watchdog: watchdogConfigSchema.optional(),
+    routine_defaults: routineDefaultsSchema.optional(),
     providers: z
       .object({
         codex: providerCommandSchema,
@@ -342,6 +362,10 @@ export class RuntimeConfigReloader {
       projects: this.snapshot?.projects ?? [],
       watchdog: this.snapshot?.watchdog ?? DEFAULT_WATCHDOG_CONFIG
     };
+  }
+
+  routineDefaultsConfig(): RoutineDefaultsConfig {
+    return this.snapshot?.routineDefaults ?? {};
   }
 
   async reload(): Promise<RuntimeConfigSnapshot | undefined> {
@@ -465,6 +489,16 @@ async function loadRuntimeConfigSnapshot(input: {
   // ADR 0062 / 0063.
   const serviceRoutines = parsed.data.routines ?? [];
   if (serviceRoutines.length > 0) {
+    const routineDefaults = normalizeRoutineDefaults(
+      parsed.data.routine_defaults
+    );
+    const routineProviderCommandsByName: Partial<Record<string, string>> = {
+      claude: parsed.data.providers.claude.command,
+      codex: parsed.data.providers.codex.command,
+      ...(parsed.data.providers.omp === undefined
+        ? {}
+        : { omp: parsed.data.providers.omp.command })
+    };
     const previousRoutines =
       input.previous?.projects.flatMap((project) => project.routines ?? []) ??
       [];
@@ -572,6 +606,38 @@ async function loadRuntimeConfigSnapshot(input: {
           continue;
         }
         attached.push(routine);
+        // Cross-check the routine's resolved model/effort/permission_mode
+        // against its resolved provider's authored command template — this is
+        // the reload-time surface that satisfies "validated at declaration
+        // load" (issue #291): a routine can only know its own front-matter
+        // fields, and providers:/routine_defaults: are parsed in this same
+        // function, so this is the earliest point both are known together.
+        const routineProviderName = routine.provider ?? project.agent.provider;
+        const routineProviderCommand =
+          routineProviderCommandsByName[routineProviderName];
+        if (routineProviderCommand !== undefined) {
+          const resolved = resolveRoutineExecutionConfig(routineDefaults, {
+            effort: routine.effort ?? null,
+            model: routine.model ?? null,
+            permissionMode: routine.permissionMode ?? null,
+            timeoutMinutes: routine.timeoutMinutes ?? null
+          });
+          try {
+            const { unreferencedFields } = renderProviderCommandTemplate(
+              routineProviderCommand,
+              resolved
+            );
+            for (const field of unreferencedFields) {
+              errors.push(
+                `routine "${routine.name}" at ${routine.sourcePath} declares ${field}, but providers.${routineProviderName}.command never references it`
+              );
+            }
+          } catch (error) {
+            errors.push(
+              `routine "${routine.name}" at ${routine.sourcePath} providers.${routineProviderName}.command is invalid: ${errorMessage(error)}`
+            );
+          }
+        }
       }
       project.routines = attached;
       if (trackerlessGitRoutines.length > 0) {
@@ -621,6 +687,7 @@ async function loadRuntimeConfigSnapshot(input: {
       pullRequestPolicy:
         pullRequestFollowupPolicyFromRaw(raw) ??
         DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY,
+      routineDefaults: normalizeRoutineDefaults(parsed.data.routine_defaults),
       watchdog: normalizeWatchdogConfig(parsed.data.watchdog)
     },
     usingLastKnownGood: false
@@ -888,6 +955,21 @@ function normalizeWatchdogConfig(
   };
 }
 
+function normalizeRoutineDefaults(
+  raw: z.infer<typeof routineDefaultsSchema> | undefined
+): RoutineDefaultsConfig {
+  return {
+    ...(raw?.model === undefined ? {} : { model: raw.model }),
+    ...(raw?.effort === undefined ? {} : { effort: raw.effort }),
+    ...(raw?.permission_mode === undefined
+      ? {}
+      : { permissionMode: raw.permission_mode }),
+    ...(raw?.timeout_minutes === undefined
+      ? {}
+      : { timeoutMinutes: raw.timeout_minutes })
+  };
+}
+
 export function resolveWatchdogConfig(
   serviceConfig: WatchdogServiceConfig,
   projectName: string
@@ -901,6 +983,32 @@ export function resolveWatchdogConfig(
   return {
     ...serviceConfig.watchdog,
     graceMinutes: projectOverride.graceMinutes
+  };
+}
+
+export type RoutineDefaultsConfig = {
+  effort?: RoutineEffort;
+  model?: string;
+  permissionMode?: RoutinePermissionMode;
+  timeoutMinutes?: number;
+};
+
+export function resolveRoutineExecutionConfig(
+  defaults: RoutineDefaultsConfig,
+  routine: Pick<
+    RoutineStatus,
+    "effort" | "model" | "permissionMode" | "timeoutMinutes"
+  >
+): RoutineDefaultsConfig {
+  const effort = routine.effort ?? defaults.effort;
+  const model = routine.model ?? defaults.model;
+  const permissionMode = routine.permissionMode ?? defaults.permissionMode;
+  const timeoutMinutes = routine.timeoutMinutes ?? defaults.timeoutMinutes;
+  return {
+    ...(effort === undefined ? {} : { effort }),
+    ...(model === undefined ? {} : { model }),
+    ...(permissionMode === undefined ? {} : { permissionMode }),
+    ...(timeoutMinutes === undefined ? {} : { timeoutMinutes })
   };
 }
 

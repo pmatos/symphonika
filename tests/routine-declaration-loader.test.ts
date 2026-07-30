@@ -81,6 +81,90 @@ describe("RoutineDeclarationLoader", () => {
     expect(result.errors.join("\n")).toContain(expectedError);
   });
 
+  it("parses model, effort, permission_mode, and timeout_minutes front matter", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "refactor-audit.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: refactor-audit",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "provider: claude",
+        "model: claude-opus-4-8",
+        "effort: xhigh",
+        "permission_mode: bypass",
+        "timeout_minutes: 60",
+        "---",
+        "Audit.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.routine).toMatchObject({
+      effort: "xhigh",
+      model: "claude-opus-4-8",
+      permissionMode: "bypass",
+      timeoutMinutes: 60
+    });
+  });
+
+  it.each([
+    ["model", "model: ''", "model must be a non-empty string"],
+    [
+      "effort",
+      "effort: extreme",
+      "effort must be one of low, medium, high, xhigh, max"
+    ],
+    [
+      "permission_mode",
+      "permission_mode: default",
+      "permission_mode must be bypass"
+    ],
+    [
+      "timeout_minutes (zero)",
+      "timeout_minutes: 0",
+      "timeout_minutes must be a positive integer"
+    ],
+    [
+      "timeout_minutes (negative)",
+      "timeout_minutes: -5",
+      "timeout_minutes must be a positive integer"
+    ],
+    [
+      "timeout_minutes (non-integer)",
+      "timeout_minutes: 1.5",
+      "timeout_minutes must be a positive integer"
+    ]
+  ])("rejects an invalid %s value", async (_label, field, expectedError) => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "invalid-execution-config.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: invalid-execution-config",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        field,
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.routine).toBeNull();
+    expect(result.errors.join("\n")).toContain(expectedError);
+  });
+
   it("parses a Markdown kind: git routine", async () => {
     const root = await makeTempRoot();
     const routinePath = path.join(root, "dependency-update.md");

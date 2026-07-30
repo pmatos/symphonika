@@ -14,11 +14,23 @@ watchdog:
 # global:
 #   max_in_flight: 8
 
+# Service-level fallback for per-routine model/effort/permission_mode/
+# timeout_minutes (a routine's own front matter wins per-field; omitting this
+# block entirely means no defaults and no wall-clock timeout). See ADR 0067.
+# routine_defaults:
+#   permission_mode: bypass
+#   timeout_minutes: 60
+
+# Provider commands may reference {{model}}, {{effort}}, and
+# {{permission_mode}} — plain tags substitute the resolved value; the
+# {{#tag}}...{{/tag}} section form omits the enclosed text entirely when the
+# field isn't resolved for a given call (issue Runs never resolve these, so
+# sections always collapse to nothing for them). See SPEC §5.1 / ADR 0067.
 providers:
   codex:
-    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
+    command: 'codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never {{#model}}-c model="{{model}}" {{/model}}{{#effort}}-c model_reasoning_effort="{{effort}}" {{/effort}}--dangerously-bypass-approvals-and-sandbox app-server'
   claude:
-    command: "claude -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json"
+    command: "claude -p {{#model}}--model {{model}} {{/model}}{{#effort}}--effort {{effort}} {{/effort}}--dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json"
   omp:
     command: "omp --mode rpc --auto-approve"
 

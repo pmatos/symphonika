@@ -7,7 +7,9 @@ import type { AgentProviderName } from "../provider.js";
 import { isIanaTimezone, normalizeRoutineCron } from "./schedule.js";
 import type {
   RoutineDeclaration,
+  RoutineEffort,
   RoutineKind,
+  RoutinePermissionMode,
   RoutineSchedule
 } from "./types.js";
 
@@ -19,6 +21,8 @@ export type RoutineDeclarationLoadResult = {
 
 const providerNames = new Set(["codex", "claude", "omp"]);
 const routineKinds = new Set(["git", "report"]);
+const routineEfforts = new Set(["low", "medium", "high", "xhigh", "max"]);
+const routinePermissionModes = new Set(["bypass"]);
 
 export async function loadRoutineDeclaration(
   routinePath: string
@@ -105,6 +109,44 @@ export function parseRoutineDeclaration(
     }
   }
 
+  const modelValue = stringField(frontMatter, "model");
+  if (Object.hasOwn(frontMatter, "model") && modelValue === undefined) {
+    errors.push(`routine at ${routinePath} model must be a non-empty string`);
+  }
+
+  const effortValue = stringField(frontMatter, "effort");
+  if (
+    Object.hasOwn(frontMatter, "effort") &&
+    (effortValue === undefined || !routineEfforts.has(effortValue))
+  ) {
+    errors.push(
+      `routine at ${routinePath} effort must be one of low, medium, high, xhigh, max`
+    );
+  }
+
+  const permissionModeValue = stringField(frontMatter, "permission_mode");
+  if (
+    Object.hasOwn(frontMatter, "permission_mode") &&
+    (permissionModeValue === undefined ||
+      !routinePermissionModes.has(permissionModeValue))
+  ) {
+    errors.push(`routine at ${routinePath} permission_mode must be bypass`);
+  }
+
+  const timeoutMinutesValue = frontMatter.timeout_minutes;
+  if (
+    Object.hasOwn(frontMatter, "timeout_minutes") &&
+    !(
+      typeof timeoutMinutesValue === "number" &&
+      Number.isInteger(timeoutMinutesValue) &&
+      timeoutMinutesValue > 0
+    )
+  ) {
+    errors.push(
+      `routine at ${routinePath} timeout_minutes must be a positive integer`
+    );
+  }
+
   const schedule = recordField(frontMatter, "schedule");
   const parsedSchedule = parseRoutineSchedule(schedule, routinePath, errors);
 
@@ -153,12 +195,22 @@ export function parseRoutineDeclaration(
       catchUp:
         catchUpValue === "fire_once_if_missed" ? "fire_once_if_missed" : "skip",
       disabled: typeof disabledValue === "boolean" ? disabledValue : false,
+      ...(effortValue === undefined
+        ? {}
+        : { effort: effortValue as RoutineEffort }),
       kind: kind as RoutineKind,
+      ...(modelValue === undefined ? {} : { model: modelValue }),
       name: name!,
+      ...(permissionModeValue === undefined
+        ? {}
+        : { permissionMode: permissionModeValue as RoutinePermissionMode }),
       prompt,
       provider,
       schedule: parsedSchedule!,
-      sourcePath: routinePath
+      sourcePath: routinePath,
+      ...(typeof timeoutMinutesValue === "number"
+        ? { timeoutMinutes: timeoutMinutesValue }
+        : {})
     }
   };
 }

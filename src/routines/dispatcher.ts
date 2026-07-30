@@ -21,6 +21,14 @@ import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig
 } from "../lifecycle/run-controller.js";
+import {
+  resolveRoutineExecutionConfig,
+  type RoutineDefaultsConfig
+} from "../reload.js";
+import {
+  ProviderCommandTemplateError,
+  renderProviderCommandTemplate
+} from "../provider-command-template.js";
 import type { RunStore } from "../run-store.js";
 import {
   evaluateRoutineSchedule,
@@ -29,6 +37,7 @@ import {
 } from "./schedule.js";
 import {
   renderRoutinePrompt,
+  ROUTINE_ONE_SHOT_NOTICE,
   RoutinePromptRenderError
 } from "./prompt-renderer.js";
 import type {
@@ -59,6 +68,7 @@ export type DispatchDueRoutinesInput = {
   projects: Map<string, RunControllerProjectConfig>;
   providersConfig: RunControllerProvidersConfig;
   recomputeSchedulesFromNow?: boolean;
+  routineDefaults?: RoutineDefaultsConfig;
   runStore: RunStore;
   stateRoot: string;
 };
@@ -79,6 +89,7 @@ export async function dispatchDueRoutines(
   const fired: string[] = [];
   const skipped: DispatchDueRoutinesResult["skipped"] = [];
   const now = input.now ?? new Date();
+  const routineDefaults = input.routineDefaults ?? {};
   const prepareRoutineWorkspace =
     input.prepareRoutineWorkspace ?? defaultPrepareRoutineWorkspace;
   const createFiringId = input.createFiringId ?? (() => createUlid());
@@ -365,6 +376,7 @@ export async function dispatchDueRoutines(
           providerCommand,
           providerName,
           routine: routineDetail,
+          routineDefaults,
           runStore: input.runStore,
           stateRoot: input.stateRoot,
           configDir: input.configDir,
@@ -394,6 +406,7 @@ async function runRoutineFiring(input: {
   providerCommand: string;
   providerName: AgentProviderName;
   routine: RoutineStatus & { prompt: string };
+  routineDefaults: RoutineDefaultsConfig;
   runStore: RunStore;
   stateRoot: string;
 }): Promise<void> {
@@ -401,6 +414,7 @@ async function runRoutineFiring(input: {
   let prepared: PreparedRoutineWorkspace | undefined;
   let rawLogPath: string | undefined;
   let normalizedLogPath: string | undefined;
+  let timeoutTimer: NodeJS.Timeout | undefined;
   try {
     input.runStore.updateRoutineFiringState(
       input.firingId,
@@ -432,13 +446,36 @@ async function runRoutineFiring(input: {
       rawLogPath,
       workspacePath: prepared.workspacePath
     });
-    await input.provider.validate(input.providerCommand);
+    const resolved = resolveRoutineExecutionConfig(
+      input.routineDefaults,
+      input.routine
+    );
+    const renderedProviderCommand = renderProviderCommandTemplate(
+      input.providerCommand,
+      resolved
+    ).rendered;
+    await input.provider.validate(renderedProviderCommand);
     input.runStore.updateRoutineFiringState(input.firingId, "running");
     input.activeRuns.attachProvider(input.firingId, {
       cancel: () => input.provider.cancel(input.firingId),
       provider: input.provider,
       respectsIssueLabels: false
     });
+    // Armed only once the cancel handle above exists, so the timer can never
+    // fire against a reserved-only slot with a no-op cancel handler. This is
+    // a declared deadline (issue #291), distinct from the Watchdog's
+    // progress-liveness check (ADR 0054, #269, out of scope here) and from
+    // operator/daemon_shutdown cancellation — it fires regardless of
+    // progress. Cleared in the `finally` below on every exit path.
+    timeoutTimer =
+      resolved.timeoutMinutes === undefined
+        ? undefined
+        : setTimeout(() => {
+            void input.activeRuns.requestCancel(
+              input.firingId,
+              "firing_timeout"
+            );
+          }, resolved.timeoutMinutes * 60_000);
 
     // A cancel can land DURING the potentially long workspace prep above (or
     // provider.validate) — before this point only the reserveSlot noop
@@ -457,11 +494,25 @@ async function runRoutineFiring(input: {
 
     for await (const event of input.provider.runAttempt({
       branchName: prepared.branchName,
+      // Routine firings are exactly one-shot headless runs — never
+      // re-invoked — so ScheduleWakeup/Monitor/CronCreate (which tempt the
+      // model to background work expecting a re-invocation) are always
+      // denied and background Bash tasks are disabled, unconditionally, on
+      // every Claude routine firing. Claude-only per the issue's framing;
+      // issue-Runs never set executionOptions and keep today's behavior.
+      ...(input.providerName === "claude"
+        ? {
+            executionOptions: {
+              disableBackgroundTasks: true,
+              disallowedTools: ["ScheduleWakeup", "Monitor", "CronCreate"]
+            }
+          }
+        : {}),
       issue: routineIssueSnapshot(input.routine),
       prompt: evidence.prompt,
       promptPath: evidence.promptPath,
       provider: {
-        command: input.providerCommand,
+        command: renderedProviderCommand,
         name: input.providerName
       },
       run: {
@@ -482,16 +533,20 @@ async function runRoutineFiring(input: {
     // Mirrors classifyFailure's cancelRequested fast path (checked before
     // any exit-code/event inspection there too): once an operator cancel is
     // observed, the firing reports cancelled even if the process happened
-    // to exit cleanly in the same race.
+    // to exit cleanly in the same race. A firing_timeout cancel is reported
+    // as a distinct failed/firing_timeout outcome instead, per issue #291 —
+    // it is a declared deadline, not an ordinary cancellation.
     const cancelEntry = input.activeRuns.get(input.firingId);
     const outcome =
-      cancelEntry?.cancelRequested === true
-        ? { kind: "cancelled" as const, reason: "cancelled" }
-        : await classifyRoutineOutcome(events, {
-            baseBranch: input.project.workspace.git.base_branch,
-            kind: input.routine.kind,
-            workspacePath: prepared.workspacePath
-          });
+      cancelEntry?.cancelReason === "firing_timeout"
+        ? { kind: "failed" as const, reason: "firing_timeout" }
+        : cancelEntry?.cancelRequested === true
+          ? { kind: "cancelled" as const, reason: "cancelled" }
+          : await classifyRoutineOutcome(events, {
+              baseBranch: input.project.workspace.git.base_branch,
+              kind: input.routine.kind,
+              workspacePath: prepared.workspacePath
+            });
     input.runStore.completeRoutineFiring({
       id: input.firingId,
       state: outcome.kind,
@@ -515,12 +570,16 @@ async function runRoutineFiring(input: {
     }
   } catch (error) {
     const cancelEntry = input.activeRuns.get(input.firingId);
-    const cancelled = cancelEntry?.cancelRequested === true;
-    const reason = cancelled
-      ? "cancelled"
-      : error instanceof RoutinePromptRenderError
-        ? error.terminalReason
-        : errorMessage(error);
+    const timedOut = cancelEntry?.cancelReason === "firing_timeout";
+    const cancelled = !timedOut && cancelEntry?.cancelRequested === true;
+    const reason = timedOut
+      ? "firing_timeout"
+      : cancelled
+        ? "cancelled"
+        : error instanceof RoutinePromptRenderError ||
+            error instanceof ProviderCommandTemplateError
+          ? error.terminalReason
+          : errorMessage(error);
     input.runStore.completeRoutineFiring({
       id: input.firingId,
       state: cancelled ? "cancelled" : "failed",
@@ -532,6 +591,10 @@ async function runRoutineFiring(input: {
         ? {}
         : { workspacePath: prepared.workspacePath })
     });
+  } finally {
+    if (timeoutTimer !== undefined) {
+      clearTimeout(timeoutTimer);
+    }
   }
 }
 
@@ -560,6 +623,7 @@ async function prepareRoutineEvidence(input: {
           }
         }
       : {}),
+    extraInstructions: ROUTINE_ONE_SHOT_NOTICE,
     firing: { id: input.firingId },
     project: { name: input.project.name },
     provider: { command: input.providerCommand, name: input.providerName },

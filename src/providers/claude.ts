@@ -96,9 +96,18 @@ export function createClaudeProvider(
       const activeRun: ActiveClaudeRun = { cancelled: false };
       activeRuns.set(input.run.id, activeRun);
 
+      const parsedCommand = parseCommand(input.provider.command);
+      if (input.executionOptions?.disallowedTools !== undefined) {
+        // Variadic — must be last, so it consumes only the tool names that
+        // follow (mirrors ptt's build_argv comment for the same flag).
+        parsedCommand.args.push(
+          "--disallowedTools",
+          ...input.executionOptions.disallowedTools
+        );
+      }
       const command = await processScope.wrapForProviderScope(
         input.run,
-        parseCommand(input.provider.command)
+        parsedCommand
       );
       if (activeRun.cancelled) {
         // Outside the try/finally below (which owns the only other
@@ -121,7 +130,13 @@ export function createClaudeProvider(
         };
         return;
       }
-      const child = spawnProviderProcess(command, input.workspacePath);
+      const child = spawnProviderProcess(
+        command,
+        input.workspacePath,
+        input.executionOptions?.disableBackgroundTasks === true
+          ? { ...process.env, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" }
+          : process.env
+      );
       activeRun.child = child;
       child.stderr.resume();
       const queue = createProcessQueue(child);

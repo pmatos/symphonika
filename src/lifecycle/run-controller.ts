@@ -39,6 +39,7 @@ import type {
   PrepareIssueWorkspaceInput
 } from "../workspace.js";
 import { prepareIssueWorkspace as defaultPrepareIssueWorkspace } from "../workspace.js";
+import { renderProviderCommandTemplate } from "../provider-command-template.js";
 import { readFile } from "node:fs/promises";
 
 import type { WorkflowReference } from "../config-schemas.js";
@@ -2526,7 +2527,11 @@ export class RunController {
         ...(promptTemplate === undefined ? {} : { promptTemplate }),
         runId: input.runId
       });
-      await input.provider.validate(input.providerCommand);
+      const renderedProviderCommand = renderProviderCommandTemplate(
+        input.providerCommand,
+        {}
+      ).rendered;
+      await input.provider.validate(renderedProviderCommand);
       await (
         this.githubIssuesApi as LabelWritingGitHubIssuesApi
       ).addLabelsToIssue({
@@ -2577,7 +2582,7 @@ export class RunController {
         prompt: started.prompt,
         promptPath: started.promptPath,
         provider: input.provider,
-        providerCommand: input.providerCommand,
+        providerCommand: renderedProviderCommand,
         providerName: input.providerName,
         runId: input.runId,
         runtime

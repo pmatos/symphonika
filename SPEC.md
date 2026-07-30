@@ -209,6 +209,14 @@ Symphonika supports hand-authored Markdown routine files with YAML front matter:
 - optional `provider`
 - optional `catch_up: fire_once_if_missed` (omitted means missed clock events are skipped)
 - optional `allow_overlap: true` (omitted means overlapping firings are skipped)
+- optional `model`, `effort`, `permission_mode`, `timeout_minutes` — per-routine provider tuning and
+  a wall-clock firing deadline. Each falls back to the service-level `routine_defaults:` block
+  (§5.1), then to the provider command as authored (no flag, no timeout). Delivered to the provider
+  via command templating, not argv injection: `providers.<name>.command` may reference `{{model}}`,
+  `{{effort}}`, and `{{permission_mode}}` (see §5.1); a routine that declares `model` or `effort`
+  its resolved provider's command never references is a declaration-load error (§5.4).
+  `permission_mode` is exempt from this check — every provider already independently enforces bypass
+  permissions, so an untemplated `permission_mode` is redundant, not silently ignored. See ADR 0067.
 
 Recurring schedules use five-field POSIX cron. They accept the `hourly`, `daily`, `weekly`,
 `monthly`, and `yearly` aliases with or without an `@` prefix. `schedule.tz` defaults to `Etc/UTC`.
@@ -233,6 +241,13 @@ remains active and advances to its next clock event after every firing.
 A clock event skipped for catch-up policy, overlap, or a concurrency cap is not a Routine Firing:
 no `routine_firings` row is created. The Routine instead records `last_attempted_at`,
 `last_skip_reason`, and `last_skip_at`, together with rolling 24-hour counts for each skip reason.
+
+A Firing whose declared `timeout_minutes` elapses is terminated (the whole provider process group,
+reusing the same kill mechanism as operator cancellation) and completes as `state: failed` with the
+distinct `terminal_reason: firing_timeout` — never the generic `cancelled`/`process_exit_*` reasons
+another cancel or ordinary exit produces. This bounds only the provider's execution window, not
+workspace preparation; it is a declared deadline, complementary to (not a duplicate of) the Watchdog's
+progress-liveness check (ADR 0054), which does not observe Routine Firings at all. See §8.5.
 
 ## 5. Config Files
 
@@ -293,6 +308,13 @@ watchdog:
   sample_interval_seconds: 60
   mtime_ignore: []
 
+# Service-level fallback for per-routine model/effort/permission_mode/
+# timeout_minutes; a routine's own front matter wins per-field. See §4.12,
+# §5.4, ADR 0067.
+routine_defaults:
+  permission_mode: bypass
+  timeout_minutes: 60
+
 pull_requests:
   enabled: true
   review_followup:
@@ -303,11 +325,16 @@ pull_requests:
     require_status_success: true
     require_review_decision: false
 
+# Provider commands may reference {{model}}, {{effort}}, {{permission_mode}}
+# — plain tags substitute the resolved value, and {{#tag}}...{{/tag}}
+# sections omit the enclosed text entirely when the field isn't resolved for
+# a given call (an issue Run never resolves these, so sections always
+# collapse to nothing). An unrecognized tag is a declaration-load error.
 providers:
   codex:
-    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
+    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never {{#model}}-c model=\"{{model}}\" {{/model}}{{#effort}}-c model_reasoning_effort=\"{{effort}}\" {{/effort}}--dangerously-bypass-approvals-and-sandbox app-server"
   claude:
-    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"
+    command: "claude -p {{#model}}--model {{model}} {{/model}}{{#effort}}--effort {{effort}} {{/effort}}--dangerously-skip-permissions --input-format stream-json --output-format stream-json"
   omp:
     command: "omp --mode rpc --auto-approve"
 
@@ -354,6 +381,11 @@ routines:
   - project: new-composer-host
     path: ./daily-report.md
 ```
+
+`daily-report.md`'s front matter may add `model: claude-sonnet-5` and `effort: high` (overriding this
+service config's `routine_defaults:` for this one routine only), inheriting `permission_mode: bypass`
+and `timeout_minutes: 60` from the block above — this is exactly the `new-composer` ptt routine's
+live settings (issue #291 / ADR 0067).
 
 The bootstrap slice must use this final multi-project shape even with one configured Project. The
 intermediate global config written before the first `init-project` invocation intentionally has an
@@ -456,6 +488,13 @@ The preamble tells the agent:
 - it should use the prepared workspace and issue branch
 - it should operate on the assigned issue unless the workflow says otherwise
 
+Routine prompt rendering additionally appends a routine-only notice — kept separate from the shared
+autonomy preamble above so it does not apply to issue Run prompts, which do support continuation via
+`previousAttemptNotice` — stating that the firing is one-shot, will not be re-invoked, and must run
+verification synchronously to completion rather than in the background. This is provider-neutral
+prose, distinct from the Claude-only `--disallowedTools`/`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`
+guards described in §8.5. See ADR 0067.
+
 ### 5.4 Routine Declarations
 
 The service config defines a top-level `routines:` sequence. Each entry is an object with a required
@@ -483,6 +522,20 @@ deterministic declaration-load error. `tz` is valid only with `cron` and default
 boolean. Their omitted defaults are missed-event skip and `false`, respectively. `disabled`, when
 present, must be a boolean; omitted defaults to `false`. `disabled: true` stops future scheduling
 for that routine on the next reload without affecting an in-flight firing; see §8.4.
+
+`model`, when present, must be a non-empty string. `effort`, when present, must be one of `low`,
+`medium`, `high`, `xhigh`, `max`. `permission_mode`, when present, must be `bypass` — the only value
+any provider currently supports (Claude's protocol validation already hard-requires full-permission
+mode; Codex and OMP already run full-bypass unconditionally). `timeout_minutes`, when present, must
+be a positive integer. Each falls back to the service-level `routine_defaults:` block (§5.1) when
+omitted from the routine's own front matter, then to no value at all (no flag appended, no timeout
+armed). Independently of these per-field checks, reload additionally renders the routine's resolved
+provider command template (§5.1) against its resolved `model`/`effort`/`permission_mode`: an
+unrecognized template tag or malformed section is a declaration-load error, and a routine declaring
+`model` or `effort` its resolved provider's command template never references is also a
+declaration-load error (the field would otherwise be silently inert). `permission_mode` is exempt from
+this last check — its value is already independently enforced by every provider regardless of
+templating, so an untemplated `permission_mode` is redundant rather than inert. See ADR 0067.
 
 ## 6. Credentials
 
@@ -728,6 +781,27 @@ Graceful daemon shutdown cancels every in-flight Routine Firing through the same
 cancellation path before waiting for dispatch work to drain, recording
 `cancel_reason = "daemon_shutdown"`. This is distinct from disabling or removing a Routine while
 the daemon remains active, which does not cancel its in-flight firing.
+
+A third, independent termination path is the per-Routine declared `timeout_minutes` deadline
+(§4.12): a wall-clock timer, armed once the Firing's provider begins running, calls the identical
+cancel path as `symphonika cancel` — killing the whole provider process group — but records
+`cancel_reason = "firing_timeout"` and completes the Firing as `state = failed`,
+`terminal_reason = "firing_timeout"`, not the `cancelled` state an operator or shutdown cancel
+produces. This is a declared deadline, not a liveness check: it fires at N minutes regardless of
+progress, and it bounds only the provider's execution window (workspace preparation is unbounded).
+It is unrelated to and does not touch the Watchdog's progress-liveness reconciliation (ADR 0054),
+which samples only the `runs` table and never observes Routine Firings. If shutdown's
+`cancel_reason = "daemon_shutdown"` reaches a Firing before its timeout would have fired, the
+shutdown reason sticks; a timeout that fires after shutdown has already begun cancelling is a safe
+no-op. See ADR 0067.
+
+For a Claude Routine Firing specifically, every run additionally passes `--disallowedTools
+ScheduleWakeup Monitor CronCreate` and sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child
+environment, unconditionally — closing the schedule-and-wait and `run_in_background` paths that
+would otherwise let the model end its turn expecting a re-invocation that never comes, since a
+Routine Firing is exactly a one-shot headless run. This is Claude-specific and does not apply to
+issue-driven Runs, which do support continuation. See §5.3 for the accompanying provider-neutral
+one-shot prompt notice, and ADR 0067.
 
 A Routine with `disabled: true` in its own front matter transitions to `state = disabled`,
 `disabled_reason = "operator"` on the next reload; future scheduling stops but an in-flight firing

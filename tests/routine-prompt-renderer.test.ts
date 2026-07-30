@@ -92,4 +92,22 @@ describe("RoutinePromptRenderer", () => {
       ).toThrowError(/prompt_render_error/);
     }
   });
+
+  it("splices extraInstructions between the shared preamble and the rendered template when provided", () => {
+    const withoutExtra = renderRoutinePrompt(baseInput);
+    const withExtra = renderRoutinePrompt({
+      ...baseInput,
+      extraInstructions: "This firing is one-shot and will not be re-invoked."
+    });
+
+    expect(withExtra.prompt).toContain(
+      "This firing is one-shot and will not be re-invoked."
+    );
+    expect(withExtra.prompt).toContain(
+      "Report daily-report for symphonika in /tmp/workspace/routines/daily-report/fire-1 via codex firing fire-1."
+    );
+    // Omitting extraInstructions renders byte-identical to today, matching
+    // renderAutonomousPrompt's own filter-empty-then-join behavior.
+    expect(withoutExtra.prompt).not.toContain("one-shot");
+  });
 });

@@ -1504,3 +1504,199 @@ describe("RuntimeConfigReloader watchdog config", () => {
     expect(reloader.getStatus().errors.join("\n")).toMatch(/watchdog/);
   });
 });
+
+describe("RuntimeConfigReloader routine_defaults config", () => {
+  it("parses a routine_defaults block and exposes it via routineDefaultsConfig()", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "routine_defaults:",
+        "  permission_mode: bypass",
+        "  timeout_minutes: 60"
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({ ok: true });
+    expect(reloader.routineDefaultsConfig()).toEqual({
+      permissionMode: "bypass",
+      timeoutMinutes: 60
+    });
+  });
+
+  it("returns an empty config when no routine_defaults block is declared", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {});
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.routineDefaultsConfig()).toEqual({});
+  });
+
+  it("rejects an invalid routine_defaults.effort value", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: ["routine_defaults:", "  effort: extreme"]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({ ok: false });
+    expect(reloader.getStatus().errors.join("\n")).toMatch(/routine_defaults/);
+  });
+
+  it("rejects a routine that declares model but whose resolved provider command never references it", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeFile(
+      path.join(root, "daily-report.md"),
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        "  at: 2026-05-22T10:00:00.000Z",
+        "kind: report",
+        "model: gpt-5.6-sol",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original.replace(
+        "    workflow: ./WORKFLOW.md",
+        [
+          "    workflow: ./WORKFLOW.md",
+          "routines:",
+          "  - project: symphonika",
+          "    path: ./daily-report.md"
+        ].join("\n")
+      )
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    expect(reloader.getStatus().ok).toBe(false);
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      'routine "daily-report" at'
+    );
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      "declares model, but providers.codex.command never references it"
+    );
+  });
+
+  it("accepts a routine whose declared model is referenced by its resolved provider command template", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeFile(
+      path.join(root, "daily-report.md"),
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        "  at: 2026-05-22T10:00:00.000Z",
+        "kind: report",
+        "model: gpt-5.6-sol",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original
+        .replace(
+          '    command: "codex -p symphonika"',
+          '    command: "codex -p symphonika {{#model}}-c model={{model}} {{/model}}"'
+        )
+        .replace(
+          "    workflow: ./WORKFLOW.md",
+          [
+            "    workflow: ./WORKFLOW.md",
+            "routines:",
+            "  - project: symphonika",
+            "    path: ./daily-report.md"
+          ].join("\n")
+        )
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({ ok: true, errors: [] });
+  });
+
+  it("accepts a routine_defaults permission_mode/timeout fallback combined with a routine's own model/effort against the shipped Claude command template", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      agentProvider: "claude",
+      serviceLines: [
+        "routine_defaults:",
+        "  permission_mode: bypass",
+        "  timeout_minutes: 60"
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeFile(
+      path.join(root, "refactor-audit.md"),
+      [
+        "---",
+        "name: refactor-audit",
+        "schedule:",
+        "  at: 2026-05-22T10:00:00.000Z",
+        "kind: report",
+        "model: claude-opus-4-8",
+        "effort: xhigh",
+        "permission_mode: bypass",
+        "---",
+        "Audit.",
+        ""
+      ].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original
+        .replace(
+          '    command: "claude -p"',
+          '    command: "claude -p {{#model}}--model {{model}} {{/model}}{{#effort}}--effort {{effort}} {{/effort}}--dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json"'
+        )
+        .replace(
+          "    workflow: ./WORKFLOW.md",
+          [
+            "    workflow: ./WORKFLOW.md",
+            "routines:",
+            "  - project: symphonika",
+            "    path: ./refactor-audit.md"
+          ].join("\n")
+        )
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({ ok: true, errors: [] });
+  });
+});

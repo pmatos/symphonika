@@ -112,13 +112,16 @@ describe("RunStore routines", () => {
           allowOverlap: false,
           catchUp: "skip",
           disabledReason: null,
+          effort: null,
           kind: "report",
           lastAttemptedAt: null,
           lastFiredAt: null,
           lastSkipAt: null,
           lastSkipReason: null,
+          model: null,
           name: "daily-report",
           nextFireAt: "2026-05-22T10:00:00.000Z",
+          permissionMode: null,
           projectName: "alpha",
           provider: null,
           pullRequestNumbers: [],
@@ -131,7 +134,8 @@ describe("RunStore routines", () => {
             overlap: 0
           },
           sourcePath: "/tmp/daily-report.md",
-          state: "active"
+          state: "active",
+          timeoutMinutes: null
         }
       ]);
     } finally {
@@ -166,13 +170,16 @@ describe("RunStore routines", () => {
           allowOverlap: false,
           catchUp: "skip",
           disabledReason: null,
+          effort: null,
           kind: "report",
           lastAttemptedAt: null,
           lastFiredAt: null,
           lastSkipAt: null,
           lastSkipReason: null,
+          model: null,
           name: "daily-report",
           nextFireAt: "2026-03-28T01:30:00.000Z",
+          permissionMode: null,
           projectName: "alpha",
           provider: null,
           pullRequestNumbers: [],
@@ -185,7 +192,8 @@ describe("RunStore routines", () => {
             overlap: 0
           },
           sourcePath: "/tmp/daily-report.md",
-          state: "active"
+          state: "active",
+          timeoutMinutes: null
         }
       ]);
     } finally {

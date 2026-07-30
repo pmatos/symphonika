@@ -7,11 +7,22 @@ import {
 import type { AgentProviderName } from "../provider.js";
 import type { RoutineKind } from "./types.js";
 
+// Provider-neutral: unlike issue Runs (which support continuation — see
+// `previousAttemptNotice` in autonomous-prompt.ts), a routine firing has no
+// resume concept at all, so this is always true for routines and must never
+// be folded into the shared AUTONOMY_PREAMBLE (issue #291 / ADR 0067).
+export const ROUTINE_ONE_SHOT_NOTICE = [
+  "## One-shot execution",
+  "",
+  "This routine firing is a single, one-shot run and will **not** be re-invoked. Run every verification step (tests, builds, suites) synchronously to completion and read its result before continuing — never launch long-running work in the background and end your turn waiting to be resumed, because anything still running when the turn ends is killed and its result is lost. If a verification suite is too large to finish synchronously within this run, run a bounded, representative subset instead and say so in your summary rather than deferring it to the background."
+].join("\n");
+
 export type RoutinePromptInput = {
   branch?: {
     name: string;
     ref: string;
   };
+  extraInstructions?: string;
   firing: {
     id: string;
   };
@@ -104,7 +115,9 @@ export function renderRoutinePrompt(
 
   return {
     preambleVersion: AUTONOMY_PREAMBLE_VERSION,
-    prompt: [AUTONOMY_PREAMBLE, rendered].join("\n"),
+    prompt: [AUTONOMY_PREAMBLE, input.extraInstructions ?? "", rendered]
+      .filter((section) => section.length > 0)
+      .join("\n"),
     templateContentHash: contentHash(input.template)
   };
 }

@@ -608,6 +608,7 @@ export async function startDaemon(
           projects: runtimeConfig.projectsByName(),
           providersConfig: runtimeConfig.providersConfig(),
           recomputeSchedulesFromNow,
+          routineDefaults: runtimeConfig.routineDefaultsConfig(),
           runStore,
           stateRoot: state.stateRoot
         });

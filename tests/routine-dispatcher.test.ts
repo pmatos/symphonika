@@ -442,6 +442,369 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("renders the provider command template with the routine's resolved model and effort before validate/runAttempt", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "alpha",
+      "routines",
+      "refactor-audit",
+      "fire-1"
+    );
+    const runStore = openRunStore({ stateRoot });
+    const providerInputs: ProviderRunInput[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "claude",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        providerInputs.push(input);
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const prepareRoutineWorkspace = vi.fn(
+      (
+        input: PrepareRoutineWorkspaceInput
+      ): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName: input.project.workspace.git.base_branch,
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { claude: provider },
+        configDir: root,
+        createFiringId: () => "fire-1",
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              agent: { provider: "claude" },
+              routines: [
+                {
+                  effort: "xhigh",
+                  kind: "report",
+                  model: "claude-opus-4-8",
+                  name: "refactor-audit",
+                  prompt: "Audit.",
+                  provider: "claude",
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: {
+            command:
+              "claude -p {{#model}}--model {{model}} {{/model}}{{#effort}}--effort {{effort}} {{/effort}}--dangerously-skip-permissions"
+          },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      const renderedCommand =
+        "claude -p --model claude-opus-4-8 --effort xhigh --dangerously-skip-permissions";
+      expect(provider.validate).toHaveBeenCalledWith(renderedCommand);
+      expect(providerInputs).toHaveLength(1);
+      expect(providerInputs[0]?.provider.command).toBe(renderedCommand);
+      expect(providerInputs[0]?.executionOptions).toEqual({
+        disableBackgroundTasks: true,
+        disallowedTools: ["ScheduleWakeup", "Monitor", "CronCreate"]
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("does not set executionOptions for a codex routine firing", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(
+      root,
+      ".symphonika",
+      "workspaces",
+      "alpha",
+      "routines",
+      "daily-report",
+      "fire-1"
+    );
+    const runStore = openRunStore({ stateRoot });
+    const providerInputs: ProviderRunInput[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        providerInputs.push(input);
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const prepareRoutineWorkspace = vi.fn(
+      (
+        input: PrepareRoutineWorkspaceInput
+      ): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName: input.project.workspace.git.base_branch,
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-1",
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(providerInputs).toHaveLength(1);
+      expect(providerInputs[0]?.executionOptions).toBeUndefined();
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("marks a firing failed with firing_timeout when the wall-clock timeout cancels it, not the generic cancelled state", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        // Simulates the wall-clock timer firing mid-run — the same
+        // requestCancel plumbing an operator cancel uses (see the sibling
+        // "operator cancel" tests), but with the timeout's distinct reason.
+        await activeRuns.requestCancel("fire-timeout", "firing_timeout");
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName: "main",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns,
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-timeout",
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-timeout",
+          cancelReason: "firing_timeout",
+          state: "failed",
+          terminalReason: "firing_timeout"
+        })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("arms a wall-clock timer from the routine's resolved timeout_minutes and cancels the firing when it elapses", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = await makeTempRoot();
+      const stateRoot = path.join(root, ".symphonika");
+      const workspacePath = path.join(root, "workspace");
+      const runStore = openRunStore({ stateRoot });
+      const activeRuns = new ActiveRunRegistry();
+      let releaseRunAttempt: (() => void) | undefined;
+      const provider = {
+        cancel: vi.fn().mockResolvedValue(undefined),
+        name: "codex",
+        runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+          await new Promise<void>((resolve) => {
+            releaseRunAttempt = resolve;
+          });
+          yield {
+            normalized: { exitCode: 0, type: "process_exit" },
+            raw: { code: 0, kind: "exit" }
+          };
+        }),
+        validate: vi.fn().mockResolvedValue(undefined)
+      } satisfies AgentProvider;
+      const prepareRoutineWorkspace = vi.fn(
+        (): Promise<PreparedRoutineWorkspace> =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          })
+      );
+
+      const dispatchPromise = dispatchDueRoutines({
+        activeRuns,
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-timer",
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  timeoutMinutes: 10,
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      // Let the microtask queue drain so runRoutineFiring reaches the
+      // for-await/runAttempt call (and arms the timer) before advancing time.
+      await vi.waitFor(() => {
+        expect(releaseRunAttempt).toBeDefined();
+      });
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      releaseRunAttempt?.();
+      await dispatchPromise;
+
+      expect(provider.cancel).toHaveBeenCalledWith("fire-timer");
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-timer",
+          cancelReason: "firing_timeout",
+          state: "failed",
+          terminalReason: "firing_timeout"
+        })
+      ]);
+      runStore.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("marks a firing cancelled when an operator cancel lands before the provider exits cleanly", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
@@ -1263,6 +1626,82 @@ describe("RoutineFiringDispatcher", () => {
           terminalReason: "prompt_render_error"
         })
       ]);
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("marks a firing failed with command_template_error for an unrecognized provider command tag", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "claude",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { claude: provider },
+        configDir: root,
+        createFiringId: () => "fire-template-error",
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              agent: { provider: "claude" },
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: "claude",
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude -p {{modle}}" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-template-error",
+          state: "failed",
+          terminalReason: "command_template_error"
+        })
+      ]);
+      expect(provider.validate).not.toHaveBeenCalled();
       expect(provider.runAttempt).not.toHaveBeenCalled();
     } finally {
       runStore.close();

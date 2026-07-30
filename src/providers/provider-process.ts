@@ -199,12 +199,13 @@ guardian.once("message", (message) => {
 
 export function spawnProviderProcess(
   command: ProcessCommand,
-  workspacePath: string
+  workspacePath: string,
+  env: NodeJS.ProcessEnv = process.env
 ): ChildProcessWithoutNullStreams {
   if (process.platform === "win32") {
     return spawn(command.executable, command.args, {
       cwd: workspacePath,
-      env: process.env,
+      env,
       stdio: ["pipe", "pipe", "pipe"]
     });
   }
@@ -221,7 +222,7 @@ export function spawnProviderProcess(
     {
       cwd: workspacePath,
       detached: true,
-      env: process.env,
+      env,
       stdio: ["pipe", "pipe", "pipe", "ipc"]
     }
   ) as ChildProcessWithoutNullStreams;

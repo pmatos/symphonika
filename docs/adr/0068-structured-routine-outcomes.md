@@ -73,10 +73,11 @@ One pure reconciliation function produces the persisted outcome:
 Routine Outcome is evidence alongside lifecycle state and terminal reason; it does not replace or
 rewrite either.
 
-Commit-only outcomes are successful while ADR 0025 preserves their workspace. A verified
-commit-only outcome is a retention signal. Any future Routine Firing workspace collector must
-retain that workspace, first observe publication to durable remote state, or require an explicit
-destructive operator override. It must not silently collect the only copy of the commit.
+Successful `kind: git` classification persists commits-ahead evidence separately from this canonical
+outcome. Routine Workspace Retention uses that independent signal, so a richer verified GitHub
+action can remain canonical without hiding local commits from the retention guard. Until Symphonika
+persists a verified durable-publication transition, every commits-ahead workspace is retained
+indefinitely rather than collected by age. It must not silently collect the only copy of a commit.
 
 ## Consequences
 
@@ -87,4 +88,5 @@ destructive operator override. It must not silently collect the only copy of the
 - The notification layer uses the shared one-line formatter for action, title, URL, and the
   unverified marker without duplicating reconciliation policy.
 - GitHub observations remain best-effort evidence and never make an otherwise valid firing fail.
-- A future retention implementation must explicitly account for verified commit-only outcomes.
+- Routine Workspace Retention keys commit protection on persisted commits-ahead evidence rather
+  than the canonical outcome action.

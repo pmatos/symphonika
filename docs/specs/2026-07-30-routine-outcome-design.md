@@ -120,13 +120,15 @@ Rules are evaluated in this order:
 When a GitHub snapshot is unavailable, a remote-action claim is retained but
 unverified. Reconciliation never changes the Routine Firing lifecycle state.
 
-## Commit-only retention rule
+## Commits-ahead retention rule
 
 ADR 0025 preserves workspaces today, so a verified commit-only outcome is
-valuable and is not an error. Its durable `action: commit` is also a retention
-signal: future workspace GC must not silently delete that workspace. Slice 9
-must either retain commit-only workspaces, observe later publication as a PR,
-or require an explicit destructive operator override before collection.
+valuable and is not an error. Workspace retention persists the underlying
+commits-ahead classification independently of `action`, because a genuinely
+verified GitHub issue or PR action may correctly remain canonical while the
+firing also created local commits. Workspace GC must key protection on that
+dedicated signal, retain the workspace until durable publication is separately
+verified, or require an explicit destructive operator override.
 
 This chooses preservation over ptt's rule because ptt's clone is ephemeral at
 the moment reconciliation runs, while Symphonika's workspace is durable.

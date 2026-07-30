@@ -984,6 +984,8 @@ async function runRoutineFiring(input: {
     if (completionCancelEntry?.cancelRequested === true) {
       outcome = { kind: "cancelled", reason: "cancelled" };
     }
+    const commitsAhead =
+      input.routine.kind === "git" && outcome.kind === "succeeded";
     const githubObservation = routineGithubObservation(
       githubBefore,
       githubAfter,
@@ -991,11 +993,11 @@ async function runRoutineFiring(input: {
       githubSnapshotSince
     );
     input.runStore.completeRoutineFiring({
+      commitsAhead,
       id: input.firingId,
       outcome: reconcileRoutineOutcome({
         claim: parseRoutineOutcomeClaim(events),
-        commitsAhead:
-          input.routine.kind === "git" && outcome.kind === "succeeded",
+        commitsAhead,
         githubObservationAvailable: githubObservation.available,
         observedAction: githubObservation.action,
         provider: input.providerName,
@@ -1080,6 +1082,7 @@ async function runRoutineFiring(input: {
       githubSnapshotSince
     );
     input.runStore.completeRoutineFiring({
+      commitsAhead: false,
       id: input.firingId,
       outcome: reconcileRoutineOutcome({
         claim: parseRoutineOutcomeClaim(events),

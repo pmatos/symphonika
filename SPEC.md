@@ -238,8 +238,11 @@ summary, while a recurring target begins with its next future clock event.
 
 A Routine Firing is one durable execution of a Routine Target. It records the Routine, its target
 Project, fan-out id, provider, workspace path, prompt evidence, provider logs, terminal reason,
-lifecycle state, its canonical Routine Outcome, and any pull requests discovered from a `kind: git`
-firing branch. The Routine Outcome records `status`, `action`, `url`, `title`, `summary`,
+lifecycle state, its canonical Routine Outcome, whether successful `kind: git` classification found
+commits ahead of the configured base branch, and any pull requests discovered from a `kind: git`
+firing branch. The commits-ahead signal is independent of the canonical action: a verified GitHub
+issue or pull-request action may legitimately be the Routine Outcome while the workspace still has
+local commits to protect. The Routine Outcome records `status`, `action`, `url`, `title`, `summary`,
 `verified`, and `source` without replacing lifecycle state or terminal reason; see ADR 0068. Its
 trigger source is `scheduled` or `manual`; a scheduled firing carries the fan-out id of the Routine
 Fan-out it belongs to, while a manual firing targets one Routine Target directly and has no fan-out
@@ -249,7 +252,8 @@ after every scheduled firing. A manual firing does not consume a scheduled clock
 
 When Routine Workspace Retention reclaims a terminal firing's worktree, the firing keeps its
 historical workspace path and records `workspace_pruned_at`. State-root logs and prompt evidence are
-not part of workspace retention.
+not part of workspace retention. A firing with persisted commits-ahead evidence is never an
+age-based prune candidate until Symphonika can separately verify durable publication.
 
 A Routine Firing with an effective `timeout_minutes` has an absolute wall-clock deadline beginning
 when execution of the claimed firing starts. Exceeding it terminates the provider process tree and
@@ -651,6 +655,7 @@ SQLite stores durable orchestration state:
 - routines
 - routine firings
 - canonical Routine Outcomes for terminal firings
+- Routine Firing commits-ahead evidence, independent of canonical Routine Outcome
 - Routine Notification Delivery state and sanitized delivery error
 - Routine Firing workspace-reclamation timestamps
 - Routine Fan-outs, their expected Project targets, and grouped-notification delivery state
@@ -867,10 +872,14 @@ suppresses the retention signal below. A successful firing with neither claim no
 otherwise it is unverified and sourced to `symphonika`. Omission alone is not a failure. Failed and
 cancelled firings retain their terminal reason independently of the reconciled outcome.
 
-Under ADR 0025 a verified commit-only outcome remains successful because its workspace is
-preserved. Such an outcome is a retention signal: future workspace garbage collection must retain
-the workspace, first establish that the commit was published to durable remote state, or require an
-explicit destructive operator override. It must not silently delete the only copy.
+Successful `kind: git` classification persists commits-ahead evidence independently of the canonical
+Routine Outcome. Under ADR 0025 such a firing remains successful, and Routine Workspace Retention
+withholds it from age-based collection even when reconciliation correctly selects a verified
+`pr`, `issue_opened`, or `issue_closed` action. Symphonika does not yet persist a separate
+durable-publication transition, so the conservative v1 behavior retains every commits-ahead
+workspace indefinitely rather than infer publication from an unrelated canonical action. A future
+publication signal or explicit destructive operator override may release that protection; age
+alone must never delete the only copy.
 
 After a Routine Firing reaches a terminal state, Symphonika evaluates its Routine notification
 policy. Delivery occurs after `kind: git` PR discovery, uses both plain text and an escaped HTML
@@ -970,7 +979,8 @@ no parseable `name` field cannot be represented as a `routines` row at all (the 
 is `(project_name, name)`) and is reported only through the reload-error and `doctor` surfaces.
 
 On every daemon tick, enabled Routine Workspace Retention selects only terminal firings whose
-terminal update time has crossed the configured outcome window. Reclamation runs
+terminal update time has crossed the configured outcome window and whose persisted commits-ahead
+signal is false. Canonical Routine Outcome does not substitute for this predicate. Reclamation runs
 `git worktree remove --force` followed by `git worktree prune` against the Project cache, so both
 the checkout and its registration are removed; for a `kind: git` firing, reclamation also deletes
 its deterministic local branch (`git branch -D`) from the Project cache, since that branch has no

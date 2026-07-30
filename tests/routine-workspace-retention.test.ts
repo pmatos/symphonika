@@ -400,6 +400,86 @@ describe("routine firing workspace retention", () => {
       store.close();
     }
   });
+
+  it("withholds commits ahead from age-based pruning when the canonical outcome is a verified issue closure", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const stateRoot = path.join(root, "state");
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const prepared = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId: "fire-commit-and-issue",
+      kind: "git",
+      project: {
+        name: "alpha",
+        workspace: {
+          git: { base_branch: "main", remote: remotePath },
+          root: workspaceRoot
+        }
+      },
+      routineName: "nightly-cleanup"
+    });
+
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "nightly-cleanup",
+          prompt: "Clean up.",
+          projectName: "alpha",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/nightly-cleanup.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-commit-and-issue",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "nightly-cleanup"
+      });
+      store.completeRoutineFiring({
+        commitsAhead: true,
+        id: "fire-commit-and-issue",
+        outcome: {
+          action: "issue_closed",
+          source: "gh",
+          status: "success",
+          summary: "Observed via GitHub state diff.",
+          title: "Close completed migration issue",
+          url: "https://github.com/pmatos/rightkey/issues/42",
+          verified: true
+        },
+        state: "succeeded",
+        workspacePath: prepared.workspacePath
+      });
+
+      const report = await pruneRoutineWorkspaces({
+        policy: {
+          cancelledDays: 14,
+          enabled: true,
+          failedDays: 14,
+          succeededDays: 0
+        },
+        runStore: store
+      });
+
+      expect(report.candidates.map((entry) => entry.firingId)).not.toContain(
+        "fire-commit-and-issue"
+      );
+      expect(report.pruned.map((entry) => entry.firingId)).not.toContain(
+        "fire-commit-and-issue"
+      );
+      await expect(access(prepared.workspacePath)).resolves.toBeUndefined();
+      expect(await worktreePaths(prepared.cachePath)).toContain(
+        prepared.workspacePath
+      );
+    } finally {
+      store.close();
+    }
+  });
 });
 
 async function makeTempRoot(): Promise<string> {

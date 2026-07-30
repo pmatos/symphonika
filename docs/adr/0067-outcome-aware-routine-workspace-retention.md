@@ -35,7 +35,14 @@ evaluates the configured age windows.
 
 Only terminal Routine Firings (`succeeded`, `failed`, or `cancelled`) whose terminal update time is
 at or before the outcome cutoff are candidates. `queued`, `preparing_workspace`, and `running`
-firings cannot be selected or marked as reclaimed. Reclamation uses
+firings cannot be selected or marked as reclaimed. A successful `kind: git` classification persists
+`commits_ahead = 1` independently of the canonical Routine Outcome, and every such firing is
+withheld from age-based candidates. A verified `pr`, `issue_opened`, or `issue_closed` outcome does
+not prove that the firing's commits reached durable remote state. Symphonika does not yet persist a
+separate publication transition, so the conservative policy retains these workspaces indefinitely;
+a future verified publication signal or explicit destructive override may release the protection.
+
+Reclamation uses
 `git worktree remove --force <path>` and then `git worktree prune` against the Project's shared bare
 cache. Force is required because report firings and failed Coding Agents can legitimately leave
 dirty or untracked files. A locked worktree remains an error and is retried on a later daemon tick;
@@ -50,11 +57,14 @@ therefore show the historical path as `pruned` rather than interpreting a missin
 Reclamation never deletes the firing row, Routine Pull Requests, or anything under
 `<state.root>/logs/routines/<firing-id>/`; it does delete the `kind: git` firing's local branch, as
 described above. Provider logs, normalized events, and prompt evidence remain durable; retention for
-those state-root artifacts is a separate future policy.
+those state-root artifacts is a separate future policy. Databases migrated from the earlier
+outcome-only retention rule backfill `commits_ahead = 1` for verified commit outcomes, the subset
+that can be reconstructed without live workspace inspection.
 
 ## Consequences
 
-- Default unattended workspace growth is bounded by the firing rate within the configured windows.
+- Default unattended workspace growth is bounded by the firing rate within the configured windows,
+  except for firings whose commits-ahead evidence requires indefinite protection.
 - Failed and cancelled workspaces remain available much longer than successful workspaces.
 - Dirty terminal worktrees are reclaimed without leaving stale bare-repository registrations.
 - ADR 0025 continues to govern issue Workspaces and immediate lifecycle behavior. This ADR narrows

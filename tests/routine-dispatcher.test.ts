@@ -1314,6 +1314,7 @@ describe("RoutineFiringDispatcher", () => {
       expect(listPullRequestsForBranch).toHaveBeenCalledTimes(2);
       expect(runStore.listRoutineFirings()).toEqual([
         expect.objectContaining({
+          commitsAhead: true,
           id: "01JABCDEFGHJKMNPQRSTVWXYZ12",
           outcome: {
             action: "pr",

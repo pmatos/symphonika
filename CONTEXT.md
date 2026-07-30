@@ -167,10 +167,11 @@ _Avoid_: Routine Firing when referring to the whole clock event
 
 **Routine Firing**:
 One durable execution attempt for a Routine Target, with its own workspace, provider logs, prompt
-evidence, lifecycle state, terminal reason, and optional canonical Routine Outcome. A scheduled
-firing is correlated to its Routine Fan-out; its trigger source is scheduled or manual, and a
-manual firing targets one Routine Target directly, using the same execution lifecycle without
-consuming the Routine's next clock event or creating a Routine Fan-out.
+evidence, lifecycle state, terminal reason, optional canonical Routine Outcome, and an independent
+record of whether successful `kind: git` classification found commits ahead of base. A scheduled
+firing is correlated to its Routine Fan-out; its trigger source is scheduled or manual, and a manual
+firing targets one Routine Target directly, using the same execution lifecycle without consuming
+the Routine's next clock event or creating a Routine Fan-out.
 _Avoid_: run when specifically referring to non-issue scheduled execution
 
 **Routine Outcome Claim**:
@@ -186,7 +187,8 @@ _Avoid_: terminal reason, provider final message
 
 **Routine Workspace Retention**:
 The Service Config policy that reclaims terminal Routine Firing worktrees after outcome-specific
-age windows while preserving their Run Store rows and state-root evidence.
+age windows while preserving their Run Store rows and state-root evidence. Firings with persisted
+commits-ahead evidence are withheld until a separate durable-publication signal exists.
 _Avoid_: evidence retention, issue Workspace cleanup
 
 **Routine Firing Deadline**:
@@ -336,7 +338,8 @@ _Avoid_: chat session
 - A **Routine Firing** may contain one canonical **Routine Outcome** reconciled from a **Routine
   Outcome Claim** and externally observed state
 - A manual **Routine Firing** leaves the Routine's next scheduled clock event unchanged
-- **Routine Workspace Retention** may reclaim only terminal **Routine Firing** worktrees
+- **Routine Workspace Retention** may reclaim only terminal **Routine Firing** worktrees without
+  persisted commits-ahead evidence
 - A **Routine Firing Deadline** terminates an over-time **Routine Firing** independently of the
   **Watchdog**'s progress-liveness decision
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**

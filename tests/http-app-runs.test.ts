@@ -1552,4 +1552,286 @@ describe("HTTP app — runs API and pages", () => {
       test.cleanup();
     }
   });
+
+  it("shows the watchdog idle badge on the dashboard and runs list only for idle active runs", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "idle-active",
+        issue: sampleIssue({ number: 202, title: "Idle run" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("idle-active", "running");
+      test.runStore.upsertWatchdogSample({
+        idleSince: "2026-05-22T11:45:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath: "",
+        outputTokensTotal: 0,
+        runId: "idle-active",
+        sampledAt: "2026-05-22T11:45:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: 0
+      });
+
+      test.runStore.createRun({
+        id: "progressing-active",
+        issue: sampleIssue({ number: 203, title: "Still progressing" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("progressing-active", "running");
+
+      // A retry after a transient failure re-enters preparing_workspace, but
+      // the run's watchdog_samples row is keyed by run_id (not per attempt)
+      // and only gets reset once the new attempt's first running sample
+      // lands — so the prior (failed) attempt's stale idleSince is still on
+      // record here. The badge must stay absent during preparing_workspace;
+      // showing it would be a live countdown for an attempt that no longer
+      // exists.
+      test.runStore.createRun({
+        id: "retrying-preparing",
+        issue: sampleIssue({ number: 204, title: "Retrying after failure" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("retrying-preparing", "preparing_workspace");
+      test.runStore.upsertWatchdogSample({
+        idleSince: "2026-05-22T11:00:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath: "prior-attempt.ndjson",
+        outputTokensTotal: 0,
+        runId: "retrying-preparing",
+        sampledAt: "2026-05-22T11:00:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: 0
+      });
+
+      const app = createHttpApp({
+        getWatchdogConfig: () => ({ enabled: true, graceMinutes: 30 }),
+        now: () => Date.parse("2026-05-22T12:00:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const dashboardBody = await (await app.request("/")).text();
+      const runsListBody = await (await app.request("/runs")).text();
+      for (const body of [dashboardBody, runsListBody]) {
+        const matches = body.match(/watchdog idle since/g) ?? [];
+        expect(matches).toHaveLength(1);
+        expect(body).toContain(
+          'class="badge badge--watchdog">watchdog idle since 15m ago (15m remaining)</span>'
+        );
+        expect(body).toContain("idle-active");
+        expect(body).toContain("progressing-active");
+        expect(body).toContain("retrying-preparing");
+      }
+
+      const disabledApp = createHttpApp({
+        getWatchdogConfig: () => ({ enabled: false, graceMinutes: 30 }),
+        now: () => Date.parse("2026-05-22T12:00:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const disabledDashboardBody = await (
+        await disabledApp.request("/")
+      ).text();
+      expect(disabledDashboardBody).not.toContain("watchdog idle since");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("renders the run-detail Watchdog section across not-yet-idle, idle, and terminated states", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "progressing-run",
+        issue: sampleIssue({ number: 210, title: "Progressing" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("progressing-run", "running");
+      test.runStore.upsertWatchdogSample({
+        idleSince: null,
+        lastMessageAt: null,
+        lastToolCallAt: "2026-05-22T11:55:00.000Z",
+        normalizedLogOffset: 0,
+        normalizedLogPath: "progressing-run.ndjson",
+        outputTokensTotal: 120,
+        runId: "progressing-run",
+        sampledAt: "2026-05-22T11:59:00.000Z",
+        turnIdSetSize: 3,
+        workspaceMtimeMax: Date.parse("2026-05-22T11:50:00.000Z")
+      });
+
+      const app = createHttpApp({
+        getWatchdogConfig: () => ({ enabled: true, graceMinutes: 30 }),
+        now: () => Date.parse("2026-05-22T12:00:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const progressingBody = await (
+        await app.request("/runs/progressing-run")
+      ).text();
+      expect(progressingBody).toContain("<h2>Watchdog</h2>");
+      expect(progressingBody).toContain(
+        "<dt>Last tool_call</dt><dd>5m ago</dd>"
+      );
+      expect(progressingBody).toContain(
+        "<dt>Workspace mtime</dt><dd>10m ago</dd>"
+      );
+      expect(progressingBody).toContain("<dt>turn_ids observed</dt><dd>3</dd>");
+      expect(progressingBody).toContain(
+        "<dt>Output tokens / 5m</dt><dd>0</dd>"
+      );
+      expect(progressingBody).not.toContain("idle_since");
+      expect(progressingBody).not.toContain("Grace remaining");
+
+      test.runStore.createRun({
+        id: "no-sample-run",
+        issue: sampleIssue({ number: 213, title: "No sample yet" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("no-sample-run", "running");
+
+      const noSampleBody = await (
+        await app.request("/runs/no-sample-run")
+      ).text();
+      expect(noSampleBody).toContain("<h2>Watchdog</h2>");
+      expect(noSampleBody).toContain("No sample yet");
+      expect(noSampleBody).not.toContain("idle_since");
+      expect(noSampleBody).not.toContain("Grace remaining");
+
+      const dashboardBody = await (await app.request("/")).text();
+      expect(dashboardBody).toContain("no-sample-run");
+      expect(dashboardBody).not.toContain("watchdog idle since");
+
+      test.runStore.createRun({
+        id: "idle-run",
+        issue: sampleIssue({ number: 211, title: "Idle within grace" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("idle-run", "running");
+      test.runStore.upsertWatchdogSample({
+        idleSince: "2026-05-22T11:45:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: "2026-05-22T11:45:00.000Z",
+        normalizedLogOffset: 0,
+        normalizedLogPath: "idle-run.ndjson",
+        outputTokensTotal: 0,
+        runId: "idle-run",
+        sampledAt: "2026-05-22T11:45:00.000Z",
+        turnIdSetSize: 1,
+        workspaceMtimeMax: Date.parse("2026-05-22T11:45:00.000Z")
+      });
+
+      const idleBody = await (await app.request("/runs/idle-run")).text();
+      expect(idleBody).toContain(
+        "<dt>idle_since</dt><dd><code>2026-05-22T11:45:00.000Z</code></dd>"
+      );
+      expect(idleBody).toContain("<dt>Grace remaining</dt><dd>15m</dd>");
+
+      test.runStore.createRun({
+        id: "terminated-run",
+        issue: sampleIssue({ number: 212, title: "Terminated by watchdog" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("terminated-run", "running");
+      test.runStore.upsertWatchdogSample({
+        idleSince: "2026-05-22T09:00:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: "2026-05-22T09:00:00.000Z",
+        normalizedLogOffset: 0,
+        normalizedLogPath: "terminated-run.ndjson",
+        outputTokensTotal: 0,
+        runId: "terminated-run",
+        // A real watchdog reconciliation only fires once
+        // `now - idleSince >= graceMinutes`, so a realistic terminal sample's
+        // sampledAt sits just past idleSince + grace (09:30), not at
+        // idleSince itself.
+        sampledAt: "2026-05-22T09:31:00.000Z",
+        turnIdSetSize: 1,
+        workspaceMtimeMax: Date.parse("2026-05-22T09:00:00.000Z")
+      });
+      // updatedAt is deliberately set to a different timestamp than
+      // sampledAt: runs.updated_at is not a safe "as of termination" anchor
+      // (e.g. PR-discovery polling keeps bumping it for succeeded Runs), so
+      // the Progress Signal must freeze at the last persisted watchdog
+      // sample's sampledAt, not at updatedAt. This distinguishes the two.
+      test.runStore.markRunNoProgressStale(
+        "terminated-run",
+        "2026-05-22T10:15:00.000Z"
+      );
+
+      const terminatedBody = await (
+        await app.request("/runs/terminated-run")
+      ).text();
+      expect(terminatedBody).toContain(
+        "<dt>Terminal reason</dt><dd><code>no_progress</code></dd>"
+      );
+      // The Progress Signal must freeze at the run's last watchdog sample
+      // (09:31) rather than updatedAt (10:15) or the live app clock (12:00)
+      // — otherwise these values would keep drifting on every reload long
+      // after the Run terminated.
+      expect(terminatedBody).toContain(
+        "<dt>Last tool_call</dt><dd>31m ago</dd>"
+      );
+      expect(terminatedBody).toContain(
+        "<dt>Workspace mtime</dt><dd>31m ago</dd>"
+      );
+      expect(terminatedBody).toContain(
+        "<dt>idle_since</dt><dd><code>2026-05-22T09:00:00.000Z</code></dd>"
+      );
+      expect(terminatedBody).toContain("<dt>Grace remaining</dt><dd>-1m</dd>");
+
+      // GET /api/runs/:id must report the exact same frozen watchdog values
+      // as the HTML page for the same terminated Run — the two surfaces
+      // must derive from one effective clock, not disagree with each other.
+      const terminatedApiBody = (await (
+        await app.request("/api/runs/terminated-run")
+      ).json()) as {
+        watchdog: {
+          graceRemainingMs?: number;
+          idleSince?: string;
+        };
+      };
+      expect(terminatedApiBody.watchdog.idleSince).toBe(
+        "2026-05-22T09:00:00.000Z"
+      );
+      expect(terminatedApiBody.watchdog.graceRemainingMs).toBe(-60_000);
+
+      const disabledApp = createHttpApp({
+        getWatchdogConfig: () => ({ enabled: false, graceMinutes: 30 }),
+        now: () => Date.parse("2026-05-22T12:00:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const disabledBody = await (
+        await disabledApp.request("/runs/idle-run")
+      ).text();
+      expect(disabledBody).not.toContain("<h2>Watchdog</h2>");
+    } finally {
+      test.cleanup();
+    }
+  });
 });

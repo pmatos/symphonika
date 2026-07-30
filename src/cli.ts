@@ -69,7 +69,9 @@ import {
 import {
   buildWatchdogIdleStatus,
   buildWatchdogStatus,
+  formatAge,
   formatWatchdogDuration,
+  resolveWatchdogNowMs,
   type WatchdogIdleStatus,
   type WatchdogStatus
 } from "./watchdog-status.js";
@@ -1061,7 +1063,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           const watchdogService = await loadWatchdogServiceConfig(
             state.configPath
           );
-          const nowMs = Date.now();
+          const nowMs = resolveWatchdogNowMs({
+            liveNowMs: Date.now(),
+            runId: detail.id,
+            runState: detail.state,
+            runStore: store
+          });
           const watchdog = buildWatchdogStatus({
             config: resolveWatchdogConfig(watchdogService, detail.project),
             nowMs,
@@ -1818,19 +1825,6 @@ function formatProgressSignal(
     );
   }
   return `${lines.join("\n")}\n`;
-}
-
-function formatAge(
-  timestamp: string | null | undefined,
-  nowMs: number
-): string {
-  if (timestamp === null || timestamp === undefined) {
-    return "never";
-  }
-  const ageMs = nowMs - Date.parse(timestamp);
-  return ageMs < 0
-    ? `in ${formatWatchdogDuration(-ageMs)}`
-    : `${formatWatchdogDuration(ageMs)} ago`;
 }
 
 function collectWatchdogIdleStatuses(

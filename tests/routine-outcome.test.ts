@@ -392,6 +392,34 @@ describe("Routine Outcome reconciliation", () => {
     });
   });
 
+  it("does not mark a provider-reported error as verified", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "none",
+          status: "error",
+          summary: "The requested report could not be produced.",
+          title: "Report failed",
+          url: null
+        },
+        commitsAhead: false,
+        githubObservationAvailable: false,
+        observedAction: null,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "none",
+      source: "codex",
+      status: "error",
+      summary: "The requested report could not be produced.",
+      title: "Report failed",
+      url: null,
+      verified: false
+    });
+  });
+
   it("derives an error outcome from a failed firing when no action was observed", () => {
     expect(
       reconcileRoutineOutcome({

@@ -194,9 +194,10 @@ export function reconcileRoutineOutcome(
       ...input.claim,
       source: input.provider,
       verified:
-        input.observedAction?.action === input.claim.action ||
-        input.claim.action === "none" ||
-        (input.claim.action === "commit" && input.commitsAhead)
+        input.claim.status !== "error" &&
+        (input.observedAction?.action === input.claim.action ||
+          input.claim.action === "none" ||
+          (input.claim.action === "commit" && input.commitsAhead))
     };
   }
 

@@ -65,8 +65,9 @@ export type DispatchDueRoutinesInput = {
   githubIssuesApi?: GitHubIssuesApi;
   logger?: Logger;
   notification?: {
-    config: EmailNotificationConfig;
-    sink: NotificationSink;
+    createSink: (config: EmailNotificationConfig) => NotificationSink;
+    resolveConfig: () => EmailNotificationConfig | undefined;
+    timeoutMs?: number;
   };
   now?: Date;
   prepareRoutineWorkspace?: (
@@ -369,6 +370,7 @@ export async function dispatchDueRoutines(
         continue;
       }
 
+      let firingResult: RoutineFiringResult;
       try {
         input.activeRuns.reserveSlot({
           issueNumber: syntheticRoutineIssueNumber(firingId),
@@ -377,12 +379,11 @@ export async function dispatchDueRoutines(
           runId: firingId
         });
         fired.push(firingId);
-        await runRoutineFiring({
+        firingResult = await runRoutineFiring({
           firingId,
           env: input.env ?? process.env,
           githubIssuesApi: input.githubIssuesApi,
           logger: input.logger,
-          notification: input.notification,
           prepareRoutineWorkspace,
           project,
           provider,
@@ -397,11 +398,33 @@ export async function dispatchDueRoutines(
       } finally {
         input.activeRuns.unregister(firingId);
       }
+      // Notification delivery is best-effort and can be as slow as the SMTP
+      // server allows (see ADR 0067); it runs after the slot above is
+      // released so a stalled relay does not suppress further dispatch for
+      // this project.
+      await recordRoutineFiringNotification(
+        {
+          env: input.env ?? process.env,
+          firingId,
+          logger: input.logger,
+          notification: input.notification,
+          project,
+          routine: routineDetail,
+          runStore: input.runStore
+        },
+        firingResult.events,
+        firingResult.prepared
+      );
     }
   }
 
   return { fired, skipped };
 }
+
+type RoutineFiringResult = {
+  events: NormalizedProviderEvent[];
+  prepared: PreparedRoutineWorkspace | undefined;
+};
 
 async function runRoutineFiring(input: {
   activeRuns: ActiveRunRegistry;
@@ -410,12 +433,6 @@ async function runRoutineFiring(input: {
   firingId: string;
   githubIssuesApi: GitHubIssuesApi | undefined;
   logger: Logger | undefined;
-  notification:
-    | {
-        config: EmailNotificationConfig;
-        sink: NotificationSink;
-      }
-    | undefined;
   prepareRoutineWorkspace: (
     input: PrepareRoutineWorkspaceInput
   ) => Promise<PreparedRoutineWorkspace>;
@@ -426,7 +443,7 @@ async function runRoutineFiring(input: {
   routine: RoutineStatus & { prompt: string };
   runStore: RunStore;
   stateRoot: string;
-}): Promise<void> {
+}): Promise<RoutineFiringResult> {
   const events: NormalizedProviderEvent[] = [];
   let prepared: PreparedRoutineWorkspace | undefined;
   let rawLogPath: string | undefined;
@@ -637,7 +654,7 @@ async function runRoutineFiring(input: {
         : { workspacePath: prepared.workspacePath })
     });
   }
-  await recordRoutineFiringNotification(input, events, prepared);
+  return { events, prepared };
 }
 
 async function recordRoutineFiringNotification(
@@ -647,8 +664,9 @@ async function recordRoutineFiringNotification(
     logger: Logger | undefined;
     notification:
       | {
-          config: EmailNotificationConfig;
-          sink: NotificationSink;
+          createSink: (config: EmailNotificationConfig) => NotificationSink;
+          resolveConfig: () => EmailNotificationConfig | undefined;
+          timeoutMs?: number;
         }
       | undefined;
     project: RunControllerProjectConfig;
@@ -670,8 +688,16 @@ async function recordRoutineFiringNotification(
   ) {
     return;
   }
+  // Resolved at delivery time (not at dispatch time) so a Service Config
+  // reload during a long-running firing still affects this delivery per
+  // ADR 0067.
+  const config = input.notification.resolveConfig();
+  if (config === undefined) {
+    return;
+  }
+  const sink = input.notification.createSink(config);
   const outcome = await deliverRoutineFiringNotification({
-    config: input.notification.config,
+    config,
     firing: {
       branchName:
         prepared?.branchName ?? input.project.workspace.git.base_branch,
@@ -691,14 +717,13 @@ async function recordRoutineFiringNotification(
       title: `${input.project.name}: ${input.routine.name}`
     },
     notifyEnabled: input.routine.notify !== false,
-    sink: input.notification.sink
+    sink,
+    ...(input.notification.timeoutMs === undefined
+      ? {}
+      : { timeoutMs: input.notification.timeoutMs })
   });
   if (outcome.state === "failed") {
-    const error = redactNotificationError(
-      outcome.error,
-      input.notification.config,
-      input.env
-    );
+    const error = redactNotificationError(outcome.error, config, input.env);
     input.runStore.recordRoutineFiringNotification({
       error,
       id: input.firingId,
@@ -722,7 +747,7 @@ async function recordRoutineFiringNotification(
 }
 
 function reportOutputFromEvents(events: NormalizedProviderEvent[]): string {
-  return events
+  const output = events
     .filter(
       (event) =>
         event.type === "message" &&
@@ -732,6 +757,20 @@ function reportOutputFromEvents(events: NormalizedProviderEvent[]): string {
     .map((event) => event.message as string)
     .join("")
     .trim();
+  const completed = [...events]
+    .reverse()
+    .find((event) => event.type === "turn_completed");
+  if (
+    completed === undefined ||
+    typeof completed.result !== "string" ||
+    parseRoutineOutcomeClaim([completed]) === null
+  ) {
+    return output;
+  }
+  const claimText = completed.result.trim();
+  return output.endsWith(claimText)
+    ? output.slice(0, -claimText.length).trim()
+    : output;
 }
 
 function redactNotificationError(

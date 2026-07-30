@@ -209,6 +209,31 @@ describe("Routine Firing notifications", () => {
       state: "failed"
     });
   });
+
+  it("bounds the complete best-effort delivery attempt", async () => {
+    const outcome = await deliverRoutineFiringNotification({
+      config: {
+        from: "symphonika@example.com",
+        on: "always",
+        smtpHost: "smtp.example.com",
+        smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+        smtpPort: 587,
+        smtpSecurity: "starttls",
+        to: "operator@example.com"
+      },
+      firing: routineFiringFixture(),
+      notifyEnabled: true,
+      sink: {
+        deliver: () => new Promise<void>(() => undefined)
+      },
+      timeoutMs: 5
+    });
+
+    expect(outcome).toEqual({
+      error: "notification delivery timed out after 5ms",
+      state: "failed"
+    });
+  });
 });
 
 function routineFiringFixture(): RoutineFiringNotification {

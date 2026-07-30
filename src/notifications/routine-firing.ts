@@ -7,6 +7,8 @@ import type { EmailDeliveryPolicy, EmailNotificationConfig } from "./config.js";
 import type { NotificationMessage } from "./types.js";
 import type { NotificationSink } from "./types.js";
 
+const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000;
+
 export type RoutineFiringNotification = {
   branchName: string;
   durationMs: number;
@@ -32,6 +34,7 @@ export async function deliverRoutineFiringNotification(input: {
   firing: RoutineFiringNotification;
   notifyEnabled: boolean;
   sink: NotificationSink;
+  timeoutMs?: number;
 }): Promise<RoutineNotificationDeliveryOutcome> {
   if (!input.notifyEnabled) {
     return { reason: "disabled", state: "skipped" };
@@ -40,16 +43,38 @@ export async function deliverRoutineFiringNotification(input: {
     return { reason: "policy", state: "skipped" };
   }
   const message = renderRoutineFiringNotification(input.firing);
-  let lastError = "notification delivery failed";
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      await input.sink.deliver(message);
-      return { state: "sent" };
-    } catch (error) {
-      lastError = errorMessage(error);
+  const timeoutMs = Math.max(1, input.timeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS);
+  const timeoutError = `notification delivery timed out after ${timeoutMs}ms`;
+  let timedOut = false;
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<RoutineNotificationDeliveryOutcome>((resolve) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      resolve({ error: timeoutError, state: "failed" });
+    }, timeoutMs);
+  });
+  const delivery = (async (): Promise<RoutineNotificationDeliveryOutcome> => {
+    let lastError = "notification delivery failed";
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await input.sink.deliver(message);
+        return timedOut
+          ? { error: timeoutError, state: "failed" }
+          : { state: "sent" };
+      } catch (error) {
+        if (timedOut) {
+          return { error: timeoutError, state: "failed" };
+        }
+        lastError = errorMessage(error);
+      }
     }
+    return { error: lastError, state: "failed" };
+  })();
+  const outcome = await Promise.race([delivery, timeout]);
+  if (timer !== undefined) {
+    clearTimeout(timer);
   }
-  return { error: lastError, state: "failed" };
+  return outcome;
 }
 
 export function renderRoutineFiringNotification(

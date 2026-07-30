@@ -783,10 +783,11 @@ explicit destructive operator override. It must not silently delete the only cop
 After a Routine Firing reaches a terminal state, Symphonika evaluates its Routine notification
 policy. Delivery occurs after `kind: git` PR discovery, uses both plain text and an escaped HTML
 alternative, and includes the canonical outcome as one ptt-style line with action, title, URL, and
-an unverified marker when applicable. Delivery gets two total attempts. Delivery failure never
-changes the firing state: `notification_state = failed` and the final sanitized
-`notification_error` remain durable. Policy or `notify: false` suppression records
-`notification_state = skipped`; success records `sent`.
+an unverified marker when applicable. The final claim JSON is excluded from report-output content.
+Delivery gets two total attempts within one 30-second orchestration deadline and runs after the
+firing releases its concurrency slot. Delivery failure or timeout never changes the firing state:
+`notification_state = failed` and the final sanitized `notification_error` remain durable. Policy
+or `notify: false` suppression records `notification_state = skipped`; success records `sent`.
 
 On daemon startup, a recurring Routine with `catch_up: fire_once_if_missed` preserves a due
 `next_fire_at` and fires at most once even when the outage spans several clock events. The claim

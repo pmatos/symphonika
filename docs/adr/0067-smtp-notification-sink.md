@@ -55,10 +55,14 @@ SQLite, and logs; transport errors are redacted before they reach durable eviden
 
 ### Failure policy and visibility
 
-Delivery gets two total attempts (one retry). Exhaustion never changes the Routine Firing's terminal
-state. Instead, `routine_firings.notification_state` records `sent`, `skipped`, or `failed`, and
-`notification_error` stores the final sanitized error for a failure. These fields are returned by
-the Routine Firing API and are durable across restart.
+Delivery gets two total attempts (one retry) within one 30-second orchestration deadline and starts
+after the Routine Firing releases its concurrency slot. Exhaustion or timeout never changes the
+Routine Firing's terminal state. Instead, `routine_firings.notification_state` records `sent`,
+`skipped`, or `failed`, and `notification_error` stores the final sanitized error for a failure.
+These fields are returned by the Routine Firing API and are durable across restart. The transport
+may still finish its in-progress send after the deadline because `NotificationSink` has no
+cancellation contract, but the dispatcher does not wait beyond the bound and starts no retry after
+the deadline.
 
 `doctor` validates configuration and reports a missing configured password variable with a manual
 env-file loading hint. It does not inspect historical delivery outcomes. The dashboard does not yet

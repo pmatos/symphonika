@@ -4,7 +4,10 @@ import type { ProcessCommand } from "../lifecycle/process-scope.js";
 
 const GRACEFUL_EOF_MS = 250;
 const FORCE_KILL_GRACE_MS = 1_000;
-const shuttingDown = new WeakSet<ChildProcessWithoutNullStreams>();
+const shuttingDown = new WeakMap<
+  ChildProcessWithoutNullStreams,
+  Promise<void>
+>();
 // POSIX permits the numeric group ID to be reused once its final member
 // exits. The supervisor's guardian ignores the group SIGTERM so that the
 // original identity remains reserved until the matching SIGKILL.
@@ -19,10 +22,17 @@ if (executable === undefined) {
 let groupTerminating = false;
 let provider;
 let settled = false;
+let shutdownRequested = false;
 const handleTerminate = () => {
   groupTerminating = true;
 };
 process.on("SIGTERM", handleTerminate);
+process.on("message", (message) => {
+  if (message === "prepare-shutdown") {
+    shutdownRequested = true;
+    process.send?.("shutdown-ready");
+  }
+});
 
 const guardian = spawn(
   process.execPath,
@@ -41,9 +51,17 @@ function finish(exitCode, signal) {
   settled = true;
 
   setTimeout(() => {
-    if (groupTerminating) {
-      process.removeListener("SIGTERM", handleTerminate);
-      process.kill(process.pid, "SIGTERM");
+    if (groupTerminating || shutdownRequested) {
+      if (groupTerminating) {
+        process.removeListener("SIGTERM", handleTerminate);
+        process.kill(process.pid, "SIGTERM");
+        return;
+      }
+      if (signal !== null) {
+        process.kill(process.pid, signal);
+        return;
+      }
+      process.exit(exitCode ?? 1);
       return;
     }
 
@@ -101,33 +119,59 @@ export function spawnProviderProcess(
   command: ProcessCommand,
   workspacePath: string
 ): ChildProcessWithoutNullStreams {
-  const executable =
-    process.platform === "win32" ? command.executable : process.execPath;
-  const args =
-    process.platform === "win32"
-      ? command.args
-      : [
-          "--input-type=module",
-          "--eval",
-          PROVIDER_SUPERVISOR_SOURCE,
-          command.executable,
-          ...command.args
-        ];
-  return spawn(executable, args, {
-    cwd: workspacePath,
-    detached: true,
-    env: process.env,
-    stdio: ["pipe", "pipe", "pipe"]
-  });
+  if (process.platform === "win32") {
+    return spawn(command.executable, command.args, {
+      cwd: workspacePath,
+      detached: true,
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+  }
+
+  return spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      PROVIDER_SUPERVISOR_SOURCE,
+      command.executable,
+      ...command.args
+    ],
+    {
+      cwd: workspacePath,
+      detached: true,
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe", "ipc"]
+    }
+  ) as ChildProcessWithoutNullStreams;
 }
 
 export function shutdownProviderProcess(
-  child: ChildProcessWithoutNullStreams
-): void {
-  if (shuttingDown.has(child)) {
+  child: ChildProcessWithoutNullStreams,
+  beforeClose?: () => void
+): Promise<void> {
+  const existing = shuttingDown.get(child);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const shutdown = beginProviderShutdown(child, beforeClose);
+  shuttingDown.set(child, shutdown);
+  return shutdown;
+}
+
+async function beginProviderShutdown(
+  child: ChildProcessWithoutNullStreams,
+  beforeClose?: () => void
+): Promise<void> {
+  if (!(await reserveProviderProcessGroup(child))) {
     return;
   }
-  shuttingDown.add(child);
+
+  try {
+    beforeClose?.();
+  } catch {
+    // Provider-specific courtesy is best-effort; group shutdown must proceed.
+  }
 
   if (!child.stdin.destroyed && child.stdin.writable) {
     child.stdin.end();
@@ -147,6 +191,55 @@ export function shutdownProviderProcess(
     killTimer.unref();
   }, GRACEFUL_EOF_MS);
   terminateTimer.unref();
+}
+
+async function reserveProviderProcessGroup(
+  child: ChildProcessWithoutNullStreams
+): Promise<boolean> {
+  if (process.platform === "win32") {
+    return true;
+  }
+  if (!child.connected) {
+    return false;
+  }
+
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const settle = (reserved: boolean): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      child.off("message", onMessage);
+      child.off("disconnect", onDisconnect);
+      child.off("exit", onExit);
+      resolve(reserved);
+    };
+    const onMessage = (message: unknown): void => {
+      if (message === "shutdown-ready") {
+        settle(true);
+      }
+    };
+    const onDisconnect = (): void => {
+      settle(false);
+    };
+    const onExit = (): void => {
+      settle(false);
+    };
+
+    child.on("message", onMessage);
+    child.once("disconnect", onDisconnect);
+    child.once("exit", onExit);
+    try {
+      child.send("prepare-shutdown", (error) => {
+        if (error !== null) {
+          settle(false);
+        }
+      });
+    } catch {
+      settle(false);
+    }
+  });
 }
 
 function signalProviderProcess(

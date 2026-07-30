@@ -537,6 +537,13 @@ describe("Codex JSON-RPC provider", () => {
         .spyOn(process, "kill")
         .mockImplementation((targetPid, signal) => {
           if (targetPid === -processGroupId) {
+            if (signal === "SIGTERM") {
+              try {
+                realKill(targetPid, "SIGKILL");
+              } catch {
+                // The process group is already gone.
+              }
+            }
             throw Object.assign(new Error("no such process group"), {
               code: "ESRCH"
             });
@@ -560,6 +567,74 @@ describe("Codex JSON-RPC provider", () => {
       } finally {
         signalSpy.mockRestore();
       }
+    }
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "reserves the process group when interrupt exits during EOF grace",
+    async () => {
+      const root = await makeTempRoot();
+      const workspacePath = path.join(root, "workspace");
+      await mkdir(workspacePath, { recursive: true });
+      const transcriptPath = path.join(root, "requests.jsonl");
+      const pidPath = path.join(root, "app-server.pid");
+      const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+      await writeFakeCodexAppServer(fakeServerPath, transcriptPath, pidPath);
+      const provider = createCodexProvider({
+        processScope: noopProcessScope()
+      });
+      const iterator = provider
+        .runAttempt({
+          ...providerInputFixture(),
+          provider: {
+            command: `${process.execPath} ${fakeServerPath} --scenario=wait app-server`,
+            name: "codex"
+          },
+          workspacePath
+        })
+        [Symbol.asyncIterator]();
+      await nextProviderEvent(iterator);
+      await nextProviderEvent(iterator);
+      await nextProviderEvent(iterator);
+      const pid = Number(await waitForFileContent(pidPath));
+      const processGroupId = Number(
+        execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], {
+          encoding: "utf8"
+        }).trim()
+      );
+      const realKill = process.kill.bind(process);
+      const signalSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation((targetPid, signal) => {
+          if (targetPid === -processGroupId) {
+            return true;
+          }
+          return realKill(targetPid, signal);
+        });
+      let groupRemainedReserved = false;
+
+      try {
+        await provider.cancel("run-issue-9");
+        await collectIteratorEvents(iterator);
+        try {
+          realKill(-processGroupId, 0);
+          groupRemainedReserved = true;
+        } catch {
+          groupRemainedReserved = false;
+        }
+      } finally {
+        await new Promise((resolve) => setTimeout(resolve, 1_350));
+        signalSpy.mockRestore();
+        if (groupRemainedReserved) {
+          try {
+            realKill(-processGroupId, "SIGKILL");
+          } catch {
+            // The provider group already exited.
+          }
+        }
+      }
+
+      expect(groupRemainedReserved).toBe(true);
     }
   );
 

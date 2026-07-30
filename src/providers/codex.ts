@@ -88,19 +88,23 @@ export function createCodexProvider(
         // post-probe recheck (see below) is what stops it from launching.
         return Promise.resolve();
       }
-      if (activeRun.threadId !== undefined && activeRun.turnId !== undefined) {
-        writeJson(activeRun.child, {
-          id: activeRun.nextRequestId,
-          method: "turn/interrupt",
-          params: {
-            threadId: activeRun.threadId,
-            turnId: activeRun.turnId
-          }
-        });
-        activeRun.nextRequestId += 1;
-      }
-      shutdownProviderProcess(activeRun.child);
-      return Promise.resolve();
+      const child = activeRun.child;
+      return shutdownProviderProcess(child, () => {
+        if (
+          activeRun.threadId !== undefined &&
+          activeRun.turnId !== undefined
+        ) {
+          writeJson(child, {
+            id: activeRun.nextRequestId,
+            method: "turn/interrupt",
+            params: {
+              threadId: activeRun.threadId,
+              turnId: activeRun.turnId
+            }
+          });
+          activeRun.nextRequestId += 1;
+        }
+      });
     },
     name: "codex",
     runAttempt: async function* (
@@ -227,7 +231,7 @@ export function createCodexProvider(
           yield protocolFailure(
             "thread/start response did not include thread.id"
           );
-          shutdownProviderProcess(child);
+          await shutdownProviderProcess(child);
           yield* await drainUntilExit(queue, activeRun);
           return;
         }
@@ -286,7 +290,7 @@ export function createCodexProvider(
             type === "turn_completed" ||
             type === "turn_failed"
           ) {
-            shutdownProviderProcess(child);
+            await shutdownProviderProcess(child);
           }
         }
       } finally {
@@ -326,7 +330,7 @@ async function readUntilResponse(
     if (item.kind === "message" && responseId(item.raw) === requestId) {
       if (objectField(item.raw, "error") !== undefined) {
         events.push(jsonRpcErrorEvent(item.raw));
-        shutdownProviderProcess(activeRun.child);
+        await shutdownProviderProcess(activeRun.child);
         events.push(...(await drainUntilExit(queue, activeRun)));
         return {
           events,
@@ -350,7 +354,7 @@ async function readUntilResponse(
       };
     }
     if (isTerminalFailure(event.normalized?.type)) {
-      shutdownProviderProcess(activeRun.child);
+      await shutdownProviderProcess(activeRun.child);
       events.push(...(await drainUntilExit(queue, activeRun)));
       return {
         events,

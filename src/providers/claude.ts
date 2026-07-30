@@ -73,8 +73,7 @@ export function createClaudeProvider(
         // post-probe recheck (see below) is what stops it from launching.
         return Promise.resolve();
       }
-      shutdownProviderProcess(activeRun.child);
-      return Promise.resolve();
+      return shutdownProviderProcess(activeRun.child);
     },
     name: "claude",
     runAttempt: async function* (
@@ -140,7 +139,7 @@ export function createClaudeProvider(
             }
 
             if (isTerminalFailure(type)) {
-              shutdownProviderProcess(child);
+              await shutdownProviderProcess(child);
             }
           }
         }

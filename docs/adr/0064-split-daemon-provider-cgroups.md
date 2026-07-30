@@ -56,11 +56,14 @@ the wrapped process exits (verified empirically — a backgrounded `cargo build 
 The cgroup is complemented by a process-group lifetime boundary. On POSIX, Node spawns a lightweight
 detached supervisor as the process-group and session leader; the configured provider command (or
 the `systemd-run` wrapper when available) and a stream-free guardian run inside that group. Provider
-shutdown closes stdin first, then signals the whole group with `SIGTERM` after 250 milliseconds and
+shutdown closes stdin before OS signals, then signals the whole group with `SIGTERM` after 250 milliseconds and
 unconditionally escalates the group to `SIGKILL` after a further one-second grace period. The
 guardian ignores `SIGTERM` only during this interval, preserving the original process-group
-identity so the delayed negative-PID signal cannot follow a reused PID. Ordinary completion removes
-the guardian immediately. Escalation remains keyed on the group even when the provider has exited,
+identity so the delayed negative-PID signal cannot follow a reused PID. Before provider-specific
+shutdown courtesy or stdin EOF, the orchestrator waits for the supervisor to acknowledge that it
+has reserved the guardian; an immediate provider exit therefore cannot release the group during
+the initial grace period either. Ordinary completion without that shutdown request removes the
+guardian immediately. Escalation remains keyed on the group even when the provider has exited,
 because a descendant can ignore `SIGTERM` and retain the Workspace. An already-dead group (`ESRCH`)
 at the first signal is successful cleanup and does not arm escalation. Non-POSIX hosts retain
 bounded direct-child signaling, but only POSIX process groups provide the descendant guarantee.

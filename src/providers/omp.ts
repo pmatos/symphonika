@@ -96,14 +96,15 @@ export function createOmpProvider(
       }
 
       activeRun.queue?.discardBeforeFrameLimits();
-      if (!activeRun.child.stdin.destroyed && activeRun.child.stdin.writable) {
-        writeJson(activeRun.child, {
-          id: requestId(activeRun),
-          type: "abort"
-        });
-      }
-      shutdownProviderProcess(activeRun.child);
-      return Promise.resolve();
+      const child = activeRun.child;
+      return shutdownProviderProcess(child, () => {
+        if (!child.stdin.destroyed && child.stdin.writable) {
+          writeJson(child, {
+            id: requestId(activeRun),
+            type: "abort"
+          });
+        }
+      });
     },
     name: "omp",
     runAttempt: async function* (
@@ -148,7 +149,7 @@ export function createOmpProvider(
         }
         if (ready.response === undefined) {
           queue.discardBeforeFrameLimits();
-          shutdownProviderProcess(child);
+          await shutdownProviderProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
         }
@@ -167,7 +168,7 @@ export function createOmpProvider(
             raw: ready.response
           };
           queue.discardBeforeFrameLimits();
-          shutdownProviderProcess(child);
+          await shutdownProviderProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
         }
@@ -191,7 +192,7 @@ export function createOmpProvider(
             return;
           }
           if (!negotiatedV2Response(negotiated.response)) {
-            shutdownProviderProcess(child);
+            await shutdownProviderProcess(child);
             yield* drainUntilExit(queue, activeRun);
             return;
           }
@@ -210,7 +211,7 @@ export function createOmpProvider(
           return;
         }
         if (!successfulResponse(state.response)) {
-          shutdownProviderProcess(child);
+          await shutdownProviderProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
         }
@@ -232,7 +233,7 @@ export function createOmpProvider(
           return;
         }
         if (!agentInvokedResponse(prompt.response)) {
-          shutdownProviderProcess(child);
+          await shutdownProviderProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
         }
@@ -264,7 +265,7 @@ export function createOmpProvider(
           yield event;
 
           if (isTerminalAgentEnd(event.raw)) {
-            markTerminalAgentEnd(activeRun);
+            await markTerminalAgentEnd(activeRun);
             if (terminalAgentEndBeforePrompt(item)) {
               yield terminalAgentEndBeforePromptEvent(event.raw);
               yield* drainUntilExit(queue, activeRun);
@@ -274,12 +275,12 @@ export function createOmpProvider(
 
           if (isTerminalFailure(type)) {
             activeRun.terminalEventSeen = true;
-            shutdownProviderProcess(child);
+            await shutdownProviderProcess(child);
           }
         }
       } finally {
         activeRuns.delete(input.run.id);
-        shutdownProviderProcess(child);
+        await shutdownProviderProcess(child);
         await processScope.stopProviderScope(input.run);
       }
     },
@@ -540,7 +541,7 @@ async function* readUntilFrame(
     }
     yield event;
     if (item.kind === "message" && isTerminalAgentEnd(item.raw)) {
-      markTerminalAgentEnd(activeRun);
+      await markTerminalAgentEnd(activeRun);
       if (terminalAgentEndBeforePrompt(item)) {
         yield terminalAgentEndBeforePromptEvent(item.raw);
         yield* drainUntilExit(queue, activeRun);
@@ -586,7 +587,7 @@ async function* readUntilResponse(
     }
     yield event;
     if (item.kind === "message" && isTerminalAgentEnd(item.raw)) {
-      markTerminalAgentEnd(activeRun);
+      await markTerminalAgentEnd(activeRun);
       if (terminalAgentEndBeforePrompt(item)) {
         yield terminalAgentEndBeforePromptEvent(item.raw);
         yield* drainUntilExit(queue, activeRun);
@@ -1658,14 +1659,13 @@ function terminalAgentEndBeforePromptEvent(raw: unknown): ProviderEvent {
   };
 }
 
-function markTerminalAgentEnd(activeRun: ActiveOmpRun): void {
+async function markTerminalAgentEnd(activeRun: ActiveOmpRun): Promise<void> {
   activeRun.terminalEventSeen = true;
   if (activeRun.child !== undefined) {
-    endStdin(activeRun.child);
     // Bound the child's exit even when the terminal frame arrives during a
     // handshake read: a host waiting for stdin EOF must not deadlock the
     // run, and a hung child gets the bounded SIGTERM→SIGKILL escalation.
-    shutdownProviderProcess(activeRun.child);
+    await shutdownProviderProcess(activeRun.child);
   }
 }
 

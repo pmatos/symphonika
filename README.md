@@ -5,6 +5,7 @@ Symphonika is a TypeScript/Node orchestrator that turns eligible GitHub issues i
 ## Documentation
 
 - [docs/tutorial.md](docs/tutorial.md) is a step-by-step walkthrough for setting up Symphonika against your own GitHub repository.
+- [docs/workflows.md](docs/workflows.md) is the complete Markdown and raw-FSM workflow-language reference.
 - [SPEC.md](SPEC.md) is the implementation contract.
 - [CONTEXT.md](CONTEXT.md) defines the project language and domain boundaries.
 - [AGENTS.md](AGENTS.md) gives repository instructions for coding agents.
@@ -123,6 +124,9 @@ workflow:
 ```
 
 The built-ins (`builtin:single-agent-pr`, `builtin:plan-tdd-pr`, `builtin:autofix-until-clean`, `builtin:merge-when-green`) expand through the same template machinery as repo-local templates and surface as `template files: builtin:<name>` in `workflow validate` / `workflow explain`. Override a built-in by writing the equivalent YAML to `.symphonika/workflow-templates/<name>.yml` and swapping the `template:` reference. See [docs/adr/0049-builtin-workflow-templates.md](docs/adr/0049-builtin-workflow-templates.md).
+
+The [workflow-language reference](docs/workflows.md) documents raw-FSM states, actions, predicates,
+prompt variables, local template authoring, built-in contracts, and runtime signal availability.
 
 ## Self-Hosting
 

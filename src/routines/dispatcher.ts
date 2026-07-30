@@ -570,16 +570,27 @@ async function runRoutineFiring(input: {
       workspacePath: prepared.workspacePath
     });
     if (outcome.kind === "succeeded" && input.routine.kind === "git") {
-      await discoverRoutinePullRequests({
-        branchName: prepared.branchName,
-        env: input.env,
-        firingId: input.firingId,
-        githubIssuesApi: input.githubIssuesApi,
-        logger: input.logger,
-        project: input.project,
-        routineName: input.routine.name,
-        runStore: input.runStore
-      });
+      if (githubAfter?.pullRequestsAvailable === true) {
+        recordRoutinePullRequests({
+          branchName: prepared.branchName,
+          firingId: input.firingId,
+          projectName: input.project.name,
+          pullRequests: githubAfter.pullRequests,
+          routineName: input.routine.name,
+          runStore: input.runStore
+        });
+      } else {
+        await discoverRoutinePullRequests({
+          branchName: prepared.branchName,
+          env: input.env,
+          firingId: input.firingId,
+          githubIssuesApi: input.githubIssuesApi,
+          logger: input.logger,
+          project: input.project,
+          routineName: input.routine.name,
+          runStore: input.runStore
+        });
+      }
     }
   } catch (error) {
     const cancelEntry = input.activeRuns.get(input.firingId);
@@ -1129,7 +1140,25 @@ async function discoverRoutinePullRequests(input: {
     return;
   }
 
-  for (const pullRequest of pullRequests ?? []) {
+  recordRoutinePullRequests({
+    branchName: input.branchName,
+    firingId: input.firingId,
+    projectName: input.project.name,
+    pullRequests: pullRequests ?? [],
+    routineName: input.routineName,
+    runStore: input.runStore
+  });
+}
+
+function recordRoutinePullRequests(input: {
+  branchName: string;
+  firingId: string;
+  projectName: string;
+  pullRequests: RawGitHubPullRequest[];
+  routineName: string;
+  runStore: RunStore;
+}): void {
+  for (const pullRequest of input.pullRequests) {
     if (!isOpenPullRequestForBranch(pullRequest, input.branchName)) {
       continue;
     }
@@ -1137,7 +1166,7 @@ async function discoverRoutinePullRequests(input: {
       firingId: input.firingId,
       headSha: pullRequest.head.sha,
       prNumber: pullRequest.number,
-      projectName: input.project.name,
+      projectName: input.projectName,
       routineName: input.routineName
     });
   }

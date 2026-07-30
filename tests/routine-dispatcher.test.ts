@@ -91,7 +91,8 @@ describe("RoutineFiringDispatcher", () => {
     const listPullRequestsForBranch = vi
       .fn()
       .mockResolvedValueOnce([])
-      .mockResolvedValue(observedPullRequests);
+      .mockResolvedValueOnce(observedPullRequests)
+      .mockRejectedValue(new Error("unexpected third PR read"));
     const prepareRoutineWorkspace = vi.fn(
       (): Promise<PreparedRoutineWorkspace> =>
         Promise.resolve({
@@ -160,6 +161,7 @@ describe("RoutineFiringDispatcher", () => {
         repo: "alpha",
         token: "secret-token"
       });
+      expect(listPullRequestsForBranch).toHaveBeenCalledTimes(2);
       expect(runStore.listRoutineFirings()).toEqual([
         expect.objectContaining({
           id: "01JABCDEFGHJKMNPQRSTVWXYZ12",
@@ -722,7 +724,9 @@ describe("RoutineFiringDispatcher", () => {
 
       expect(delivered).toHaveLength(2);
       expect(delivered[0]?.text).toContain("## Findings");
-      expect(delivered[0]?.text).toContain("⏭️  alpha — nothing to do");
+      expect(delivered[0]?.text).toContain(
+        "⏭️  alpha — nothing to do (unverified)"
+      );
       expect(delivered[0]?.html).toContain(
         "&lt;script&gt;alert(&#39;report&#39;)&lt;/script&gt;"
       );

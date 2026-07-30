@@ -514,6 +514,17 @@ type RoutineFiringRow = {
   workspace_path: string | null;
 };
 
+type RoutineOutcomeRow = Pick<
+  RoutineFiringRow,
+  | "outcome_action"
+  | "outcome_source"
+  | "outcome_status"
+  | "outcome_summary"
+  | "outcome_title"
+  | "outcome_url"
+  | "outcome_verified"
+>;
+
 type RoutinePullRequestRow = {
   firing_id: string;
   head_sha: string;
@@ -1732,12 +1743,16 @@ export class RunStore {
     projectName: string,
     routineName: string
   ): RoutineOutcome | null {
-    return (
-      this.listRoutineFirings({
-        project: projectName,
-        routineName
-      })[0]?.outcome ?? null
-    );
+    const row = this.database
+      .prepare(
+        [
+          "select outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source",
+          "from routine_firings where project_name = ? and routine_name = ?",
+          "order by created_at desc, id desc limit 1"
+        ].join(" ")
+      )
+      .get(projectName, routineName) as RoutineOutcomeRow | undefined;
+    return mapRoutineOutcomeRow(row);
   }
 
   skipRoutineFiring(input: {
@@ -3789,23 +3804,7 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
           notificationError: row.notification_error ?? null,
           notificationState: row.notification_state
         }),
-    outcome:
-      row.outcome_status === null ||
-      row.outcome_action === null ||
-      row.outcome_title === null ||
-      row.outcome_summary === null ||
-      row.outcome_verified === null ||
-      row.outcome_source === null
-        ? null
-        : {
-            action: row.outcome_action,
-            source: row.outcome_source,
-            status: row.outcome_status,
-            summary: row.outcome_summary,
-            title: row.outcome_title,
-            url: row.outcome_url,
-            verified: row.outcome_verified === 1
-          },
+    outcome: mapRoutineOutcomeRow(row),
     projectName: row.project_name,
     provider: row.provider_name,
     providerCommand: row.provider_command,
@@ -3815,6 +3814,31 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
     terminalReason: row.terminal_reason ?? null,
     updatedAt: row.updated_at,
     workspacePath: row.workspace_path ?? ""
+  };
+}
+
+function mapRoutineOutcomeRow(
+  row: RoutineOutcomeRow | undefined
+): RoutineOutcome | null {
+  if (
+    row === undefined ||
+    row.outcome_status === null ||
+    row.outcome_action === null ||
+    row.outcome_title === null ||
+    row.outcome_summary === null ||
+    row.outcome_verified === null ||
+    row.outcome_source === null
+  ) {
+    return null;
+  }
+  return {
+    action: row.outcome_action,
+    source: row.outcome_source,
+    status: row.outcome_status,
+    summary: row.outcome_summary,
+    title: row.outcome_title,
+    url: row.outcome_url,
+    verified: row.outcome_verified === 1
   };
 }
 

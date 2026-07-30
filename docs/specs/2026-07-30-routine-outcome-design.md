@@ -111,7 +111,9 @@ Rules are evaluated in this order:
 4. A success with no claim but with local commits becomes a verified,
    `git`-sourced commit.
 5. A successful firing with neither claim nor observed action becomes
-   `no_action`; omission alone never changes the firing to failed.
+   `no_action`; it is verified and sourced to `gh` when GitHub comparison
+   completed, otherwise unverified and sourced to `symphonika`. Omission alone
+   never changes the firing to failed.
 6. A failed or cancelled firing with no observed external action becomes an
    error sourced to `symphonika`, retaining its terminal reason in the summary.
 

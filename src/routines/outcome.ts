@@ -162,7 +162,8 @@ export function formatRoutineOutcomeLine(
     return `❌ ${projectName} — failed (${outcome.summary || "error"})`;
   }
   if (outcome.action === "none") {
-    return `⏭️  ${projectName} — nothing to do`;
+    const unverified = outcome.verified ? "" : " (unverified)";
+    return `⏭️  ${projectName} — nothing to do${unverified}`;
   }
   const url = outcome.url === null ? "" : ` ${outcome.url}`;
   const unverified = outcome.verified ? "" : " (unverified)";
@@ -206,6 +207,18 @@ export function reconcileRoutineOutcome(
       status: "success",
       summary: "Observed commits ahead of the configured base branch.",
       title: "Commit retained in the Routine Firing workspace",
+      url: null,
+      verified: true
+    };
+  }
+
+  if (input.terminalState === "succeeded" && input.githubObservationAvailable) {
+    return {
+      action: "none",
+      source: "gh",
+      status: "no_action",
+      summary: "GitHub state diff observed no external action.",
+      title: "",
       url: null,
       verified: true
     };

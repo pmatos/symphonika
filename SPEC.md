@@ -771,8 +771,9 @@ GitHub action wins over an absent, error, no-action, or commit claim and is sour
 claimed PR or issue action is verified only when the same action kind was observed; an unobserved
 claim is retained but marked unverified. A successful `kind: git` firing with commits ahead of base
 can verify or derive a `commit` outcome. A successful firing with neither claim nor observation
-records `no_action`; omission alone is not a failure. Failed and cancelled firings retain their
-terminal reason independently of the reconciled outcome.
+records `no_action`; it is verified and sourced to `gh` only when the before/after GitHub reads
+completed, otherwise it is unverified and sourced to `symphonika`. Omission alone is not a failure.
+Failed and cancelled firings retain their terminal reason independently of the reconciled outcome.
 
 Under ADR 0025 a verified commit-only outcome remains successful because its workspace is
 preserved. Such an outcome is a retention signal: future workspace garbage collection must retain

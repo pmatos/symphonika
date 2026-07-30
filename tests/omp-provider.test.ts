@@ -86,7 +86,7 @@ describe("Oh My Pi RPC provider", () => {
         type: "session_started"
       },
       {
-        message: "done",
+        message: "working",
         messageKind: "text",
         sessionId: "omp-session-335",
         type: "message"
@@ -108,6 +108,12 @@ describe("Oh My Pi RPC provider", () => {
         toolCallId: "tool-1",
         toolName: "bash",
         type: "tool_call"
+      },
+      {
+        message: "done",
+        messageKind: "text",
+        sessionId: "omp-session-335",
+        type: "message"
       },
       {
         result: "done",
@@ -1987,9 +1993,11 @@ async function writeFakeOmp(
       "  if (message.type === 'prompt') {",
       "    send({ id: message.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
       "    send({ type: 'agent_start' });",
-      "    send({ type: 'message_update', message: { role: 'assistant' }, assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'done', partial: { role: 'assistant' } } });",
+      "    send({ type: 'message_update', message: { role: 'assistant' }, assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'working', partial: { role: 'assistant' } } });",
       "    send({ type: 'message_end', message: { role: 'assistant', model: 'gpt-5.4', usage: { input: 11, output: 7, cacheRead: 2, cacheWrite: 3, totalTokens: 23, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } } });",
       "    send({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'bash', args: { cmd: 'npm test' } });",
+      "    send({ type: 'message_update', message: { role: 'assistant' }, assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'done', partial: { role: 'assistant' } } });",
+      "    send({ type: 'message_end', message: { role: 'assistant' } });",
       "    send({ type: 'turn_end', message: { role: 'assistant' }, toolResults: [] });",
       "    send({ type: 'agent_end', isTerminal: true, messages: [] });",
       "  }",

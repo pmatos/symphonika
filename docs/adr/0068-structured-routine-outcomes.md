@@ -51,8 +51,9 @@ One pure reconciliation function produces the persisted outcome:
    commits ahead of the configured base branch.
 4. Without a claim, an observed GitHub action is sourced to `gh`; otherwise a successful
    commits-ahead firing is a verified `git` outcome.
-5. A successful firing with no claim or observation records an unverified `no_action` outcome.
-   Claim omission alone never fails the firing.
+5. A successful firing with no claim or observed action records `no_action`. A completed GitHub
+   comparison makes it verified and sourced to `gh`; an unavailable comparison leaves it
+   unverified and sourced to `symphonika`. Claim omission alone never fails the firing.
 6. A failed or cancelled firing with no observed external action records an error outcome sourced
    to `symphonika` and retains the terminal reason in its summary.
 

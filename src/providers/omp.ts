@@ -25,6 +25,7 @@ type ActiveOmpRun = {
   assistantText?: string;
   cancelled: boolean;
   child?: ChildProcessWithoutNullStreams;
+  completedAssistantText?: string;
   nextRequestId: number;
   promptDispatched: boolean;
   queue?: ProcessQueue;
@@ -406,6 +407,13 @@ function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
 
   if (type === "message_end") {
     const message = objectField(raw, "message");
+    if (
+      stringField(message, "role") === "assistant" &&
+      activeRun.assistantText !== undefined
+    ) {
+      activeRun.completedAssistantText = activeRun.assistantText;
+      delete activeRun.assistantText;
+    }
     const usage = objectField(message, "usage");
     if (stringField(message, "role") === "assistant" && usage !== undefined) {
       return {
@@ -439,11 +447,10 @@ function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
   }
 
   if (type === "turn_end") {
+    const result = activeRun.assistantText ?? activeRun.completedAssistantText;
     return {
       normalized: {
-        ...(activeRun.assistantText === undefined
-          ? {}
-          : { result: activeRun.assistantText }),
+        ...(result === undefined ? {} : { result }),
         sessionId: activeRun.sessionId,
         type: "turn_completed"
       },

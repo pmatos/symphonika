@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { openRunStore } from "../src/run-store.js";
 
@@ -875,13 +875,24 @@ describe("RunStore routines", () => {
       expect(
         store.listRoutineFiringTransitions("fire-1").map((entry) => entry.state)
       ).toEqual(["queued", "preparing_workspace", "running", "succeeded"]);
+      const listFirings = vi.spyOn(store, "listRoutineFirings");
       expect(store.listRoutines()[0]).toEqual(
         expect.objectContaining({
           lastFiredAt: "2026-05-22T10:00:02.000Z",
+          latestOutcome: {
+            action: "pr",
+            source: "gh",
+            status: "success",
+            summary: "Observed via GitHub state diff.",
+            title: "Extract retry policy",
+            url: "https://github.com/pmatos/rightkey/pull/42",
+            verified: true
+          },
           nextFireAt: null,
           state: "expired"
         })
       );
+      expect(listFirings).not.toHaveBeenCalled();
     } finally {
       store.close();
     }

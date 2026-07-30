@@ -24,6 +24,20 @@ describe("Routine Outcome reconciliation", () => {
     );
   });
 
+  it("preserves the unverified marker when a no-action outcome came from missing evidence", () => {
+    expect(
+      formatRoutineOutcomeLine("rightkey", {
+        action: "none",
+        source: "symphonika",
+        status: "no_action",
+        summary: "No externally observable action was reported.",
+        title: "",
+        url: null,
+        verified: false
+      })
+    ).toBe("⏭️  rightkey — nothing to do (unverified)");
+  });
+
   it("observes an issue changing from open to closed", () => {
     expect(
       diffRoutineGithubSnapshots(
@@ -271,6 +285,28 @@ describe("Routine Outcome reconciliation", () => {
       title: "",
       url: null,
       verified: false
+    });
+  });
+
+  it("records a verified GitHub no-op when observation completed and found no action", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: null,
+        commitsAhead: false,
+        githubObservationAvailable: true,
+        observedAction: null,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "none",
+      source: "gh",
+      status: "no_action",
+      summary: "GitHub state diff observed no external action.",
+      title: "",
+      url: null,
+      verified: true
     });
   });
 

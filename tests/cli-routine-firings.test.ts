@@ -502,4 +502,69 @@ describe("CLI routine firing commands", () => {
       expect(output.stdout).toContain("  (no events recorded)");
     }
   );
+
+  it("show-firing reports started and duration for a firing that fails before reaching running", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = seedRoutine(stateRoot);
+    store.createRoutineFiring({
+      id: "01J-TIMEOUT",
+      projectName: "alpha",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      routineName: "dependency-update",
+      scheduledAt: "2026-07-30T08:00:00.000Z"
+    });
+    store.updateRoutineFiringState("01J-TIMEOUT", "preparing_workspace");
+    store.completeRoutineFiring({
+      id: "01J-TIMEOUT",
+      state: "failed",
+      terminalReason: "firing_timeout"
+    });
+    store.close();
+
+    const { output, program } = captureProgram(stateRoot);
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "show-firing",
+      "01J-TIMEOUT",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+
+    expect(output.stdout).not.toMatch(/started:\s+-\s*\n/);
+    expect(output.stdout).not.toMatch(/duration:\s+-\s*\n/);
+  });
+
+  it("firings reports a non-placeholder duration for a firing still preparing its workspace", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = seedRoutine(stateRoot);
+    store.createRoutineFiring({
+      id: "01J-PREPARING",
+      projectName: "alpha",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      routineName: "dependency-update",
+      scheduledAt: "2026-07-30T08:00:00.000Z"
+    });
+    store.updateRoutineFiringState("01J-PREPARING", "preparing_workspace");
+    store.close();
+
+    const { output, program } = captureProgram(stateRoot);
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "firings",
+      "dependency-update",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+
+    const row = output.stdout
+      .trim()
+      .split("\n")
+      .find((line) => line.includes("01J-PREPARING"));
+    expect(row).toBeDefined();
+    expect(row?.trim().endsWith("-")).toBe(false);
+  });
 });

@@ -1240,7 +1240,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           for (const firing of firings) {
             const transitions = store.listRoutineFiringTransitions(firing.id);
             const startedAt = transitions.find(
-              (transition) => transition.state === "running"
+              (transition) => transition.state === "queued"
             )?.createdAt;
             const endedAt = [...transitions]
               .reverse()
@@ -1426,7 +1426,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           const displayDetail = detail;
           const transitions = store.listRoutineFiringTransitions(id);
           const startedAt = transitions.find(
-            (transition) => transition.state === "running"
+            (transition) => transition.state === "queued"
           )?.createdAt;
           const endedAt = [...transitions]
             .reverse()
@@ -2378,12 +2378,13 @@ function formatFiringDuration(
     return "-";
   }
   const startMs = Date.parse(startedAt);
+  const terminal = ["succeeded", "failed", "cancelled"].includes(state);
   const endMs =
-    endedAt === undefined && state === "running"
-      ? Date.now()
-      : endedAt === undefined
+    endedAt === undefined
+      ? terminal
         ? Number.NaN
-        : Date.parse(endedAt);
+        : Date.now()
+      : Date.parse(endedAt);
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
     return "-";
   }

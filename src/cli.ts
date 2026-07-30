@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { InvalidArgumentError, Command } from "commander";
 import { realpathSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -23,9 +24,11 @@ import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
 import type { InitOptions, InitProvider, InitReport } from "./init.js";
 import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
+import { routineEvidencePaths } from "./routines/evidence.js";
 import { formatRoutineOutcomeLine } from "./routines/outcome.js";
 import type { RoutineKind, RoutineStatus } from "./routines/types.js";
 import { pruneRoutineWorkspaces } from "./routines/workspace-retention.js";
+import { planRoutineWorkspacePaths } from "./routines/workspace.js";
 import {
   resolveWatchdogConfig,
   RuntimeConfigReloader,
@@ -35,8 +38,9 @@ import {
 import type {
   ListRunsFilter,
   OpenRunStoreOptions,
-  RunDetail,
   ProjectState,
+  RoutineFiringStatus,
+  RunDetail,
   RunArtifactDescriptor,
   RunState,
   RunStatus,
@@ -1192,6 +1196,69 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     });
 
   program
+    .command("firings")
+    .description("list a routine's firing history")
+    .argument("<routine>", "routine name")
+    .option("--config <path>", "service config path")
+    .option("--project <project>", "filter by project name")
+    .option("--limit <n>", "max rows", parsePositiveInt, 25)
+    .action(
+      (
+        routine: string,
+        options: { config?: string; limit: number; project?: string }
+      ) => {
+        const stateRoot = resolveStateRoot(
+          withConfigPath(options.config)
+        ).stateRoot;
+        const store = openRunStore({ stateRoot });
+        try {
+          const firings = store.listRoutineFirings({
+            limit: options.limit,
+            ...(options.project === undefined
+              ? {}
+              : { project: options.project }),
+            routineName: routine
+          });
+          if (firings.length === 0) {
+            writeOut(program, "(no firings)\n");
+            return;
+          }
+          writeOut(
+            program,
+            "id  project  routine  state  provider  scheduled  started  ended  duration\n"
+          );
+          for (const firing of firings) {
+            const transitions = store.listRoutineFiringTransitions(firing.id);
+            const startedAt = transitions.find(
+              (transition) => transition.state === "running"
+            )?.createdAt;
+            const endedAt = [...transitions]
+              .reverse()
+              .find((transition) =>
+                ["succeeded", "failed", "cancelled"].includes(transition.state)
+              )?.createdAt;
+            writeOut(
+              program,
+              [
+                firing.id,
+                firing.projectName,
+                firing.routineName,
+                firing.state,
+                firing.provider,
+                firing.scheduledAt,
+                startedAt ?? "-",
+                endedAt ?? "-",
+                formatFiringDuration(startedAt, endedAt, firing.state)
+              ].join("  ") + "\n"
+            );
+          }
+        } finally {
+          store.close();
+        }
+      }
+    );
+
+  program
     .command("show-run")
     .description("show run detail, attempts, transitions, and recent events")
     .argument("<id>", "run id")
@@ -1308,6 +1375,131 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           const events = store.listProviderEvents(id, {
             limit: options.events
           });
+          writeOut(program, `\nnormalized events (last ${events.length}):\n`);
+          if (events.length === 0) {
+            writeOut(program, "  (no events recorded)\n");
+          }
+          for (const event of events) {
+            const message =
+              typeof event.normalized.message === "string"
+                ? event.normalized.message
+                : JSON.stringify(event.normalized);
+            writeOut(
+              program,
+              `  ${event.sequence}. ${event.type}  ${message}\n`
+            );
+          }
+        } finally {
+          store.close();
+        }
+      }
+    );
+
+  program
+    .command("show-firing")
+    .description("show routine firing detail and recent normalized events")
+    .argument("<id>", "routine firing id")
+    .option("--config <path>", "service config path")
+    .option("--events <n>", "max recent events", parsePositiveInt, 25)
+    .action(
+      async (id: string, options: { config?: string; events: number }) => {
+        const state = resolveStateRoot(withConfigPath(options.config));
+        const store = openRunStore({ stateRoot: state.stateRoot });
+        try {
+          const detail = store.getRoutineFiring(id);
+          if (detail === undefined) {
+            writeErr(program, `routine firing ${id} not found\n`);
+            process.exitCode = 1;
+            program.error(`routine firing ${id} not found`, { exitCode: 1 });
+            return;
+          }
+          const displayDetail = await fillMissingRoutineFiringDisplayPaths(
+            detail,
+            store,
+            {
+              configDir: state.configDir,
+              configPath: state.configPath
+            }
+          );
+          const transitions = store.listRoutineFiringTransitions(id);
+          const startedAt = transitions.find(
+            (transition) => transition.state === "running"
+          )?.createdAt;
+          const endedAt = [...transitions]
+            .reverse()
+            .find((transition) =>
+              ["succeeded", "failed", "cancelled"].includes(transition.state)
+            )?.createdAt;
+          const evidence = routineEvidencePaths(state.stateRoot, id);
+
+          writeFiringField(program, "id", displayDetail.id);
+          writeFiringField(program, "routine", displayDetail.routineName);
+          writeFiringField(program, "project", displayDetail.projectName);
+          writeFiringField(program, "state", displayDetail.state);
+          writeFiringField(program, "provider", displayDetail.provider);
+          writeFiringField(program, "trigger", displayDetail.triggerSource);
+          writeFiringField(program, "scheduled", displayDetail.scheduledAt);
+          writeFiringField(program, "started", startedAt ?? "-");
+          writeFiringField(program, "ended", endedAt ?? "-");
+          writeFiringField(
+            program,
+            "duration",
+            formatFiringDuration(startedAt, endedAt, displayDetail.state)
+          );
+          writeFiringField(
+            program,
+            "workspace",
+            formatPath(displayDetail.workspacePath)
+          );
+          writeFiringField(
+            program,
+            "branch",
+            formatPath(displayDetail.branchName)
+          );
+          writeFiringField(
+            program,
+            "branch ref",
+            formatPath(displayDetail.branchRef)
+          );
+          writeFiringField(program, "prompt", formatPath(evidence.promptPath));
+          writeFiringField(
+            program,
+            "prompt metadata",
+            formatPath(evidence.promptMetadataPath)
+          );
+          writeFiringField(program, "raw log", formatPath(evidence.rawLogPath));
+          writeFiringField(
+            program,
+            "normalized log",
+            formatPath(evidence.normalizedLogPath)
+          );
+          if (displayDetail.terminalReason !== null) {
+            writeFiringField(program, "terminal", displayDetail.terminalReason);
+          }
+          if (displayDetail.cancelReason !== null) {
+            writeFiringField(
+              program,
+              "cancel reason",
+              displayDetail.cancelReason
+            );
+          }
+          writeFiringField(
+            program,
+            "pull requests",
+            displayDetail.pullRequests.length === 0
+              ? "-"
+              : displayDetail.pullRequests
+                  .map(
+                    (pullRequest) =>
+                      `#${pullRequest.prNumber} ${pullRequest.headSha}`
+                  )
+                  .join(", ")
+          );
+
+          const events = await readRecentRoutineEvents(
+            evidence.normalizedLogPath,
+            options.events
+          );
           writeOut(program, `\nnormalized events (last ${events.length}):\n`);
           if (events.length === 0) {
             writeOut(program, "  (no events recorded)\n");
@@ -2162,6 +2354,82 @@ function formatPath(value: string): string {
   return value.length === 0 ? "<not yet recorded>" : value;
 }
 
+function writeFiringField(
+  program: Command,
+  label: string,
+  value: string
+): void {
+  writeOut(program, `${`${label}:`.padEnd(17)}${value}\n`);
+}
+
+function formatFiringDuration(
+  startedAt: string | undefined,
+  endedAt: string | undefined,
+  state: string
+): string {
+  if (startedAt === undefined) {
+    return "-";
+  }
+  const startMs = Date.parse(startedAt);
+  const endMs =
+    endedAt === undefined && state === "running"
+      ? Date.now()
+      : endedAt === undefined
+        ? Number.NaN
+        : Date.parse(endedAt);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+    return "-";
+  }
+  return formatWatchdogDuration(Math.max(0, endMs - startMs));
+}
+
+type RecentRoutineEvent = {
+  normalized: Record<string, unknown>;
+  sequence: number;
+  type: string;
+};
+
+async function readRecentRoutineEvents(
+  normalizedLogPath: string,
+  limit: number
+): Promise<RecentRoutineEvent[]> {
+  let contents: string;
+  try {
+    contents = await readFile(normalizedLogPath, "utf8");
+  } catch {
+    return [];
+  }
+  const lines = contents.split(/\r?\n/).filter((line) => line.length > 0);
+  return lines.slice(-limit).map((line, index) => {
+    const sequence = lines.length - Math.min(lines.length, limit) + index + 1;
+    try {
+      const normalized = JSON.parse(line) as unknown;
+      if (
+        typeof normalized === "object" &&
+        normalized !== null &&
+        "type" in normalized &&
+        typeof normalized.type === "string"
+      ) {
+        return {
+          normalized,
+          sequence,
+          type: normalized.type
+        };
+      }
+    } catch {
+      // Preserve the line position as diagnosable malformed log evidence.
+    }
+    return {
+      normalized: {
+        message: "could not parse normalized event",
+        type: "malformed_event"
+      },
+      sequence,
+      type: "malformed_event"
+    };
+  });
+}
+
 function formatArtifactKinds(artifacts: RunArtifactDescriptor[]): string {
   const present = artifacts
     .filter((artifact) => artifact.present)
@@ -2272,6 +2540,59 @@ async function fillMissingRunDisplayPaths(
         ? plan.workspacePath
         : detail.workspacePath
   };
+}
+
+async function fillMissingRoutineFiringDisplayPaths(
+  detail: RoutineFiringStatus,
+  store: RunStore,
+  input: { configDir: string; configPath: string }
+): Promise<RoutineFiringStatus> {
+  if (
+    detail.branchName.length > 0 &&
+    detail.branchRef.length > 0 &&
+    detail.workspacePath.length > 0
+  ) {
+    return detail;
+  }
+
+  try {
+    const reloader = new RuntimeConfigReloader({
+      configPath: input.configPath
+    });
+    const snapshot = await reloader.reload();
+    const project = snapshot?.projects.find(
+      (entry) => entry.name === detail.projectName
+    );
+    const routine = store
+      .listRoutines({
+        includeInactive: true,
+        project: detail.projectName
+      })
+      .find((entry) => entry.name === detail.routineName);
+    if (project === undefined || routine === undefined) {
+      return detail;
+    }
+    const plan = planRoutineWorkspacePaths({
+      configDir: input.configDir,
+      firingId: detail.id,
+      kind: routine.kind,
+      project,
+      routineName: detail.routineName
+    });
+    return {
+      ...detail,
+      branchName:
+        detail.branchName.length === 0 ? plan.branchName : detail.branchName,
+      branchRef:
+        detail.branchRef.length === 0 ? plan.branchRef : detail.branchRef,
+      workspacePath:
+        detail.workspacePath.length === 0
+          ? plan.workspacePath
+          : detail.workspacePath
+    };
+  } catch {
+    return detail;
+  }
 }
 
 async function planRunWorkspacePaths(

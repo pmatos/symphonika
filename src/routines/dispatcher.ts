@@ -47,6 +47,7 @@ import {
   renderRoutinePrompt,
   RoutinePromptRenderError
 } from "./prompt-renderer.js";
+import { routineEvidencePaths } from "./evidence.js";
 import type {
   RoutineSchedule,
   RoutineState,
@@ -646,7 +647,8 @@ export async function dispatchDueRoutines(
         projectName: project.name,
         providerCommand,
         providerName,
-        routineName: routine.name
+        routineName: routine.name,
+        scheduledAt: routineDetail.nextFireAt ?? now.toISOString()
       });
       if (!claimed) {
         skipped.push({
@@ -800,6 +802,12 @@ async function runRoutineFiring(input: {
         routineName: input.routine.name
       })
     );
+    input.runStore.updateRoutineFiringWorkspace({
+      branchName: prepared.branchName,
+      branchRef: prepared.branchRef,
+      id: input.firingId,
+      workspacePath: prepared.workspacePath
+    });
     const evidence = await deadline.race(
       prepareRoutineEvidence({
         configDir: input.configDir,
@@ -1485,17 +1493,14 @@ async function prepareRoutineEvidence(input: {
       root: path.resolve(input.configDir, input.project.workspace.root)
     }
   });
-  const directory = path.join(
-    path.resolve(input.stateRoot),
-    "logs",
-    "routines",
-    safePathSegment(input.firingId)
-  );
-  await mkdir(directory, { recursive: true });
-  const promptPath = path.join(directory, "prompt.md");
-  const metadataPath = path.join(directory, "prompt-metadata.json");
-  const rawLogPath = path.join(directory, "provider.raw.jsonl");
-  const normalizedLogPath = path.join(directory, "provider.normalized.jsonl");
+  const evidencePaths = routineEvidencePaths(input.stateRoot, input.firingId);
+  await mkdir(evidencePaths.directory, { recursive: true });
+  const {
+    normalizedLogPath,
+    promptMetadataPath: metadataPath,
+    promptPath,
+    rawLogPath
+  } = evidencePaths;
   await Promise.all([
     writeFile(promptPath, rendered.prompt, "utf8"),
     writeFile(
@@ -1854,13 +1859,6 @@ function numberField(value: unknown, key: string): number | undefined {
     return typeof field === "number" ? field : undefined;
   }
   return undefined;
-}
-
-function safePathSegment(input: string): string {
-  const segment = input
-    .replace(/[^A-Za-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return segment.length === 0 ? "firing" : segment;
 }
 
 function errorMessage(error: unknown): string {

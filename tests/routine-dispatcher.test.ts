@@ -1315,6 +1315,7 @@ describe("RoutineFiringDispatcher", () => {
       expect(runStore.listRoutineFirings()).toEqual([
         expect.objectContaining({
           id: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+          branchName,
           outcome: {
             action: "pr",
             source: "gh",
@@ -1328,6 +1329,7 @@ describe("RoutineFiringDispatcher", () => {
             expect.objectContaining({ prNumber: 17 }),
             expect.objectContaining({ prNumber: 18 })
           ],
+          scheduledAt: "2026-05-22T10:00:00.000Z",
           state: "succeeded",
           terminalReason: null
         })

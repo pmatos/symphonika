@@ -266,9 +266,25 @@ export function fireRoutineNow(
     routine: detail,
     runStore: input.runStore,
     stateRoot: input.stateRoot
-  }).finally(() => {
-    input.activeRuns.unregister(firingId);
-  });
+  })
+    .finally(() => {
+      input.activeRuns.unregister(firingId);
+    })
+    .then((firingResult) =>
+      recordRoutineFiringNotification(
+        {
+          env: input.env ?? process.env,
+          firingId,
+          logger: input.logger,
+          notification: input.notification,
+          project,
+          routine: detail,
+          runStore: input.runStore
+        },
+        firingResult.events,
+        firingResult.prepared
+      )
+    );
   return {
     completion,
     firingId,

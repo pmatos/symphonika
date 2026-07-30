@@ -237,6 +237,13 @@ _Avoid_: agent when referring to the adapter boundary
 The execution posture where coding agents run without provider approval prompts or provider sandbox restrictions.
 _Avoid_: safe mode, yolo mode in formal docs
 
+**Provider PID Isolation**:
+The host-level process boundary that runs each Agent Provider's process tree inside its own Linux
+PID namespace, so one Run's provider cannot observe or signal PIDs belonging to a different Run's
+provider tree. Decided in ADR 0067 as a boundary adjacent to, not a change of, Full-Permission Agent
+Execution.
+_Avoid_: sandboxing, approval policy when referring to this PID-visibility boundary
+
 **Autonomous Run**:
 A coding-agent run expected to proceed without asking the operator for interactive input.
 _Avoid_: chat session
@@ -287,6 +294,8 @@ _Avoid_: chat session
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete
 - A **Project Cursor** belongs to exactly one **Dispatch Project**
 - **Full-Permission Agent Execution** is the default and assumed provider posture
+- **Provider PID Isolation** bounds what an **Agent Provider** can see and signal without changing
+  **Full-Permission Agent Execution**
 - An **Autonomous Run** fails if the provider requests interactive input
 
 ## Example dialogue

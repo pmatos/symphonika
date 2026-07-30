@@ -1338,6 +1338,74 @@ describe("RuntimeConfigReloader concurrency caps", () => {
   });
 });
 
+describe("RuntimeConfigReloader routine workspace retention", () => {
+  it("defaults automatic cleanup to short success and longer forensic windows", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    const snapshot = await reloader.reload();
+
+    expect(snapshot?.routineWorkspaceRetention).toEqual({
+      cancelledDays: 14,
+      enabled: true,
+      failedDays: 14,
+      succeededDays: 1
+    });
+  });
+
+  it("loads an operator-tuned service-level policy", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "retention:",
+        "  routine_workspaces:",
+        "    enabled: false",
+        "    succeeded_days: 2",
+        "    failed_days: 30",
+        "    cancelled_days: 7"
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    const snapshot = await reloader.reload();
+
+    expect(snapshot?.routineWorkspaceRetention).toEqual({
+      cancelledDays: 7,
+      enabled: false,
+      failedDays: 30,
+      succeededDays: 2
+    });
+  });
+
+  it("rejects a retention window large enough to overflow Date math", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "retention:",
+        "  routine_workspaces:",
+        "    succeeded_days: 1000000000"
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.getStatus().ok).toBe(false);
+  });
+});
+
 describe("RuntimeConfigReloader watchdog config", () => {
   it("resolves a Project grace override while inheriting daemon settings", async () => {
     const root = await makeTempRoot();

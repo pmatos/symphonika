@@ -136,6 +136,12 @@ describe("routine operator surfaces", () => {
     const store = openRunStore({ stateRoot });
     try {
       seedRoutine(store);
+      expect(
+        store.markRoutineWorkspacePruned({
+          id: "fire-1",
+          prunedAt: "2026-05-23T10:00:00.000Z"
+        })
+      ).toBe(true);
       const app = createHttpApp({
         runStore: store,
         stateRoot,
@@ -161,13 +167,14 @@ describe("routine operator surfaces", () => {
         "/api/routines/daily-report/firings?project=alpha"
       );
       const firingsBody = (await firingsResponse.json()) as {
-        firings: unknown[];
+        firings: Array<{ workspacePrunedAt: string | null }>;
       };
       expect(firingsResponse.status).toBe(200);
       expect(firingsBody.firings).toEqual([
         expect.objectContaining({
           id: "fire-1",
-          pullRequests: [expect.objectContaining({ prNumber: 42 })]
+          pullRequests: [expect.objectContaining({ prNumber: 42 })],
+          workspacePrunedAt: "2026-05-23T10:00:00.000Z"
         })
       ]);
     } finally {

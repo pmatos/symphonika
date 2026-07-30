@@ -911,6 +911,86 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("records workspace reclamation only for an eligible terminal firing", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-retention",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.updateRoutineFiringWorkspace({
+        id: "fire-retention",
+        workspacePath: "/tmp/workspace-retention"
+      });
+
+      expect(
+        store.markRoutineWorkspacePruned({
+          id: "fire-retention",
+          prunedAt: "2026-05-23T10:00:00.000Z"
+        })
+      ).toBe(false);
+      expect(store.getRoutineFiring("fire-retention")).toMatchObject({
+        state: "queued",
+        workspacePrunedAt: null
+      });
+
+      store.completeRoutineFiring({
+        id: "fire-retention",
+        state: "succeeded"
+      });
+      const future = "9999-12-31T23:59:59.999Z";
+      expect(
+        store.listRoutineWorkspacePruneCandidates({
+          cancelledBefore: future,
+          failedBefore: future,
+          succeededBefore: future
+        })
+      ).toEqual([
+        expect.objectContaining({
+          id: "fire-retention",
+          state: "succeeded",
+          workspacePath: "/tmp/workspace-retention",
+          workspacePrunedAt: null
+        })
+      ]);
+
+      expect(
+        store.markRoutineWorkspacePruned({
+          id: "fire-retention",
+          prunedAt: "2026-05-23T10:00:00.000Z"
+        })
+      ).toBe(true);
+      expect(store.getRoutineFiring("fire-retention")).toMatchObject({
+        workspacePath: "/tmp/workspace-retention",
+        workspacePrunedAt: "2026-05-23T10:00:00.000Z"
+      });
+      expect(
+        store.listRoutineWorkspacePruneCandidates({
+          cancelledBefore: future,
+          failedBefore: future,
+          succeededBefore: future
+        })
+      ).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("claimRoutineFiring inserts the firing only when the claim wins", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

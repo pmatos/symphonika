@@ -9,6 +9,16 @@ watchdog:
   grace_minutes: 30
   sample_interval_seconds: 60
 
+# Automatic Routine Firing workspace reclamation. Successful workspaces have
+# a short inspection window; failed/cancelled workspaces retain longer
+# forensic value. State-root logs and prompt evidence are never removed.
+retention:
+  routine_workspaces:
+    enabled: true
+    succeeded_days: 1
+    failed_days: 14
+    cancelled_days: 14
+
 # Optional global cap on the total number of concurrent provider runs across
 # all projects. Omit (or comment out) for unbounded. See ADR 0053.
 # global:

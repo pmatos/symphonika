@@ -339,31 +339,12 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       if (matches.length === 0) {
         return context.json({ error: "routine not found" }, 404);
       }
-      if (matches.length > 1) {
-        const candidates = matches.map((routine) => ({
-          projectName: routine.projectName,
-          routineName: routine.name
-        }));
-        return context.json(
-          {
-            candidates,
-            error: `routine ${routineName} is ambiguous; candidates: ${candidates
-              .map(
-                (candidate) =>
-                  `${candidate.projectName}/${candidate.routineName}`
-              )
-              .join(", ")}; provide the project query parameter`
-          },
-          409
-        );
-      }
-      const routine = matches[0]!;
       return context.json({
         firings: runStore.listRoutineFirings({
-          project: routine.projectName,
-          routineName: routine.name
+          ...(project === undefined ? {} : { project }),
+          routineName
         }),
-        routine
+        targets: matches
       });
     });
 

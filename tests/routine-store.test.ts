@@ -78,6 +78,293 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("persists one restart-safe fan-out identity and its expected Project targets", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      const first = store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["alpha", "beta"],
+        routineName: "refactor-audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      const afterRestart = store.ensureRoutineFanout({
+        id: "fanout-replacement",
+        projectNames: ["alpha", "beta"],
+        routineName: "refactor-audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+
+      expect(first).toEqual({ created: true, id: "fanout-1" });
+      expect(afterRestart).toEqual({ created: false, id: "fanout-1" });
+      expect(store.getRoutineFanout("fanout-1")).toEqual(
+        expect.objectContaining({
+          id: "fanout-1",
+          routineName: "refactor-audit",
+          scheduledAt: "2026-05-22T10:00:00.000Z",
+          targets: [
+            expect.objectContaining({
+              disposition: "pending",
+              projectName: "alpha"
+            }),
+            expect.objectContaining({
+              disposition: "pending",
+              projectName: "beta"
+            })
+          ]
+        })
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("correlates firing and skip legs and exposes a fan-out only when every target is terminal", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      const declaration = {
+        kind: "report" as const,
+        name: "refactor-audit",
+        prompt: "Audit.",
+        provider: "codex" as const,
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: "/tmp/refactor-audit.md"
+      };
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["alpha", "beta"],
+        routineName: "refactor-audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+
+      expect(
+        store.claimRoutineFiring({
+          fanoutId: "fanout-1",
+          firedAt: "2026-05-22T10:00:01.000Z",
+          firingId: "fire-alpha",
+          projectName: "alpha",
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName: "refactor-audit"
+        })
+      ).toBe(true);
+      expect(store.listReadyRoutineFanouts()).toEqual([]);
+
+      store.completeRoutineFiring({
+        id: "fire-alpha",
+        state: "succeeded"
+      });
+      expect(
+        store.skipRoutineFiring({
+          attemptedAt: "2026-05-22T10:00:01.000Z",
+          fanoutId: "fanout-1",
+          name: "refactor-audit",
+          projectName: "beta",
+          reason: "concurrency_cap"
+        })
+      ).toBe(true);
+
+      expect(store.getRoutineFiring("fire-alpha")).toMatchObject({
+        fanoutId: "fanout-1"
+      });
+      expect(store.listReadyRoutineFanouts()).toEqual([
+        expect.objectContaining({
+          id: "fanout-1",
+          targets: [
+            expect.objectContaining({
+              disposition: "firing",
+              firingId: "fire-alpha",
+              projectName: "alpha"
+            }),
+            expect.objectContaining({
+              disposition: "skipped",
+              projectName: "beta",
+              skipReason: "concurrency_cap"
+            })
+          ]
+        })
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("releases an interrupted grouped-notification claim when the Run Store reopens", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.syncRoutines([
+      {
+        kind: "report",
+        name: "refactor-audit",
+        prompt: "Audit.",
+        provider: "codex",
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: "/tmp/refactor-audit.md",
+        projectName: "alpha"
+      }
+    ]);
+    store.ensureRoutineFanout({
+      id: "fanout-restart",
+      projectNames: ["alpha"],
+      routineName: "refactor-audit",
+      scheduledAt: "2026-05-22T10:00:00.000Z"
+    });
+    expect(
+      store.skipRoutineFiring({
+        attemptedAt: "2026-05-22T10:00:01.000Z",
+        fanoutId: "fanout-restart",
+        name: "refactor-audit",
+        projectName: "alpha",
+        reason: "concurrency_cap"
+      })
+    ).toBe(true);
+    expect(store.claimRoutineFanoutNotification("fanout-restart")).toBe(true);
+    store.close();
+
+    const reopened = openRunStore({ stateRoot });
+    try {
+      expect(reopened.releaseInterruptedRoutineFanoutNotifications()).toBe(1);
+      expect(reopened.listReadyRoutineFanouts()).toEqual([
+        expect.objectContaining({
+          id: "fanout-restart",
+          notificationState: "pending"
+        })
+      ]);
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it("completes a pending fan-out leg when its target is removed during a restart", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const routine = {
+      kind: "report" as const,
+      name: "refactor-audit",
+      prompt: "Audit.",
+      provider: "codex" as const,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/refactor-audit.md"
+    };
+    try {
+      store.syncRoutines([
+        { ...routine, projectName: "alpha" },
+        { ...routine, projectName: "beta" }
+      ]);
+      store.ensureRoutineFanout({
+        id: "fanout-restart-removal",
+        projectNames: ["alpha", "beta"],
+        routineName: "refactor-audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      expect(
+        store.claimRoutineFiring({
+          fanoutId: "fanout-restart-removal",
+          firedAt: "2026-05-22T10:00:01.000Z",
+          firingId: "fire-alpha",
+          projectName: "alpha",
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName: "refactor-audit"
+        })
+      ).toBe(true);
+      store.completeRoutineFiring({
+        id: "fire-alpha",
+        state: "succeeded"
+      });
+
+      store.syncRoutines([{ ...routine, projectName: "alpha" }], {
+        projects: ["alpha", "beta"]
+      });
+
+      expect(store.settleUnavailableRoutineFanoutTargets()).toBe(1);
+      expect(store.listReadyRoutineFanouts()[0]).toMatchObject({
+        id: "fanout-restart-removal",
+        targets: [
+          expect.objectContaining({
+            disposition: "firing",
+            projectName: "alpha"
+          }),
+          expect.objectContaining({
+            disposition: "skipped",
+            projectName: "beta",
+            skipReason: "target_unavailable"
+          })
+        ]
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("builds the grouped subject from terminal failures and discovered pull requests", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      const routine = {
+        kind: "git" as const,
+        name: "refactor-audit",
+        prompt: "Audit.",
+        provider: "codex" as const,
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: "/tmp/refactor-audit.md"
+      };
+      store.syncRoutines([
+        { ...routine, projectName: "alpha" },
+        { ...routine, projectName: "beta" }
+      ]);
+      store.ensureRoutineFanout({
+        id: "fanout-subject",
+        projectNames: ["alpha", "beta"],
+        routineName: "refactor-audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      for (const projectName of ["alpha", "beta"]) {
+        expect(
+          store.claimRoutineFiring({
+            fanoutId: "fanout-subject",
+            firedAt: "2026-05-22T10:00:01.000Z",
+            firingId: `fire-${projectName}`,
+            projectName,
+            providerCommand: "codex fake",
+            providerName: "codex",
+            routineName: "refactor-audit"
+          })
+        ).toBe(true);
+      }
+      store.completeRoutineFiring({
+        id: "fire-alpha",
+        state: "succeeded"
+      });
+      store.recordRoutinePullRequest({
+        firingId: "fire-alpha",
+        headSha: "abc123",
+        prNumber: 42,
+        projectName: "alpha",
+        routineName: "refactor-audit"
+      });
+      store.completeRoutineFiring({
+        id: "fire-beta",
+        state: "failed",
+        terminalReason: "firing_timeout"
+      });
+
+      expect(store.listReadyRoutineFanouts()[0]).toMatchObject({
+        failureCount: 1,
+        issueCount: 0,
+        pullRequestCount: 1,
+        subject: "[ptt] refactor-audit — 1 PR, 0 issue, 1 failed"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("records every pull request discovered for a successful firing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -340,20 +627,21 @@ describe("RunStore routines", () => {
     }
   });
 
-  it("keeps a one-shot routine active and due after an overlap or concurrency-cap skip", async () => {
+  it("expires each one-shot target after its matched clock event is skipped", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
+      const routine = {
+        kind: "report" as const,
+        name: "daily-report",
+        prompt: "Report.",
+        provider: "codex" as const,
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: "/tmp/daily-report.md"
+      };
       store.syncRoutines([
-        {
-          kind: "report",
-          name: "daily-report",
-          prompt: "Report.",
-          provider: "codex",
-          schedule: { at: "2026-05-22T10:00:00.000Z" },
-          sourcePath: "/tmp/daily-report.md",
-          projectName: "alpha"
-        }
+        { ...routine, projectName: "alpha" },
+        { ...routine, projectName: "beta" }
       ]);
 
       const overlapSkipped = store.skipRoutineFiring({
@@ -364,34 +652,40 @@ describe("RunStore routines", () => {
       });
       expect(overlapSkipped).toBe(true);
       expect(
-        store.listRoutines({ now: new Date("2026-05-22T10:00:01.000Z") })[0]
+        store.listRoutines({
+          now: new Date("2026-05-22T10:00:01.000Z"),
+          project: "alpha"
+        })[0]
       ).toEqual(
         expect.objectContaining({
           lastSkipReason: "overlap",
-          nextFireAt: "2026-05-22T10:00:00.000Z",
-          state: "active"
+          nextFireAt: null,
+          state: "expired"
         })
       );
 
       const capSkipped = store.skipRoutineFiring({
         attemptedAt: "2026-05-22T10:00:01.000Z",
         name: "daily-report",
-        projectName: "alpha",
+        projectName: "beta",
         reason: "concurrency_cap"
       });
       expect(capSkipped).toBe(true);
       expect(
-        store.listRoutines({ now: new Date("2026-05-22T10:00:02.000Z") })[0]
+        store.listRoutines({
+          now: new Date("2026-05-22T10:00:02.000Z"),
+          project: "beta"
+        })[0]
       ).toEqual(
         expect.objectContaining({
           lastSkipReason: "concurrency_cap",
-          nextFireAt: "2026-05-22T10:00:00.000Z",
+          nextFireAt: null,
           skipCounts24h: {
             catch_up_window: 0,
             concurrency_cap: 1,
-            overlap: 1
+            overlap: 0
           },
-          state: "active"
+          state: "expired"
         })
       );
 
@@ -499,6 +793,55 @@ describe("RunStore routines", () => {
         state: "disabled",
         disabledReason: "operator"
       });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("applies declaration disable to every target while a Project cascade affects only its own target", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      disabled: true,
+      kind: "report" as const,
+      name: "refactor-audit",
+      prompt: "Audit.",
+      provider: null,
+      schedule: { cron: "0 2 * * *", tz: "Etc/UTC" },
+      sourcePath: "/tmp/refactor-audit.md"
+    };
+    try {
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      expect(
+        store
+          .listRoutines()
+          .map((routine) => [
+            routine.projectName,
+            routine.state,
+            routine.disabledReason
+          ])
+      ).toEqual([
+        ["alpha", "disabled", "operator"],
+        ["beta", "disabled", "operator"]
+      ]);
+
+      store.syncRoutines([
+        { ...declaration, disabled: false, projectName: "alpha" },
+        { ...declaration, disabled: false, projectName: "beta" }
+      ]);
+      store.markRoutinesInactiveForProject("alpha");
+
+      expect(
+        store
+          .listRoutines({ includeInactive: true })
+          .map((routine) => [routine.projectName, routine.state])
+      ).toEqual([
+        ["alpha", "inactive"],
+        ["beta", "active"]
+      ]);
     } finally {
       store.close();
     }

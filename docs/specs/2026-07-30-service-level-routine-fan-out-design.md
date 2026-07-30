@@ -76,6 +76,11 @@ Skipped targets appear as project lines but do not count as failures. Failed and
 count as failures; discovered Routine Pull Requests contribute to the PR count. Issue counts remain
 zero until the structured outcome slice supplies verified issue actions.
 
+If a restart leaves a target pending and that target's declaration or Project is then disabled or
+removed, reconciliation completes the leg as `target_unavailable`. It does not invent a provider
+firing or increment a concurrency/overlap counter, and it prevents the durable group from waiting
+forever on work that is no longer schedulable.
+
 Notification delivery is claimed durably so normal concurrent ticks emit one grouped notification.
 Failures return the claim to pending for retry and never change firing state. On daemon restart,
 orphan firing reconciliation makes lost live legs terminal and the next reconciliation can deliver

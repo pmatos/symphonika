@@ -262,7 +262,7 @@ const agentSchema = z
 
 // Explicitly reject the removed per-project `routines:` key so a legacy config
 // fails loudly with a migration pointer instead of silently stopping firing.
-// See ADR 0063.
+// See ADR 0069.
 function rejectPerProjectRoutines(
   rawProject: unknown,
   ctx: z.RefinementCtx
@@ -275,7 +275,7 @@ function rejectPerProjectRoutines(
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message:
-        "per-project `routines:` was removed; move routine entries to the top-level `routines:` block with a `project:` target (see ADR 0063)",
+        "per-project `routines:` was removed; move routine entries to the top-level `routines:` block with a `projects: [<name>, ...]` target list (see ADR 0069)",
       path: ["routines"]
     });
   }
@@ -341,10 +341,43 @@ const projectSchema = z.union([
 
 const serviceRoutineSchema = z
   .object({
-    project: z.string().trim().min(1),
+    projects: z.array(z.string().trim().min(1)).min(1).optional(),
     path: pathStringSchema
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((entry, ctx) => {
+    if ("project" in entry) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "service-level `project:` was replaced by the explicit `projects: [<name>, ...]` target list (see ADR 0069)",
+        path: ["project"]
+      });
+    }
+    if (entry.projects === undefined) {
+      if (!("project" in entry)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "an explicit non-empty `projects: [<name>, ...]` target list is required",
+          path: ["projects"]
+        });
+      }
+      return;
+    }
+    const seen = new Set<string>();
+    for (const [index, projectName] of entry.projects.entries()) {
+      if (seen.has(projectName)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `duplicate target project "${projectName}"`,
+          path: ["projects", index]
+        });
+      }
+      seen.add(projectName);
+    }
+  })
+  .transform((entry) => ({ ...entry, projects: entry.projects! }));
 
 const routineExecutionDefaultsSchema = z
   .object({
@@ -467,7 +500,7 @@ export async function runDoctor(
   errors.push(
     ...(await validateServiceRoutines(
       (parsedConfig.routines ?? []).map((entry) => ({
-        projectName: entry.project,
+        projectNames: entry.projects,
         sourcePath: path.resolve(path.dirname(configPath), entry.path)
       })),
       parsedConfig.projects,
@@ -606,7 +639,7 @@ async function readFileIfExists(filePath: string): Promise<string | undefined> {
 }
 
 async function validateServiceRoutines(
-  entries: Array<{ projectName: string; sourcePath: string }>,
+  entries: Array<{ projectNames: string[]; sourcePath: string }>,
   declaredProjects: ProjectConfig[],
   projectReports: DoctorProjectReport[],
   providers: ServiceConfig["providers"],
@@ -639,19 +672,23 @@ async function validateServiceRoutines(
     // simultaneously diagnosable errors. Checking this first means both
     // surface in the same `doctor` pass instead of requiring a
     // fix-and-rerun cycle to find the second one.
-    const isDuplicateTarget =
-      (projectNameCounts.get(entry.projectName) ?? 0) > 1;
-    const declared = isDuplicateTarget
-      ? undefined
-      : declaredProjects.find((p) => p.name === entry.projectName);
-    if (isDuplicateTarget) {
-      errors.push(
-        `routines entry targets project "${entry.projectName}" (declared at ${entry.sourcePath}), but "${entry.projectName}" is declared more than once; routine targets require a unique project name`
-      );
-    } else if (declared === undefined) {
-      errors.push(
-        `routines entry targets project "${entry.projectName}" (declared at ${entry.sourcePath}), but no project with that name is declared`
-      );
+    const declaredTargets = new Map<string, ProjectConfig>();
+    for (const projectName of entry.projectNames) {
+      const isDuplicateTarget = (projectNameCounts.get(projectName) ?? 0) > 1;
+      const declared = isDuplicateTarget
+        ? undefined
+        : declaredProjects.find((p) => p.name === projectName);
+      if (isDuplicateTarget) {
+        errors.push(
+          `routines entry targets project "${projectName}" (declared at ${entry.sourcePath}), but "${projectName}" is declared more than once; routine targets require a unique project name`
+        );
+      } else if (declared === undefined) {
+        errors.push(
+          `routines entry targets project "${projectName}" (declared at ${entry.sourcePath}), but no project with that name is declared`
+        );
+      } else {
+        declaredTargets.set(projectName, declared);
+      }
     }
 
     const result = await loadRoutineDeclaration(entry.sourcePath);
@@ -660,7 +697,7 @@ async function validateServiceRoutines(
       // Reserve an invalid declaration's recovered name too — otherwise a
       // later declaration in this pass can legitimately claim the same name
       // while this file remains broken, violating the service-level
-      // global-name uniqueness requirement (ADR 0063).
+      // global-name uniqueness requirement (ADR 0069).
       if (result.partialName !== undefined) {
         const existingForPartialName = seenNames.get(result.partialName);
         if (existingForPartialName !== undefined) {
@@ -705,27 +742,23 @@ async function validateServiceRoutines(
       }
     }
 
-    if (declared === undefined) {
-      continue;
-    }
-
     // kind: git on a tracker-less Routine Host is a declaration-time error
     // (ADR 0062). Flip the host's validForHosting false so the report is not
     // self-contradictory.
-    const host = hostsByName.get(entry.projectName);
-    if (
-      routine.kind === "git" &&
-      host !== undefined &&
-      host.tracker === undefined
-    ) {
-      errors.push(
-        `routine "${routine.name}" (kind: git) targets routine host "${entry.projectName}" which declares no tracker; a kind: git routine requires a tracker for PR discovery`
-      );
-      const reportEntry = projectReports.find(
-        (p) => p.name === entry.projectName
-      );
-      if (reportEntry !== undefined) {
-        reportEntry.validForHosting = false;
+    for (const projectName of declaredTargets.keys()) {
+      const host = hostsByName.get(projectName);
+      if (
+        routine.kind === "git" &&
+        host !== undefined &&
+        host.tracker === undefined
+      ) {
+        errors.push(
+          `routine "${routine.name}" (kind: git) targets routine host "${projectName}" which declares no tracker; a kind: git routine requires a tracker for PR discovery`
+        );
+        const reportEntry = projectReports.find((p) => p.name === projectName);
+        if (reportEntry !== undefined) {
+          reportEntry.validForHosting = false;
+        }
       }
     }
   }

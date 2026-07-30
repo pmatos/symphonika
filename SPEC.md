@@ -196,10 +196,10 @@ Symphonika stores both:
 
 ### 4.12 Routine
 
-A Routine is a service-level scheduled prompt declaration that targets one declared Project by name
-(Dispatch Project or Routine Host). Routines are declared in a top-level `routines:` block in
-`symphonika.yml`, not under a Project; see §5.4. A Routine Host owns no routines — Routines point
-*at* it. See ADR 0063.
+A Routine is a service-level scheduled prompt declaration with a globally unique name that targets
+an explicit, non-empty list of declared Projects (Dispatch Projects or Routine Hosts). Routines are
+declared in a top-level `routines:` block in `symphonika.yml`, not under a Project; see §5.4. A
+Routine Host owns no routines — Routines point *at* it. See ADR 0069.
 
 Symphonika supports hand-authored Markdown routine files with YAML front matter:
 
@@ -219,21 +219,28 @@ Aliases are expanded during validation without rewriting the declaration file.
 
 The Markdown body is the routine prompt template. `name` must be safe as a single workspace path
 segment because routine firing workspaces live under `<workspace.root>/routines/<name>/<firing-id>/`.
-Routine names are globally unique across the `routines:` block. Routine states are `active`,
-`expired`, and `inactive`. `inactive` means the Routine's target Project is disabled or omitted from
-the current valid Service Config snapshot (ADR 0021 cascade); the row remains durable but is hidden
-from default operator listings. Routine-level scheduling control also uses `disabled` and `invalid`
-as defined in §8.5.
+Routine names are globally unique across the `routines:` block. One declaration materializes a
+**Routine Target** row for each named Project, keyed `(project_name, name)`. Target states are
+`active`, `expired`, and `inactive`. `inactive` means that target's Project is disabled or omitted
+from the current valid Service Config snapshot (ADR 0021 cascade); the row remains durable but is
+hidden from default operator listings while sibling targets keep running. Routine-level scheduling
+control also uses `disabled` and `invalid` as defined in §8.5.
 
 ### 4.13 Routine Firing
 
-A Routine Firing is one durable execution of a Routine. It records the Routine, its target Project,
-provider, workspace path, prompt evidence, provider logs, terminal reason, lifecycle state, and any
-pull requests discovered from a `kind: git` firing branch. Its trigger source is `scheduled` or
-`manual`. A one-shot `schedule.at` Routine becomes `expired` after its scheduled firing is claimed
-and must not fire again on daemon restart. A recurring Routine remains active and advances to its
-next clock event after every scheduled firing. A manual firing does not consume a scheduled clock
-event.
+A **Routine Fan-out** is the durable group for one Routine clock event. It stores a shared
+correlation id and the expected Project targets before work begins. Each target is completed by a
+Routine Firing or a Routine Skip, and the group produces one summary only after every target
+completes.
+
+A Routine Firing is one durable execution of a Routine Target. It records the Routine, its target
+Project, fan-out id, provider, workspace path, prompt evidence, provider logs, terminal reason,
+lifecycle state, and any pull requests discovered from a `kind: git` firing branch. Its trigger
+source is `scheduled` or `manual`; a scheduled firing carries the fan-out id of the Routine Fan-out
+it belongs to, while a manual firing targets one Routine Target directly and has no fan-out id. A
+one-shot `schedule.at` target becomes `expired` after its firing is claimed and must not fire again
+on daemon restart. A recurring target remains active and advances to its next clock event after
+every scheduled firing. A manual firing does not consume a scheduled clock event.
 
 When Routine Workspace Retention reclaims a terminal firing's worktree, the firing keeps its
 historical workspace path and records `workspace_pruned_at`. State-root logs and prompt evidence are
@@ -378,8 +385,8 @@ projects:
       provider: claude
 
 routines:
-  - project: new-composer-host
-    path: ./daily-report.md
+  - path: ./daily-report.md
+    projects: [symphonika, new-composer-host]
 ```
 
 The bootstrap slice must use this final multi-project shape even with one configured Project. The
@@ -493,12 +500,17 @@ The preamble tells the agent:
 
 ### 5.4 Routine Declarations
 
-The service config defines a top-level `routines:` sequence. Each entry is an object with a required
-`project: <name>` target naming a declared Project (Dispatch Project or Routine Host) and a `path:`
-pointing at a hand-authored Markdown routine file. Paths are resolved relative to the service config
-directory and are re-read on every daemon tick with the rest of the runtime snapshot. Routine names
-are globally unique across the `routines:` block. The per-Project `routines:` key is not supported;
-routines point at Projects by name rather than being owned by them. See ADR 0063.
+The service config defines a top-level `routines:` sequence. Each entry is an object with a `path:`
+pointing at a hand-authored Markdown routine file and a required, non-empty
+`projects: [<name>, ...]` list. Every target names a declared Dispatch Project or Routine Host.
+Targets are explicit: duplicates and wildcard values such as `all` are invalid, so adding a Project
+never expands a Routine's blast radius implicitly. Paths are resolved relative to the service
+config directory and are re-read on every daemon tick with the rest of the runtime snapshot.
+
+Routine names are globally unique across the complete `routines:` block, including declarations
+with different target lists. The per-Project `routines:` key is not supported; routines point at
+Projects by name rather than being owned by them. ADR 0063's transitional singular `project:` form
+is also rejected with a validation error pointing to `projects: [<name>, ...]`. See ADR 0069.
 
 Invalid routine declarations are reported through the same reload-error surface as invalid workflow
 contracts. Unlike a workflow contract or Project-detail error, an invalid routine declaration does
@@ -586,6 +598,7 @@ SQLite stores durable orchestration state:
 - routines
 - routine firings
 - Routine Firing workspace-reclamation timestamps
+- Routine Fan-outs, their expected Project targets, and grouped-notification delivery state
 - exact-timestamp Routine skip counters used to compute rolling 24-hour per-reason totals
 
 The run store is not a replacement for GitHub as the canonical tracker. It is durable runtime
@@ -712,13 +725,14 @@ Invalid Projects are disabled. Valid Projects may continue running.
 Existing runs continue by default. Removing a Project from service config marks it inactive rather
 than killing active full-permission agents. Operators can explicitly cancel runs.
 
-Routine rows for Projects disabled or omitted from the current valid Service Config snapshot are
-marked `inactive` and pruned from default operator listings on reload. Historical `routine_firings`
-rows and `last_fired_at` remain durable Run Store evidence. Re-enabling a Project restores its
-configured Routines to `active` or `expired` without re-firing an already-fired one-shot. A one-shot
-Routine whose `at` elapsed while its Project was disabled and that never fired is restored to
-`expired`, not `active`, on re-enable — it does not fire retroactively, mirroring the same guarantee
-a routine-level `disabled` restore gives (§8.5).
+Routine Target rows for Projects disabled or omitted from the current valid Service Config snapshot
+are marked `inactive` and pruned from default operator listings on reload. Other targets of the same
+Routine remain active. Historical `routine_firings` rows and `last_fired_at` remain durable Run
+Store evidence. Re-enabling a Project restores its configured Routine Targets to `active` or
+`expired` without re-firing an already-fired one-shot. A one-shot target whose `at` elapsed while
+its Project was disabled and that never fired is restored to `expired`, not `active`, on re-enable
+— it does not fire retroactively, mirroring the same guarantee a routine-level `disabled` restore
+gives (§8.5).
 
 `inactive` is a Project-cascade state and is distinct from a Routine's own `disabled` or `invalid`
 state (§8.5): a Routine can be `disabled` while its Project stays fully enabled, and `disabled`
@@ -727,7 +741,8 @@ ones.
 
 ### 8.5 Routines
 
-On each daemon tick, Symphonika evaluates loaded active Routines. `ScheduleEvaluator` supports:
+On each daemon tick, Symphonika evaluates loaded active Routine Targets. `ScheduleEvaluator`
+supports:
 
 - `wait_until` when `now < at`
 - `fire_now` when `now >= at` and the Routine has not fired
@@ -735,7 +750,10 @@ On each daemon tick, Symphonika evaluates loaded active Routines. `ScheduleEvalu
 - recurring five-field cron evaluated in the Routine's IANA timezone, returning the next fire time
   strictly after `now`
 
-When a Routine fires, Symphonika allocates a ULID firing id and prepares a workspace at
+When one or more targets for a globally named Routine match the same scheduled clock event,
+Symphonika first creates a durable Routine Fan-out with a shared ULID correlation id and expected
+Project membership. It then admits each target independently against overlap and concurrency gates.
+For every admitted target, Symphonika allocates a ULID firing id and prepares a workspace at
 `<workspace.root>/routines/<routine-name>/<firing-id>/`. A `kind: report` workspace is detached at
 the Project base branch. A `kind: git` workspace is checked out on
 `sym/<project>/routine/<routine-name>/<first-10-firing-id-chars>`, created from the Project base.
@@ -768,12 +786,27 @@ then advances `next_fire_at` strictly beyond the current clock. Without the opt-
 past the missed window without firing and records a `catch_up_window` skip. Timezone and DST
 behavior comes from `cron-parser`; the Orchestrator does not implement separate DST rules.
 
-Routine Firings consume the same per-Project and global `max_in_flight` slots as issue Runs. If a
-cap is already full, the daemon records a `concurrency_cap` skip. If an earlier firing of the same
-Routine remains non-terminal, the daemon records an `overlap` skip unless `allow_overlap: true` is
-configured; overlap opt-in does not bypass concurrency caps. Every skip atomically advances the
-clock event, updates the Routine's latest-attempt/skip fields and rolling counter evidence, writes no
-Routine Firing row, and emits `routine.skipped` with `reason`, `routine`, and `scheduled_at` fields.
+Routine Firings consume the same per-Project and global `max_in_flight` slots as issue Runs.
+Fan-out admission is per target rather than atomic: admitted siblings start concurrently, while a
+target whose cap is full records a `concurrency_cap` skip. If an earlier firing of the same Routine
+Target remains non-terminal, that target records an `overlap` skip unless `allow_overlap: true` is
+configured; overlap opt-in does not bypass concurrency caps. A partial group is therefore normal.
+Every skip atomically advances only that target's clock event, updates its latest-attempt/skip
+fields and per-Project rolling counter evidence, completes its fan-out leg, writes no Routine
+Firing row, and emits `routine.skipped` with `reason`, `routine`, and `scheduled_at` fields. A
+skipped one-shot expires rather than remaining due.
+
+A Routine Fan-out is summary-ready only after every expected target is skipped or has a terminal
+firing. Symphonika then claims one durable grouped-notification delivery with a per-Project result
+and subject
+`[ptt] <routine> — <PR count> PR, <issue count> issue, <failure count> failed`. Skips remain visible
+but do not count as failures; failed and cancelled firings do. Delivery failures return to pending
+for retry. Startup releases interrupted delivery claims and existing orphan-firing reconciliation
+makes claimed legs lost across a daemon restart terminal. A pending leg whose Routine Target becomes
+disabled or inactive before it can be claimed is settled as `target_unavailable` without adding a
+skip counter, so configuration changes cannot strand the group. There is no separate
+partial-summary deadline: the firing timeout bounds live provider work, and the summary waits for
+every admitted firing.
 
 `symphonika fire-now <routine>` asks the daemon to claim a manual Routine Firing even when the
 Routine is not due. The manual claim records `trigger_source = "manual"` and otherwise uses the
@@ -801,16 +834,18 @@ cancellation path before waiting for dispatch work to drain, recording
 `cancel_reason = "daemon_shutdown"`. This is distinct from disabling or removing a Routine while
 the daemon remains active, which does not cancel its in-flight firing.
 
-A Routine with `disabled: true` in its own front matter transitions to `state = disabled`,
-`disabled_reason = "operator"` on the next reload; future scheduling stops but an in-flight firing
-continues to completion under the snapshot it started with — the daemon never cancels it as a side
-effect of the routine becoming disabled. Removing a Routine's entry from the top-level `routines:`
-block (or its target Project) has the same in-flight-continues behavior, with `disabled_reason =
-"removed_from_config"`. Restoring a Routine — removing `disabled: true` or re-adding its entry —
-un-disables it on the next reload and recomputes `next_fire_at` strictly after the current clock; a
-one-shot Routine whose `at` elapsed while disabled is marked `expired` instead of firing
-retroactively. `catch_up: fire_once_if_missed` does not apply to a routine-level restore — that
-policy is for daemon outage, not deliberate operator disable.
+A Routine with `disabled: true` in its own front matter transitions every Routine Target to
+`state = disabled`, `disabled_reason = "operator"` on the next reload; future scheduling stops but
+in-flight firings continue under the snapshot they started with — the daemon never cancels them as
+a side effect of the Routine becoming disabled. Removing the declaration from the top-level
+`routines:` block likewise soft-disables every target with `disabled_reason =
+"removed_from_config"`. Removing one Project from its `projects:` list soft-disables only that
+target with the same reason, leaving siblings active. Restoring a Routine or target — removing
+`disabled: true`, re-adding the entry, or restoring the target name — un-disables it on the next
+reload and recomputes `next_fire_at` strictly after the current clock; a one-shot target whose `at`
+elapsed while disabled is marked `expired` instead of firing retroactively.
+`catch_up: fire_once_if_missed` does not apply to a routine-level restore — that policy is for
+daemon outage, not deliberate operator disable.
 
 A previously persisted `kind: git` Routine rejected because its Routine Host has no tracker is
 soft-disabled with `disabled_reason = "rejected_tracker_less_host"`. This is distinct from
@@ -1402,10 +1437,11 @@ after the interactive review or explicit `--yes` selection. In `routine-host` mo
 Workflow Contract and no labels. See §5.1 and ADR 0062.
 
 `add-routine` writes `<cwd>/routines/<name>.md` with validated YAML front matter and a placeholder
-prompt, then registers the declaration as a top-level `routines:` block entry targeting the named
-Project. It preserves the Service Config's YAML comments and key ordering where supported by the
-YAML document parser, refuses missing Projects, unsafe names, duplicate names, invalid schedules,
-and existing target files, and never contacts GitHub or triggers a daemon reload. An unrelated
+prompt, then registers the declaration as a top-level `routines:` block entry with
+`projects: [<named Project>]`. It preserves the Service Config's YAML comments and key ordering
+where supported by the YAML document parser, refuses missing Projects, unsafe names, service-wide
+duplicate names, invalid schedules, and existing target files, and never contacts GitHub or
+triggers a daemon reload. An unrelated
 existing Routine declaration that cannot be loaded does not block registration. If the loader can
 recover a path-safe name from an otherwise-invalid declaration, that name still participates in the
 duplicate-name check; declarations whose names cannot be recovered remain visible through `doctor`.
@@ -1428,10 +1464,11 @@ mtime ages, observed turn-id count, five-minute output-token growth, and `idle_s
 grace remaining when idle. `status` and its dashboard render an idle indicator only for active Runs
 whose latest sample has `idle_since` set.
 
-`routines` lists Routine status per Project with `state`, `next_fire_at`, `last_fired_at`,
-`last_attempted_at`, `last_skip_reason`, `last_skip_at`, rolling 24-hour skip counts per reason, and
-PR numbers discovered for the latest firing. Inactive Routines are hidden by default;
-`--include-inactive` includes them.
+`routines` groups Routine Targets under their globally unique Routine name and target list, then
+shows each Project's `state`, `next_fire_at`, `last_fired_at`, `last_attempted_at`,
+`last_skip_reason`, `last_skip_at`, rolling 24-hour skip counts per reason, and PR numbers
+discovered for the latest firing. Inactive targets are hidden by default; `--include-inactive`
+includes them. `--project` narrows the grouped view to one target.
 
 `prune-workspaces` reclaims terminal Routine Firing worktrees eligible under the effective
 service-level retention policy. `--dry-run` lists candidates without changing Git registrations,
@@ -1485,10 +1522,10 @@ a CLI/API action (ADR 0067).
 The HTTP API exposes `GET /api/routines` with the same Routine status shape as the CLI and
 dashboard, including latest-attempt/skip fields and per-reason `skipCounts24h`. Inactive Routines
 are hidden by default; `?include_inactive=true` includes them, and the
-server-rendered dashboard accepts the same query parameter. `GET /api/routines/:id/firings` returns
-firing history and linked PRs for the named Routine; callers use `?project=<name>` to disambiguate
-the same Routine name across Projects and `?include_inactive=true` to resolve an inactive Routine and
-reach its durable firing history.
+server-rendered dashboard accepts the same query parameter. Because Routine names are globally
+unique, `GET /api/routines/:id/firings` returns firing history and linked PRs across every target,
+along with the target list. Callers may use `?project=<name>` to narrow the result and
+`?include_inactive=true` to include an inactive target and reach its durable firing history.
 
 `POST /api/routines/:id/fire` claims a manual Routine Firing. The optional `project` query
 parameter disambiguates a target and `force=true` applies the narrow disabled-Routine override from

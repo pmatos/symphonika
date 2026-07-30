@@ -23,6 +23,10 @@ import type {
 } from "../lifecycle/run-controller.js";
 import type { RunStore } from "../run-store.js";
 import {
+  renderRoutineFanoutNotification,
+  type RoutineFanoutNotification
+} from "./fanout-summary.js";
+import {
   evaluateRoutineSchedule,
   nextRecurringFireAt,
   type RoutineScheduleEvaluation
@@ -48,11 +52,15 @@ export type DispatchDueRoutinesInput = {
   activeRuns: ActiveRunRegistry;
   agentProviders: AgentProviderRegistry;
   configDir: string;
+  createFanoutId?: () => string;
   createFiringId?: () => string;
   env?: NodeJS.ProcessEnv;
   globalConcurrency: { maxInFlight: number | undefined };
   githubIssuesApi?: GitHubIssuesApi;
   logger?: Logger;
+  notifyRoutineFanout?: (
+    notification: RoutineFanoutNotification
+  ) => Promise<void>;
   now?: Date;
   prepareRoutineWorkspace?: (
     input: PrepareRoutineWorkspaceInput
@@ -290,7 +298,10 @@ export async function dispatchDueRoutines(
   const prepareRoutineWorkspace =
     input.prepareRoutineWorkspace ?? defaultPrepareRoutineWorkspace;
   const createFiringId = input.createFiringId ?? (() => createUlid());
+  const createFanoutId = input.createFanoutId ?? (() => createUlid());
   const projects = [...input.projects.values()];
+  const fanoutIds = new Map<string, string>();
+  const firingTasks: Promise<void>[] = [];
 
   for (const project of projects) {
     if (project.disabled === true) {
@@ -384,6 +395,7 @@ export async function dispatchDueRoutines(
   input.runStore.pruneRoutinesForUnknownProjects(
     projects.map((project) => project.name)
   );
+  input.runStore.settleUnavailableRoutineFanoutTargets();
 
   for (const project of projects) {
     if (project.disabled === true) {
@@ -413,6 +425,27 @@ export async function dispatchDueRoutines(
       if (evaluation.kind !== "fire_now") {
         continue;
       }
+      const scheduledAt = routine.nextFireAt ?? now.toISOString();
+      const fanoutKey = `${routine.name}\0${scheduledAt}`;
+      let fanoutId = fanoutIds.get(fanoutKey);
+      if (fanoutId === undefined) {
+        const targetProjectNames = input.runStore
+          .listRoutines()
+          .filter(
+            (target) =>
+              target.name === routine.name &&
+              target.state === "active" &&
+              target.nextFireAt === scheduledAt
+          )
+          .map((target) => target.projectName);
+        fanoutId = input.runStore.ensureRoutineFanout({
+          id: createFanoutId(),
+          projectNames: targetProjectNames,
+          routineName: routine.name,
+          scheduledAt
+        }).id;
+        fanoutIds.set(fanoutKey, fanoutId);
+      }
       if (
         !routine.allowOverlap &&
         input.runStore.hasActiveRoutineFiring({
@@ -423,6 +456,7 @@ export async function dispatchDueRoutines(
         if (
           recordDueRoutineSkip(input.runStore, {
             evaluation,
+            fanoutId,
             now,
             projectName: project.name,
             reason: "overlap",
@@ -472,6 +506,7 @@ export async function dispatchDueRoutines(
         if (
           recordDueRoutineSkip(input.runStore, {
             evaluation,
+            fanoutId,
             now,
             projectName: project.name,
             reason: "concurrency_cap",
@@ -535,6 +570,7 @@ export async function dispatchDueRoutines(
 
       const firingId = createFiringId();
       const claimed = input.runStore.claimRoutineFiring({
+        fanoutId,
         firedAt: now.toISOString(),
         firingId,
         ...(reEvaluation.nextAt === undefined
@@ -554,37 +590,65 @@ export async function dispatchDueRoutines(
         continue;
       }
 
-      try {
-        input.activeRuns.reserveSlot({
-          issueNumber: syntheticRoutineIssueNumber(firingId),
-          projectName: project.name,
-          respectsIssueLabels: false,
-          runId: firingId
-        });
-        fired.push(firingId);
-        await runRoutineFiring({
-          firingId,
-          env: input.env ?? process.env,
-          githubIssuesApi: input.githubIssuesApi,
-          logger: input.logger,
-          prepareRoutineWorkspace,
-          project,
-          provider,
-          providerCommand,
-          providerName,
-          routine: routineDetail,
-          runStore: input.runStore,
-          stateRoot: input.stateRoot,
-          configDir: input.configDir,
-          activeRuns: input.activeRuns
-        });
-      } finally {
+      input.activeRuns.reserveSlot({
+        issueNumber: syntheticRoutineIssueNumber(firingId),
+        projectName: project.name,
+        respectsIssueLabels: false,
+        runId: firingId
+      });
+      fired.push(firingId);
+      const firingTask = runRoutineFiring({
+        firingId,
+        env: input.env ?? process.env,
+        githubIssuesApi: input.githubIssuesApi,
+        logger: input.logger,
+        prepareRoutineWorkspace,
+        project,
+        provider,
+        providerCommand,
+        providerName,
+        routine: routineDetail,
+        runStore: input.runStore,
+        stateRoot: input.stateRoot,
+        configDir: input.configDir,
+        activeRuns: input.activeRuns
+      }).finally(() => {
         input.activeRuns.unregister(firingId);
-      }
+      });
+      firingTasks.push(firingTask);
     }
   }
 
+  await Promise.all(firingTasks);
+  await deliverReadyRoutineFanouts(input);
   return { fired, skipped };
+}
+
+async function deliverReadyRoutineFanouts(
+  input: DispatchDueRoutinesInput
+): Promise<void> {
+  if (input.notifyRoutineFanout === undefined) {
+    return;
+  }
+  for (const fanout of input.runStore.listReadyRoutineFanouts()) {
+    if (!input.runStore.claimRoutineFanoutNotification(fanout.id)) {
+      continue;
+    }
+    try {
+      await input.notifyRoutineFanout(renderRoutineFanoutNotification(fanout));
+      input.runStore.completeRoutineFanoutNotification({ id: fanout.id });
+    } catch (error) {
+      const message = errorMessage(error);
+      input.runStore.completeRoutineFanoutNotification({
+        error: message,
+        id: fanout.id
+      });
+      input.logger?.warn(
+        { err: error, fanout: fanout.id, routine: fanout.routineName },
+        "symphonika routine fan-out notification failed"
+      );
+    }
+  }
 }
 
 async function runRoutineFiring(input: {
@@ -1124,6 +1188,7 @@ function recordDueRoutineSkip(
   runStore: RunStore,
   input: {
     evaluation: Extract<RoutineScheduleEvaluation, { kind: "fire_now" }>;
+    fanoutId?: string;
     now: Date;
     projectName: string;
     reason: "overlap" | "concurrency_cap";
@@ -1132,6 +1197,7 @@ function recordDueRoutineSkip(
 ): boolean {
   return runStore.skipRoutineFiring({
     attemptedAt: input.now.toISOString(),
+    ...(input.fanoutId === undefined ? {} : { fanoutId: input.fanoutId }),
     name: input.routine.name,
     ...(input.evaluation.nextAt === undefined
       ? {}

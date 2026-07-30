@@ -63,6 +63,7 @@ import {
   type RunState,
   type SyncProjectStateInput
 } from "./run-store.js";
+import type { RoutineFanoutNotification } from "./routines/fanout-summary.js";
 import { dispatchDueRoutines, fireRoutineNow } from "./routines/dispatcher.js";
 import type { RoutineFiringState } from "./routines/types.js";
 import type {
@@ -98,7 +99,11 @@ export type StartDaemonOptions = {
   prepareIssueWorkspace?: (
     input: PrepareIssueWorkspaceInput
   ) => Promise<PreparedIssueWorkspace>;
+  createRoutineFanoutId?: () => string;
   createRoutineFiringId?: () => string;
+  notifyRoutineFanout?: (
+    notification: RoutineFanoutNotification
+  ) => Promise<void>;
   prepareRoutineWorkspace?: (
     input: PrepareRoutineWorkspaceInput
   ) => Promise<PreparedRoutineWorkspace>;
@@ -138,6 +143,14 @@ export async function startDaemon(
   const runStore = openRunStore({
     stateRoot: state.stateRoot
   });
+  const recoveredRoutineFanoutNotifications =
+    runStore.releaseInterruptedRoutineFanoutNotifications();
+  if (recoveredRoutineFanoutNotifications > 0) {
+    logger.warn(
+      { recovered: recoveredRoutineFanoutNotifications },
+      "symphonika startup: released interrupted routine fan-out notification claims"
+    );
+  }
   const failedLegacyInputRequired = runStore.failLegacyInputRequiredRuns();
   if (failedLegacyInputRequired.length > 0) {
     logger.info(
@@ -629,6 +642,9 @@ export async function startDaemon(
           activeRuns,
           agentProviders,
           configDir: state.configDir,
+          ...(options.createRoutineFanoutId === undefined
+            ? {}
+            : { createFanoutId: options.createRoutineFanoutId }),
           ...(options.createRoutineFiringId === undefined
             ? {}
             : { createFiringId: options.createRoutineFiringId }),
@@ -636,6 +652,9 @@ export async function startDaemon(
           globalConcurrency: runtimeConfig.globalConcurrency(),
           githubIssuesApi,
           logger,
+          ...(options.notifyRoutineFanout === undefined
+            ? {}
+            : { notifyRoutineFanout: options.notifyRoutineFanout }),
           ...(options.prepareRoutineWorkspace === undefined
             ? {}
             : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),

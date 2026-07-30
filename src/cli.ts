@@ -1059,27 +1059,46 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           writeOut(program, "(no routines)\n");
           return;
         }
-        writeOut(
-          program,
-          "project  routine  state  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests\n"
-        );
+        const groups = new Map<string, RoutineStatus[]>();
         for (const routine of routines) {
+          const targets = groups.get(routine.name);
+          if (targets === undefined) {
+            groups.set(routine.name, [routine]);
+          } else {
+            targets.push(routine);
+          }
+        }
+        for (const [routineName, targets] of [...groups].sort(
+          ([left], [right]) => left.localeCompare(right)
+        )) {
+          targets.sort((left, right) =>
+            left.projectName.localeCompare(right.projectName)
+          );
           writeOut(
             program,
-            [
-              routine.projectName,
-              routine.name,
-              routine.state,
-              routine.disabledReason ?? "-",
-              routine.nextFireAt ?? "-",
-              routine.lastFiredAt ?? "-",
-              routine.lastAttemptedAt ?? "-",
-              routine.lastSkipReason ?? "-",
-              routine.lastSkipAt ?? "-",
-              formatRoutineSkipCounts(routine.skipCounts24h),
-              formatRoutinePullRequestNumbers(routine.pullRequestNumbers)
-            ].join("  ") + "\n"
+            `${routineName}  targets=[${targets.map((target) => target.projectName).join(",")}]\n`
           );
+          writeOut(
+            program,
+            "  project  state  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests\n"
+          );
+          for (const routine of targets) {
+            writeOut(
+              program,
+              [
+                `  ${routine.projectName}`,
+                routine.state,
+                routine.disabledReason ?? "-",
+                routine.nextFireAt ?? "-",
+                routine.lastFiredAt ?? "-",
+                routine.lastAttemptedAt ?? "-",
+                routine.lastSkipReason ?? "-",
+                routine.lastSkipAt ?? "-",
+                formatRoutineSkipCounts(routine.skipCounts24h),
+                formatRoutinePullRequestNumbers(routine.pullRequestNumbers)
+              ].join("  ") + "\n"
+            );
+          }
         }
       } finally {
         store.close();

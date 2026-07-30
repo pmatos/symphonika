@@ -676,8 +676,8 @@ async function writeTrackerLessGitRoutineHost(
       "    agent:",
       "      provider: codex",
       "routines:",
-      "  - project: audit-host",
-      "    path: ./refactor-audit.md"
+      "  - path: ./refactor-audit.md",
+      "    projects: [audit-host]"
     ].join("\n")
   );
 }

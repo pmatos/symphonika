@@ -1261,7 +1261,7 @@ async function writeValidConfig(
             "routines:",
             ...overrides.routinePaths.map(
               (routinePath) =>
-                `  - project: symphonika\n    path: ${routinePath}`
+                `  - projects: [symphonika]\n    path: ${routinePath}`
             )
           ]),
       ""

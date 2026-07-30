@@ -88,11 +88,13 @@ projects:
       provider: codex
     workflow: ./WORKFLOW.md
 
+# Routines live at service level and target an explicit, non-empty Project list.
+# The old singular `project:` field and nested Project `routines:` lists are invalid.
 # Per-Routine overrides use the same model, effort, permission_mode, and
 # timeout_minutes keys in the referenced Markdown file's YAML front matter.
 # Provider adapters append their native override flags when a firing spawns;
 # the configured commands above do not need template placeholders. Claude
 # Routine Firings also receive the one-shot anti-backgrounding guards.
 # routines:
-#   - project: symphonika
-#     path: ./routines/refactor-audit.md
+#   - path: ./routines/refactor-audit.md
+#     projects: [symphonika]

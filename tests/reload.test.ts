@@ -819,7 +819,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./daily-report.md"
         ].join("\n")
       )
@@ -838,6 +838,142 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         schedule: { at: "2026-05-22T10:00:00.000Z" }
       })
     ]);
+  });
+
+  it("fans one service-level Routine declaration out to every named Project", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work.\n");
+    await writeFile(
+      path.join(root, "refactor-audit.md"),
+      [
+        "---",
+        "name: refactor-audit",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "---",
+        "Audit {{project.name}}.",
+        ""
+      ].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      [
+        original.trimEnd(),
+        "  - name: vow",
+        "    mode: routine_host",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/vow",
+        "      git:",
+        "        remote: git@github.com:vow-lang/vow.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "routines:",
+        "  - path: ./refactor-audit.md",
+        "    projects: [symphonika, vow]",
+        ""
+      ].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({ ok: true });
+    expect(reloader.projectsByName().get("symphonika")?.routines).toEqual([
+      expect.objectContaining({
+        name: "refactor-audit",
+        projectName: "symphonika"
+      })
+    ]);
+    expect(reloader.projectsByName().get("vow")?.routines).toEqual([
+      expect.objectContaining({
+        name: "refactor-audit",
+        projectName: "vow"
+      })
+    ]);
+  });
+
+  it("rejects the transitional service-level project target with the projects-list replacement", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work.\n");
+    await writeFile(
+      path.join(root, "daily-report.md"),
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      [
+        original.trimEnd(),
+        "routines:",
+        "  - path: ./daily-report.md",
+        "    project: symphonika",
+        ""
+      ].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    expect(reloader.getStatus().ok).toBe(false);
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      "service-level `project:` was replaced by the explicit `projects: [<name>, ...]` target list"
+    );
+  });
+
+  it("requires an explicit non-empty target list without duplicate Project names", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work.\n");
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      [
+        original.trimEnd(),
+        "routines:",
+        "  - path: ./daily-report.md",
+        "    projects: [symphonika, symphonika]",
+        ""
+      ].join("\n")
+    );
+
+    const duplicateReloader = new RuntimeConfigReloader({ configPath });
+    await duplicateReloader.reload();
+    expect(duplicateReloader.getStatus().errors.join("\n")).toContain(
+      'duplicate target project "symphonika"'
+    );
+
+    await writeFile(
+      configPath,
+      [
+        original.trimEnd(),
+        "routines:",
+        "  - path: ./daily-report.md",
+        "    projects: all",
+        ""
+      ].join("\n")
+    );
+    const wildcardReloader = new RuntimeConfigReloader({ configPath });
+    await wildcardReloader.reload();
+    expect(wildcardReloader.getStatus().errors.join("\n")).toMatch(
+      /routines\.0\.projects.*expected array/i
+    );
   });
 
   it("resolves omitted routine execution settings from service defaults", async () => {
@@ -984,9 +1120,9 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./daily-report.md",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./weekly-report.md"
         ].join("\n")
       )
@@ -1042,7 +1178,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: s11",
+          "  - projects: [s11]",
           "    path: ./broken-routine.md"
         ].join("\n")
       );
@@ -1080,7 +1216,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./new-invalid.md"
         ].join("\n")
       )
@@ -1119,7 +1255,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./unnamed.md"
         ].join("\n")
       )
@@ -1170,7 +1306,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./routine-a.md"
         ].join("\n")
       )
@@ -1207,7 +1343,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         "    path: ./routine-a.md",
         [
           "    path: ./routine-a.md",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./routine-b.md"
         ].join("\n")
       )
@@ -1252,9 +1388,9 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./daily-report.md",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./daily-report-2.md"
         ].join("\n")
       )
@@ -1317,7 +1453,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         .concat(
           [
             "routines:",
-            "  - project: disabled-project",
+            "  - projects: [disabled-project]",
             "    path: ./broken-routine.md",
             ""
           ].join("\n")

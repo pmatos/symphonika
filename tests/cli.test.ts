@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildCli } from "../src/cli.js";
 import type { StartDaemonOptions } from "../src/daemon.js";
@@ -53,6 +53,42 @@ afterEach(async () => {
 });
 
 describe("CLI", () => {
+  it("test-email sends through the configured notification path and reports the recipient", async () => {
+    const output = { stderr: "", stdout: "" };
+    const runTestEmail = vi.fn().mockResolvedValue({
+      configPath: "/tmp/custom.yml",
+      error: null,
+      ok: true,
+      to: "operator@example.com"
+    });
+    const program = buildCli({
+      registerSignalHandlers: false,
+      runTestEmail
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "test-email",
+      "--config",
+      "/tmp/custom.yml"
+    ]);
+
+    expect(runTestEmail).toHaveBeenCalledWith({
+      configPath: "/tmp/custom.yml"
+    });
+    expect(output.stderr).toBe("");
+    expect(output.stdout).toBe("test email sent to operator@example.com\n");
+  });
+
   it("builds a missing dist bin during npm link so the linked executable shows help", async () => {
     const root = await makeTempRoot();
     const prefix = path.join(root, "prefix");

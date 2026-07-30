@@ -16,6 +16,10 @@ import type {
   PollingServiceConfig
 } from "./issue-polling.js";
 import { DEFAULT_POLLING_INTERVAL_MS } from "./issue-polling.js";
+import {
+  emailNotificationConfigSchema,
+  type EmailNotificationConfig
+} from "./notifications/config.js";
 import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig,
@@ -36,6 +40,7 @@ import type { TargetedRoutineDeclaration } from "./routines/types.js";
 
 export type RuntimeConfigSnapshot = {
   configPath: string;
+  email: EmailNotificationConfig | undefined;
   // Global concurrency cap snapshot. `maxInFlight: undefined` means
   // unbounded. See ADR 0053.
   globalConcurrency: { maxInFlight: number | undefined };
@@ -255,6 +260,7 @@ const serviceRoutineSchema = z
 
 const serviceConfigSchema = z
   .object({
+    email: emailNotificationConfigSchema.optional(),
     polling: z
       .object({
         interval_ms: z.number().int().positive().optional()
@@ -335,6 +341,10 @@ export class RuntimeConfigReloader {
 
   globalConcurrency(): { maxInFlight: number | undefined } {
     return this.snapshot?.globalConcurrency ?? { maxInFlight: undefined };
+  }
+
+  emailConfig(): EmailNotificationConfig | undefined {
+    return this.snapshot?.email;
   }
 
   watchdogServiceConfig(): WatchdogServiceConfig {
@@ -602,6 +612,7 @@ async function loadRuntimeConfigSnapshot(input: {
     errors,
     snapshot: {
       configPath: input.configPath,
+      email: parsed.data.email,
       globalConcurrency: {
         maxInFlight: parsed.data.global?.max_in_flight
       },

@@ -1,6 +1,7 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { Writable } from "node:stream";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -15,10 +16,12 @@ import type {
   ProviderEvent,
   ProviderRunInput
 } from "../src/provider.js";
+import type { NotificationMessage } from "../src/notifications/types.js";
 import {
   dispatchDueRoutines,
   fireRoutineNow
 } from "../src/routines/dispatcher.js";
+import type { TargetedRoutineDeclaration } from "../src/routines/types.js";
 import type { RoutineFanoutNotification } from "../src/routines/fanout-summary.js";
 import type {
   PreparedRoutineWorkspace,
@@ -564,6 +567,66 @@ describe("RoutineFiringDispatcher", () => {
     } finally {
       clearTimeout(fallback);
       releaseProvider();
+      runStore.close();
+    }
+  });
+
+  it("terminates a firing at its wall-clock deadline when the pre-run GitHub snapshot read hangs", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const provider = quietProvider();
+    const listIssues = vi.fn(
+      () =>
+        new Promise<never>(() => {
+          // Never resolves: the deadline race, not this call, must end the
+          // firing.
+        })
+    );
+    const project = dueRoutineProjectFixture(root, "codex");
+    project.routines = [
+      {
+        ...project.routines![0]!,
+        timeoutMinutes: 0.001
+      }
+    ];
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-snapshot-timeout",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", project]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(runStore.getRoutineFiring("fire-snapshot-timeout")).toMatchObject({
+        state: "failed",
+        terminalReason: "firing_timeout"
+      });
+    } finally {
       runStore.close();
     }
   });
@@ -1154,23 +1217,32 @@ describe("RoutineFiringDispatcher", () => {
       }),
       validate: vi.fn().mockResolvedValue(undefined)
     } satisfies AgentProvider;
-    const listPullRequestsForBranch = vi.fn().mockResolvedValue([
+    const observedPullRequests = [
       {
         head: { ref: branchName, sha: "abc123" },
+        html_url: "https://github.com/pmatos/alpha/pull/17",
         number: 17,
-        state: "open"
+        state: "open",
+        title: "Extract retry policy"
       },
       {
         head: { ref: branchName, sha: "def456" },
+        html_url: "https://github.com/pmatos/alpha/pull/18",
         number: 18,
-        state: "open"
+        state: "open",
+        title: "Document retry policy"
       },
       {
         head: { ref: "another-branch", sha: "ignored" },
         number: 19,
         state: "open"
       }
-    ]);
+    ];
+    const listPullRequestsForBranch = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(observedPullRequests)
+      .mockRejectedValue(new Error("unexpected third PR read"));
     const prepareRoutineWorkspace = vi.fn(
       (): Promise<PreparedRoutineWorkspace> =>
         Promise.resolve({
@@ -1239,9 +1311,19 @@ describe("RoutineFiringDispatcher", () => {
         repo: "alpha",
         token: "secret-token"
       });
+      expect(listPullRequestsForBranch).toHaveBeenCalledTimes(2);
       expect(runStore.listRoutineFirings()).toEqual([
         expect.objectContaining({
           id: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+          outcome: {
+            action: "pr",
+            source: "gh",
+            status: "success",
+            summary: "Observed via GitHub state diff.",
+            title: "Extract retry policy",
+            url: "https://github.com/pmatos/alpha/pull/17",
+            verified: true
+          },
           pullRequests: [
             expect.objectContaining({ prNumber: 17 }),
             expect.objectContaining({ prNumber: 18 })
@@ -1252,6 +1334,113 @@ describe("RoutineFiringDispatcher", () => {
       ]);
       expect(runStore.listOpenTrackedPullRequests()).toEqual([]);
       expect(runStore.hasPullRequestFollowupWork()).toBe(false);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("observes a pull request that was opened and closed within the same firing", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/dependency-update/01JCLOSEDPR";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const listPullRequestsForBranch = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          head: { ref: branchName, sha: "abc123" },
+          html_url: "https://github.com/pmatos/alpha/pull/17",
+          number: 17,
+          state: "closed",
+          title: "Extract retry policy"
+        }
+      ]);
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName,
+          branchRef: `refs/heads/${branchName}`,
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-closed-pr-observed",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "dependency-update",
+                  prompt: "Commit on {{branch.name}}.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "dependency-update.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-closed-pr-observed",
+          outcome: {
+            action: "pr",
+            source: "gh",
+            status: "success",
+            summary: "Observed via GitHub state diff.",
+            title: "Extract retry policy",
+            url: "https://github.com/pmatos/alpha/pull/17",
+            verified: true
+          },
+          // The closed PR is observed for the outcome diff above, but a
+          // closed PR is still correctly excluded from the separate
+          // Routine Pull Request follow-up association.
+          pullRequests: [],
+          state: "succeeded"
+        })
+      ]);
     } finally {
       runStore.close();
     }
@@ -1458,7 +1647,7 @@ describe("RoutineFiringDispatcher", () => {
           terminalReason: "no_workspace_changes"
         })
       ]);
-      expect(listPullRequestsForBranch).not.toHaveBeenCalled();
+      expect(listPullRequestsForBranch).toHaveBeenCalledTimes(2);
     } finally {
       runStore.close();
     }
@@ -1594,6 +1783,15 @@ describe("RoutineFiringDispatcher", () => {
       expect(runStore.listRoutineFirings()).toEqual([
         expect.objectContaining({
           id: "fire-1",
+          outcome: {
+            action: "none",
+            source: "symphonika",
+            status: "no_action",
+            summary: "No externally observable action was reported.",
+            title: "",
+            url: null,
+            verified: false
+          },
           provider: "codex",
           routineName: "daily-report",
           state: "succeeded",
@@ -1650,6 +1848,484 @@ describe("RoutineFiringDispatcher", () => {
 
       expect(second.fired).toEqual([]);
       expect(providerInputs).toHaveLength(1);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("derives an issue-closed outcome from GitHub state when the claim is absent", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const listIssues = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          html_url: "https://github.com/pmatos/alpha/issues/17",
+          number: 17,
+          state: "open",
+          title: "Superseded dependency issue"
+        }
+      ])
+      .mockResolvedValueOnce([
+        {
+          html_url: "https://github.com/pmatos/alpha/issues/17",
+          number: 17,
+          state: "closed",
+          title: "Superseded dependency issue"
+        }
+      ]);
+    const provider = quietProvider();
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns: new ActiveRunRegistry(),
+          provider,
+          root,
+          routine: {
+            ...minuteRoutine(root),
+            schedule: { at: "2026-05-22T10:00:00.000Z" }
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-issue-close",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        }
+      });
+
+      expect(listIssues).toHaveBeenCalledTimes(2);
+      expect(listIssues).toHaveBeenCalledWith({
+        owner: "pmatos",
+        repo: "alpha",
+        since: "2026-05-21T10:00:00.000Z",
+        state: "all",
+        token: "secret-token"
+      });
+      expect(runStore.getRoutineFiring("fire-issue-close")?.outcome).toEqual({
+        action: "issue_closed",
+        source: "gh",
+        status: "success",
+        summary: "Observed via GitHub state diff.",
+        title: "Superseded dependency issue",
+        url: "https://github.com/pmatos/alpha/issues/17",
+        verified: true
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("logs and skips issue observation for a tracker-less Routine Host", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const logger = pino({ enabled: false });
+    const logInfo = vi.spyOn(logger, "info");
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: quietProvider() },
+        configDir: root,
+        createFiringId: () => "fire-trackerless",
+        globalConcurrency: { maxInFlight: undefined },
+        githubIssuesApi: {
+          listIssues: vi.fn().mockResolvedValue([]),
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        logger,
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "report-host",
+            {
+              agent: { provider: "codex" },
+              disabled: false,
+              mode: "routine_host",
+              name: "report-host",
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  projectName: "report-host",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md")
+                }
+              ],
+              workspace: {
+                git: {
+                  base_branch: "main",
+                  remote: "git@github.com:pmatos/alpha.git"
+                },
+                root: "./workspaces/report-host"
+              }
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(logInfo).toHaveBeenCalledWith(
+        { project: "report-host", routine: "daily-report" },
+        "symphonika routine issue observation skipped: tracker absent"
+      );
+      expect(runStore.getRoutineFiring("fire-trackerless")).toMatchObject({
+        outcome: {
+          action: "none",
+          status: "no_action"
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("keeps a successful firing terminal when email fails and persists only sanitized failure evidence", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const secret = "smtp-password-that-must-never-be-persisted";
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const claim = JSON.stringify({
+      action: "none",
+      status: "no_action",
+      summary: "The report completed without an external action.",
+      title: "Daily report",
+      url: null
+    });
+    let logs = "";
+    const logger = pino(
+      { level: "trace" },
+      new Writable({
+        write(chunk: unknown, _encoding, callback) {
+          logs += Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk);
+          callback();
+        }
+      })
+    );
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: {
+            message:
+              "## Findings\n\n- **safe**\n- <script>alert('report')</script>",
+            type: "message"
+          },
+          raw: { delta: "report output" }
+        };
+        yield {
+          normalized: { message: claim, type: "message" },
+          raw: { delta: claim }
+        };
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-email-failed",
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        logger,
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.reject(
+                new Error(`relay rejected credentials ${secret}`)
+              );
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(delivered).toHaveLength(2);
+      expect(delivered[0]?.text).toContain("## Findings");
+      expect(delivered[0]?.text).toContain("⏭️  alpha — nothing to do");
+      expect(delivered[0]?.text).not.toContain(claim);
+      expect(delivered[0]?.html).toContain(
+        "&lt;script&gt;alert(&#39;report&#39;)&lt;/script&gt;"
+      );
+      expect(JSON.stringify(delivered)).not.toContain(secret);
+      expect(runStore.getRoutineFiring("fire-email-failed")).toMatchObject({
+        notificationError: "relay rejected credentials [REDACTED]",
+        notificationState: "failed",
+        state: "succeeded",
+        terminalReason: null
+      });
+      expect(logs).not.toContain(secret);
+      const database = await readFile(path.join(stateRoot, "symphonika.db"));
+      expect(database.includes(Buffer.from(secret))).toBe(false);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("releases the concurrency slot before notification delivery finishes", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const delivery = new Promise<void>(() => undefined);
+    let recordSlotCount: ((count: number) => void) | undefined;
+    const slotCountAtDeliveryStart = new Promise<number>((resolve) => {
+      recordSlotCount = resolve;
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      const dispatched = dispatchDueRoutines({
+        activeRuns,
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-slow-email",
+        env: {},
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            async deliver() {
+              recordSlotCount?.(activeRuns.countInFlightByProject("alpha"));
+              await delivery;
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          }),
+          timeoutMs: 5
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      // The slot must already be released by the time notification delivery
+      // starts, so a stalled SMTP relay cannot suppress further dispatch for
+      // this project (docs/adr/0067-smtp-notification-sink.md).
+      expect(await slotCountAtDeliveryStart).toBe(0);
+      await dispatched;
+      expect(runStore.getRoutineFiring("fire-slow-email")).toMatchObject({
+        notificationError: "notification delivery timed out after 5ms",
+        notificationState: "failed",
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("resolves the email config at delivery time so a mid-firing reload applies", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const runStore = openRunStore({ stateRoot });
+    const delivered: Array<{ to: string }> = [];
+    let currentTo = "before-reload@example.com";
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        // Simulate a Service Config reload landing while this firing's
+        // provider work is still in flight.
+        currentTo = "after-reload@example.com";
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-reload",
+        env: {},
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: (config) => ({
+            deliver() {
+              delivered.push({ to: config.to });
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: currentTo
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(delivered).toEqual([{ to: "after-reload@example.com" }]);
     } finally {
       runStore.close();
     }
@@ -1895,6 +2571,286 @@ describe("RoutineFiringDispatcher", () => {
           id: "fire-cancel-prepare",
           cancelReason: "operator",
           state: "cancelled"
+        })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("never launches the provider when an operator cancel lands during the pre-run GitHub snapshot", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = quietProvider();
+    const listIssues = vi.fn().mockImplementationOnce(async () => {
+      // Simulates an operator cancel landing while the before-run GitHub
+      // snapshot read is still in flight — after attachProvider, but before
+      // the provider is actually launched.
+      await activeRuns.requestCancel("fire-cancel-before-snapshot", "operator");
+      return [];
+    });
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine: {
+            ...minuteRoutine(root),
+            schedule: { at: "2026-05-22T10:00:00.000Z" }
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-cancel-before-snapshot",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        }
+      });
+
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-cancel-before-snapshot",
+          cancelReason: "operator",
+          state: "cancelled"
+        })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("reclassifies a succeeded kind: git firing as cancelled when an operator cancel lands during the after-run GitHub snapshot", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/dependency-update/01JCANCELAFTERSNAP";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const listPullRequestsForBranch = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(async () => {
+        // Simulates an operator cancel landing while the after-run GitHub
+        // snapshot read is still in flight — after the workspace was already
+        // classified "succeeded" with commits ahead, but before that
+        // classification is persisted.
+        await activeRuns.requestCancel(
+          "fire-cancel-after-snapshot",
+          "operator"
+        );
+        return [];
+      });
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName,
+          branchRef: `refs/heads/${branchName}`,
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns,
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-cancel-after-snapshot",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "dependency-update",
+                  prompt: "Commit on {{branch.name}}.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "dependency-update.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(listPullRequestsForBranch).toHaveBeenCalledTimes(2);
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-cancel-after-snapshot",
+          cancelReason: "operator",
+          state: "cancelled",
+          outcome: {
+            action: "none",
+            source: "symphonika",
+            status: "error",
+            summary: "cancelled",
+            title: "",
+            url: null,
+            verified: false
+          }
+        })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("reclassifies a failed firing as cancelled when an operator cancel lands during the failure-path GitHub snapshot", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        throw new Error("provider process killed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const listIssues = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(async () => {
+        // Simulates an operator cancel landing while the failure-path
+        // after-snapshot GitHub read is still in flight — after `cancelled`
+        // was already computed as false from the pre-await state.
+        await activeRuns.requestCancel(
+          "fire-cancel-during-failure-snapshot",
+          "operator"
+        );
+        return [];
+      });
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine: {
+            ...minuteRoutine(root),
+            schedule: { at: "2026-05-22T10:00:00.000Z" }
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-cancel-during-failure-snapshot",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        }
+      });
+
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-cancel-during-failure-snapshot",
+          cancelReason: "operator",
+          state: "cancelled",
+          terminalReason: "cancelled"
+        })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("reclassifies a failed firing as firing_timeout when the deadline expires during the failure-path GitHub snapshot", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        throw new Error("provider process killed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const listIssues = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      // Never resolves: only the firing's own wall-clock deadline can end
+      // this read, distinguishing a genuine timeout from the earlier
+      // provider error that put us in the catch block.
+      .mockImplementationOnce(() => new Promise<never>(() => {}));
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine: {
+            ...minuteRoutine(root),
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            timeoutMinutes: 0.001
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-timeout-during-failure-snapshot",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        }
+      });
+
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-timeout-during-failure-snapshot",
+          state: "failed",
+          terminalReason: "firing_timeout"
         })
       ]);
     } finally {
@@ -2710,7 +3666,7 @@ function recurringDispatchInput(input: {
   activeRuns: ActiveRunRegistry;
   provider: AgentProvider;
   root: string;
-  routine: ReturnType<typeof minuteRoutine>;
+  routine: Omit<TargetedRoutineDeclaration, "projectName">;
   runStore: ReturnType<typeof openRunStore>;
 }) {
   return {

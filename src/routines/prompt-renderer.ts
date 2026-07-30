@@ -72,6 +72,24 @@ const tagPattern = /{{\s*([^{}]+?)\s*}}/g;
 const ROUTINE_ONE_SHOT_NOTICE =
   "This routine firing is one-shot and will not be re-invoked. Complete all work before returning; do not schedule background work or finish with the expectation of a later wake-up.";
 
+const ROUTINE_OUTCOME_INSTRUCTIONS = [
+  "## Routine Outcome",
+  "",
+  "When you finish, report the Routine Outcome as exactly one JSON object, even when the work failed or nothing needed to change:",
+  "",
+  "```json",
+  "{",
+  '  "status":  "success" | "no_action" | "error",',
+  '  "action":  "pr" | "issue_opened" | "issue_closed" | "commit" | "none",',
+  '  "url":     "<pull request or issue URL, or null>",',
+  '  "title":   "<short human title>",',
+  '  "summary": "<one to three sentences describing what was done or why nothing was>"',
+  "}",
+  "```",
+  "",
+  "Do not wrap the final JSON object in prose. Symphonika cross-checks pull requests and issue changes against GitHub; a missing or malformed object does not fail the firing, but it makes the result less informative."
+].join("\n");
+
 export class RoutinePromptRenderError extends Error {
   readonly terminalReason = "prompt_render_error";
 
@@ -106,7 +124,12 @@ export function renderRoutinePrompt(
 
   return {
     preambleVersion: AUTONOMY_PREAMBLE_VERSION,
-    prompt: [AUTONOMY_PREAMBLE, ROUTINE_ONE_SHOT_NOTICE, rendered].join("\n"),
+    prompt: [
+      AUTONOMY_PREAMBLE,
+      ROUTINE_ONE_SHOT_NOTICE,
+      rendered,
+      ROUTINE_OUTCOME_INSTRUCTIONS
+    ].join("\n"),
     templateContentHash: contentHash(input.template)
   };
 }

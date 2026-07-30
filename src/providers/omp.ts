@@ -22,8 +22,10 @@ import {
 type JsonObject = Record<string, unknown>;
 
 type ActiveOmpRun = {
+  assistantText?: string;
   cancelled: boolean;
   child?: ChildProcessWithoutNullStreams;
+  completedAssistantText?: string;
   nextRequestId: number;
   promptDispatched: boolean;
   queue?: ProcessQueue;
@@ -368,9 +370,13 @@ function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
     const update = objectField(raw, "assistantMessageEvent");
     const updateType = stringField(update, "type");
     if (updateType === "text_delta" || updateType === "thinking_delta") {
+      const delta = stringField(update, "delta") ?? "";
+      if (updateType === "text_delta") {
+        activeRun.assistantText = (activeRun.assistantText ?? "") + delta;
+      }
       return {
         normalized: {
-          message: stringField(update, "delta") ?? "",
+          message: delta,
           messageKind: updateType === "text_delta" ? "text" : "thinking",
           sessionId: activeRun.sessionId,
           type: "message"
@@ -404,6 +410,13 @@ function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
 
   if (type === "message_end") {
     const message = objectField(raw, "message");
+    if (
+      stringField(message, "role") === "assistant" &&
+      activeRun.assistantText !== undefined
+    ) {
+      activeRun.completedAssistantText = activeRun.assistantText;
+      delete activeRun.assistantText;
+    }
     const usage = objectField(message, "usage");
     if (stringField(message, "role") === "assistant" && usage !== undefined) {
       return {
@@ -437,8 +450,15 @@ function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
   }
 
   if (type === "turn_end") {
+    const result = activeRun.assistantText ?? activeRun.completedAssistantText;
+    // OMP does not expose a stable turn id, and a session can emit more than
+    // one turn_end before its terminal agent_end. Clearing the completed
+    // text once consumed here stops a later, textless turn from reporting an
+    // earlier turn's stale result.
+    delete activeRun.completedAssistantText;
     return {
       normalized: {
+        ...(result === undefined ? {} : { result }),
         sessionId: activeRun.sessionId,
         type: "turn_completed"
       },

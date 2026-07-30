@@ -277,6 +277,55 @@ describe("Claude stream-json provider", () => {
     ]);
   });
 
+  it("reinforces a routine claim schema and normalizes Claude's structured output", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeClaudePath = path.join(root, "fake-claude.mjs");
+    await writeFakeClaudeStreamJson(fakeClaudePath, transcriptPath);
+    const processScope = noopProcessScope();
+    const provider = createClaudeProvider({ processScope });
+    const outputSchema = {
+      properties: {
+        status: { enum: ["success", "no_action", "error"], type: "string" }
+      },
+      required: ["status"],
+      type: "object"
+    };
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        outputSchema,
+        provider: {
+          command: `${process.execPath} ${fakeClaudePath} --scenario=structured -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
+          name: "claude"
+        },
+        workspacePath
+      })
+    );
+
+    expect(processScope.wrapCalls[0]?.command.args).toContain("--json-schema");
+    expect(processScope.wrapCalls[0]?.command.args).toContain(
+      JSON.stringify(outputSchema)
+    );
+    expect(
+      events
+        .map((event) => event.normalized)
+        .find((event) => event?.type === "turn_completed")
+    ).toMatchObject({
+      structuredOutput: {
+        action: "pr",
+        status: "success",
+        summary: "Opened the pull request.",
+        title: "Extract retry policy",
+        url: "https://github.com/pmatos/rightkey/pull/42"
+      },
+      type: "turn_completed"
+    });
+  });
+
   it("wraps the spawned command via the injected process scope and stops the scope when the run completes normally", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -832,6 +881,10 @@ async function writeFakeClaudeStreamJson(
       "  }",
       "  if (scenario === 'wait') {",
       "    await new Promise(() => {});",
+      "  }",
+      "  if (scenario === 'structured') {",
+      "    send({ type: 'result', subtype: 'success', duration_ms: 123, duration_api_ms: 90, is_error: false, num_turns: 1, result: '{\"status\":\"success\"}', structured_output: { status: 'success', action: 'pr', url: 'https://github.com/pmatos/rightkey/pull/42', title: 'Extract retry policy', summary: 'Opened the pull request.' }, session_id: 'session-10', total_cost_usd: 0.01 });",
+      "    process.exit(0);",
       "  }",
       "  send({ type: 'assistant', session_id: 'session-10', message: { id: 'msg_10', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 11, output_tokens: 7 } } });",
       "  send({ type: 'result', subtype: 'success', duration_ms: 123, duration_api_ms: 90, is_error: false, num_turns: 1, result: 'done', session_id: 'session-10', total_cost_usd: 0.01 });",

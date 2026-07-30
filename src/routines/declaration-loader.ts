@@ -133,6 +133,14 @@ export function parseRoutineDeclaration(
     errors.push(`routine at ${routinePath} disabled must be a boolean`);
   }
 
+  const notifyValue = frontMatter.notify;
+  if (
+    Object.hasOwn(frontMatter, "notify") &&
+    typeof notifyValue !== "boolean"
+  ) {
+    errors.push(`routine at ${routinePath} notify must be a boolean`);
+  }
+
   const model = executionStringField(frontMatter, "model", routinePath, errors);
   const effort = executionStringField(
     frontMatter,
@@ -187,6 +195,7 @@ export function parseRoutineDeclaration(
       kind: kind as RoutineKind,
       ...(model === undefined ? {} : { model }),
       name: name!,
+      ...(typeof notifyValue === "boolean" ? { notify: notifyValue } : {}),
       ...(permissionModeValue === "bypass"
         ? { permissionMode: permissionModeValue }
         : {}),

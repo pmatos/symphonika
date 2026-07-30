@@ -1,4 +1,5 @@
 import type { AgentProviderName } from "../provider.js";
+import type { RoutineOutcome } from "./outcome.js";
 
 export type RoutineKind = "git" | "report";
 
@@ -15,6 +16,8 @@ export type RoutineFiringState =
   | "succeeded"
   | "failed"
   | "cancelled";
+
+export type RoutineNotificationState = "sent" | "skipped" | "failed";
 
 export type RoutineFiringTriggerSource = "manual" | "scheduled";
 
@@ -38,6 +41,7 @@ export type RoutineDeclaration = {
   disabled?: boolean;
   kind: RoutineKind;
   name: string;
+  notify?: boolean;
   prompt: string;
   provider: AgentProviderName | null;
   schedule: RoutineSchedule;
@@ -65,12 +69,14 @@ export type RoutineStatus = {
   catchUp: RoutineCatchUpPolicy;
   disabledReason: RoutineDisabledReason | null;
   kind: RoutineKind;
+  latestOutcome: RoutineOutcome | null;
   lastAttemptedAt: string | null;
   lastFiredAt: string | null;
   lastSkipAt: string | null;
   lastSkipReason: RoutineSkipReason | null;
   name: string;
   nextFireAt: string | null;
+  notify?: boolean;
   projectName: string;
   provider: AgentProviderName | null;
   pullRequestNumbers: number[];

@@ -7,6 +7,12 @@ import type { Database as SqliteDatabase } from "better-sqlite3";
 import type { IssueSnapshot } from "./issue-polling.js";
 import { isPathInside } from "./path-safety.js";
 import type { AgentProviderName, NormalizedProviderEvent } from "./provider.js";
+import type {
+  RoutineOutcome,
+  RoutineOutcomeAction,
+  RoutineOutcomeSource,
+  RoutineOutcomeStatus
+} from "./routines/outcome.js";
 import { nextRecurringFireAt } from "./routines/schedule.js";
 import type {
   RoutineCatchUpPolicy,
@@ -14,6 +20,7 @@ import type {
   RoutineFiringState,
   RoutineFiringTriggerSource,
   RoutineKind,
+  RoutineNotificationState,
   RoutinePullRequestStatus,
   RoutineSkipReason,
   RoutineState,
@@ -144,6 +151,9 @@ export type RoutineFiringStatus = {
   createdAt: string;
   fanoutId: string | null;
   id: string;
+  notificationError?: string | null;
+  notificationState?: RoutineNotificationState;
+  outcome: RoutineOutcome | null;
   projectName: string;
   provider: AgentProviderName;
   providerCommand: string;
@@ -499,6 +509,7 @@ type RoutineRow = {
   model: string | null;
   name: string;
   next_fire_at: string | null;
+  notify_enabled: number;
   project_name: string;
   permission_mode: "bypass" | null;
   provider_name: AgentProviderName | null;
@@ -517,6 +528,15 @@ type RoutineFiringRow = {
   created_at: string;
   fanout_id: string | null;
   id: string;
+  notification_error: string | null;
+  notification_state: RoutineNotificationState | null;
+  outcome_action: RoutineOutcomeAction | null;
+  outcome_source: RoutineOutcomeSource | null;
+  outcome_status: RoutineOutcomeStatus | null;
+  outcome_summary: string | null;
+  outcome_title: string | null;
+  outcome_url: string | null;
+  outcome_verified: number | null;
   project_name: string;
   provider_command: string;
   provider_name: AgentProviderName;
@@ -528,6 +548,17 @@ type RoutineFiringRow = {
   workspace_path: string | null;
   workspace_pruned_at: string | null;
 };
+
+type RoutineOutcomeRow = Pick<
+  RoutineFiringRow,
+  | "outcome_action"
+  | "outcome_source"
+  | "outcome_status"
+  | "outcome_summary"
+  | "outcome_title"
+  | "outcome_url"
+  | "outcome_verified"
+>;
 
 type RoutinePullRequestRow = {
   firing_id: string;
@@ -1293,11 +1324,11 @@ export class RunStore {
     const upsert = this.database.prepare(
       [
         "insert into routines (",
-        "project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, catch_up, created_at, updated_at",
+        "project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, catch_up, notify_enabled, created_at, updated_at",
         ") values (",
         "@project_name, @name, @source_path, @kind, @provider_name, @model, @effort, @permission_mode, @timeout_minutes, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body,",
         "case when @disabled = 1 then 'disabled' else 'active' end,",
-        "@disabled_reason, @allow_overlap, @catch_up, @created_at, @updated_at",
+        "@disabled_reason, @allow_overlap, @catch_up, @notify_enabled, @created_at, @updated_at",
         ")",
         "on conflict(project_name, name) do update set",
         "source_path = excluded.source_path,",
@@ -1309,6 +1340,7 @@ export class RunStore {
         "timeout_minutes = excluded.timeout_minutes,",
         "allow_overlap = excluded.allow_overlap,",
         "catch_up = excluded.catch_up,",
+        "notify_enabled = excluded.notify_enabled,",
         "schedule_at = excluded.schedule_at,",
         "schedule_cron = excluded.schedule_cron,",
         "schedule_tz = excluded.schedule_tz,",
@@ -1507,6 +1539,7 @@ export class RunStore {
             kind: routine.kind,
             model: routine.model ?? null,
             name: routine.name,
+            notify_enabled: routine.notify === false ? 0 : 1,
             permission_mode: routine.permissionMode ?? null,
             project_name: routine.projectName,
             prompt_body: routine.prompt,
@@ -1945,7 +1978,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at",
+          "select project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, notify_enabled, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at",
           "from routines",
           where,
           "order by project_name asc, name asc"
@@ -1957,6 +1990,7 @@ export class RunStore {
     const countsNow = filter.now ?? new Date();
     return rows.map((row) => ({
       ...mapRoutineRow(row),
+      latestOutcome: this.latestRoutineOutcome(row.project_name, row.name),
       pullRequestNumbers: this.latestRoutinePullRequestNumbers(
         row.project_name,
         row.name
@@ -2005,7 +2039,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at, prompt_body",
+          "select project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, notify_enabled, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at, prompt_body",
           "from routines where project_name = ? and name = ? and state != 'inactive'"
         ].join(" ")
       )
@@ -2016,6 +2050,7 @@ export class RunStore {
     }
     return {
       ...mapRoutineRow(row),
+      latestOutcome: this.latestRoutineOutcome(row.project_name, row.name),
       pullRequestNumbers: this.latestRoutinePullRequestNumbers(
         row.project_name,
         row.name
@@ -2044,6 +2079,22 @@ export class RunStore {
       )
       .get(input.projectName, input.name);
     return row !== undefined;
+  }
+
+  private latestRoutineOutcome(
+    projectName: string,
+    routineName: string
+  ): RoutineOutcome | null {
+    const row = this.database
+      .prepare(
+        [
+          "select outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source",
+          "from routine_firings where project_name = ? and routine_name = ?",
+          "order by created_at desc, id desc limit 1"
+        ].join(" ")
+      )
+      .get(projectName, routineName) as RoutineOutcomeRow | undefined;
+    return mapRoutineOutcomeRow(row);
   }
 
   skipRoutineFiring(input: {
@@ -2296,6 +2347,7 @@ export class RunStore {
   completeRoutineFiring(input: {
     cancelReason?: CancelReason;
     id: string;
+    outcome?: RoutineOutcome;
     state: Extract<RoutineFiringState, "succeeded" | "failed" | "cancelled">;
     terminalReason?: string | null;
     workspacePath?: string;
@@ -2307,6 +2359,13 @@ export class RunStore {
           "update routine_firings set",
           "state = @state,",
           "terminal_reason = @terminal_reason,",
+          "outcome_status = @outcome_status,",
+          "outcome_action = @outcome_action,",
+          "outcome_url = @outcome_url,",
+          "outcome_title = @outcome_title,",
+          "outcome_summary = @outcome_summary,",
+          "outcome_verified = @outcome_verified,",
+          "outcome_source = @outcome_source,",
           "cancel_reason = case when cancel_reason = @shutdown_preemptive then cancel_reason else coalesce(@cancel_reason, cancel_reason) end,",
           "workspace_path = coalesce(@workspace_path, workspace_path),",
           "updated_at = @updated_at",
@@ -2317,6 +2376,14 @@ export class RunStore {
         cancel_reason: input.cancelReason ?? null,
         shutdown_preemptive: SHUTDOWN_PREEMPTIVE_REASON,
         id: input.id,
+        outcome_action: input.outcome?.action ?? null,
+        outcome_source: input.outcome?.source ?? null,
+        outcome_status: input.outcome?.status ?? null,
+        outcome_summary: input.outcome?.summary ?? null,
+        outcome_title: input.outcome?.title ?? null,
+        outcome_url: input.outcome?.url ?? null,
+        outcome_verified:
+          input.outcome === undefined ? null : Number(input.outcome.verified),
         state: input.state,
         terminal_reason: input.terminalReason ?? null,
         updated_at: now,
@@ -2329,7 +2396,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings where id = ?"
         ].join(" ")
       )
@@ -2341,6 +2408,18 @@ export class RunStore {
       ...mapRoutineFiringRow(row),
       pullRequests: this.listRoutinePullRequests({ firingId: row.id })
     };
+  }
+
+  recordRoutineFiringNotification(input: {
+    error?: string | null;
+    id: string;
+    state: RoutineNotificationState;
+  }): void {
+    this.database
+      .prepare(
+        "update routine_firings set notification_state = ?, notification_error = ?, updated_at = ? where id = ?"
+      )
+      .run(input.state, input.error ?? null, timestamp(), input.id);
   }
 
   markRoutineFiringCancelRequested(
@@ -2401,7 +2480,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           where,
           "order by created_at desc, id desc"
@@ -2428,6 +2507,13 @@ export class RunStore {
           "from routine_firings",
           "where workspace_path is not null and workspace_path <> ''",
           "and workspace_pruned_at is null",
+          // A verified commit-only outcome is the sole retention signal for that
+          // commit (ADR 0068): pruning its workspace on age alone would delete the
+          // only copy, so it is withheld from age-based candidates entirely.
+          // coalesce guards firings with no recorded outcome (most existing rows):
+          // NULL = 'commit' is NULL in SQLite, and `not (NULL and ...)` is also
+          // NULL, which WHERE treats as excluding the row rather than keeping it.
+          "and not (coalesce(outcome_action, '') = 'commit' and coalesce(outcome_verified, 0) = 1)",
           "and (",
           "(state = 'succeeded' and updated_at <= @succeeded_before)",
           "or (state = 'failed' and updated_at <= @failed_before)",
@@ -3597,6 +3683,7 @@ export class RunStore {
         state text not null,
         allow_overlap integer not null default 0,
         catch_up text not null default 'skip',
+        notify_enabled integer not null default 1,
         last_fired_at text,
         last_attempted_at text,
         last_skip_reason text,
@@ -3630,6 +3717,15 @@ export class RunStore {
         raw_log_path text,
         normalized_log_path text,
         terminal_reason text,
+        outcome_status text,
+        outcome_action text,
+        outcome_url text,
+        outcome_title text,
+        outcome_summary text,
+        outcome_verified integer,
+        outcome_source text,
+        notification_state text,
+        notification_error text,
         trigger_source text not null default 'scheduled',
         cancel_requested integer not null default 0,
         cancel_reason text,
@@ -3715,6 +3811,7 @@ export class RunStore {
       ["routines", "next_fire_at", "text"],
       ["routines", "allow_overlap", "integer not null default 0"],
       ["routines", "catch_up", "text not null default 'skip'"],
+      ["routines", "notify_enabled", "integer not null default 1"],
       ["routines", "last_attempted_at", "text"],
       ["routines", "last_skip_reason", "text"],
       ["routines", "last_skip_at", "text"],
@@ -3726,6 +3823,13 @@ export class RunStore {
       ["routine_firings", "prompt_path", "text"],
       ["routine_firings", "raw_log_path", "text"],
       ["routine_firings", "normalized_log_path", "text"],
+      ["routine_firings", "outcome_status", "text"],
+      ["routine_firings", "outcome_action", "text"],
+      ["routine_firings", "outcome_url", "text"],
+      ["routine_firings", "outcome_title", "text"],
+      ["routine_firings", "outcome_summary", "text"],
+      ["routine_firings", "outcome_verified", "integer"],
+      ["routine_firings", "outcome_source", "text"],
       [
         "routine_firings",
         "trigger_source",
@@ -3733,6 +3837,8 @@ export class RunStore {
       ],
       ["routine_firings", "cancel_requested", "integer not null default 0"],
       ["routine_firings", "cancel_reason", "text"],
+      ["routine_firings", "notification_state", "text"],
+      ["routine_firings", "notification_error", "text"],
       ["routine_firings", "workspace_pruned_at", "text"],
       ["routine_firings", "fanout_id", "text"]
     ];
@@ -4184,6 +4290,7 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
     disabledReason: row.disabled_reason ?? null,
     ...(row.effort === null ? {} : { effort: row.effort }),
     kind: row.kind,
+    latestOutcome: null,
     lastAttemptedAt: row.last_attempted_at ?? null,
     lastFiredAt: row.last_fired_at ?? null,
     lastSkipAt: row.last_skip_at ?? null,
@@ -4191,6 +4298,7 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
     ...(row.model === null ? {} : { model: row.model }),
     name: row.name,
     nextFireAt: row.state === "active" ? row.next_fire_at : null,
+    ...(row.notify_enabled === 0 ? { notify: false } : {}),
     projectName: row.project_name,
     ...(row.permission_mode === null
       ? {}
@@ -4220,6 +4328,13 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
     createdAt: row.created_at,
     fanoutId: row.fanout_id ?? null,
     id: row.id,
+    ...(row.notification_state === null
+      ? {}
+      : {
+          notificationError: row.notification_error ?? null,
+          notificationState: row.notification_state
+        }),
+    outcome: mapRoutineOutcomeRow(row),
     projectName: row.project_name,
     provider: row.provider_name,
     providerCommand: row.provider_command,
@@ -4231,6 +4346,31 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
     updatedAt: row.updated_at,
     workspacePath: row.workspace_path ?? "",
     workspacePrunedAt: row.workspace_pruned_at ?? null
+  };
+}
+
+function mapRoutineOutcomeRow(
+  row: RoutineOutcomeRow | undefined
+): RoutineOutcome | null {
+  if (
+    row === undefined ||
+    row.outcome_status === null ||
+    row.outcome_action === null ||
+    row.outcome_title === null ||
+    row.outcome_summary === null ||
+    row.outcome_verified === null ||
+    row.outcome_source === null
+  ) {
+    return null;
+  }
+  return {
+    action: row.outcome_action,
+    source: row.outcome_source,
+    status: row.outcome_status,
+    summary: row.outcome_summary,
+    title: row.outcome_title,
+    url: row.outcome_url,
+    verified: row.outcome_verified === 1
   };
 }
 

@@ -24,6 +24,18 @@ retention:
 # global:
 #   max_in_flight: 8
 
+# Optional best-effort Routine Firing notifications (ADR 0067). The password
+# value comes only from the named environment variable.
+# email:
+#   from: "symphonika@example.com"
+#   to: "operator@example.com"
+#   on: changes
+#   smtp_host: "smtp.postmarkapp.com"
+#   smtp_security: starttls
+#   smtp_port: 587
+#   smtp_username: "<postmark-server-token>"
+#   smtp_password_env: "SYMPHONIKA_SMTP_PASSWORD"
+
 # Optional Routine execution defaults. A Routine's Markdown front matter wins;
 # when both levels omit a value, the provider command below stays as authored.
 # routine_defaults:

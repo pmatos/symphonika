@@ -23,6 +23,7 @@ import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
 import type { InitOptions, InitProvider, InitReport } from "./init.js";
 import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
+import { formatRoutineOutcomeLine } from "./routines/outcome.js";
 import type { RoutineKind, RoutineStatus } from "./routines/types.js";
 import { pruneRoutineWorkspaces } from "./routines/workspace-retention.js";
 import {
@@ -46,6 +47,8 @@ import type { ServiceInstallOptions, ServiceInstallReport } from "./service.js";
 import { runServiceInstall as runServiceInstallReal } from "./service.js";
 import type { SmokeOptions, SmokeReport } from "./smoke.js";
 import { runSmoke } from "./smoke.js";
+import type { TestEmailOptions, TestEmailReport } from "./test-email.js";
+import { runTestEmail } from "./test-email.js";
 import {
   formatCapReachedReason,
   parseCapReachedReason
@@ -90,6 +93,7 @@ export type CliDependencies = {
     options: ServiceInstallOptions
   ) => Promise<ServiceInstallReport>;
   runSmoke?: (options: SmokeOptions) => Promise<SmokeReport>;
+  runTestEmail?: (options: TestEmailOptions) => Promise<TestEmailReport>;
   startDaemon?: (options: StartDaemonOptions) => Promise<DaemonHandle>;
 };
 
@@ -162,6 +166,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   const serviceInstall =
     dependencies.runServiceInstall ?? runServiceInstallReal;
   const smoke = dependencies.runSmoke ?? runSmoke;
+  const testEmail = dependencies.runTestEmail ?? runTestEmail;
   const start = dependencies.startDaemon ?? startDaemon;
   const openRunStore = dependencies.openRunStore ?? openRunStoreReal;
   const fetcher = dependencies.fetch ?? fetch;
@@ -201,6 +206,26 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       printStaleSection(program, report.projects);
       printWarningsSection(program, report.warnings);
       process.exitCode = 1;
+    });
+
+  program
+    .command("test-email")
+    .description("send a representative notification through configured SMTP")
+    .option("--config <path>", "service config path")
+    .action(async (options: { config?: string }) => {
+      const result = await testEmail(withConfigPath(options.config));
+      if (!result.ok) {
+        writeErr(
+          program,
+          `test email failed: ${result.error ?? "unknown SMTP failure"}\n`
+        );
+        process.exitCode = 1;
+        return;
+      }
+      writeOut(
+        program,
+        `test email sent to ${result.to ?? "configured recipient"}\n`
+      );
     });
 
   program
@@ -1080,7 +1105,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           );
           writeOut(
             program,
-            "  project  state  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests\n"
+            "  project  state  latest_outcome  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests\n"
           );
           for (const routine of targets) {
             writeOut(
@@ -1088,6 +1113,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
               [
                 `  ${routine.projectName}`,
                 routine.state,
+                routine.latestOutcome === null
+                  ? "-"
+                  : formatRoutineOutcomeLine(
+                      routine.projectName,
+                      routine.latestOutcome
+                    ),
                 routine.disabledReason ?? "-",
                 routine.nextFireAt ?? "-",
                 routine.lastFiredAt ?? "-",

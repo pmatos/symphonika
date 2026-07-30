@@ -7,8 +7,10 @@ import type { ActiveRunRegistry } from "../lifecycle/active-runs.js";
 import { classifyFailure } from "../lifecycle/classify-failure.js";
 import {
   resolveEnvBackedValue,
+  tryListIssues,
   tryListPullRequestsForBranch,
   type GitHubIssuesApi,
+  type RawGitHubIssue,
   type RawGitHubPullRequest
 } from "../issue-polling.js";
 import type {
@@ -21,6 +23,9 @@ import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig
 } from "../lifecycle/run-controller.js";
+import type { EmailNotificationConfig } from "../notifications/config.js";
+import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
+import type { NotificationSink } from "../notifications/types.js";
 import type { RunStore } from "../run-store.js";
 import {
   renderRoutineFanoutNotification,
@@ -31,6 +36,13 @@ import {
   nextRecurringFireAt,
   type RoutineScheduleEvaluation
 } from "./schedule.js";
+import {
+  diffRoutineGithubSnapshots,
+  parseRoutineOutcomeClaim,
+  reconcileRoutineOutcome,
+  ROUTINE_OUTCOME_JSON_SCHEMA,
+  type RoutineGithubSnapshot
+} from "./outcome.js";
 import {
   renderRoutinePrompt,
   RoutinePromptRenderError
@@ -58,6 +70,11 @@ export type DispatchDueRoutinesInput = {
   globalConcurrency: { maxInFlight: number | undefined };
   githubIssuesApi?: GitHubIssuesApi;
   logger?: Logger;
+  notification?: {
+    createSink: (config: EmailNotificationConfig) => NotificationSink;
+    resolveConfig: () => EmailNotificationConfig | undefined;
+    timeoutMs?: number;
+  };
   notifyRoutineFanout?: (
     notification: RoutineFanoutNotification
   ) => Promise<void>;
@@ -114,6 +131,21 @@ type RoutineTerminalOutcome =
   | { kind: "cancelled"; reason: string }
   | { kind: "failed"; reason: string }
   | { kind: "succeeded"; reason: string };
+
+// A single firing's before/after GitHub snapshots are captured minutes apart
+// at most, so bounding `state: "all"` issue pagination to this window (well
+// above any realistic firing duration) avoids paginating a repository's
+// entire issue/PR history on every firing.
+const ISSUE_SNAPSHOT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+const EPOCH_ISO = new Date(0).toISOString();
+
+type CapturedRoutineGithubSnapshot = {
+  issuesAvailable: boolean;
+  pullRequests: RawGitHubPullRequest[];
+  pullRequestsAvailable: boolean;
+  snapshot: RoutineGithubSnapshot;
+};
 
 export function fireRoutineNow(
   input: FireRoutineNowInput
@@ -258,6 +290,7 @@ export function fireRoutineNow(
     firingId,
     githubIssuesApi: input.githubIssuesApi,
     logger: input.logger,
+    now: new Date(),
     prepareRoutineWorkspace:
       input.prepareRoutineWorkspace ?? defaultPrepareRoutineWorkspace,
     project,
@@ -267,9 +300,11 @@ export function fireRoutineNow(
     routine: detail,
     runStore: input.runStore,
     stateRoot: input.stateRoot
-  }).finally(() => {
-    input.activeRuns.unregister(firingId);
-  });
+  })
+    .then(() => undefined)
+    .finally(() => {
+      input.activeRuns.unregister(firingId);
+    });
   return {
     completion,
     firingId,
@@ -634,6 +669,7 @@ export async function dispatchDueRoutines(
         env: input.env ?? process.env,
         githubIssuesApi: input.githubIssuesApi,
         logger: input.logger,
+        now,
         prepareRoutineWorkspace,
         project,
         provider,
@@ -644,9 +680,29 @@ export async function dispatchDueRoutines(
         stateRoot: input.stateRoot,
         configDir: input.configDir,
         activeRuns: input.activeRuns
-      }).finally(() => {
-        input.activeRuns.unregister(firingId);
-      });
+      })
+        .finally(() => {
+          input.activeRuns.unregister(firingId);
+        })
+        .then((firingResult) =>
+          // Notification delivery is best-effort and can be as slow as the
+          // SMTP server allows (see ADR 0067); it runs after the slot above
+          // is released so a stalled relay does not suppress further
+          // dispatch for this project.
+          recordRoutineFiringNotification(
+            {
+              env: input.env ?? process.env,
+              firingId,
+              logger: input.logger,
+              notification: input.notification,
+              project,
+              routine: routineDetail,
+              runStore: input.runStore
+            },
+            firingResult.events,
+            firingResult.prepared
+          )
+        );
       firingTasks.push(firingTask);
     }
   }
@@ -655,6 +711,11 @@ export async function dispatchDueRoutines(
   await deliverReadyRoutineFanouts(input);
   return { fired, skipped };
 }
+
+type RoutineFiringResult = {
+  events: NormalizedProviderEvent[];
+  prepared: PreparedRoutineWorkspace | undefined;
+};
 
 async function deliverReadyRoutineFanouts(
   input: DispatchDueRoutinesInput
@@ -700,6 +761,7 @@ async function runRoutineFiring(input: {
   firingId: string;
   githubIssuesApi: GitHubIssuesApi | undefined;
   logger: Logger | undefined;
+  now: Date;
   prepareRoutineWorkspace: (
     input: PrepareRoutineWorkspaceInput
   ) => Promise<PreparedRoutineWorkspace>;
@@ -710,13 +772,20 @@ async function runRoutineFiring(input: {
   routine: RoutineStatus & { prompt: string };
   runStore: RunStore;
   stateRoot: string;
-}): Promise<void> {
+}): Promise<RoutineFiringResult> {
   const events: NormalizedProviderEvent[] = [];
   const deadline = routineFiringDeadline(input.routine.timeoutMinutes);
   let prepared: PreparedRoutineWorkspace | undefined;
   let providerAttempt: Promise<void> | undefined;
   let rawLogPath: string | undefined;
   let normalizedLogPath: string | undefined;
+  let githubBefore: CapturedRoutineGithubSnapshot | null = null;
+  // Bounds `state: "all"` issue pagination to records that could plausibly
+  // have changed during this firing, instead of the repository's entire
+  // issue/PR history (a single firing runs for at most this window).
+  const githubSnapshotSince = new Date(
+    input.now.getTime() - ISSUE_SNAPSHOT_WINDOW_MS
+  ).toISOString();
   try {
     input.runStore.updateRoutineFiringState(
       input.firingId,
@@ -775,10 +844,35 @@ async function runRoutineFiring(input: {
       );
     }
 
+    githubBefore = await deadline.race(
+      captureRoutineGithubSnapshot({
+        branchName: prepared.branchName,
+        env: input.env,
+        githubIssuesApi: input.githubIssuesApi,
+        kind: input.routine.kind,
+        logger: input.logger,
+        project: input.project,
+        routineName: input.routine.name,
+        since: githubSnapshotSince
+      })
+    );
+
+    // A cancel can also land DURING the snapshot read just above; the
+    // cancelDuringPrepare check earlier only covers the window before it.
+    // Re-check before spawning the provider for the same reason as that
+    // earlier check (ADR 0052).
+    const cancelBeforeProviderStart = input.activeRuns.get(input.firingId);
+    if (cancelBeforeProviderStart?.cancelRequested === true) {
+      throw new Error(
+        `routine firing ${input.firingId} was cancelled before provider start`
+      );
+    }
+
     providerAttempt = (async () => {
       for await (const event of input.provider.runAttempt({
         branchName: prepared.branchName,
         issue: routineIssueSnapshot(input.routine),
+        outputSchema: ROUTINE_OUTCOME_JSON_SCHEMA,
         prompt: evidence.prompt,
         promptPath: evidence.promptPath,
         provider: {
@@ -828,6 +922,30 @@ async function runRoutineFiring(input: {
               workspacePath: prepared.workspacePath
             })
           );
+    const githubAfter =
+      githubBefore === null
+        ? null
+        : await deadline.race(
+            captureRoutineGithubSnapshot({
+              branchName: prepared.branchName,
+              env: input.env,
+              githubIssuesApi: input.githubIssuesApi,
+              kind: input.routine.kind,
+              logger: input.logger,
+              project: input.project,
+              routineName: input.routine.name,
+              since: githubSnapshotSince
+            })
+          );
+    // A cancel can also land DURING the snapshot read just above, after
+    // `outcome` above was already classified as succeeded/failed. Downgrade
+    // here so a `kind: git` firing cancelled in this window cannot still
+    // report commitsAhead and let reconcileRoutineOutcome's git-evidence
+    // override mint a verified commit outcome for a cancelled run.
+    const cancelAfterGithubAfter = input.activeRuns.get(input.firingId);
+    if (cancelAfterGithubAfter?.cancelRequested === true) {
+      outcome = { kind: "cancelled", reason: "cancelled" };
+    }
     // The firing's own execution phase is done. PR discovery is post-terminal
     // enrichment, so it must not let the execution deadline rewrite a
     // completed outcome.
@@ -838,16 +956,27 @@ async function runRoutineFiring(input: {
     // tick could otherwise observe "succeeded" and send the grouped summary
     // with this leg's PRs missing, before discovery has recorded them.
     if (outcome.kind === "succeeded" && input.routine.kind === "git") {
-      await discoverRoutinePullRequests({
-        branchName: prepared.branchName,
-        env: input.env,
-        firingId: input.firingId,
-        githubIssuesApi: input.githubIssuesApi,
-        logger: input.logger,
-        project: input.project,
-        routineName: input.routine.name,
-        runStore: input.runStore
-      });
+      if (githubAfter?.pullRequestsAvailable === true) {
+        recordRoutinePullRequests({
+          branchName: prepared.branchName,
+          firingId: input.firingId,
+          projectName: input.project.name,
+          pullRequests: githubAfter.pullRequests,
+          routineName: input.routine.name,
+          runStore: input.runStore
+        });
+      } else {
+        await discoverRoutinePullRequests({
+          branchName: prepared.branchName,
+          env: input.env,
+          firingId: input.firingId,
+          githubIssuesApi: input.githubIssuesApi,
+          logger: input.logger,
+          project: input.project,
+          routineName: input.routine.name,
+          runStore: input.runStore
+        });
+      }
     }
     // Re-check for a cancel that landed during discovery: an operator cancel
     // still wins even though the provider itself already finished (ADR 0060).
@@ -855,8 +984,24 @@ async function runRoutineFiring(input: {
     if (completionCancelEntry?.cancelRequested === true) {
       outcome = { kind: "cancelled", reason: "cancelled" };
     }
+    const githubObservation = routineGithubObservation(
+      githubBefore,
+      githubAfter,
+      input.routine.kind,
+      githubSnapshotSince
+    );
     input.runStore.completeRoutineFiring({
       id: input.firingId,
+      outcome: reconcileRoutineOutcome({
+        claim: parseRoutineOutcomeClaim(events),
+        commitsAhead:
+          input.routine.kind === "git" && outcome.kind === "succeeded",
+        githubObservationAvailable: githubObservation.available,
+        observedAction: githubObservation.action,
+        provider: input.providerName,
+        terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
+        terminalState: outcome.kind
+      }),
       state: outcome.kind,
       terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
       ...(completionCancelEntry?.cancelReason === undefined
@@ -879,13 +1024,77 @@ async function runRoutineFiring(input: {
         : error instanceof RoutinePromptRenderError
           ? error.terminalReason
           : errorMessage(error);
+    // The deadline may already be expired here (we can be in this catch
+    // block precisely because it expired). deadline.race would then reject
+    // again immediately with the same timeout error, and — unlike the try
+    // block above — there is no outer catch left to route that into; left
+    // unhandled, it would abort runRoutineFiring before completeRoutineFiring
+    // runs, stranding the row in a non-terminal state. Treat that as
+    // "snapshot unavailable" — but still surface the expiry itself: SPEC.md
+    // §12.2/ADR 0067 make terminal outcome classification part of the raced
+    // scope and require `firing_timeout` to win over whatever reason drove
+    // us into this catch block, the same precedence `timedOut` already
+    // applies to the entry error above.
+    let failureSnapshotTimedOut = false;
+    const githubAfter =
+      githubBefore === null || prepared === undefined
+        ? null
+        : await deadline
+            .race(
+              captureRoutineGithubSnapshot({
+                branchName: prepared.branchName,
+                env: input.env,
+                githubIssuesApi: input.githubIssuesApi,
+                kind: input.routine.kind,
+                logger: input.logger,
+                project: input.project,
+                routineName: input.routine.name,
+                since: githubSnapshotSince
+              })
+            )
+            .catch((snapshotError: unknown) => {
+              if (snapshotError instanceof RoutineFiringTimeoutError) {
+                failureSnapshotTimedOut = true;
+              }
+              return null;
+            });
+    // A cancel can also land DURING the snapshot read just above, after
+    // `cancelled`/`reason` above were already computed from the pre-await
+    // state. Re-check so a cancel arriving in this window doesn't get
+    // persisted as a stale failed/pre-cancellation reason. A timeout newly
+    // discovered by the snapshot race takes precedence over both, matching
+    // `timedOut`'s precedence over `cancelled` above.
+    const cancelAfterFailureSnapshot = input.activeRuns.get(input.firingId);
+    const finalCancelled =
+      !failureSnapshotTimedOut &&
+      (cancelled || cancelAfterFailureSnapshot?.cancelRequested === true);
+    const finalReason = failureSnapshotTimedOut
+      ? "firing_timeout"
+      : finalCancelled
+        ? "cancelled"
+        : reason;
+    const githubObservation = routineGithubObservation(
+      githubBefore,
+      githubAfter,
+      input.routine.kind,
+      githubSnapshotSince
+    );
     input.runStore.completeRoutineFiring({
       id: input.firingId,
-      state: cancelled ? "cancelled" : "failed",
-      terminalReason: reason,
-      ...(cancelEntry?.cancelReason === undefined
+      outcome: reconcileRoutineOutcome({
+        claim: parseRoutineOutcomeClaim(events),
+        commitsAhead: false,
+        githubObservationAvailable: githubObservation.available,
+        observedAction: githubObservation.action,
+        provider: input.providerName,
+        terminalReason: finalReason,
+        terminalState: finalCancelled ? "cancelled" : "failed"
+      }),
+      state: finalCancelled ? "cancelled" : "failed",
+      terminalReason: finalReason,
+      ...(cancelAfterFailureSnapshot?.cancelReason === undefined
         ? {}
-        : { cancelReason: cancelEntry.cancelReason }),
+        : { cancelReason: cancelAfterFailureSnapshot.cancelReason }),
       ...(prepared === undefined
         ? {}
         : { workspacePath: prepared.workspacePath })
@@ -893,6 +1102,316 @@ async function runRoutineFiring(input: {
   } finally {
     deadline.clear();
   }
+  return { events, prepared };
+}
+
+async function recordRoutineFiringNotification(
+  input: {
+    env: NodeJS.ProcessEnv;
+    firingId: string;
+    logger: Logger | undefined;
+    notification:
+      | {
+          createSink: (config: EmailNotificationConfig) => NotificationSink;
+          resolveConfig: () => EmailNotificationConfig | undefined;
+          timeoutMs?: number;
+        }
+      | undefined;
+    project: RunControllerProjectConfig;
+    routine: RoutineStatus & { prompt: string };
+    runStore: RunStore;
+  },
+  events: NormalizedProviderEvent[],
+  prepared: PreparedRoutineWorkspace | undefined
+): Promise<void> {
+  if (input.notification === undefined) {
+    return;
+  }
+  const firing = input.runStore.getRoutineFiring(input.firingId);
+  if (
+    firing === undefined ||
+    (firing.state !== "succeeded" &&
+      firing.state !== "failed" &&
+      firing.state !== "cancelled")
+  ) {
+    return;
+  }
+  // Resolved at delivery time (not at dispatch time) so a Service Config
+  // reload during a long-running firing still affects this delivery per
+  // ADR 0067.
+  const config = input.notification.resolveConfig();
+  if (config === undefined) {
+    return;
+  }
+  const sink = input.notification.createSink(config);
+  const outcome = await deliverRoutineFiringNotification({
+    config,
+    firing: {
+      branchName:
+        prepared?.branchName ?? input.project.workspace.git.base_branch,
+      durationMs: Math.max(
+        0,
+        Date.parse(firing.updatedAt) - Date.parse(firing.createdAt)
+      ),
+      firingId: firing.id,
+      kind: input.routine.kind,
+      outcome: firing.outcome,
+      projectName: input.project.name,
+      pullRequests: firing.pullRequests,
+      reportOutput: reportOutputFromEvents(events),
+      routineName: input.routine.name,
+      state: firing.state,
+      terminalReason: firing.terminalReason,
+      title: `${input.project.name}: ${input.routine.name}`
+    },
+    notifyEnabled: input.routine.notify !== false,
+    sink,
+    ...(input.notification.timeoutMs === undefined
+      ? {}
+      : { timeoutMs: input.notification.timeoutMs })
+  });
+  if (outcome.state === "failed") {
+    const error = redactNotificationError(outcome.error, config, input.env);
+    input.runStore.recordRoutineFiringNotification({
+      error,
+      id: input.firingId,
+      state: "failed"
+    });
+    input.logger?.warn(
+      {
+        error,
+        firingId: input.firingId,
+        project: input.project.name,
+        routine: input.routine.name
+      },
+      "symphonika routine notification delivery failed"
+    );
+    return;
+  }
+  input.runStore.recordRoutineFiringNotification({
+    id: input.firingId,
+    state: outcome.state
+  });
+}
+
+function reportOutputFromEvents(events: NormalizedProviderEvent[]): string {
+  const output = events
+    .filter(
+      (event) =>
+        event.type === "message" &&
+        event.messageKind !== "thinking" &&
+        typeof event.message === "string"
+    )
+    .map((event) => event.message as string)
+    .join("")
+    .trim();
+  const completed = [...events]
+    .reverse()
+    .find((event) => event.type === "turn_completed");
+  if (
+    completed === undefined ||
+    typeof completed.result !== "string" ||
+    parseRoutineOutcomeClaim([completed]) === null
+  ) {
+    return output;
+  }
+  const claimText = completed.result.trim();
+  return output.endsWith(claimText)
+    ? output.slice(0, -claimText.length).trim()
+    : output;
+}
+
+function redactNotificationError(
+  message: string,
+  config: EmailNotificationConfig,
+  env: NodeJS.ProcessEnv
+): string {
+  const secret =
+    config.smtpUsername === undefined ? undefined : env[config.smtpPasswordEnv];
+  if (secret === undefined || secret.length === 0) {
+    return message;
+  }
+  return message.split(secret).join("[REDACTED]");
+}
+
+async function captureRoutineGithubSnapshot(input: {
+  branchName: string;
+  env: NodeJS.ProcessEnv;
+  githubIssuesApi: GitHubIssuesApi | undefined;
+  kind: RoutineStatus["kind"];
+  logger: Logger | undefined;
+  project: RunControllerProjectConfig;
+  routineName: string;
+  since: string;
+}): Promise<CapturedRoutineGithubSnapshot | null> {
+  if (input.project.tracker === undefined) {
+    input.logger?.info(
+      { project: input.project.name, routine: input.routineName },
+      "symphonika routine issue observation skipped: tracker absent"
+    );
+    return null;
+  }
+  if (input.githubIssuesApi === undefined) {
+    input.logger?.info(
+      { project: input.project.name, routine: input.routineName },
+      "symphonika routine GitHub observation skipped: API unavailable"
+    );
+    return null;
+  }
+  const token = resolveEnvBackedValue(input.project.tracker.token, input.env);
+  if (token === undefined) {
+    input.logger?.warn(
+      { project: input.project.name, routine: input.routineName },
+      "symphonika routine GitHub observation token unavailable"
+    );
+    return null;
+  }
+
+  let issues: RawGitHubIssue[] = [];
+  let issuesAvailable = false;
+  try {
+    const listed = await tryListIssues(input.githubIssuesApi, {
+      owner: input.project.tracker.owner,
+      repo: input.project.tracker.repo,
+      since: input.since,
+      state: "all",
+      token
+    });
+    if (listed === undefined) {
+      input.logger?.info(
+        { project: input.project.name, routine: input.routineName },
+        "symphonika routine issue observation skipped: API unsupported"
+      );
+    } else {
+      issues = listed;
+      issuesAvailable = true;
+    }
+  } catch (error) {
+    input.logger?.warn(
+      { err: error, project: input.project.name, routine: input.routineName },
+      "symphonika routine issue observation failed"
+    );
+  }
+
+  let pullRequests: RawGitHubPullRequest[] = [];
+  let pullRequestsAvailable = false;
+  if (input.kind === "git") {
+    try {
+      const listed = await tryListPullRequestsForBranch(input.githubIssuesApi, {
+        branch: input.branchName,
+        owner: input.project.tracker.owner,
+        repo: input.project.tracker.repo,
+        token
+      });
+      if (listed !== undefined) {
+        pullRequests = listed;
+        pullRequestsAvailable = true;
+      }
+    } catch (error) {
+      input.logger?.warn(
+        { branch: input.branchName, err: error },
+        "symphonika routine PR observation failed"
+      );
+    }
+  }
+
+  if (!issuesAvailable && !pullRequestsAvailable) {
+    return null;
+  }
+  return {
+    issuesAvailable,
+    pullRequests,
+    pullRequestsAvailable,
+    snapshot: {
+      issues: routineIssueObservations(issues),
+      pullRequests: routinePullRequestObservations(
+        pullRequests,
+        input.branchName
+      )
+    }
+  };
+}
+
+function routineGithubObservation(
+  before: CapturedRoutineGithubSnapshot | null,
+  after: CapturedRoutineGithubSnapshot | null,
+  kind: RoutineStatus["kind"],
+  windowStart: string
+): {
+  action: ReturnType<typeof diffRoutineGithubSnapshots>;
+  available: boolean;
+} {
+  if (before === null || after === null) {
+    return { action: null, available: false };
+  }
+  const issuesAvailable = before.issuesAvailable && after.issuesAvailable;
+  const pullRequestsAvailable =
+    before.pullRequestsAvailable && after.pullRequestsAvailable;
+  if (!issuesAvailable && !pullRequestsAvailable) {
+    return { action: null, available: false };
+  }
+  // A `kind: git` firing's primary evidence channel is its branch's PRs, so
+  // a silently-failed PR read must not be masked by a succeeding issue read
+  // (or vice versa); report firings never observe PRs, so issues alone
+  // suffice there.
+  const available =
+    kind === "git" ? issuesAvailable && pullRequestsAvailable : issuesAvailable;
+  return {
+    action: diffRoutineGithubSnapshots(
+      {
+        issues: issuesAvailable ? before.snapshot.issues : {},
+        pullRequests: pullRequestsAvailable ? before.snapshot.pullRequests : {}
+      },
+      {
+        issues: issuesAvailable ? after.snapshot.issues : {},
+        pullRequests: pullRequestsAvailable ? after.snapshot.pullRequests : {}
+      },
+      windowStart
+    ),
+    available
+  };
+}
+
+function routineIssueObservations(
+  issues: RawGitHubIssue[]
+): RoutineGithubSnapshot["issues"] {
+  const observations: RoutineGithubSnapshot["issues"] = {};
+  for (const issue of issues) {
+    if (
+      issue.pull_request !== undefined ||
+      issue.number === undefined ||
+      issue.number <= 0
+    ) {
+      continue;
+    }
+    observations[String(issue.number)] = {
+      closedAt: issue.closed_at ?? null,
+      // A missing created_at is treated as "always predates the window" so
+      // an issue never falsely counts as newly opened for lack of evidence.
+      createdAt: issue.created_at ?? EPOCH_ISO,
+      state: issue.state ?? "",
+      title: issue.title ?? `Issue #${issue.number}`,
+      url: issue.html_url ?? null
+    };
+  }
+  return observations;
+}
+
+function routinePullRequestObservations(
+  pullRequests: RawGitHubPullRequest[],
+  branchName: string
+): RoutineGithubSnapshot["pullRequests"] {
+  const observations: RoutineGithubSnapshot["pullRequests"] = {};
+  for (const pullRequest of pullRequests) {
+    if (!isPullRequestForBranch(pullRequest, branchName)) {
+      continue;
+    }
+    observations[String(pullRequest.number)] = {
+      title: pullRequest.title ?? `Pull request #${pullRequest.number}`,
+      url: pullRequest.html_url ?? null
+    };
+  }
+  return observations;
 }
 
 function routineFiringDeadline(timeoutMinutes: number | undefined): {
@@ -1151,7 +1670,25 @@ async function discoverRoutinePullRequests(input: {
     return;
   }
 
-  for (const pullRequest of pullRequests ?? []) {
+  recordRoutinePullRequests({
+    branchName: input.branchName,
+    firingId: input.firingId,
+    projectName: input.project.name,
+    pullRequests: pullRequests ?? [],
+    routineName: input.routineName,
+    runStore: input.runStore
+  });
+}
+
+function recordRoutinePullRequests(input: {
+  branchName: string;
+  firingId: string;
+  projectName: string;
+  pullRequests: RawGitHubPullRequest[];
+  routineName: string;
+  runStore: RunStore;
+}): void {
+  for (const pullRequest of input.pullRequests) {
     if (!isOpenPullRequestForBranch(pullRequest, input.branchName)) {
       continue;
     }
@@ -1159,10 +1696,30 @@ async function discoverRoutinePullRequests(input: {
       firingId: input.firingId,
       headSha: pullRequest.head.sha,
       prNumber: pullRequest.number,
-      projectName: input.project.name,
+      projectName: input.projectName,
       routineName: input.routineName
     });
   }
+}
+
+// Unlike isOpenPullRequestForBranch, this admits a closed/merged PR: outcome
+// observation needs to detect a PR that was opened AND closed within the same
+// firing window, not just associate currently-open ones (see
+// routinePullRequestObservations).
+function isPullRequestForBranch(
+  pullRequest: RawGitHubPullRequest,
+  branchName: string
+): pullRequest is RawGitHubPullRequest & {
+  head: { ref: string; sha: string };
+  number: number;
+} {
+  return (
+    pullRequest.number !== undefined &&
+    pullRequest.number > 0 &&
+    pullRequest.head?.ref === branchName &&
+    pullRequest.head.sha !== undefined &&
+    pullRequest.head.sha.length > 0
+  );
 }
 
 function isOpenPullRequestForBranch(

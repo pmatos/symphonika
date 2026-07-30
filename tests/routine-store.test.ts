@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { openRunStore } from "../src/run-store.js";
 
@@ -22,6 +22,54 @@ afterEach(async () => {
 });
 
 describe("RunStore routines", () => {
+  it("records notification failure evidence without changing a successful Routine Firing", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          notify: false,
+          prompt: "Report.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      expect(
+        store.getRoutine({ name: "daily-report", projectName: "alpha" })
+      ).toMatchObject({ notify: false });
+      store.createRoutineFiring({
+        id: "fire-notification-failed",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.completeRoutineFiring({
+        id: "fire-notification-failed",
+        state: "succeeded"
+      });
+
+      store.recordRoutineFiringNotification({
+        error: "SMTP send failed: relay unavailable",
+        id: "fire-notification-failed",
+        state: "failed"
+      });
+
+      expect(store.getRoutineFiring("fire-notification-failed")).toMatchObject({
+        notificationError: "SMTP send failed: relay unavailable",
+        notificationState: "failed",
+        state: "succeeded",
+        terminalReason: null
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("claims a manual firing without consuming the pending scheduled clock event", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -756,6 +804,7 @@ describe("RunStore routines", () => {
           lastFiredAt: null,
           lastSkipAt: null,
           lastSkipReason: null,
+          latestOutcome: null,
           name: "daily-report",
           nextFireAt: "2026-05-22T10:00:00.000Z",
           projectName: "alpha",
@@ -846,6 +895,7 @@ describe("RunStore routines", () => {
           lastFiredAt: null,
           lastSkipAt: null,
           lastSkipReason: null,
+          latestOutcome: null,
           name: "daily-report",
           nextFireAt: "2026-03-28T01:30:00.000Z",
           projectName: "alpha",
@@ -1515,6 +1565,15 @@ describe("RunStore routines", () => {
       store.updateRoutineFiringState("fire-1", "running");
       store.completeRoutineFiring({
         id: "fire-1",
+        outcome: {
+          action: "pr",
+          source: "gh",
+          status: "success",
+          summary: "Observed via GitHub state diff.",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/rightkey/pull/42",
+          verified: true
+        },
         state: "succeeded",
         workspacePath: "/tmp/workspace"
       });
@@ -1530,6 +1589,15 @@ describe("RunStore routines", () => {
           projectName: "alpha",
           provider: "codex",
           routineName: "daily-report",
+          outcome: {
+            action: "pr",
+            source: "gh",
+            status: "success",
+            summary: "Observed via GitHub state diff.",
+            title: "Extract retry policy",
+            url: "https://github.com/pmatos/rightkey/pull/42",
+            verified: true
+          },
           state: "succeeded",
           terminalReason: null,
           workspacePath: "/tmp/workspace"
@@ -1538,13 +1606,24 @@ describe("RunStore routines", () => {
       expect(
         store.listRoutineFiringTransitions("fire-1").map((entry) => entry.state)
       ).toEqual(["queued", "preparing_workspace", "running", "succeeded"]);
+      const listFirings = vi.spyOn(store, "listRoutineFirings");
       expect(store.listRoutines()[0]).toEqual(
         expect.objectContaining({
           lastFiredAt: "2026-05-22T10:00:02.000Z",
+          latestOutcome: {
+            action: "pr",
+            source: "gh",
+            status: "success",
+            summary: "Observed via GitHub state diff.",
+            title: "Extract retry policy",
+            url: "https://github.com/pmatos/rightkey/pull/42",
+            verified: true
+          },
           nextFireAt: null,
           state: "expired"
         })
       );
+      expect(listFirings).not.toHaveBeenCalled();
     } finally {
       store.close();
     }

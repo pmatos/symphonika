@@ -52,6 +52,8 @@ import {
 import { detectStaleClaims } from "./lifecycle/stale-claims.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
+import { createSmtpNotificationSink } from "./notifications/smtp.js";
+import type { NotificationSink } from "./notifications/types.js";
 import {
   runPullRequestFollowup,
   type PullRequestFollowupPolicy
@@ -94,6 +96,7 @@ export type StartDaemonOptions = {
   legacyInputRequiredRecheckDelayMs?: number;
   lifecyclePolicy?: LifecyclePolicy;
   logger?: Logger;
+  notificationSink?: NotificationSink;
   port?: number;
   processScope?: ProcessScope;
   prepareIssueWorkspace?: (
@@ -652,6 +655,14 @@ export async function startDaemon(
           globalConcurrency: runtimeConfig.globalConcurrency(),
           githubIssuesApi,
           logger,
+          notification: {
+            createSink: (config) =>
+              options.notificationSink ??
+              createSmtpNotificationSink(config, { env }),
+            // Resolved at delivery time so a reload mid-firing is honored
+            // for that firing's own notification (ADR 0067).
+            resolveConfig: () => runtimeConfig.emailConfig()
+          },
           ...(options.notifyRoutineFanout === undefined
             ? {}
             : { notifyRoutineFanout: options.notifyRoutineFanout }),

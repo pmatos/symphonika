@@ -28,6 +28,10 @@ type JsonObject = Record<string, unknown>;
 type ActiveCodexRun = {
   cancelled: boolean;
   child?: ChildProcessWithoutNullStreams;
+  lastAgentMessage?: {
+    itemId: string | undefined;
+    text: string;
+  };
   nextRequestId: number;
   threadId?: string;
   turnId?: string;
@@ -465,15 +469,38 @@ function mapCodexJsonRpcMessage(
 
   const params = objectField(raw, "params");
   if (method === "item/agentMessage/delta") {
+    const delta = stringField(params, "delta") ?? "";
+    const itemId = stringField(params, "itemId");
+    const lastAgentMessage = activeRun.lastAgentMessage;
+    if (lastAgentMessage !== undefined && lastAgentMessage.itemId === itemId) {
+      lastAgentMessage.text += delta;
+    } else {
+      activeRun.lastAgentMessage = { itemId, text: delta };
+    }
     return {
       normalized: {
-        message: stringField(params, "delta") ?? "",
+        message: delta,
         threadId: stringField(params, "threadId"),
         turnId: stringField(params, "turnId"),
         type: "message"
       },
       raw
     };
+  }
+
+  if (method === "item/completed") {
+    const item = objectField(params, "item");
+    const phase = stringField(item, "phase");
+    if (
+      stringField(item, "type") === "agentMessage" &&
+      (phase === undefined || phase === "final_answer")
+    ) {
+      activeRun.lastAgentMessage = {
+        itemId: stringField(item, "id"),
+        text: stringField(item, "text") ?? ""
+      };
+    }
+    return { raw };
   }
 
   if (method === "thread/tokenUsage/updated") {
@@ -507,6 +534,9 @@ function mapCodexJsonRpcMessage(
     if (status === "completed") {
       return {
         normalized: {
+          ...(activeRun.lastAgentMessage === undefined
+            ? {}
+            : { result: activeRun.lastAgentMessage.text }),
           status,
           threadId,
           turnId,

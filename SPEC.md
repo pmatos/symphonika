@@ -238,12 +238,14 @@ summary, while a recurring target begins with its next future clock event.
 
 A Routine Firing is one durable execution of a Routine Target. It records the Routine, its target
 Project, fan-out id, provider, workspace path, prompt evidence, provider logs, terminal reason,
-lifecycle state, and any pull requests discovered from a `kind: git` firing branch. Its trigger
-source is `scheduled` or `manual`; a scheduled firing carries the fan-out id of the Routine Fan-out
-it belongs to, while a manual firing targets one Routine Target directly and has no fan-out id. A
-one-shot `schedule.at` target becomes `expired` after its firing is claimed and must not fire again
-on daemon restart. A recurring target remains active and advances to its next clock event after
-every scheduled firing. A manual firing does not consume a scheduled clock event.
+lifecycle state, its canonical Routine Outcome, and any pull requests discovered from a `kind: git`
+firing branch. The Routine Outcome records `status`, `action`, `url`, `title`, `summary`,
+`verified`, and `source` without replacing lifecycle state or terminal reason; see ADR 0068. Its
+trigger source is `scheduled` or `manual`; a scheduled firing carries the fan-out id of the Routine
+Fan-out it belongs to, while a manual firing targets one Routine Target directly and has no fan-out
+id. A one-shot `schedule.at` target becomes `expired` after its firing is claimed and must not fire
+again on daemon restart. A recurring target remains active and advances to its next clock event
+after every scheduled firing. A manual firing does not consume a scheduled clock event.
 
 When Routine Workspace Retention reclaims a terminal firing's worktree, the firing keeps its
 historical workspace path and records `workspace_pruned_at`. State-root logs and prompt evidence are
@@ -257,6 +259,12 @@ independent of Watchdog progress-liveness: useful progress does not extend it.
 A clock event skipped for catch-up policy, overlap, or a concurrency cap is not a Routine Firing:
 no `routine_firings` row is created. The Routine instead records `last_attempted_at`,
 `last_skip_reason`, and `last_skip_at`, together with rolling 24-hour counts for each skip reason.
+
+### 4.14 Notification Sink
+
+A Notification Sink is a transport-neutral delivery boundary for a rendered subject, plain-text
+body, and HTML alternative. SMTP is the first sink. Routine Firing policy and rendering remain
+outside the transport so later issue-Run and daemon-health notification sources can reuse it.
 
 ## 5. Config Files
 
@@ -490,6 +498,12 @@ top-level objects are:
 `kind: report`; `issue` and `run` are unavailable to every Routine kind. Referencing an unavailable
 object fails rendering with terminal reason `prompt_render_error`.
 
+Every rendered Routine prompt also requires a final JSON Routine Outcome Claim with
+`status`, `action`, `url`, `title`, and `summary`. This prompt-level contract applies to every
+provider. Claude additionally receives the same JSON Schema through `--json-schema`, but the
+provider-specific flag is reinforcement rather than the parsing mechanism. A missing, non-JSON, or
+schema-invalid final claim does not fail the firing.
+
 The preamble tells the agent:
 
 - it is running as an autonomous full-permission worker
@@ -545,6 +559,37 @@ value, Symphonika leaves that aspect of the provider command as authored. Defaul
 Service Config; an invalid defaults mapping rejects the candidate snapshot through the normal
 Service Config last-known-good path.
 
+### 5.5 Email Notifications
+
+The optional service-level `email:` block configures SMTP delivery for terminal Routine Firings:
+
+```yaml
+email:
+  from: "symphonika@example.com"
+  to: "operator@example.com"
+  on: changes
+  smtp_host: "smtp.postmarkapp.com"
+  smtp_security: starttls
+  smtp_port: 587
+  smtp_username: "<postmark-server-token>"
+  smtp_password_env: "SYMPHONIKA_SMTP_PASSWORD"
+```
+
+`from`, `to`, and `smtp_host` are required when the block is present. `on` is `always`, `changes`,
+or `failures` and defaults to `always`. `smtp_security` is `starttls`, `ssl`, or `none` and defaults
+to `starttls`; an omitted `smtp_port` defaults respectively to 587, 465, or 25.
+`smtp_password_env` names an environment variable and defaults to
+`SYMPHONIKA_SMTP_PASSWORD`.
+
+An SMTP username over `smtp_security: none` is invalid unless the host is loopback (`localhost`,
+`127.0.0.1`, or `::1`). Project-level email overrides are not supported. Routine front matter may
+set `notify: false` to opt out entirely; omission defaults to enabled.
+
+For terminal Routine Firings, `always` sends every outcome, including cancellation. `changes` sends
+non-empty `kind: report` provider message output and succeeded `kind: git` firings (whose success
+already proves commits ahead of base). `failures` sends only `state = failed`, not cancellation.
+See ADR 0067.
+
 ## 6. Credentials
 
 GitHub credentials are environment-backed.
@@ -554,6 +599,11 @@ GitHub credentials are environment-backed.
 - Literal tokens should not be stored in YAML
 - Tokens must not be stored in SQLite
 - Token-like values must be redacted from logs
+
+SMTP passwords are also environment-backed. Service Config stores only `email.smtp_password_env`,
+never a literal password. The named variable is resolved only for SMTP authentication and its value
+must not be written to SQLite, logs, rendered notification content, or prompt evidence. SMTP
+transport errors are redacted before logging or durable failure recording.
 
 Codex, Claude, and OMP use their native local authentication.
 
@@ -600,6 +650,8 @@ SQLite stores durable orchestration state:
 - raw log file paths
 - routines
 - routine firings
+- canonical Routine Outcomes for terminal firings
+- Routine Notification Delivery state and sanitized delivery error
 - Routine Firing workspace-reclamation timestamps
 - Routine Fan-outs, their expected Project targets, and grouped-notification delivery state
 - exact-timestamp Routine skip counters used to compute rolling 24-hour per-reason totals
@@ -785,6 +837,49 @@ code 0 applies the same commits-ahead-of-base inspection as §12.1: zero commits
 more commits succeeds. On the succeeded transition, Symphonika lists every open pull request whose
 head is the firing branch and records its PR number and head SHA. Routine PR discovery is
 informational only: it never enters PR Follow-up, review re-dispatch, or auto-merge.
+
+The dispatcher asks every provider for the same Routine Outcome Claim
+`{status, action, url, title, summary}` and parses it only from the final normalized
+`turn_completed` event. When tracker configuration and GitHub reads are available, it snapshots
+repository issues before and after provider execution, bounded to a window sized for a single firing
+rather than the repository's full history; `kind: git` firings also snapshot open pull requests on
+the firing branch. It observes newly opened pull requests, newly opened issues, and issues that
+change to closed, using each issue's own creation/closure timestamp — not mere absence from the
+bounded before-snapshot — to tell an issue created or closed inside the window apart from a
+pre-existing issue merely touched inside it. Issue and pull-request entries are distinguished before
+diffing. A comparison is complete only when every channel relevant to the routine's kind succeeded
+on both reads (issues alone for a report routine; issues and pull requests for a `kind: git`
+routine), so a silently failed channel is never mistaken for "checked and found nothing changed". A
+tracker-less Project skips GitHub observation with an informational log line; unavailable or failed
+optional observation is also non-fatal.
+
+One pure reconciliation step persists a canonical result with `verified` and `source`. An observed
+GitHub action wins over an absent, error, no-action, or commit claim and is sourced to `gh`. A
+claimed PR or issue action is verified only when the same action kind was observed; an unobserved
+claim is retained but marked unverified. A claimed no-action (`none`) is verified only when the
+before/after GitHub comparison completed and found nothing; an unavailable comparison leaves it
+unverified. A successful `kind: git` firing with commits ahead of base can verify or derive a
+`commit` outcome regardless of the claim's own reported status, and this git evidence overrides a
+`none` claim or an unconfirmed pull-request/issue claim that under-reports it so a self-reported
+"nothing to do", an external action no GitHub observation corroborates, or an "error" never
+suppresses the retention signal below. A successful firing with neither claim nor observation records
+`no_action`; it is verified and sourced to `gh` only when the before/after GitHub reads completed,
+otherwise it is unverified and sourced to `symphonika`. Omission alone is not a failure. Failed and
+cancelled firings retain their terminal reason independently of the reconciled outcome.
+
+Under ADR 0025 a verified commit-only outcome remains successful because its workspace is
+preserved. Such an outcome is a retention signal: future workspace garbage collection must retain
+the workspace, first establish that the commit was published to durable remote state, or require an
+explicit destructive operator override. It must not silently delete the only copy.
+
+After a Routine Firing reaches a terminal state, Symphonika evaluates its Routine notification
+policy. Delivery occurs after `kind: git` PR discovery, uses both plain text and an escaped HTML
+alternative, and includes the canonical outcome as one ptt-style line with action, title, URL, and
+an unverified marker when applicable. The final claim JSON is excluded from report-output content.
+Delivery gets two total attempts within one 30-second orchestration deadline and runs after the
+firing releases its concurrency slot. Delivery failure or timeout never changes the firing state:
+`notification_state = failed` and the final sanitized `notification_error` remain durable. Policy
+or `notify: false` suppression records `notification_state = skipped`; success records `sent`.
 
 On daemon startup, a recurring Routine with `catch_up: fire_once_if_missed` preserves a due
 `next_fire_at` and fires at most once even when the outage spans several clock events. The claim
@@ -1053,6 +1148,9 @@ Required normalized events:
 - `malformed_event`
 
 Provider adapters must persist raw stream entries and derive normalized events.
+The final `turn_completed` event may include provider-neutral final-result text and structured
+output used to parse a Routine Outcome Claim. Provider-specific event shapes do not escape the
+adapter.
 
 ### 11.3 Full-Permission Execution
 
@@ -1403,6 +1501,7 @@ Bootstrap CLI commands:
 - `symphonika init [--yes] [--force]`
 - `symphonika add-routine <name> --project <project> (--schedule <expr> | --at <iso8601>) --kind <git|report> [--provider <codex|claude|omp>] [--tz <iana>] [--config <path>]`
 - `symphonika doctor [--config <path>]`
+- `symphonika test-email [--config <path>]`
 - `symphonika init-project [--config <path>] [--yes] [--force]`
 - `symphonika daemon [--config <path>] [--port <port>]`
 - `symphonika service install [--config <path>] [--force] [--print] [--no-reload]`
@@ -1434,6 +1533,7 @@ config path and points the operator to `symphonika init`.
   routines targeting a tracker-less Routine Host
 - database path
 - workspace root
+- SMTP password environment-variable availability when authenticated email is configured
 
 `init` writes only the user Service Config and never inspects or mutates a repository or GitHub.
 
@@ -1472,15 +1572,20 @@ whose latest sample has `idle_since` set.
 
 `routines` groups Routine Targets under their globally unique Routine name and target list, then
 shows each Project's `state`, `next_fire_at`, `last_fired_at`, `last_attempted_at`,
-`last_skip_reason`, `last_skip_at`, rolling 24-hour skip counts per reason, and PR numbers
-discovered for the latest firing. Inactive targets are hidden by default; `--include-inactive`
-includes them. `--project` narrows the grouped view to one target.
+`last_skip_reason`, `last_skip_at`, rolling 24-hour skip counts per reason, and the latest canonical
+Routine Outcome plus PR numbers discovered for the latest firing. Outcome rendering includes action,
+title, URL, and an `(unverified)` marker when applicable. Inactive targets are hidden by default;
+`--include-inactive` includes them. `--project` narrows the grouped view to one target.
 
 `prune-workspaces` reclaims terminal Routine Firing worktrees eligible under the effective
 service-level retention policy. `--dry-run` lists candidates without changing Git registrations,
 directories, or Run Store rows. The command remains available when automatic retention is disabled.
 
 `clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
+
+`test-email` renders a representative fake Routine Firing and sends it through the configured
+renderer, retry policy, and SMTP sink. It forces delivery regardless of `email.on`, reports the
+configured recipient on success, and reports the final sanitized SMTP failure on error.
 
 ## 14. Local Web UI and API
 
@@ -1505,8 +1610,8 @@ The UI is primarily read-only. It shows:
 - raw log links or content
 - rendered prompt links
 - retry and continuation state
-- routines with firing/attempt timestamps, latest skip evidence, rolling 24-hour skip counts, and
-  discovered PR numbers
+- routines with firing/attempt timestamps, latest Routine Outcome, latest skip evidence, rolling
+  24-hour skip counts, and discovered PR numbers
 - a per-run interactive workflow graph
 
 Operator pages stay server-rendered and primarily read-only, but a page may embed a
@@ -1526,10 +1631,11 @@ server-rendered dashboard exposes only cancellation and poll-now controls; manua
 a CLI/API action (ADR 0067).
 
 The HTTP API exposes `GET /api/routines` with the same Routine status shape as the CLI and
-dashboard, including latest-attempt/skip fields and per-reason `skipCounts24h`. Inactive Routines
-are hidden by default; `?include_inactive=true` includes them, and the
+dashboard, including `latestOutcome`, latest-attempt/skip fields, and per-reason `skipCounts24h`.
+Inactive Routines are hidden by default; `?include_inactive=true` includes them, and the
 server-rendered dashboard accepts the same query parameter. Because Routine names are globally
-unique, `GET /api/routines/:id/firings` returns firing history and linked PRs across every target,
+unique, `GET /api/routines/:id/firings` returns firing history with each canonical `outcome`,
+linked PRs, and `notificationState` / `notificationError` delivery evidence across every target,
 along with the target list. Callers may use `?project=<name>` to narrow the result and
 `?include_inactive=true` to include an inactive target and reach its durable firing history.
 

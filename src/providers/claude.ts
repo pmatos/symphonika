@@ -98,9 +98,12 @@ export function createClaudeProvider(
 
       const command = await processScope.wrapForProviderScope(
         input.run,
-        applyRoutineArguments(
-          parseCommand(input.provider.command),
-          input.routine
+        withOutputSchema(
+          applyRoutineArguments(
+            parseCommand(input.provider.command),
+            input.routine
+          ),
+          input.outputSchema
         )
       );
       if (activeRun.cancelled) {
@@ -418,6 +421,7 @@ function mapResultMessage(
   const isError = booleanField(raw, "is_error");
 
   if (subtype === "success" && isError !== true) {
+    const structuredOutput = objectField(raw, "structured_output");
     return [
       {
         normalized: {
@@ -425,6 +429,7 @@ function mapResultMessage(
           numTurns: numberField(raw, "num_turns"),
           result: stringField(raw, "result"),
           sessionId,
+          ...(structuredOutput === undefined ? {} : { structuredOutput }),
           totalCostUsd: numberField(raw, "total_cost_usd"),
           type: "turn_completed"
         },
@@ -448,6 +453,24 @@ function mapResultMessage(
       raw
     }
   ];
+}
+
+function withOutputSchema(
+  command: { args: string[]; executable: string },
+  outputSchema: object | undefined
+): { args: string[]; executable: string } {
+  if (outputSchema === undefined) {
+    return command;
+  }
+  const args = [...command.args];
+  const disallowedToolsIndex = args.indexOf("--disallowedTools");
+  args.splice(
+    disallowedToolsIndex < 0 ? args.length : disallowedToolsIndex,
+    0,
+    "--json-schema",
+    JSON.stringify(outputSchema)
+  );
+  return { ...command, args };
 }
 
 function mapStreamEvent(

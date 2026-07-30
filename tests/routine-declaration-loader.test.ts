@@ -22,6 +22,30 @@ afterEach(async () => {
 });
 
 describe("RoutineDeclarationLoader", () => {
+  it("parses notify false as a Routine-level notification opt-out", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "self-notifying.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: self-notifying",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "notify: false",
+        "---",
+        "Send the report through the Routine's own delivery path.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.routine).toMatchObject({ notify: false });
+  });
+
   it("parses per-routine provider tuning and a wall-clock timeout", async () => {
     const root = await makeTempRoot();
     const routinePath = path.join(root, "refactor-audit.md");

@@ -27,6 +27,7 @@ export type ProviderEvent = {
 export type ProviderRunInput = {
   branchName: string;
   issue: IssueSnapshot;
+  outputSchema?: object;
   prompt: string;
   promptPath: string;
   provider: {

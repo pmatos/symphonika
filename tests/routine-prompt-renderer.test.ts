@@ -85,6 +85,12 @@ describe("RoutinePromptRenderer", () => {
     expect(routinePrompt.prompt).toContain(
       "This routine firing is one-shot and will not be re-invoked"
     );
+    expect(routinePrompt.prompt).toContain(
+      "When you finish, report the Routine Outcome as exactly one JSON object"
+    );
+    expect(routinePrompt.prompt).toContain(
+      '"action":  "pr" | "issue_opened" | "issue_closed" | "commit" | "none"'
+    );
   });
 
   it("rejects issue, run, and branch variables with prompt_render_error", () => {

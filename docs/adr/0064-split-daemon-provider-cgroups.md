@@ -62,11 +62,15 @@ guardian ignores `SIGTERM` only during this interval, preserving the original pr
 identity so the delayed negative-PID signal cannot follow a reused PID. Before provider-specific
 shutdown courtesy or stdin EOF, the orchestrator waits for the supervisor to acknowledge that it
 has reserved the guardian; an immediate provider exit therefore cannot release the group during
-the initial grace period either. Ordinary completion without that shutdown request removes the
-guardian immediately. Escalation remains keyed on the group even when the provider has exited,
-because a descendant can ignore `SIGTERM` and retain the Workspace. An already-dead group (`ESRCH`)
-at the first signal is successful cleanup and does not arm escalation. Non-POSIX hosts retain
-bounded direct-child signaling, but only POSIX process groups provide the descendant guarantee.
+the initial grace period either. The supervisor reports guardian readiness before launching the
+provider and suppresses that launch when shutdown is already requested. It also reports ordinary
+group release before removing the guardian. The orchestrator can therefore distinguish a
+pre-readiness disconnect, where no provider work was launched, from an unexpected supervisor exit
+while the guardian still reserves the group; the latter safely falls back to group signaling.
+Escalation remains keyed on the group even when the provider has exited, because a descendant can
+ignore `SIGTERM` and retain the Workspace. An already-dead group (`ESRCH`) at the first signal is
+successful cleanup and does not arm escalation. Non-POSIX hosts retain bounded direct-child
+signaling, but only POSIX process groups provide the descendant guarantee.
 
 `symphonika daemon` remains a standalone CLI command independent of `service install`
 (`src/cli.ts`), and must keep working on hosts with no systemd `--user` session (non-systemd hosts,

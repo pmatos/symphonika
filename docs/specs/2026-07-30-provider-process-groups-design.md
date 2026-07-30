@@ -31,14 +31,18 @@ streams and a stream-free guardian in that same group. Short-lived provider
 validation probes remain ordinary child processes because they do not execute
 agent work or spawn Run-owned tools.
 
-The guardian ignores `SIGTERM`. Before any shutdown courtesy or stdin EOF, the
-orchestrator sends the supervisor a preparation request and waits for its
-acknowledgement. That acknowledgement means the supervisor has latched the
-shutdown state and will leave the guardian in place even if the provider exits
-immediately. On ordinary provider completion without a shutdown request, the
-supervisor removes the guardian before mirroring the provider's exit, so the
-group ends immediately. Once group shutdown begins, the guardian instead keeps
-the original process-group identity reserved through both grace periods. This
+The guardian ignores `SIGTERM`. The supervisor reports guardian readiness to
+the orchestrator before launching the configured provider. If shutdown
+preparation has already been requested when readiness arrives, the supervisor
+keeps the guardian reserved but never launches the provider. Before any
+shutdown courtesy or stdin EOF, the orchestrator sends the supervisor a
+preparation request and waits for its acknowledgement. That acknowledgement
+means the supervisor has latched the shutdown state and will leave the guardian
+in place even if the provider exits immediately. On ordinary provider
+completion without a shutdown request, the supervisor reports group release,
+removes the guardian, and mirrors the provider's exit, so the group ends
+immediately. Once group shutdown begins, the guardian instead keeps the
+original process-group identity reserved through both grace periods. This
 prevents either delayed negative-PID signal from targeting an unrelated group
 after numeric PID reuse.
 
@@ -64,6 +68,13 @@ The escalation is keyed on the process group rather than the direct child's
 exit state because a cooperative parent can exit on `SIGTERM` while an
 uncooperative grandchild remains alive. Repeated shutdown requests reuse the
 same escalation rather than arming competing timers.
+
+The orchestrator records the interval between the supervisor's group-ready and
+group-released messages. If the supervisor's IPC channel dies unexpectedly
+during that interval, the known-live guardian still reserves the original PGID,
+so shutdown safely falls back to the same group signal sequence. A disconnect
+before readiness cannot strand provider work because the provider is not
+launched until readiness has been reported.
 
 `ESRCH` means the process group is already gone and is treated as successful
 cleanup at either signal step. Other synchronous group-signal failures must not
@@ -128,7 +139,10 @@ Implementation proceeds in vertical red-green slices:
    identity remains reserved between successful `SIGTERM` and `SIGKILL`.
 6. Add a public provider regression proving an immediate protocol-courtesy exit
    cannot release the group during the initial EOF grace period.
-7. Re-run existing daemon-shutdown and Watchdog cancellation tests to confirm
+7. Add shared lifecycle regressions proving shutdown preparation preempts
+   provider launch and a recorded group remains cancellable after unexpected
+   supervisor IPC loss.
+8. Re-run existing daemon-shutdown and Watchdog cancellation tests to confirm
    those callers still converge on `provider.cancel`.
 
 The subprocess regressions are POSIX-only because negative-PID process groups
@@ -171,6 +185,8 @@ The change is complete when:
   escalation window, preventing delayed signals from following a reused PID.
 - Provider-specific shutdown courtesy and stdin EOF happen only after the
   supervisor acknowledges that the guardian is reserved.
+- Shutdown acknowledged before guardian readiness never launches the provider,
+  and a ready group remains cancellable after unexpected supervisor exit.
 - An already-dead group is harmless and repeated cancellation does not arm
   duplicate escalation sequences.
 - Provider-level regressions prove a forked grandchild exits after

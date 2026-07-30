@@ -10,6 +10,13 @@ type ProviderShutdownState = {
   promise: Promise<void>;
   reserved: boolean;
 };
+type ProviderProcessGroupState = {
+  reserved: boolean;
+};
+const providerProcessGroups = new WeakMap<
+  ChildProcessWithoutNullStreams,
+  ProviderProcessGroupState
+>();
 const shuttingDown = new WeakMap<
   ChildProcessWithoutNullStreams,
   ProviderShutdownState
@@ -79,14 +86,21 @@ function finish(exitCode, signal) {
       process.exit(exitCode ?? 1);
     };
 
-    if (guardian.exitCode !== null || guardian.signalCode !== null) {
-      exit();
+    const releaseGuardian = () => {
+      if (guardian.exitCode !== null || guardian.signalCode !== null) {
+        exit();
+        return;
+      }
+      guardian.once("close", exit);
+      if (!guardian.kill("SIGKILL")) {
+        exit();
+      }
+    };
+    if (process.send !== undefined && process.connected) {
+      process.send("group-released", releaseGuardian);
       return;
     }
-    guardian.once("close", exit);
-    if (!guardian.kill("SIGKILL")) {
-      exit();
-    }
+    releaseGuardian();
   }, 25);
 }
 
@@ -96,6 +110,7 @@ function fail(message) {
   }
   settled = true;
   provider?.kill("SIGKILL");
+  guardian.kill("SIGKILL");
   process.stderr.write(\`\${message}\\n\`);
   process.exit(127);
 }
@@ -109,15 +124,35 @@ guardian.once("close", (exitCode, signal) => {
   );
 });
 guardian.once("message", (message) => {
-  if (message !== "ready" || groupTerminating || settled) {
+  if (
+    message !== "ready" ||
+    groupTerminating ||
+    shutdownRequested ||
+    settled
+  ) {
     return;
   }
-  provider = spawn(executable, args, { stdio: "inherit" });
-  provider.once("error", (error) => {
-    process.stderr.write(\`failed to spawn provider: \${error.message}\\n\`);
-    finish(127, null);
+  if (process.send === undefined) {
+    fail("provider supervisor IPC channel is unavailable");
+    return;
+  }
+  process.send("group-ready", (error) => {
+    if (error) {
+      fail(\`failed to report provider process-group readiness: \${error.message}\`);
+      return;
+    }
+    if (groupTerminating || shutdownRequested || settled) {
+      return;
+    }
+    provider = spawn(executable, args, { stdio: "inherit" });
+    provider.once("error", (spawnError) => {
+      process.stderr.write(
+        \`failed to spawn provider: \${spawnError.message}\\n\`
+      );
+      finish(127, null);
+    });
+    provider.once("close", finish);
   });
-  provider.once("close", finish);
 });
 `;
 
@@ -133,7 +168,7 @@ export function spawnProviderProcess(
     });
   }
 
-  return spawn(
+  const child = spawn(
     process.execPath,
     [
       "--input-type=module",
@@ -149,6 +184,8 @@ export function spawnProviderProcess(
       stdio: ["pipe", "pipe", "pipe", "ipc"]
     }
   ) as ChildProcessWithoutNullStreams;
+  trackProviderProcessGroup(child);
+  return child;
 }
 
 export function shutdownProviderProcess(
@@ -229,7 +266,7 @@ async function reserveProviderProcessGroup(
     return true;
   }
   if (!child.connected) {
-    return false;
+    return isProviderProcessGroupReserved(child);
   }
 
   return await new Promise<boolean>((resolve) => {
@@ -250,10 +287,10 @@ async function reserveProviderProcessGroup(
       }
     };
     const onDisconnect = (): void => {
-      settle(false);
+      settle(isProviderProcessGroupReserved(child));
     };
     const onExit = (): void => {
-      settle(false);
+      settle(isProviderProcessGroupReserved(child));
     };
 
     child.on("message", onMessage);
@@ -262,13 +299,35 @@ async function reserveProviderProcessGroup(
     try {
       child.send("prepare-shutdown", (error) => {
         if (error !== null) {
-          settle(false);
+          settle(isProviderProcessGroupReserved(child));
         }
       });
     } catch {
-      settle(false);
+      settle(isProviderProcessGroupReserved(child));
     }
   });
+}
+
+function trackProviderProcessGroup(
+  child: ChildProcessWithoutNullStreams
+): void {
+  const state: ProviderProcessGroupState = {
+    reserved: false
+  };
+  providerProcessGroups.set(child, state);
+  child.on("message", (message: unknown) => {
+    if (message === "group-ready") {
+      state.reserved = true;
+    } else if (message === "group-released") {
+      state.reserved = false;
+    }
+  });
+}
+
+function isProviderProcessGroupReserved(
+  child: ChildProcessWithoutNullStreams
+): boolean {
+  return providerProcessGroups.get(child)?.reserved === true;
 }
 
 function signalProviderProcess(

@@ -142,9 +142,10 @@ one-line form including action, title, URL, and an `(unverified)` marker.
 
 Slice 3's SMTP sink is being implemented independently. This slice provides a
 shared one-line Routine Outcome formatter so the notification path can consume
-the same rendering without duplicating the marker rules. If the sink lands
-first, integration is a narrow call-site change; this branch does not invent a
-second notification subsystem.
+the same rendering without duplicating the marker rules. Slice 3 opened PR #347
+from a sibling issue branch after this design was approved; integrating the
+formatter at that call site requires the branches to share a base. This branch
+does not copy the independently owned notification subsystem.
 
 ## Test seams
 
@@ -157,4 +158,3 @@ Behavior-focused tests cover:
   tracker degradation, and persisted fallback outcomes;
 - Run Store migration and firing readers;
 - the firing-history HTTP response and CLI rendering.
-

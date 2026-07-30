@@ -12,6 +12,7 @@ import type {
   ProviderRunInput
 } from "../src/provider.js";
 import { dispatchDueRoutines } from "../src/routines/dispatcher.js";
+import type { TargetedRoutineDeclaration } from "../src/routines/types.js";
 import type {
   PreparedRoutineWorkspace,
   PrepareRoutineWorkspaceInput
@@ -64,23 +65,31 @@ describe("RoutineFiringDispatcher", () => {
       }),
       validate: vi.fn().mockResolvedValue(undefined)
     } satisfies AgentProvider;
-    const listPullRequestsForBranch = vi.fn().mockResolvedValue([
+    const observedPullRequests = [
       {
         head: { ref: branchName, sha: "abc123" },
+        html_url: "https://github.com/pmatos/alpha/pull/17",
         number: 17,
-        state: "open"
+        state: "open",
+        title: "Extract retry policy"
       },
       {
         head: { ref: branchName, sha: "def456" },
+        html_url: "https://github.com/pmatos/alpha/pull/18",
         number: 18,
-        state: "open"
+        state: "open",
+        title: "Document retry policy"
       },
       {
         head: { ref: "another-branch", sha: "ignored" },
         number: 19,
         state: "open"
       }
-    ]);
+    ];
+    const listPullRequestsForBranch = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue(observedPullRequests);
     const prepareRoutineWorkspace = vi.fn(
       (): Promise<PreparedRoutineWorkspace> =>
         Promise.resolve({
@@ -152,6 +161,15 @@ describe("RoutineFiringDispatcher", () => {
       expect(runStore.listRoutineFirings()).toEqual([
         expect.objectContaining({
           id: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+          outcome: {
+            action: "pr",
+            source: "gh",
+            status: "success",
+            summary: "Observed via GitHub state diff.",
+            title: "Extract retry policy",
+            url: "https://github.com/pmatos/alpha/pull/17",
+            verified: true
+          },
           pullRequests: [
             expect.objectContaining({ prNumber: 17 }),
             expect.objectContaining({ prNumber: 18 })
@@ -245,7 +263,7 @@ describe("RoutineFiringDispatcher", () => {
           terminalReason: "no_workspace_changes"
         })
       ]);
-      expect(listPullRequestsForBranch).not.toHaveBeenCalled();
+      expect(listPullRequestsForBranch).toHaveBeenCalledTimes(2);
     } finally {
       runStore.close();
     }
@@ -381,6 +399,15 @@ describe("RoutineFiringDispatcher", () => {
       expect(runStore.listRoutineFirings()).toEqual([
         expect.objectContaining({
           id: "fire-1",
+          outcome: {
+            action: "none",
+            source: "symphonika",
+            status: "no_action",
+            summary: "No externally observable action was reported.",
+            title: "",
+            url: null,
+            verified: false
+          },
           provider: "codex",
           routineName: "daily-report",
           state: "succeeded",
@@ -437,6 +464,152 @@ describe("RoutineFiringDispatcher", () => {
 
       expect(second.fired).toEqual([]);
       expect(providerInputs).toHaveLength(1);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("derives an issue-closed outcome from GitHub state when the claim is absent", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const listIssues = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          html_url: "https://github.com/pmatos/alpha/issues/17",
+          number: 17,
+          state: "open",
+          title: "Superseded dependency issue"
+        }
+      ])
+      .mockResolvedValueOnce([
+        {
+          html_url: "https://github.com/pmatos/alpha/issues/17",
+          number: 17,
+          state: "closed",
+          title: "Superseded dependency issue"
+        }
+      ]);
+    const provider = quietProvider();
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns: new ActiveRunRegistry(),
+          provider,
+          root,
+          routine: {
+            ...minuteRoutine(root),
+            schedule: { at: "2026-05-22T10:00:00.000Z" }
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-issue-close",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        }
+      });
+
+      expect(listIssues).toHaveBeenCalledTimes(2);
+      expect(listIssues).toHaveBeenCalledWith({
+        owner: "pmatos",
+        repo: "alpha",
+        state: "all",
+        token: "secret-token"
+      });
+      expect(runStore.getRoutineFiring("fire-issue-close")?.outcome).toEqual({
+        action: "issue_closed",
+        source: "gh",
+        status: "success",
+        summary: "Observed via GitHub state diff.",
+        title: "Superseded dependency issue",
+        url: "https://github.com/pmatos/alpha/issues/17",
+        verified: true
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("logs and skips issue observation for a tracker-less Routine Host", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const logger = pino({ enabled: false });
+    const logInfo = vi.spyOn(logger, "info");
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: quietProvider() },
+        configDir: root,
+        createFiringId: () => "fire-trackerless",
+        globalConcurrency: { maxInFlight: undefined },
+        githubIssuesApi: {
+          listIssues: vi.fn().mockResolvedValue([]),
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        logger,
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "report-host",
+            {
+              agent: { provider: "codex" },
+              disabled: false,
+              mode: "routine_host",
+              name: "report-host",
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  projectName: "report-host",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md")
+                }
+              ],
+              workspace: {
+                git: {
+                  base_branch: "main",
+                  remote: "git@github.com:pmatos/alpha.git"
+                },
+                root: "./workspaces/report-host"
+              }
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(logInfo).toHaveBeenCalledWith(
+        { project: "report-host", routine: "daily-report" },
+        "symphonika routine issue observation skipped: tracker absent"
+      );
+      expect(runStore.getRoutineFiring("fire-trackerless")).toMatchObject({
+        outcome: {
+          action: "none",
+          status: "no_action"
+        },
+        state: "succeeded"
+      });
     } finally {
       runStore.close();
     }
@@ -1494,7 +1667,7 @@ function recurringDispatchInput(input: {
   activeRuns: ActiveRunRegistry;
   provider: AgentProvider;
   root: string;
-  routine: ReturnType<typeof minuteRoutine>;
+  routine: Omit<TargetedRoutineDeclaration, "projectName">;
   runStore: ReturnType<typeof openRunStore>;
 }) {
   return {

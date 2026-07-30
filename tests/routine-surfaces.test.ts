@@ -167,6 +167,15 @@ describe("routine operator surfaces", () => {
       expect(firingsBody.firings).toEqual([
         expect.objectContaining({
           id: "fire-1",
+          outcome: {
+            action: "pr",
+            source: "codex",
+            status: "success",
+            summary: "Opened the pull request.",
+            title: "Extract retry policy",
+            url: "https://github.com/pmatos/alpha/pull/42",
+            verified: false
+          },
           pullRequests: [expect.objectContaining({ prNumber: 42 })]
         })
       ]);
@@ -280,6 +289,8 @@ describe("routine operator surfaces", () => {
       expect(body).toContain("daily-report");
       expect(body).toContain("next_fire_at");
       expect(body).toContain("#42");
+      expect(body).toContain("Extract retry policy");
+      expect(body).toContain("(unverified)");
     } finally {
       store.close();
     }
@@ -445,10 +456,10 @@ describe("routine operator surfaces", () => {
     ]);
 
     expect(output.stdout).toContain(
-      "project  routine  state  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests"
+      "project  routine  state  latest_outcome  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests"
     );
     expect(output.stdout).toContain(
-      "alpha  daily-report  active  -  2026-05-22T10:00:00.000Z  -  -  -  -  overlap=0,concurrency_cap=0,catch_up_window=0  #42"
+      'alpha  daily-report  active  ✅ alpha — pr: "Extract retry policy" https://github.com/pmatos/alpha/pull/42 (unverified)  -  2026-05-22T10:00:00.000Z  -  -  -  -  overlap=0,concurrency_cap=0,catch_up_window=0  #42'
     );
   });
 
@@ -492,7 +503,7 @@ describe("routine operator surfaces", () => {
     ]);
 
     expect(output.stdout).toContain(
-      "alpha  daily-report  disabled  operator  "
+      "alpha  daily-report  disabled  -  operator  "
     );
   });
 
@@ -526,7 +537,9 @@ describe("routine operator surfaces", () => {
       path.join(stateRoot, "symphonika.yml")
     ]);
 
-    expect(output.stdout).toContain("alpha  daily-report  inactive  -  -");
+    expect(output.stdout).toContain(
+      'alpha  daily-report  inactive  ✅ alpha — pr: "Extract retry policy"'
+    );
   });
 });
 
@@ -551,6 +564,15 @@ function seedRoutine(store: ReturnType<typeof openRunStore>): void {
   });
   store.completeRoutineFiring({
     id: "fire-1",
+    outcome: {
+      action: "pr",
+      source: "codex",
+      status: "success",
+      summary: "Opened the pull request.",
+      title: "Extract retry policy",
+      url: "https://github.com/pmatos/alpha/pull/42",
+      verified: false
+    },
     state: "succeeded",
     workspacePath: "/tmp/workspace"
   });

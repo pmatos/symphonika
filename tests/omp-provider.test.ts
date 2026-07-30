@@ -110,6 +110,7 @@ describe("Oh My Pi RPC provider", () => {
         type: "tool_call"
       },
       {
+        result: "done",
         sessionId: "omp-session-335",
         type: "turn_completed"
       },

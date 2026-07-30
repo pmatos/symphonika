@@ -23,6 +23,7 @@ import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
 import type { InitOptions, InitProvider, InitReport } from "./init.js";
 import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
+import { formatRoutineOutcomeLine } from "./routines/outcome.js";
 import type { RoutineKind, RoutineStatus } from "./routines/types.js";
 import {
   resolveWatchdogConfig,
@@ -944,7 +945,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         }
         writeOut(
           program,
-          "project  routine  state  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests\n"
+          "project  routine  state  latest_outcome  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests\n"
         );
         for (const routine of routines) {
           writeOut(
@@ -953,6 +954,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
               routine.projectName,
               routine.name,
               routine.state,
+              routine.latestOutcome === null
+                ? "-"
+                : formatRoutineOutcomeLine(
+                    routine.projectName,
+                    routine.latestOutcome
+                  ),
               routine.disabledReason ?? "-",
               routine.nextFireAt ?? "-",
               routine.lastFiredAt ?? "-",

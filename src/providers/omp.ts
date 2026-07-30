@@ -22,6 +22,7 @@ import {
 type JsonObject = Record<string, unknown>;
 
 type ActiveOmpRun = {
+  assistantText?: string;
   cancelled: boolean;
   child?: ChildProcessWithoutNullStreams;
   nextRequestId: number;
@@ -365,9 +366,13 @@ function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
     const update = objectField(raw, "assistantMessageEvent");
     const updateType = stringField(update, "type");
     if (updateType === "text_delta" || updateType === "thinking_delta") {
+      const delta = stringField(update, "delta") ?? "";
+      if (updateType === "text_delta") {
+        activeRun.assistantText = (activeRun.assistantText ?? "") + delta;
+      }
       return {
         normalized: {
-          message: stringField(update, "delta") ?? "",
+          message: delta,
           messageKind: updateType === "text_delta" ? "text" : "thinking",
           sessionId: activeRun.sessionId,
           type: "message"
@@ -436,6 +441,9 @@ function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
   if (type === "turn_end") {
     return {
       normalized: {
+        ...(activeRun.assistantText === undefined
+          ? {}
+          : { result: activeRun.assistantText }),
         sessionId: activeRun.sessionId,
         type: "turn_completed"
       },

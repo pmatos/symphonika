@@ -7,8 +7,10 @@ import type { ActiveRunRegistry } from "../lifecycle/active-runs.js";
 import { classifyFailure } from "../lifecycle/classify-failure.js";
 import {
   resolveEnvBackedValue,
+  tryListIssues,
   tryListPullRequestsForBranch,
   type GitHubIssuesApi,
+  type RawGitHubIssue,
   type RawGitHubPullRequest
 } from "../issue-polling.js";
 import type {
@@ -27,6 +29,13 @@ import {
   nextRecurringFireAt,
   type RoutineScheduleEvaluation
 } from "./schedule.js";
+import {
+  diffRoutineGithubSnapshots,
+  parseRoutineOutcomeClaim,
+  reconcileRoutineOutcome,
+  ROUTINE_OUTCOME_JSON_SCHEMA,
+  type RoutineGithubSnapshot
+} from "./outcome.js";
 import {
   renderRoutinePrompt,
   RoutinePromptRenderError
@@ -72,6 +81,13 @@ type RoutineTerminalOutcome =
   | { kind: "cancelled"; reason: string }
   | { kind: "failed"; reason: string }
   | { kind: "succeeded"; reason: string };
+
+type CapturedRoutineGithubSnapshot = {
+  issuesAvailable: boolean;
+  pullRequests: RawGitHubPullRequest[];
+  pullRequestsAvailable: boolean;
+  snapshot: RoutineGithubSnapshot;
+};
 
 export async function dispatchDueRoutines(
   input: DispatchDueRoutinesInput
@@ -401,6 +417,7 @@ async function runRoutineFiring(input: {
   let prepared: PreparedRoutineWorkspace | undefined;
   let rawLogPath: string | undefined;
   let normalizedLogPath: string | undefined;
+  let githubBefore: CapturedRoutineGithubSnapshot | null = null;
   try {
     input.runStore.updateRoutineFiringState(
       input.firingId,
@@ -455,9 +472,20 @@ async function runRoutineFiring(input: {
       );
     }
 
+    githubBefore = await captureRoutineGithubSnapshot({
+      branchName: prepared.branchName,
+      env: input.env,
+      githubIssuesApi: input.githubIssuesApi,
+      kind: input.routine.kind,
+      logger: input.logger,
+      project: input.project,
+      routineName: input.routine.name
+    });
+
     for await (const event of input.provider.runAttempt({
       branchName: prepared.branchName,
       issue: routineIssueSnapshot(input.routine),
+      outputSchema: ROUTINE_OUTCOME_JSON_SCHEMA,
       prompt: evidence.prompt,
       promptPath: evidence.promptPath,
       provider: {
@@ -492,8 +520,34 @@ async function runRoutineFiring(input: {
             kind: input.routine.kind,
             workspacePath: prepared.workspacePath
           });
+    const githubAfter =
+      githubBefore === null
+        ? null
+        : await captureRoutineGithubSnapshot({
+            branchName: prepared.branchName,
+            env: input.env,
+            githubIssuesApi: input.githubIssuesApi,
+            kind: input.routine.kind,
+            logger: input.logger,
+            project: input.project,
+            routineName: input.routine.name
+          });
+    const githubObservation = routineGithubObservation(
+      githubBefore,
+      githubAfter
+    );
     input.runStore.completeRoutineFiring({
       id: input.firingId,
+      outcome: reconcileRoutineOutcome({
+        claim: parseRoutineOutcomeClaim(events),
+        commitsAhead:
+          input.routine.kind === "git" && outcome.kind === "succeeded",
+        githubObservationAvailable: githubObservation.available,
+        observedAction: githubObservation.action,
+        provider: input.providerName,
+        terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
+        terminalState: outcome.kind
+      }),
       state: outcome.kind,
       terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
       ...(cancelEntry?.cancelReason === undefined
@@ -521,8 +575,33 @@ async function runRoutineFiring(input: {
       : error instanceof RoutinePromptRenderError
         ? error.terminalReason
         : errorMessage(error);
+    const githubAfter =
+      githubBefore === null || prepared === undefined
+        ? null
+        : await captureRoutineGithubSnapshot({
+            branchName: prepared.branchName,
+            env: input.env,
+            githubIssuesApi: input.githubIssuesApi,
+            kind: input.routine.kind,
+            logger: input.logger,
+            project: input.project,
+            routineName: input.routine.name
+          });
+    const githubObservation = routineGithubObservation(
+      githubBefore,
+      githubAfter
+    );
     input.runStore.completeRoutineFiring({
       id: input.firingId,
+      outcome: reconcileRoutineOutcome({
+        claim: parseRoutineOutcomeClaim(events),
+        commitsAhead: false,
+        githubObservationAvailable: githubObservation.available,
+        observedAction: githubObservation.action,
+        provider: input.providerName,
+        terminalReason: reason,
+        terminalState: cancelled ? "cancelled" : "failed"
+      }),
       state: cancelled ? "cancelled" : "failed",
       terminalReason: reason,
       ...(cancelEntry?.cancelReason === undefined
@@ -533,6 +612,171 @@ async function runRoutineFiring(input: {
         : { workspacePath: prepared.workspacePath })
     });
   }
+}
+
+async function captureRoutineGithubSnapshot(input: {
+  branchName: string;
+  env: NodeJS.ProcessEnv;
+  githubIssuesApi: GitHubIssuesApi | undefined;
+  kind: RoutineStatus["kind"];
+  logger: Logger | undefined;
+  project: RunControllerProjectConfig;
+  routineName: string;
+}): Promise<CapturedRoutineGithubSnapshot | null> {
+  if (input.project.tracker === undefined) {
+    input.logger?.info(
+      { project: input.project.name, routine: input.routineName },
+      "symphonika routine issue observation skipped: tracker absent"
+    );
+    return null;
+  }
+  if (input.githubIssuesApi === undefined) {
+    input.logger?.info(
+      { project: input.project.name, routine: input.routineName },
+      "symphonika routine GitHub observation skipped: API unavailable"
+    );
+    return null;
+  }
+  const token = resolveEnvBackedValue(input.project.tracker.token, input.env);
+  if (token === undefined) {
+    input.logger?.warn(
+      { project: input.project.name, routine: input.routineName },
+      "symphonika routine GitHub observation token unavailable"
+    );
+    return null;
+  }
+
+  let issues: RawGitHubIssue[] = [];
+  let issuesAvailable = false;
+  try {
+    const listed = await tryListIssues(input.githubIssuesApi, {
+      owner: input.project.tracker.owner,
+      repo: input.project.tracker.repo,
+      state: "all",
+      token
+    });
+    if (listed === undefined) {
+      input.logger?.info(
+        { project: input.project.name, routine: input.routineName },
+        "symphonika routine issue observation skipped: API unsupported"
+      );
+    } else {
+      issues = listed;
+      issuesAvailable = true;
+    }
+  } catch (error) {
+    input.logger?.warn(
+      { err: error, project: input.project.name, routine: input.routineName },
+      "symphonika routine issue observation failed"
+    );
+  }
+
+  let pullRequests: RawGitHubPullRequest[] = [];
+  let pullRequestsAvailable = false;
+  if (input.kind === "git") {
+    try {
+      const listed = await tryListPullRequestsForBranch(input.githubIssuesApi, {
+        branch: input.branchName,
+        owner: input.project.tracker.owner,
+        repo: input.project.tracker.repo,
+        token
+      });
+      if (listed !== undefined) {
+        pullRequests = listed;
+        pullRequestsAvailable = true;
+      }
+    } catch (error) {
+      input.logger?.warn(
+        { branch: input.branchName, err: error },
+        "symphonika routine PR observation failed"
+      );
+    }
+  }
+
+  if (!issuesAvailable && !pullRequestsAvailable) {
+    return null;
+  }
+  return {
+    issuesAvailable,
+    pullRequests,
+    pullRequestsAvailable,
+    snapshot: {
+      issues: routineIssueObservations(issues),
+      pullRequests: routinePullRequestObservations(
+        pullRequests,
+        input.branchName
+      )
+    }
+  };
+}
+
+function routineGithubObservation(
+  before: CapturedRoutineGithubSnapshot | null,
+  after: CapturedRoutineGithubSnapshot | null
+): {
+  action: ReturnType<typeof diffRoutineGithubSnapshots>;
+  available: boolean;
+} {
+  if (before === null || after === null) {
+    return { action: null, available: false };
+  }
+  const issuesAvailable = before.issuesAvailable && after.issuesAvailable;
+  const pullRequestsAvailable =
+    before.pullRequestsAvailable && after.pullRequestsAvailable;
+  if (!issuesAvailable && !pullRequestsAvailable) {
+    return { action: null, available: false };
+  }
+  return {
+    action: diffRoutineGithubSnapshots(
+      {
+        issues: issuesAvailable ? before.snapshot.issues : {},
+        pullRequests: pullRequestsAvailable ? before.snapshot.pullRequests : {}
+      },
+      {
+        issues: issuesAvailable ? after.snapshot.issues : {},
+        pullRequests: pullRequestsAvailable ? after.snapshot.pullRequests : {}
+      }
+    ),
+    available: true
+  };
+}
+
+function routineIssueObservations(
+  issues: RawGitHubIssue[]
+): RoutineGithubSnapshot["issues"] {
+  const observations: RoutineGithubSnapshot["issues"] = {};
+  for (const issue of issues) {
+    if (
+      issue.pull_request !== undefined ||
+      issue.number === undefined ||
+      issue.number <= 0
+    ) {
+      continue;
+    }
+    observations[String(issue.number)] = {
+      state: issue.state ?? "",
+      title: issue.title ?? `Issue #${issue.number}`,
+      url: issue.html_url ?? null
+    };
+  }
+  return observations;
+}
+
+function routinePullRequestObservations(
+  pullRequests: RawGitHubPullRequest[],
+  branchName: string
+): RoutineGithubSnapshot["pullRequests"] {
+  const observations: RoutineGithubSnapshot["pullRequests"] = {};
+  for (const pullRequest of pullRequests) {
+    if (!isOpenPullRequestForBranch(pullRequest, branchName)) {
+      continue;
+    }
+    observations[String(pullRequest.number)] = {
+      title: pullRequest.title ?? `Pull request #${pullRequest.number}`,
+      url: pullRequest.html_url ?? null
+    };
+  }
+  return observations;
 }
 
 async function prepareRoutineEvidence(input: {

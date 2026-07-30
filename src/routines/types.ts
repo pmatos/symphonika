@@ -1,4 +1,5 @@
 import type { AgentProviderName } from "../provider.js";
+import type { RoutineOutcome } from "./outcome.js";
 
 export type RoutineKind = "git" | "report";
 
@@ -56,6 +57,7 @@ export type RoutineStatus = {
   catchUp: RoutineCatchUpPolicy;
   disabledReason: RoutineDisabledReason | null;
   kind: RoutineKind;
+  latestOutcome: RoutineOutcome | null;
   lastAttemptedAt: string | null;
   lastFiredAt: string | null;
   lastSkipAt: string | null;

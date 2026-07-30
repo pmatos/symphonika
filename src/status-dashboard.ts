@@ -2,6 +2,7 @@ import type { DoctorProjectReport } from "./doctor.js";
 import type { NormalizedProviderEvent } from "./provider.js";
 import type { ProviderEventRecord, RunState, RunStatus } from "./run-store.js";
 import type { RoutineStatus } from "./routines/types.js";
+import { formatRoutineOutcomeLine } from "./routines/outcome.js";
 import {
   formatWatchdogDuration,
   type WatchdogIdleStatus
@@ -128,8 +129,8 @@ function formatRoutines(routines: RoutineStatus[]): string[] {
     return ["│   No routines configured"];
   }
   return [
-    "│   PROJECT      ROUTINE              STATE     DISABLED_REASON    NEXT_FIRE_AT              LAST_FIRED_AT             LAST_ATTEMPTED_AT         LAST_SKIP_REASON   LAST_SKIP_AT              SKIPS_24H                                                        PRS",
-    "│   -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------",
+    "│   PROJECT      ROUTINE              STATE     LATEST_OUTCOME                                                            DISABLED_REASON    NEXT_FIRE_AT              LAST_FIRED_AT             LAST_ATTEMPTED_AT         LAST_SKIP_REASON   LAST_SKIP_AT              SKIPS_24H                                                        PRS",
+    "│   -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------",
     ...routines.map((routine) =>
       [
         "│  ",
@@ -138,6 +139,19 @@ function formatRoutines(routines: RoutineStatus[]): string[] {
         pad(truncate(routine.name, 20), 20),
         " ",
         pad(routine.state, 9),
+        " ",
+        pad(
+          truncate(
+            routine.latestOutcome === null
+              ? "-"
+              : formatRoutineOutcomeLine(
+                  routine.projectName,
+                  routine.latestOutcome
+                ),
+            72
+          ),
+          72
+        ),
         " ",
         pad(truncate(routine.disabledReason ?? "-", 18), 18),
         " ",

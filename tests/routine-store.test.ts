@@ -117,6 +117,7 @@ describe("RunStore routines", () => {
           lastFiredAt: null,
           lastSkipAt: null,
           lastSkipReason: null,
+          latestOutcome: null,
           name: "daily-report",
           nextFireAt: "2026-05-22T10:00:00.000Z",
           projectName: "alpha",
@@ -171,6 +172,7 @@ describe("RunStore routines", () => {
           lastFiredAt: null,
           lastSkipAt: null,
           lastSkipReason: null,
+          latestOutcome: null,
           name: "daily-report",
           nextFireAt: "2026-03-28T01:30:00.000Z",
           projectName: "alpha",
@@ -784,6 +786,15 @@ describe("RunStore routines", () => {
       store.updateRoutineFiringState("fire-1", "running");
       store.completeRoutineFiring({
         id: "fire-1",
+        outcome: {
+          action: "pr",
+          source: "gh",
+          status: "success",
+          summary: "Observed via GitHub state diff.",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/rightkey/pull/42",
+          verified: true
+        },
         state: "succeeded",
         workspacePath: "/tmp/workspace"
       });
@@ -799,6 +810,15 @@ describe("RunStore routines", () => {
           projectName: "alpha",
           provider: "codex",
           routineName: "daily-report",
+          outcome: {
+            action: "pr",
+            source: "gh",
+            status: "success",
+            summary: "Observed via GitHub state diff.",
+            title: "Extract retry policy",
+            url: "https://github.com/pmatos/rightkey/pull/42",
+            verified: true
+          },
           state: "succeeded",
           terminalReason: null,
           workspacePath: "/tmp/workspace"

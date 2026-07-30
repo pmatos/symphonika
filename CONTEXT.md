@@ -163,8 +163,19 @@ _Avoid_: workflow contract when referring to recurring or one-shot scheduled wor
 
 **Routine Firing**:
 One durable execution attempt of a Routine, with its own workspace, provider logs, prompt evidence,
-and lifecycle state.
+lifecycle state, terminal reason, and optional canonical Routine Outcome.
 _Avoid_: run when specifically referring to non-issue scheduled execution
+
+**Routine Outcome Claim**:
+The provider-reported `{status, action, url, title, summary}` object parsed from the final normalized
+event of a Routine Firing. It is evidence to reconcile, not proof that the claimed action happened.
+_Avoid_: Routine Outcome when referring to the provider's unverified input
+
+**Routine Outcome**:
+The canonical per-firing result produced by reconciling a Routine Outcome Claim with observed
+GitHub and workspace state. It adds `verified` and `source` and remains separate from Routine
+Firing lifecycle state and terminal reason.
+_Avoid_: terminal reason, provider final message
 
 **Routine Skip**:
 An operator-visible clock attempt that did not create a Routine Firing because of a catch-up window,
@@ -279,6 +290,8 @@ _Avoid_: chat session
 - A **Routine** targets one declared **Project** by name and may create zero or more **Routine Firings**
 - A **Routine** may record **Routine Skips** without creating Routine Firings
 - A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
+- A **Routine Firing** may contain one canonical **Routine Outcome** reconciled from a **Routine
+  Outcome Claim** and externally observed state
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
 - A **Watchdog** samples a **Progress Signal** for each active **Run** during daemon reconciliation and may mark no-progress work `stale`, preserving **Workspace** contents

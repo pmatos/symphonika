@@ -80,6 +80,12 @@ describe("RoutinePromptRenderer", () => {
     expect(
       routinePrompt.prompt.slice(0, routinePrompt.prompt.indexOf("Report"))
     ).toBe(issuePrompt.prompt.slice(0, issuePrompt.prompt.indexOf("Report")));
+    expect(routinePrompt.prompt).toContain(
+      "When you finish, report the Routine Outcome as exactly one JSON object"
+    );
+    expect(routinePrompt.prompt).toContain(
+      '"action":  "pr" | "issue_opened" | "issue_closed" | "commit" | "none"'
+    );
   });
 
   it("rejects issue, run, and branch variables with prompt_render_error", () => {

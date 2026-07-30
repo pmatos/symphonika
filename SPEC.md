@@ -225,10 +225,12 @@ as defined in §8.5.
 ### 4.13 Routine Firing
 
 A Routine Firing is one durable execution of a Routine. It records the Routine, its target Project,
-provider, workspace path, prompt evidence, provider logs, terminal reason, lifecycle state, and any
-pull requests discovered from a `kind: git` firing branch. A one-shot `schedule.at` Routine becomes
-`expired` after its firing is claimed and must not fire again on daemon restart. A recurring Routine
-remains active and advances to its next clock event after every firing.
+provider, workspace path, prompt evidence, provider logs, terminal reason, lifecycle state, its
+canonical Routine Outcome, and any pull requests discovered from a `kind: git` firing branch. The
+Routine Outcome records `status`, `action`, `url`, `title`, `summary`, `verified`, and `source`
+without replacing lifecycle state or terminal reason; see ADR 0068. A one-shot `schedule.at`
+Routine becomes `expired` after its firing is claimed and must not fire again on daemon restart. A
+recurring Routine remains active and advances to its next clock event after every firing.
 
 A clock event skipped for catch-up policy, overlap, or a concurrency cap is not a Routine Firing:
 no `routine_firings` row is created. The Routine instead records `last_attempted_at`,
@@ -445,6 +447,12 @@ preamble. For every Routine kind, available top-level objects are:
 `kind: report`; `issue` and `run` are unavailable to every Routine kind. Referencing an unavailable
 object fails rendering with terminal reason `prompt_render_error`.
 
+Every rendered Routine prompt also requires a final JSON Routine Outcome Claim with
+`status`, `action`, `url`, `title`, and `summary`. This prompt-level contract applies to every
+provider. Claude additionally receives the same JSON Schema through `--json-schema`, but the
+provider-specific flag is reinforcement rather than the parsing mechanism. A missing, non-JSON, or
+schema-invalid final claim does not fail the firing.
+
 The preamble tells the agent:
 
 - it is running as an autonomous full-permission worker
@@ -539,6 +547,7 @@ SQLite stores durable orchestration state:
 - raw log file paths
 - routines
 - routine firings
+- canonical Routine Outcomes for terminal firings
 - exact-timestamp Routine skip counters used to compute rolling 24-hour per-reason totals
 
 The run store is not a replacement for GitHub as the canonical tracker. It is durable runtime
@@ -704,6 +713,28 @@ code 0 applies the same commits-ahead-of-base inspection as §12.1: zero commits
 more commits succeeds. On the succeeded transition, Symphonika lists every open pull request whose
 head is the firing branch and records its PR number and head SHA. Routine PR discovery is
 informational only: it never enters PR Follow-up, review re-dispatch, or auto-merge.
+
+The dispatcher asks every provider for the same Routine Outcome Claim
+`{status, action, url, title, summary}` and parses it only from the final normalized
+`turn_completed` event. When tracker configuration and GitHub reads are available, it snapshots
+repository issues before and after provider execution; `kind: git` firings also snapshot open pull
+requests on the firing branch. It observes newly opened pull requests, newly opened issues, and
+issues that change to closed. Issue and pull-request entries are distinguished before diffing.
+A tracker-less Project skips GitHub observation with an informational log line; unavailable or
+failed optional observation is also non-fatal.
+
+One pure reconciliation step persists a canonical result with `verified` and `source`. An observed
+GitHub action wins over an absent, error, no-action, or commit claim and is sourced to `gh`. A
+claimed PR or issue action is verified only when the same action kind was observed; an unobserved
+claim is retained but marked unverified. A successful `kind: git` firing with commits ahead of base
+can verify or derive a `commit` outcome. A successful firing with neither claim nor observation
+records `no_action`; omission alone is not a failure. Failed and cancelled firings retain their
+terminal reason independently of the reconciled outcome.
+
+Under ADR 0025 a verified commit-only outcome remains successful because its workspace is
+preserved. Such an outcome is a retention signal: future workspace garbage collection must retain
+the workspace, first establish that the commit was published to durable remote state, or require an
+explicit destructive operator override. It must not silently delete the only copy.
 
 On daemon startup, a recurring Routine with `catch_up: fire_once_if_missed` preserves a due
 `next_fire_at` and fires at most once even when the outage spans several clock events. The claim
@@ -926,6 +957,9 @@ Required normalized events:
 - `malformed_event`
 
 Provider adapters must persist raw stream entries and derive normalized events.
+The final `turn_completed` event may include provider-neutral final-result text and structured
+output used to parse a Routine Outcome Claim. Provider-specific event shapes do not escape the
+adapter.
 
 ### 11.3 Full-Permission Execution
 
@@ -1333,8 +1367,9 @@ whose latest sample has `idle_since` set.
 
 `routines` lists Routine status per Project with `state`, `next_fire_at`, `last_fired_at`,
 `last_attempted_at`, `last_skip_reason`, `last_skip_at`, rolling 24-hour skip counts per reason, and
-PR numbers discovered for the latest firing. Inactive Routines are hidden by default;
-`--include-inactive` includes them.
+the latest canonical Routine Outcome plus PR numbers discovered for the latest firing. Outcome
+rendering includes action, title, URL, and an `(unverified)` marker when applicable. Inactive
+Routines are hidden by default; `--include-inactive` includes them.
 
 `clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
 
@@ -1361,8 +1396,8 @@ The UI is primarily read-only. It shows:
 - raw log links or content
 - rendered prompt links
 - retry and continuation state
-- routines with firing/attempt timestamps, latest skip evidence, rolling 24-hour skip counts, and
-  discovered PR numbers
+- routines with firing/attempt timestamps, latest Routine Outcome, latest skip evidence, rolling
+  24-hour skip counts, and discovered PR numbers
 - a per-run interactive workflow graph
 
 Operator pages stay server-rendered and primarily read-only, but a page may embed a
@@ -1380,12 +1415,12 @@ The v1 mutating web actions are explicit active-run cancellation and a manual po
 uses the normal daemon scheduler path.
 
 The HTTP API exposes `GET /api/routines` with the same Routine status shape as the CLI and
-dashboard, including latest-attempt/skip fields and per-reason `skipCounts24h`. Inactive Routines
-are hidden by default; `?include_inactive=true` includes them, and the
+dashboard, including `latestOutcome`, latest-attempt/skip fields, and per-reason `skipCounts24h`.
+Inactive Routines are hidden by default; `?include_inactive=true` includes them, and the
 server-rendered dashboard accepts the same query parameter. `GET /api/routines/:id/firings` returns
-firing history and linked PRs for the named Routine; callers use `?project=<name>` to disambiguate
-the same Routine name across Projects and `?include_inactive=true` to resolve an inactive Routine and
-reach its durable firing history.
+firing history with each canonical `outcome` and linked PRs for the named Routine; callers use
+`?project=<name>` to disambiguate the same Routine name across Projects and
+`?include_inactive=true` to resolve an inactive Routine and reach its durable firing history.
 
 `GET /api/runs/:id` exposes the latest sample as a camel-cased top-level `watchdog` object, including
 the effective `graceMs` and server-computed `graceRemainingMs`. `GET /api/status` adds a `watchdog`

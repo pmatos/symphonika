@@ -253,6 +253,7 @@ describe("Codex JSON-RPC provider", () => {
         type: "rate_limit_updated"
       },
       {
+        result: "done",
         status: "completed",
         threadId: "thread-9",
         turnId: "turn-9",

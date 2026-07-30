@@ -7,6 +7,12 @@ import type { Database as SqliteDatabase } from "better-sqlite3";
 import type { IssueSnapshot } from "./issue-polling.js";
 import { isPathInside } from "./path-safety.js";
 import type { AgentProviderName, NormalizedProviderEvent } from "./provider.js";
+import type {
+  RoutineOutcome,
+  RoutineOutcomeAction,
+  RoutineOutcomeSource,
+  RoutineOutcomeStatus
+} from "./routines/outcome.js";
 import { nextRecurringFireAt } from "./routines/schedule.js";
 import type {
   RoutineCatchUpPolicy,
@@ -142,6 +148,7 @@ export type RoutineFiringStatus = {
   cancelRequested: boolean;
   createdAt: string;
   id: string;
+  outcome: RoutineOutcome | null;
   projectName: string;
   provider: AgentProviderName;
   providerCommand: string;
@@ -484,6 +491,13 @@ type RoutineFiringRow = {
   cancel_requested: number;
   created_at: string;
   id: string;
+  outcome_action: RoutineOutcomeAction | null;
+  outcome_source: RoutineOutcomeSource | null;
+  outcome_status: RoutineOutcomeStatus | null;
+  outcome_summary: string | null;
+  outcome_title: string | null;
+  outcome_url: string | null;
+  outcome_verified: number | null;
   project_name: string;
   provider_command: string;
   provider_name: AgentProviderName;
@@ -1615,6 +1629,7 @@ export class RunStore {
     const countsNow = filter.now ?? new Date();
     return rows.map((row) => ({
       ...mapRoutineRow(row),
+      latestOutcome: this.latestRoutineOutcome(row.project_name, row.name),
       pullRequestNumbers: this.latestRoutinePullRequestNumbers(
         row.project_name,
         row.name
@@ -1674,6 +1689,7 @@ export class RunStore {
     }
     return {
       ...mapRoutineRow(row),
+      latestOutcome: this.latestRoutineOutcome(row.project_name, row.name),
       pullRequestNumbers: this.latestRoutinePullRequestNumbers(
         row.project_name,
         row.name
@@ -1702,6 +1718,18 @@ export class RunStore {
       )
       .get(input.projectName, input.name);
     return row !== undefined;
+  }
+
+  private latestRoutineOutcome(
+    projectName: string,
+    routineName: string
+  ): RoutineOutcome | null {
+    return (
+      this.listRoutineFirings({
+        project: projectName,
+        routineName
+      })[0]?.outcome ?? null
+    );
   }
 
   skipRoutineFiring(input: {
@@ -1873,6 +1901,7 @@ export class RunStore {
   completeRoutineFiring(input: {
     cancelReason?: CancelReason;
     id: string;
+    outcome?: RoutineOutcome;
     state: Extract<RoutineFiringState, "succeeded" | "failed" | "cancelled">;
     terminalReason?: string | null;
     workspacePath?: string;
@@ -1884,6 +1913,13 @@ export class RunStore {
           "update routine_firings set",
           "state = @state,",
           "terminal_reason = @terminal_reason,",
+          "outcome_status = @outcome_status,",
+          "outcome_action = @outcome_action,",
+          "outcome_url = @outcome_url,",
+          "outcome_title = @outcome_title,",
+          "outcome_summary = @outcome_summary,",
+          "outcome_verified = @outcome_verified,",
+          "outcome_source = @outcome_source,",
           "cancel_reason = case when cancel_reason = @shutdown_preemptive then cancel_reason else coalesce(@cancel_reason, cancel_reason) end,",
           "workspace_path = coalesce(@workspace_path, workspace_path),",
           "updated_at = @updated_at",
@@ -1894,6 +1930,14 @@ export class RunStore {
         cancel_reason: input.cancelReason ?? null,
         shutdown_preemptive: SHUTDOWN_PREEMPTIVE_REASON,
         id: input.id,
+        outcome_action: input.outcome?.action ?? null,
+        outcome_source: input.outcome?.source ?? null,
+        outcome_status: input.outcome?.status ?? null,
+        outcome_summary: input.outcome?.summary ?? null,
+        outcome_title: input.outcome?.title ?? null,
+        outcome_url: input.outcome?.url ?? null,
+        outcome_verified:
+          input.outcome === undefined ? null : Number(input.outcome.verified),
         state: input.state,
         terminal_reason: input.terminalReason ?? null,
         updated_at: now,
@@ -1906,7 +1950,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings where id = ?"
         ].join(" ")
       )
@@ -1978,7 +2022,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           where,
           "order by created_at desc, id desc"
@@ -3158,6 +3202,13 @@ export class RunStore {
         raw_log_path text,
         normalized_log_path text,
         terminal_reason text,
+        outcome_status text,
+        outcome_action text,
+        outcome_url text,
+        outcome_title text,
+        outcome_summary text,
+        outcome_verified integer,
+        outcome_source text,
         cancel_requested integer not null default 0,
         cancel_reason text,
         created_at text not null,
@@ -3224,6 +3275,13 @@ export class RunStore {
       ["routine_firings", "prompt_path", "text"],
       ["routine_firings", "raw_log_path", "text"],
       ["routine_firings", "normalized_log_path", "text"],
+      ["routine_firings", "outcome_status", "text"],
+      ["routine_firings", "outcome_action", "text"],
+      ["routine_firings", "outcome_url", "text"],
+      ["routine_firings", "outcome_title", "text"],
+      ["routine_firings", "outcome_summary", "text"],
+      ["routine_firings", "outcome_verified", "integer"],
+      ["routine_firings", "outcome_source", "text"],
       ["routine_firings", "cancel_requested", "integer not null default 0"],
       ["routine_firings", "cancel_reason", "text"]
     ];
@@ -3669,6 +3727,7 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
     catchUp: row.catch_up,
     disabledReason: row.disabled_reason ?? null,
     kind: row.kind,
+    latestOutcome: null,
     lastAttemptedAt: row.last_attempted_at ?? null,
     lastFiredAt: row.last_fired_at ?? null,
     lastSkipAt: row.last_skip_at ?? null,
@@ -3697,6 +3756,23 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
     cancelRequested: row.cancel_requested === 1,
     createdAt: row.created_at,
     id: row.id,
+    outcome:
+      row.outcome_status === null ||
+      row.outcome_action === null ||
+      row.outcome_title === null ||
+      row.outcome_summary === null ||
+      row.outcome_verified === null ||
+      row.outcome_source === null
+        ? null
+        : {
+            action: row.outcome_action,
+            source: row.outcome_source,
+            status: row.outcome_status,
+            summary: row.outcome_summary,
+            title: row.outcome_title,
+            url: row.outcome_url,
+            verified: row.outcome_verified === 1
+          },
     projectName: row.project_name,
     provider: row.provider_name,
     providerCommand: row.provider_command,

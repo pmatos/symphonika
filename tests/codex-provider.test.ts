@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -526,11 +527,16 @@ describe("Codex JSON-RPC provider", () => {
       await nextProviderEvent(iterator);
       await nextProviderEvent(iterator);
       const pid = Number(await waitForFileContent(pidPath));
+      const processGroupId = Number(
+        execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], {
+          encoding: "utf8"
+        }).trim()
+      );
       const realKill = process.kill.bind(process);
       const signalSpy = vi
         .spyOn(process, "kill")
         .mockImplementation((targetPid, signal) => {
-          if (targetPid === -pid) {
+          if (targetPid === -processGroupId) {
             throw Object.assign(new Error("no such process group"), {
               code: "ESRCH"
             });
@@ -548,12 +554,85 @@ describe("Codex JSON-RPC provider", () => {
 
         expect(
           signalSpy.mock.calls
-            .filter(([targetPid]) => targetPid === -pid)
+            .filter(([targetPid]) => targetPid === -processGroupId)
             .map(([, signal]) => signal)
         ).toEqual(["SIGTERM"]);
       } finally {
         signalSpy.mockRestore();
       }
+    }
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "keeps the original process group reserved until SIGKILL escalation",
+    async () => {
+      const root = await makeTempRoot();
+      const workspacePath = path.join(root, "workspace");
+      await mkdir(workspacePath, { recursive: true });
+      const transcriptPath = path.join(root, "requests.jsonl");
+      const pidPath = path.join(root, "app-server.pid");
+      const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+      await writeFakeCodexAppServer(fakeServerPath, transcriptPath, pidPath);
+      const provider = createCodexProvider({
+        processScope: noopProcessScope()
+      });
+      const iterator = provider
+        .runAttempt({
+          ...providerInputFixture(),
+          provider: {
+            command: `${process.execPath} ${fakeServerPath} --scenario=term-exit app-server`,
+            name: "codex"
+          },
+          workspacePath
+        })
+        [Symbol.asyncIterator]();
+      await nextProviderEvent(iterator);
+      await nextProviderEvent(iterator);
+      await nextProviderEvent(iterator);
+      const pid = Number(await waitForFileContent(pidPath));
+      const processGroupId = Number(
+        execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], {
+          encoding: "utf8"
+        }).trim()
+      );
+      const realKill = process.kill.bind(process);
+      const signalSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation((targetPid, signal) => {
+          if (targetPid === -processGroupId && signal === "SIGKILL") {
+            return true;
+          }
+          return realKill(targetPid, signal);
+        });
+      let groupRemainedReserved = false;
+      let groupSignals: Array<string | number | undefined>;
+
+      try {
+        await provider.cancel("run-issue-9");
+        await collectIteratorEvents(iterator);
+        try {
+          realKill(-processGroupId, 0);
+          groupRemainedReserved = true;
+        } catch {
+          groupRemainedReserved = false;
+        }
+      } finally {
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+        groupSignals = signalSpy.mock.calls
+          .filter(([targetPid]) => targetPid === -processGroupId)
+          .map(([, signal]) => signal);
+        signalSpy.mockRestore();
+        if (groupRemainedReserved) {
+          try {
+            realKill(-processGroupId, "SIGKILL");
+          } catch {
+            // The provider group already exited.
+          }
+        }
+      }
+
+      expect(groupRemainedReserved).toBe(true);
+      expect(groupSignals).toEqual(["SIGTERM", "SIGKILL"]);
     }
   );
 
@@ -1014,7 +1093,7 @@ async function writeFakeCodexAppServer(
       "      send({ method: 'error', params: { threadId: 'thread-9', turnId: 'turn-9', error: { message: 'model exploded politely', codexErrorInfo: null, additionalDetails: null }, willRetry: false } });",
       "      continue;",
       "    }",
-      "    if (scenario === 'wait') {",
+      "    if (scenario === 'wait' || scenario === 'term-exit') {",
       "      continue;",
       "    }",
       "    send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-9', turnId: 'turn-9', itemId: 'item-1', delta: 'done' } });",
@@ -1025,9 +1104,10 @@ async function writeFakeCodexAppServer(
       "  }",
       "  if (message.method === 'turn/interrupt') {",
       "    send({ id: message.id, result: {} });",
-      "    process.exit(0);",
+      "    if (scenario !== 'term-exit') { process.exit(0); }",
       "  }",
       "}",
+      "if (scenario === 'term-exit') { setInterval(() => {}, 1_000); }",
       ""
     ].join("\n"),
     "utf8"

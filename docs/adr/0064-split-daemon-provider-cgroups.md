@@ -53,14 +53,17 @@ necessary, not incidental: `systemd-run --user --scope` does not reap detached g
 the wrapped process exits (verified empirically — a backgrounded `cargo build &` left the scope
 `active running` after the wrapped process returned).
 
-The cgroup is complemented by a process-group lifetime boundary. Node spawns every real Run command
-with `detached: true`, making the direct child (the provider command on fallback hosts or the
-`systemd-run` wrapper when available) a process-group leader. Provider shutdown closes stdin first,
-then signals the whole group with `SIGTERM` after 250 milliseconds and unconditionally escalates the
-group to `SIGKILL` after a further one-second grace period. Escalation remains keyed on the group
-even when the direct child has exited, because a descendant can ignore `SIGTERM` and retain the
-Workspace. An already-dead group (`ESRCH`) is successful cleanup. Non-POSIX hosts retain bounded
-direct-child signaling, but only POSIX process groups provide the descendant guarantee.
+The cgroup is complemented by a process-group lifetime boundary. On POSIX, Node spawns a lightweight
+detached supervisor as the process-group and session leader; the configured provider command (or
+the `systemd-run` wrapper when available) and a stream-free guardian run inside that group. Provider
+shutdown closes stdin first, then signals the whole group with `SIGTERM` after 250 milliseconds and
+unconditionally escalates the group to `SIGKILL` after a further one-second grace period. The
+guardian ignores `SIGTERM` only during this interval, preserving the original process-group
+identity so the delayed negative-PID signal cannot follow a reused PID. Ordinary completion removes
+the guardian immediately. Escalation remains keyed on the group even when the provider has exited,
+because a descendant can ignore `SIGTERM` and retain the Workspace. An already-dead group (`ESRCH`)
+at the first signal is successful cleanup and does not arm escalation. Non-POSIX hosts retain
+bounded direct-child signaling, but only POSIX process groups provide the descendant guarantee.
 
 `symphonika daemon` remains a standalone CLI command independent of `service install`
 (`src/cli.ts`), and must keep working on hosts with no systemd `--user` session (non-systemd hosts,

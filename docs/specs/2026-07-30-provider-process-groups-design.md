@@ -24,10 +24,19 @@ Agent Providers.
 ## Decision
 
 Introduce a shared provider-process lifecycle helper under `src/providers/`.
-Real provider Runs use it to spawn their configured command with
-`detached: true`, making the direct child the leader of a new process group.
-Short-lived provider validation probes remain ordinary child processes because
-they do not execute agent work or spawn Run-owned tools.
+On POSIX, real provider Runs use it to spawn a lightweight supervisor with
+`detached: true`, making the supervisor the leader of a new process group and
+session. The supervisor starts the configured provider with inherited standard
+streams and a stream-free guardian in that same group. Short-lived provider
+validation probes remain ordinary child processes because they do not execute
+agent work or spawn Run-owned tools.
+
+The guardian ignores `SIGTERM`. On ordinary provider completion the supervisor
+removes the guardian before mirroring the provider's exit, so the group ends
+immediately. Once group shutdown begins, the guardian instead keeps the
+original process-group identity reserved through the escalation window. This
+prevents a delayed negative-PID `SIGKILL` from targeting an unrelated group
+after numeric PID reuse.
 
 The shared shutdown operation is idempotent and performs this sequence:
 
@@ -35,10 +44,12 @@ The shared shutdown operation is idempotent and performs this sequence:
    existing graceful EOF path.
 2. After 250 milliseconds, signal the process group with
    `process.kill(-child.pid, "SIGTERM")`.
-3. When that group still exists, after a short bounded grace period signal it
-   with `SIGKILL` unconditionally, even when the direct child has already
-   exited. An `ESRCH` response to the `SIGTERM` attempt means the group is
-   already gone and no escalation timer is armed.
+3. When that group still exists, its guardian preserves the group identity
+   while the provider and its descendants handle `SIGTERM`.
+4. After a short bounded grace period, signal the preserved group with
+   `SIGKILL` unconditionally, even when the provider has already exited. An
+   `ESRCH` response to the `SIGTERM` attempt means graceful EOF already removed
+   the whole group, so no escalation timer is armed.
 
 The escalation is keyed on the process group rather than the direct child's
 exit state because a cooperative parent can exit on `SIGTERM` while an
@@ -103,7 +114,9 @@ Implementation proceeds in vertical red-green slices:
 4. Add focused escalation cases proving `SIGKILL` is attempted after the
    direct child exits while its group remains, and that an already-dead group
    (`ESRCH`) stops escalation harmlessly.
-5. Re-run existing daemon-shutdown and Watchdog cancellation tests to confirm
+5. Add a public provider regression proving the original process-group
+   identity remains reserved between successful `SIGTERM` and `SIGKILL`.
+6. Re-run existing daemon-shutdown and Watchdog cancellation tests to confirm
    those callers still converge on `provider.cancel`.
 
 The subprocess regressions are POSIX-only because negative-PID process groups
@@ -137,10 +150,12 @@ model, or CONTEXT vocabulary changes are required.
 
 The change is complete when:
 
-- Claude, Codex, and OMP real Run commands spawn as detached process-group
-  leaders.
+- Claude, Codex, and OMP real Run commands execute inside a detached
+  process-group boundary led by the shared POSIX supervisor.
 - Cancellation closes stdin first, signals the whole group with `SIGTERM`,
   and, when that group exists, unconditionally escalates it to `SIGKILL`.
+- The guardian preserves the original group identity throughout that
+  escalation window, preventing delayed signals from following a reused PID.
 - An already-dead group is harmless and repeated cancellation does not arm
   duplicate escalation sequences.
 - Provider-level regressions prove a forked grandchild exits after

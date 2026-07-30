@@ -286,15 +286,48 @@ const runtimeRoutineHostDetailSchema = z
   })
   .passthrough();
 
-// A service-level routine entry: targets one declared Project by name and
-// points at a routine declaration file. Single target only; fan-out is #295.
-// See ADR 0063.
+// A service-level routine entry fans one declaration file out to an explicit,
+// non-empty list of declared Projects. The transitional ADR 0063 `project:`
+// spelling is rejected below with a migration error. See ADR 0069.
 const serviceRoutineSchema = z
   .object({
-    project: z.string().trim().min(1),
+    projects: z.array(z.string().trim().min(1)).min(1).optional(),
     path: pathStringSchema
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((entry, ctx) => {
+    if ("project" in entry) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "service-level `project:` was replaced by the explicit `projects: [<name>, ...]` target list (see ADR 0069)",
+        path: ["project"]
+      });
+    }
+    if (entry.projects === undefined) {
+      if (!("project" in entry)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "an explicit non-empty `projects: [<name>, ...]` target list is required",
+          path: ["projects"]
+        });
+      }
+      return;
+    }
+    const seen = new Set<string>();
+    for (const [index, projectName] of entry.projects.entries()) {
+      if (seen.has(projectName)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `duplicate target project "${projectName}"`,
+          path: ["projects", index]
+        });
+      }
+      seen.add(projectName);
+    }
+  })
+  .transform((entry) => ({ ...entry, projects: entry.projects! }));
 
 const serviceConfigSchema = z
   .object({
@@ -327,7 +360,7 @@ const serviceConfigSchema = z
       .passthrough(),
     routine_defaults: routineExecutionDefaultsSchema.optional(),
     // Service-level routine declarations targeting declared Projects. See
-    // ADR 0063. Optional; omitted means no routines.
+    // ADR 0069. Optional; omitted means no routines.
     routines: z.array(serviceRoutineSchema).optional(),
     projects: z.array(z.unknown()).min(1)
   })
@@ -523,7 +556,7 @@ async function loadRuntimeConfigSnapshot(input: {
       [];
     const routineResult = await readRoutineDeclarations(
       serviceRoutines.map((entry) => ({
-        projectName: entry.project,
+        projectNames: entry.projects,
         sourcePath: path.resolve(input.configDir, entry.path)
       })),
       previousRoutines,
@@ -764,7 +797,7 @@ function optionalWatchdogOf(rawProject: unknown): unknown {
 // schemas use `.passthrough()`, so without this a legacy `routines:` list
 // would validate silently and then be ignored — its routines would stop
 // firing with no error. Force a migration error pointing at the top-level
-// block. See ADR 0063.
+// block. See ADR 0069.
 function rejectPerProjectRoutines(
   rawProject: unknown,
   ctx: z.RefinementCtx
@@ -777,7 +810,7 @@ function rejectPerProjectRoutines(
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message:
-        "per-project `routines:` was removed; move routine entries to the top-level `routines:` block with a `project:` target (see ADR 0063)",
+        "per-project `routines:` was removed; move routine entries to the top-level `routines:` block with a `projects: [<name>, ...]` target list (see ADR 0069)",
       path: ["routines"]
     });
   }
@@ -1088,7 +1121,7 @@ async function readWorkflowSnapshot(
 }
 
 async function readRoutineDeclarations(
-  entries: Array<{ projectName: string; sourcePath: string }>,
+  entries: Array<{ projectNames: string[]; sourcePath: string }>,
   previousRoutines: TargetedRoutineDeclaration[],
   errors: string[]
 ): Promise<{
@@ -1128,14 +1161,19 @@ async function readRoutineDeclarations(
           );
         } else {
           seenNames.set(previous.name, previous.sourcePath);
-          routines.push({ ...previous, projectName: entry.projectName });
+          routines.push(
+            ...entry.projectNames.map((projectName) => ({
+              ...previous,
+              projectName
+            }))
+          );
         }
       } else {
         // Reserve a brand-new invalid declaration's recovered name too —
         // otherwise a later declaration in this same pass (especially one
         // targeting another Project) can legitimately claim the same name
         // while this file remains broken, violating the service-level
-        // global-name uniqueness requirement (ADR 0063).
+        // global-name uniqueness requirement (ADR 0069).
         if (result.partialName !== undefined) {
           const existingForPartialName = seenNames.get(result.partialName);
           if (existingForPartialName !== undefined) {
@@ -1146,25 +1184,33 @@ async function readRoutineDeclarations(
             seenNames.set(result.partialName, entry.sourcePath);
           }
         }
-        invalidNew.push({
-          ...(result.partialName === undefined
-            ? {}
-            : { name: result.partialName }),
-          path: entry.sourcePath,
-          projectName: entry.projectName
-        });
+        invalidNew.push(
+          ...entry.projectNames.map((projectName) => ({
+            ...(result.partialName === undefined
+              ? {}
+              : { name: result.partialName }),
+            path: entry.sourcePath,
+            projectName
+          }))
+        );
       }
       continue;
     }
-    const existing = seenNames.get(result.routine.name);
+    const routine = result.routine;
+    const existing = seenNames.get(routine.name);
     if (existing !== undefined) {
       errors.push(
-        `duplicate routine name "${result.routine.name}" declared by ${existing} and ${result.routine.sourcePath}`
+        `duplicate routine name "${routine.name}" declared by ${existing} and ${routine.sourcePath}`
       );
       continue;
     }
-    seenNames.set(result.routine.name, result.routine.sourcePath);
-    routines.push({ ...result.routine, projectName: entry.projectName });
+    seenNames.set(routine.name, routine.sourcePath);
+    routines.push(
+      ...entry.projectNames.map((projectName) => ({
+        ...routine,
+        projectName
+      }))
+    );
   }
   return { invalidNew, routines };
 }

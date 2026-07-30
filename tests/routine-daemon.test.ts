@@ -1145,7 +1145,7 @@ function routineLines(projectName: string, routines: string[]): string[] {
   return [
     "routines:",
     ...routines.map(
-      (routine) => `  - project: ${projectName}\n    path: ${routine}`
+      (routine) => `  - projects: [${projectName}]\n    path: ${routine}`
     )
   ];
 }

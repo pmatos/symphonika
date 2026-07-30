@@ -142,6 +142,7 @@ export type RoutineFiringStatus = {
   cancelReason: CancelReason | null;
   cancelRequested: boolean;
   createdAt: string;
+  fanoutId: string | null;
   id: string;
   projectName: string;
   provider: AgentProviderName;
@@ -160,6 +161,30 @@ export type RoutineFiringStateTransition = {
   createdAt: string;
   sequence: number;
   state: RoutineFiringState;
+};
+
+export type RoutineFanoutTargetStatus = {
+  disposition: "pending" | "firing" | "skipped";
+  firing: RoutineFiringStatus | null;
+  firingId: string | null;
+  projectName: string;
+  skipReason: RoutineSkipReason | "target_unavailable" | null;
+};
+
+export type RoutineFanoutStatus = {
+  createdAt: string;
+  failureCount: number;
+  id: string;
+  issueCount: number;
+  notificationError: string | null;
+  notificationState: "pending" | "sending" | "sent";
+  notifiedAt: string | null;
+  pullRequestCount: number;
+  routineName: string;
+  scheduledAt: string;
+  subject: string;
+  targets: RoutineFanoutTargetStatus[];
+  updatedAt: string;
 };
 
 export type SyncProjectStateInput = {
@@ -490,6 +515,7 @@ type RoutineFiringRow = {
   cancel_reason: CancelReason | null;
   cancel_requested: number;
   created_at: string;
+  fanout_id: string | null;
   id: string;
   project_name: string;
   provider_command: string;
@@ -509,6 +535,25 @@ type RoutinePullRequestRow = {
   pr_number: number;
   project_name: string;
   routine_name: string;
+};
+
+type RoutineFanoutRow = {
+  created_at: string;
+  id: string;
+  notification_error: string | null;
+  notification_state: RoutineFanoutStatus["notificationState"];
+  notified_at: string | null;
+  routine_name: string;
+  scheduled_at: string;
+  updated_at: string;
+};
+
+type RoutineFanoutTargetRow = {
+  disposition: RoutineFanoutTargetStatus["disposition"];
+  fanout_id: string;
+  firing_id: string | null;
+  project_name: string;
+  skip_reason: RoutineSkipReason | null;
 };
 
 const PULL_REQUEST_DISCOVERY_LIMIT = 25;
@@ -1214,7 +1259,7 @@ export class RunStore {
   }
 
   // Synchronizes service-level routine declarations into the routines table.
-  // Each routine carries its own target `projectName` (ADR 0063); removal-
+  // Each routine carries its own target `projectName` (ADR 0069); removal-
   // detection runs per project so a routine removed from one project's target
   // set is soft-disabled without touching another project's rows.
   // `protectedNamesByProject` holds invalid-routine names per project so their
@@ -1232,7 +1277,7 @@ export class RunStore {
       // All projects that should run removal-detection this sync, including
       // projects whose last routine was just removed (zero routines). Without
       // this, `syncRoutines([])` would never enter the loop and a removed
-      // routine's row would stay active. See ADR 0063.
+      // routine's row would stay active. See ADR 0069.
       projects?: string[];
       protectedNamesByProject?: Record<string, string[]>;
       recomputeRecurring?: boolean;
@@ -1307,7 +1352,7 @@ export class RunStore {
     // Seed the per-project iteration set from BOTH the declared routines AND
     // `options.projects` — a project whose last routine was just removed has
     // zero routines but must still run removal-detection (its persisted rows
-    // must be soft-disabled). See ADR 0063.
+    // must be soft-disabled). See ADR 0069.
     const byProject = new Map<string, TargetedRoutineDeclaration[]>();
     for (const projectName of options.projects ?? []) {
       byProject.set(projectName, []);
@@ -1482,6 +1527,252 @@ export class RunStore {
       }
     });
     apply();
+  }
+
+  ensureRoutineFanout(input: {
+    id: string;
+    projectNames: string[];
+    routineName: string;
+    scheduledAt: string;
+  }): { created: boolean; id: string } {
+    const now = timestamp();
+    const ensure = this.database.transaction(() => {
+      const inserted = this.database
+        .prepare(
+          [
+            "insert into routine_fanouts (",
+            "id, routine_name, scheduled_at, notification_state, created_at, updated_at",
+            ") values (?, ?, ?, 'pending', ?, ?)",
+            "on conflict(routine_name, scheduled_at) do nothing"
+          ].join(" ")
+        )
+        .run(input.id, input.routineName, input.scheduledAt, now, now);
+      const row = this.database
+        .prepare(
+          [
+            "select id from routine_fanouts",
+            "where routine_name = ? and scheduled_at = ?"
+          ].join(" ")
+        )
+        .get(input.routineName, input.scheduledAt) as
+        { id: string } | undefined;
+      if (row === undefined) {
+        throw new Error("routine fan-out identity could not be persisted");
+      }
+      const insertTarget = this.database.prepare(
+        [
+          "insert into routine_fanout_targets (",
+          "fanout_id, project_name, disposition, created_at, updated_at",
+          ") values (?, ?, 'pending', ?, ?)",
+          "on conflict(fanout_id, project_name) do nothing"
+        ].join(" ")
+      );
+      // Expected membership belongs to the clock event snapshot that creates
+      // the fan-out. A later reload may introduce another due one-shot target
+      // with the same scheduled_at, but extending this existing row would
+      // mutate the group after work began and could require a second summary.
+      if (inserted.changes > 0) {
+        for (const projectName of input.projectNames) {
+          insertTarget.run(row.id, projectName, now, now);
+        }
+      }
+      return { created: inserted.changes > 0, id: row.id };
+    });
+    return ensure();
+  }
+
+  hasRoutineFanoutTarget(input: { id: string; projectName: string }): boolean {
+    return (
+      this.database
+        .prepare(
+          "select 1 from routine_fanout_targets where fanout_id = ? and project_name = ?"
+        )
+        .get(input.id, input.projectName) !== undefined
+    );
+  }
+
+  getRoutineFanout(id: string): RoutineFanoutStatus | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select id, routine_name, scheduled_at, notification_state,",
+          "notification_error, notified_at, created_at, updated_at",
+          "from routine_fanouts where id = ?"
+        ].join(" ")
+      )
+      .get(id) as RoutineFanoutRow | undefined;
+    if (row === undefined) {
+      return undefined;
+    }
+    const targets = this.database
+      .prepare(
+        [
+          "select fanout_id, project_name, disposition, firing_id, skip_reason",
+          "from routine_fanout_targets where fanout_id = ?",
+          "order by project_name asc"
+        ].join(" ")
+      )
+      .all(id) as RoutineFanoutTargetRow[];
+    const mappedTargets = targets.map((target) => ({
+      disposition: target.disposition,
+      firing:
+        target.firing_id === null
+          ? null
+          : (this.getRoutineFiring(target.firing_id) ?? null),
+      firingId: target.firing_id,
+      projectName: target.project_name,
+      skipReason: target.skip_reason
+    }));
+    const pullRequestCount = mappedTargets.reduce(
+      (count, target) => count + (target.firing?.pullRequests.length ?? 0),
+      0
+    );
+    const failureCount = mappedTargets.filter(
+      (target) =>
+        target.firing?.state === "failed" ||
+        target.firing?.state === "cancelled"
+    ).length;
+    const issueCount = 0;
+    return {
+      createdAt: row.created_at,
+      failureCount,
+      id: row.id,
+      issueCount,
+      notificationError: row.notification_error,
+      notificationState: row.notification_state,
+      notifiedAt: row.notified_at,
+      pullRequestCount,
+      routineName: row.routine_name,
+      scheduledAt: row.scheduled_at,
+      subject: `[ptt] ${row.routine_name} — ${pullRequestCount} PR, ${issueCount} issue, ${failureCount} failed`,
+      targets: mappedTargets,
+      updatedAt: row.updated_at
+    };
+  }
+
+  listReadyRoutineFanouts(): RoutineFanoutStatus[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select f.id",
+          "from routine_fanouts f",
+          "where f.notification_state = 'pending'",
+          "and not exists (",
+          "select 1 from routine_fanout_targets t",
+          "left join routine_firings rf on rf.id = t.firing_id",
+          "where t.fanout_id = f.id",
+          "and (t.disposition = 'pending'",
+          "or (t.disposition = 'firing' and (rf.id is null or rf.state not in ('succeeded', 'failed', 'cancelled'))))",
+          ")",
+          "order by f.created_at asc, f.id asc"
+        ].join(" ")
+      )
+      .all() as Array<{ id: string }>;
+    return rows.flatMap((row) => {
+      const fanout = this.getRoutineFanout(row.id);
+      return fanout === undefined ? [] : [fanout];
+    });
+  }
+
+  // A target can be inserted by a re-entrant reload (ADR 0052) between
+  // listReadyRoutineFanouts()'s snapshot and this claim. Rechecking
+  // readiness here, atomically with the state flip, stops the claim from
+  // starting a send for a fan-out that just gained an outstanding target.
+  private routineFanoutHasOutstandingTargets(id: string): boolean {
+    return (
+      this.database
+        .prepare(
+          [
+            "select 1 from routine_fanout_targets t",
+            "left join routine_firings rf on rf.id = t.firing_id",
+            "where t.fanout_id = ?",
+            "and (t.disposition = 'pending'",
+            "or (t.disposition = 'firing' and (rf.id is null or rf.state not in ('succeeded', 'failed', 'cancelled'))))"
+          ].join(" ")
+        )
+        .get(id) !== undefined
+    );
+  }
+
+  claimRoutineFanoutNotification(id: string): boolean {
+    const claim = this.database.transaction(() => {
+      if (this.routineFanoutHasOutstandingTargets(id)) {
+        return false;
+      }
+      const result = this.database
+        .prepare(
+          [
+            "update routine_fanouts set notification_state = 'sending',",
+            "notification_error = null, updated_at = ?",
+            "where id = ? and notification_state = 'pending'"
+          ].join(" ")
+        )
+        .run(timestamp(), id);
+      return result.changes > 0;
+    });
+    return claim();
+  }
+
+  completeRoutineFanoutNotification(input: {
+    error?: string;
+    id: string;
+  }): void {
+    const now = timestamp();
+    if (input.error === undefined) {
+      this.database
+        .prepare(
+          [
+            "update routine_fanouts set notification_state = 'sent',",
+            "notification_error = null, notified_at = ?, updated_at = ?",
+            "where id = ? and notification_state = 'sending'"
+          ].join(" ")
+        )
+        .run(now, now, input.id);
+      return;
+    }
+    this.database
+      .prepare(
+        [
+          "update routine_fanouts set notification_state = 'pending',",
+          "notification_error = ?, updated_at = ?",
+          "where id = ? and notification_state = 'sending'"
+        ].join(" ")
+      )
+      .run(input.error, now, input.id);
+  }
+
+  releaseInterruptedRoutineFanoutNotifications(): number {
+    const result = this.database
+      .prepare(
+        [
+          "update routine_fanouts set notification_state = 'pending',",
+          "notification_error = 'delivery interrupted by daemon restart',",
+          "updated_at = ? where notification_state = 'sending'"
+        ].join(" ")
+      )
+      .run(timestamp());
+    return result.changes;
+  }
+
+  settleUnavailableRoutineFanoutTargets(): number {
+    const result = this.database
+      .prepare(
+        [
+          "update routine_fanout_targets",
+          "set disposition = 'skipped', skip_reason = 'target_unavailable', updated_at = ?",
+          "where disposition = 'pending'",
+          "and not exists (",
+          "select 1 from routine_fanouts f",
+          "join routines r on r.name = f.routine_name",
+          "and r.project_name = routine_fanout_targets.project_name",
+          "where f.id = routine_fanout_targets.fanout_id",
+          "and r.state = 'active'",
+          "and r.next_fire_at = f.scheduled_at",
+          ")"
+        ].join(" ")
+      )
+      .run(timestamp());
+    return result.changes;
   }
 
   markRoutinesInactiveForProject(
@@ -1757,6 +2048,7 @@ export class RunStore {
 
   skipRoutineFiring(input: {
     attemptedAt: string;
+    fanoutId?: string;
     name: string;
     nextFireAt?: string;
     projectName: string;
@@ -1767,8 +2059,8 @@ export class RunStore {
         .prepare(
           [
             "update routines set",
-            "state = 'active',",
-            "next_fire_at = coalesce(@next_fire_at, next_fire_at),",
+            "state = case when schedule_cron is null then 'expired' else 'active' end,",
+            "next_fire_at = case when schedule_cron is null then null else coalesce(@next_fire_at, next_fire_at) end,",
             "last_attempted_at = @attempted_at,",
             "last_skip_reason = @reason,",
             "last_skip_at = @attempted_at,",
@@ -1788,6 +2080,20 @@ export class RunStore {
         });
       if (result.changes === 0) {
         return false;
+      }
+      if (input.fanoutId !== undefined) {
+        const target = this.database
+          .prepare(
+            [
+              "update routine_fanout_targets set",
+              "disposition = 'skipped', skip_reason = ?, updated_at = ?",
+              "where fanout_id = ? and project_name = ? and disposition = 'pending'"
+            ].join(" ")
+          )
+          .run(input.reason, timestamp(), input.fanoutId, input.projectName);
+        if (target.changes === 0) {
+          throw new RoutineAlreadyClaimedError();
+        }
       }
       this.database
         .prepare(
@@ -1829,6 +2135,7 @@ export class RunStore {
   }
 
   createRoutineFiring(input: {
+    fanoutId?: string;
     id: string;
     projectName: string;
     providerCommand: string;
@@ -1841,14 +2148,15 @@ export class RunStore {
       .prepare(
         [
           "insert into routine_firings (",
-          "id, project_name, routine_name, state, provider_name, provider_command, trigger_source, created_at, updated_at",
+          "id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, created_at, updated_at",
           ") values (",
-          "@id, @project_name, @routine_name, 'queued', @provider_name, @provider_command, @trigger_source, @created_at, @updated_at",
+          "@id, @fanout_id, @project_name, @routine_name, 'queued', @provider_name, @provider_command, @trigger_source, @created_at, @updated_at",
           ")"
         ].join(" ")
       )
       .run({
         created_at: now,
+        fanout_id: input.fanoutId ?? null,
         id: input.id,
         project_name: input.projectName,
         provider_command: input.providerCommand,
@@ -1861,6 +2169,7 @@ export class RunStore {
   }
 
   claimRoutineFiring(input: {
+    fanoutId?: string;
     firedAt: string;
     firingId: string;
     nextFireAt?: string;
@@ -1871,6 +2180,7 @@ export class RunStore {
   }): boolean {
     const claim = this.database.transaction(() => {
       this.createRoutineFiring({
+        ...(input.fanoutId === undefined ? {} : { fanoutId: input.fanoutId }),
         id: input.firingId,
         projectName: input.projectName,
         providerCommand: input.providerCommand,
@@ -1900,6 +2210,20 @@ export class RunStore {
         });
       if (result.changes === 0) {
         throw new RoutineAlreadyClaimedError();
+      }
+      if (input.fanoutId !== undefined) {
+        const target = this.database
+          .prepare(
+            [
+              "update routine_fanout_targets set",
+              "disposition = 'firing', firing_id = ?, skip_reason = null, updated_at = ?",
+              "where fanout_id = ? and project_name = ? and disposition = 'pending'"
+            ].join(" ")
+          )
+          .run(input.firingId, timestamp(), input.fanoutId, input.projectName);
+        if (target.changes === 0) {
+          throw new RoutineAlreadyClaimedError();
+        }
       }
     });
     try {
@@ -2005,7 +2329,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings where id = ?"
         ].join(" ")
       )
@@ -2077,7 +2401,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           where,
           "order by created_at desc, id desc"
@@ -2100,7 +2424,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           "where workspace_path is not null and workspace_path <> ''",
           "and workspace_pruned_at is null",
@@ -3336,6 +3660,31 @@ export class RunStore {
         foreign key (project_name, routine_name) references routines(project_name, name),
         foreign key (firing_id) references routine_firings(id)
       );
+
+      create table if not exists routine_fanouts (
+        id text primary key,
+        routine_name text not null,
+        scheduled_at text not null,
+        notification_state text not null default 'pending',
+        notification_error text,
+        notified_at text,
+        created_at text not null,
+        updated_at text not null,
+        unique(routine_name, scheduled_at)
+      );
+
+      create table if not exists routine_fanout_targets (
+        fanout_id text not null,
+        project_name text not null,
+        disposition text not null default 'pending',
+        firing_id text,
+        skip_reason text,
+        created_at text not null,
+        updated_at text not null,
+        primary key (fanout_id, project_name),
+        foreign key (fanout_id) references routine_fanouts(id),
+        foreign key (firing_id) references routine_firings(id)
+      );
     `);
 
     const additions: Array<[string, string, string]> = [
@@ -3384,7 +3733,8 @@ export class RunStore {
       ],
       ["routine_firings", "cancel_requested", "integer not null default 0"],
       ["routine_firings", "cancel_reason", "text"],
-      ["routine_firings", "workspace_pruned_at", "text"]
+      ["routine_firings", "workspace_pruned_at", "text"],
+      ["routine_firings", "fanout_id", "text"]
     ];
 
     const apply = this.database.transaction(() => {
@@ -3868,6 +4218,7 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
     cancelReason: row.cancel_reason ?? null,
     cancelRequested: row.cancel_requested === 1,
     createdAt: row.created_at,
+    fanoutId: row.fanout_id ?? null,
     id: row.id,
     projectName: row.project_name,
     provider: row.provider_name,

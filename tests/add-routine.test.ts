@@ -63,7 +63,7 @@ describe("add-routine", () => {
       schedule: { cron: "0 0 * * 0", tz: "Europe/Berlin" }
     });
     expect(await readFile(configPath, "utf8")).toContain(
-      "routines:\n  - path: ./routines/weekly-maintenance.md\n    project: alpha\n"
+      "routines:\n  - path: ./routines/weekly-maintenance.md\n    projects:\n      - alpha\n"
     );
   });
 
@@ -96,7 +96,7 @@ describe("add-routine", () => {
     });
     expect(await readFile(routinePath, "utf8")).not.toContain("provider:");
     expect(await readFile(configPath, "utf8")).toContain(
-      `routines:\n  - path: ${routinePath}\n    project: alpha\n`
+      `routines:\n  - path: ${routinePath}\n    projects:\n      - alpha\n`
     );
   });
 
@@ -127,7 +127,7 @@ describe("add-routine", () => {
       project: "alpha"
     });
     expect(await readFile(configPath, "utf8")).toContain(
-      "routines:\n  - path: ./routines/normalized-target.md\n    project: alpha\n"
+      "routines:\n  - path: ./routines/normalized-target.md\n    projects:\n      - alpha\n"
     );
   });
 
@@ -371,9 +371,11 @@ describe("add-routine", () => {
       [
         "routines:",
         "  - path: ./routines/missing.md",
-        "    project: alpha",
+        "    projects:",
+        "      - alpha",
         "  - path: ./routines/daily-report.md",
-        "    project: alpha",
+        "    projects:",
+        "      - alpha",
         ""
       ].join("\n")
     );
@@ -516,7 +518,7 @@ async function writeConfig(
         : [
             "routines:",
             ...routines.map(
-              (routine) => `  - path: ${routine}\n    project: alpha`
+              (routine) => `  - path: ${routine}\n    projects:\n      - alpha`
             )
           ]),
       ""

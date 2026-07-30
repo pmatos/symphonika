@@ -605,13 +605,17 @@ async function loadRuntimeConfigSnapshot(input: {
           trackerlessGitRoutines.push(routine);
           continue;
         }
-        attached.push(routine);
         // Cross-check the routine's resolved model/effort/permission_mode
         // against its resolved provider's authored command template — this is
         // the reload-time surface that satisfies "validated at declaration
         // load" (issue #291): a routine can only know its own front-matter
         // fields, and providers:/routine_defaults: are parsed in this same
         // function, so this is the earliest point both are known together.
+        // Runs BEFORE attaching, like the tracker-less check above — a
+        // template-invalid routine must not fire, so on failure it is never
+        // attached (`continue`s instead), falling through to `syncRoutines`'s
+        // existing removed_from_config demotion/restore path rather than
+        // silently keeping the misconfigured routine active.
         const routineProviderName = routine.provider ?? project.agent.provider;
         const routineProviderCommand =
           routineProviderCommandsByName[routineProviderName];
@@ -627,17 +631,22 @@ async function loadRuntimeConfigSnapshot(input: {
               routineProviderCommand,
               resolved
             );
-            for (const field of unreferencedFields) {
-              errors.push(
-                `routine "${routine.name}" at ${routine.sourcePath} declares ${field}, but providers.${routineProviderName}.command never references it`
-              );
+            if (unreferencedFields.length > 0) {
+              for (const field of unreferencedFields) {
+                errors.push(
+                  `routine "${routine.name}" at ${routine.sourcePath} declares ${field}, but providers.${routineProviderName}.command never references it`
+                );
+              }
+              continue;
             }
           } catch (error) {
             errors.push(
               `routine "${routine.name}" at ${routine.sourcePath} providers.${routineProviderName}.command is invalid: ${errorMessage(error)}`
             );
+            continue;
           }
         }
+        attached.push(routine);
       }
       project.routines = attached;
       if (trackerlessGitRoutines.length > 0) {

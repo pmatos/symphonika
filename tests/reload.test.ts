@@ -1601,6 +1601,64 @@ describe("RuntimeConfigReloader routine_defaults config", () => {
     expect(reloader.getStatus().errors.join("\n")).toContain(
       "declares model, but providers.codex.command never references it"
     );
+    const project = reloader.projectsByName().get("symphonika");
+    expect(project?.routines?.some((r) => r.name === "daily-report")).toBe(
+      false
+    );
+  });
+
+  it("drops a routine whose provider command template is malformed from the attached snapshot instead of retaining it as active", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeFile(
+      path.join(root, "daily-report.md"),
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        "  at: 2026-05-22T10:00:00.000Z",
+        "kind: report",
+        "model: gpt-5.6-sol",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original
+        .replace(
+          '    command: "codex -p symphonika"',
+          '    command: "codex -p symphonika {{modle}}"'
+        )
+        .replace(
+          "    workflow: ./WORKFLOW.md",
+          [
+            "    workflow: ./WORKFLOW.md",
+            "routines:",
+            "  - project: symphonika",
+            "    path: ./daily-report.md"
+          ].join("\n")
+        )
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    expect(reloader.getStatus().ok).toBe(false);
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      'routine "daily-report" at'
+    );
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      "providers.codex.command is invalid"
+    );
+    const project = reloader.projectsByName().get("symphonika");
+    expect(project?.routines?.some((r) => r.name === "daily-report")).toBe(
+      false
+    );
   });
 
   it("accepts a routine whose declared model is referenced by its resolved provider command template", async () => {

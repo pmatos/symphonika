@@ -727,11 +727,15 @@ row. One-shot Routines become `expired`; recurring Routines remain active and at
 clock event visible. Routine Firings use states `queued`, `preparing_workspace`, `running`,
 `succeeded`, `failed`, and `cancelled`.
 
-When `timeout_minutes` is effective, one absolute deadline covers workspace preparation, provider
-validation, provider streaming, and terminal outcome classification. Expiry invokes the provider's
-cancellation path, which stops the full process group (ADR 0064 / #341), preserves workspace and
-logs, and completes the firing as `failed` with `terminal_reason = "firing_timeout"` rather than
-classifying the cancellation-produced exit event as `process_exit_*` or `cancelled`.
+When `timeout_minutes` is effective, one absolute deadline bounds how long the dispatcher waits
+on workspace preparation, provider validation, provider streaming, and terminal outcome
+classification, and completes the firing as `failed` with `terminal_reason = "firing_timeout"`
+rather than classifying the cancellation-produced exit event as `process_exit_*` or `cancelled`.
+Once a provider process exists, expiry invokes the provider's cancellation path, which stops the
+full process group (ADR 0064 / #341) and preserves workspace and logs. Expiry during workspace
+preparation does not cancel the in-flight `git` subprocesses: the dispatcher stops waiting on
+`prepareRoutineWorkspace`, but the abandoned clone/fetch keeps running and can delay a later
+firing that shares the same per-project repository cache (tracked in #353).
 
 For `kind: report`, provider exit code 0 succeeds without requiring commits. For `kind: git`, exit
 code 0 applies the same commits-ahead-of-base inspection as §12.1: zero commits fails with

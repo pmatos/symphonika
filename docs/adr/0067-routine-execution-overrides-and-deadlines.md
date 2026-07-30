@@ -41,7 +41,10 @@ begins. It races workspace preparation, provider validation, and provider stream
 the provider adapter's existing cancellation method and persists `failed / firing_timeout`,
 regardless of the cancellation-generated process-exit event. Terminal outcome classification is
 also inside the deadline; post-terminal pull-request discovery is not. The process-group
-implementation from #341 and ADR 0064 makes that cancellation a whole-tree termination.
+implementation from #341 and ADR 0064 makes that cancellation a whole-tree termination once a
+provider process exists. Expiry during workspace preparation only stops the dispatcher from
+waiting on that stage — the underlying `git` subprocesses are not cancelled and can keep running
+in the background (tracked in #353).
 
 ## Consequences
 
@@ -52,3 +55,7 @@ implementation from #341 and ADR 0064 makes that cancellation a whole-tree termi
 - A progressing firing can still exceed its declared deadline; a non-progressing firing can still
   trip the Watchdog first. Neither policy replaces the other.
 - Restricted or interactive Routine permission modes remain unsupported by design.
+- A firing that times out during workspace preparation leaves its `git` clone/fetch running
+  unattended; because `ensureRepositoryCache` serializes callers per project repository cache, that
+  abandoned work can delay the next firing's or Run's workspace preparation for the same project
+  (#353).

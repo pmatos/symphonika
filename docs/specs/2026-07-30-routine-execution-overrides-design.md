@@ -24,7 +24,10 @@ timer rather than receiving fresh per-stage budgets. If it expires during provid
 dispatcher awaits provider cancellation and stream cleanup, then writes the deterministic
 `failed / firing_timeout` outcome. Terminal classification remains inside the deadline;
 post-terminal pull-request discovery does not. Provider cancellation uses the process-group
-boundary delivered by #341.
+boundary delivered by #341. If it expires during workspace preparation instead, no provider process
+exists yet to cancel: the dispatcher stops waiting on `prepareRoutineWorkspace`, but its in-flight
+`git` subprocesses are not killed and can keep running, serialized against later callers of the
+same project's repository cache (#353).
 
 ## Public test seams
 

@@ -505,6 +505,66 @@ describe("Routine Outcome reconciliation", () => {
     });
   });
 
+  it("overrides an unconfirmed pull-request claim with git evidence of a retained commit", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "pr",
+          status: "success",
+          summary: "Opened a pull request.",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/alpha/pull/17"
+        },
+        commitsAhead: true,
+        githubObservationAvailable: true,
+        observedAction: null,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "commit",
+      source: "git",
+      status: "success",
+      summary: "Observed commits ahead of the configured base branch.",
+      title: "Commit retained in the Routine Firing workspace",
+      url: null,
+      verified: true
+    });
+  });
+
+  it("does not override a pull-request claim git evidence when GitHub observation confirms it", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "pr",
+          status: "success",
+          summary: "Opened a pull request.",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/alpha/pull/17"
+        },
+        commitsAhead: true,
+        githubObservationAvailable: true,
+        observedAction: {
+          action: "pr",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/alpha/pull/17"
+        },
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "pr",
+      source: "codex",
+      status: "success",
+      summary: "Opened a pull request.",
+      title: "Extract retry policy",
+      url: "https://github.com/pmatos/alpha/pull/17",
+      verified: true
+    });
+  });
+
   it("verifies a commit claim from git evidence even when the claim reports an error status", () => {
     expect(
       reconcileRoutineOutcome({

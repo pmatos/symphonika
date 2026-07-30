@@ -860,8 +860,9 @@ claim is retained but marked unverified. A claimed no-action (`none`) is verifie
 before/after GitHub comparison completed and found nothing; an unavailable comparison leaves it
 unverified. A successful `kind: git` firing with commits ahead of base can verify or derive a
 `commit` outcome regardless of the claim's own reported status, and this git evidence overrides a
-`none` claim that under-reports it so a self-reported "nothing to do" or "error" never suppresses
-the retention signal below. A successful firing with neither claim nor observation records
+`none` claim or an unconfirmed pull-request/issue claim that under-reports it so a self-reported
+"nothing to do", an external action no GitHub observation corroborates, or an "error" never
+suppresses the retention signal below. A successful firing with neither claim nor observation records
 `no_action`; it is verified and sourced to `gh` only when the before/after GitHub reads completed,
 otherwise it is unverified and sourced to `symphonika`. Omission alone is not a failure. Failed and
 cancelled firings retain their terminal reason independently of the reconciled outcome.

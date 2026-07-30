@@ -60,9 +60,10 @@ One pure reconciliation function produces the persisted outcome:
    ahead of the configured base branch, regardless of the claim's own reported status.
 4. Without a claim, an observed GitHub action is sourced to `gh`; otherwise a successful
    commits-ahead firing is a verified `git` outcome. This git evidence also overrides a `none`
-   claim that under-reports a successful `kind: git` firing with commits ahead of the base branch —
-   regardless of that claim's own status — so a self-reported "nothing to do" or "error" never
-   suppresses the retention signal below.
+   claim, or a pull-request/issue claim no GitHub observation corroborates, that under-reports a
+   successful `kind: git` firing with commits ahead of the base branch — regardless of that claim's
+   own status — so a self-reported "nothing to do", an unconfirmed external-action claim, or an
+   "error" never suppresses the retention signal below.
 5. A successful firing with no claim or observed action records `no_action`. A completed GitHub
    comparison makes it verified and sourced to `gh`; an unavailable comparison leaves it
    unverified and sourced to `symphonika`. Claim omission alone never fails the firing.

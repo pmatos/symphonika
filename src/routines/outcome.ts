@@ -207,14 +207,28 @@ export function reconcileRoutineOutcome(
     };
   }
 
-  // A `none`/absent claim under-reports a real commit-only outcome; git
-  // evidence overrides it here — unqualified by the claim's own status, per
+  // A `none`/absent claim under-reports a real commit-only outcome, and so
+  // does an external-action claim (pr/issue_opened/issue_closed) that no
+  // GitHub observation corroborates — the retention query only protects rows
+  // whose canonical action is a verified `commit`, so leaving an unconfirmed
+  // external-action claim as the canonical outcome would let age-based
+  // pruning delete the only copy of real commits behind it. Git evidence
+  // overrides both cases here — unqualified by the claim's own status, per
   // ADR 0068 rule 4 — so a future retention pass never treats a
-  // commit-bearing firing as claim-verified "nothing to do".
+  // commit-bearing firing as claim-verified "nothing to do" or an
+  // unconfirmed external action.
+  const claimIsUnconfirmedExternalAction =
+    input.claim !== null &&
+    (input.claim.action === "pr" ||
+      input.claim.action === "issue_opened" ||
+      input.claim.action === "issue_closed") &&
+    input.observedAction?.action !== input.claim.action;
   if (
     input.terminalState === "succeeded" &&
     input.commitsAhead &&
-    (input.claim === null || input.claim.action === "none")
+    (input.claim === null ||
+      input.claim.action === "none" ||
+      claimIsUnconfirmedExternalAction)
   ) {
     return {
       action: "commit",

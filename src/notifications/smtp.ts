@@ -1,15 +1,19 @@
 import nodemailer from "nodemailer";
 
 import type { EmailNotificationConfig } from "./config.js";
+import { smtpDeliveryTimeoutMs } from "./routine-firing.js";
 import type { NotificationMessage, NotificationSink } from "./types.js";
 
 type SmtpTransportOptions = {
   auth?: { pass: string; user: string };
+  connectionTimeout: number;
+  greetingTimeout: number;
   host: string;
   ignoreTLS?: boolean;
   port: number;
   requireTLS?: boolean;
   secure: boolean;
+  socketTimeout: number;
 };
 
 type SmtpMail = NotificationMessage & {
@@ -48,6 +52,12 @@ export function createSmtpNotificationSink(
         throw new Error(`$${config.smtpPasswordEnv} is not set`);
       }
 
+      // Nodemailer's own connection/greeting/socket timeouts are set to the
+      // same bound as deliverWithTimeout's wrapper (routine-firing.ts) so a
+      // stalled relay is actually aborted at the transport level, instead of
+      // merely being abandoned by the wrapper while the send keeps running
+      // underneath it.
+      const timeoutMs = smtpDeliveryTimeoutMs();
       const transport = createTransport({
         ...(config.smtpUsername === undefined || password === undefined
           ? {}
@@ -57,6 +67,8 @@ export function createSmtpNotificationSink(
                 user: config.smtpUsername
               }
             }),
+        connectionTimeout: timeoutMs,
+        greetingTimeout: timeoutMs,
         host: config.smtpHost,
         port: config.smtpPort,
         ...(config.smtpSecurity === "starttls"
@@ -64,7 +76,8 @@ export function createSmtpNotificationSink(
           : config.smtpSecurity === "none"
             ? { ignoreTLS: true }
             : {}),
-        secure: config.smtpSecurity === "ssl"
+        secure: config.smtpSecurity === "ssl",
+        socketTimeout: timeoutMs
       });
       try {
         await transport.sendMail({

@@ -89,7 +89,7 @@ function deliverWithTimeout(
   });
 }
 
-function smtpDeliveryTimeoutMs(): number {
+export function smtpDeliveryTimeoutMs(): number {
   const envTimeout = Number(process.env.SYMPHONIKA_SMTP_DELIVERY_TIMEOUT_MS);
   return Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 15_000;
 }

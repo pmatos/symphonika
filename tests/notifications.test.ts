@@ -75,10 +75,13 @@ describe("Routine Firing notifications", () => {
     expect(transports).toEqual([
       {
         auth: { pass: secret, user: "server-token" },
+        connectionTimeout: 15_000,
+        greetingTimeout: 15_000,
         host: "smtp.example.com",
         port: 587,
         requireTLS: true,
-        secure: false
+        secure: false,
+        socketTimeout: 15_000
       }
     ]);
     expect(sent).toEqual([
@@ -91,6 +94,55 @@ describe("Routine Firing notifications", () => {
       }
     ]);
     expect(JSON.stringify(sent)).not.toContain(secret);
+  });
+
+  it("bounds the SMTP transport's own connection/greeting/socket timeouts to the configured delivery timeout", async () => {
+    const previousTimeout = process.env.SYMPHONIKA_SMTP_DELIVERY_TIMEOUT_MS;
+    process.env.SYMPHONIKA_SMTP_DELIVERY_TIMEOUT_MS = "5000";
+    try {
+      const transports: unknown[] = [];
+      const sink = createSmtpNotificationSink(
+        {
+          from: "symphonika@example.com",
+          on: "always",
+          smtpHost: "smtp.example.com",
+          smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+          smtpPort: 587,
+          smtpSecurity: "none",
+          to: "operator@example.com"
+        },
+        {
+          createTransport: (options) => {
+            transports.push(options);
+            return { sendMail: vi.fn().mockResolvedValue(undefined) };
+          }
+        }
+      );
+
+      await sink.deliver({
+        html: "<p>report</p>",
+        subject: "Routine report",
+        text: "report"
+      });
+
+      expect(transports).toEqual([
+        {
+          connectionTimeout: 5_000,
+          greetingTimeout: 5_000,
+          host: "smtp.example.com",
+          ignoreTLS: true,
+          port: 587,
+          secure: false,
+          socketTimeout: 5_000
+        }
+      ]);
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.SYMPHONIKA_SMTP_DELIVERY_TIMEOUT_MS;
+      } else {
+        process.env.SYMPHONIKA_SMTP_DELIVERY_TIMEOUT_MS = previousTimeout;
+      }
+    }
   });
 
   it.each([

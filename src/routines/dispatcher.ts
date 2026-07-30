@@ -590,9 +590,12 @@ export async function dispatchDueRoutines(
         input.activeRuns.unregister(firingId);
       }
       // Notification delivery is best-effort and can be as slow as the SMTP
-      // server allows (see ADR 0067); it runs after the slot above is
-      // released so a stalled relay does not suppress further dispatch for
-      // this project.
+      // server allows (see ADR 0067), bounded per attempt by
+      // deliverWithTimeout. Releasing the slot above before this await lets
+      // a concurrent or later dispatch tick fire this project's next
+      // routine without seeing a stale reservation; within this same
+      // sequential loop, the next due routine (here or in another project)
+      // still waits behind this await.
       await recordRoutineFiringNotification(
         {
           env: input.env ?? process.env,

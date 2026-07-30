@@ -190,35 +190,41 @@ describe("provider process lifecycle", () => {
         root
       );
       const supervisorPid = child.pid;
-      expect(supervisorPid).toBeDefined();
-      const providerPid = Number(await waitForFileContent(providerPidPath));
-      const grandchildPid = Number(await waitForFileContent(grandchildPidPath));
-      const directChildren = (
-        await readFile(
-          `/proc/${supervisorPid!}/task/${supervisorPid!}/children`,
-          "utf8"
-        )
-      )
-        .trim()
-        .split(/\s+/)
-        .map(Number);
-      const guardianPid = directChildren.find((pid) => pid !== providerPid);
-      expect(guardianPid).toBeDefined();
+      let grandchildPid: number | undefined;
 
       try {
+        expect(supervisorPid).toBeDefined();
+        const providerPid = Number(await waitForFileContent(providerPidPath));
+        grandchildPid = Number(await waitForFileContent(grandchildPidPath));
+        const directChildren = (
+          await readFile(
+            `/proc/${supervisorPid!}/task/${supervisorPid!}/children`,
+            "utf8"
+          )
+        )
+          .trim()
+          .split(/\s+/)
+          .map(Number);
+        const guardianPid = directChildren.find((pid) => pid !== providerPid);
+        expect(guardianPid).toBeDefined();
+
         const closed = once(child, "close");
         process.kill(guardianPid!, "SIGKILL");
         await closed;
         await waitForProcessStopped(grandchildPid);
       } finally {
-        try {
-          process.kill(-supervisorPid!, "SIGKILL");
-        } catch {
-          // Guardian failure handling already removed the process group.
+        if (supervisorPid !== undefined) {
+          try {
+            process.kill(-supervisorPid, "SIGKILL");
+          } catch {
+            // Guardian failure handling already removed the process group.
+          }
         }
-        await waitForProcessStopped(grandchildPid).catch(() => {
-          // Best-effort cleanup after an assertion failure.
-        });
+        if (grandchildPid !== undefined) {
+          await waitForProcessStopped(grandchildPid).catch(() => {
+            // Best-effort cleanup after an assertion failure.
+          });
+        }
       }
     }
   );

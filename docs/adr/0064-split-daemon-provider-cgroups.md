@@ -68,7 +68,9 @@ group release before removing the guardian, and rejects shutdown preparation onc
 begun. The orchestrator can therefore distinguish a pre-readiness disconnect, where no provider
 work was launched, from an unexpected supervisor exit while the guardian still reserves the group;
 the latter safely falls back to group signaling. The preparation handshake is bounded, with timeout
-fallback allowed only for a recorded live reservation. Unexpected guardian loss fails closed by
+fallback allowed only for a recorded live reservation. Before readiness, the supervisor suppresses
+provider launch, removes its guardian directly, and exits before cancellation completes rather than
+allowing an unverified group signal. Unexpected guardian loss fails closed by
 terminating the entire process group rather than only the direct provider.
 Escalation remains keyed on the group even when the provider has exited, because a descendant can
 ignore `SIGTERM` and retain the Workspace. An already-dead group (`ESRCH`) at the first signal is

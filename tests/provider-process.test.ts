@@ -70,10 +70,16 @@ describe("provider process spawning", () => {
         destroy: vi.fn()
       }
     }) as unknown as ChildProcessWithoutNullStreams;
+    vi.mocked(spawn).mockReturnValue(child);
+    const spawned = spawnProviderProcess(
+      { args: ["--version"], executable: "provider" },
+      "/workspace"
+    );
+    child.emit("message", "group-ready");
 
-    const internalShutdown = shutdownProviderProcess(child);
+    const internalShutdown = shutdownProviderProcess(spawned);
     const cancellationShutdown = shutdownProviderProcess(
-      child,
+      spawned,
       () => {
         order.push("courtesy");
       },
@@ -113,9 +119,15 @@ describe("provider process spawning", () => {
         destroy: vi.fn()
       }
     }) as unknown as ChildProcessWithoutNullStreams;
+    vi.mocked(spawn).mockReturnValue(child);
+    const spawned = spawnProviderProcess(
+      { args: ["--version"], executable: "provider" },
+      "/workspace"
+    );
+    child.emit("message", "group-ready");
     let resolved = false;
     const shutdown = shutdownProviderProcess(
-      child,
+      spawned,
       undefined,
       "cancellation"
     ).then(() => {
@@ -134,6 +146,56 @@ describe("provider process spawning", () => {
     expect(kill.mock.calls).toEqual([
       [-12_346, "SIGTERM"],
       [-12_346, "SIGKILL"]
+    ]);
+    kill.mockRestore();
+  });
+
+  it("does not resolve a timed-out preparation before the group is reserved", async () => {
+    vi.useFakeTimers();
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const child = Object.assign(new EventEmitter(), {
+      connected: true,
+      kill: vi.fn(),
+      pid: 12_347,
+      send: vi.fn(),
+      stderr: {
+        destroy: vi.fn()
+      },
+      stdin: {
+        destroy: vi.fn(),
+        destroyed: false,
+        end: vi.fn(),
+        writable: true
+      },
+      stdout: {
+        destroy: vi.fn()
+      }
+    }) as unknown as ChildProcessWithoutNullStreams;
+    vi.mocked(spawn).mockReturnValue(child);
+    const spawned = spawnProviderProcess(
+      { args: ["--version"], executable: "provider" },
+      "/workspace"
+    );
+    let resolved = false;
+    const shutdown = shutdownProviderProcess(
+      spawned,
+      undefined,
+      "cancellation"
+    ).then(() => {
+      resolved = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(250);
+    expect(resolved).toBe(false);
+
+    child.emit("message", "group-ready");
+    child.emit("message", "shutdown-ready");
+    await vi.advanceTimersByTimeAsync(1_250);
+    await shutdown;
+
+    expect(kill.mock.calls).toEqual([
+      [-12_347, "SIGTERM"],
+      [-12_347, "SIGKILL"]
     ]);
     kill.mockRestore();
   });

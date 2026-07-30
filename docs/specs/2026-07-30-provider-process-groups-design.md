@@ -34,11 +34,12 @@ agent work or spawn Run-owned tools.
 The guardian ignores `SIGTERM`. The supervisor reports guardian readiness to
 the orchestrator before launching the configured provider. If shutdown
 preparation has already been requested when readiness arrives, the supervisor
-keeps the guardian reserved but never launches the provider. Before any
-shutdown courtesy or stdin EOF, the orchestrator sends the supervisor a
-preparation request and waits for its acknowledgement. That acknowledgement
-means the supervisor has latched the shutdown state and will leave the guardian
-in place even if the provider exits immediately. On ordinary provider
+never launches the provider and directly removes the not-yet-reserved guardian
+before exiting. Before any shutdown courtesy or stdin EOF, the orchestrator
+sends the supervisor a preparation request and waits for its acknowledgement.
+An acknowledgement after readiness means the supervisor has latched the
+shutdown state and will leave the guardian in place even if the provider exits
+immediately. On ordinary provider
 completion without a shutdown request, the supervisor reports group release,
 removes the guardian, and mirrors the provider's exit, so the group ends
 immediately. Release and shutdown reservation are mutually exclusive: once
@@ -92,7 +93,10 @@ before readiness cannot strand provider work because the provider is not
 launched until readiness has been reported. The preparation handshake is
 bounded to 250 milliseconds; a timeout falls back only when that recorded
 guardian reservation is live, so a stopped supervisor cannot block
-cancellation without allowing an unverified bare-PGID signal.
+cancellation without allowing an unverified bare-PGID signal. Before readiness,
+the timeout remains pending until the supervisor directly removes its guardian
+and exits; it cannot report successful cancellation while startup cleanup is
+still outstanding.
 
 The supervisor treats unexpected guardian exit as a failure of the entire Run
 boundary. It signals its own process group with `SIGKILL` before exiting, so the

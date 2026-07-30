@@ -55,7 +55,11 @@ process.on("message", (message) => {
       return;
     }
     shutdownRequested = true;
-    process.send?.("shutdown-ready");
+    if (process.send !== undefined && process.connected) {
+      process.send("shutdown-ready", stopBeforeProviderLaunch);
+      return;
+    }
+    stopBeforeProviderLaunch();
   }
 });
 
@@ -68,6 +72,24 @@ const guardian = spawn(
   ],
   { stdio: ["ignore", "ignore", "ignore", "ipc"] }
 );
+
+function stopBeforeProviderLaunch() {
+  if (provider !== undefined || settled) {
+    return;
+  }
+  settled = true;
+  const exit = () => {
+    process.exit(0);
+  };
+  if (guardian.exitCode !== null || guardian.signalCode !== null) {
+    exit();
+    return;
+  }
+  guardian.once("close", exit);
+  if (!guardian.kill("SIGKILL")) {
+    exit();
+  }
+}
 
 function finish(exitCode, signal) {
   if (settled) {
@@ -393,7 +415,9 @@ async function reserveProviderProcessGroup(
     };
     const onMessage = (message: unknown): void => {
       if (message === "shutdown-ready") {
-        settle(true);
+        if (isProviderProcessGroupReserved(child)) {
+          settle(true);
+        }
       } else if (message === "shutdown-unavailable") {
         settle(false);
       }
@@ -405,7 +429,9 @@ async function reserveProviderProcessGroup(
       settle(isProviderProcessGroupReserved(child));
     };
     const preparationTimer = setTimeout(() => {
-      settle(isProviderProcessGroupReserved(child));
+      if (isProviderProcessGroupReserved(child)) {
+        settle(true);
+      }
     }, SHUTDOWN_PREPARATION_TIMEOUT_MS);
 
     child.on("message", onMessage);
@@ -414,11 +440,15 @@ async function reserveProviderProcessGroup(
     try {
       child.send("prepare-shutdown", (error) => {
         if (error !== null) {
-          settle(isProviderProcessGroupReserved(child));
+          if (isProviderProcessGroupReserved(child)) {
+            settle(true);
+          }
         }
       });
     } catch {
-      settle(isProviderProcessGroupReserved(child));
+      if (isProviderProcessGroupReserved(child)) {
+        settle(true);
+      }
     }
   });
 }

@@ -96,6 +96,8 @@ type RoutineTerminalOutcome =
 // entire issue/PR history on every firing.
 const ISSUE_SNAPSHOT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+const EPOCH_ISO = new Date(0).toISOString();
+
 type CapturedRoutineGithubSnapshot = {
   issuesAvailable: boolean;
   pullRequests: RawGitHubPullRequest[];
@@ -581,7 +583,9 @@ async function runRoutineFiring(input: {
           });
     const githubObservation = routineGithubObservation(
       githubBefore,
-      githubAfter
+      githubAfter,
+      input.routine.kind,
+      githubSnapshotSince
     );
     input.runStore.completeRoutineFiring({
       id: input.firingId,
@@ -648,7 +652,9 @@ async function runRoutineFiring(input: {
           });
     const githubObservation = routineGithubObservation(
       githubBefore,
-      githubAfter
+      githubAfter,
+      input.routine.kind,
+      githubSnapshotSince
     );
     input.runStore.completeRoutineFiring({
       id: input.firingId,
@@ -903,7 +909,9 @@ async function captureRoutineGithubSnapshot(input: {
 
 function routineGithubObservation(
   before: CapturedRoutineGithubSnapshot | null,
-  after: CapturedRoutineGithubSnapshot | null
+  after: CapturedRoutineGithubSnapshot | null,
+  kind: RoutineStatus["kind"],
+  windowStart: string
 ): {
   action: ReturnType<typeof diffRoutineGithubSnapshots>;
   available: boolean;
@@ -917,6 +925,12 @@ function routineGithubObservation(
   if (!issuesAvailable && !pullRequestsAvailable) {
     return { action: null, available: false };
   }
+  // A `kind: git` firing's primary evidence channel is its branch's PRs, so
+  // a silently-failed PR read must not be masked by a succeeding issue read
+  // (or vice versa); report firings never observe PRs, so issues alone
+  // suffice there.
+  const available =
+    kind === "git" ? issuesAvailable && pullRequestsAvailable : issuesAvailable;
   return {
     action: diffRoutineGithubSnapshots(
       {
@@ -926,9 +940,10 @@ function routineGithubObservation(
       {
         issues: issuesAvailable ? after.snapshot.issues : {},
         pullRequests: pullRequestsAvailable ? after.snapshot.pullRequests : {}
-      }
+      },
+      windowStart
     ),
-    available: true
+    available
   };
 }
 
@@ -945,6 +960,10 @@ function routineIssueObservations(
       continue;
     }
     observations[String(issue.number)] = {
+      closedAt: issue.closed_at ?? null,
+      // A missing created_at is treated as "always predates the window" so
+      // an issue never falsely counts as newly opened for lack of evidence.
+      createdAt: issue.created_at ?? EPOCH_ISO,
       state: issue.state ?? "",
       title: issue.title ?? `Issue #${issue.number}`,
       url: issue.html_url ?? null

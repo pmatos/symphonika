@@ -760,11 +760,17 @@ informational only: it never enters PR Follow-up, review re-dispatch, or auto-me
 The dispatcher asks every provider for the same Routine Outcome Claim
 `{status, action, url, title, summary}` and parses it only from the final normalized
 `turn_completed` event. When tracker configuration and GitHub reads are available, it snapshots
-repository issues before and after provider execution; `kind: git` firings also snapshot open pull
-requests on the firing branch. It observes newly opened pull requests, newly opened issues, and
-issues that change to closed. Issue and pull-request entries are distinguished before diffing.
-A tracker-less Project skips GitHub observation with an informational log line; unavailable or
-failed optional observation is also non-fatal.
+repository issues before and after provider execution, bounded to a window sized for a single firing
+rather than the repository's full history; `kind: git` firings also snapshot open pull requests on
+the firing branch. It observes newly opened pull requests, newly opened issues, and issues that
+change to closed, using each issue's own creation/closure timestamp — not mere absence from the
+bounded before-snapshot — to tell an issue created or closed inside the window apart from a
+pre-existing issue merely touched inside it. Issue and pull-request entries are distinguished before
+diffing. A comparison is complete only when every channel relevant to the routine's kind succeeded
+on both reads (issues alone for a report routine; issues and pull requests for a `kind: git`
+routine), so a silently failed channel is never mistaken for "checked and found nothing changed". A
+tracker-less Project skips GitHub observation with an informational log line; unavailable or failed
+optional observation is also non-fatal.
 
 One pure reconciliation step persists a canonical result with `verified` and `source`. An observed
 GitHub action wins over an absent, error, no-action, or commit claim and is sourced to `gh`. A
@@ -772,12 +778,12 @@ claimed PR or issue action is verified only when the same action kind was observ
 claim is retained but marked unverified. A claimed no-action (`none`) is verified only when the
 before/after GitHub comparison completed and found nothing; an unavailable comparison leaves it
 unverified. A successful `kind: git` firing with commits ahead of base can verify or derive a
-`commit` outcome, and this git evidence overrides a `none` claim that under-reports it so a
-self-reported "nothing to do" never suppresses the retention signal below. A successful firing with
-neither claim nor observation records `no_action`; it is verified and sourced to `gh` only when the
-before/after GitHub reads completed, otherwise it is unverified and sourced to `symphonika`.
-Omission alone is not a failure. Failed and cancelled firings retain their terminal reason
-independently of the reconciled outcome.
+`commit` outcome regardless of the claim's own reported status, and this git evidence overrides a
+`none` claim that under-reports it so a self-reported "nothing to do" or "error" never suppresses
+the retention signal below. A successful firing with neither claim nor observation records
+`no_action`; it is verified and sourced to `gh` only when the before/after GitHub reads completed,
+otherwise it is unverified and sourced to `symphonika`. Omission alone is not a failure. Failed and
+cancelled firings retain their terminal reason independently of the reconciled outcome.
 
 Under ADR 0025 a verified commit-only outcome remains successful because its workspace is
 preserved. Such an outcome is a retention signal: future workspace garbage collection must retain

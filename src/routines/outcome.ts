@@ -62,6 +62,8 @@ export type ObservedRoutineAction = {
 };
 
 type RoutineGithubIssueObservation = {
+  closedAt: string | null;
+  createdAt: string;
   state: string;
   title: string;
   url: string | null;
@@ -114,7 +116,8 @@ export function parseRoutineOutcomeClaim(
 
 export function diffRoutineGithubSnapshots(
   before: RoutineGithubSnapshot,
-  after: RoutineGithubSnapshot
+  after: RoutineGithubSnapshot,
+  windowStart: string
 ): ObservedRoutineAction | null {
   const newPullRequest = sortedNumericKeys(after.pullRequests).find(
     (number) => before.pullRequests[number] === undefined
@@ -127,9 +130,16 @@ export function diffRoutineGithubSnapshots(
       url: pullRequest.url
     };
   }
-  const newlyOpenedIssue = sortedNumericKeys(after.issues).find(
-    (number) => before.issues[number] === undefined
-  );
+  // A time-bounded before-snapshot can be missing an issue that predates the
+  // window, so absence alone does not mean "created during this firing" —
+  // only an actual creation timestamp inside the window does.
+  const windowStartMs = Date.parse(windowStart);
+  const newlyOpenedIssue = sortedNumericKeys(after.issues).find((number) => {
+    if (before.issues[number] !== undefined) {
+      return false;
+    }
+    return Date.parse(after.issues[number]!.createdAt) >= windowStartMs;
+  });
   if (newlyOpenedIssue !== undefined) {
     const issue = after.issues[newlyOpenedIssue]!;
     return {
@@ -138,11 +148,19 @@ export function diffRoutineGithubSnapshots(
       url: issue.url
     };
   }
-  const newlyClosedIssue = sortedNumericKeys(after.issues).find(
-    (number) =>
-      after.issues[number]?.state.toLowerCase() === "closed" &&
-      before.issues[number]?.state.toLowerCase() !== "closed"
-  );
+  const newlyClosedIssue = sortedNumericKeys(after.issues).find((number) => {
+    const issue = after.issues[number]!;
+    if (issue.state.toLowerCase() !== "closed") {
+      return false;
+    }
+    const beforeIssue = before.issues[number];
+    if (beforeIssue === undefined) {
+      return (
+        issue.closedAt !== null && Date.parse(issue.closedAt) >= windowStartMs
+      );
+    }
+    return beforeIssue.state.toLowerCase() !== "closed";
+  });
   if (newlyClosedIssue !== undefined) {
     const issue = after.issues[newlyClosedIssue]!;
     return {
@@ -190,13 +208,13 @@ export function reconcileRoutineOutcome(
   }
 
   // A `none`/absent claim under-reports a real commit-only outcome; git
-  // evidence overrides it here so a future retention pass never treats a
-  // commit-bearing firing as claim-verified "nothing to do" (ADR 0068).
+  // evidence overrides it here — unqualified by the claim's own status, per
+  // ADR 0068 rule 4 — so a future retention pass never treats a
+  // commit-bearing firing as claim-verified "nothing to do".
   if (
     input.terminalState === "succeeded" &&
     input.commitsAhead &&
-    (input.claim === null ||
-      (input.claim.status !== "error" && input.claim.action === "none"))
+    (input.claim === null || input.claim.action === "none")
   ) {
     return {
       action: "commit",
@@ -217,10 +235,11 @@ export function reconcileRoutineOutcome(
       ...input.claim,
       source: input.provider,
       verified:
-        input.claim.status !== "error" &&
-        (input.observedAction?.action === input.claim.action ||
-          (input.claim.action === "none" && input.githubObservationAvailable) ||
-          (input.claim.action === "commit" && input.commitsAhead))
+        (input.claim.action === "commit" && input.commitsAhead) ||
+        (input.claim.status !== "error" &&
+          (input.observedAction?.action === input.claim.action ||
+            (input.claim.action === "none" &&
+              input.githubObservationAvailable)))
     };
   }
 

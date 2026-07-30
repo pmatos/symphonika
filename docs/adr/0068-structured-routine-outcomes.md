@@ -35,11 +35,18 @@ receives the same JSON Schema through `--json-schema`; this is reinforcement, no
 Missing, malformed, or schema-invalid claims are treated as absent and do not fail a firing.
 
 For Projects with tracker configuration, the dispatcher reads repository issues before and after
-provider execution. A `kind: git` firing additionally reads open pull requests whose head is its
-deterministic firing branch. The before/after diff can observe a newly opened pull request, a newly
-opened issue, or an issue changing to closed. Tracker-less Projects skip this observation with an
-informational log entry. Missing optional API support, credentials, or a failed read similarly
-degrades observation without changing the firing lifecycle.
+provider execution, bounded to a window wide enough to cover any single firing rather than the
+repository's entire history. Because that window can exclude an issue's last update before the
+firing, the diff distinguishes an issue created or closed within the window from a pre-existing
+issue merely touched inside it, using the issue's own creation/closure timestamps rather than mere
+absence from the bounded before-snapshot. A `kind: git` firing additionally reads open pull requests
+whose head is its deterministic firing branch. The before/after diff can observe a newly opened pull
+request, a newly opened issue, or an issue changing to closed. A comparison counts as complete only
+when every channel relevant to the routine's kind succeeded on both reads — issues alone for a
+report routine, both issues and pull requests for a `kind: git` routine — so a silently failed
+channel cannot be mistaken for "checked and found nothing changed". Tracker-less Projects skip this
+observation with an informational log entry. Missing optional API support, credentials, or a failed
+read similarly degrades observation without changing the firing lifecycle.
 
 One pure reconciliation function produces the persisted outcome:
 
@@ -49,12 +56,13 @@ One pure reconciliation function produces the persisted outcome:
    A claimed no-action (`none`) is verified only when a completed GitHub comparison confirms no
    external action occurred; an unavailable comparison leaves it unverified. Otherwise the provider
    claim remains visible with `verified: false`.
-3. A commit claim is verified only when the successful `kind: git` workspace inspection found
-   commits ahead of the configured base branch.
+3. A commit claim is verified whenever the successful `kind: git` workspace inspection found commits
+   ahead of the configured base branch, regardless of the claim's own reported status.
 4. Without a claim, an observed GitHub action is sourced to `gh`; otherwise a successful
    commits-ahead firing is a verified `git` outcome. This git evidence also overrides a `none`
-   claim that under-reports a successful `kind: git` firing with commits ahead of the base branch,
-   so a self-reported "nothing to do" never suppresses the retention signal below.
+   claim that under-reports a successful `kind: git` firing with commits ahead of the base branch —
+   regardless of that claim's own status — so a self-reported "nothing to do" or "error" never
+   suppresses the retention signal below.
 5. A successful firing with no claim or observed action records `no_action`. A completed GitHub
    comparison makes it verified and sourced to `gh`; an unavailable comparison leaves it
    unverified and sourced to `symphonika`. Claim omission alone never fails the firing.

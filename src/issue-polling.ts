@@ -23,6 +23,7 @@ export type GitHubIssueLabelInput = GitHubIssueRepositoryInput & {
 
 export type RawGitHubIssue = {
   body?: string | null;
+  closed_at?: string | null;
   created_at?: string | null;
   html_url?: string | null;
   id?: number;

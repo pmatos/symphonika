@@ -44,6 +44,8 @@ describe("Routine Outcome reconciliation", () => {
         {
           issues: {
             "17": {
+              closedAt: null,
+              createdAt: "2026-05-01T00:00:00.000Z",
               state: "open",
               title: "Superseded dependency issue",
               url: "https://github.com/pmatos/rightkey/issues/17"
@@ -54,19 +56,68 @@ describe("Routine Outcome reconciliation", () => {
         {
           issues: {
             "17": {
+              closedAt: "2026-05-22T10:00:00.000Z",
+              createdAt: "2026-05-01T00:00:00.000Z",
               state: "closed",
               title: "Superseded dependency issue",
               url: "https://github.com/pmatos/rightkey/issues/17"
             }
           },
           pullRequests: {}
-        }
+        },
+        "2026-05-21T10:00:00.000Z"
       )
     ).toEqual({
       action: "issue_closed",
       title: "Superseded dependency issue",
       url: "https://github.com/pmatos/rightkey/issues/17"
     });
+  });
+
+  it("observes an old issue closed during the firing without a stale before-snapshot", () => {
+    expect(
+      diffRoutineGithubSnapshots(
+        { issues: {}, pullRequests: {} },
+        {
+          issues: {
+            "17": {
+              closedAt: "2026-05-22T10:00:00.000Z",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              state: "closed",
+              title: "Superseded dependency issue",
+              url: "https://github.com/pmatos/rightkey/issues/17"
+            }
+          },
+          pullRequests: {}
+        },
+        "2026-05-21T10:00:00.000Z"
+      )
+    ).toEqual({
+      action: "issue_closed",
+      title: "Superseded dependency issue",
+      url: "https://github.com/pmatos/rightkey/issues/17"
+    });
+  });
+
+  it("does not report an action for an old issue merely touched inside the window", () => {
+    expect(
+      diffRoutineGithubSnapshots(
+        { issues: {}, pullRequests: {} },
+        {
+          issues: {
+            "17": {
+              closedAt: "2026-01-05T00:00:00.000Z",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              state: "closed",
+              title: "Superseded dependency issue",
+              url: "https://github.com/pmatos/rightkey/issues/17"
+            }
+          },
+          pullRequests: {}
+        },
+        "2026-05-21T10:00:00.000Z"
+      )
+    ).toBeNull();
   });
 
   it("observes a newly opened issue", () => {
@@ -76,13 +127,16 @@ describe("Routine Outcome reconciliation", () => {
         {
           issues: {
             "23": {
+              closedAt: null,
+              createdAt: "2026-05-22T09:30:00.000Z",
               state: "open",
               title: "Track a follow-up refactor",
               url: "https://github.com/pmatos/rightkey/issues/23"
             }
           },
           pullRequests: {}
-        }
+        },
+        "2026-05-21T10:00:00.000Z"
       )
     ).toEqual({
       action: "issue_opened",
@@ -98,6 +152,8 @@ describe("Routine Outcome reconciliation", () => {
         {
           issues: {
             "23": {
+              closedAt: null,
+              createdAt: "2026-05-22T09:30:00.000Z",
               state: "open",
               title: "Track a follow-up refactor",
               url: "https://github.com/pmatos/rightkey/issues/23"
@@ -109,7 +165,8 @@ describe("Routine Outcome reconciliation", () => {
               url: "https://github.com/pmatos/rightkey/pull/42"
             }
           }
-        }
+        },
+        "2026-05-21T10:00:00.000Z"
       )
     ).toEqual({
       action: "pr",
@@ -415,6 +472,62 @@ describe("Routine Outcome reconciliation", () => {
       status: "success",
       summary: "Observed commits ahead of the configured base branch.",
       title: "Commit retained in the Routine Firing workspace",
+      url: null,
+      verified: true
+    });
+  });
+
+  it("overrides an error-status no-action claim with git evidence of a retained commit", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "none",
+          status: "error",
+          summary: "The task could not be completed.",
+          title: "",
+          url: null
+        },
+        commitsAhead: true,
+        githubObservationAvailable: false,
+        observedAction: null,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "commit",
+      source: "git",
+      status: "success",
+      summary: "Observed commits ahead of the configured base branch.",
+      title: "Commit retained in the Routine Firing workspace",
+      url: null,
+      verified: true
+    });
+  });
+
+  it("verifies a commit claim from git evidence even when the claim reports an error status", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "commit",
+          status: "error",
+          summary: "Committed a partial fix before the task failed.",
+          title: "Extract retry policy",
+          url: null
+        },
+        commitsAhead: true,
+        githubObservationAvailable: false,
+        observedAction: null,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "commit",
+      source: "codex",
+      status: "error",
+      summary: "Committed a partial fix before the task failed.",
+      title: "Extract retry policy",
       url: null,
       verified: true
     });

@@ -14,6 +14,7 @@ import type {
   ProviderRunInput
 } from "../provider.js";
 import {
+  providerProcessExitResult,
   shutdownProviderProcess,
   spawnProviderProcess
 } from "./provider-process.js";
@@ -73,7 +74,11 @@ export function createClaudeProvider(
         // post-probe recheck (see below) is what stops it from launching.
         return Promise.resolve();
       }
-      return shutdownProviderProcess(activeRun.child);
+      return shutdownProviderProcess(
+        activeRun.child,
+        undefined,
+        "cancellation"
+      );
     },
     name: "claude",
     runAttempt: async function* (
@@ -548,10 +553,11 @@ function createProcessQueue(
     });
   });
   child.once("close", (exitCode, signal) => {
+    const result = providerProcessExitResult(child, exitCode, signal);
     push({
-      exitCode,
+      exitCode: result.exitCode,
       kind: "exit",
-      signal
+      signal: result.signal
     });
   });
 

@@ -18,6 +18,7 @@ import type {
 } from "../provider.js";
 import { VERSION } from "../version.js";
 import {
+  providerProcessExitResult,
   shutdownProviderProcess,
   spawnProviderProcess
 } from "./provider-process.js";
@@ -89,22 +90,26 @@ export function createCodexProvider(
         return Promise.resolve();
       }
       const child = activeRun.child;
-      return shutdownProviderProcess(child, () => {
-        if (
-          activeRun.threadId !== undefined &&
-          activeRun.turnId !== undefined
-        ) {
-          writeJson(child, {
-            id: activeRun.nextRequestId,
-            method: "turn/interrupt",
-            params: {
-              threadId: activeRun.threadId,
-              turnId: activeRun.turnId
-            }
-          });
-          activeRun.nextRequestId += 1;
-        }
-      });
+      return shutdownProviderProcess(
+        child,
+        () => {
+          if (
+            activeRun.threadId !== undefined &&
+            activeRun.turnId !== undefined
+          ) {
+            writeJson(child, {
+              id: activeRun.nextRequestId,
+              method: "turn/interrupt",
+              params: {
+                threadId: activeRun.threadId,
+                turnId: activeRun.turnId
+              }
+            });
+            activeRun.nextRequestId += 1;
+          }
+        },
+        "cancellation"
+      );
     },
     name: "codex",
     runAttempt: async function* (
@@ -622,10 +627,11 @@ function createProcessQueue(
     });
   });
   child.once("close", (exitCode, signal) => {
+    const result = providerProcessExitResult(child, exitCode, signal);
     push({
-      exitCode,
+      exitCode: result.exitCode,
       kind: "exit",
-      signal
+      signal: result.signal
     });
   });
 

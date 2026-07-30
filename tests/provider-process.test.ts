@@ -72,9 +72,13 @@ describe("provider process spawning", () => {
     }) as unknown as ChildProcessWithoutNullStreams;
 
     const internalShutdown = shutdownProviderProcess(child);
-    const cancellationShutdown = shutdownProviderProcess(child, () => {
-      order.push("courtesy");
-    });
+    const cancellationShutdown = shutdownProviderProcess(
+      child,
+      () => {
+        order.push("courtesy");
+      },
+      "cancellation"
+    );
     child.emit("message", "shutdown-ready");
 
     await vi.advanceTimersByTimeAsync(1_250);
@@ -110,7 +114,11 @@ describe("provider process spawning", () => {
       }
     }) as unknown as ChildProcessWithoutNullStreams;
     let resolved = false;
-    const shutdown = shutdownProviderProcess(child).then(() => {
+    const shutdown = shutdownProviderProcess(
+      child,
+      undefined,
+      "cancellation"
+    ).then(() => {
       resolved = true;
     });
     child.emit("message", "shutdown-ready");

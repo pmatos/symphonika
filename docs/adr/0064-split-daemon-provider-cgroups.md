@@ -74,6 +74,8 @@ Escalation remains keyed on the group even when the provider has exited, because
 ignore `SIGTERM` and retain the Workspace. An already-dead group (`ESRCH`) at the first signal is
 successful cleanup and does not arm escalation. Non-POSIX hosts retain bounded direct-child
 signaling, but only POSIX process groups provide the descendant guarantee.
+Ordinary terminal cleanup may skip the cancellation grace once the provider has actually exited:
+it immediately kills the remaining group while retaining the provider's exit result for evidence.
 
 `symphonika daemon` remains a standalone CLI command independent of `service install`
 (`src/cli.ts`), and must keep working on hosts with no systemd `--user` session (non-systemd hosts,

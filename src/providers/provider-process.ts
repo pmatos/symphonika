@@ -5,12 +5,20 @@ import type { ProcessCommand } from "../lifecycle/process-scope.js";
 const GRACEFUL_EOF_MS = 250;
 const FORCE_KILL_GRACE_MS = 1_000;
 const SHUTDOWN_PREPARATION_TIMEOUT_MS = 250;
+type ProviderShutdownIntent = "cancellation" | "completion";
+type ProviderProcessExit = {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+};
 type ProviderShutdownState = {
   acceptingCourtesies: boolean;
+  cancellationRequested: boolean;
   courtesies: Array<() => void>;
   promise: Promise<void>;
 };
 type ProviderProcessGroupState = {
+  preserveProviderExit: boolean;
+  providerExit?: ProviderProcessExit;
   reserved: boolean;
 };
 const providerProcessGroups = new WeakMap<
@@ -66,6 +74,11 @@ function finish(exitCode, signal) {
     return;
   }
   settled = true;
+  process.send?.({
+    exitCode,
+    signal,
+    type: "provider-exited"
+  });
 
   setTimeout(() => {
     if (groupTerminating || shutdownRequested) {
@@ -199,10 +212,14 @@ export function spawnProviderProcess(
 
 export function shutdownProviderProcess(
   child: ChildProcessWithoutNullStreams,
-  beforeClose?: () => void
+  beforeClose?: () => void,
+  intent: ProviderShutdownIntent = "completion"
 ): Promise<void> {
   const existing = shuttingDown.get(child);
   if (existing !== undefined) {
+    if (intent === "cancellation") {
+      existing.cancellationRequested = true;
+    }
     if (beforeClose !== undefined) {
       if (existing.acceptingCourtesies) {
         existing.courtesies.push(beforeClose);
@@ -212,6 +229,7 @@ export function shutdownProviderProcess(
   }
   const state: ProviderShutdownState = {
     acceptingCourtesies: true,
+    cancellationRequested: intent === "cancellation",
     courtesies: beforeClose === undefined ? [] : [beforeClose],
     promise: Promise.resolve()
   };
@@ -239,12 +257,46 @@ async function beginProviderShutdown(
     child.stdin.end();
   }
 
-  await shutdownDelay(GRACEFUL_EOF_MS);
+  const gracefulStartedAt = Date.now();
+  const exitedBeforeTerm = await waitForProviderExit(child, GRACEFUL_EOF_MS);
+  if (exitedBeforeTerm && !state.cancellationRequested) {
+    forceKillProviderProcess(child, true);
+    return;
+  }
+  if (state.cancellationRequested) {
+    await remainingShutdownDelay(gracefulStartedAt, GRACEFUL_EOF_MS);
+  }
   if (!signalProviderProcess(child, "SIGTERM")) {
     return;
   }
 
-  await shutdownDelay(FORCE_KILL_GRACE_MS);
+  const forceGraceStartedAt = Date.now();
+  if (!state.cancellationRequested) {
+    const exitedAfterTerm = await waitForProviderExit(
+      child,
+      FORCE_KILL_GRACE_MS
+    );
+    if (exitedAfterTerm && !state.cancellationRequested) {
+      forceKillProviderProcess(child, true);
+      return;
+    }
+  }
+  if (state.cancellationRequested) {
+    await remainingShutdownDelay(forceGraceStartedAt, FORCE_KILL_GRACE_MS);
+  }
+  forceKillProviderProcess(child);
+}
+
+function forceKillProviderProcess(
+  child: ChildProcessWithoutNullStreams,
+  preserveProviderExit = false
+): void {
+  if (preserveProviderExit) {
+    const group = providerProcessGroups.get(child);
+    if (group?.providerExit !== undefined) {
+      group.preserveProviderExit = true;
+    }
+  }
   signalProviderProcess(child, "SIGKILL");
   child.stdin.destroy();
   child.stdout.destroy();
@@ -263,6 +315,60 @@ async function shutdownDelay(milliseconds: number): Promise<void> {
   await new Promise<void>((resolve) => {
     setTimeout(resolve, milliseconds);
   });
+}
+
+async function remainingShutdownDelay(
+  startedAt: number,
+  duration: number
+): Promise<void> {
+  const remaining = duration - (Date.now() - startedAt);
+  if (remaining > 0) {
+    await shutdownDelay(remaining);
+  }
+}
+
+async function waitForProviderExit(
+  child: ChildProcessWithoutNullStreams,
+  timeoutMs: number
+): Promise<boolean> {
+  if (providerHasExited(child)) {
+    return true;
+  }
+
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const settle = (exited: boolean): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      child.off("message", onMessage);
+      child.off("exit", onExit);
+      resolve(exited);
+    };
+    const onMessage = (message: unknown): void => {
+      if (providerExitFromMessage(message) !== undefined) {
+        settle(true);
+      }
+    };
+    const onExit = (): void => {
+      settle(providerHasExited(child));
+    };
+    const timer = setTimeout(() => {
+      settle(providerHasExited(child));
+    }, timeoutMs);
+
+    child.on("message", onMessage);
+    child.once("exit", onExit);
+  });
+}
+
+function providerHasExited(child: ChildProcessWithoutNullStreams): boolean {
+  if (process.platform === "win32") {
+    return child.exitCode !== null || child.signalCode !== null;
+  }
+  return providerProcessGroups.get(child)?.providerExit !== undefined;
 }
 
 async function reserveProviderProcessGroup(
@@ -324,6 +430,7 @@ function trackProviderProcessGroup(
   child: ChildProcessWithoutNullStreams
 ): void {
   const state: ProviderProcessGroupState = {
+    preserveProviderExit: false,
     reserved: false
   };
   providerProcessGroups.set(child, state);
@@ -332,8 +439,55 @@ function trackProviderProcessGroup(
       state.reserved = true;
     } else if (message === "group-released") {
       state.reserved = false;
+    } else {
+      const providerExit = providerExitFromMessage(message);
+      if (providerExit !== undefined) {
+        state.providerExit = providerExit;
+      }
     }
   });
+}
+
+export function providerProcessExitResult(
+  child: ChildProcessWithoutNullStreams,
+  exitCode: number | null,
+  signal: NodeJS.Signals | null
+): ProviderProcessExit {
+  const state = providerProcessGroups.get(child);
+  if (
+    state?.preserveProviderExit === true &&
+    state.providerExit !== undefined
+  ) {
+    return state.providerExit;
+  }
+  return { exitCode, signal };
+}
+
+function providerExitFromMessage(
+  message: unknown
+): ProviderProcessExit | undefined {
+  if (
+    typeof message !== "object" ||
+    message === null ||
+    !("type" in message) ||
+    message.type !== "provider-exited" ||
+    !("exitCode" in message) ||
+    !("signal" in message)
+  ) {
+    return undefined;
+  }
+  const exitCode = message.exitCode;
+  const signal = message.signal;
+  if (
+    (typeof exitCode !== "number" && exitCode !== null) ||
+    (typeof signal !== "string" && signal !== null)
+  ) {
+    return undefined;
+  }
+  return {
+    exitCode,
+    signal: signal as NodeJS.Signals | null
+  };
 }
 
 function isProviderProcessGroupReserved(

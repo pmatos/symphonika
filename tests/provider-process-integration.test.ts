@@ -281,6 +281,49 @@ describe("provider process lifecycle", () => {
       }
     }
   );
+
+  it.skipIf(process.platform === "win32")(
+    "completes ordinary cleanup promptly after the provider exits on EOF",
+    async () => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "symphonika-provider-process-test-")
+      );
+      tempRoots.push(root);
+      const providerPidPath = path.join(root, "provider.pid");
+      const providerPath = path.join(root, "provider.mjs");
+      await writeFile(
+        providerPath,
+        [
+          "import { writeFile } from 'node:fs/promises';",
+          `await writeFile(${JSON.stringify(providerPidPath)}, String(process.pid), "utf8");`,
+          "process.stdin.resume();",
+          'process.stdin.on("end", () => process.exit(0));',
+          ""
+        ].join("\n"),
+        "utf8"
+      );
+
+      const child = spawnProviderProcess(
+        { args: [providerPath], executable: process.execPath },
+        root
+      );
+      const supervisorPid = child.pid;
+      expect(supervisorPid).toBeDefined();
+      await waitForFileContent(providerPidPath);
+      const startedAt = Date.now();
+
+      try {
+        await shutdownProviderProcess(child);
+        expect(Date.now() - startedAt).toBeLessThan(750);
+      } finally {
+        try {
+          process.kill(-supervisorPid!, "SIGKILL");
+        } catch {
+          // Ordinary cleanup already removed the process group.
+        }
+      }
+    }
+  );
 });
 
 async function waitForFileContent(filePath: string): Promise<string> {

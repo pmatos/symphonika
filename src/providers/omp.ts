@@ -14,6 +14,7 @@ import type {
   ProviderRunInput
 } from "../provider.js";
 import {
+  providerProcessExitResult,
   shutdownProviderProcess,
   spawnProviderProcess
 } from "./provider-process.js";
@@ -97,14 +98,18 @@ export function createOmpProvider(
 
       activeRun.queue?.discardBeforeFrameLimits();
       const child = activeRun.child;
-      return shutdownProviderProcess(child, () => {
-        if (!child.stdin.destroyed && child.stdin.writable) {
-          writeJson(child, {
-            id: requestId(activeRun),
-            type: "abort"
-          });
-        }
-      });
+      return shutdownProviderProcess(
+        child,
+        () => {
+          if (!child.stdin.destroyed && child.stdin.writable) {
+            writeJson(child, {
+              id: requestId(activeRun),
+              type: "abort"
+            });
+          }
+        },
+        "cancellation"
+      );
     },
     name: "omp",
     runAttempt: async function* (
@@ -1048,7 +1053,7 @@ export function createProcessQueue(
     push({ error, kind: "error" });
   });
   child.once("close", (exitCode, signal) => {
-    closeResult = { exitCode, signal };
+    closeResult = providerProcessExitResult(child, exitCode, signal);
     // A destroyed stdout never emits 'end'; treat close as terminal either way.
     stdoutEnded = true;
     finishStdout();

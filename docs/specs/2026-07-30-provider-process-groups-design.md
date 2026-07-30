@@ -75,6 +75,11 @@ promise remains pending until the group is found absent or the `SIGKILL`
 escalation completes, so daemon shutdown cannot exit while the final cleanup
 timer is still outstanding. A courtesy registered after stdin EOF is skipped;
 it is no longer safe or useful to write a protocol frame to the ended stream.
+Explicit cancellation retains both grace periods. Ordinary terminal cleanup
+instead watches the supervisor's provider-exited report: once the provider has
+actually exited, it immediately kills the remaining guardian and descendants
+while preserving the provider's original exit code or signal for normalized
+events.
 Bulk Watchdog and active-run reconciliation sweeps start independent
 cancellations without awaiting each grace period in sequence, then await the
 collected cleanup promises before completing the sweep.
@@ -214,6 +219,8 @@ The change is complete when:
   duplicate escalation sequences.
 - Shutdown completion covers the forced-kill grace period, and no courtesy is
   written after stdin EOF.
+- Ordinary terminal cleanup exits promptly after the provider does, preserves
+  its exit result, and still removes the remaining process group.
 - Bulk Watchdog and active-run reconciliation cancellation latency is bounded
   by the slowest independent cleanup rather than the sum of all grace periods.
 - Provider-level regressions prove a forked grandchild exits after

@@ -1556,17 +1556,16 @@ export class RunStore {
       if (row === undefined) {
         throw new Error("routine fan-out identity could not be persisted");
       }
-      if (inserted.changes > 0) {
-        const insertTarget = this.database.prepare(
-          [
-            "insert into routine_fanout_targets (",
-            "fanout_id, project_name, disposition, created_at, updated_at",
-            ") values (?, ?, 'pending', ?, ?)"
-          ].join(" ")
-        );
-        for (const projectName of input.projectNames) {
-          insertTarget.run(row.id, projectName, now, now);
-        }
+      const insertTarget = this.database.prepare(
+        [
+          "insert into routine_fanout_targets (",
+          "fanout_id, project_name, disposition, created_at, updated_at",
+          ") values (?, ?, 'pending', ?, ?)",
+          "on conflict(fanout_id, project_name) do nothing"
+        ].join(" ")
+      );
+      for (const projectName of input.projectNames) {
+        insertTarget.run(row.id, projectName, now, now);
       }
       return { created: inserted.changes > 0, id: row.id };
     });

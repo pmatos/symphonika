@@ -12,6 +12,7 @@ export type GitHubIssueRepositoryInput = {
 };
 
 export type GitHubIssuesListInput = GitHubIssueRepositoryInput & {
+  since?: string;
   state: "all" | "closed" | "open";
 };
 
@@ -313,6 +314,7 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
       owner: input.owner,
       per_page: 100,
       repo: input.repo,
+      ...(input.since === undefined ? {} : { since: input.since }),
       state: input.state
     });
   }

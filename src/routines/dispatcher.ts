@@ -90,6 +90,12 @@ type RoutineTerminalOutcome =
   | { kind: "failed"; reason: string }
   | { kind: "succeeded"; reason: string };
 
+// A single firing's before/after GitHub snapshots are captured minutes apart
+// at most, so bounding `state: "all"` issue pagination to this window (well
+// above any realistic firing duration) avoids paginating a repository's
+// entire issue/PR history on every firing.
+const ISSUE_SNAPSHOT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 type CapturedRoutineGithubSnapshot = {
   issuesAvailable: boolean;
   pullRequests: RawGitHubPullRequest[];
@@ -384,6 +390,7 @@ export async function dispatchDueRoutines(
           env: input.env ?? process.env,
           githubIssuesApi: input.githubIssuesApi,
           logger: input.logger,
+          now,
           prepareRoutineWorkspace,
           project,
           provider,
@@ -433,6 +440,7 @@ async function runRoutineFiring(input: {
   firingId: string;
   githubIssuesApi: GitHubIssuesApi | undefined;
   logger: Logger | undefined;
+  now: Date;
   prepareRoutineWorkspace: (
     input: PrepareRoutineWorkspaceInput
   ) => Promise<PreparedRoutineWorkspace>;
@@ -449,6 +457,12 @@ async function runRoutineFiring(input: {
   let rawLogPath: string | undefined;
   let normalizedLogPath: string | undefined;
   let githubBefore: CapturedRoutineGithubSnapshot | null = null;
+  // Bounds `state: "all"` issue pagination to records that could plausibly
+  // have changed during this firing, instead of the repository's entire
+  // issue/PR history (a single firing runs for at most this window).
+  const githubSnapshotSince = new Date(
+    input.now.getTime() - ISSUE_SNAPSHOT_WINDOW_MS
+  ).toISOString();
   try {
     input.runStore.updateRoutineFiringState(
       input.firingId,
@@ -510,7 +524,8 @@ async function runRoutineFiring(input: {
       kind: input.routine.kind,
       logger: input.logger,
       project: input.project,
-      routineName: input.routine.name
+      routineName: input.routine.name,
+      since: githubSnapshotSince
     });
 
     for await (const event of input.provider.runAttempt({
@@ -561,7 +576,8 @@ async function runRoutineFiring(input: {
             kind: input.routine.kind,
             logger: input.logger,
             project: input.project,
-            routineName: input.routine.name
+            routineName: input.routine.name,
+            since: githubSnapshotSince
           });
     const githubObservation = routineGithubObservation(
       githubBefore,
@@ -627,7 +643,8 @@ async function runRoutineFiring(input: {
             kind: input.routine.kind,
             logger: input.logger,
             project: input.project,
-            routineName: input.routine.name
+            routineName: input.routine.name,
+            since: githubSnapshotSince
           });
     const githubObservation = routineGithubObservation(
       githubBefore,
@@ -794,6 +811,7 @@ async function captureRoutineGithubSnapshot(input: {
   logger: Logger | undefined;
   project: RunControllerProjectConfig;
   routineName: string;
+  since: string;
 }): Promise<CapturedRoutineGithubSnapshot | null> {
   if (input.project.tracker === undefined) {
     input.logger?.info(
@@ -824,6 +842,7 @@ async function captureRoutineGithubSnapshot(input: {
     const listed = await tryListIssues(input.githubIssuesApi, {
       owner: input.project.tracker.owner,
       repo: input.project.tracker.repo,
+      since: input.since,
       state: "all",
       token
     });

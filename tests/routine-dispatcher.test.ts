@@ -521,6 +521,7 @@ describe("RoutineFiringDispatcher", () => {
       expect(listIssues).toHaveBeenCalledWith({
         owner: "pmatos",
         repo: "alpha",
+        since: "2026-05-21T10:00:00.000Z",
         state: "all",
         token: "secret-token"
       });

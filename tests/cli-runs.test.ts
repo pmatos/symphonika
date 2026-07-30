@@ -1696,6 +1696,237 @@ describe("CLI run commands", () => {
     ]);
   });
 
+  it("fire-now discovers the daemon and forwards Project and force selection", async () => {
+    const stateRoot = await makeTempRoot();
+    const cfg = path.join(stateRoot, "symphonika.yml");
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    await mkdir(resolvedStateRoot, { recursive: true });
+    await writeFile(
+      path.join(resolvedStateRoot, "daemon.json"),
+      JSON.stringify({ url: "http://127.0.0.1:3030" }),
+      "utf8"
+    );
+    const requests: Array<{ method: string; url: string }> = [];
+    const { output, program } = captureProgram(stateRoot, {
+      fetch: (input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        requests.push({ method: init?.method ?? "GET", url });
+        if (url.endsWith("/api/status")) {
+          return Promise.resolve(
+            Response.json({ stateRoot: resolvedStateRoot })
+          );
+        }
+        return Promise.resolve(
+          Response.json(
+            {
+              firingId: "manual-fire-1",
+              kind: "accepted",
+              projectName: "alpha",
+              routineName: "daily-report",
+              state: "queued"
+            },
+            { status: 202 }
+          )
+        );
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "fire-now",
+      "daily-report",
+      "--project",
+      "alpha",
+      "--force",
+      "--config",
+      cfg
+    ]);
+
+    expect(output.stderr).toBe("");
+    expect(output.stdout).toContain(
+      "fired daily-report for alpha: manual-fire-1"
+    );
+    expect(requests).toEqual([
+      { method: "GET", url: "http://127.0.0.1:3030/api/status" },
+      {
+        method: "POST",
+        url: "http://127.0.0.1:3030/api/routines/daily-report/fire?project=alpha&force=true"
+      }
+    ]);
+  });
+
+  it("fire-now --wait blocks for terminal state and exits non-zero on failure", async () => {
+    const stateRoot = await makeTempRoot();
+    const cfg = path.join(stateRoot, "symphonika.yml");
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    await mkdir(resolvedStateRoot, { recursive: true });
+    await writeFile(
+      path.join(resolvedStateRoot, "daemon.json"),
+      JSON.stringify({ url: "http://127.0.0.1:3030" }),
+      "utf8"
+    );
+    let historyReads = 0;
+    const requests: Array<{ method: string; url: string }> = [];
+    const { output, program } = captureProgram(stateRoot, {
+      fetch: (input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        requests.push({ method: init?.method ?? "GET", url });
+        if (url.endsWith("/api/status")) {
+          return Promise.resolve(
+            Response.json({ stateRoot: resolvedStateRoot })
+          );
+        }
+        if (url.includes("/firings?")) {
+          historyReads += 1;
+          return Promise.resolve(
+            Response.json({
+              firings: [
+                {
+                  id: "manual-fire-1",
+                  state: historyReads === 1 ? "running" : "failed",
+                  terminalReason: historyReads === 1 ? null : "process_exit_1"
+                }
+              ]
+            })
+          );
+        }
+        return Promise.resolve(
+          Response.json(
+            {
+              firingId: "manual-fire-1",
+              kind: "accepted",
+              projectName: "alpha",
+              routineName: "daily-report",
+              state: "queued"
+            },
+            { status: 202 }
+          )
+        );
+      }
+    });
+
+    await expect(
+      program.parseAsync([
+        "node",
+        "symphonika",
+        "fire-now",
+        "daily-report",
+        "--project",
+        "alpha",
+        "--wait",
+        "--config",
+        cfg
+      ])
+    ).rejects.toThrow();
+
+    expect(output.stdout).toContain(
+      "firing manual-fire-1 failed: process_exit_1"
+    );
+    expect(output.stderr).toContain("fire-now failed: process_exit_1");
+    expect(requests).toEqual([
+      { method: "GET", url: "http://127.0.0.1:3030/api/status" },
+      {
+        method: "POST",
+        url: "http://127.0.0.1:3030/api/routines/daily-report/fire?project=alpha"
+      },
+      {
+        method: "GET",
+        url: "http://127.0.0.1:3030/api/routines/daily-report/firings?include_inactive=true&project=alpha"
+      },
+      {
+        method: "GET",
+        url: "http://127.0.0.1:3030/api/routines/daily-report/firings?include_inactive=true&project=alpha"
+      }
+    ]);
+  });
+
+  it("fire-now --wait keeps waiting for a terminal state after the routine goes inactive", async () => {
+    const stateRoot = await makeTempRoot();
+    const cfg = path.join(stateRoot, "symphonika.yml");
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    await mkdir(resolvedStateRoot, { recursive: true });
+    await writeFile(
+      path.join(resolvedStateRoot, "daemon.json"),
+      JSON.stringify({ url: "http://127.0.0.1:3030" }),
+      "utf8"
+    );
+    let historyReads = 0;
+    const { output, program } = captureProgram(stateRoot, {
+      fetch: (input: string | URL | Request) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        if (url.endsWith("/api/status")) {
+          return Promise.resolve(
+            Response.json({ stateRoot: resolvedStateRoot })
+          );
+        }
+        if (url.includes("/firings?")) {
+          // A routine whose Project got disabled mid-firing only remains
+          // reachable via include_inactive=true; the in-flight firing must
+          // still be waited on to a terminal state.
+          if (!url.includes("include_inactive=true")) {
+            return Promise.resolve(
+              Response.json({ error: "routine not found" }, { status: 404 })
+            );
+          }
+          historyReads += 1;
+          return Promise.resolve(
+            Response.json({
+              firings: [
+                {
+                  id: "manual-fire-1",
+                  state: historyReads === 1 ? "running" : "succeeded",
+                  terminalReason: null
+                }
+              ]
+            })
+          );
+        }
+        return Promise.resolve(
+          Response.json(
+            {
+              firingId: "manual-fire-1",
+              kind: "accepted",
+              projectName: "alpha",
+              routineName: "daily-report",
+              state: "queued"
+            },
+            { status: 202 }
+          )
+        );
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "fire-now",
+      "daily-report",
+      "--project",
+      "alpha",
+      "--wait",
+      "--config",
+      cfg
+    ]);
+
+    expect(output.stdout).toContain("firing manual-fire-1 succeeded");
+  });
+
   it("poll-now refuses a daemon endpoint for another state root", async () => {
     const stateRoot = await makeTempRoot();
     const requests: string[] = [];

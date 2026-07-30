@@ -175,6 +175,43 @@ describe("routine operator surfaces", () => {
     }
   });
 
+  it("names every Project candidate when Routine firing history is ambiguous", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines(
+        ["alpha", "beta"].map((projectName) => ({
+          kind: "report" as const,
+          name: "daily-report",
+          prompt: "Report.",
+          projectName,
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: `/tmp/${projectName}-daily-report.md`
+        }))
+      );
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/api/routines/daily-report/firings");
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        candidates: [
+          { projectName: "alpha", routineName: "daily-report" },
+          { projectName: "beta", routineName: "daily-report" }
+        ],
+        error:
+          "routine daily-report is ambiguous; candidates: alpha/daily-report, beta/daily-report; provide the project query parameter"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("POST /api/runs/:id/cancel cancels a routine firing via the store-only fallback", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

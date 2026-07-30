@@ -1717,13 +1717,89 @@ describe("CLI run commands", () => {
       },
       {
         method: "GET",
-        url: "http://127.0.0.1:3030/api/routines/daily-report/firings?project=alpha"
+        url: "http://127.0.0.1:3030/api/routines/daily-report/firings?include_inactive=true&project=alpha"
       },
       {
         method: "GET",
-        url: "http://127.0.0.1:3030/api/routines/daily-report/firings?project=alpha"
+        url: "http://127.0.0.1:3030/api/routines/daily-report/firings?include_inactive=true&project=alpha"
       }
     ]);
+  });
+
+  it("fire-now --wait keeps waiting for a terminal state after the routine goes inactive", async () => {
+    const stateRoot = await makeTempRoot();
+    const cfg = path.join(stateRoot, "symphonika.yml");
+    const resolvedStateRoot = path.join(stateRoot, ".symphonika");
+    await mkdir(resolvedStateRoot, { recursive: true });
+    await writeFile(
+      path.join(resolvedStateRoot, "daemon.json"),
+      JSON.stringify({ url: "http://127.0.0.1:3030" }),
+      "utf8"
+    );
+    let historyReads = 0;
+    const { output, program } = captureProgram(stateRoot, {
+      fetch: (input: string | URL | Request) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        if (url.endsWith("/api/status")) {
+          return Promise.resolve(
+            Response.json({ stateRoot: resolvedStateRoot })
+          );
+        }
+        if (url.includes("/firings?")) {
+          // A routine whose Project got disabled mid-firing only remains
+          // reachable via include_inactive=true; the in-flight firing must
+          // still be waited on to a terminal state.
+          if (!url.includes("include_inactive=true")) {
+            return Promise.resolve(
+              Response.json({ error: "routine not found" }, { status: 404 })
+            );
+          }
+          historyReads += 1;
+          return Promise.resolve(
+            Response.json({
+              firings: [
+                {
+                  id: "manual-fire-1",
+                  state: historyReads === 1 ? "running" : "succeeded",
+                  terminalReason: null
+                }
+              ]
+            })
+          );
+        }
+        return Promise.resolve(
+          Response.json(
+            {
+              firingId: "manual-fire-1",
+              kind: "accepted",
+              projectName: "alpha",
+              routineName: "daily-report",
+              state: "queued"
+            },
+            { status: 202 }
+          )
+        );
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "fire-now",
+      "daily-report",
+      "--project",
+      "alpha",
+      "--wait",
+      "--config",
+      cfg
+    ]);
+
+    expect(output.stdout).toContain("firing manual-fire-1 succeeded");
   });
 
   it("poll-now refuses a daemon endpoint for another state root", async () => {

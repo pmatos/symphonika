@@ -1524,7 +1524,10 @@ async function waitForRoutineFiring(
 ): Promise<
   { error: string; ok: false } | { ok: true; status: RoutineFiringWaitStatus }
 > {
-  const query = new URLSearchParams({ project: firing.projectName });
+  const query = new URLSearchParams({
+    include_inactive: "true",
+    project: firing.projectName
+  });
   const url = `${daemonUrl}/api/routines/${encodeURIComponent(
     firing.routineName
   )}/firings?${query.toString()}`;

@@ -516,7 +516,16 @@ still do.
 
 ## 15. Level 3: wait, repair, and merge
 
-After the implementation agent opens a PR, the Workflow can park until GitHub state changes:
+Before copying this workflow, add the repair prompt used by its `repair` state:
+
+```text
+prompts/
+  repair.md
+```
+
+Tell the repair agent to inspect failing checks and review feedback, update the existing branch and
+PR, run the Project's checks, commit, and push the fixes. After the implementation agent opens a PR,
+the Workflow can park until GitHub state changes:
 
 ```yaml
 workflow:
@@ -598,8 +607,7 @@ The `wait` state launches no provider. Every daemon tick refreshes the tracked P
 signals for checks, mergeability, review decision, unresolved threads, open state, and merged
 state. If no transition matches—for example, checks are pending—the Run stays parked.
 
-The repair prompt must update the existing branch and PR. After it exits, the graph returns to the
-wait state.
+After the repair prompt exits, the graph returns to the wait state.
 
 `merge_pr` also parks. It merges only a PR associated with the Symphonika issue branch and only
 when the service-level merge policy allows it. For this example, change:

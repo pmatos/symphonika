@@ -191,6 +191,82 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("reopens an already-sent fan-out's notification when a late target joins", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      const declaration = {
+        kind: "report" as const,
+        name: "refactor-audit",
+        prompt: "Audit.",
+        provider: "codex" as const,
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: "/tmp/refactor-audit.md"
+      };
+      store.syncRoutines([{ ...declaration, projectName: "alpha" }]);
+      store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      expect(
+        store.claimRoutineFiring({
+          fanoutId: "fanout-1",
+          firedAt: "2026-05-22T10:00:01.000Z",
+          firingId: "fire-alpha",
+          projectName: "alpha",
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName: "refactor-audit"
+        })
+      ).toBe(true);
+      store.completeRoutineFiring({ id: "fire-alpha", state: "succeeded" });
+      expect(store.listReadyRoutineFanouts()).toEqual([
+        expect.objectContaining({ id: "fanout-1" })
+      ]);
+      expect(store.claimRoutineFanoutNotification("fanout-1")).toBe(true);
+      store.completeRoutineFanoutNotification({ id: "fanout-1" });
+      expect(store.getRoutineFanout("fanout-1")).toMatchObject({
+        notificationState: "sent"
+      });
+
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      const expanded = store.ensureRoutineFanout({
+        id: "fanout-1-ignored-because-already-exists",
+        projectNames: ["alpha", "beta"],
+        routineName: "refactor-audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      expect(expanded).toEqual({ created: false, id: "fanout-1" });
+      expect(store.getRoutineFanout("fanout-1")).toMatchObject({
+        notificationState: "pending"
+      });
+      expect(store.listReadyRoutineFanouts()).toEqual([]);
+
+      expect(
+        store.claimRoutineFiring({
+          fanoutId: "fanout-1",
+          firedAt: "2026-05-22T10:00:02.000Z",
+          firingId: "fire-beta",
+          projectName: "beta",
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName: "refactor-audit"
+        })
+      ).toBe(true);
+      store.completeRoutineFiring({ id: "fire-beta", state: "succeeded" });
+      expect(store.listReadyRoutineFanouts()).toEqual([
+        expect.objectContaining({ id: "fanout-1" })
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("correlates firing and skip legs and exposes a fan-out only when every target is terminal", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

@@ -1549,10 +1549,13 @@ export class RunStore {
         .run(input.id, input.routineName, input.scheduledAt, now, now);
       const row = this.database
         .prepare(
-          "select id from routine_fanouts where routine_name = ? and scheduled_at = ?"
+          [
+            "select id, notification_state from routine_fanouts",
+            "where routine_name = ? and scheduled_at = ?"
+          ].join(" ")
         )
         .get(input.routineName, input.scheduledAt) as
-        { id: string } | undefined;
+        { id: string; notification_state: string } | undefined;
       if (row === undefined) {
         throw new Error("routine fan-out identity could not be persisted");
       }
@@ -1564,8 +1567,27 @@ export class RunStore {
           "on conflict(fanout_id, project_name) do nothing"
         ].join(" ")
       );
+      let addedLateTarget = false;
       for (const projectName of input.projectNames) {
-        insertTarget.run(row.id, projectName, now, now);
+        const targetInserted = insertTarget.run(row.id, projectName, now, now);
+        if (targetInserted.changes > 0) {
+          addedLateTarget = true;
+        }
+      }
+      // A target added after the fan-out's summary already went out (e.g. a
+      // Project joining a one-shot Routine mid-flight) must reopen delivery,
+      // or listReadyRoutineFanouts() will never revisit an already-'sent'
+      // fan-out and the late target's result is dropped from the summary.
+      if (addedLateTarget && row.notification_state === "sent") {
+        this.database
+          .prepare(
+            [
+              "update routine_fanouts set notification_state = 'pending',",
+              "notification_error = null, updated_at = ?",
+              "where id = ? and notification_state = 'sent'"
+            ].join(" ")
+          )
+          .run(now, row.id);
       }
       return { created: inserted.changes > 0, id: row.id };
     });

@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import type { RoutineFiringStatus, RunStore } from "../run-store.js";
+import { routineFiringBranchName } from "./workspace.js";
 
 const execFileAsync = promisify(execFile);
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -104,9 +105,30 @@ async function reclaimRegisteredWorktree(
     if (workspaceExists || registeredPaths.has(workspacePath)) {
       throw removeError;
     }
+    await deleteRoutineFiringBranch(cachePath, firing);
     return;
   }
   await git(["-C", cachePath, "worktree", "prune"]);
+  await deleteRoutineFiringBranch(cachePath, firing);
+}
+
+async function deleteRoutineFiringBranch(
+  cachePath: string,
+  firing: RoutineFiringStatus
+): Promise<void> {
+  const branchName = routineFiringBranchName({
+    firingId: firing.id,
+    projectName: firing.projectName,
+    routineName: firing.routineName
+  });
+  try {
+    await git(["-C", cachePath, "branch", "-D", branchName]);
+  } catch (error) {
+    if (isBranchNotFoundError(error)) {
+      return;
+    }
+    throw error;
+  }
 }
 
 function routineWorkspacePlan(firing: RoutineFiringStatus): {
@@ -181,4 +203,8 @@ function pruneEntry(firing: RoutineFiringStatus): RoutineWorkspacePruneEntry {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+function isBranchNotFoundError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("not found");
 }

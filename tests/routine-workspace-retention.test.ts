@@ -159,6 +159,89 @@ describe("routine firing workspace retention", () => {
       reopened.close();
     }
   });
+
+  it("deletes the deterministic kind: git branch after reclaiming its worktree, tolerating firings without one", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const stateRoot = path.join(root, "state");
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const configPath = path.join(root, "symphonika.yml");
+    await writeServiceConfig({
+      configPath,
+      remotePath,
+      stateRoot,
+      workspaceRoot
+    });
+    const prepared = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId: "fire-git-branch",
+      kind: "git",
+      project: {
+        name: "alpha",
+        workspace: {
+          git: { base_branch: "main", remote: remotePath },
+          root: workspaceRoot
+        }
+      },
+      routineName: "dependency-update"
+    });
+
+    const store = openRunStore({ stateRoot });
+    store.syncRoutines([
+      {
+        kind: "git",
+        name: "dependency-update",
+        prompt: "Update dependencies.",
+        projectName: "alpha",
+        provider: "codex",
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: "/tmp/dependency-update.md"
+      }
+    ]);
+    store.createRoutineFiring({
+      id: "fire-git-branch",
+      projectName: "alpha",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      routineName: "dependency-update"
+    });
+    store.completeRoutineFiring({
+      id: "fire-git-branch",
+      state: "succeeded",
+      workspacePath: prepared.workspacePath
+    });
+    store.close();
+
+    await expect(
+      branchExists(prepared.cachePath, prepared.branchName)
+    ).resolves.toBe(true);
+
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({ registerSignalHandlers: false });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+    program.exitOverride();
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "prune-workspaces",
+      "--config",
+      configPath
+    ]);
+
+    expect(output.stderr).toBe("");
+    expect(output.stdout).toContain("pruned: fire-git-branch");
+    await expect(
+      branchExists(prepared.cachePath, prepared.branchName)
+    ).resolves.toBe(false);
+  });
 });
 
 async function makeTempRoot(): Promise<string> {
@@ -236,4 +319,22 @@ async function worktreePaths(cachePath: string): Promise<string[]> {
 async function git(args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args);
   return stdout.trim();
+}
+
+async function branchExists(
+  cachePath: string,
+  branchName: string
+): Promise<boolean> {
+  try {
+    await git([
+      "-C",
+      cachePath,
+      "show-ref",
+      "--verify",
+      `refs/heads/${branchName}`
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
 }

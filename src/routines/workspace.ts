@@ -42,13 +42,11 @@ export async function prepareRoutineWorkspace(
   const baseRef = `refs/remotes/origin/${input.project.workspace.git.base_branch}`;
   const branchName =
     input.kind === "git"
-      ? [
-          "sym",
-          slugifyWorkspaceSegment(input.project.name, "project"),
-          "routine",
-          slugifyWorkspaceSegment(input.routineName, "routine"),
-          input.firingId.slice(0, 10)
-        ].join("/")
+      ? routineFiringBranchName({
+          firingId: input.firingId,
+          projectName: input.project.name,
+          routineName: input.routineName
+        })
       : input.project.workspace.git.base_branch;
   const branchRef = input.kind === "git" ? `refs/heads/${branchName}` : baseRef;
   await ensureRepositoryCache(input.project, cachePath);
@@ -94,6 +92,20 @@ export async function prepareRoutineWorkspace(
     reused: false,
     workspacePath
   };
+}
+
+export function routineFiringBranchName(input: {
+  firingId: string;
+  projectName: string;
+  routineName: string;
+}): string {
+  return [
+    "sym",
+    slugifyWorkspaceSegment(input.projectName, "project"),
+    "routine",
+    slugifyWorkspaceSegment(input.routineName, "routine"),
+    input.firingId.slice(0, 10)
+  ].join("/");
 }
 
 async function exists(filePath: string): Promise<boolean> {

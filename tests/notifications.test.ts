@@ -194,6 +194,41 @@ describe("Routine Firing notifications", () => {
       state: "failed"
     });
   });
+
+  it("bounds a stalled delivery instead of hanging indefinitely", async () => {
+    const previousTimeout = process.env.SYMPHONIKA_SMTP_DELIVERY_TIMEOUT_MS;
+    process.env.SYMPHONIKA_SMTP_DELIVERY_TIMEOUT_MS = "20";
+    try {
+      const deliver = vi.fn(() => new Promise<void>(() => {}));
+
+      const outcome = await deliverRoutineFiringNotification({
+        config: {
+          from: "symphonika@example.com",
+          on: "always",
+          smtpHost: "smtp.example.com",
+          smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+          smtpPort: 587,
+          smtpSecurity: "starttls",
+          to: "operator@example.com"
+        },
+        firing: routineFiringFixture(),
+        notifyEnabled: true,
+        sink: { deliver }
+      });
+
+      expect(deliver).toHaveBeenCalledTimes(2);
+      expect(outcome).toEqual({
+        error: "notification delivery timed out after 20ms",
+        state: "failed"
+      });
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.SYMPHONIKA_SMTP_DELIVERY_TIMEOUT_MS;
+      } else {
+        process.env.SYMPHONIKA_SMTP_DELIVERY_TIMEOUT_MS = previousTimeout;
+      }
+    }
+  });
 });
 
 function routineFiringFixture(): RoutineFiringNotification {

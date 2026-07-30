@@ -38,13 +38,60 @@ export async function deliverRoutineFiringNotification(input: {
   let lastError = "notification delivery failed";
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      await input.sink.deliver(message);
+      await deliverWithTimeout(input.sink, message);
       return { state: "sent" };
     } catch (error) {
       lastError = errorMessage(error);
     }
   }
   return { error: lastError, state: "failed" };
+}
+
+// A stalled or unreachable SMTP relay must not hang delivery indefinitely:
+// dispatchDueRoutines awaits this call, and that promise is tracked by the
+// daemon's shutdown drain (see src/daemon.ts's inflightDispatches), so an
+// unbounded wait here would delay graceful shutdown by as long as the
+// relay stays unresponsive.
+function deliverWithTimeout(
+  sink: NotificationSink,
+  message: NotificationMessage
+): Promise<void> {
+  const timeoutMs = smtpDeliveryTimeoutMs();
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(new Error(`notification delivery timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref();
+
+    sink.deliver(message).then(
+      () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      },
+      (error: unknown) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    );
+  });
+}
+
+function smtpDeliveryTimeoutMs(): number {
+  const envTimeout = Number(process.env.SYMPHONIKA_SMTP_DELIVERY_TIMEOUT_MS);
+  return Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 15_000;
 }
 
 export function renderRoutineFiringNotification(

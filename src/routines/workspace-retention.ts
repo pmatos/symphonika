@@ -104,11 +104,12 @@ async function reclaimRegisteredWorktree(
       workspacePath
     ]);
   } catch (removeError) {
+    const workspaceExists = await exists(workspacePath);
+    if (!workspaceExists && !(await isUsableRepositoryCache(cachePath))) {
+      return;
+    }
     await git(["-C", cachePath, "worktree", "prune"]);
-    const [workspaceExists, registeredPaths] = await Promise.all([
-      exists(workspacePath),
-      listRegisteredWorktrees(cachePath)
-    ]);
+    const registeredPaths = await listRegisteredWorktrees(cachePath);
     if (workspaceExists || registeredPaths.has(workspacePath)) {
       throw removeError;
     }
@@ -117,6 +118,17 @@ async function reclaimRegisteredWorktree(
   }
   await git(["-C", cachePath, "worktree", "prune"]);
   await deleteRoutineFiringBranch(cachePath, firing);
+}
+
+async function isUsableRepositoryCache(cachePath: string): Promise<boolean> {
+  try {
+    return (
+      (await git(["-C", cachePath, "rev-parse", "--is-bare-repository"])) ===
+      "true"
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function deleteRoutineFiringBranch(

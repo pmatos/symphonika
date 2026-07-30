@@ -43,7 +43,10 @@ the Orchestrator does not bypass the lock or fall back to plain directory deleti
 firing, reclamation also deletes its deterministic local branch (`git branch -D`) from the shared
 bare cache once the worktree is gone, since that branch otherwise has no further purpose and would
 otherwise grow the same shared cache this ADR bounds. A `kind: report` firing was never given a
-branch, so this step is a no-op for it.
+branch, so this step is a no-op for it. When workspace preparation failed before creating either the
+planned workspace or a usable bare cache, retention treats the absent workspace as already
+reclaimed and records that outcome; an existing workspace with an absent or unusable cache remains
+an error and is never removed as a plain directory.
 
 The Run Store retains `workspace_path` and records `workspace_pruned_at`. Operator surfaces can
 therefore show the historical path as `pruned` rather than interpreting a missing path as damage.

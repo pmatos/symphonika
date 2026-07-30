@@ -254,7 +254,8 @@ mutable live configuration.
 
 When Routine Workspace Retention reclaims a terminal firing's worktree, the firing keeps its
 historical workspace path and records `workspace_pruned_at`. State-root logs and prompt evidence are
-not part of workspace retention.
+not part of workspace retention. A planned workspace that was never created because preparation
+failed is treated as already reclaimed when its repository cache is also absent or unusable.
 
 A Routine Firing with an effective `timeout_minutes` has an absolute wall-clock deadline beginning
 when execution of the claimed firing starts. Exceeding it terminates the provider process tree and

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { renderRoutinePrompt } from "../src/routines/prompt-renderer.js";
-import { renderAutonomousPrompt } from "../src/workflow.js";
+import { renderAutonomousPrompt } from "../src/workflow/autonomous-prompt.js";
 
 const baseInput = {
   firing: {

@@ -30,7 +30,7 @@ import {
   type WatchdogIdleStatus,
   type WatchdogStatus
 } from "../watchdog-status.js";
-import type { ExpandedWorkflow } from "../workflow.js";
+import type { ExpandedWorkflow } from "../workflow/types.js";
 import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 
 export type RegisterPagesOptions = {

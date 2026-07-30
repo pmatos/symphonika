@@ -20,7 +20,7 @@ import type {
   RoutineStatus,
   TargetedRoutineDeclaration
 } from "./routines/types.js";
-import type { ExpandedWorkflow } from "./workflow.js";
+import type { ExpandedWorkflow } from "./workflow/types.js";
 
 export type RunState =
   | "queued"
@@ -607,15 +607,33 @@ export class RunStore {
     }));
   }
 
-  createContinuationRun(input: CreateRunInput & { parentRunId: string }): void {
+  // Inheriting the parent's current_state_id is only correct when the caller
+  // has already forward-stamped that parent row with the state this
+  // continuation should start at (recordWorkflowStateAdvance / createWaitingRun
+  // do this before scheduling). A caller whose "parent" is simply whatever run
+  // is currently associated with an issue/PR — e.g. PR review-followup, where
+  // the parent is by construction parked at a wait/merge_pr state — must pass
+  // inheritParentState: false so the continuation instead falls back to
+  // expandedWorkflow.initial in runAttemptLifecycle. See issue #358.
+  createContinuationRun(
+    input: CreateRunInput & {
+      inheritParentState?: boolean;
+      parentRunId: string;
+    }
+  ): void {
     this.insertRunRow({
-      ...input,
+      id: input.id,
       isContinuation: true,
+      issue: input.issue,
       parentRunId: input.parentRunId,
+      projectName: input.projectName,
       providerCommand: input.providerCommand,
       providerName: input.providerName,
       state: "queued"
     });
+    if (input.inheritParentState === false) {
+      return;
+    }
     const parent = this.database
       .prepare("select current_state_id from runs where id = ?")
       .get(input.parentRunId) as

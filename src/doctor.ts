@@ -36,12 +36,12 @@ import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import { userUnitDir } from "./service.js";
 import { resolveStateRoot } from "./state.js";
-import type { ExpandedWorkflow } from "./workflow.js";
+import type { ExpandedWorkflow } from "./workflow/types.js";
 import {
   loadExpandedWorkflow,
   resolveWorkflowFormat,
   validateExpandedWorkflowReferences
-} from "./workflow.js";
+} from "./workflow/fsm-expansion.js";
 
 export { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 

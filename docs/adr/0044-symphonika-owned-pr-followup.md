@@ -21,6 +21,14 @@ Continuation so existing status surfaces show it without a separate run-state mo
 Symphonika fingerprints the head SHA plus unresolved feedback and does not dispatch the same
 fingerprint twice; it also caps review follow-ups per PR, defaulting to three.
 
+The follow-up run's Continuation parent is "record-keeping only": it links the follow-up back to the
+tracked PR in status surfaces, but the run does not resume the parent's FSM position. The parent is
+whichever run is currently associated with the tracked PR, which for a raw FSM workflow is by
+construction parked at a `wait`/`merge_pr` state — that parked position is never a valid start state
+for a fresh follow-up dispatch. The follow-up run instead starts at the workflow's `initial` state (the
+same entry point a fresh dispatch would use), with the review context supplied only via the rendered
+prompt's follow-up section (see issue #358).
+
 PR review follow-up is workflow-owned continuation work, not label-controlled work. Once
 `dispatchReviewFollowup` confirms that the Issue is open, the Run's reservation is label-immune
 before workspace preparation or provider validation begins. Reconciliation may still cancel it for

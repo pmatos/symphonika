@@ -6,15 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { BUILTIN_WORKFLOW_TEMPLATES } from "../src/builtin-templates.js";
 import { decideNextStep } from "../src/lifecycle/state-machine-dispatch.js";
 import {
-  explainWorkflow as explainWorkflowFromFacade,
-  loadExpandedWorkflow as loadExpandedWorkflowFromFacade,
-  loadProjectWorkflow as loadProjectWorkflowFromFacade,
-  validateExpandedWorkflowReferences as validateExpandedWorkflowReferencesFromFacade
-} from "../src/workflow.js";
-import {
   explainWorkflow,
   loadExpandedWorkflow,
-  loadProjectWorkflow,
   validateExpandedWorkflowReferences
 } from "../src/workflow/fsm-expansion.js";
 import type { ExpandedWorkflow } from "../src/workflow/types.js";
@@ -33,17 +26,6 @@ afterEach(async () => {
       .splice(0)
       .map((root) => rm(root, { force: true, recursive: true }))
   );
-});
-
-describe("workflow FSM expansion facade", () => {
-  it("keeps FSM expansion exports available through the workflow facade", () => {
-    expect(loadExpandedWorkflowFromFacade).toBe(loadExpandedWorkflow);
-    expect(loadProjectWorkflowFromFacade).toBe(loadProjectWorkflow);
-    expect(validateExpandedWorkflowReferencesFromFacade).toBe(
-      validateExpandedWorkflowReferences
-    );
-    expect(explainWorkflowFromFacade).toBe(explainWorkflow);
-  });
 });
 
 describe("state machine workflow definitions", () => {

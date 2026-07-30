@@ -4,18 +4,10 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
-  loadExpandedWorkflow,
-  loadWorkflowContract as loadWorkflowContractFromFacade,
-  parseWorkflowContract as parseWorkflowContractFromFacade,
-  validateWorkflowContract as validateWorkflowContractFromFacade,
-  validateWorkflowTemplate as validateWorkflowTemplateFromFacade
-} from "../src/workflow.js";
-import {
   loadWorkflowContract,
-  parseWorkflowContract,
-  validateWorkflowContract,
-  validateWorkflowTemplate
+  parseWorkflowContract
 } from "../src/workflow/contract-loading.js";
+import { loadExpandedWorkflow } from "../src/workflow/fsm-expansion.js";
 
 const tempRoots: string[] = [];
 
@@ -34,13 +26,6 @@ afterEach(async () => {
 });
 
 describe("workflow contract loading", () => {
-  it("keeps contract-loading exports available through the workflow facade", () => {
-    expect(loadWorkflowContractFromFacade).toBe(loadWorkflowContract);
-    expect(parseWorkflowContractFromFacade).toBe(parseWorkflowContract);
-    expect(validateWorkflowContractFromFacade).toBe(validateWorkflowContract);
-    expect(validateWorkflowTemplateFromFacade).toBe(validateWorkflowTemplate);
-  });
-
   it("loads WORKFLOW.md body without prompt-adjacent front matter", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "WORKFLOW.md");

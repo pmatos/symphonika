@@ -4,10 +4,10 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
-  loadExpandedWorkflow,
   persistRunEvidence,
   renderAutonomousPrompt
-} from "../src/workflow.js";
+} from "../src/workflow/autonomous-prompt.js";
+import { loadExpandedWorkflow } from "../src/workflow/fsm-expansion.js";
 
 const tempRoots: string[] = [];
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
@@ -27,7 +27,7 @@ afterEach(async () => {
 });
 
 describe("autonomous prompt rendering", () => {
-  it("keeps rendered autonomous prompt output stable through the workflow facade", () => {
+  it("keeps rendered autonomous prompt output stable", () => {
     const rendered = renderAutonomousPrompt({
       branch: {
         name: "sym/symphonika/157-autonomous-prompt",

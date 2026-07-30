@@ -1586,6 +1586,34 @@ describe("HTTP app — runs API and pages", () => {
       });
       test.runStore.updateRunState("progressing-active", "running");
 
+      // A retry after a transient failure re-enters preparing_workspace, but
+      // the run's watchdog_samples row is keyed by run_id (not per attempt)
+      // and only gets reset once the new attempt's first running sample
+      // lands — so the prior (failed) attempt's stale idleSince is still on
+      // record here. The badge must stay absent during preparing_workspace;
+      // showing it would be a live countdown for an attempt that no longer
+      // exists.
+      test.runStore.createRun({
+        id: "retrying-preparing",
+        issue: sampleIssue({ number: 204, title: "Retrying after failure" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("retrying-preparing", "preparing_workspace");
+      test.runStore.upsertWatchdogSample({
+        idleSince: "2026-05-22T11:00:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath: "prior-attempt.ndjson",
+        outputTokensTotal: 0,
+        runId: "retrying-preparing",
+        sampledAt: "2026-05-22T11:00:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: 0
+      });
+
       const app = createHttpApp({
         getWatchdogConfig: () => ({ enabled: true, graceMinutes: 30 }),
         now: () => Date.parse("2026-05-22T12:00:00.000Z"),
@@ -1604,6 +1632,7 @@ describe("HTTP app — runs API and pages", () => {
         );
         expect(body).toContain("idle-active");
         expect(body).toContain("progressing-active");
+        expect(body).toContain("retrying-preparing");
       }
 
       const disabledApp = createHttpApp({

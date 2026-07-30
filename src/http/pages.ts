@@ -56,10 +56,15 @@ export type RegisterPagesOptions = {
 // terminated Run's last persisted sample can still show idleSince set, but
 // "time remaining before termination" no longer applies once it has already
 // terminated (see the Run-detail page's final-Progress-Signal treatment
-// instead).
+// instead). preparing_workspace is deliberately excluded even though it's
+// "active": runAttemptLifecycle enters it at the start of every attempt,
+// including a retry, but the run's watchdog_samples row is keyed by run_id
+// (not per attempt) and is only reset once the new attempt's first running
+// sample lands. Including preparing_workspace here would surface the prior
+// (failed) attempt's stale idleSince as a live countdown that has nothing to
+// do with the current attempt.
 const ACTIVE_WATCHDOG_STATES: ReadonlySet<RunState> = new Set([
   "queued",
-  "preparing_workspace",
   "running",
   "waiting"
 ]);

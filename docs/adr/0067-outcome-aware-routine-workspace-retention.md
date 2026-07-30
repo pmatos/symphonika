@@ -61,9 +61,14 @@ therefore show the historical path as `pruned` rather than interpreting a missin
 Reclamation never deletes the firing row, Routine Pull Requests, or anything under
 `<state.root>/logs/routines/<firing-id>/`; it does delete the `kind: git` firing's local branch, as
 described above. Provider logs, normalized events, and prompt evidence remain durable; retention for
-those state-root artifacts is a separate future policy. Databases migrated from the earlier
-outcome-only retention rule backfill `commits_ahead = 1` for verified commit outcomes, the subset
-that can be reconstructed without live workspace inspection.
+those state-root artifacts is a separate future policy. When a database first gains the
+`commits_ahead` column, its addition and backfill run atomically. Every historical firing not known
+to belong to a `kind: report` routine receives `commits_ahead = 1`: successful Git firings may have
+a richer canonical action, failed and cancelled Git firings were not inspected on every historical
+terminal path, and an unclassifiable row is likewise unknown rather than verified zero. The
+one-time backfill does not run after the column exists, so it cannot overwrite later inspected-zero
+evidence. Startup orphan reconciliation applies the same conservative protection to a prepared
+`kind: git` workspace whose ordinary terminal inspection was interrupted by a daemon crash.
 
 ## Consequences
 

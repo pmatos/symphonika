@@ -884,6 +884,12 @@ every commits-ahead workspace indefinitely rather than infer publication from an
 canonical action. A future publication signal or explicit destructive operator override may
 release that protection; age alone must never delete the only copy.
 
+When a pre-signal database first gains commits-ahead evidence, the column addition and backfill are
+atomic. Every historical firing not known to be a `kind: report` firing is conservatively protected;
+subsequent startups do not repeat the backfill and therefore cannot overwrite a newly inspected
+zero. Startup reconciliation similarly protects a prepared `kind: git` workspace when a daemon
+crash prevents the ordinary terminal inspection from running.
+
 After a Routine Firing reaches a terminal state, Symphonika evaluates its Routine notification
 policy. Delivery occurs after `kind: git` PR discovery, uses both plain text and an escaped HTML
 alternative, and includes the canonical outcome as one ptt-style line with action, title, URL, and

@@ -3457,6 +3457,14 @@ export class RunStore {
         "update routine_firings set",
         "state = 'failed',",
         "terminal_reason = ?,",
+        "commits_ahead = case",
+        "when workspace_path is not null and workspace_path <> '' and exists (",
+        "select 1 from routines",
+        "where routines.project_name = routine_firings.project_name",
+        "and routines.name = routine_firings.routine_name",
+        "and routines.kind = 'git'",
+        ") then 1",
+        "else commits_ahead end,",
         "updated_at = ?",
         "where id = ?"
       ].join(" ")
@@ -3854,20 +3862,38 @@ export class RunStore {
     ];
 
     const apply = this.database.transaction(() => {
+      let addedCommitsAhead = false;
       for (const [table, column, decl] of additions) {
-        this.ensureColumn(table, column, decl);
+        const added = this.ensureColumn(table, column, decl);
+        if (
+          added &&
+          table === "routine_firings" &&
+          column === "commits_ahead"
+        ) {
+          addedCommitsAhead = true;
+        }
+      }
+
+      if (addedCommitsAhead) {
+        // Rows written before commits_ahead existed were never inspected on
+        // every terminal path. Only a known report routine is a verified
+        // negative; git and unclassifiable historical rows are protected.
+        // Keep this in the column-add transaction so a crash cannot expose
+        // the default zero before the one-time backfill finishes.
+        this.database.exec(`
+          update routine_firings
+          set commits_ahead = 1
+          where not exists (
+            select 1
+            from routines
+            where routines.project_name = routine_firings.project_name
+              and routines.name = routine_firings.routine_name
+              and routines.kind = 'report'
+          );
+        `);
       }
     });
     apply();
-
-    // Before commits_ahead existed, a verified commit-only Routine Outcome
-    // was the only persisted retention signal. Preserve that known subset
-    // during migration; richer canonical outcomes cannot be reconstructed.
-    this.database.exec(`
-      update routine_firings
-      set commits_ahead = 1
-      where outcome_action = 'commit' and outcome_verified = 1;
-    `);
 
     this.database.exec(`
       create index if not exists routine_firing_workspace_retention_idx
@@ -3930,15 +3956,16 @@ export class RunStore {
     apply();
   }
 
-  private ensureColumn(table: string, column: string, decl: string): void {
+  private ensureColumn(table: string, column: string, decl: string): boolean {
     const existing = this.database
       .prepare("select name from pragma_table_info(?)")
       .all(table) as { name: string }[];
     if (existing.some((row) => row.name === column)) {
-      return;
+      return false;
     }
 
     this.database.exec(`alter table ${table} add column ${column} ${decl};`);
+    return true;
   }
 
   private recordRunTransition(

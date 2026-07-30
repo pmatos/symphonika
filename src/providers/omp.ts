@@ -13,6 +13,11 @@ import type {
   ProviderEvent,
   ProviderRunInput
 } from "../provider.js";
+import {
+  providerProcessExitResult,
+  shutdownProviderProcess,
+  spawnProviderProcess
+} from "./provider-process.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -92,14 +97,19 @@ export function createOmpProvider(
       }
 
       activeRun.queue?.discardBeforeFrameLimits();
-      if (!activeRun.child.stdin.destroyed && activeRun.child.stdin.writable) {
-        writeJson(activeRun.child, {
-          id: requestId(activeRun),
-          type: "abort"
-        });
-      }
-      shutdownProcess(activeRun.child);
-      return Promise.resolve();
+      const child = activeRun.child;
+      return shutdownProviderProcess(
+        child,
+        () => {
+          if (!child.stdin.destroyed && child.stdin.writable) {
+            writeJson(child, {
+              id: requestId(activeRun),
+              type: "abort"
+            });
+          }
+        },
+        "cancellation"
+      );
     },
     name: "omp",
     runAttempt: async function* (
@@ -125,11 +135,7 @@ export function createOmpProvider(
         return;
       }
 
-      const child = spawn(command.executable, command.args, {
-        cwd: input.workspacePath,
-        env: process.env,
-        stdio: ["pipe", "pipe", "pipe"]
-      });
+      const child = spawnProviderProcess(command, input.workspacePath);
       activeRun.child = child;
       child.stderr.resume();
       const queue = createProcessQueue(child, {
@@ -148,7 +154,7 @@ export function createOmpProvider(
         }
         if (ready.response === undefined) {
           queue.discardBeforeFrameLimits();
-          shutdownProcess(child);
+          await shutdownProviderProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
         }
@@ -167,7 +173,7 @@ export function createOmpProvider(
             raw: ready.response
           };
           queue.discardBeforeFrameLimits();
-          shutdownProcess(child);
+          await shutdownProviderProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
         }
@@ -191,7 +197,7 @@ export function createOmpProvider(
             return;
           }
           if (!negotiatedV2Response(negotiated.response)) {
-            shutdownProcess(child);
+            await shutdownProviderProcess(child);
             yield* drainUntilExit(queue, activeRun);
             return;
           }
@@ -210,7 +216,7 @@ export function createOmpProvider(
           return;
         }
         if (!successfulResponse(state.response)) {
-          shutdownProcess(child);
+          await shutdownProviderProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
         }
@@ -232,7 +238,7 @@ export function createOmpProvider(
           return;
         }
         if (!agentInvokedResponse(prompt.response)) {
-          shutdownProcess(child);
+          await shutdownProviderProcess(child);
           yield* drainUntilExit(queue, activeRun);
           return;
         }
@@ -264,7 +270,7 @@ export function createOmpProvider(
           yield event;
 
           if (isTerminalAgentEnd(event.raw)) {
-            markTerminalAgentEnd(activeRun);
+            await markTerminalAgentEnd(activeRun);
             if (terminalAgentEndBeforePrompt(item)) {
               yield terminalAgentEndBeforePromptEvent(event.raw);
               yield* drainUntilExit(queue, activeRun);
@@ -274,12 +280,12 @@ export function createOmpProvider(
 
           if (isTerminalFailure(type)) {
             activeRun.terminalEventSeen = true;
-            shutdownProcess(child);
+            await shutdownProviderProcess(child);
           }
         }
       } finally {
         activeRuns.delete(input.run.id);
-        shutdownProcess(child);
+        await shutdownProviderProcess(child);
         await processScope.stopProviderScope(input.run);
       }
     },
@@ -540,7 +546,7 @@ async function* readUntilFrame(
     }
     yield event;
     if (item.kind === "message" && isTerminalAgentEnd(item.raw)) {
-      markTerminalAgentEnd(activeRun);
+      await markTerminalAgentEnd(activeRun);
       if (terminalAgentEndBeforePrompt(item)) {
         yield terminalAgentEndBeforePromptEvent(item.raw);
         yield* drainUntilExit(queue, activeRun);
@@ -586,7 +592,7 @@ async function* readUntilResponse(
     }
     yield event;
     if (item.kind === "message" && isTerminalAgentEnd(item.raw)) {
-      markTerminalAgentEnd(activeRun);
+      await markTerminalAgentEnd(activeRun);
       if (terminalAgentEndBeforePrompt(item)) {
         yield terminalAgentEndBeforePromptEvent(item.raw);
         yield* drainUntilExit(queue, activeRun);
@@ -1047,7 +1053,7 @@ export function createProcessQueue(
     push({ error, kind: "error" });
   });
   child.once("close", (exitCode, signal) => {
-    closeResult = { exitCode, signal };
+    closeResult = providerProcessExitResult(child, exitCode, signal);
     // A destroyed stdout never emits 'end'; treat close as terminal either way.
     stdoutEnded = true;
     finishStdout();
@@ -1454,7 +1460,7 @@ async function validateOmpRpcCommand(command: {
 
     const timer = setTimeout(() => {
       settle(() => {
-        shutdownProcess(child);
+        shutdownProbeProcess(child);
         reject(new Error("Oh My Pi provider command validation timed out"));
       });
     }, ompProbeTimeoutMs());
@@ -1483,7 +1489,7 @@ async function validateOmpRpcCommand(command: {
         }
         if (item.kind === "malformed") {
           settle(() => {
-            shutdownProcess(child);
+            shutdownProbeProcess(child);
             reject(
               new Error(
                 `Oh My Pi provider command emitted malformed JSON before ready: ${item.message}`
@@ -1515,7 +1521,7 @@ async function validateOmpRpcCommand(command: {
         } catch (error) {
           queue.discardBeforeFrameLimits();
           settle(() => {
-            shutdownProcess(child);
+            shutdownProbeProcess(child);
             reject(error instanceof Error ? error : new Error(String(error)));
           });
           return;
@@ -1553,7 +1559,7 @@ async function validateOmpRpcCommand(command: {
       }
     })().catch((error: unknown) => {
       settle(() => {
-        shutdownProcess(child);
+        shutdownProbeProcess(child);
         reject(error instanceof Error ? error : new Error(String(error)));
       });
     });
@@ -1598,7 +1604,7 @@ function terminateProcess(child: ChildProcess): void {
   child.kill("SIGTERM");
 }
 
-function shutdownProcess(child: ChildProcessWithoutNullStreams): void {
+function shutdownProbeProcess(child: ChildProcessWithoutNullStreams): void {
   endStdin(child);
   const timer = setTimeout(() => {
     terminateProcess(child);
@@ -1658,14 +1664,13 @@ function terminalAgentEndBeforePromptEvent(raw: unknown): ProviderEvent {
   };
 }
 
-function markTerminalAgentEnd(activeRun: ActiveOmpRun): void {
+async function markTerminalAgentEnd(activeRun: ActiveOmpRun): Promise<void> {
   activeRun.terminalEventSeen = true;
   if (activeRun.child !== undefined) {
-    endStdin(activeRun.child);
     // Bound the child's exit even when the terminal frame arrives during a
     // handshake read: a host waiting for stdin EOF must not deadlock the
     // run, and a hung child gets the bounded SIGTERM→SIGKILL escalation.
-    shutdownProcess(activeRun.child);
+    await shutdownProviderProcess(activeRun.child);
   }
 }
 

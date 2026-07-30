@@ -13,6 +13,11 @@ import type {
   ProviderEvent,
   ProviderRunInput
 } from "../provider.js";
+import {
+  providerProcessExitResult,
+  shutdownProviderProcess,
+  spawnProviderProcess
+} from "./provider-process.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -69,8 +74,11 @@ export function createClaudeProvider(
         // post-probe recheck (see below) is what stops it from launching.
         return Promise.resolve();
       }
-      shutdownProcess(activeRun.child);
-      return Promise.resolve();
+      return shutdownProviderProcess(
+        activeRun.child,
+        undefined,
+        "cancellation"
+      );
     },
     name: "claude",
     runAttempt: async function* (
@@ -113,11 +121,7 @@ export function createClaudeProvider(
         };
         return;
       }
-      const child = spawn(command.executable, command.args, {
-        cwd: input.workspacePath,
-        env: process.env,
-        stdio: ["pipe", "pipe", "pipe"]
-      });
+      const child = spawnProviderProcess(command, input.workspacePath);
       activeRun.child = child;
       child.stderr.resume();
       const queue = createProcessQueue(child);
@@ -140,7 +144,7 @@ export function createClaudeProvider(
             }
 
             if (isTerminalFailure(type)) {
-              shutdownProcess(child);
+              await shutdownProviderProcess(child);
             }
           }
         }
@@ -549,10 +553,11 @@ function createProcessQueue(
     });
   });
   child.once("close", (exitCode, signal) => {
+    const result = providerProcessExitResult(child, exitCode, signal);
     push({
-      exitCode,
+      exitCode: result.exitCode,
       kind: "exit",
-      signal
+      signal: result.signal
     });
   });
 
@@ -615,17 +620,6 @@ function terminateProcess(child: ChildProcess): void {
   }
 
   child.kill("SIGTERM");
-}
-
-function shutdownProcess(child: ChildProcessWithoutNullStreams): void {
-  if (!child.stdin.destroyed && child.stdin.writable) {
-    child.stdin.end();
-  }
-
-  const timer = setTimeout(() => {
-    terminateProcess(child);
-  }, 250);
-  timer.unref();
 }
 
 async function validateClaudeStreamJsonCommand(command: {

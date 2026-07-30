@@ -17,6 +17,11 @@ import type {
   ProviderRunInput
 } from "../provider.js";
 import { VERSION } from "../version.js";
+import {
+  providerProcessExitResult,
+  shutdownProviderProcess,
+  spawnProviderProcess
+} from "./provider-process.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -84,19 +89,27 @@ export function createCodexProvider(
         // post-probe recheck (see below) is what stops it from launching.
         return Promise.resolve();
       }
-      if (activeRun.threadId !== undefined && activeRun.turnId !== undefined) {
-        writeJson(activeRun.child, {
-          id: activeRun.nextRequestId,
-          method: "turn/interrupt",
-          params: {
-            threadId: activeRun.threadId,
-            turnId: activeRun.turnId
+      const child = activeRun.child;
+      return shutdownProviderProcess(
+        child,
+        () => {
+          if (
+            activeRun.threadId !== undefined &&
+            activeRun.turnId !== undefined
+          ) {
+            writeJson(child, {
+              id: activeRun.nextRequestId,
+              method: "turn/interrupt",
+              params: {
+                threadId: activeRun.threadId,
+                turnId: activeRun.turnId
+              }
+            });
+            activeRun.nextRequestId += 1;
           }
-        });
-        activeRun.nextRequestId += 1;
-      }
-      shutdownProcess(activeRun.child);
-      return Promise.resolve();
+        },
+        "cancellation"
+      );
     },
     name: "codex",
     runAttempt: async function* (
@@ -142,11 +155,7 @@ export function createCodexProvider(
         };
         return;
       }
-      const child = spawn(command.executable, command.args, {
-        cwd: input.workspacePath,
-        env: process.env,
-        stdio: ["pipe", "pipe", "pipe"]
-      });
+      const child = spawnProviderProcess(command, input.workspacePath);
       activeRun.child = child;
       const spawnedRun: SpawnedCodexRun = activeRun as SpawnedCodexRun;
       child.stderr.resume();
@@ -227,7 +236,7 @@ export function createCodexProvider(
           yield protocolFailure(
             "thread/start response did not include thread.id"
           );
-          shutdownProcess(child);
+          await shutdownProviderProcess(child);
           yield* await drainUntilExit(queue, activeRun);
           return;
         }
@@ -286,7 +295,7 @@ export function createCodexProvider(
             type === "turn_completed" ||
             type === "turn_failed"
           ) {
-            shutdownProcess(child);
+            await shutdownProviderProcess(child);
           }
         }
       } finally {
@@ -326,7 +335,7 @@ async function readUntilResponse(
     if (item.kind === "message" && responseId(item.raw) === requestId) {
       if (objectField(item.raw, "error") !== undefined) {
         events.push(jsonRpcErrorEvent(item.raw));
-        shutdownProcess(activeRun.child);
+        await shutdownProviderProcess(activeRun.child);
         events.push(...(await drainUntilExit(queue, activeRun)));
         return {
           events,
@@ -350,7 +359,7 @@ async function readUntilResponse(
       };
     }
     if (isTerminalFailure(event.normalized?.type)) {
-      shutdownProcess(activeRun.child);
+      await shutdownProviderProcess(activeRun.child);
       events.push(...(await drainUntilExit(queue, activeRun)));
       return {
         events,
@@ -618,10 +627,11 @@ function createProcessQueue(
     });
   });
   child.once("close", (exitCode, signal) => {
+    const result = providerProcessExitResult(child, exitCode, signal);
     push({
-      exitCode,
+      exitCode: result.exitCode,
       kind: "exit",
-      signal
+      signal: result.signal
     });
   });
 
@@ -673,7 +683,7 @@ function terminateProcess(child: ChildProcess): void {
   child.kill("SIGTERM");
 }
 
-function shutdownProcess(child: ChildProcessWithoutNullStreams): void {
+function shutdownProbeProcess(child: ChildProcessWithoutNullStreams): void {
   if (!child.stdin.destroyed && child.stdin.writable) {
     child.stdin.end();
   }
@@ -838,7 +848,7 @@ async function validateCodexAppServerRuntime(command: {
     );
     validateCommandExecProbeResponse(commandResponse);
   } finally {
-    shutdownProcess(child);
+    shutdownProbeProcess(child);
     await rm(cwd, { force: true, recursive: true });
   }
 }

@@ -259,6 +259,71 @@ describe("reconcileActiveRuns", () => {
     });
   });
 
+  it("starts independent run cancellations without serializing their grace periods", async () => {
+    await withRunStore(async (store) => {
+      const issueA = snapshot({ state: "closed" });
+      const issueB = snapshot({ id: 2, number: 8, state: "closed" });
+      store.createRun({
+        id: "run-a",
+        issue: issueA,
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      store.createRun({
+        id: "run-b",
+        issue: issueB,
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      let resolveA: (() => void) | undefined;
+      let resolveB: (() => void) | undefined;
+      const pendingA = new Promise<void>((resolve) => {
+        resolveA = resolve;
+      });
+      const pendingB = new Promise<void>((resolve) => {
+        resolveB = resolve;
+      });
+      const cancelA = vi.fn(() => pendingA);
+      const cancelB = vi.fn(() => pendingB);
+      const registry = new ActiveRunRegistry();
+      registry.register({
+        cancel: cancelA,
+        issueNumber: issueA.number,
+        projectName: project.name,
+        runId: "run-a"
+      });
+      registry.register({
+        cancel: cancelB,
+        issueNumber: issueB.number,
+        projectName: project.name,
+        runId: "run-b"
+      });
+
+      const reconciling = reconcileActiveRuns({
+        activeRuns: registry,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: { listOpenIssues: vi.fn().mockResolvedValue([]) },
+        logger,
+        pollStatus: pollStatus([issueA, issueB]),
+        projects: new Map([[project.name, project]]),
+        runStore: store
+      });
+
+      try {
+        await vi.waitFor(() => {
+          expect(cancelA).toHaveBeenCalledOnce();
+        });
+        expect(cancelB).toHaveBeenCalledOnce();
+      } finally {
+        resolveA?.();
+        resolveB?.();
+        await reconciling;
+      }
+    });
+  });
+
   it("does not cancel when project is removed from config", async () => {
     await withRunStore(async (store) => {
       store.createRun({

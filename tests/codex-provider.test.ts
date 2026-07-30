@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -499,6 +500,283 @@ describe("Codex JSON-RPC provider", () => {
     expect(processScope.stopCalls).toEqual([{ attempt: 1, id: "run-issue-9" }]);
   });
 
+  it.skipIf(process.platform === "win32")(
+    "does not escalate after cancellation finds the process group already gone",
+    async () => {
+      const root = await makeTempRoot();
+      const workspacePath = path.join(root, "workspace");
+      await mkdir(workspacePath, { recursive: true });
+      const transcriptPath = path.join(root, "requests.jsonl");
+      const pidPath = path.join(root, "app-server.pid");
+      const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+      await writeFakeCodexAppServer(fakeServerPath, transcriptPath, pidPath);
+      const provider = createCodexProvider({
+        processScope: noopProcessScope()
+      });
+      const iterator = provider
+        .runAttempt({
+          ...providerInputFixture(),
+          provider: {
+            command: `${process.execPath} ${fakeServerPath} --scenario=wait app-server`,
+            name: "codex"
+          },
+          workspacePath
+        })
+        [Symbol.asyncIterator]();
+      await nextProviderEvent(iterator);
+      await nextProviderEvent(iterator);
+      await nextProviderEvent(iterator);
+      const pid = Number(await waitForFileContent(pidPath));
+      const processGroupId = Number(
+        execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], {
+          encoding: "utf8"
+        }).trim()
+      );
+      const realKill = process.kill.bind(process);
+      const signalSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation((targetPid, signal) => {
+          if (targetPid === -processGroupId) {
+            if (signal === "SIGTERM") {
+              try {
+                realKill(targetPid, "SIGKILL");
+              } catch {
+                // The process group is already gone.
+              }
+            }
+            throw Object.assign(new Error("no such process group"), {
+              code: "ESRCH"
+            });
+          }
+          return realKill(targetPid, signal);
+        });
+
+      try {
+        await provider.cancel("run-issue-9");
+        await collectIteratorEvents(iterator);
+        await vi.waitFor(() => {
+          expect(signalSpy).toHaveBeenCalledWith(expect.any(Number), "SIGTERM");
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+
+        expect(
+          signalSpy.mock.calls
+            .filter(([targetPid]) => targetPid === -processGroupId)
+            .map(([, signal]) => signal)
+        ).toEqual(["SIGTERM"]);
+      } finally {
+        signalSpy.mockRestore();
+      }
+    }
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "reserves the process group when interrupt exits during EOF grace",
+    async () => {
+      const root = await makeTempRoot();
+      const workspacePath = path.join(root, "workspace");
+      await mkdir(workspacePath, { recursive: true });
+      const transcriptPath = path.join(root, "requests.jsonl");
+      const pidPath = path.join(root, "app-server.pid");
+      const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+      await writeFakeCodexAppServer(fakeServerPath, transcriptPath, pidPath);
+      const provider = createCodexProvider({
+        processScope: noopProcessScope()
+      });
+      const iterator = provider
+        .runAttempt({
+          ...providerInputFixture(),
+          provider: {
+            command: `${process.execPath} ${fakeServerPath} --scenario=wait app-server`,
+            name: "codex"
+          },
+          workspacePath
+        })
+        [Symbol.asyncIterator]();
+      await nextProviderEvent(iterator);
+      await nextProviderEvent(iterator);
+      await nextProviderEvent(iterator);
+      const pid = Number(await waitForFileContent(pidPath));
+      const processGroupId = Number(
+        execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], {
+          encoding: "utf8"
+        }).trim()
+      );
+      const realKill = process.kill.bind(process);
+      const signalSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation((targetPid, signal) => {
+          if (targetPid === -processGroupId) {
+            return true;
+          }
+          return realKill(targetPid, signal);
+        });
+      let groupRemainedReserved = false;
+
+      try {
+        await provider.cancel("run-issue-9");
+        await collectIteratorEvents(iterator);
+        try {
+          realKill(-processGroupId, 0);
+          groupRemainedReserved = true;
+        } catch {
+          groupRemainedReserved = false;
+        }
+      } finally {
+        await new Promise((resolve) => setTimeout(resolve, 1_350));
+        signalSpy.mockRestore();
+        if (groupRemainedReserved) {
+          try {
+            realKill(-processGroupId, "SIGKILL");
+          } catch {
+            // The provider group already exited.
+          }
+        }
+      }
+
+      expect(groupRemainedReserved).toBe(true);
+    }
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "keeps the original process group reserved until SIGKILL escalation",
+    async () => {
+      const root = await makeTempRoot();
+      const workspacePath = path.join(root, "workspace");
+      await mkdir(workspacePath, { recursive: true });
+      const transcriptPath = path.join(root, "requests.jsonl");
+      const pidPath = path.join(root, "app-server.pid");
+      const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+      await writeFakeCodexAppServer(fakeServerPath, transcriptPath, pidPath);
+      const provider = createCodexProvider({
+        processScope: noopProcessScope()
+      });
+      const iterator = provider
+        .runAttempt({
+          ...providerInputFixture(),
+          provider: {
+            command: `${process.execPath} ${fakeServerPath} --scenario=term-exit app-server`,
+            name: "codex"
+          },
+          workspacePath
+        })
+        [Symbol.asyncIterator]();
+      await nextProviderEvent(iterator);
+      await nextProviderEvent(iterator);
+      await nextProviderEvent(iterator);
+      const pid = Number(await waitForFileContent(pidPath));
+      const processGroupId = Number(
+        execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], {
+          encoding: "utf8"
+        }).trim()
+      );
+      const realKill = process.kill.bind(process);
+      const signalSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation((targetPid, signal) => {
+          if (targetPid === -processGroupId && signal === "SIGKILL") {
+            return true;
+          }
+          return realKill(targetPid, signal);
+        });
+      let groupRemainedReserved = false;
+      let groupSignals: Array<string | number | undefined>;
+
+      try {
+        await provider.cancel("run-issue-9");
+        await collectIteratorEvents(iterator);
+        try {
+          realKill(-processGroupId, 0);
+          groupRemainedReserved = true;
+        } catch {
+          groupRemainedReserved = false;
+        }
+      } finally {
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+        groupSignals = signalSpy.mock.calls
+          .filter(([targetPid]) => targetPid === -processGroupId)
+          .map(([, signal]) => signal);
+        signalSpy.mockRestore();
+        if (groupRemainedReserved) {
+          try {
+            realKill(-processGroupId, "SIGKILL");
+          } catch {
+            // The provider group already exited.
+          }
+        }
+      }
+
+      expect(groupRemainedReserved).toBe(true);
+      expect(groupSignals).toEqual(["SIGTERM", "SIGKILL"]);
+    }
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "terminates app-server-spawned grandchildren on cancellation",
+    async () => {
+      const root = await makeTempRoot();
+      const workspacePath = path.join(root, "workspace");
+      await mkdir(workspacePath, { recursive: true });
+      const grandchildPath = path.join(root, "grandchild.mjs");
+      const grandchildPidPath = path.join(root, "grandchild.pid");
+      const fakeServerPath = path.join(root, "fake-codex-process-tree.mjs");
+      await writeFakeCodexProcessTree(
+        fakeServerPath,
+        grandchildPath,
+        grandchildPidPath
+      );
+      const provider = createCodexProvider({
+        processScope: noopProcessScope()
+      });
+      const iterator = provider
+        .runAttempt({
+          ...providerInputFixture(),
+          provider: {
+            command: `${process.execPath} ${fakeServerPath} app-server`,
+            name: "codex"
+          },
+          workspacePath
+        })
+        [Symbol.asyncIterator]();
+      let grandchildPid: number | undefined;
+
+      try {
+        const initialEvents = [
+          await nextProviderEvent(iterator),
+          await nextProviderEvent(iterator),
+          await nextProviderEvent(iterator)
+        ];
+        grandchildPid = Number(await waitForFileContent(grandchildPidPath));
+
+        await provider.cancel("run-issue-9");
+        const events = [
+          ...initialEvents,
+          ...(await collectIteratorEvents(iterator))
+        ];
+
+        expect(events.at(-1)?.normalized).toMatchObject({
+          cancelled: true,
+          type: "process_exit"
+        });
+        await waitForProcessStopped(grandchildPid);
+      } finally {
+        if (
+          grandchildPid !== undefined &&
+          Number.isSafeInteger(grandchildPid)
+        ) {
+          try {
+            process.kill(grandchildPid, "SIGKILL");
+          } catch {
+            // The provider already cleaned the process up.
+          }
+          await waitForProcessStopped(grandchildPid).catch(() => {
+            // Best-effort cleanup after an assertion failure.
+          });
+        }
+      }
+    }
+  );
+
   // Regression: wrapForProviderScope's await (up to probeTimeoutMs on an
   // uncached probe) sits between RunController's one-shot pre-start
   // cancellation recheck (ADR 0052) and the point where this provider used
@@ -813,16 +1091,19 @@ function providerInputFixture(): ProviderRunInput {
 
 async function writeFakeCodexAppServer(
   filePath: string,
-  transcriptPath: string
+  transcriptPath: string,
+  pidPath?: string
 ): Promise<void> {
   await writeFile(
     filePath,
     [
-      "import { appendFile } from 'node:fs/promises';",
+      "import { appendFile, writeFile } from 'node:fs/promises';",
       "import readline from 'node:readline';",
       "",
       "const scenarioArg = process.argv.find((arg) => arg.startsWith('--scenario='));",
       "const scenario = scenarioArg ? scenarioArg.slice('--scenario='.length) : 'success';",
+      `const pidPath = ${JSON.stringify(pidPath)};`,
+      "if (pidPath) { await writeFile(pidPath, String(process.pid), 'utf8'); }",
       "",
       "if (process.argv.includes('--help')) {",
       "  process.stdout.write('Usage: fake-codex app-server --listen <URL>\\n');",
@@ -887,7 +1168,7 @@ async function writeFakeCodexAppServer(
       "      send({ method: 'error', params: { threadId: 'thread-9', turnId: 'turn-9', error: { message: 'model exploded politely', codexErrorInfo: null, additionalDetails: null }, willRetry: false } });",
       "      continue;",
       "    }",
-      "    if (scenario === 'wait') {",
+      "    if (scenario === 'wait' || scenario === 'term-exit') {",
       "      continue;",
       "    }",
       "    send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-9', turnId: 'turn-9', itemId: 'item-1', delta: 'done' } });",
@@ -898,15 +1179,113 @@ async function writeFakeCodexAppServer(
       "  }",
       "  if (message.method === 'turn/interrupt') {",
       "    send({ id: message.id, result: {} });",
-      "    process.exit(0);",
+      "    if (scenario !== 'term-exit') { process.exit(0); }",
       "  }",
       "}",
+      "if (scenario === 'term-exit') { setInterval(() => {}, 1_000); }",
       ""
     ].join("\n"),
     "utf8"
   );
 
   process.env.SYMPHONIKA_FAKE_CODEX_TRANSCRIPT = transcriptPath;
+}
+
+async function writeFakeCodexProcessTree(
+  filePath: string,
+  grandchildPath: string,
+  grandchildPidPath: string
+): Promise<void> {
+  await writeFile(
+    grandchildPath,
+    [
+      "import { writeFileSync } from 'node:fs';",
+      "process.on('SIGTERM', () => {});",
+      `writeFileSync(${JSON.stringify(grandchildPidPath)}, String(process.pid));`,
+      "setInterval(() => {}, 1000);",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  await writeFile(
+    filePath,
+    [
+      "import { spawn } from 'node:child_process';",
+      "import readline from 'node:readline';",
+      `spawn(process.execPath, [${JSON.stringify(grandchildPath)}], { stdio: 'ignore' });`,
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "for await (const line of rl) {",
+      "  const message = JSON.parse(line);",
+      "  if (message.method === 'initialize') {",
+      "    send({ id: message.id, result: { codexHome: '/tmp/fake-codex-home', platformFamily: 'unix', platformOs: 'linux', userAgent: 'fake-codex-app-server' } });",
+      "  }",
+      "  if (message.method === 'thread/start') {",
+      "    send({ id: message.id, result: { cwd: process.cwd(), thread: { id: 'thread-9' } } });",
+      "  }",
+      "  if (message.method === 'turn/start') {",
+      "    send({ id: message.id, result: { turn: { id: 'turn-9', status: 'inProgress' } } });",
+      "  }",
+      "  if (message.method === 'turn/interrupt') {",
+      "    send({ id: message.id, result: {} });",
+      "  }",
+      "}",
+      "await new Promise(() => {});",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function waitForFileContent(filePath: string): Promise<string> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      return await readFile(filePath, "utf8");
+    } catch {
+      // The child process has not created the file yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for file ${filePath}`);
+}
+
+async function waitForProcessStopped(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (!(await processIsRunning(pid))) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for process ${pid} to stop`);
+}
+
+async function processIsRunning(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    return !hasErrorCode(error, "ESRCH");
+  }
+
+  if (process.platform !== "linux") {
+    return true;
+  }
+
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    const commandEnd = stat.lastIndexOf(")");
+    return commandEnd < 0 || stat.slice(commandEnd + 2, commandEnd + 3) !== "Z";
+  } catch (error) {
+    return !hasErrorCode(error, "ENOENT");
+  }
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code
+  );
 }
 
 async function writeFakeCodexValidator(

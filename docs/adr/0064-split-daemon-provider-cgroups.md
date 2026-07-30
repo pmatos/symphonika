@@ -33,8 +33,8 @@ TasksMax=4096
 ```
 
 `src/service.ts`'s generated `.service` unit now sets `Slice=symphonika-daemon.slice` instead of
-`Slice=symphonika.slice`. Every provider process (Codex, Claude — not their `--help`/probe
-invocations, which are short validation calls, not real work) is spawned under a transient
+`Slice=symphonika.slice`. Every real provider Run (Codex, Claude, or OMP — not their validation
+probes, which are short checks rather than agent work) is spawned under a transient
 `systemd-run --user --scope --slice=symphonika-providers.slice` scope instead of inheriting the
 daemon's own cgroup. Because cgroup v2 confines `memory.high` enforcement to the over-budget
 subtree, a provider's build-tool blowup can now only throttle tasks inside
@@ -51,26 +51,48 @@ Cancellation and normal completion both stop the run's scope explicitly
 (`systemctl --user stop <scope-unit>`), which atomically kills the scope's entire cgroup. This is
 necessary, not incidental: `systemd-run --user --scope` does not reap detached grandchildren when
 the wrapped process exits (verified empirically — a backgrounded `cargo build &` left the scope
-`active running` after the wrapped process returned). Today's `terminateProcess` helpers
-(`src/providers/codex.ts`, `src/providers/claude.ts`) only `SIGTERM` the immediate child PID, so a
-provider-spawned build tool already survives cancellation before this change; explicit scope-stop
-in the run's unconditional cleanup path — not only its cancellation path — closes that gap for both
-the operator-cancelled case and the far more common case of a Run finishing successfully while a
-background build it started keeps running.
+`active running` after the wrapped process returned).
+
+The cgroup is complemented by a process-group lifetime boundary. On POSIX, Node spawns a lightweight
+detached supervisor as the process-group and session leader; the configured provider command (or
+the `systemd-run` wrapper when available) and a stream-free guardian run inside that group. Provider
+shutdown closes stdin before OS signals, then signals the whole group with `SIGTERM` after 250 milliseconds and
+unconditionally escalates the group to `SIGKILL` after a further one-second grace period. The
+guardian ignores `SIGTERM` only during this interval, preserving the original process-group
+identity so the delayed negative-PID signal cannot follow a reused PID. Before provider-specific
+shutdown courtesy or stdin EOF, the orchestrator waits for the supervisor to acknowledge that it
+has reserved the guardian; an immediate provider exit therefore cannot release the group during
+the initial grace period either. The supervisor reports guardian readiness before launching the
+provider and suppresses that launch when shutdown is already requested. It also reports ordinary
+group release before removing the guardian, and rejects shutdown preparation once that release has
+begun. The orchestrator can therefore distinguish a pre-readiness disconnect, where no provider
+work was launched, from an unexpected supervisor exit while the guardian still reserves the group;
+the latter safely falls back to group signaling. The preparation handshake is bounded, with timeout
+fallback allowed only for a recorded live reservation. Before readiness, the supervisor suppresses
+provider launch, removes its guardian directly, and exits before cancellation completes rather than
+allowing an unverified group signal. Unexpected guardian loss fails closed by
+terminating the entire process group rather than only the direct provider.
+Escalation remains keyed on the group even when the provider has exited, because a descendant can
+ignore `SIGTERM` and retain the Workspace. An already-dead group (`ESRCH`) at the first signal is
+successful cleanup and does not arm escalation. Non-POSIX hosts retain bounded direct-child
+signaling, but only POSIX process groups provide the descendant guarantee.
+Ordinary terminal cleanup may skip the cancellation grace once the provider has actually exited:
+it immediately kills the remaining group while retaining the provider's exit result for evidence.
 
 `symphonika daemon` remains a standalone CLI command independent of `service install`
 (`src/cli.ts`), and must keep working on hosts with no systemd `--user` session (non-systemd hosts,
 containers, CI). Scope-wrapping is therefore probed once and gracefully skipped when
-`systemd-run --user` is unusable — providers spawn unwrapped in that case, exactly as they do
-today, with no new failure mode introduced for those environments.
+`systemd-run --user` is unusable — providers spawn unwrapped in that case but retain the detached
+POSIX process-group boundary, with no dependency on systemd for cancellation-time descendant
+cleanup.
 
 ## Consequences
 
 - A memory blowup in one project's provider-spawned build tools can no longer throttle the
   daemon's own event loop or the HTTP dashboard, because they no longer share a cgroup subtree.
-- Cancellation (and normal completion) now reliably tears down a provider's full process tree,
-  fixing a pre-existing orphaned-grandchild leak that this plan's isolation would otherwise have
-  only relocated rather than closed.
+- On systemd hosts, cancellation and normal completion stop the full provider cgroup. On POSIX
+  fallback hosts, cancellation still tears down the detached provider process group, fixing the
+  orphaned-grandchild leak instead of making cleanup depend on the optional user manager.
 - Operators with an already-installed (single-slice) unit see no benefit until they re-run
   `symphonika service install --force`, consistent with ADR 0055's existing "re-run install after
   upgrading" precedent. This ADR does not add automated migration.

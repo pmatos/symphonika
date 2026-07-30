@@ -189,19 +189,15 @@ export function reconcileRoutineOutcome(
     };
   }
 
-  if (input.claim !== null) {
-    return {
-      ...input.claim,
-      source: input.provider,
-      verified:
-        input.claim.status !== "error" &&
-        (input.observedAction?.action === input.claim.action ||
-          input.claim.action === "none" ||
-          (input.claim.action === "commit" && input.commitsAhead))
-    };
-  }
-
-  if (input.terminalState === "succeeded" && input.commitsAhead) {
+  // A `none`/absent claim under-reports a real commit-only outcome; git
+  // evidence overrides it here so a future retention pass never treats a
+  // commit-bearing firing as claim-verified "nothing to do" (ADR 0068).
+  if (
+    input.terminalState === "succeeded" &&
+    input.commitsAhead &&
+    (input.claim === null ||
+      (input.claim.status !== "error" && input.claim.action === "none"))
+  ) {
     return {
       action: "commit",
       source: "git",
@@ -210,6 +206,21 @@ export function reconcileRoutineOutcome(
       title: "Commit retained in the Routine Firing workspace",
       url: null,
       verified: true
+    };
+  }
+
+  if (
+    input.claim !== null &&
+    (input.terminalState === "succeeded" || input.observedAction !== null)
+  ) {
+    return {
+      ...input.claim,
+      source: input.provider,
+      verified:
+        input.claim.status !== "error" &&
+        (input.observedAction?.action === input.claim.action ||
+          (input.claim.action === "none" && input.githubObservationAvailable) ||
+          (input.claim.action === "commit" && input.commitsAhead))
     };
   }
 

@@ -46,11 +46,15 @@ One pure reconciliation function produces the persisted outcome:
 1. An observed GitHub action wins over an absent claim, an error/no-action claim, or a commit claim.
    It is verified and sourced to `gh`.
 2. A claimed pull request or issue action is verified only when the same action kind was observed.
-   Otherwise the provider claim remains visible with `verified: false`.
+   A claimed no-action (`none`) is verified only when a completed GitHub comparison confirms no
+   external action occurred; an unavailable comparison leaves it unverified. Otherwise the provider
+   claim remains visible with `verified: false`.
 3. A commit claim is verified only when the successful `kind: git` workspace inspection found
    commits ahead of the configured base branch.
 4. Without a claim, an observed GitHub action is sourced to `gh`; otherwise a successful
-   commits-ahead firing is a verified `git` outcome.
+   commits-ahead firing is a verified `git` outcome. This git evidence also overrides a `none`
+   claim that under-reports a successful `kind: git` firing with commits ahead of the base branch,
+   so a self-reported "nothing to do" never suppresses the retention signal below.
 5. A successful firing with no claim or observed action records `no_action`. A completed GitHub
    comparison makes it verified and sourced to `gh`; an unavailable comparison leaves it
    unverified and sourced to `symphonika`. Claim omission alone never fails the firing.

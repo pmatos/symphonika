@@ -392,6 +392,90 @@ describe("Routine Outcome reconciliation", () => {
     });
   });
 
+  it("overrides an under-reporting no-action claim with git evidence of a retained commit", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "none",
+          status: "no_action",
+          summary: "Nothing to do.",
+          title: "",
+          url: null
+        },
+        commitsAhead: true,
+        githubObservationAvailable: false,
+        observedAction: null,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "commit",
+      source: "git",
+      status: "success",
+      summary: "Observed commits ahead of the configured base branch.",
+      title: "Commit retained in the Routine Firing workspace",
+      url: null,
+      verified: true
+    });
+  });
+
+  it("requires a completed GitHub comparison before verifying a claimed no-action outcome", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "none",
+          status: "no_action",
+          summary: "Nothing to do.",
+          title: "",
+          url: null
+        },
+        commitsAhead: false,
+        githubObservationAvailable: false,
+        observedAction: null,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "none",
+      source: "codex",
+      status: "no_action",
+      summary: "Nothing to do.",
+      title: "",
+      url: null,
+      verified: false
+    });
+  });
+
+  it("discards a no-action claim from a failed firing in favor of the terminal error", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "none",
+          status: "no_action",
+          summary: "Nothing to do.",
+          title: "",
+          url: null
+        },
+        commitsAhead: false,
+        githubObservationAvailable: true,
+        observedAction: null,
+        provider: "codex",
+        terminalReason: "no_workspace_changes",
+        terminalState: "failed"
+      })
+    ).toEqual({
+      action: "none",
+      source: "symphonika",
+      status: "error",
+      summary: "no_workspace_changes",
+      title: "",
+      url: null,
+      verified: false
+    });
+  });
+
   it("does not mark a provider-reported error as verified", () => {
     expect(
       reconcileRoutineOutcome({

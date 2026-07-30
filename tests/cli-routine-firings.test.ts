@@ -174,6 +174,60 @@ describe("CLI routine firing commands", () => {
     expect(output.stdout).toContain("process_exit");
   });
 
+  it("show-firing streams a large normalized log through a bounded event tail", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = seedRoutine(stateRoot);
+    store.createRoutineFiring({
+      id: "large-log",
+      projectName: "alpha",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      routineName: "dependency-update"
+    });
+    store.close();
+
+    const evidenceDirectory = path.join(
+      stateRoot,
+      "logs",
+      "routines",
+      "large-log"
+    );
+    await mkdir(evidenceDirectory, { recursive: true });
+    const oldEvents = Array.from({ length: 1_024 }, (_, index) =>
+      JSON.stringify({
+        message: index === 0 ? "x".repeat(70_000) : `old event ${index + 1}`,
+        type: "message"
+      })
+    );
+    await writeFile(
+      path.join(evidenceDirectory, "provider.normalized.jsonl"),
+      [
+        ...oldEvents,
+        "",
+        "{malformed",
+        JSON.stringify({ exitCode: 0, type: "process_exit" })
+      ].join("\r\n"),
+      "utf8"
+    );
+
+    const { output, program } = captureProgram(stateRoot);
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "show-firing",
+      "large-log",
+      "--events",
+      "2",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+
+    expect(output.stdout).toContain("normalized events (last 2):");
+    expect(output.stdout).toContain("1025. malformed_event");
+    expect(output.stdout).toContain("1026. process_exit");
+    expect(output.stdout).not.toContain("old event");
+  });
+
   it("show-firing exits non-zero with a clear error for an unknown id", async () => {
     const stateRoot = await makeTempRoot();
     const { output, program } = captureProgram(stateRoot);

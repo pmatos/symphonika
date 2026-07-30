@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { InvalidArgumentError, Command } from "commander";
 import { realpathSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { open, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -2393,15 +2393,36 @@ async function readRecentRoutineEvents(
   normalizedLogPath: string,
   limit: number
 ): Promise<RecentRoutineEvent[]> {
-  let contents: string;
+  const recentLines: { line: string; sequence: number }[] = [];
+  let nextSlot = 0;
+  let sequence = 0;
+  let handle: FileHandle | undefined;
   try {
-    contents = await readFile(normalizedLogPath, "utf8");
+    handle = await open(normalizedLogPath, "r");
+    for await (const line of handle.readLines({ autoClose: false })) {
+      if (line.length === 0) {
+        continue;
+      }
+      sequence += 1;
+      const entry = { line, sequence };
+      if (recentLines.length < limit) {
+        recentLines.push(entry);
+      } else {
+        recentLines[nextSlot] = entry;
+        nextSlot = (nextSlot + 1) % limit;
+      }
+    }
   } catch {
     return [];
+  } finally {
+    await handle?.close();
   }
-  const lines = contents.split(/\r?\n/).filter((line) => line.length > 0);
-  return lines.slice(-limit).map((line, index) => {
-    const sequence = lines.length - Math.min(lines.length, limit) + index + 1;
+
+  const orderedLines =
+    nextSlot === 0
+      ? recentLines
+      : [...recentLines.slice(nextSlot), ...recentLines.slice(0, nextSlot)];
+  return orderedLines.map(({ line, sequence }) => {
     try {
       const normalized = JSON.parse(line) as unknown;
       if (

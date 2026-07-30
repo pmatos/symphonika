@@ -33,6 +33,10 @@ import {
 } from "./workflow.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import type { TargetedRoutineDeclaration } from "./routines/types.js";
+import {
+  DEFAULT_ROUTINE_WORKSPACE_RETENTION,
+  type RoutineWorkspaceRetentionPolicy
+} from "./routines/workspace-retention.js";
 
 export type RuntimeConfigSnapshot = {
   configPath: string;
@@ -55,6 +59,7 @@ export type RuntimeConfigSnapshot = {
   projects: RuntimeProjectConfig[];
   providers: RunControllerProvidersConfig;
   pullRequestPolicy: PullRequestFollowupPolicy;
+  routineWorkspaceRetention: RoutineWorkspaceRetentionPolicy;
   watchdog: WatchdogConfig;
 };
 
@@ -130,6 +135,27 @@ const projectWatchdogConfigSchema = z
     grace_minutes: z.number().int().positive()
   })
   .strict();
+
+const routineWorkspaceRetentionSchema = z
+  .object({
+    enabled: z.boolean().default(DEFAULT_ROUTINE_WORKSPACE_RETENTION.enabled),
+    succeeded_days: z
+      .number()
+      .int()
+      .nonnegative()
+      .default(DEFAULT_ROUTINE_WORKSPACE_RETENTION.succeededDays),
+    failed_days: z
+      .number()
+      .int()
+      .nonnegative()
+      .default(DEFAULT_ROUTINE_WORKSPACE_RETENTION.failedDays),
+    cancelled_days: z
+      .number()
+      .int()
+      .nonnegative()
+      .default(DEFAULT_ROUTINE_WORKSPACE_RETENTION.cancelledDays)
+  })
+  .passthrough();
 
 const trackerSchema = z
   .object({
@@ -269,6 +295,12 @@ const serviceConfigSchema = z
       .passthrough()
       .optional(),
     watchdog: watchdogConfigSchema.optional(),
+    retention: z
+      .object({
+        routine_workspaces: routineWorkspaceRetentionSchema.optional()
+      })
+      .passthrough()
+      .optional(),
     providers: z
       .object({
         codex: providerCommandSchema,
@@ -621,9 +653,26 @@ async function loadRuntimeConfigSnapshot(input: {
       pullRequestPolicy:
         pullRequestFollowupPolicyFromRaw(raw) ??
         DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY,
+      routineWorkspaceRetention: normalizeRoutineWorkspaceRetention(
+        parsed.data.retention?.routine_workspaces
+      ),
       watchdog: normalizeWatchdogConfig(parsed.data.watchdog)
     },
     usingLastKnownGood: false
+  };
+}
+
+function normalizeRoutineWorkspaceRetention(
+  config: z.infer<typeof routineWorkspaceRetentionSchema> | undefined
+): RoutineWorkspaceRetentionPolicy {
+  if (config === undefined) {
+    return { ...DEFAULT_ROUTINE_WORKSPACE_RETENTION };
+  }
+  return {
+    cancelledDays: config.cancelled_days,
+    enabled: config.enabled,
+    failedDays: config.failed_days,
+    succeededDays: config.succeeded_days
   };
 }
 

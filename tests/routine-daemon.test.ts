@@ -132,6 +132,51 @@ describe("daemon routine firing", () => {
     }
   });
 
+  it("runs automatic Routine Firing workspace retention with the effective service policy", async () => {
+    const root = await makeTempRoot();
+    await writeRoutineProject(
+      root,
+      new Date(Date.now() + 60 * 60_000).toISOString()
+    );
+    const pruneRoutineWorkspaces = vi.fn().mockResolvedValue({
+      candidates: [],
+      failures: [],
+      pruned: []
+    });
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: quietProvider() },
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      pruneRoutineWorkspaces
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(pruneRoutineWorkspaces).toHaveBeenCalled();
+      });
+      expect(pruneRoutineWorkspaces).toHaveBeenCalledWith(
+        expect.objectContaining({
+          policy: {
+            cancelledDays: 14,
+            enabled: true,
+            failedDays: 14,
+            succeededDays: 1
+          }
+        })
+      );
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("fires a one-shot kind: report routine once after the scheduled time", async () => {
     const root = await makeTempRoot();
     const fireAt = new Date(Date.now() + 50).toISOString();

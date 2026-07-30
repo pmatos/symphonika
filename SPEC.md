@@ -24,7 +24,7 @@ repository as one real Project well enough to help implement later Symphonika is
 - A separate/standalone rich frontend application (SPA). Self-contained, read-only
   interactive visualizations embedded in a server-rendered operator page (e.g. the
   workflow-graph view) are permitted — see §14 and ADR-0056.
-- Automatic workspace deletion.
+- Automatic issue Workspace deletion.
 - GitHub Projects board integration.
 - Parsing issue-body dependency syntax.
 
@@ -232,6 +232,10 @@ and must not fire again on daemon restart. A recurring Routine remains active an
 next clock event after every scheduled firing. A manual firing does not consume a scheduled clock
 event.
 
+When Routine Workspace Retention reclaims a terminal firing's worktree, the firing keeps its
+historical workspace path and records `workspace_pruned_at`. State-root logs and prompt evidence are
+not part of workspace retention.
+
 A clock event skipped for catch-up policy, overlap, or a concurrency cap is not a Routine Firing:
 no `routine_firings` row is created. The Routine instead records `last_attempted_at`,
 `last_skip_reason`, and `last_skip_at`, together with rolling 24-hour counts for each skip reason.
@@ -294,6 +298,13 @@ watchdog:
   grace_minutes: 30
   sample_interval_seconds: 60
   mtime_ignore: []
+
+retention:
+  routine_workspaces:
+    enabled: true
+    succeeded_days: 1
+    failed_days: 14
+    cancelled_days: 14
 
 pull_requests:
   enabled: true
@@ -376,6 +387,12 @@ scope, so a Project can lengthen its grace window but cannot opt into a daemon-d
 Project overrides are part of the defensive Service Config reload snapshot: any invalid value or
 unknown key rejects the candidate snapshot for all Projects and leaves the last known-good snapshot
 live.
+
+Routine Workspace Retention is a service-level policy under `retention.routine_workspaces`.
+Automatic reclamation defaults to enabled. Successful firing workspaces are retained for `1` day;
+failed and cancelled firing workspaces are retained for `14` days. Each day value is a non-negative
+integer. Operators may tune the windows or set `enabled: false`; the manual cleanup command still
+uses the configured windows when automatic reclamation is disabled. See ADR 0067.
 
 ### 5.2 Workflow Contract
 
@@ -541,6 +558,7 @@ SQLite stores durable orchestration state:
 - raw log file paths
 - routines
 - routine firings
+- Routine Firing workspace-reclamation timestamps
 - exact-timestamp Routine skip counters used to compute rolling 24-hour per-reason totals
 
 The run store is not a replacement for GitHub as the canonical tracker. It is durable runtime
@@ -736,9 +754,10 @@ a tracker-less-host rejection. Ambiguous names return every Project/Routine cand
 
 `symphonika cancel <id>` accepts a `run_id` or a Routine Firing id. A non-terminal Routine Firing
 transitions to `cancelled` with `cancel_reason = "operator"`; the provider process is killed and the
-workspace and logs are preserved, matching issue Run cancellation. Cancelling an unknown id or a
-Routine Firing already in a terminal state (`succeeded`, `failed`, `cancelled`) returns a clear
-error and makes no state change.
+workspace and logs are not deleted as part of cancellation, matching issue Run cancellation.
+Routine Workspace Retention may later reclaim the terminal workspace after the cancelled window;
+state-root logs remain. Cancelling an unknown id or a Routine Firing already in a terminal state
+(`succeeded`, `failed`, `cancelled`) returns a clear error and makes no state change.
 
 Graceful daemon shutdown cancels every in-flight Routine Firing through the same provider
 cancellation path before waiting for dispatch work to drain, recording
@@ -776,6 +795,15 @@ last known good value. A Routine with no prior valid declaration — a newly add
 the start — is `state = invalid` and does not fire until a valid reload succeeds. A declaration with
 no parseable `name` field cannot be represented as a `routines` row at all (the table's primary key
 is `(project_name, name)`) and is reported only through the reload-error and `doctor` surfaces.
+
+On every daemon tick, enabled Routine Workspace Retention selects only terminal firings whose
+terminal update time has crossed the configured outcome window. Reclamation runs
+`git worktree remove --force` followed by `git worktree prune` against the Project cache, so both
+the checkout and its registration are removed. A failed removal remains unmarked and is retried on
+a later tick. The Run Store preserves `workspace_path` and writes `workspace_pruned_at`; no
+state-root provider log, normalized event, or prompt artifact is removed. The manual
+`symphonika prune-workspaces [--dry-run]` command evaluates the same policy even when automatic
+retention is disabled. See ADR 0067.
 
 ## 9. GitHub Tracker Behavior
 
@@ -907,6 +935,9 @@ Retry or continuation:
 - notify the agent in the rendered prompt that it is entering a previous-attempt workspace
 
 Workspace conflicts are deterministic failures unless explicitly resolved by an operator.
+
+Issue Workspaces are not deleted automatically. Terminal Routine Firing workspaces are the narrow
+exception governed by Routine Workspace Retention in §8.5 and ADR 0067.
 
 ## 11. Agent Providers
 
@@ -1291,6 +1322,7 @@ Bootstrap CLI commands:
 - `symphonika fire-now <routine> [--project <project>] [--force] [--wait] [--config <path>]`
 - `symphonika runs [--config <path>]`
 - `symphonika routines [--config <path>] [--project <project>] [--include-inactive]`
+- `symphonika prune-workspaces [--config <path>] [--dry-run]`
 - `symphonika show-run <run-id> [--config <path>]`
 - `symphonika cancel <run-id> [--config <path>]`
 - `symphonika clear-stale <project> <issue-number> [--config <path>] --yes`
@@ -1352,6 +1384,10 @@ whose latest sample has `idle_since` set.
 `last_attempted_at`, `last_skip_reason`, `last_skip_at`, rolling 24-hour skip counts per reason, and
 PR numbers discovered for the latest firing. Inactive Routines are hidden by default;
 `--include-inactive` includes them.
+
+`prune-workspaces` reclaims terminal Routine Firing worktrees eligible under the effective
+service-level retention policy. `--dry-run` lists candidates without changing Git registrations,
+directories, or Run Store rows. The command remains available when automatic retention is disabled.
 
 `clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
 
@@ -1464,6 +1500,8 @@ The bootstrap slice is accepted when:
 - durable run state is updated in SQLite
 - a configured recurring `kind: report` Routine fires on its clock tick, records a Routine Firing,
   and exposes its next clock event
+- automatic and manual Routine Workspace Retention reclaim registered terminal worktrees without
+  deleting state-root evidence
 - CLI and local status page show Projects, runs, failures, input-required events, stale state, and
   log links
 
@@ -1471,7 +1509,6 @@ The bootstrap slice is accepted when:
 
 - remote workers
 - external sandboxing
-- workspace cleanup commands
 - stale-claim TTLs
 - GitHub Projects board support
 - webhook-based PR subscriptions

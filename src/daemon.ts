@@ -69,6 +69,10 @@ import type {
   PreparedRoutineWorkspace,
   PrepareRoutineWorkspaceInput
 } from "./routines/workspace.js";
+import {
+  pruneRoutineWorkspaces as pruneRoutineWorkspacesReal,
+  type RoutineWorkspaceRetentionPolicy
+} from "./routines/workspace-retention.js";
 import { resolveStateRoot } from "./state.js";
 import { buildStatusSnapshot } from "./status.js";
 import { VERSION } from "./version.js";
@@ -98,6 +102,7 @@ export type StartDaemonOptions = {
   prepareRoutineWorkspace?: (
     input: PrepareRoutineWorkspaceInput
   ) => Promise<PreparedRoutineWorkspace>;
+  pruneRoutineWorkspaces?: typeof pruneRoutineWorkspacesReal;
 };
 
 export type DaemonHandle = {
@@ -118,6 +123,8 @@ export async function startDaemon(
     options.daemonHeartbeat ?? createDaemonHeartbeat({ env, logger });
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 3000;
+  const pruneRoutineWorkspaces =
+    options.pruneRoutineWorkspaces ?? pruneRoutineWorkspacesReal;
   const stateRootOptions: Parameters<typeof resolveStateRoot>[0] = {};
   if (options.configPath !== undefined) {
     stateRootOptions.configPath = options.configPath;
@@ -560,6 +567,15 @@ export async function startDaemon(
     // ADR 0052.
     const promise = (async () => {
       try {
+        const retentionSnapshot = runtimeConfig.getSnapshot();
+        if (retentionSnapshot?.routineWorkspaceRetention.enabled === true) {
+          await runAutomaticRoutineWorkspaceRetention({
+            logger,
+            policy: retentionSnapshot.routineWorkspaceRetention,
+            pruneRoutineWorkspaces,
+            runStore
+          });
+        }
         const now = Date.now();
         let prResult: Awaited<ReturnType<typeof runPullRequestFollowup>>;
         if (
@@ -1161,6 +1177,41 @@ async function rollbackDaemonStartup(
     logger.warn(
       { error: errorMessage(error) },
       "symphonika daemon startup rollback failed to close run store"
+    );
+  }
+}
+
+async function runAutomaticRoutineWorkspaceRetention(input: {
+  logger: Logger;
+  policy: RoutineWorkspaceRetentionPolicy;
+  pruneRoutineWorkspaces: typeof pruneRoutineWorkspacesReal;
+  runStore: ReturnType<typeof openRunStore>;
+}): Promise<void> {
+  try {
+    const report = await input.pruneRoutineWorkspaces({
+      policy: input.policy,
+      runStore: input.runStore
+    });
+    if (report.pruned.length > 0) {
+      input.logger.info(
+        { firingIds: report.pruned.map((entry) => entry.firingId) },
+        "symphonika pruned Routine Firing workspaces"
+      );
+    }
+    for (const failure of report.failures) {
+      input.logger.warn(
+        {
+          err: failure.error,
+          firingId: failure.firingId,
+          workspacePath: failure.workspacePath
+        },
+        "symphonika failed to prune Routine Firing workspace"
+      );
+    }
+  } catch (error) {
+    input.logger.error(
+      { err: error },
+      "symphonika Routine Firing workspace retention failed"
     );
   }
 }

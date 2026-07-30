@@ -530,6 +530,17 @@ async function runRoutineFiring(input: {
       since: githubSnapshotSince
     });
 
+    // A cancel can also land DURING the snapshot read just above; the
+    // cancelDuringPrepare check earlier only covers the window before it.
+    // Re-check before spawning the provider for the same reason as that
+    // earlier check (ADR 0052).
+    const cancelBeforeProviderStart = input.activeRuns.get(input.firingId);
+    if (cancelBeforeProviderStart?.cancelRequested === true) {
+      throw new Error(
+        `routine firing ${input.firingId} was cancelled before provider start`
+      );
+    }
+
     for await (const event of input.provider.runAttempt({
       branchName: prepared.branchName,
       issue: routineIssueSnapshot(input.routine),
@@ -581,6 +592,16 @@ async function runRoutineFiring(input: {
             routineName: input.routine.name,
             since: githubSnapshotSince
           });
+    // A cancel can also land DURING the snapshot read just above, after
+    // `outcome` above was already classified as succeeded/failed. Downgrade
+    // here so a `kind: git` firing cancelled in this window cannot still
+    // report commitsAhead and let reconcileRoutineOutcome's git-evidence
+    // override mint a verified commit outcome for a cancelled run.
+    const cancelAfterGithubAfter = input.activeRuns.get(input.firingId);
+    const finalOutcome =
+      cancelAfterGithubAfter?.cancelRequested === true
+        ? { kind: "cancelled" as const, reason: "cancelled" }
+        : outcome;
     const githubObservation = routineGithubObservation(
       githubBefore,
       githubAfter,
@@ -592,21 +613,23 @@ async function runRoutineFiring(input: {
       outcome: reconcileRoutineOutcome({
         claim: parseRoutineOutcomeClaim(events),
         commitsAhead:
-          input.routine.kind === "git" && outcome.kind === "succeeded",
+          input.routine.kind === "git" && finalOutcome.kind === "succeeded",
         githubObservationAvailable: githubObservation.available,
         observedAction: githubObservation.action,
         provider: input.providerName,
-        terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
-        terminalState: outcome.kind
+        terminalReason:
+          finalOutcome.reason.length === 0 ? null : finalOutcome.reason,
+        terminalState: finalOutcome.kind
       }),
-      state: outcome.kind,
-      terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
-      ...(cancelEntry?.cancelReason === undefined
+      state: finalOutcome.kind,
+      terminalReason:
+        finalOutcome.reason.length === 0 ? null : finalOutcome.reason,
+      ...(cancelAfterGithubAfter?.cancelReason === undefined
         ? {}
-        : { cancelReason: cancelEntry.cancelReason }),
+        : { cancelReason: cancelAfterGithubAfter.cancelReason }),
       workspacePath: prepared.workspacePath
     });
-    if (outcome.kind === "succeeded" && input.routine.kind === "git") {
+    if (finalOutcome.kind === "succeeded" && input.routine.kind === "git") {
       if (githubAfter?.pullRequestsAvailable === true) {
         recordRoutinePullRequests({
           branchName: prepared.branchName,

@@ -132,6 +132,51 @@ describe("Oh My Pi RPC provider", () => {
     ]);
   });
 
+  it("does not carry a stale result from an earlier turn into a later textless turn", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeOmpPath = path.join(root, "fake-omp-multi-turn.mjs");
+    await writeFakeMultiTurnOmp(fakeOmpPath, transcriptPath);
+    const processScope = noopProcessScope();
+    const provider = createOmpProvider({ processScope });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+    );
+
+    const turnCompletedEvents = events
+      .map((event) => event.normalized)
+      .filter(
+        (
+          normalized
+        ): normalized is Extract<
+          typeof normalized,
+          { type: "turn_completed" }
+        > => normalized?.type === "turn_completed"
+      );
+
+    expect(turnCompletedEvents).toEqual([
+      {
+        result: "first turn result",
+        sessionId: "omp-session-multi-turn",
+        type: "turn_completed"
+      },
+      {
+        sessionId: "omp-session-multi-turn",
+        type: "turn_completed"
+      }
+    ]);
+  });
+
   it("reassembles protocol v2 chunks before normalizing the logical event", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -1998,6 +2043,52 @@ async function writeFakeOmp(
       "    send({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'bash', args: { cmd: 'npm test' } });",
       "    send({ type: 'message_update', message: { role: 'assistant' }, assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'done', partial: { role: 'assistant' } } });",
       "    send({ type: 'message_end', message: { role: 'assistant' } });",
+      "    send({ type: 'turn_end', message: { role: 'assistant' }, toolResults: [] });",
+      "    send({ type: 'agent_end', isTerminal: true, messages: [] });",
+      "  }",
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakeMultiTurnOmp(
+  filePath: string,
+  transcriptPath: string
+): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "import { appendFile } from 'node:fs/promises';",
+      "import readline from 'node:readline';",
+      "",
+      `const transcriptPath = ${JSON.stringify(transcriptPath)};`,
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) {",
+      "  process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "}",
+      "async function record(message) {",
+      "  await appendFile(transcriptPath, `${JSON.stringify(message)}\\n`, 'utf8');",
+      "}",
+      "",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1, 2], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
+      "for await (const line of rl) {",
+      "  const message = JSON.parse(line);",
+      "  await record(message);",
+      "  if (message.type === 'negotiate_protocol') {",
+      "    send({ id: message.id, type: 'response', command: 'negotiate_protocol', success: true, data: { protocolVersion: 2 } });",
+      "  }",
+      "  if (message.type === 'get_state') {",
+      "    send({ id: message.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-multi-turn', sessionFile: '/tmp/omp-session.jsonl', model: { provider: 'openai', id: 'gpt-5.4' }, thinkingLevel: 'high', isStreaming: false, isCompacting: false, steeringMode: 'one-at-a-time', followUpMode: 'one-at-a-time', interruptMode: 'immediate', autoCompactionEnabled: true, messageCount: 0, queuedMessageCount: 0, todoPhases: [] } });",
+      "  }",
+      "  if (message.type === 'prompt') {",
+      "    send({ id: message.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
+      "    send({ type: 'agent_start' });",
+      "    send({ type: 'message_update', message: { role: 'assistant' }, assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'first turn result', partial: { role: 'assistant' } } });",
+      "    send({ type: 'message_end', message: { role: 'assistant' } });",
+      "    send({ type: 'turn_end', message: { role: 'assistant' }, toolResults: [] });",
+      "    send({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'bash', args: { cmd: 'npm test' } });",
       "    send({ type: 'turn_end', message: { role: 'assistant' }, toolResults: [] });",
       "    send({ type: 'agent_end', isTerminal: true, messages: [] });",
       "  }",

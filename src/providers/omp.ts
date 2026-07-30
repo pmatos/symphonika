@@ -448,6 +448,11 @@ function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
 
   if (type === "turn_end") {
     const result = activeRun.assistantText ?? activeRun.completedAssistantText;
+    // OMP does not expose a stable turn id, and a session can emit more than
+    // one turn_end before its terminal agent_end. Clearing the completed
+    // text once consumed here stops a later, textless turn from reporting an
+    // earlier turn's stale result.
+    delete activeRun.completedAssistantText;
     return {
       normalized: {
         ...(result === undefined ? {} : { result }),

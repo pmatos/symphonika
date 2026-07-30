@@ -1198,6 +1198,162 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("never launches the provider when an operator cancel lands during the pre-run GitHub snapshot", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = quietProvider();
+    const listIssues = vi.fn().mockImplementationOnce(async () => {
+      // Simulates an operator cancel landing while the before-run GitHub
+      // snapshot read is still in flight — after attachProvider, but before
+      // the provider is actually launched.
+      await activeRuns.requestCancel("fire-cancel-before-snapshot", "operator");
+      return [];
+    });
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine: {
+            ...minuteRoutine(root),
+            schedule: { at: "2026-05-22T10:00:00.000Z" }
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-cancel-before-snapshot",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        }
+      });
+
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-cancel-before-snapshot",
+          cancelReason: "operator",
+          state: "cancelled"
+        })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("reclassifies a succeeded kind: git firing as cancelled when an operator cancel lands during the after-run GitHub snapshot", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/dependency-update/01JCANCELAFTERSNAP";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const listPullRequestsForBranch = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(async () => {
+        // Simulates an operator cancel landing while the after-run GitHub
+        // snapshot read is still in flight — after the workspace was already
+        // classified "succeeded" with commits ahead, but before that
+        // classification is persisted.
+        await activeRuns.requestCancel(
+          "fire-cancel-after-snapshot",
+          "operator"
+        );
+        return [];
+      });
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName,
+          branchRef: `refs/heads/${branchName}`,
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns,
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-cancel-after-snapshot",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "dependency-update",
+                  prompt: "Commit on {{branch.name}}.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "dependency-update.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(listPullRequestsForBranch).toHaveBeenCalledTimes(2);
+      expect(runStore.listRoutineFirings()).toEqual([
+        expect.objectContaining({
+          id: "fire-cancel-after-snapshot",
+          cancelReason: "operator",
+          state: "cancelled",
+          outcome: {
+            action: "none",
+            source: "symphonika",
+            status: "error",
+            summary: "cancelled",
+            title: "",
+            url: null,
+            verified: false
+          }
+        })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("fires every recurring tick and advances next_fire_at after success or failure", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

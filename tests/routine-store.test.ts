@@ -2205,7 +2205,7 @@ describe("RunStore routines", () => {
     }
   });
 
-  it("protects an uninspected git workspace when startup settles a leaked firing", async () => {
+  it("protects an uninspected git workspace after its routine kind changes", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
@@ -2232,6 +2232,23 @@ describe("RunStore routines", () => {
         workspacePath: "/tmp/leaked-git-workspace"
       });
       store.updateRoutineFiringState("leaked-git-fire", "running");
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "dependency-update",
+          prompt: "Report on dependencies.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
+        }
+      ]);
+      expect(
+        store.getRoutine({
+          name: "dependency-update",
+          projectName: "alpha"
+        })
+      ).toMatchObject({ kind: "report" });
 
       store.markRoutineFiringsFailed([
         {

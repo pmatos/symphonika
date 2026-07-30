@@ -888,7 +888,9 @@ When a pre-signal database first gains commits-ahead evidence, the column additi
 atomic. Every historical firing not known to be a `kind: report` firing is conservatively protected;
 subsequent startups do not repeat the backfill and therefore cannot overwrite a newly inspected
 zero. Startup reconciliation similarly protects a prepared `kind: git` workspace when a daemon
-crash prevents the ordinary terminal inspection from running.
+crash prevents the ordinary terminal inspection from running. Because a Routine declaration can
+change kind while its firing is active and the firing row does not retain execution-time kind,
+reconciliation treats every leaked firing with a recorded workspace path as unknown and protected.
 
 After a Routine Firing reaches a terminal state, Symphonika evaluates its Routine notification
 policy. Delivery occurs after `kind: git` PR discovery, uses both plain text and an escaped HTML

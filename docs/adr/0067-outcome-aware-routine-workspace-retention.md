@@ -68,7 +68,11 @@ a richer canonical action, failed and cancelled Git firings were not inspected o
 terminal path, and an unclassifiable row is likewise unknown rather than verified zero. The
 one-time backfill does not run after the column exists, so it cannot overwrite later inspected-zero
 evidence. Startup orphan reconciliation applies the same conservative protection to a prepared
-`kind: git` workspace whose ordinary terminal inspection was interrupted by a daemon crash.
+workspace whose ordinary terminal inspection was interrupted by a daemon crash. The firing row
+does not retain execution-time kind, and a declaration can change kind while that firing is active,
+so every leaked firing with a recorded workspace path is protected. This can retain a
+crash-interrupted report workspace indefinitely, but avoids treating an old Git firing as verified
+zero after its declaration changes to `kind: report`.
 
 ## Consequences
 

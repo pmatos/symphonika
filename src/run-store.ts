@@ -3458,12 +3458,7 @@ export class RunStore {
         "state = 'failed',",
         "terminal_reason = ?,",
         "commits_ahead = case",
-        "when workspace_path is not null and workspace_path <> '' and exists (",
-        "select 1 from routines",
-        "where routines.project_name = routine_firings.project_name",
-        "and routines.name = routine_firings.routine_name",
-        "and routines.kind = 'git'",
-        ") then 1",
+        "when workspace_path is not null and workspace_path <> '' then 1",
         "else commits_ahead end,",
         "updated_at = ?",
         "where id = ?"

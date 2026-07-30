@@ -628,7 +628,6 @@ export async function startDaemon(
         }
         const recomputeSchedulesFromNow = recomputeRoutineSchedulesFromNow;
         recomputeRoutineSchedulesFromNow = false;
-        const emailConfig = runtimeConfig.emailConfig();
         const routineResult = await dispatchDueRoutines({
           activeRuns,
           agentProviders,
@@ -640,16 +639,14 @@ export async function startDaemon(
           globalConcurrency: runtimeConfig.globalConcurrency(),
           githubIssuesApi,
           logger,
-          ...(emailConfig === undefined
-            ? {}
-            : {
-                notification: {
-                  config: emailConfig,
-                  sink:
-                    options.notificationSink ??
-                    createSmtpNotificationSink(emailConfig, { env })
-                }
-              }),
+          notification: {
+            createSink: (config) =>
+              options.notificationSink ??
+              createSmtpNotificationSink(config, { env }),
+            // Resolved at delivery time so a reload mid-firing is honored
+            // for that firing's own notification (ADR 0067).
+            resolveConfig: () => runtimeConfig.emailConfig()
+          },
           ...(options.prepareRoutineWorkspace === undefined
             ? {}
             : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),

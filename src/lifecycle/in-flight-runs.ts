@@ -37,15 +37,42 @@ export type RegisterRunInput = ReserveSlotInput & AttachProviderInput;
 
 const NOOP_CANCEL = (): Promise<void> => Promise.resolve();
 
+// Thrown by reserveSlot once beginShutdown() has closed the registry. Claim
+// paths treat this as "skip this fire": no label write, no row, no slot, and
+// scheduled callers must NOT reschedule (the scheduler itself is being torn
+// down). See ADR 0052.
+export class RegistryShutdownError extends Error {
+  readonly name = "RegistryShutdownError";
+}
+
 export class InFlightRunRegistry {
   private readonly entries = new Map<string, InFlightRunEntry>();
   private readonly issueLocks = new Set<string>();
+  private shuttingDown = false;
+
+  // Closes the registry to new claims. Daemon stop() invokes this under the
+  // dispatch mutex BEFORE snapshotting entries for cancellation, so a
+  // dispatch still in its pre-claim work can never reserve a slot after
+  // cancellation began (which would leave an uncancelled provider and a row
+  // without daemon_shutdown). Idempotent.
+  beginShutdown(): void {
+    this.shuttingDown = true;
+  }
+
+  isShuttingDown(): boolean {
+    return this.shuttingDown;
+  }
 
   // Reserves an in-flight slot WITHOUT a provider/cancel handler. Used inside
   // the narrowed dispatch critical section so subsequent picks see the
   // (project, issue) as locked and per-project / global cap counts include
   // the run before provider event streaming begins. See ADR 0052.
   reserveSlot(input: ReserveSlotInput): void {
+    if (this.shuttingDown) {
+      throw new RegistryShutdownError(
+        `active-run registry is shutting down; refusing slot for run ${input.runId}`
+      );
+    }
     if (this.entries.has(input.runId)) {
       throw new Error(`in-flight run already exists for run ${input.runId}`);
     }
@@ -155,9 +182,24 @@ export class InFlightRunRegistry {
     return n;
   }
 
-  async requestCancel(runId: string, reason: CancelReason): Promise<void> {
+  async requestCancel(
+    runId: string,
+    reason: CancelReason,
+    options?: { supersedeReason?: boolean }
+  ): Promise<void> {
     const entry = this.entries.get(runId);
-    if (entry === undefined || entry.cancelRequested) {
+    if (entry === undefined) {
+      return;
+    }
+    if (entry.cancelRequested) {
+      // The cancel handler already fired for the earlier request and must not
+      // be re-invoked, but shutdown (cancelAll) still supersedes the recorded
+      // reason: finalization persists the entry's cancelReason, and the
+      // shutdown contract requires daemon_shutdown to stick for every run
+      // that was live when stop() began.
+      if (options?.supersedeReason === true) {
+        entry.cancelReason = reason;
+      }
       return;
     }
     entry.cancelRequested = true;

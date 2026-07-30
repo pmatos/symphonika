@@ -66,11 +66,12 @@ async function createGitRepo(root: string, remote: string): Promise<void> {
 // tracker, no tracker/filters/priority/workflow.
 function hostProjectLines(
   name: string,
-  options: { tracker?: boolean } = {}
+  options: { disabled?: boolean; tracker?: boolean } = {}
 ): string[] {
   return [
     `  - name: ${name}`,
     "    mode: routine_host",
+    ...(options.disabled ? ["    disabled: true"] : []),
     "    workspace:",
     "      root: ./.symphonika/workspaces/" + name,
     "      git:",
@@ -301,6 +302,492 @@ describe("Routine Host reload (ADR 0062)", () => {
       .getSnapshot()
       ?.projects.find((p) => p.name === "audit-host");
     expect(host?.routines ?? []).toEqual([]);
+  });
+
+  it("soft-disables a persisted kind: git routine rejected by a tracker-less host and restores it when the tracker returns", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const configPath = path.join(root, "symphonika.yml");
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      path.join(root, "refactor-audit.md"),
+      [
+        "---",
+        "name: refactor-audit",
+        "kind: git",
+        "schedule:",
+        '  cron: "0 1 * * *"',
+        "  tz: Etc/UTC",
+        "---",
+        "Run an audit."
+      ].join("\n")
+    );
+    const writeConfig = (tracker: boolean): Promise<void> =>
+      writeFile(
+        configPath,
+        [
+          "state:",
+          "  root: ./.symphonika",
+          "providers:",
+          "  codex:",
+          '    command: "codex -p symphonika"',
+          "  claude:",
+          '    command: "claude -p"',
+          "projects:",
+          ...hostProjectLines("audit-host", { tracker }),
+          "routines:",
+          "  - project: audit-host",
+          "    path: ./refactor-audit.md"
+        ].join("\n")
+      );
+
+    await writeConfig(true);
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+    const runStore = openRunStore({ stateRoot });
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.reject(
+          new Error("rejected routine must not prepare a workspace")
+        )
+    );
+    const dispatch = (now: Date) =>
+      dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: fakeAgentProviders(),
+        configDir: root,
+        globalConcurrency: { maxInFlight: undefined },
+        now,
+        prepareRoutineWorkspace,
+        projects: reloader.projectsByName(),
+        providersConfig: reloader.providersConfig(),
+        runStore,
+        stateRoot
+      });
+
+    try {
+      await dispatch(new Date("2026-07-27T00:00:00.000Z"));
+      expect(runStore.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          name: "refactor-audit",
+          state: "active"
+        })
+      );
+
+      await writeConfig(false);
+      await reloader.reload();
+      const rejected = await dispatch(new Date("2026-07-27T02:00:00.000Z"));
+
+      expect(rejected.fired).toEqual([]);
+      expect(prepareRoutineWorkspace).not.toHaveBeenCalled();
+      expect(runStore.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: "rejected_tracker_less_host",
+          name: "refactor-audit",
+          state: "disabled"
+        })
+      );
+
+      await writeConfig(true);
+      await reloader.reload();
+      await dispatch(new Date("2026-07-27T02:00:00.000Z"));
+      expect(runStore.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          name: "refactor-audit",
+          state: "active"
+        })
+      );
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("expires a first-seen one-shot kind: git routine rejected on a tracker-less host when the tracker returns after its at elapsed", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const configPath = path.join(root, "symphonika.yml");
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      path.join(root, "audit-fix.md"),
+      [
+        "---",
+        "name: audit-fix",
+        "kind: git",
+        "schedule:",
+        '  at: "2026-07-27T01:00:00.000Z"',
+        "---",
+        "Fix the audit."
+      ].join("\n")
+    );
+    const writeConfig = (tracker: boolean): Promise<void> =>
+      writeFile(
+        configPath,
+        [
+          "state:",
+          "  root: ./.symphonika",
+          "providers:",
+          "  codex:",
+          '    command: "codex -p symphonika"',
+          "  claude:",
+          '    command: "claude -p"',
+          "projects:",
+          ...hostProjectLines("audit-host", { tracker }),
+          "routines:",
+          "  - project: audit-host",
+          "    path: ./audit-fix.md"
+        ].join("\n")
+      );
+
+    await writeConfig(false);
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+    expect(
+      reloader
+        .getStatus()
+        .errors.some((e) => e.includes("kind: git routine requires a tracker"))
+    ).toBe(true);
+    const runStore = openRunStore({ stateRoot });
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.reject(
+          new Error("expired one-shot must not prepare a workspace")
+        )
+    );
+    const dispatch = (now: Date) =>
+      dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: fakeAgentProviders(),
+        configDir: root,
+        globalConcurrency: { maxInFlight: undefined },
+        now,
+        prepareRoutineWorkspace,
+        projects: reloader.projectsByName(),
+        providersConfig: reloader.providersConfig(),
+        runStore,
+        stateRoot
+      });
+
+    try {
+      // First-seen rejection with no prior persisted row: the rejection
+      // evidence must still be recorded so a later restore can apply the
+      // one-shot restore rules instead of treating it as a new declaration.
+      const rejected = await dispatch(new Date("2026-07-27T00:30:00.000Z"));
+      expect(rejected.fired).toEqual([]);
+      expect(runStore.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: "rejected_tracker_less_host",
+          name: "audit-fix",
+          state: "disabled"
+        })
+      );
+
+      // The tracker returns after the one-shot's `at` elapsed: the restore
+      // must expire it, never fire the overdue full-permission routine.
+      await writeConfig(true);
+      await reloader.reload();
+      const restored = await dispatch(new Date("2026-07-27T02:00:00.000Z"));
+
+      expect(restored.fired).toEqual([]);
+      expect(prepareRoutineWorkspace).not.toHaveBeenCalled();
+      expect(runStore.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          lastFiredAt: null,
+          name: "audit-fix",
+          state: "expired"
+        })
+      );
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("activates a first-seen one-shot kind: git routine rejected on a tracker-less host when the tracker returns before its at", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const configPath = path.join(root, "symphonika.yml");
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      path.join(root, "audit-fix.md"),
+      [
+        "---",
+        "name: audit-fix",
+        "kind: git",
+        "schedule:",
+        '  at: "2026-07-27T01:00:00.000Z"',
+        "---",
+        "Fix the audit."
+      ].join("\n")
+    );
+    const writeConfig = (tracker: boolean): Promise<void> =>
+      writeFile(
+        configPath,
+        [
+          "state:",
+          "  root: ./.symphonika",
+          "providers:",
+          "  codex:",
+          '    command: "codex -p symphonika"',
+          "  claude:",
+          '    command: "claude -p"',
+          "projects:",
+          ...hostProjectLines("audit-host", { tracker }),
+          "routines:",
+          "  - project: audit-host",
+          "    path: ./audit-fix.md"
+        ].join("\n")
+      );
+
+    await writeConfig(false);
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+    const runStore = openRunStore({ stateRoot });
+    const dispatch = (now: Date) =>
+      dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: fakeAgentProviders(),
+        configDir: root,
+        globalConcurrency: { maxInFlight: undefined },
+        now,
+        prepareRoutineWorkspace: vi.fn(),
+        projects: reloader.projectsByName(),
+        providersConfig: reloader.providersConfig(),
+        runStore,
+        stateRoot
+      });
+
+    try {
+      await dispatch(new Date("2026-07-27T00:30:00.000Z"));
+      expect(runStore.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: "rejected_tracker_less_host",
+          name: "audit-fix",
+          state: "disabled"
+        })
+      );
+
+      // The tracker returns before the one-shot's `at`: the restore
+      // reactivates it with the declared fire time still ahead.
+      await writeConfig(true);
+      await reloader.reload();
+      const restored = await dispatch(new Date("2026-07-27T00:45:00.000Z"));
+
+      expect(restored.fired).toEqual([]);
+      expect(runStore.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          name: "audit-fix",
+          nextFireAt: "2026-07-27T01:00:00.000Z",
+          state: "active"
+        })
+      );
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("expires a first-seen one-shot kind: git routine whose at was edited while rejected and still elapsed when the tracker returns", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const configPath = path.join(root, "symphonika.yml");
+    await mkdir(root, { recursive: true });
+    const writeRoutine = (at: string): Promise<void> =>
+      writeFile(
+        path.join(root, "audit-fix.md"),
+        [
+          "---",
+          "name: audit-fix",
+          "kind: git",
+          "schedule:",
+          `  at: "${at}"`,
+          "---",
+          "Fix the audit."
+        ].join("\n")
+      );
+    const writeConfig = (tracker: boolean): Promise<void> =>
+      writeFile(
+        configPath,
+        [
+          "state:",
+          "  root: ./.symphonika",
+          "providers:",
+          "  codex:",
+          '    command: "codex -p symphonika"',
+          "  claude:",
+          '    command: "claude -p"',
+          "projects:",
+          ...hostProjectLines("audit-host", { tracker }),
+          "routines:",
+          "  - project: audit-host",
+          "    path: ./audit-fix.md"
+        ].join("\n")
+      );
+
+    await writeRoutine("2026-07-27T01:00:00.000Z");
+    await writeConfig(false);
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+    const runStore = openRunStore({ stateRoot });
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.reject(
+          new Error("expired one-shot must not prepare a workspace")
+        )
+    );
+    const dispatch = (now: Date) =>
+      dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: fakeAgentProviders(),
+        configDir: root,
+        globalConcurrency: { maxInFlight: undefined },
+        now,
+        prepareRoutineWorkspace,
+        projects: reloader.projectsByName(),
+        providersConfig: reloader.providersConfig(),
+        runStore,
+        stateRoot
+      });
+
+    try {
+      await dispatch(new Date("2026-07-27T00:30:00.000Z"));
+      expect(runStore.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: "rejected_tracker_less_host",
+          name: "audit-fix",
+          state: "disabled"
+        })
+      );
+
+      // The operator edits `at` while the host is still tracker-less; the new
+      // time also elapses before the tracker returns. The schedule change must
+      // not reactivate the restore into an immediate retroactive firing.
+      await writeRoutine("2026-07-27T01:30:00.000Z");
+      await reloader.reload();
+      await dispatch(new Date("2026-07-27T01:00:00.000Z"));
+
+      await writeConfig(true);
+      await reloader.reload();
+      const restored = await dispatch(new Date("2026-07-27T02:00:00.000Z"));
+
+      expect(restored.fired).toEqual([]);
+      expect(prepareRoutineWorkspace).not.toHaveBeenCalled();
+      expect(runStore.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          lastFiredAt: null,
+          name: "audit-fix",
+          scheduleAt: "2026-07-27T01:30:00.000Z",
+          state: "expired"
+        })
+      );
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("expires an elapsed first-seen rejection when a disabled host and its tracker are restored together", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const configPath = path.join(root, "symphonika.yml");
+    await mkdir(root, { recursive: true });
+    const writeRoutine = (at: string): Promise<void> =>
+      writeFile(
+        path.join(root, "audit-fix.md"),
+        [
+          "---",
+          "name: audit-fix",
+          "kind: git",
+          "schedule:",
+          `  at: "${at}"`,
+          "---",
+          "Fix the audit."
+        ].join("\n")
+      );
+    const writeConfig = (options: {
+      disabled: boolean;
+      tracker: boolean;
+    }): Promise<void> =>
+      writeFile(
+        configPath,
+        [
+          "state:",
+          "  root: ./.symphonika",
+          "providers:",
+          "  codex:",
+          '    command: "codex -p symphonika"',
+          "  claude:",
+          '    command: "claude -p"',
+          "projects:",
+          ...hostProjectLines("audit-host", options),
+          "routines:",
+          "  - project: audit-host",
+          "    path: ./audit-fix.md"
+        ].join("\n")
+      );
+
+    await writeRoutine("2026-07-27T01:00:00.000Z");
+    await writeConfig({ disabled: true, tracker: false });
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+    const runStore = openRunStore({ stateRoot });
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.reject(
+          new Error("expired one-shot must not prepare a workspace")
+        )
+    );
+    const dispatch = (now: Date) =>
+      dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: fakeAgentProviders(),
+        configDir: root,
+        globalConcurrency: { maxInFlight: undefined },
+        now,
+        prepareRoutineWorkspace,
+        projects: reloader.projectsByName(),
+        providersConfig: reloader.providersConfig(),
+        runStore,
+        stateRoot
+      });
+
+    try {
+      // Project inactivity dominates the routine-level rejection state, but
+      // the first-seen declaration still needs a durable row for restoration.
+      await dispatch(new Date("2026-07-27T00:30:00.000Z"));
+      expect(runStore.listRoutines({ includeInactive: true })).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          name: "audit-fix",
+          scheduleAt: "2026-07-27T01:00:00.000Z",
+          state: "inactive"
+        })
+      );
+
+      // Editing `at` while the host stays disabled must not turn a past
+      // schedule into an immediately fireable declaration when the Project
+      // and tracker are restored in the same reload.
+      await writeRoutine("2026-07-27T01:30:00.000Z");
+      await reloader.reload();
+      await dispatch(new Date("2026-07-27T01:00:00.000Z"));
+      await writeConfig({ disabled: false, tracker: true });
+      await reloader.reload();
+      const restored = await dispatch(new Date("2026-07-27T02:00:00.000Z"));
+
+      expect(restored.fired).toEqual([]);
+      expect(prepareRoutineWorkspace).not.toHaveBeenCalled();
+      expect(runStore.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          lastFiredAt: null,
+          name: "audit-fix",
+          scheduleAt: "2026-07-27T01:30:00.000Z",
+          state: "expired"
+        })
+      );
+    } finally {
+      runStore.close();
+    }
   });
 
   it("rejects the removed per-project routines: key with a migration error", async () => {

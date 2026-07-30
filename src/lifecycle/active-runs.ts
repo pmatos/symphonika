@@ -17,7 +17,10 @@ import {
   type ScheduledWorkSnapshot
 } from "./scheduled-work.js";
 
-export { InFlightRunRegistry } from "./in-flight-runs.js";
+export {
+  InFlightRunRegistry,
+  RegistryShutdownError
+} from "./in-flight-runs.js";
 export type {
   AttachProviderInput,
   ReserveSlotInput
@@ -32,6 +35,7 @@ export type {
 
 export const CANCEL_REASONS = {
   CLOSED_ISSUE: "closed_issue",
+  DAEMON_SHUTDOWN: "daemon_shutdown",
   ELIGIBILITY_LOSS: "eligibility_loss",
   NO_PROGRESS: "no_progress",
   OPERATOR: "operator"
@@ -91,6 +95,18 @@ export class ActiveRunRegistry {
 
   register(input: RegisterInput): void {
     this.inFlightRuns.register(input);
+  }
+
+  // Closes the registry to new claims. Daemon stop() invokes this under the
+  // dispatch mutex before snapshotting active runs for cancellation; any
+  // dispatch still in pre-claim work then fails its claim instead of
+  // starting an uncancelled provider. See ADR 0052.
+  beginShutdown(): void {
+    this.inFlightRuns.beginShutdown();
+  }
+
+  isShuttingDown(): boolean {
+    return this.inFlightRuns.isShuttingDown();
   }
 
   reserveSlot(input: ReserveSlotInput): void {
@@ -157,7 +173,15 @@ export class ActiveRunRegistry {
     return this.scheduledWork.issueKeys();
   }
 
-  cancelAll(): void {
+  async cancelAll(reason: CancelReason): Promise<void> {
+    this.inFlightRuns.beginShutdown();
     this.scheduledWork.cancelAll();
+    await Promise.allSettled(
+      this.inFlightRuns.list().map((entry) =>
+        this.inFlightRuns.requestCancel(entry.runId, reason, {
+          supersedeReason: true
+        })
+      )
+    );
   }
 }

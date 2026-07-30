@@ -58,6 +58,12 @@ memory isolation:
   stay truthfully null pre-first-tick, only the banner's own age computation uses the fallback. A
   human-visible warning an operator can notice on a dashboard visit, before the systemd watchdog
   would eventually restart the unit.
+- Tick liveness uses a monotonic clock for elapsed-time decisions. The daemon records parallel
+  `performance.now()` values when the tick loop starts and when a tick completes; the systemd
+  watchdog gate and dashboard stale banner compare those values with the same monotonic clock so
+  NTP corrections, VM snapshot restores, and manual wall-clock changes cannot mask a real stall or
+  create a false one. The epoch-valued `Date.now()` timestamp remains separate and continues to
+  back `/api/status`'s human/API-facing `lastTickAt` and `tickAgeMs` fields.
 - `symphonika doctor` warns (does not fail) when an installed systemd unit predates this change —
   missing `Type=notify`, `NotifyAccess=all`, a `WatchdogSec=` directive, or a `TimeoutStartSec=`
   directive — pointing the operator at `symphonika service install --force`, and noting that a
@@ -67,9 +73,11 @@ memory isolation:
   `.service` file generically (`ExecStart`/`Environment=PATH` are baked in from the operator's
   install-time environment); it checks structural markers instead — `WatchdogSec=`/
   `TimeoutStartSec=` are matched as line-anchored directives (not substring `.includes()`) so an
-  operator's own hand-tuned values aren't misreported as drift. The two `.slice` files carry no
-  install-specific content, so those are compared byte-for-byte against the current generator
-  output, same as ADR 0064's own drift concern.
+  operator's own hand-tuned values aren't misreported as drift. The two `.slice` files are checked
+  structurally too: each must retain its `[Slice]` section and required resource-directive keys,
+  while operator-tuned `MemoryHigh=`, `MemoryMax=`, and `TasksMax=` values are accepted. This keeps
+  `doctor` sensitive to incomplete cgroup-split upgrades without recommending a `--force`
+  remediation that would overwrite the per-host tuning documented in the README.
 
 ## Consequences
 

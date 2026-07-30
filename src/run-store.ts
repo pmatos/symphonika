@@ -37,7 +37,17 @@ export type FailureClassification =
   "transient" | "deterministic" | "input_required";
 
 export type CancelReason =
-  "closed_issue" | "eligibility_loss" | "no_progress" | "operator";
+  | "closed_issue"
+  | "daemon_shutdown"
+  | "eligibility_loss"
+  | "no_progress"
+  | "operator";
+
+// Once stop() records daemon_shutdown, later cancellation writers (an
+// in-flight reconcile or a UI cancel during the shutdown drain) must not
+// overwrite it — the shutdown contract requires the reason to stick for
+// every row that was live when shutdown began. See SPEC 12.3.
+const SHUTDOWN_PREEMPTIVE_REASON: CancelReason = "daemon_shutdown";
 
 export type RunStatus = {
   branchName: string;
@@ -1182,6 +1192,12 @@ export class RunStore {
   // set is soft-disabled without touching another project's rows.
   // `protectedNamesByProject` holds invalid-routine names per project so their
   // rows are not demoted to removed_from_config (ADR 0060).
+  // `trackerlessGitRoutinesByProject` carries declarations rejected by ADR
+  // 0062 so persisted rows are safely disabled with their precise cause. A
+  // first-seen rejection also persists a disabled row, so a later tracker
+  // restoration re-enters through the normal upsert's restore rules instead
+  // of looking like a brand-new declaration (an elapsed one-shot expires
+  // rather than firing retroactively). See ADR 0066.
   syncRoutines(
     routines: TargetedRoutineDeclaration[],
     options: {
@@ -1193,6 +1209,10 @@ export class RunStore {
       projects?: string[];
       protectedNamesByProject?: Record<string, string[]>;
       recomputeRecurring?: boolean;
+      trackerlessGitRoutinesByProject?: Record<
+        string,
+        TargetedRoutineDeclaration[]
+      >;
     } = {}
   ): void {
     const now = timestamp();
@@ -1241,11 +1261,12 @@ export class RunStore {
         "state = case",
         "when @disabled = 1 then 'disabled'",
         "when excluded.schedule_cron is not null then 'active'",
-        "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then 'active'",
-        // Restoring a one-shot whose `at` already elapsed while disabled must
-        // not fire it retroactively — treat it the same as a missed one-shot
-        // without catch-up: expired, never fired.
+        // Restoring a one-shot whose `at` already elapsed while disabled or
+        // inactive must not fire it retroactively, even when its schedule was
+        // edited while stopped. This precedes schedule-change reactivation so
+        // only a future one-shot edit can reactivate a stopped Routine.
         "when (routines.state = 'disabled' or routines.state = 'inactive') and @disabled = 0 and excluded.schedule_cron is null and routines.last_fired_at is null and excluded.schedule_at <= @now_iso then 'expired'",
+        "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then 'active'",
         "when routines.state = 'expired' or routines.last_fired_at is not null then 'expired'",
         "else 'active' end,",
         "disabled_reason = excluded.disabled_reason,",
@@ -1271,10 +1292,16 @@ export class RunStore {
     const apply = this.database.transaction(() => {
       for (const [projectName, projectRoutines] of byProject) {
         const declaredNames = projectRoutines.map((routine) => routine.name);
+        const trackerlessGitRoutines =
+          options.trackerlessGitRoutinesByProject?.[projectName] ?? [];
+        const trackerlessGitNames = trackerlessGitRoutines.map(
+          (routine) => routine.name
+        );
         const excludedNames = [
           ...new Set([
             ...declaredNames,
-            ...(options.protectedNamesByProject?.[projectName] ?? [])
+            ...(options.protectedNamesByProject?.[projectName] ?? []),
+            ...trackerlessGitNames
           ])
         ];
         // Excludes only rows already disabled *for this same reason* — an
@@ -1294,6 +1321,79 @@ export class RunStore {
               `update routines set state = 'disabled', disabled_reason = 'removed_from_config', updated_at = ? where project_name = ? and name not in (${placeholders}) and not (state = 'disabled' and disabled_reason = 'removed_from_config')`
             )
             .run(now, projectName, ...excludedNames);
+        }
+        if (trackerlessGitRoutines.length > 0) {
+          const placeholders = trackerlessGitNames.map(() => "?").join(", ");
+          this.database
+            .prepare(
+              `update routines set state = 'disabled', disabled_reason = 'rejected_tracker_less_host', updated_at = ? where project_name = ? and name in (${placeholders}) and not (state = 'disabled' and disabled_reason = 'rejected_tracker_less_host')`
+            )
+            .run(now, projectName, ...trackerlessGitNames);
+          // First-seen rejections have no row to demote — persist one so a
+          // later tracker restoration re-enters through the normal upsert's
+          // restore rules (ADR 0066). The UPDATE above already demoted a real
+          // existing row, so the conflict clause only replaces an
+          // identity-only invalid stub (empty prompt_body) with the rejected
+          // declaration; previously valid configuration stays untouched.
+          for (const routine of trackerlessGitRoutines) {
+            const scheduleValues =
+              "cron" in routine.schedule
+                ? {
+                    nextFireAt: nextRecurringFireAt(
+                      routine.schedule,
+                      scheduleNow
+                    ),
+                    scheduleAt: "",
+                    scheduleCron: routine.schedule.cron,
+                    scheduleTz: routine.schedule.tz
+                  }
+                : {
+                    nextFireAt: routine.schedule.at,
+                    scheduleAt: routine.schedule.at,
+                    scheduleCron: null,
+                    scheduleTz: null
+                  };
+            this.database
+              .prepare(
+                [
+                  "insert into routines (",
+                  "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, catch_up, created_at, updated_at",
+                  ") values (",
+                  "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'disabled', 'rejected_tracker_less_host', @allow_overlap, @catch_up, @created_at, @updated_at",
+                  ") on conflict(project_name, name) do update set",
+                  "source_path = excluded.source_path,",
+                  "kind = excluded.kind,",
+                  "provider_name = excluded.provider_name,",
+                  "schedule_at = excluded.schedule_at,",
+                  "schedule_cron = excluded.schedule_cron,",
+                  "schedule_tz = excluded.schedule_tz,",
+                  "next_fire_at = excluded.next_fire_at,",
+                  "prompt_body = excluded.prompt_body,",
+                  "state = excluded.state,",
+                  "disabled_reason = excluded.disabled_reason,",
+                  "allow_overlap = excluded.allow_overlap,",
+                  "catch_up = excluded.catch_up,",
+                  "updated_at = excluded.updated_at",
+                  "where routines.prompt_body = ''"
+                ].join(" ")
+              )
+              .run({
+                allow_overlap: routine.allowOverlap === true ? 1 : 0,
+                catch_up: routine.catchUp ?? "skip",
+                created_at: now,
+                kind: routine.kind,
+                name: routine.name,
+                project_name: routine.projectName,
+                prompt_body: routine.prompt,
+                provider_name: routine.provider,
+                next_fire_at: scheduleValues.nextFireAt,
+                schedule_at: scheduleValues.scheduleAt,
+                schedule_cron: scheduleValues.scheduleCron,
+                schedule_tz: scheduleValues.scheduleTz,
+                source_path: routine.sourcePath,
+                updated_at: now
+              });
+          }
         }
         for (const routine of projectRoutines) {
           const scheduleValues =
@@ -1341,15 +1441,87 @@ export class RunStore {
     apply();
   }
 
-  markRoutinesInactiveForProject(projectName: string): void {
-    this.database
-      .prepare(
-        // disabled_reason only means anything on state = 'disabled' — clear
-        // it here so an inactive row never surfaces a stale routine-level
-        // reason left over from before the Project-cascade (ADR-0060).
-        "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name = ? and state != 'inactive'"
-      )
-      .run(timestamp(), projectName);
+  markRoutinesInactiveForProject(
+    projectName: string,
+    options: {
+      now?: Date;
+      trackerlessGitRoutines?: TargetedRoutineDeclaration[];
+    } = {}
+  ): void {
+    const now = timestamp();
+    const scheduleNow = options.now ?? new Date();
+    const insertInactive = this.database.prepare(
+      [
+        "insert into routines (",
+        "project_name, name, source_path, kind, provider_name, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, allow_overlap, catch_up, created_at, updated_at",
+        ") values (",
+        "@project_name, @name, @source_path, @kind, @provider_name, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'inactive', @allow_overlap, @catch_up, @created_at, @updated_at",
+        ") on conflict(project_name, name) do update set",
+        "source_path = excluded.source_path,",
+        "kind = excluded.kind,",
+        "provider_name = excluded.provider_name,",
+        "schedule_at = excluded.schedule_at,",
+        "schedule_cron = excluded.schedule_cron,",
+        "schedule_tz = excluded.schedule_tz,",
+        "next_fire_at = excluded.next_fire_at,",
+        "prompt_body = excluded.prompt_body,",
+        "state = excluded.state,",
+        "disabled_reason = excluded.disabled_reason,",
+        "allow_overlap = excluded.allow_overlap,",
+        "catch_up = excluded.catch_up,",
+        "updated_at = excluded.updated_at",
+        "where routines.prompt_body = ''"
+      ].join(" ")
+    );
+    const apply = this.database.transaction(() => {
+      // A disabled Project still needs identity and schedule evidence for a
+      // first-seen tracker-less kind: git rejection. Without this inactive
+      // row, simultaneously restoring the Project and tracker after `at`
+      // elapsed would look like a brand-new active declaration and fire
+      // retroactively. Only an identity-only invalid stub is reclaimed on
+      // conflict; previously valid rows stay intact until the cascade below.
+      for (const routine of options.trackerlessGitRoutines ?? []) {
+        const scheduleValues =
+          "cron" in routine.schedule
+            ? {
+                nextFireAt: nextRecurringFireAt(routine.schedule, scheduleNow),
+                scheduleAt: "",
+                scheduleCron: routine.schedule.cron,
+                scheduleTz: routine.schedule.tz
+              }
+            : {
+                nextFireAt: routine.schedule.at,
+                scheduleAt: routine.schedule.at,
+                scheduleCron: null,
+                scheduleTz: null
+              };
+        insertInactive.run({
+          allow_overlap: routine.allowOverlap === true ? 1 : 0,
+          catch_up: routine.catchUp ?? "skip",
+          created_at: now,
+          kind: routine.kind,
+          name: routine.name,
+          project_name: projectName,
+          prompt_body: routine.prompt,
+          provider_name: routine.provider,
+          next_fire_at: scheduleValues.nextFireAt,
+          schedule_at: scheduleValues.scheduleAt,
+          schedule_cron: scheduleValues.scheduleCron,
+          schedule_tz: scheduleValues.scheduleTz,
+          source_path: routine.sourcePath,
+          updated_at: now
+        });
+      }
+      this.database
+        .prepare(
+          // disabled_reason only means anything on state = 'disabled' — clear
+          // it here so an inactive row never surfaces a stale routine-level
+          // reason left over from before the Project-cascade (ADR-0060).
+          "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name = ? and (state != 'inactive' or disabled_reason is not null)"
+        )
+        .run(now, projectName);
+    });
+    apply();
   }
 
   // Persists identity-only evidence for a routine declaration that has never
@@ -1712,7 +1884,7 @@ export class RunStore {
           "update routine_firings set",
           "state = @state,",
           "terminal_reason = @terminal_reason,",
-          "cancel_reason = coalesce(@cancel_reason, cancel_reason),",
+          "cancel_reason = case when cancel_reason = @shutdown_preemptive then cancel_reason else coalesce(@cancel_reason, cancel_reason) end,",
           "workspace_path = coalesce(@workspace_path, workspace_path),",
           "updated_at = @updated_at",
           "where id = @id"
@@ -1720,6 +1892,7 @@ export class RunStore {
       )
       .run({
         cancel_reason: input.cancelReason ?? null,
+        shutdown_preemptive: SHUTDOWN_PREEMPTIVE_REASON,
         id: input.id,
         state: input.state,
         terminal_reason: input.terminalReason ?? null,
@@ -1753,9 +1926,9 @@ export class RunStore {
   ): void {
     this.database
       .prepare(
-        "update routine_firings set cancel_requested = 1, cancel_reason = ?, updated_at = ? where id = ?"
+        "update routine_firings set cancel_requested = 1, cancel_reason = case when cancel_reason = ? then cancel_reason else ? end, updated_at = ? where id = ?"
       )
-      .run(reason, timestamp(), firingId);
+      .run(SHUTDOWN_PREEMPTIVE_REASON, reason, timestamp(), firingId);
   }
 
   updateRoutineFiringWorkspace(input: {
@@ -2586,9 +2759,9 @@ export class RunStore {
   markCancelRequested(runId: string, reason: CancelReason): void {
     this.database
       .prepare(
-        "update runs set cancel_requested = 1, cancel_reason = ?, updated_at = ? where id = ?"
+        "update runs set cancel_requested = 1, cancel_reason = case when cancel_reason = ? then cancel_reason else ? end, updated_at = ? where id = ?"
       )
-      .run(reason, timestamp(), runId);
+      .run(SHUTDOWN_PREEMPTIVE_REASON, reason, timestamp(), runId);
   }
 
   findLeakedRuns(): {

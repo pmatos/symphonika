@@ -1,58 +1,59 @@
 # Oh My Pi (omp) as a third Agent Provider
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 
-Symphonika v1 supports exactly two Agent Providers: Codex (JSON-RPC `app-server`) and Claude
-(stream-json). The provider set is closed in code, not just by convention:
+Symphonika originally supported Codex through JSON-RPC `app-server` mode and Claude through its
+`stream-json` CLI mode. Operators also use Oh My Pi (`omp`) as a local coding harness and need to
+dispatch it from Projects, Workflow states, and Routines without losing streaming evidence or
+in-band cancellation.
 
-- `AgentProviderName = "codex" | "claude"` (`src/provider.ts`).
-- `providerNameSchema = z.enum(["codex", "claude"])` in `src/dispatch.ts`, `src/doctor.ts`,
-  `src/issue-polling.ts`, and `src/reload.ts`; the `providers:` config object hardcodes the two
-  command keys.
-- The `providers:` object parses with `.passthrough()`, so an extra `omp:` key is accepted but
-  **inert**: `reload.ts` reads only `providers.codex` and `providers.claude`, no adapter is
-  registered, and a Project declaring `agent.provider: omp` fails schema validation.
+OMP exposes a native headless protocol that fits the existing `AgentProvider` boundary:
 
-Operators also run Oh My Pi (`omp`) as a local coding harness alongside Codex and Claude, and
-want Symphonika to dispatch it side-by-side with the existing providers. omp ships a documented headless host protocol that
-fits the `AgentProvider` seam:
-
-- `omp --mode rpc` speaks newline-delimited JSON over stdio: a `ready` handshake frame,
-  id-correlated request/response, and a streamed `AgentSessionEvent` vocabulary (`agent_start`,
-  `agent_end`, `turn_start`, `turn_end`, `message_start`, `message_update`, `message_end`,
-  `tool_execution_start`, `tool_execution_update`, `tool_execution_end`). `prompt` commands are
-  acked immediately and completion is observed via `agent_end`; `abort` cancels; closing stdin
-  exits the process with code 0.
-- RPC mode resets workflow-altering user settings (todo, task, memory, advisor, async, bash
-  auto-background) to deterministic built-in defaults and disables automatic title generation —
-  the right posture for autonomous orchestrated runs.
-- `omp --auto-approve` skips all tool-approval prompts, matching the full-permission execution
-  posture of SPEC §11.3.
+- `omp --mode rpc` speaks newline-delimited JSON over stdio, beginning with a versioned `ready`
+  frame and continuing with id-correlated commands and streamed Agent Session events.
+- Protocol v2 adds bounded `rpc_chunk` frames for logical messages that exceed the physical frame
+  limit; protocol v1 remains usable when v2 is not advertised.
+- `prompt` starts agent work, `abort` cancels it, terminal `agent_end` drains the session, and
+  closing stdin disposes the RPC host.
+- `omp --auto-approve` prevents tool-approval prompts and matches Symphonika's full-permission,
+  unattended execution posture.
 
 ## Decision
 
-Adopt omp as the third Agent Provider. This ADR records the decision and the integration shape;
-implementation (adapter, schema, doctor, init, SPEC amendment) lands in follow-up slices. Until
-then omp is documented but not dispatched.
+Adopt OMP as the third Agent Provider using its native RPC protocol. Codex and Claude remain
+supported; OMP is additive.
 
-### Protocol: omp RPC mode
+### Protocol
 
-The omp adapter speaks `omp --mode rpc` over stdio. Rejected alternatives:
+The adapter:
 
-- `omp acp` (Agent Client Protocol): a generic editor-facing protocol; using it would make
-  Symphonika an ACP client and force mapping ACP session updates onto the normalized vocabulary
-  instead of omp's native, richer `AgentSessionEvent` stream.
-- `omp -p --mode json` (print mode): one-shot output without streaming turn/tool granularity or an
-  in-band cancel path, so the Watchdog would lose its liveness signals and §12 cancellation would
-  degrade to process kill only.
+1. launches OMP from the Workspace cwd;
+2. validates the `ready` frame and negotiates protocol v2 when advertised;
+3. sends `get_state` and records the session id, session file, and model;
+4. delivers the rendered Autonomous Prompt with `prompt`;
+5. streams raw frames and normalized events until a terminal `agent_end`;
+6. closes stdin, records the child exit, and unconditionally stops the provider process scope.
 
-The adapter launches the command from the Workspace cwd (per SPEC §12 dispatch), delivers the
-rendered prompt via a `prompt` RPC command (argv and `@file` are rejected in RPC mode and prompts
-exceed safe argv length), streams stdout frames into raw + normalized logs, implements `cancel` as
-an `abort` RPC command followed by process kill on timeout, and treats stdin-close/exit 0 as the
-clean terminal path.
+Protocol v2 chunks are decoded as strict base64, checked against advertised physical and logical
+byte limits, reassembled in order, and retained as raw evidence alongside the reconstructed logical
+frame. Missing, mismatched, out-of-order, invalid, or oversized chunks are malformed provider
+events.
+
+The initial normalized mapping is:
+
+- successful `get_state` response -> `session_started`
+- text and thinking `message_update` deltas -> `message`
+- assistant `message_end` usage -> `usage_updated`
+- `tool_execution_start` -> `tool_call`
+- `turn_end` -> `turn_completed`
+- assistant errors, error notices, failed commands, or `agentInvoked: false` -> `turn_failed`
+- interactive `extension_ui_request` methods -> `input_required`
+- child close -> `process_exit`
+
+OMP does not expose a stable turn id in Agent Session events, so the adapter does not synthesize
+one. Message, token-usage, tool-call, and Workspace-mtime signals still advance the Watchdog.
 
 ### Default command
 
@@ -60,44 +61,52 @@ clean terminal path.
 omp --mode rpc --auto-approve
 ```
 
-No session or title flags: RPC mode already disables title generation, and persisted omp sessions
-remain useful post-mortem evidence alongside Symphonika's own run logs.
+The command uses normal `PATH` resolution. Generated configuration must not persist a
+machine-specific path such as `~/.bun/bin/omp`. Operators who install OMP through Bun must run
+`symphonika service install` from a login shell whose `PATH` contains Bun's bin directory.
 
-### Normalized event mapping (initial)
+Provider validation requires RPC mode and either `--auto-approve` or
+`--approval-mode yolo`, rejects print mode, and performs a bounded ready-frame probe without
+sending a model prompt.
 
-- `agent_start` → `session_started`
-- `message_update` text/thinking deltas → `message`
-- `tool_execution_start` → `tool_call`
-- `turn_end` → `turn_completed`
-- `agent_end` then process exit → `process_exit`
-- usage-bearing events → `usage_updated`
-- `extension_ui_request` (`confirm`, `input`, `select`) → `input_required`, failing the attempt
-  per SPEC §11.4; headless runs with `--auto-approve` should not emit these, and the mapping is
-  defense-in-depth.
+### Configuration
 
-For the Watchdog (SPEC §12.4): `turn_id_set_size` can advance if the adapter synthesizes turn ids
-from `turn_start`/`turn_end`; otherwise `last_message_at`, `output_tokens_total`, and workspace
-mtime signals apply unchanged.
+`AgentProviderName`, Project schemas, Workflow actions and provider inputs, Routine declarations,
+CLI parsing, and runtime command selection include `omp`.
 
-### Schema and touchpoints
+`providers.omp` is optional so existing two-provider Service Configs remain valid. Newly generated
+configs always include:
 
-- `AgentProviderName` and all four `providerNameSchema` sites gain `"omp"`.
-- The `providers:` object gains `omp: providerCommandSchema.optional()` — optional so existing
-  two-provider configs remain valid; `reload.ts` and `dispatch.ts` thread it through only when
-  present.
-- `src/providers/omp.ts` implements `AgentProvider`; the daemon registry registers it when the
-  `omp` binary and command validate.
-- `doctor` validates the omp command for Routine Hosts and Dispatch Projects that select it:
-  binary resolvable on PATH plus a ready-frame handshake probe.
-- `symphonika init` scaffolds the `omp` block when the binary is on PATH;
-  `add-routine --provider` and SPEC §11.3/§6 gain `omp` alongside `codex` and `claude` in the same
-  implementing slice.
+```yaml
+providers:
+  omp:
+    command: "omp --mode rpc --auto-approve"
+```
+
+Selecting OMP without configuring `providers.omp.command` is a deterministic
+`provider_command_missing: omp` failure. `doctor` validates OMP only when a Project or Routine
+selects it, just as it validates the other selected providers.
+
+### Cancellation
+
+Cancellation is latched before the asynchronous process-scope setup so a pre-spawn cancellation
+cannot be lost. Once spawned, cancellation sends a correlated `abort`, closes stdin, and escalates
+to `SIGTERM` after a short grace period. Successful, failed, and cancelled attempts all stop their
+provider process scope.
+
+## Alternatives rejected
+
+- OMP print/JSON mode loses streaming liveness, tool evidence, and in-band cancellation.
+- ACP would add a generic editor protocol client while discarding useful native OMP events.
+- Requiring `providers.omp` in all existing configs would make an additive provider a breaking
+  migration.
+- Hardcoding the current user's OMP path would make generated configuration host-specific and
+  bypass the service installer's established `PATH` contract.
 
 ## Consequences
 
-- Once implemented, operators declare `providers.omp.command` and route Dispatch Projects,
-  Routine Hosts, and individual Routines with `agent.provider: omp` / routine `provider: omp`.
-- The v1 requirement to support both Codex and Claude is preserved; omp is strictly additive.
-- Until implementation lands, an `omp:` block under `providers:` in `symphonika.yml` parses
-  cleanly but is ignored by reload and dispatch, and `agent.provider: omp` remains a validation
-  error.
+- Dispatch Projects, Workflow agent states, Routine Hosts, and individual Routines can select OMP.
+- Raw logs preserve physical RPC frames; normalized logs expose provider-neutral lifecycle events.
+- OMP input requests fail unattended runs rather than waiting forever for an operator.
+- Existing configs without an OMP block continue to load.
+- The service environment must expose `omp`, including `~/.bun/bin` for common Bun installations.

@@ -3,7 +3,7 @@
 This tutorial starts with an empty checkout and ends with two kinds of automation:
 
 - **Issue Workflows** claim eligible GitHub issues and move them through an agent-authored or
-  YAML-defined execution graph.
+  YAML-defined execution graph using Codex, Claude, or Oh My Pi.
 - **Routines** run scheduled prompts for recurring reports or repository maintenance, without
   needing an eligible issue.
 
@@ -57,13 +57,19 @@ You need:
    export GITHUB_TOKEN=ghp_xxx...
    ```
 
-4. **Local `git` and `gh`.** Run `gh auth status`; authenticate with `gh auth login` if needed.
-   Agents use `gh` for GitHub mutations.
-5. **At least one Agent Provider on `PATH`:**
-   - Codex: `which codex`
-   - Claude: `which claude`
+4. **Local `git` and `gh`.** The agent uses `gh` for every GitHub mutation; if it
+   is missing or unauthenticated, the workflow contract cannot post comments or
+   open PRs. Run `gh auth status` and authenticate with `gh auth login` if needed.
+5. **One agent provider installed and on `PATH`:**
+   - **Codex** — install the `codex` CLI per its upstream instructions, then add
+     a `symphonika` profile to `~/.codex/config.toml` (see §5 below). `which codex`
+     should resolve.
+   - **Claude** — install the `claude` CLI per its upstream instructions. `which claude`
+     should resolve.
+   - **Oh My Pi** — install OMP, commonly through Bun, and confirm `command -v omp`
+     resolves. Bun installations commonly place it in `~/.bun/bin`.
 
-You do not need both providers for the first run.
+You do not need all three; pick one and skip the other provider-specific setup.
 
 ## 2. Install Symphonika
 
@@ -144,6 +150,8 @@ providers:
     command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
   claude:
     command: "claude -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json"
+  omp:
+    command: "omp --mode rpc --auto-approve"
 
 projects:
   - name: my-app
@@ -172,29 +180,38 @@ projects:
         remote: https://github.com/your-github-handle/your-repo-name.git
         base_branch: main
     agent:
-      provider: codex
+      provider: codex          # or: claude / omp
     workflow: /home/you/dev/my-app/WORKFLOW.md
 ```
 
 The important boundaries are:
 
-- `"$GITHUB_TOKEN"` is an environment reference, not a literal token.
+- `"$GITHUB_TOKEN"` is an environment reference, not a literal token. Tokens are not stored in the
+  SQLite run store.
+- `name: my-app` is the Symphonika Project name, not a GitHub Projects board. Commands such as
+  `symphonika clear-stale my-app 42` use it.
 - `labels_all` controls eligibility. An issue must have every listed label before dispatch.
 - `labels_none` excludes issues. `sym:stale` prevents automatic re-claim after a stale Run.
 - `sym:*` labels belong to the orchestrator. Workflow labels such as `agent-ready` belong to the
   repository.
-- `workspace.git.remote` is cloned into the Project workspace root.
-- `agent.provider` is the Project default. YAML agent states can override it.
-- `workflow` points to Markdown or raw-FSM YAML. Relative paths resolve from the Service Config.
-- `pull_requests.merge.enabled: false` is a safe starting point. A `merge_pr` Workflow state also
-  respects this gate.
+- `workspace.git.remote` is cloned into the Project workspace root. HTTPS and SSH are both
+  supported; pushes use the credentials implied by the URL.
+- `agent.provider` selects Codex, Claude, or OMP as the Project default. YAML agent states can
+  override it, and the `providers:` block defines each command.
+- `workflow` points to Markdown or raw-FSM YAML. Generated paths are absolute; hand-authored
+  relative paths resolve from the Service Config.
+- `pull_requests.merge.enabled: false` is a safe starting point. Leave automatic merging off until
+  you trust the Workflow; a `merge_pr` state also respects this gate.
 
 Add other repositories by running `symphonika init-project` from each checkout. Dispatch uses
 weighted round-robin across Projects.
 
-## 5. Configure the Codex profile
+## 5. Complete provider-specific setup
 
-If the Project uses Codex, add this profile to `~/.codex/config.toml`:
+### Codex profile
+
+The default Codex provider command passes `-p symphonika`, which selects a named
+profile. Add this block to `~/.codex/config.toml`:
 
 ```toml
 [profiles.symphonika]
@@ -212,7 +229,40 @@ image_generation = false
 This keeps headless runs from inheriting interactive-only behavior. See
 [ADR-0042](./adr/0042-codex-profile-for-headless-runs.md).
 
-Claude users can skip this step.
+Claude and OMP users do not need this Codex profile.
+
+### Oh My Pi RPC and service `PATH`
+
+The generated OMP command is:
+
+```text
+omp --mode rpc --auto-approve
+```
+
+`--mode rpc` selects the newline-delimited JSON host protocol. `--auto-approve` is required for an
+unattended full-permission run; without it, an approval request would become `input_required` and
+fail the attempt.
+
+Verify OMP in the same login environment you will use to launch Symphonika:
+
+```sh
+command -v omp
+omp --version
+symphonika doctor
+```
+
+If Bun installed OMP under `~/.bun/bin`, ensure that directory is on `PATH`. This matters especially
+for `systemd --user`, which does not inherit additions made only inside an interactive terminal.
+Install or refresh the service from a login shell where `command -v omp` succeeds:
+
+```sh
+exec zsh -l
+command -v omp
+symphonika service install --force
+```
+
+The generated service captures that shell's `PATH`. Keep the portable `omp` command in
+`symphonika.yml`; do not replace it with a user-specific absolute path.
 
 ## 6. Start with a Markdown Workflow Contract
 
@@ -278,9 +328,12 @@ It dispatches nothing. Fix every error before continuing.
 
 Common first-run errors:
 
-- **GitHub auth failed:** `GITHUB_TOKEN` is unset, expired, or under-scoped.
-- **Workflow file not found:** fix the Project's `workflow` path.
-- **Provider command not on PATH:** check `which codex` or `which claude`.
+- **GitHub auth failed:** `GITHUB_TOKEN` is unset, expired, or lacks scopes.
+- **Workflow file not found:** check the Project's `workflow` path. Generated paths are absolute;
+  hand-authored relative paths resolve from the directory containing `symphonika.yml`.
+- **Provider command not on PATH:** check the selected `codex`, `claude`, or `omp` command with
+  `command -v <name>`. For a Bun-installed OMP, confirm `~/.bun/bin` is on the launching shell's
+  `PATH`.
 - **Codex profile missing:** add the profile from the previous section.
 - **Required label missing:** rerun `init-project` or create the configured eligibility label.
 
@@ -985,17 +1038,34 @@ Cancellation kills an active provider but preserves its workspace and logs.
 
 # Part IV: operating and extending the setup
 
-## 25. Switch providers or use both
+## 25. Switch providers or run several
 
-`agent.provider` is per Project. `action.provider` and Routine `provider` can override it for one
-state or declaration.
+`agent.provider` is per Project. A raw-FSM `action.provider` and Routine `provider` can override it
+for one state or declaration.
 
-To compare providers on issue work, create separate Projects with distinct names, workspace roots,
-and eligibility labels. Do not point two Projects with the same eligibility rule at the same issue
-set unless you intend them to race.
+To compare OMP, Claude, and Codex on issue work, create separate Projects with distinct names,
+workspace roots, and eligibility labels such as `agent-ready-omp`. All Projects dispatch from the
+same daemon. Do not point two Projects with the same eligibility rule at the same issue set unless
+you intend them to race.
 
-Oh My Pi (`omp`) is proposed in [ADR-0066](./adr/0066-oh-my-pi-provider.md) but is not implemented.
-Use Codex or Claude in current Workflows and Routines.
+If you switch an existing Project to another provider, finish its in-flight Runs first. The
+workspace is reusable, but mid-flight provider events come from whichever provider started the
+attempt.
+
+Routines use the Project provider by default and may override it in front matter:
+
+```yaml
+---
+name: dependency-audit
+kind: report
+provider: omp
+schedule:
+  cron: "@weekly"
+---
+```
+
+OMP support and its native RPC lifecycle are recorded in
+[ADR-0066](./adr/0066-oh-my-pi-provider.md).
 
 ## 26. Troubleshooting
 

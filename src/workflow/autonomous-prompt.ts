@@ -4,6 +4,7 @@ import path from "node:path";
 
 import type { IssueSnapshot } from "../issue-polling.js";
 import { isPathInside } from "../path-safety.js";
+import type { AgentProviderName } from "../provider.js";
 import type { ExpandedWorkflow } from "./types.js";
 
 export const AUTONOMY_PREAMBLE_VERSION = "autonomy-preamble-v2";
@@ -31,7 +32,7 @@ export type PromptRun = {
 
 export type PromptProvider = {
   command: string;
-  name: "codex" | "claude";
+  name: AgentProviderName;
 };
 
 export type RenderAutonomousPromptInput = {

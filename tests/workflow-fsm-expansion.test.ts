@@ -959,6 +959,41 @@ describe("state machine workflow definitions", () => {
     expect(holding?.action?.kind).toBe("wait");
   });
 
+  it("accepts Oh My Pi for an agent action provider", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: omp_workflow",
+        "  initial: run_agent",
+        "  states:",
+        "    run_agent:",
+        "      action:",
+        "        kind: agent",
+        "        provider: omp",
+        "        prompt: prompts/run.md",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    expect(
+      result.workflow.states.find((state) => state.id === "run_agent")?.action
+    ).toEqual({
+      kind: "agent",
+      prompt: "prompts/run.md",
+      provider: "omp"
+    });
+  });
+
   it("rejects a wait action that declares a provider", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");

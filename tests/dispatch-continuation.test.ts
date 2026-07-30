@@ -6,8 +6,16 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startDaemon } from "../src/daemon.js";
-import type { LifecyclePolicy } from "../src/lifecycle/active-runs.js";
+import {
+  ActiveRunRegistry,
+  type LifecyclePolicy
+} from "../src/lifecycle/active-runs.js";
+import {
+  RunController,
+  type RunControllerProjectConfig
+} from "../src/lifecycle/run-controller.js";
 import type { AgentProvider, ProviderEvent } from "../src/provider.js";
+import { openRunStore } from "../src/run-store.js";
 import type { PreparedIssueWorkspace } from "../src/workspace.js";
 import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
@@ -346,6 +354,116 @@ describe("dispatch continuation cap", () => {
       await daemon.stop();
     }
   }, 70_000);
+
+  it("terminalizes a scheduled continuation when its provider command disappears", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const project: RunControllerProjectConfig = {
+      agent: { provider: "omp" },
+      issue_filters: {
+        labels_all: ["agent-ready"],
+        labels_none: ["blocked", "needs-human"],
+        states: ["open"]
+      },
+      mode: "dispatch",
+      name: "symphonika",
+      priority: { default: 99, labels: {} },
+      tracker: {
+        kind: "github",
+        owner: "pmatos",
+        repo: "symphonika",
+        token: "$GITHUB_TOKEN"
+      },
+      workflow: { format: "auto", path: "./WORKFLOW.md" },
+      workspace: {
+        git: {
+          base_branch: "main",
+          remote: "git@github.com:pmatos/symphonika.git"
+        },
+        root: "./.symphonika/workspaces/symphonika"
+      }
+    };
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "omp",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue({
+        ...baseIssue,
+        labels: ["agent-ready", "sym:claimed"]
+      }),
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const prepareIssueWorkspace = vi.fn();
+    const controller = new RunController({
+      activeRuns: new ActiveRunRegistry(),
+      agentProviders: { omp: provider },
+      configDir: root,
+      createRunId: () => "run-cont-missing-omp",
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      prepareIssueWorkspace,
+      projectsLoader: () => Promise.resolve(new Map([[project.name, project]])),
+      providersLoader: () =>
+        Promise.resolve({
+          claude: { command: "claude" },
+          codex: { command: "codex" }
+        }),
+      runStore,
+      schedule: () => undefined,
+      stateRoot
+    });
+
+    try {
+      await controller.executeContinuation({
+        issue: {
+          body: baseIssue.body,
+          created_at: baseIssue.created_at,
+          id: baseIssue.id,
+          labels: ["agent-ready", "sym:claimed"],
+          number: baseIssue.number,
+          priority: 99,
+          state: baseIssue.state,
+          title: baseIssue.title,
+          updated_at: baseIssue.updated_at,
+          url: baseIssue.html_url
+        },
+        parentRunId: "parent-run",
+        projectName: project.name
+      });
+
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(prepareIssueWorkspace).not.toHaveBeenCalled();
+      expect(runStore.getRun("run-cont-missing-omp")).toMatchObject({
+        continuationParentRunId: "parent-run",
+        failureClassification: "deterministic",
+        isContinuation: true,
+        state: "failed",
+        terminalReason: "provider_command_missing: omp"
+      });
+      expect(
+        githubIssuesApi.addLabelsToIssue.mock.calls.some(([input]) =>
+          (input as { labels: string[] }).labels.includes("sym:failed")
+        )
+      ).toBe(true);
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:running"] })
+      );
+    } finally {
+      runStore.close();
+    }
+  });
 
   it("does not start scheduled continuation when issue loses eligibility during delay", async () => {
     const root = await makeTempRoot();

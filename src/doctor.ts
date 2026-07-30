@@ -31,15 +31,12 @@ import {
   type GitHubIssuesApi
 } from "./issue-polling.js";
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
-import type { AgentProviderRegistry } from "./provider.js";
+import type { AgentProviderName, AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
-import {
-  renderProvidersSliceUnit,
-  renderSliceUnit,
-  userUnitDir
-} from "./service.js";
+import { userUnitDir } from "./service.js";
 import { resolveStateRoot } from "./state.js";
+import type { ExpandedWorkflow } from "./workflow.js";
 import {
   loadExpandedWorkflow,
   resolveWorkflowFormat,
@@ -227,7 +224,7 @@ const SILENT_OCTOKIT_LOG = {
   warn: () => undefined
 };
 
-const providerNameSchema = z.enum(["codex", "claude"]);
+const providerNameSchema = z.enum(["codex", "claude", "omp"]);
 const providerCommandSchema = z
   .object({
     command: z.string().trim().min(1)
@@ -366,7 +363,8 @@ const serviceConfigSchema = z
     providers: z
       .object({
         codex: providerCommandSchema,
-        claude: providerCommandSchema
+        claude: providerCommandSchema,
+        omp: providerCommandSchema.optional()
       })
       .passthrough(),
     routines: z.array(serviceRoutineSchema).optional(),
@@ -435,7 +433,10 @@ export async function runDoctor(
     );
     const workflowErrors = await collectWorkflowErrors(
       workflowPath,
-      project.workflow.format
+      project.workflow.format,
+      project,
+      parsedConfig,
+      agentProviders
     );
     errors.push(...workflowErrors);
     const staleIssues = await fetchStaleIssues(project, env, githubIssuesApi);
@@ -460,7 +461,9 @@ export async function runDoctor(
         sourcePath: path.resolve(path.dirname(configPath), entry.path)
       })),
       parsedConfig.projects,
-      projects
+      projects,
+      parsedConfig.providers,
+      agentProviders
     ))
   );
 
@@ -475,9 +478,9 @@ export async function runDoctor(
 // that's not a doctor concern. `ExecStart`/`Environment=PATH` are baked in
 // at install time from the operator's own environment, so the `.service`
 // file can't be regenerated and byte-compared generically; only structural
-// markers (Slice=, Type=notify) are checked there. The two `.slice` files
-// carry no install-specific content, so they're compared byte-for-byte
-// against the current generator output.
+// markers (Slice=, Type=notify) are checked there. The `.slice` files are
+// also checked structurally because their resource-limit values are
+// operator-customizable (README.md).
 async function checkInstalledUnitDrift(
   homeDir: string,
   env: NodeJS.ProcessEnv
@@ -505,7 +508,7 @@ async function checkInstalledUnitDrift(
     );
   }
   if (
-    !serviceContent.includes("Type=notify") ||
+    !/^[ \t]*Type[ \t]*=[ \t]*notify[ \t]*$/m.test(serviceContent) ||
     !serviceContent.includes("NotifyAccess=all") ||
     !/^WatchdogSec=/m.test(serviceContent) ||
     !/^TimeoutStartSec=/m.test(serviceContent)
@@ -518,14 +521,14 @@ async function checkInstalledUnitDrift(
   warnings.push(
     ...(await checkSliceDrift(
       path.join(unitDir, "symphonika-daemon.slice"),
-      renderSliceUnit(),
+      ["MemoryHigh", "MemoryMax"],
       reinstallHint
     ))
   );
   warnings.push(
     ...(await checkSliceDrift(
       path.join(unitDir, "symphonika-providers.slice"),
-      renderProvidersSliceUnit(),
+      ["MemoryHigh", "MemoryMax", "TasksMax"],
       reinstallHint
     ))
   );
@@ -535,19 +538,53 @@ async function checkInstalledUnitDrift(
 
 async function checkSliceDrift(
   slicePath: string,
-  expectedContent: string,
+  requiredDirectives: string[],
   reinstallHint: string
 ): Promise<string[]> {
   const content = await readFileIfExists(slicePath);
   if (content === undefined) {
     return [`${slicePath} is missing — ${reinstallHint}`];
   }
-  if (content !== expectedContent) {
+  const directives = sliceDirectiveNames(content);
+  if (directives === undefined) {
+    return [`${slicePath} has no [Slice] section — ${reinstallHint}`];
+  }
+  const missingDirectives = requiredDirectives.filter(
+    (directive) => !directives.has(directive)
+  );
+  if (missingDirectives.length > 0) {
     return [
-      `${slicePath} content differs from the current generator output — ${reinstallHint}`
+      `${slicePath} is missing required [Slice] directives (${missingDirectives
+        .map((directive) => `${directive}=`)
+        .join(", ")}) — ${reinstallHint}`
     ];
   }
   return [];
+}
+
+function sliceDirectiveNames(content: string): Set<string> | undefined {
+  const directives = new Set<string>();
+  let inSliceSection = false;
+  let sawSliceSection = false;
+
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const section = /^\[([^\]]+)\]$/.exec(trimmed);
+    if (section !== null) {
+      inSliceSection = section[1] === "Slice";
+      sawSliceSection ||= inSliceSection;
+      continue;
+    }
+    if (!inSliceSection || trimmed.startsWith("#") || trimmed.startsWith(";")) {
+      continue;
+    }
+    const equalsIndex = trimmed.indexOf("=");
+    if (equalsIndex > 0) {
+      directives.add(trimmed.slice(0, equalsIndex).trim());
+    }
+  }
+
+  return sawSliceSection ? directives : undefined;
 }
 
 async function readFileIfExists(filePath: string): Promise<string | undefined> {
@@ -561,7 +598,9 @@ async function readFileIfExists(filePath: string): Promise<string | undefined> {
 async function validateServiceRoutines(
   entries: Array<{ projectName: string; sourcePath: string }>,
   declaredProjects: ProjectConfig[],
-  projectReports: DoctorProjectReport[]
+  projectReports: DoctorProjectReport[],
+  providers: ServiceConfig["providers"],
+  agentProviders: AgentProviderRegistry
 ): Promise<string[]> {
   const errors: string[] = [];
   const seenNames = new Map<string, string>();
@@ -634,6 +673,28 @@ async function validateServiceRoutines(
     }
     seenNames.set(routine.name, routine.sourcePath);
 
+    if (routine.provider !== null) {
+      const providerConfig = providers[routine.provider];
+      const providerAdapter = agentProviders[routine.provider];
+      if (providerConfig === undefined) {
+        errors.push(
+          `routine "${routine.name}" provider ${routine.provider} references providers.${routine.provider}.command, but it is missing`
+        );
+      } else if (providerAdapter === undefined) {
+        errors.push(
+          `routine "${routine.name}" provider ${routine.provider} has no registered adapter`
+        );
+      } else {
+        try {
+          await providerAdapter.validate(providerConfig.command);
+        } catch (error) {
+          errors.push(
+            `routine "${routine.name}" providers.${routine.provider}.command is invalid: ${errorMessage(error)}`
+          );
+        }
+      }
+    }
+
     if (declared === undefined) {
       continue;
     }
@@ -663,18 +724,82 @@ async function validateServiceRoutines(
 
 async function collectWorkflowErrors(
   workflowPath: string,
-  format: WorkflowFormat
+  format: WorkflowFormat,
+  project: ProjectConfig,
+  config: ServiceConfig,
+  agentProviders: AgentProviderRegistry
 ): Promise<string[]> {
   try {
     const expanded = await loadExpandedWorkflow(workflowPath, format);
     if (expanded.errors.length > 0) {
       return expanded.errors;
     }
-    return validateExpandedWorkflowReferences(expanded.workflow, workflowPath);
+    const errors = await validateExpandedWorkflowReferences(
+      expanded.workflow,
+      workflowPath
+    );
+    errors.push(
+      ...(await validateWorkflowProviderReferences(
+        expanded.workflow,
+        project,
+        config,
+        agentProviders
+      ))
+    );
+    return errors;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return [`workflow contract not found at ${workflowPath}: ${message}`];
   }
+}
+
+async function validateWorkflowProviderReferences(
+  workflow: ExpandedWorkflow,
+  project: ProjectConfig,
+  config: ServiceConfig,
+  agentProviders: AgentProviderRegistry
+): Promise<string[]> {
+  const referenced = new Set<AgentProviderName>();
+  for (const state of workflow.states) {
+    const action = state.action;
+    if (action?.kind === "agent" && action.provider !== undefined) {
+      referenced.add(action.provider);
+    }
+  }
+  // The project default provider is already validated by validateProject.
+  referenced.delete(project.agent.provider);
+
+  const errors: string[] = [];
+  for (const providerName of referenced) {
+    const provider = config.providers[providerName];
+    if (provider === undefined) {
+      errors.push(
+        `projects.${project.name} workflow references provider ${providerName}, but providers.${providerName}.command is missing`
+      );
+      continue;
+    }
+    if (provider.command.trim().length === 0) {
+      errors.push(
+        `projects.${project.name} workflow references provider ${providerName}, but its command is empty`
+      );
+      continue;
+    }
+    const adapter = agentProviders[providerName];
+    if (adapter === undefined) {
+      errors.push(
+        `projects.${project.name} workflow references provider ${providerName}, but no adapter is registered`
+      );
+      continue;
+    }
+    try {
+      await adapter.validate(provider.command);
+    } catch (error) {
+      errors.push(
+        `projects.${project.name} providers.${providerName}.command is invalid: ${errorMessage(error)}`
+      );
+    }
+  }
+  return errors;
 }
 
 async function fetchStaleIssues(
@@ -1013,7 +1138,7 @@ async function collectProjectSettings(input: {
       await promptController.ask({
         defaultValue: "codex",
         key: "provider",
-        message: "Agent Provider (codex or claude)"
+        message: "Agent Provider (codex, claude, or omp)"
       })
     );
     const baseBranch = await promptController.ask({
@@ -1147,10 +1272,10 @@ function createInitProjectPromptController(
 }
 
 function parseInitProvider(value: string): InitProvider {
-  if (value === "codex" || value === "claude") {
+  if (value === "codex" || value === "claude" || value === "omp") {
     return value;
   }
-  throw new Error("Agent Provider must be one of codex, claude");
+  throw new Error("Agent Provider must be one of codex, claude, omp");
 }
 
 function parseLabelList(value: string, label: string): string[] {
@@ -1774,7 +1899,12 @@ async function validateProject(
   // Provider command + adapter checks are shared by both modes.
   const provider = config.providers[project.agent.provider];
   let providerOk = true;
-  if (provider.command.trim().length === 0) {
+  if (provider === undefined) {
+    errors.push(
+      `projects.${project.name}.agent.provider references ${project.agent.provider}, but providers.${project.agent.provider}.command is missing`
+    );
+    providerOk = false;
+  } else if (provider.command.trim().length === 0) {
     errors.push(
       `projects.${project.name}.agent.provider references ${project.agent.provider}, but its command is empty`
     );
@@ -1786,7 +1916,7 @@ async function validateProject(
       `projects.${project.name}.agent.provider references ${project.agent.provider}, but no adapter is registered`
     );
     providerOk = false;
-  } else {
+  } else if (provider !== undefined) {
     try {
       await providerAdapter.validate(provider.command);
     } catch (error) {

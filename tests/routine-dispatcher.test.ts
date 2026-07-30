@@ -1319,7 +1319,10 @@ describe("RoutineFiringDispatcher", () => {
           skipped: [
             {
               projectName: "alpha",
-              reason: "provider_not_registered: claude",
+              reason:
+                missingFrom === "providers config"
+                  ? "provider_command_missing: claude"
+                  : "provider_not_registered: claude",
               routineName: "daily-report"
             }
           ]

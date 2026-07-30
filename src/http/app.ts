@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import { Readable } from "node:stream";
 
 import { Hono, type Context } from "hono";
@@ -77,9 +78,12 @@ export type HttpAppOptions = {
     projectName: string;
     runId: string;
   }>;
+  // Epoch timestamp exposed by /api/status.
   getLastTickAt?: () => number | undefined;
+  // Internal liveness timestamps share monotonicNow's clock domain.
+  getLastTickAtMonotonic?: () => number | undefined;
   getPollingIntervalMs?: () => number | undefined;
-  getTickLoopStartedAt?: () => number | undefined;
+  getTickLoopStartedAtMonotonic?: () => number | undefined;
   getPullRequestFollowupPolicy?: () => {
     maxReviewDispatchesPerPr: number;
   };
@@ -95,6 +99,8 @@ export type HttpAppOptions = {
     projectName: string
   ) => Pick<WatchdogConfig, "enabled" | "graceMinutes">;
   issuePollStatus?: IssuePollStatus;
+  monotonicNow?: () => number;
+  // Wall clock used by human/API-facing timestamps and ages.
   now?: () => number;
   pollNow?: PollNowFn;
   runStore?: RunStore;
@@ -141,6 +147,7 @@ const RUN_ARTIFACT_KINDS: ReadonlySet<string> = new Set(
 export function createHttpApp(options: HttpAppOptions): Hono {
   const app = new Hono();
   const startedAtMs = options.startedAtMs ?? Date.now();
+  const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const now = options.now ?? Date.now;
   const issuePollStatus = options.issuePollStatus ?? emptyIssuePollStatus();
   const dispatchRuntime = options.dispatchRuntime ?? {
@@ -404,15 +411,17 @@ export function createHttpApp(options: HttpAppOptions): Hono {
 
     registerPages({
       app,
-      ...(options.getLastTickAt === undefined
+      ...(options.getLastTickAtMonotonic === undefined
         ? {}
-        : { getLastTickAt: options.getLastTickAt }),
+        : { getLastTickAtMonotonic: options.getLastTickAtMonotonic }),
       ...(options.getPollingIntervalMs === undefined
         ? {}
         : { getPollingIntervalMs: options.getPollingIntervalMs }),
-      ...(options.getTickLoopStartedAt === undefined
+      ...(options.getTickLoopStartedAtMonotonic === undefined
         ? {}
-        : { getTickLoopStartedAt: options.getTickLoopStartedAt }),
+        : {
+            getTickLoopStartedAtMonotonic: options.getTickLoopStartedAtMonotonic
+          }),
       ...(options.getPullRequestFollowupPolicy === undefined
         ? {}
         : {
@@ -422,7 +431,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         ? {}
         : { getStatusSnapshot: options.getStatusSnapshot }),
       issuePollStatus,
-      now,
+      monotonicNow,
       runStore,
       version: options.version
     });

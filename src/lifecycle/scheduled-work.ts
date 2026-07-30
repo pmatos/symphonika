@@ -24,8 +24,15 @@ type ScheduledItem = ScheduledWorkSnapshot & {
 
 export class ScheduledWorkRegistry {
   private readonly scheduled = new Map<string, ScheduledItem>();
+  private cancelled = false;
 
   scheduleDelayed(input: ScheduledWorkInput): void {
+    // Refused after cancelAll (daemon shutdown): an armed timer would fire
+    // against a store that stop() is closing. Callers gate their row
+    // mutations on the shutdown latch before reaching here. See ADR 0052.
+    if (this.cancelled) {
+      return;
+    }
     const key = issueKey(input.projectName, input.issueNumber);
     if (this.scheduled.has(key)) {
       throw new Error(`scheduled work already exists for issue ${key}`);
@@ -76,6 +83,7 @@ export class ScheduledWorkRegistry {
   }
 
   cancelAll(): void {
+    this.cancelled = true;
     for (const item of this.scheduled.values()) {
       clearTimeout(item.timeout);
     }

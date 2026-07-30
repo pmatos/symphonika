@@ -36,6 +36,7 @@ export async function runAddRoutine(
   options: AddRoutineOptions
 ): Promise<AddRoutineReport> {
   const cwd = options.cwd ?? process.cwd();
+  const project = options.project.trim();
   const configPath = resolveServiceConfigPath({
     ...(options.configPath === undefined
       ? {}
@@ -51,7 +52,7 @@ export async function runAddRoutine(
     errors,
     filePath,
     ok,
-    project: options.project,
+    project,
     registeredPath,
     routineName: options.name
   });
@@ -88,7 +89,7 @@ export async function runAddRoutine(
 
   try {
     await new RoutineConfigEditor(configPath).addRoutine({
-      projectName: options.project,
+      projectName: project,
       routinePath: registeredPath
     });
   } catch (error) {

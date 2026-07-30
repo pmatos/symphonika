@@ -17,7 +17,7 @@ export type WorkflowAction = {
   kind: WorkflowActionKind;
   method?: string;
   prompt?: string;
-  provider?: "codex" | "claude";
+  provider?: AgentProviderName;
 };
 
 export type WorkflowTransition = {
@@ -44,3 +44,4 @@ export type ExpandedWorkflow = {
   states: ExpandedWorkflowState[];
   templateFiles: string[];
 };
+import type { AgentProviderName } from "../provider.js";

@@ -5,7 +5,8 @@ export type RoutineKind = "git" | "report";
 export type RoutineState =
   "active" | "expired" | "inactive" | "disabled" | "invalid";
 
-export type RoutineDisabledReason = "operator" | "removed_from_config";
+export type RoutineDisabledReason =
+  "operator" | "removed_from_config" | "rejected_tracker_less_host";
 
 export type RoutineFiringState =
   | "queued"

@@ -11,7 +11,10 @@ import {
   type IssueSnapshot
 } from "../src/issue-polling.js";
 import type { RunControllerProjectConfig } from "../src/lifecycle/run-controller.js";
-import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
+import {
+  ActiveRunRegistry,
+  CANCEL_REASONS
+} from "../src/lifecycle/active-runs.js";
 import { detectStaleClaims } from "../src/lifecycle/stale-claims.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
 
@@ -343,7 +346,7 @@ describe("detectStaleClaims", () => {
 
       expect(addLabelsToIssue).not.toHaveBeenCalled();
       expect(marks).toEqual([]);
-      registry.cancelAll();
+      await registry.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
     });
   });
 

@@ -62,6 +62,7 @@ import {
   CANCEL_REASONS,
   computeRetryDelayMs,
   LIFECYCLE_POLICY,
+  RegistryShutdownError,
   type LifecyclePolicy
 } from "./active-runs.js";
 import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
@@ -126,6 +127,12 @@ export type RunControllerProjectConfig = {
   // rows (state = 'invalid') from being soft-disabled as "removed from
   // config" by the next syncRoutines call — see ADR 0060.
   invalidRoutineNames?: string[] | undefined;
+  // kind: git routines rejected because this Routine Host has no tracker.
+  // Persisted rows are soft-disabled with a precise reason so stale
+  // executable configuration cannot keep firing, and first-seen rejections
+  // persist a disabled row so a later tracker restoration follows the normal
+  // one-shot/cron restore rules. See ADR 0066.
+  trackerlessGitRoutines?: TargetedRoutineDeclaration[] | undefined;
   watchdog?: { graceMinutes: number } | undefined;
 };
 
@@ -157,6 +164,7 @@ export function isDispatchProject(
 export type RunControllerProvidersConfig = {
   codex: { command: string };
   claude: { command: string };
+  omp?: { command: string };
 };
 
 export type ScheduleHandler = (input: {
@@ -465,34 +473,37 @@ export class RunController {
       providersConfig as Partial<RunControllerProvidersConfig>
     )[providerName]?.command;
 
-    if (providerCommand === undefined || providerCommand.trim().length === 0) {
-      await this.failFreshDispatchBeforeProvider({
-        issue: target.candidate.issue,
-        project: target.project,
-        providerCommand: providerCommand ?? "",
-        providerName,
-        reason: `provider_command_missing: ${providerName}`,
-        repository,
-        runId
-      });
-      return { dispatched: true, runId };
-    }
-
-    const provider = this.agentProviders[providerName];
-    if (provider === undefined) {
-      await this.failFreshDispatchBeforeProvider({
-        issue: target.candidate.issue,
-        project: target.project,
-        providerCommand,
-        providerName,
-        reason: `provider_not_registered: ${providerName}`,
-        repository,
-        runId
-      });
-      return { dispatched: true, runId };
-    }
-
     try {
+      if (
+        providerCommand === undefined ||
+        providerCommand.trim().length === 0
+      ) {
+        await this.failFreshDispatchBeforeProvider({
+          issue: target.candidate.issue,
+          project: target.project,
+          providerCommand: providerCommand ?? "",
+          providerName,
+          reason: `provider_command_missing: ${providerName}`,
+          repository,
+          runId
+        });
+        return { dispatched: true, runId };
+      }
+
+      const provider = this.agentProviders[providerName];
+      if (provider === undefined) {
+        await this.failFreshDispatchBeforeProvider({
+          issue: target.candidate.issue,
+          project: target.project,
+          providerCommand,
+          providerName,
+          reason: `provider_not_registered: ${providerName}`,
+          repository,
+          runId
+        });
+        return { dispatched: true, runId };
+      }
+
       await this.runFreshLifecycle({
         attemptNumber: 1,
         isContinuation: false,
@@ -507,6 +518,13 @@ export class RunController {
         schedulerWeights: target.schedulerWeights
       });
     } catch (error) {
+      if (error instanceof RegistryShutdownError) {
+        this.logger?.debug(
+          { reason: error.message, runId },
+          "symphonika fresh dispatch skipped: daemon shutting down"
+        );
+        return { dispatched: false, reason: error.message };
+      }
       if (
         error instanceof CapBreachedError ||
         error instanceof IssueReservedError
@@ -536,6 +554,11 @@ export class RunController {
     repository: GitHubIssueRepositoryInput;
     runId: string;
   }): Promise<void> {
+    if (this.activeRuns.isShuttingDown()) {
+      throw new RegistryShutdownError(
+        `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
+      );
+    }
     await this.bestEffort(
       () =>
         (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
@@ -552,6 +575,32 @@ export class RunController {
         runId: input.runId
       }
     );
+    if (this.activeRuns.isShuttingDown()) {
+      // The provider-resolution failure path does not reserve an in-flight
+      // slot, so reserveSlot cannot reject a shutdown-racing claim for it.
+      // Roll back the label before skipping row creation. See ADR 0052.
+      await this.bestEffort(
+        () =>
+          (
+            this.githubIssuesApi as LabelWritingGitHubIssuesApi
+          ).removeLabelsFromIssue({
+            ...input.repository,
+            issueNumber: input.issue.number,
+            labels: ["sym:claimed"]
+          }),
+        {
+          issueNumber: input.issue.number,
+          label: "sym:claimed",
+          operation: "removeLabel",
+          phase: "fresh-dispatch-provider-resolution-shutdown",
+          project: input.project.name,
+          runId: input.runId
+        }
+      );
+      throw new RegistryShutdownError(
+        `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
+      );
+    }
     this.runStore.createRun({
       id: input.runId,
       issue: input.issue,
@@ -693,59 +742,93 @@ export class RunController {
     // reservation inside the mutex; on contention, reschedule the retry
     // instead of breaching the cap. See ADR 0053.
     let contention: CapBreachedError | IssueReservedError | undefined;
+    // A retry that arrives after stop() closed the registry must skip —
+    // WITHOUT rescheduling, since the scheduler itself is being torn down.
+    // See ADR 0052.
+    let shuttingDown = false;
     await this.dispatchMutex.acquire();
     try {
-      const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
-      if (
-        globalMax !== undefined &&
-        this.activeRuns.countInFlight() >= globalMax
-      ) {
-        contention = new CapBreachedError(
-          `global max_in_flight (${globalMax}) reached`
-        );
+      if (this.activeRuns.isShuttingDown()) {
+        shuttingDown = true;
       } else {
-        const projectMax = project.max_in_flight ?? 1;
+        const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
         if (
-          this.activeRuns.countInFlightByProject(project.name) >= projectMax
+          globalMax !== undefined &&
+          this.activeRuns.countInFlight() >= globalMax
         ) {
           contention = new CapBreachedError(
-            `project ${project.name} max_in_flight (${projectMax}) reached`
+            `global max_in_flight (${globalMax}) reached`
           );
-        } else if (
-          this.activeRuns.isIssueReserved(project.name, refreshed.number)
-        ) {
-          contention = new IssueReservedError(
-            `issue ${project.name}#${refreshed.number} is already reserved`
-          );
-        }
-      }
-      if (contention === undefined) {
-        await this.bestEffort(
-          () =>
-            this.githubIssuesApi.addLabelsToIssue!({
-              ...repository,
-              issueNumber: refreshed.number,
-              labels: ["sym:claimed"]
-            }),
-          {
-            issueNumber: refreshed.number,
-            label: "sym:claimed",
-            operation: "addLabel",
-            project: project.name,
-            runId: payload.runId
+        } else {
+          const projectMax = project.max_in_flight ?? 1;
+          if (
+            this.activeRuns.countInFlightByProject(project.name) >= projectMax
+          ) {
+            contention = new CapBreachedError(
+              `project ${project.name} max_in_flight (${projectMax}) reached`
+            );
+          } else if (
+            this.activeRuns.isIssueReserved(project.name, refreshed.number)
+          ) {
+            contention = new IssueReservedError(
+              `issue ${project.name}#${refreshed.number} is already reserved`
+            );
           }
-        );
-        this.activeRuns.reserveSlot({
-          issueNumber: refreshed.number,
-          projectName: project.name,
-          ...(payload.respectsIssueLabels === undefined
-            ? {}
-            : { respectsIssueLabels: payload.respectsIssueLabels }),
-          runId: payload.runId
-        });
+        }
+        if (contention === undefined) {
+          // Reserve BEFORE re-asserting the label: when stop() closes the
+          // registry during the loader await above, reserveSlot refuses the
+          // slot here and no stale sym:claimed label is left behind. See
+          // ADR 0052.
+          try {
+            this.activeRuns.reserveSlot({
+              issueNumber: refreshed.number,
+              projectName: project.name,
+              ...(payload.respectsIssueLabels === undefined
+                ? {}
+                : { respectsIssueLabels: payload.respectsIssueLabels }),
+              runId: payload.runId
+            });
+          } catch (error) {
+            if (!(error instanceof RegistryShutdownError)) {
+              throw error;
+            }
+            // The run row keeps its pre-retry state; no provider starts.
+            shuttingDown = true;
+          }
+          if (!shuttingDown) {
+            await this.bestEffort(
+              () =>
+                this.githubIssuesApi.addLabelsToIssue!({
+                  ...repository,
+                  issueNumber: refreshed.number,
+                  labels: ["sym:claimed"]
+                }),
+              {
+                issueNumber: refreshed.number,
+                label: "sym:claimed",
+                operation: "addLabel",
+                project: project.name,
+                runId: payload.runId
+              }
+            );
+          }
+        }
       }
     } finally {
       this.dispatchMutex.release();
+    }
+
+    if (shuttingDown) {
+      this.logger?.debug(
+        {
+          issueNumber: refreshed.number,
+          project: project.name,
+          runId: payload.runId
+        },
+        "symphonika retry skipped: daemon shutting down"
+      );
+      return;
     }
 
     if (contention !== undefined) {
@@ -1071,6 +1154,17 @@ export class RunController {
       state: waitState
     });
 
+    // Re-evaluation during shutdown must not mutate rows or arm timers:
+    // the scheduler has been cancelled and stop() is closing the store.
+    // The waiting row stays durable for the next daemon's reconciliation.
+    if (this.activeRuns.isShuttingDown()) {
+      this.logger?.debug(
+        { runId },
+        "symphonika wait re-eval skipped: daemon shutting down"
+      );
+      return;
+    }
+
     if (decision.kind === "stay_waiting") {
       this.logger?.debug(
         { reason: decision.reason, runId },
@@ -1249,9 +1343,10 @@ export class RunController {
           (providersConfig as Partial<RunControllerProvidersConfig>)[
             providerName
           ]?.command ?? "";
-        await this.failStateAdvanceBeforeProvider({
+        await this.failScheduledRunBeforeProvider({
           issue: refreshed,
           parentRunId: payload.parentRunId,
+          phase: "state-advance",
           project,
           providerCommand,
           providerName,
@@ -1285,9 +1380,10 @@ export class RunController {
           (providersConfig as Partial<RunControllerProvidersConfig>)[
             providerName
           ]?.command ?? "";
-        await this.failStateAdvanceBeforeProvider({
+        await this.failScheduledRunBeforeProvider({
           issue: refreshed,
           parentRunId: payload.parentRunId,
+          phase: "state-advance",
           project,
           providerCommand,
           providerName,
@@ -1319,9 +1415,10 @@ export class RunController {
       const providerCommand =
         (providersConfig as Partial<RunControllerProvidersConfig>)[providerName]
           ?.command ?? "";
-      await this.failStateAdvanceBeforeProvider({
+      await this.failScheduledRunBeforeProvider({
         issue: refreshed,
         parentRunId: payload.parentRunId,
+        phase: "state-advance",
         project,
         providerCommand,
         providerName,
@@ -1366,9 +1463,10 @@ export class RunController {
     const providerCommand = providerConfig?.command;
 
     if (providerCommand === undefined || providerCommand.trim().length === 0) {
-      await this.failStateAdvanceBeforeProvider({
+      await this.failScheduledRunBeforeProvider({
         issue: refreshed,
         parentRunId: payload.parentRunId,
+        phase: "state-advance",
         project,
         providerCommand: providerCommand ?? "",
         providerName,
@@ -1381,9 +1479,10 @@ export class RunController {
 
     const provider = this.agentProviders[providerName];
     if (provider === undefined) {
-      await this.failStateAdvanceBeforeProvider({
+      await this.failScheduledRunBeforeProvider({
         issue: refreshed,
         parentRunId: payload.parentRunId,
+        phase: "state-advance",
         project,
         providerCommand,
         providerName,
@@ -1417,6 +1516,20 @@ export class RunController {
         runId
       });
     } catch (error) {
+      if (error instanceof RegistryShutdownError) {
+        // Skip WITHOUT rescheduling: a rescheduled timer would keep the
+        // shutdown drain alive past stop().
+        this.logger?.debug(
+          {
+            issueNumber: refreshed.number,
+            project: project.name,
+            reason: error.message,
+            runId
+          },
+          "symphonika state_advance skipped: daemon shutting down"
+        );
+        return;
+      }
       if (
         error instanceof CapBreachedError ||
         error instanceof IssueReservedError
@@ -1444,9 +1557,46 @@ export class RunController {
     }
   }
 
-  private async failStateAdvanceBeforeProvider(input: {
+  // Rolls back a sym:claimed written before the shutdown gate closed.
+  // Only the shutdown path awaits: the isShuttingDown() check at each call
+  // site and the createContinuationRun below it are synchronous, so stop()
+  // cannot close the gate between check and row creation. See ADR 0052.
+  private async rollbackScheduledRunClaimLabel(input: {
+    issueNumber: number;
+    phase: "continuation" | "state-advance";
+    projectName: string;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    await this.bestEffort(
+      () =>
+        (
+          this.githubIssuesApi as LabelWritingGitHubIssuesApi
+        ).removeLabelsFromIssue({
+          ...input.repository,
+          issueNumber: input.issueNumber,
+          labels: ["sym:claimed"]
+        }),
+      {
+        issueNumber: input.issueNumber,
+        label: "sym:claimed",
+        operation: "removeLabel",
+        project: input.projectName,
+        runId: input.runId
+      }
+    );
+    this.logger?.debug(
+      { issueNumber: input.issueNumber, runId: input.runId },
+      `symphonika ${
+        input.phase === "state-advance" ? "state advance" : "continuation"
+      } skipped: daemon shutting down`
+    );
+  }
+
+  private async failScheduledRunBeforeProvider(input: {
     issue: IssueSnapshot;
     parentRunId: string;
+    phase: "continuation" | "state-advance";
     project: RunControllerProjectConfig;
     providerCommand: string;
     providerName: AgentProviderName;
@@ -1454,6 +1604,18 @@ export class RunController {
     repository: GitHubIssueRepositoryInput;
     runId: string;
   }): Promise<void> {
+    // Shutdown gate: every call site returns immediately after this helper,
+    // so skipping here skips the whole exit. The checks are synchronous
+    // with the row creation below — see rollbackScheduledRunClaimLabel.
+    if (this.activeRuns.isShuttingDown()) {
+      this.logger?.debug(
+        { issueNumber: input.issue.number, runId: input.runId },
+        `symphonika ${
+          input.phase === "state-advance" ? "state advance" : "continuation"
+        } skipped: daemon shutting down`
+      );
+      return;
+    }
     await this.bestEffort(
       () =>
         (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
@@ -1465,11 +1627,21 @@ export class RunController {
         issueNumber: input.issue.number,
         label: "sym:claimed",
         operation: "addLabel",
-        phase: "state-advance-provider-resolution",
+        phase: `${input.phase}-provider-resolution`,
         project: input.project.name,
         runId: input.runId
       }
     );
+    if (this.activeRuns.isShuttingDown()) {
+      await this.rollbackScheduledRunClaimLabel({
+        issueNumber: input.issue.number,
+        phase: input.phase,
+        projectName: input.project.name,
+        repository: input.repository,
+        runId: input.runId
+      });
+      return;
+    }
     this.runStore.createContinuationRun({
       id: input.runId,
       issue: input.issue,
@@ -1493,7 +1665,9 @@ export class RunController {
         reason: input.reason,
         runId: input.runId
       },
-      "symphonika state advance failed before provider launch"
+      `symphonika ${
+        input.phase === "state-advance" ? "state advance" : "continuation"
+      } failed before provider launch`
     );
     await this.applyTerminalLabels({
       fsmContinuing: false,
@@ -1518,6 +1692,13 @@ export class RunController {
     runId: string;
     targetState: ExpandedWorkflowState;
   }): Promise<void> {
+    if (this.activeRuns.isShuttingDown()) {
+      this.logger?.debug(
+        { issueNumber: input.issue.number, runId: input.runId },
+        "symphonika state advance skipped: daemon shutting down"
+      );
+      return;
+    }
     await this.bestEffort(
       () =>
         (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
@@ -1534,6 +1715,16 @@ export class RunController {
         runId: input.runId
       }
     );
+    if (this.activeRuns.isShuttingDown()) {
+      await this.rollbackScheduledRunClaimLabel({
+        issueNumber: input.issue.number,
+        phase: "state-advance",
+        projectName: input.project.name,
+        repository: input.repository,
+        runId: input.runId
+      });
+      return;
+    }
     this.runStore.createContinuationRun({
       id: input.runId,
       issue: input.issue,
@@ -1593,13 +1784,7 @@ export class RunController {
       return;
     }
 
-    const provider = this.agentProviders[project.agent.provider];
-    if (provider === undefined) {
-      return;
-    }
-
     const providersConfig = await this.providersLoader();
-    const providerCommand = providersConfig[project.agent.provider].command;
 
     if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
       return;
@@ -1641,6 +1826,39 @@ export class RunController {
     }
 
     const runId = this.createRunId();
+    const providerName = project.agent.provider;
+    const providerCommand = providersConfig[providerName]?.command;
+    if (providerCommand === undefined || providerCommand.trim().length === 0) {
+      await this.failScheduledRunBeforeProvider({
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        phase: "continuation",
+        project,
+        providerCommand: providerCommand ?? "",
+        providerName,
+        reason: `provider_command_missing: ${providerName}`,
+        repository,
+        runId
+      });
+      return;
+    }
+
+    const provider = this.agentProviders[providerName];
+    if (provider === undefined) {
+      await this.failScheduledRunBeforeProvider({
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        phase: "continuation",
+        project,
+        providerCommand,
+        providerName,
+        reason: `provider_not_registered: ${providerName}`,
+        repository,
+        runId
+      });
+      return;
+    }
+
     try {
       await this.runFreshLifecycle({
         attemptNumber: 1,
@@ -1650,11 +1868,25 @@ export class RunController {
         project,
         provider,
         providerCommand,
-        providerName: project.agent.provider,
+        providerName,
         repository,
         runId
       });
     } catch (error) {
+      if (error instanceof RegistryShutdownError) {
+        // Skip WITHOUT rescheduling: a rescheduled timer would keep the
+        // shutdown drain alive past stop().
+        this.logger?.debug(
+          {
+            issueNumber: refreshed.number,
+            project: project.name,
+            reason: error.message,
+            runId
+          },
+          "symphonika continuation skipped: daemon shutting down"
+        );
+        return;
+      }
       if (
         error instanceof CapBreachedError ||
         error instanceof IssueReservedError
@@ -1717,7 +1949,13 @@ export class RunController {
     }
 
     const providersConfig = await this.providersLoader();
-    const providerCommand = providersConfig[project.agent.provider].command;
+    const providerCommand = providersConfig[project.agent.provider]?.command;
+    if (providerCommand === undefined || providerCommand.trim().length === 0) {
+      return {
+        dispatched: false,
+        reason: `provider command is not configured: ${project.agent.provider}`
+      };
+    }
 
     if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
       return {
@@ -1774,6 +2012,9 @@ export class RunController {
         runId
       });
     } catch (error) {
+      if (error instanceof RegistryShutdownError) {
+        return { dispatched: false, reason: error.message };
+      }
       if (
         error instanceof CapBreachedError ||
         error instanceof IssueReservedError
@@ -1960,6 +2201,14 @@ export class RunController {
       weight: number;
     }>;
   }): Promise<void> {
+    // Shutdown gate, fast path: throwing before any side effect needs no
+    // rollback. The gate can still land during the addLabelsToIssue await
+    // below; the catch then cleans up the partial claim. See ADR 0052.
+    if (this.activeRuns.isShuttingDown()) {
+      throw new RegistryShutdownError(
+        `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
+      );
+    }
     // Re-check concurrency caps inside the mutex. pickTargetFromCandidates
     // ran without the lock, so two concurrent ticks could both observe a
     // below-cap count before either reserves a slot — without this guard,
@@ -2056,7 +2305,31 @@ export class RunController {
         runId: input.runId
       });
     } catch (error) {
-      if (!runCreated && claimed) {
+      if (error instanceof RegistryShutdownError && runCreated) {
+        // The shutdown snapshot in stop() predates this row, so record the
+        // shutdown reason here and release the claim label best-effort.
+        this.runStore.markCancelRequested(
+          input.runId,
+          CANCEL_REASONS.DAEMON_SHUTDOWN
+        );
+        this.runStore.updateRunState(input.runId, "cancelled");
+        const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
+        await this.bestEffort(
+          () =>
+            api.removeLabelsFromIssue({
+              ...input.repository,
+              issueNumber: input.issue.number,
+              labels: ["sym:claimed"]
+            }),
+          {
+            issueNumber: input.issue.number,
+            label: "sym:claimed",
+            operation: "removeLabel",
+            project: input.project.name,
+            runId: input.runId
+          }
+        );
+      } else if (!runCreated && claimed) {
         // Failure between claim and createRun (rare): still mark sym:failed best-effort.
         await this.markIssueFailed({
           issueNumber: input.issue.number,
@@ -2165,6 +2438,16 @@ export class RunController {
         currentState !== undefined &&
         isParkedAction(currentState.action?.kind)
       ) {
+        // A cancel (operator or shutdown) can land during loadWorkflow
+        // above, after cancelBeforeAttach was captured. Parking now would
+        // flip the row to waiting and arm a timer after the scheduler was
+        // cancelled. Returning early instead: the finally sees the latched
+        // cancelRequested and classifies the run cancelled — no error
+        // escapes to be logged as a dispatch failure. See ADR 0052.
+        const cancelBeforePark = this.activeRuns.getInFlight(input.runId);
+        if (cancelBeforePark?.cancelRequested === true) {
+          return;
+        }
         this.runStore.updateRunState(input.runId, "waiting");
         this.schedule({
           delayMs: this.lifecyclePolicy.continuation.delayMs,

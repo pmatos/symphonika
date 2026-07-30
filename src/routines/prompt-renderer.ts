@@ -4,6 +4,7 @@ import {
   AUTONOMY_PREAMBLE,
   AUTONOMY_PREAMBLE_VERSION
 } from "../workflow/autonomous-prompt.js";
+import type { AgentProviderName } from "../provider.js";
 import type { RoutineKind } from "./types.js";
 
 export type RoutinePromptInput = {
@@ -19,7 +20,7 @@ export type RoutinePromptInput = {
   };
   provider: {
     command: string;
-    name: "codex" | "claude";
+    name: AgentProviderName;
   };
   routine: {
     kind: RoutineKind;

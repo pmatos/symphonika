@@ -17,7 +17,7 @@ export type RoutineDeclarationLoadResult = {
   routine: RoutineDeclaration | null;
 };
 
-const providerNames = new Set(["codex", "claude"]);
+const providerNames = new Set(["codex", "claude", "omp"]);
 const routineKinds = new Set(["git", "report"]);
 
 export async function loadRoutineDeclaration(
@@ -97,7 +97,9 @@ export function parseRoutineDeclaration(
   let provider: AgentProviderName | null = null;
   if (providerValue !== undefined) {
     if (!providerNames.has(providerValue)) {
-      errors.push(`routine at ${routinePath} provider must be codex or claude`);
+      errors.push(
+        `routine at ${routinePath} provider must be codex, claude, or omp`
+      );
     } else {
       provider = providerValue as AgentProviderName;
     }

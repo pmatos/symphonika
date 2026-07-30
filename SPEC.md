@@ -9,8 +9,8 @@ full-permission coding-agent runs. It is inspired by the upstream Symphony speci
 ## 1. Purpose
 
 Symphonika runs as a local daemon. It reads eligible GitHub issues from one or more configured
-Projects, creates deterministic Git workspaces and branches, launches Codex or Claude agents inside
-those workspaces, and records enough evidence to debug and continue the work.
+Projects, creates deterministic Git workspaces and branches, launches Codex, Claude, or Oh My Pi
+agents inside those workspaces, and records enough evidence to debug and continue the work.
 
 The first milestone is a self-hosting bootstrap slice: Symphonika should be able to run this
 repository as one real Project well enough to help implement later Symphonika issues.
@@ -181,10 +181,11 @@ workflow-label drift does not cancel them.
 
 An Agent Provider is a normalized adapter that lets Symphonika run one coding-agent implementation.
 
-v1 supports both:
+v1 supports:
 
 - Codex through JSON-RPC app-server mode
 - Claude through `stream-json` CLI mode
+- Oh My Pi through its native newline-delimited JSON RPC mode
 
 ### 4.11 Event Logs
 
@@ -218,7 +219,8 @@ segment because routine firing workspaces live under `<workspace.root>/routines/
 Routine names are globally unique across the `routines:` block. Routine states are `active`,
 `expired`, and `inactive`. `inactive` means the Routine's target Project is disabled or omitted from
 the current valid Service Config snapshot (ADR 0021 cascade); the row remains durable but is hidden
-from default operator listings.
+from default operator listings. Routine-level scheduling control also uses `disabled` and `invalid`
+as defined in §8.5.
 
 ### 4.13 Routine Firing
 
@@ -252,7 +254,7 @@ reload is surfaced in structured logs and operator status while the daemon keeps
 known good effective snapshot.
 
 `symphonika init` initializes Symphonika's user Service Config independently of any repository. It
-prompts for service-level state, polling, pull-request merge policy, and Codex/Claude commands,
+prompts for service-level state, polling, pull-request merge policy, and Codex/Claude/OMP commands,
 writes `$XDG_CONFIG_HOME/symphonika/symphonika.yml` (or the home-directory fallback), and starts
 with `projects: []`. `--yes` accepts every displayed default without prompting, and `--force` is
 required to replace an existing user config.
@@ -306,6 +308,8 @@ providers:
     command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
   claude:
     command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"
+  omp:
+    command: "omp --mode rpc --auto-approve"
 
 projects:
   - name: symphonika
@@ -490,7 +494,7 @@ GitHub credentials are environment-backed.
 - Tokens must not be stored in SQLite
 - Token-like values must be redacted from logs
 
-Codex and Claude use their native local authentication.
+Codex, Claude, and OMP use their native local authentication.
 
 ## 7. State and Logs
 
@@ -720,6 +724,11 @@ workspace and logs are preserved, matching issue Run cancellation. Cancelling an
 Routine Firing already in a terminal state (`succeeded`, `failed`, `cancelled`) returns a clear
 error and makes no state change.
 
+Graceful daemon shutdown cancels every in-flight Routine Firing through the same provider
+cancellation path before waiting for dispatch work to drain, recording
+`cancel_reason = "daemon_shutdown"`. This is distinct from disabling or removing a Routine while
+the daemon remains active, which does not cancel its in-flight firing.
+
 A Routine with `disabled: true` in its own front matter transitions to `state = disabled`,
 `disabled_reason = "operator"` on the next reload; future scheduling stops but an in-flight firing
 continues to completion under the snapshot it started with — the daemon never cancels it as a side
@@ -730,6 +739,19 @@ un-disables it on the next reload and recomputes `next_fire_at` strictly after t
 one-shot Routine whose `at` elapsed while disabled is marked `expired` instead of firing
 retroactively. `catch_up: fire_once_if_missed` does not apply to a routine-level restore — that
 policy is for daemon outage, not deliberate operator disable.
+
+A previously persisted `kind: git` Routine rejected because its Routine Host has no tracker is
+soft-disabled with `disabled_reason = "rejected_tracker_less_host"`. This is distinct from
+`removed_from_config`: the top-level entry is still present but is incompatible with its target
+host. The rejected name must not be folded into the declaration-loader's `invalidRoutineNames`
+protection, because a protected, undeclared persisted row is skipped by both removal detection and
+the valid-declaration upsert and could remain active. A first-appearance rejection persists the
+Routine with its declared schedule and prompt: as `disabled` with the same reason while its host is
+enabled, or as `inactive` when the Project-level disable cascade takes precedence. Restoring the
+host's tracker therefore returns the Routine to the normal upsert path and the existing restore
+rules above in every case: a recurring Routine reactivates, while an elapsed one-shot is marked
+`expired` instead of firing retroactively — even when its schedule was edited while rejected or
+inactive. See ADR 0066.
 
 An invalid Routine declaration on reload does not abort reload for the rest of the fleet (§5.4): the
 daemon logs the error and surfaces it in the operator status surface and `doctor`. A Routine with a
@@ -878,7 +900,7 @@ Provider adapters expose a normalized interface conceptually equivalent to:
 
 ```ts
 type AgentProvider = {
-  name: "codex" | "claude";
+  name: "codex" | "claude" | "omp";
   validate(command: string): Promise<void>;
   runAttempt(input: ProviderRunInput): AsyncIterable<ProviderEvent>;
   cancel(runId: string): Promise<void>;
@@ -925,6 +947,16 @@ Default Claude command:
 ```text
 claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json
 ```
+
+Default Oh My Pi command:
+
+```text
+omp --mode rpc --auto-approve
+```
+
+The OMP adapter requires RPC mode and full-permission operation through `--auto-approve` or
+`--approval-mode yolo`. It validates the versioned ready frame with a bounded startup probe and
+negotiates protocol v2 chunking when the installed OMP advertises it. See ADR-0066.
 
 Provider commands may be overridden, but the replacement command must speak the provider adapter's
 expected protocol.
@@ -1040,8 +1072,27 @@ Cancel active provider process when:
 - issue is closed
 - issue loses eligibility
 - operator cancels through CLI or UI
+- the daemon begins graceful shutdown
 
 Cancellation preserves workspace and logs.
+
+On graceful shutdown, the daemon first closes the active-run registry to new claims
+synchronously, before snapshotting active runs, so a dispatch still in pre-claim work can never
+reserve a slot after cancellation begins; a claim that raced the gate is rolled back to
+`cancel_reason = "daemon_shutdown"`, and later claims are skipped, not rescheduled. The daemon
+then cancels queued or delayed work, records `cancel_reason = "daemon_shutdown"` for every
+currently in-flight Run and Routine Firing, and requests cancellation through each live Agent
+Provider. The shutdown reason supersedes any cancellation already in progress and is
+sticky in the run store: later cancellation writes — from an in-flight reconcile or a UI
+cancel landing during the drain — cannot overwrite `daemon_shutdown` with another reason.
+Delayed-work registration closes with cancellation: the scheduler refuses timers armed after
+that point, so nothing fires against a store that is closing. A Run that was about to park
+into a wait state when cancellation latched is classified `cancelled` instead of flipping to
+`waiting`, and an in-flight wait re-evaluation stops before mutating rows — durable waiting
+rows are left untouched for the next daemon's reconciliation. Only after those requests have
+been awaited does it wait for in-flight dispatches to unwind. This explicit
+shutdown path is required because provider processes may run in a cgroup outside the daemon's
+own process tree (ADR 0064).
 
 ### 12.4 Watchdog
 
@@ -1079,8 +1130,8 @@ A sampled Run is making progress when any one signal advances since the previous
 
 - `last_tool_call_at` increases
 - `workspace_mtime_max` advances by at least one second
-- `turn_id_set_size` increases (only the Codex provider tags events with a `turnId`; Claude emits
-  `sessionId`, so this signal advances for Codex Runs)
+- `turn_id_set_size` increases (only the Codex provider tags events with a `turnId`; Claude and OMP
+  emit session-level identity without a stable turn id, so this signal advances for Codex Runs)
 - `output_tokens_total` increases
 - `last_message_at` increases (a new streamed assistant `message` event arrived — both providers
   normalize their streamed deltas to a `message` event)
@@ -1214,7 +1265,7 @@ states (§12.6).
 Bootstrap CLI commands:
 
 - `symphonika init [--yes] [--force]`
-- `symphonika add-routine <name> --project <project> (--schedule <expr> | --at <iso8601>) --kind <git|report> [--provider <codex|claude>] [--tz <iana>] [--config <path>]`
+- `symphonika add-routine <name> --project <project> (--schedule <expr> | --at <iso8601>) --kind <git|report> [--provider <codex|claude|omp>] [--tz <iana>] [--config <path>]`
 - `symphonika doctor [--config <path>]`
 - `symphonika init-project [--config <path>] [--yes] [--force]`
 - `symphonika daemon [--config <path>] [--port <port>]`
@@ -1238,7 +1289,7 @@ config path and points the operator to `symphonika init`.
   Labels (`issue_filters.labels_all`)
 - Routine Hosts: provider command + adapter + workspace resolvable (no GitHub access, no label
   checks); `validForHosting` rather than `validForDispatch`
-- provider commands for Codex and Claude
+- provider commands for Codex, Claude, and OMP when selected by a Project or Routine
 - Dispatch Projects: workflow contract path and parse
 - every Routine declaration in the top-level `routines:` block, including unknown target Projects,
   a target Project name declared more than once, globally duplicate Routine names, and `kind: git`
@@ -1359,14 +1410,14 @@ The bootstrap slice is accepted when:
 - `init` can create an empty user Service Config with interactive service-level settings
 - `init-project` can append a Dispatch Project without losing existing config and create its starter
   Workflow Contract
-- `doctor` validates service config, GitHub auth, operational labels, Codex and Claude provider
-  commands, workflow file, database path, workspace root, and configured Required Eligibility
-  Labels for Dispatch Projects; Routine Hosts validate provider + workspace only
+- `doctor` validates service config, GitHub auth, operational labels, selected Codex, Claude, and
+  OMP provider commands, workflow file, database path, workspace root, and configured Required
+  Eligibility Labels for Dispatch Projects; Routine Hosts validate provider + workspace only
 - `init-project` can create missing operational and Required Eligibility Labels for a Dispatch
   Project after interactive review or `--yes`; `init-project --mode routine-host` creates none
 - `daemon` can claim one `agent-ready` issue in this repository
 - daemon prepares the deterministic issue worktree and branch
-- daemon runs the configured provider through either Codex JSON-RPC or Claude stream-json
+- daemon runs the configured provider through Codex JSON-RPC, Claude stream-json, or OMP native RPC
 - daemon captures raw logs, normalized events, rendered prompt, issue snapshot, and provider metadata
 - durable run state is updated in SQLite
 - a configured recurring `kind: report` Routine fires on its clock tick, records a Routine Firing,

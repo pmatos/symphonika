@@ -998,10 +998,11 @@ function parseWorkflowAction(
     if (
       provider !== undefined &&
       provider !== "codex" &&
-      provider !== "claude"
+      provider !== "claude" &&
+      provider !== "omp"
     ) {
       errors.push(
-        `workflow state ${stateId} at ${workflowPath} agent action provider must be codex or claude`
+        `workflow state ${stateId} at ${workflowPath} agent action provider must be codex, claude, or omp`
       );
     }
     if (prompt === undefined) {
@@ -1046,7 +1047,9 @@ function parseWorkflowAction(
     kind,
     ...(method === undefined ? {} : { method }),
     ...(prompt === undefined ? {} : { prompt }),
-    ...(provider === "codex" || provider === "claude" ? { provider } : {})
+    ...(provider === "codex" || provider === "claude" || provider === "omp"
+      ? { provider }
+      : {})
   };
 }
 
@@ -1306,7 +1309,7 @@ function validateWorkflowTemplateInputValue(
       return value;
     }
   } else if (inputType === "provider") {
-    if (value === "codex" || value === "claude") {
+    if (value === "codex" || value === "claude" || value === "omp") {
       return value;
     }
   } else if (typeof value === "string" && value.trim().length > 0) {

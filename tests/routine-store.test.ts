@@ -1287,6 +1287,57 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("daemon_shutdown overwrites an earlier firing reason and cannot be overwritten", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-cancel",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+
+      store.markRoutineFiringCancelRequested("fire-cancel", "operator");
+      store.markRoutineFiringCancelRequested("fire-cancel", "daemon_shutdown");
+      expect(store.getRoutineFiring("fire-cancel")).toMatchObject({
+        cancelRequested: true,
+        cancelReason: "daemon_shutdown"
+      });
+
+      store.markRoutineFiringCancelRequested("fire-cancel", "operator");
+      expect(store.getRoutineFiring("fire-cancel")).toMatchObject({
+        cancelRequested: true,
+        cancelReason: "daemon_shutdown"
+      });
+
+      // Finalization with a stale reason cannot overwrite it either.
+      store.completeRoutineFiring({
+        cancelReason: "operator",
+        id: "fire-cancel",
+        state: "cancelled"
+      });
+      expect(store.getRoutineFiring("fire-cancel")).toMatchObject({
+        cancelReason: "daemon_shutdown",
+        state: "cancelled"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("completeRoutineFiring records the cancel reason for a cancelled firing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -1365,6 +1416,55 @@ describe("RunStore routines", () => {
       expect(store.listRoutines()).toContainEqual(
         expect.objectContaining({ name: "broken-routine", state: "active" })
       );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("replaces an invalid identity stub with a tracker-less rejection snapshot", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.upsertInvalidRoutineStub({
+        name: "audit-fix",
+        projectName: "alpha",
+        sourcePath: "/tmp/broken-audit-fix.md"
+      });
+
+      store.syncRoutines([], {
+        now: new Date("2026-07-27T00:30:00.000Z"),
+        projects: ["alpha"],
+        trackerlessGitRoutinesByProject: {
+          alpha: [
+            {
+              allowOverlap: true,
+              catchUp: "fire_once_if_missed",
+              kind: "git",
+              name: "audit-fix",
+              prompt: "Fix the audit.",
+              projectName: "alpha",
+              provider: "codex",
+              schedule: { at: "2026-07-27T01:00:00.000Z" },
+              sourcePath: "/tmp/audit-fix.md"
+            }
+          ]
+        }
+      });
+
+      expect(
+        store.getRoutine({ name: "audit-fix", projectName: "alpha" })
+      ).toMatchObject({
+        allowOverlap: true,
+        catchUp: "fire_once_if_missed",
+        disabledReason: "rejected_tracker_less_host",
+        kind: "git",
+        name: "audit-fix",
+        prompt: "Fix the audit.",
+        provider: "codex",
+        scheduleAt: "2026-07-27T01:00:00.000Z",
+        sourcePath: "/tmp/audit-fix.md",
+        state: "disabled"
+      });
     } finally {
       store.close();
     }

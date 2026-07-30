@@ -78,30 +78,23 @@ export function buildWatchdogIdleStatus(input: {
 }
 
 // Sampling only ever runs against `state = 'running'` Runs (see
-// listWatchdogCandidateRuns), so a terminal Run's last persisted sample is
-// permanently frozen the moment it stops being sampled. `runs.updated_at` is
-// not: it can keep advancing after termination for unrelated reasons (e.g.
-// PR-discovery polling bumps it for succeeded Runs), so it is not a safe
-// "as of termination" reference clock. All Progress Signal consumers (CLI
-// show-run, the HTTP API, and the web UI) must derive the same effective
-// clock from the same source so they render the same values for the same
-// Run — see the discussion on PR #344.
-const WATCHDOG_TERMINAL_RUN_STATES: ReadonlySet<RunState> = new Set([
-  "cancelled",
-  "failed",
-  "blocked",
-  "input_required",
-  "stale",
-  "succeeded"
-]);
-
+// listWatchdogCandidateRuns) -- every other state (terminal, waiting,
+// queued, or preparing_workspace for a retry) can be carrying a sample from
+// before the Run left 'running', which a live clock would render as a
+// misleading, ever-drifting countdown for data that no longer describes
+// what the Run is currently doing. `runs.updated_at` is not a safe stand-in
+// for "stopped being sampled" either: it can keep advancing for unrelated
+// reasons (e.g. PR-discovery polling bumps it for succeeded Runs). All
+// Progress Signal consumers (CLI show-run, the HTTP API, and the web UI)
+// must derive the same effective clock from the same source so they render
+// the same values for the same Run — see the discussion on PR #344.
 export function resolveWatchdogNowMs(input: {
   liveNowMs: number;
   runId: string;
   runState: RunState;
   runStore: RunStore;
 }): number {
-  if (!WATCHDOG_TERMINAL_RUN_STATES.has(input.runState)) {
+  if (input.runState === "running") {
     return input.liveNowMs;
   }
   const sample = input.runStore.getWatchdogSample(input.runId);

@@ -175,7 +175,7 @@ projects:
         "priority:low": 3
       default: 99
     workspace:
-      root: ~/.local/state/symphonika/workspaces/my-app
+      root: /home/you/.local/state/symphonika/workspaces/my-app
       git:
         remote: https://github.com/your-github-handle/your-repo-name.git
         base_branch: main
@@ -194,6 +194,8 @@ The important boundaries are:
 - `labels_none` excludes issues. `sym:stale` prevents automatic re-claim after a stale Run.
 - `sym:*` labels belong to the orchestrator. Workflow labels such as `agent-ready` belong to the
   repository.
+- `workspace.root` should be absolute. Relative paths resolve from the Service Config directory,
+  and `~` is not expanded.
 - `workspace.git.remote` is cloned into the Project workspace root. HTTPS and SSH are both
   supported; pushes use the credentials implied by the URL.
 - `agent.provider` selects Codex, Claude, or OMP as the Project default. YAML agent states can
@@ -889,7 +891,7 @@ projects:
       repo: maintenance-target
       token: "$GITHUB_TOKEN"
     workspace:
-      root: ~/.local/state/symphonika/workspaces/maintenance-target
+      root: /home/you/.local/state/symphonika/workspaces/maintenance-target
       git:
         remote: https://github.com/your-github-handle/maintenance-target.git
         base_branch: main

@@ -1505,6 +1505,46 @@ describe("RuntimeConfigReloader watchdog config", () => {
   });
 });
 
+describe("RuntimeConfigReloader provider command template validation", () => {
+  it("rejects a malformed provider command template even when no routine references that provider", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md");
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original.replace(
+        '    command: "codex -p symphonika"',
+        '    command: "codex -p symphonika {{modle}}"'
+      )
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    expect(reloader.getStatus().ok).toBe(false);
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      "providers.codex.command is invalid"
+    );
+  });
+
+  it("accepts every configured provider's command template when none reference an unrecognized tag", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      providerLines: ["  omp:", '    command: "omp --mode rpc --auto-approve"']
+    });
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({ ok: true, errors: [] });
+  });
+});
+
 describe("RuntimeConfigReloader routine_defaults config", () => {
   it("parses a routine_defaults block and exposes it via routineDefaultsConfig()", async () => {
     const root = await makeTempRoot();

@@ -433,6 +433,32 @@ async function loadRuntimeConfigSnapshot(input: {
     return lastKnownGoodOrNothing(input.previous, errors);
   }
 
+  // Validate every configured provider's command template unconditionally,
+  // independent of whether any routine references it (review follow-up on
+  // issue #291). Without this, a provider used only by issue-driven dispatch
+  // Projects never has its command template rendered at reload time — the
+  // routine-scoped check a few lines below only renders a provider's command
+  // when at least one routine resolves to it — so an unknown/malformed tag
+  // first surfaces deep in run-controller.ts's Run lifecycle, after an issue
+  // has already been claimed and its workspace prepared, instead of failing
+  // loudly at config-load time like the templating design intends.
+  const configuredProviderCommands: Array<[string, string]> = [
+    ["claude", parsed.data.providers.claude.command],
+    ["codex", parsed.data.providers.codex.command],
+    ...(parsed.data.providers.omp === undefined
+      ? []
+      : [["omp", parsed.data.providers.omp.command] as [string, string]])
+  ];
+  for (const [providerName, command] of configuredProviderCommands) {
+    try {
+      renderProviderCommandTemplate(command, {});
+    } catch (error) {
+      errors.push(
+        `providers.${providerName}.command is invalid: ${errorMessage(error)}`
+      );
+    }
+  }
+
   const pollingProjects: PollingProjectConfig[] = [];
   const dispatchProjects: RuntimeProjectConfig[] = [];
   const invalidRoutines: RuntimeConfigSnapshot["invalidRoutines"] = [];

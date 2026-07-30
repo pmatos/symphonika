@@ -20,7 +20,7 @@ import type {
   RoutineStatus,
   TargetedRoutineDeclaration
 } from "./routines/types.js";
-import type { ExpandedWorkflow } from "./workflow.js";
+import type { ExpandedWorkflow } from "./workflow/types.js";
 
 export type RunState =
   | "queued"

@@ -19,7 +19,7 @@ import type {
 } from "../src/provider.js";
 import { RuntimeConfigReloader } from "../src/reload.js";
 import { databasePath, openRunStore } from "../src/run-store.js";
-import { loadExpandedWorkflow } from "../src/workflow.js";
+import { loadExpandedWorkflow } from "../src/workflow/fsm-expansion.js";
 import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput

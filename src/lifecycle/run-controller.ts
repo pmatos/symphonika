@@ -44,18 +44,20 @@ import { readFile } from "node:fs/promises";
 import type { WorkflowReference } from "../config-schemas.js";
 import type { TargetedRoutineDeclaration } from "../routines/types.js";
 import {
-  expandWorkflowDefinition,
-  parseWorkflowContract,
   persistRunEvidence,
   renderAutonomousPrompt
-} from "../workflow.js";
+} from "../workflow/autonomous-prompt.js";
+import {
+  parseWorkflowContract,
+  type WorkflowEvidence
+} from "../workflow/contract-loading.js";
+import { expandWorkflowDefinition } from "../workflow/fsm-expansion.js";
 import type {
   ExpandedWorkflow,
   ExpandedWorkflowState,
   WorkflowAction,
-  WorkflowEvidence,
   WorkflowPredicateMap
-} from "../workflow.js";
+} from "../workflow/types.js";
 
 import {
   ActiveRunRegistry,

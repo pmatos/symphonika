@@ -9,28 +9,28 @@ import type { ExpandedWorkflow } from "./types.js";
 
 export const AUTONOMY_PREAMBLE_VERSION = "autonomy-preamble-v2";
 
-export type PromptProject = {
+type PromptProject = {
   name: string;
 };
 
-export type PromptWorkspace = {
+type PromptWorkspace = {
   path: string;
   previous_attempt: boolean;
   root: string;
 };
 
-export type PromptBranch = {
+type PromptBranch = {
   name: string;
   ref: string;
 };
 
-export type PromptRun = {
+type PromptRun = {
   attempt: number;
   continuation: boolean;
   id: string;
 };
 
-export type PromptProvider = {
+type PromptProvider = {
   command: string;
   name: AgentProviderName;
 };

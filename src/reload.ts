@@ -26,11 +26,11 @@ import {
   pullRequestFollowupPolicyFromRaw,
   type PullRequestFollowupPolicy
 } from "./pull-request-followup.js";
+import { parseWorkflowContract } from "./workflow/contract-loading.js";
 import {
   expandWorkflowDefinition,
-  parseWorkflowContract,
   validateExpandedWorkflowReferences
-} from "./workflow.js";
+} from "./workflow/fsm-expansion.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import type { TargetedRoutineDeclaration } from "./routines/types.js";
 

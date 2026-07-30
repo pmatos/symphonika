@@ -862,7 +862,10 @@ async function recordRoutineFiringNotification(
       kind: input.routine.kind,
       projectName: input.project.name,
       pullRequests: firing.pullRequests,
-      reportOutput: reportOutputFromEvents(events),
+      reportOutput: redactSecret(
+        reportOutputFromEvents(events),
+        input.env[config.smtpPasswordEnv]
+      ),
       routineName: input.routine.name,
       state: firing.state,
       terminalReason: firing.terminalReason,
@@ -915,6 +918,10 @@ function redactNotificationError(
 ): string {
   const secret =
     config.smtpUsername === undefined ? undefined : env[config.smtpPasswordEnv];
+  return redactSecret(message, secret);
+}
+
+function redactSecret(message: string, secret: string | undefined): string {
   if (secret === undefined || secret.length === 0) {
     return message;
   }

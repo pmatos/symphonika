@@ -68,6 +68,7 @@ export async function reconcileWatchdog(
     projects: input.projects ?? [],
     watchdog: input.config
   };
+  const cancellations: Promise<void>[] = [];
   let sampled = 0;
   let terminated = 0;
 
@@ -116,7 +117,9 @@ export async function reconcileWatchdog(
     if (!marked) {
       continue;
     }
-    await input.activeRuns.requestCancel(run.runId, CANCEL_REASONS.NO_PROGRESS);
+    cancellations.push(
+      input.activeRuns.requestCancel(run.runId, CANCEL_REASONS.NO_PROGRESS)
+    );
     terminated += 1;
     input.logger?.warn(
       {
@@ -129,6 +132,7 @@ export async function reconcileWatchdog(
     );
   }
 
+  await Promise.all(cancellations);
   return { sampled, terminated };
 }
 

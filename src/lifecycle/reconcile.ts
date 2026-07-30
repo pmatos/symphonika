@@ -31,6 +31,7 @@ export type ReconcileInput = {
 export async function reconcileActiveRuns(
   input: ReconcileInput
 ): Promise<void> {
+  const cancellations: Promise<void>[] = [];
   for (const entry of input.activeRuns.list()) {
     if (entry.cancelRequested) {
       continue;
@@ -46,16 +47,21 @@ export async function reconcileActiveRuns(
       entry.issueNumber
     );
     if (snapshot === undefined) {
-      await handleMissingFromPoll({
+      const result = await handleMissingFromPoll({
         ...input,
         entry,
         project
       });
+      if (result.cancellation !== undefined) {
+        cancellations.push(result.cancellation);
+      }
       continue;
     }
 
     if (snapshot.state !== "open") {
-      await markCancelled(input, entry.runId, CANCEL_REASONS.CLOSED_ISSUE);
+      cancellations.push(
+        markCancelled(input, entry.runId, CANCEL_REASONS.CLOSED_ISSUE)
+      );
       continue;
     }
 
@@ -70,9 +76,12 @@ export async function reconcileActiveRuns(
       ignoreOperationalLabels: true
     });
     if (!eligibility.eligible) {
-      await markCancelled(input, entry.runId, CANCEL_REASONS.ELIGIBILITY_LOSS);
+      cancellations.push(
+        markCancelled(input, entry.runId, CANCEL_REASONS.ELIGIBILITY_LOSS)
+      );
     }
   }
+  await Promise.all(cancellations);
 }
 
 async function handleMissingFromPoll(
@@ -80,14 +89,14 @@ async function handleMissingFromPoll(
     entry: ReturnType<ActiveRunRegistry["list"]>[number];
     project: DispatchProjectConfig;
   }
-): Promise<void> {
+): Promise<{ cancellation?: Promise<void> }> {
   const token = resolveToken(input.project.tracker.token, input.env);
   if (token === undefined) {
     input.logger.warn(
       { project: input.project.name, runId: input.entry.runId },
       "symphonika reconcile skipped: github token not available"
     );
-    return;
+    return {};
   }
 
   let raw;
@@ -103,7 +112,7 @@ async function handleMissingFromPoll(
       { err: error, runId: input.entry.runId },
       "symphonika reconcile getIssue failed"
     );
-    return;
+    return {};
   }
 
   if (raw === undefined) {
@@ -111,21 +120,28 @@ async function handleMissingFromPoll(
       { runId: input.entry.runId },
       "symphonika reconcile skipped: githubIssuesApi.getIssue not available"
     );
-    return;
+    return {};
   }
 
   if (raw === null || raw.state === "closed") {
-    await markCancelled(input, input.entry.runId, CANCEL_REASONS.CLOSED_ISSUE);
+    return {
+      cancellation: markCancelled(
+        input,
+        input.entry.runId,
+        CANCEL_REASONS.CLOSED_ISSUE
+      )
+    };
   }
+  return {};
 }
 
-async function markCancelled(
+function markCancelled(
   input: ReconcileInput,
   runId: string,
   reason: (typeof CANCEL_REASONS)[keyof typeof CANCEL_REASONS]
 ): Promise<void> {
   input.runStore.markCancelRequested(runId, reason);
-  await input.activeRuns.requestCancel(runId, reason);
+  return input.activeRuns.requestCancel(runId, reason);
 }
 
 function findIssueSnapshot(

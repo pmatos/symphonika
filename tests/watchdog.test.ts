@@ -448,6 +448,70 @@ describe("reconcileWatchdog", () => {
     }
   });
 
+  it("starts independent stale-run cancellations without serializing their grace periods", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      await prepareIdleRun(store, root, workspacePath, "run-idle-a", 198);
+      await prepareIdleRun(store, root, workspacePath, "run-idle-b", 199);
+      let resolveA: (() => void) | undefined;
+      let resolveB: (() => void) | undefined;
+      const pendingA = new Promise<void>((resolve) => {
+        resolveA = resolve;
+      });
+      const pendingB = new Promise<void>((resolve) => {
+        resolveB = resolve;
+      });
+      const cancelA = vi.fn(() => pendingA);
+      const cancelB = vi.fn(() => pendingB);
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel: cancelA,
+        issueNumber: 198,
+        projectName: "symphonika",
+        runId: "run-idle-a"
+      });
+      activeRuns.register({
+        cancel: cancelB,
+        issueNumber: 199,
+        projectName: "symphonika",
+        runId: "run-idle-b"
+      });
+
+      const reconciling = reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          mtimeIgnore: [],
+          graceMinutes: 30,
+          sampleIntervalSeconds: 60
+        },
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore: store
+      });
+
+      try {
+        await vi.waitFor(() => {
+          expect(cancelA).toHaveBeenCalledOnce();
+        });
+        expect(cancelB).toHaveBeenCalledOnce();
+      } finally {
+        resolveA?.();
+        resolveB?.();
+        await reconciling;
+      }
+      await expect(reconciling).resolves.toEqual({
+        sampled: 2,
+        terminated: 2
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("uses the Project grace override when deciding whether an idle run is stale", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -1264,24 +1328,60 @@ describe("reconcileWatchdog", () => {
 function seedRun(
   store: RunStore,
   id: string,
-  projectName = "symphonika"
+  projectName = "symphonika",
+  issueNumber = 198
 ): void {
   store.createRun({
     id,
     issue: {
       body: "",
       created_at: "2026-05-22T09:00:00.000Z",
-      id: 198,
+      id: issueNumber,
       labels: ["agent-ready"],
-      number: 198,
+      number: issueNumber,
       priority: 1,
       state: "open",
       title: "watchdog",
       updated_at: "2026-05-22T09:00:00.000Z",
-      url: "https://example.test/198"
+      url: `https://example.test/${issueNumber}`
     },
     projectName,
     providerCommand: "codex fake",
     providerName: "codex"
+  });
+}
+
+async function prepareIdleRun(
+  store: RunStore,
+  root: string,
+  workspacePath: string,
+  runId: string,
+  issueNumber: number
+): Promise<void> {
+  seedRun(store, runId, "symphonika", issueNumber);
+  const normalizedLogPath = path.join(root, `${runId}.normalized.jsonl`);
+  store.updateRunEvidence(runId, {
+    branchName: `sym/symphonika/${issueNumber}-${runId}`,
+    branchRef: `refs/heads/sym/symphonika/${issueNumber}-${runId}`,
+    issueSnapshotPath: path.join(root, runId, "issue.json"),
+    metadataPath: path.join(root, runId, "metadata.json"),
+    normalizedLogPath,
+    promptPath: path.join(root, runId, "prompt.md"),
+    rawLogPath: path.join(root, runId, "raw.jsonl"),
+    workflowGraphPath: path.join(root, runId, "workflow.json"),
+    workspacePath
+  });
+  store.updateRunState(runId, "running");
+  store.upsertWatchdogSample({
+    idleSince: "2026-05-22T09:00:00.000Z",
+    lastMessageAt: null,
+    lastToolCallAt: null,
+    normalizedLogOffset: 0,
+    normalizedLogPath,
+    outputTokensTotal: 0,
+    runId,
+    sampledAt: "2026-05-22T09:00:00.000Z",
+    turnIdSetSize: 0,
+    workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
   });
 }

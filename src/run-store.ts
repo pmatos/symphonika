@@ -2092,6 +2092,7 @@ export class RunStore {
         [
           "select outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source",
           "from routine_firings where project_name = ? and routine_name = ?",
+          "and outcome_status is not null",
           "order by created_at desc, id desc limit 1"
         ].join(" ")
       )

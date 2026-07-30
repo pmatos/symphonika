@@ -1629,6 +1629,70 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("keeps the latest canonical outcome visible while a newer firing is non-terminal", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const latestOutcome = {
+      action: "pr" as const,
+      source: "gh" as const,
+      status: "success" as const,
+      summary: "Observed via GitHub state diff.",
+      title: "Extract retry policy",
+      url: "https://github.com/pmatos/rightkey/pull/42",
+      verified: true
+    };
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { cron: "0 9 * * *", tz: "UTC" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-terminal",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.completeRoutineFiring({
+        id: "fire-terminal",
+        outcome: latestOutcome,
+        state: "succeeded"
+      });
+      store.createRoutineFiring({
+        id: "fire-active",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+
+      const expectLatestOutcome = () => {
+        expect(store.listRoutines()[0]?.latestOutcome).toEqual(latestOutcome);
+        expect(
+          store.getRoutine({
+            name: "daily-report",
+            projectName: "alpha"
+          })?.latestOutcome
+        ).toEqual(latestOutcome);
+      };
+
+      expectLatestOutcome();
+      store.updateRoutineFiringState("fire-active", "preparing_workspace");
+      expectLatestOutcome();
+      store.updateRoutineFiringState("fire-active", "running");
+      expectLatestOutcome();
+    } finally {
+      store.close();
+    }
+  });
+
   it("records workspace reclamation only for an eligible terminal firing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

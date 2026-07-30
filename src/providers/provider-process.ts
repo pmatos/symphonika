@@ -122,7 +122,6 @@ export function spawnProviderProcess(
   if (process.platform === "win32") {
     return spawn(command.executable, command.args, {
       cwd: workspacePath,
-      detached: true,
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"]
     });

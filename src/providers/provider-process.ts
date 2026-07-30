@@ -31,7 +31,9 @@ export function shutdownProviderProcess(
   }
 
   const terminateTimer = setTimeout(() => {
-    signalProviderProcess(child, "SIGTERM");
+    if (!signalProviderProcess(child, "SIGTERM")) {
+      return;
+    }
 
     const killTimer = setTimeout(() => {
       signalProviderProcess(child, "SIGKILL");
@@ -47,7 +49,7 @@ export function shutdownProviderProcess(
 function signalProviderProcess(
   child: ChildProcessWithoutNullStreams,
   signal: NodeJS.Signals
-): void {
+): boolean {
   const pid = child.pid;
   if (
     process.platform !== "win32" &&
@@ -57,10 +59,10 @@ function signalProviderProcess(
   ) {
     try {
       process.kill(-pid, signal);
-      return;
+      return true;
     } catch (error) {
       if (hasErrorCode(error, "ESRCH")) {
-        return;
+        return false;
       }
     }
   }
@@ -70,6 +72,7 @@ function signalProviderProcess(
   } catch {
     // A spawn failure or concurrent exit can leave no direct child to signal.
   }
+  return true;
 }
 
 function hasErrorCode(error: unknown, code: string): boolean {

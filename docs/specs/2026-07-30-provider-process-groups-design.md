@@ -35,8 +35,10 @@ The shared shutdown operation is idempotent and performs this sequence:
    existing graceful EOF path.
 2. After 250 milliseconds, signal the process group with
    `process.kill(-child.pid, "SIGTERM")`.
-3. After a short bounded grace period, signal that process group with
-   `SIGKILL` unconditionally, even when the direct child has already exited.
+3. When that group still exists, after a short bounded grace period signal it
+   with `SIGKILL` unconditionally, even when the direct child has already
+   exited. An `ESRCH` response to the `SIGTERM` attempt means the group is
+   already gone and no escalation timer is armed.
 
 The escalation is keyed on the process group rather than the direct child's
 exit state because a cooperative parent can exit on `SIGTERM` while an
@@ -99,7 +101,8 @@ Implementation proceeds in vertical red-green slices:
 3. Reuse it in OMP while preserving the RPC `abort` courtesy, and add the
    equivalent provider regression.
 4. Add focused escalation cases proving `SIGKILL` is attempted after the
-   direct child exits and that an already-dead group (`ESRCH`) is harmless.
+   direct child exits while its group remains, and that an already-dead group
+   (`ESRCH`) stops escalation harmlessly.
 5. Re-run existing daemon-shutdown and Watchdog cancellation tests to confirm
    those callers still converge on `provider.cancel`.
 
@@ -136,8 +139,8 @@ The change is complete when:
 
 - Claude, Codex, and OMP real Run commands spawn as detached process-group
   leaders.
-- Cancellation closes stdin first, signals the whole group with `SIGTERM`, and
-  unconditionally escalates that group to `SIGKILL`.
+- Cancellation closes stdin first, signals the whole group with `SIGTERM`,
+  and, when that group exists, unconditionally escalates it to `SIGKILL`.
 - An already-dead group is harmless and repeated cancellation does not arm
   duplicate escalation sequences.
 - Provider-level regressions prove a forked grandchild exits after

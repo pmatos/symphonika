@@ -500,6 +500,64 @@ describe("Codex JSON-RPC provider", () => {
   });
 
   it.skipIf(process.platform === "win32")(
+    "does not escalate after cancellation finds the process group already gone",
+    async () => {
+      const root = await makeTempRoot();
+      const workspacePath = path.join(root, "workspace");
+      await mkdir(workspacePath, { recursive: true });
+      const transcriptPath = path.join(root, "requests.jsonl");
+      const pidPath = path.join(root, "app-server.pid");
+      const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+      await writeFakeCodexAppServer(fakeServerPath, transcriptPath, pidPath);
+      const provider = createCodexProvider({
+        processScope: noopProcessScope()
+      });
+      const iterator = provider
+        .runAttempt({
+          ...providerInputFixture(),
+          provider: {
+            command: `${process.execPath} ${fakeServerPath} --scenario=wait app-server`,
+            name: "codex"
+          },
+          workspacePath
+        })
+        [Symbol.asyncIterator]();
+      await nextProviderEvent(iterator);
+      await nextProviderEvent(iterator);
+      await nextProviderEvent(iterator);
+      const pid = Number(await waitForFileContent(pidPath));
+      const realKill = process.kill.bind(process);
+      const signalSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation((targetPid, signal) => {
+          if (targetPid === -pid) {
+            throw Object.assign(new Error("no such process group"), {
+              code: "ESRCH"
+            });
+          }
+          return realKill(targetPid, signal);
+        });
+
+      try {
+        await provider.cancel("run-issue-9");
+        await collectIteratorEvents(iterator);
+        await vi.waitFor(() => {
+          expect(signalSpy).toHaveBeenCalledWith(expect.any(Number), "SIGTERM");
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+
+        expect(
+          signalSpy.mock.calls
+            .filter(([targetPid]) => targetPid === -pid)
+            .map(([, signal]) => signal)
+        ).toEqual(["SIGTERM"]);
+      } finally {
+        signalSpy.mockRestore();
+      }
+    }
+  );
+
+  it.skipIf(process.platform === "win32")(
     "terminates app-server-spawned grandchildren on cancellation",
     async () => {
       const root = await makeTempRoot();
@@ -879,16 +937,19 @@ function providerInputFixture(): ProviderRunInput {
 
 async function writeFakeCodexAppServer(
   filePath: string,
-  transcriptPath: string
+  transcriptPath: string,
+  pidPath?: string
 ): Promise<void> {
   await writeFile(
     filePath,
     [
-      "import { appendFile } from 'node:fs/promises';",
+      "import { appendFile, writeFile } from 'node:fs/promises';",
       "import readline from 'node:readline';",
       "",
       "const scenarioArg = process.argv.find((arg) => arg.startsWith('--scenario='));",
       "const scenario = scenarioArg ? scenarioArg.slice('--scenario='.length) : 'success';",
+      `const pidPath = ${JSON.stringify(pidPath)};`,
+      "if (pidPath) { await writeFile(pidPath, String(process.pid), 'utf8'); }",
       "",
       "if (process.argv.includes('--help')) {",
       "  process.stdout.write('Usage: fake-codex app-server --listen <URL>\\n');",

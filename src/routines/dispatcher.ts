@@ -784,7 +784,10 @@ async function runRoutineFiring(input: {
     input.runStore.completeRoutineFiring({
       id: input.firingId,
       state: outcome.kind,
-      terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
+      terminalReason:
+        outcome.reason.length === 0
+          ? null
+          : redactAll(outcome.reason, input.redactSecrets),
       ...(cancelEntry?.cancelReason === undefined
         ? {}
         : { cancelReason: cancelEntry.cancelReason }),
@@ -823,7 +826,7 @@ async function runRoutineFiring(input: {
     input.runStore.completeRoutineFiring({
       id: input.firingId,
       state: cancelled ? "cancelled" : "failed",
-      terminalReason: reason,
+      terminalReason: redactAll(reason, input.redactSecrets),
       ...(cancelEntry?.cancelReason === undefined
         ? {}
         : { cancelReason: cancelEntry.cancelReason }),
@@ -894,7 +897,13 @@ async function recordRoutineFiringNotification(
       ),
       routineName: input.routine.name,
       state: firing.state,
-      terminalReason: firing.terminalReason,
+      terminalReason:
+        firing.terminalReason === null
+          ? null
+          : redactSecret(
+              firing.terminalReason,
+              input.env[config.smtpPasswordEnv]
+            ),
       title: `${input.project.name}: ${input.routine.name}`
     },
     notifyEnabled: input.routine.notify !== false,
@@ -952,6 +961,13 @@ function redactSecret(message: string, secret: string | undefined): string {
     return message;
   }
   return message.split(secret).join("[REDACTED]");
+}
+
+function redactAll(message: string, secrets: string[]): string {
+  return secrets.reduce(
+    (redacted, secret) => redactSecret(redacted, secret),
+    message
+  );
 }
 
 function routineFiringDeadline(timeoutMinutes: number | undefined): {
@@ -1367,10 +1383,7 @@ async function appendJsonl(
   value: unknown,
   redactSecrets: string[]
 ): Promise<void> {
-  const serialized = redactSecrets.reduce(
-    (text, secret) => redactSecret(text, secret),
-    JSON.stringify(value)
-  );
+  const serialized = redactAll(JSON.stringify(value), redactSecrets);
   await appendFile(filePath, `${serialized}\n`, "utf8");
 }
 

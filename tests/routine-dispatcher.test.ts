@@ -1303,6 +1303,104 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("redacts the SMTP password from a provider-derived terminal reason", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const secret = "smtp-password-leaked-into-a-failure-message";
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { message: "starting up", type: "message" },
+          raw: { delta: "starting up" }
+        };
+        throw new Error(`provider crashed with env dump: ${secret}`);
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-terminal-reason-secret",
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      const firing = runStore.getRoutineFiring("fire-terminal-reason-secret");
+      expect(firing?.terminalReason).toContain("[REDACTED]");
+      expect(firing?.terminalReason).not.toContain(secret);
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]?.text).toContain("[REDACTED]");
+      expect(delivered[0]?.html).toContain("[REDACTED]");
+      expect(delivered[0]?.text).not.toContain(secret);
+      expect(delivered[0]?.html).not.toContain(secret);
+      const database = await readFile(path.join(stateRoot, "symphonika.db"));
+      expect(database.includes(Buffer.from(secret))).toBe(false);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("releases the concurrency slot before notification delivery finishes", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

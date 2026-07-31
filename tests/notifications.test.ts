@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  DEFAULT_DELIVERY_TIMEOUT_MS,
   deliverRoutineFiringNotification,
   renderRoutineFiringNotification,
   type RoutineFiringNotification
@@ -90,10 +91,13 @@ describe("Routine Firing notifications", () => {
     expect(transports).toEqual([
       {
         auth: { pass: secret, user: "server-token" },
+        connectionTimeout: DEFAULT_DELIVERY_TIMEOUT_MS,
+        greetingTimeout: DEFAULT_DELIVERY_TIMEOUT_MS,
         host: "smtp.example.com",
         port: 587,
         requireTLS: true,
-        secure: false
+        secure: false,
+        socketTimeout: DEFAULT_DELIVERY_TIMEOUT_MS
       }
     ]);
     expect(sent).toEqual([
@@ -106,6 +110,42 @@ describe("Routine Firing notifications", () => {
       }
     ]);
     expect(JSON.stringify(sent)).not.toContain(secret);
+  });
+
+  it("bounds the SMTP transport's own connection/greeting/socket timeouts to the configured delivery timeout", async () => {
+    const transports: unknown[] = [];
+    const sink = createSmtpNotificationSink(
+      {
+        from: "symphonika@example.com",
+        on: "always",
+        smtpHost: "smtp.example.com",
+        smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+        smtpPort: 587,
+        smtpSecurity: "starttls",
+        to: "operator@example.com"
+      },
+      {
+        timeoutMs: 5_000,
+        createTransport: (options) => {
+          transports.push(options);
+          return { sendMail: () => Promise.resolve() };
+        }
+      }
+    );
+
+    await sink.deliver({ html: "<p>x</p>", subject: "x", text: "x" });
+
+    expect(transports).toEqual([
+      {
+        connectionTimeout: 5_000,
+        greetingTimeout: 5_000,
+        host: "smtp.example.com",
+        port: 587,
+        requireTLS: true,
+        secure: false,
+        socketTimeout: 5_000
+      }
+    ]);
   });
 
   it.each([

@@ -7,7 +7,7 @@ import type { EmailDeliveryPolicy, EmailNotificationConfig } from "./config.js";
 import type { NotificationMessage } from "./types.js";
 import type { NotificationSink } from "./types.js";
 
-const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000;
+export const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000;
 
 export type RoutineFiringNotification = {
   branchName: string;

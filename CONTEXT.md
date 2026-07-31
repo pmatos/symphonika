@@ -205,6 +205,13 @@ evidence and rolling counters but creates no `routine_firings` row. A refused ma
 Routine Skip because no clock event was attempted.
 _Avoid_: Routine Firing when no provider execution was launched
 
+**Routine Dispatch Hold**:
+A due Routine Target that cannot be admitted because its selected Agent Provider adapter is not
+registered. The original clock event remains due, its Routine Fan-out leg remains pending, and no
+Routine Skip evidence is written; the Orchestrator warns and retries admission on later daemon
+ticks until configuration is repaired.
+_Avoid_: Routine Skip, schedule advance
+
 **Routine Pull Request**:
 An informational association discovered from a succeeded `kind: git` Routine Firing's deterministic
 branch. It records the PR number and head SHA but never enters PR Follow-up, review re-dispatch, or
@@ -335,6 +342,8 @@ _Avoid_: chat session
 - A matched clock event creates one **Routine Fan-out** across the currently due Routine Targets
 - Each **Routine Target** completes its fan-out leg with either one **Routine Firing** or one
   **Routine Skip**
+- A **Routine Dispatch Hold** preserves a **Routine Target**'s original due clock event and pending
+  **Routine Fan-out** leg until its selected **Agent Provider** is registered
 - A **Routine Fan-out** produces one grouped notification after all target legs complete
 - A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
 - A **Routine Firing** may contain one canonical **Routine Outcome** reconciled from a **Routine

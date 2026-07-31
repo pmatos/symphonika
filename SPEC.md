@@ -936,6 +936,15 @@ fields and per-Project rolling counter evidence, completes its fan-out leg, writ
 Firing row, and emits `routine.skipped` with `reason`, `routine`, and `scheduled_at` fields. A
 skipped one-shot expires rather than remaining due.
 
+A selected Agent Provider adapter that is not registered is a Routine Dispatch Hold, not a Routine
+Skip. The target remains active with its original `next_fire_at`, its fan-out leg remains pending,
+and Symphonika writes neither Routine Firing nor latest-attempt/skip/counter evidence. Each daemon
+tick returns `provider_not_registered: <provider>` for that target and emits a structured warning
+with the Project, Routine, provider, and scheduled clock time. Once the adapter is registered, a
+later tick claims the original clock event and only then advances or expires the target normally.
+This deliberately preserves a persistent configuration failure instead of silently progressing a
+schedule whose work never ran; see ADR 0070.
+
 A Routine Fan-out is summary-ready only after every expected target is skipped or has a terminal
 firing. Symphonika then claims one durable grouped-notification delivery with a per-Project result
 and subject

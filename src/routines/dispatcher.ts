@@ -594,6 +594,15 @@ export async function dispatchDueRoutines(
         input.providersConfig as Partial<RunControllerProvidersConfig>
       )[providerName]?.command;
       if (provider === undefined) {
+        input.logger?.warn(
+          {
+            project: project.name,
+            provider: providerName,
+            routine: routine.name,
+            scheduled_at: scheduledAt
+          },
+          "routine dispatch held: provider adapter not registered"
+        );
         skipped.push({
           projectName: project.name,
           reason: `provider_not_registered: ${providerName}`,

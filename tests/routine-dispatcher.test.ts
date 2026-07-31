@@ -3983,6 +3983,89 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("holds a recurring clock event until its provider adapter is registered", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const codexProvider = quietProvider();
+    const claudeProvider = {
+      ...quietProvider(),
+      name: "claude"
+    } satisfies AgentProvider;
+    const routine = {
+      ...minuteRoutine(root),
+      provider: "claude" as const
+    };
+    const logger = pino({ enabled: false });
+    const logWarn = vi.spyOn(logger, "warn");
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+    const dispatchInput = recurringDispatchInput({
+      activeRuns: new ActiveRunRegistry(),
+      provider: codexProvider,
+      root,
+      routine,
+      runStore
+    });
+
+    try {
+      const held = await dispatchDueRoutines({
+        ...dispatchInput,
+        logger
+      });
+
+      expect(held).toEqual({
+        fired: [],
+        skipped: [
+          {
+            projectName: "alpha",
+            reason: "provider_not_registered: claude",
+            routineName: "minute-report"
+          }
+        ]
+      });
+      expect(runStore.listRoutineFirings()).toEqual([]);
+      expect(runStore.listRoutines()[0]).toMatchObject({
+        lastAttemptedAt: null,
+        lastSkipAt: null,
+        lastSkipReason: null,
+        nextFireAt: "2026-05-22T10:00:00.000Z",
+        state: "active"
+      });
+      expect(logWarn).toHaveBeenCalledWith(
+        {
+          project: "alpha",
+          provider: "claude",
+          routine: "minute-report",
+          scheduled_at: "2026-05-22T10:00:00.000Z"
+        },
+        "routine dispatch held: provider adapter not registered"
+      );
+
+      const resumed = await dispatchDueRoutines({
+        ...dispatchInput,
+        agentProviders: {
+          claude: claudeProvider,
+          codex: codexProvider
+        },
+        now: new Date("2026-05-22T10:00:30.000Z")
+      });
+
+      expect(resumed).toEqual({ fired: ["new-fire"], skipped: [] });
+      expect(runStore.getRoutineFiring("new-fire")).toMatchObject({
+        scheduledAt: "2026-05-22T10:00:00.000Z",
+        state: "succeeded"
+      });
+      expect(runStore.listRoutines()[0]).toMatchObject({
+        lastFiredAt: "2026-05-22T10:00:30.000Z",
+        nextFireAt: "2026-05-22T10:01:00.000Z"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("skips a recurring tick at the concurrency cap and advances its schedule", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

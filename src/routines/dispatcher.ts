@@ -315,14 +315,35 @@ export function fireRoutineNow(
     provider,
     providerCommand,
     providerName,
+    redactSecrets: resolveRedactSecrets(
+      input.notification,
+      input.env ?? process.env
+    ),
     routine: detail,
     runStore: input.runStore,
     stateRoot: input.stateRoot
   })
-    .then(() => undefined)
     .finally(() => {
       input.activeRuns.unregister(firingId);
-    });
+    })
+    .then((firingResult) =>
+      // Same ordering as dispatchDueRoutines's per-firing task chain: the
+      // concurrency slot above is released before notification delivery
+      // starts, so a stalled relay does not suppress further dispatch.
+      recordRoutineFiringNotification(
+        {
+          env: input.env ?? process.env,
+          firingId,
+          logger: input.logger,
+          notification: input.notification,
+          project,
+          routine: detail,
+          runStore: input.runStore
+        },
+        firingResult.events,
+        firingResult.prepared
+      )
+    );
   return {
     completion,
     firingId,
@@ -355,6 +376,10 @@ export async function dispatchDueRoutines(
   const projects = [...input.projects.values()];
   const fanoutIds = new Map<string, string>();
   const firingTasks: Promise<void>[] = [];
+  const redactSecrets = resolveRedactSecrets(
+    input.notification,
+    input.env ?? process.env
+  );
 
   for (const project of projects) {
     if (project.disabled === true) {
@@ -706,6 +731,7 @@ export async function dispatchDueRoutines(
         provider,
         providerCommand,
         providerName,
+        redactSecrets,
         routine: routineDetail,
         runStore: input.runStore,
         stateRoot: input.stateRoot,
@@ -801,6 +827,7 @@ async function runRoutineFiring(input: {
   provider: NonNullable<AgentProviderRegistry[AgentProviderName]>;
   providerCommand: string;
   providerName: AgentProviderName;
+  redactSecrets: string[];
   routine: RoutineStatus & { prompt: string };
   runStore: RunStore;
   stateRoot: string;
@@ -937,7 +964,8 @@ async function runRoutineFiring(input: {
         await appendRoutineEvent({
           event,
           normalizedLogPath,
-          rawLogPath
+          rawLogPath,
+          redactSecrets: input.redactSecrets
         });
         if (event.normalized !== undefined) {
           events.push(event.normalized);
@@ -1045,6 +1073,10 @@ async function runRoutineFiring(input: {
       input.routine.kind,
       githubSnapshotSince
     );
+    const redactedTerminalReason =
+      outcome.reason.length === 0
+        ? null
+        : redactAll(outcome.reason, input.redactSecrets);
     input.runStore.completeRoutineFiring({
       commitsAhead,
       id: input.firingId,
@@ -1054,11 +1086,11 @@ async function runRoutineFiring(input: {
         githubObservationAvailable: githubObservation.available,
         observedAction: githubObservation.action,
         provider: input.providerName,
-        terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
+        terminalReason: redactedTerminalReason,
         terminalState: outcome.kind
       }),
       state: outcome.kind,
-      terminalReason: outcome.reason.length === 0 ? null : outcome.reason,
+      terminalReason: redactedTerminalReason,
       ...(completionCancelEntry?.cancelReason === undefined
         ? {}
         : { cancelReason: completionCancelEntry.cancelReason }),
@@ -1152,6 +1184,7 @@ async function runRoutineFiring(input: {
       : finalCancelled
         ? "cancelled"
         : reason;
+    const redactedFinalReason = redactAll(finalReason, input.redactSecrets);
     input.runStore.completeRoutineFiring({
       commitsAhead,
       id: input.firingId,
@@ -1161,11 +1194,11 @@ async function runRoutineFiring(input: {
         githubObservationAvailable: githubObservation.available,
         observedAction: githubObservation.action,
         provider: input.providerName,
-        terminalReason: finalReason,
+        terminalReason: redactedFinalReason,
         terminalState: finalCancelled ? "cancelled" : "failed"
       }),
       state: finalCancelled ? "cancelled" : "failed",
-      terminalReason: finalReason,
+      terminalReason: redactedFinalReason,
       ...(completionCancelEntry?.cancelReason === undefined
         ? {}
         : { cancelReason: completionCancelEntry.cancelReason }),
@@ -1247,6 +1280,7 @@ async function recordRoutineFiringNotification(
     return;
   }
   const sink = input.notification.createSink(config);
+  const redactSecrets = resolveRedactSecrets(input.notification, input.env);
   const outcome = await deliverRoutineFiringNotification({
     config,
     firing: {
@@ -1261,10 +1295,20 @@ async function recordRoutineFiringNotification(
       outcome: firing.outcome,
       projectName: input.project.name,
       pullRequests: firing.pullRequests,
-      reportOutput: reportOutputFromEvents(events),
+      // The provider's own report output can echo back an inherited env
+      // value (full-permission execution, see CLAUDE.md) — redact it here
+      // too, not just in the persisted evidence, since this text (not the
+      // evidence file) is what actually ends up in the sent email.
+      reportOutput: redactAll(reportOutputFromEvents(events), redactSecrets),
       routineName: input.routine.name,
       state: firing.state,
-      terminalReason: firing.terminalReason,
+      // Defense-in-depth: terminalReason is already redacted when persisted
+      // (runRoutineFiring), but redact again here in case it predates that
+      // or reached the store through a path that didn't have redactSecrets.
+      terminalReason:
+        firing.terminalReason === null
+          ? null
+          : redactAll(firing.terminalReason, redactSecrets),
       title: `${input.project.name}: ${input.routine.name}`
     },
     notifyEnabled: input.routine.notify !== false,
@@ -1651,12 +1695,19 @@ async function appendRoutineEvent(input: {
   event: ProviderEvent;
   normalizedLogPath: string;
   rawLogPath: string;
+  redactSecrets: string[];
 }): Promise<void> {
   await Promise.all([
-    appendJsonl(input.rawLogPath, input.event.raw),
+    appendJsonl(input.rawLogPath, input.event.raw, input.redactSecrets),
     ...(input.event.normalized === undefined
       ? []
-      : [appendJsonl(input.normalizedLogPath, input.event.normalized)])
+      : [
+          appendJsonl(
+            input.normalizedLogPath,
+            input.event.normalized,
+            input.redactSecrets
+          )
+        ])
   ]);
 }
 
@@ -1936,8 +1987,39 @@ function logRoutineSkip(
   );
 }
 
-async function appendJsonl(filePath: string, value: unknown): Promise<void> {
-  await appendFile(filePath, `${JSON.stringify(value)}\n`, "utf8");
+async function appendJsonl(
+  filePath: string,
+  value: unknown,
+  redactSecrets: string[]
+): Promise<void> {
+  const serialized = redactAll(JSON.stringify(value), redactSecrets);
+  await appendFile(filePath, `${serialized}\n`, "utf8");
+}
+
+// A provider's own output can echo back environment values it inherited
+// (full-permission execution, see CLAUDE.md) — persisted evidence and any
+// terminal reason derived from it must never retain the raw SMTP password.
+function redactAll(message: string, redactSecrets: string[]): string {
+  return redactSecrets.reduce(
+    (acc, secret) =>
+      secret.length === 0 ? acc : acc.split(secret).join("[REDACTED]"),
+    message
+  );
+}
+
+function resolveRedactSecrets(
+  notification: DispatchDueRoutinesInput["notification"],
+  env: NodeJS.ProcessEnv
+): string[] {
+  if (notification === undefined) {
+    return [];
+  }
+  const config = notification.resolveConfig();
+  if (config === undefined || config.smtpUsername === undefined) {
+    return [];
+  }
+  const secret = env[config.smtpPasswordEnv];
+  return secret === undefined || secret.length === 0 ? [] : [secret];
 }
 
 function stringField(value: unknown, key: string): string | undefined {

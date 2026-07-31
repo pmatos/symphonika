@@ -1,15 +1,19 @@
 import nodemailer from "nodemailer";
 
+import { DEFAULT_DELIVERY_TIMEOUT_MS } from "./routine-firing.js";
 import type { EmailNotificationConfig } from "./config.js";
 import type { NotificationMessage, NotificationSink } from "./types.js";
 
 type SmtpTransportOptions = {
   auth?: { pass: string; user: string };
+  connectionTimeout: number;
+  greetingTimeout: number;
   host: string;
   ignoreTLS?: boolean;
   port: number;
   requireTLS?: boolean;
   secure: boolean;
+  socketTimeout: number;
 };
 
 type SmtpMail = NotificationMessage & {
@@ -26,6 +30,7 @@ type CreateSmtpTransport = (options: SmtpTransportOptions) => SmtpTransport;
 export type CreateSmtpNotificationSinkOptions = {
   createTransport?: CreateSmtpTransport;
   env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
 };
 
 export function createSmtpNotificationSink(
@@ -34,6 +39,7 @@ export function createSmtpNotificationSink(
 ): NotificationSink {
   const env = options.env ?? process.env;
   const createTransport = options.createTransport ?? defaultCreateTransport;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
 
   return {
     async deliver(message): Promise<void> {
@@ -48,6 +54,11 @@ export function createSmtpNotificationSink(
         throw new Error(`$${config.smtpPasswordEnv} is not set`);
       }
 
+      // Bound the transport's own connection/greeting/socket timeouts to the
+      // same delivery-timeout contract deliverRoutineFiringNotification races
+      // against — without this, nodemailer's own (much longer) defaults let a
+      // stalled relay hold the underlying socket open well past the point the
+      // caller has already given up and reported failure.
       const transport = createTransport({
         ...(config.smtpUsername === undefined || password === undefined
           ? {}
@@ -57,6 +68,8 @@ export function createSmtpNotificationSink(
                 user: config.smtpUsername
               }
             }),
+        connectionTimeout: timeoutMs,
+        greetingTimeout: timeoutMs,
         host: config.smtpHost,
         port: config.smtpPort,
         ...(config.smtpSecurity === "starttls"
@@ -64,7 +77,8 @@ export function createSmtpNotificationSink(
           : config.smtpSecurity === "none"
             ? { ignoreTLS: true }
             : {}),
-        secure: config.smtpSecurity === "ssl"
+        secure: config.smtpSecurity === "ssl",
+        socketTimeout: timeoutMs
       });
       try {
         await transport.sendMail({

@@ -53,7 +53,11 @@ purely in terms of those counters:
 - `failures`: send only when `failureCount > 0`. A group where every target succeeded or was
   skipped for overlap/cap does not count as a failure, matching ADR 0069's "skips are visible per
   Project but do not count as failures."
-- `changes` (default): send when `failureCount > 0 || issueCount > 0 || pullRequestCount > 0`.
+- `changes` (default): send when `failureCount > 0 || pullRequestCount > 0`, or when any target's
+  own structured outcome action is `issue_opened` or `issue_closed`. The group's `issueCount` field
+  itself is not used for this check — it remains ADR 0069's "until the structured-outcome slice
+  supplies it" placeholder and stays 0 — so an issue-only fan-out is detected from each target's own
+  `RoutineOutcome.action` rather than from that permanently-zero counter.
 
 `notify: false` on a Routine's declaration is uniform across every target of its fan-out (the field
 lives on the shared `RoutineDeclaration`, materialized identically per Project per ADR 0069), so it

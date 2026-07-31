@@ -39,7 +39,14 @@ export async function deliverRoutineFanoutNotification(input: {
 // No per-target report output is reachable from RoutineFanoutStatus (only
 // state/terminalReason/pullRequests, see fanout-summary.ts's targetSummary),
 // so — unlike the per-firing "changes" definition — the group-level signal
-// can only be the counters ADR 0069 already computes for the subject line.
+// is limited to fanout.failureCount/pullRequestCount plus each target's own
+// structured outcome action. fanout.issueCount itself is not used here: it
+// is ADR 0069's "until the structured-outcome slice supplies it" placeholder
+// and stays permanently 0 (see getRoutineFanout in run-store.ts), so relying
+// on it would make "changes" permanently skip a fan-out whose only change is
+// an issue action. hasIssueOutcome checks the same per-target
+// RoutineOutcome.action the subject-line counter is meant to eventually
+// summarize, without changing that counter or the rendered subject.
 function shouldNotifyRoutineFanout(
   fanout: RoutineFanoutStatus,
   policy: EmailDeliveryPolicy
@@ -52,7 +59,15 @@ function shouldNotifyRoutineFanout(
   }
   return (
     fanout.failureCount > 0 ||
-    fanout.issueCount > 0 ||
-    fanout.pullRequestCount > 0
+    fanout.pullRequestCount > 0 ||
+    hasIssueOutcome(fanout)
+  );
+}
+
+function hasIssueOutcome(fanout: RoutineFanoutStatus): boolean {
+  return fanout.targets.some(
+    (target) =>
+      target.firing?.outcome?.action === "issue_opened" ||
+      target.firing?.outcome?.action === "issue_closed"
   );
 }

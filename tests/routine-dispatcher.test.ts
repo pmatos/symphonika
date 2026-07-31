@@ -2483,6 +2483,88 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("sends the fan-out summary under the default changes policy when a target's outcome is an issue action", async () => {
+    // fanout.issueCount is permanently 0 (ADR 0069's deferred structured-
+    // outcome slice — see getRoutineFanout in run-store.ts), so this proves
+    // "changes" detects an issue-only change via each target's own
+    // RoutineOutcome.action instead of relying on that counter.
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const listIssues = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          html_url: "https://github.com/pmatos/alpha/issues/17",
+          number: 17,
+          state: "open",
+          title: "Superseded dependency issue"
+        }
+      ])
+      .mockResolvedValueOnce([
+        {
+          html_url: "https://github.com/pmatos/alpha/issues/17",
+          number: 17,
+          state: "closed",
+          title: "Superseded dependency issue"
+        }
+      ]);
+    const provider = quietProvider();
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns: new ActiveRunRegistry(),
+          provider,
+          root,
+          routine: {
+            ...minuteRoutine(root),
+            schedule: { at: "2026-05-22T10:00:00.000Z" }
+          },
+          runStore
+        }),
+        createFanoutId: () => "fanout-issue-outcome",
+        createFiringId: () => "fire-issue-outcome",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "changes",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        }
+      });
+
+      expect(runStore.getRoutineFiring("fire-issue-outcome")?.outcome).toEqual(
+        expect.objectContaining({ action: "issue_closed" })
+      );
+      const fanoutMessages = delivered.filter((message) =>
+        message.subject.startsWith("[ptt]")
+      );
+      expect(fanoutMessages).toHaveLength(1);
+      expect(runStore.getRoutineFanout("fanout-issue-outcome")).toMatchObject({
+        notificationState: "sent"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("never leaks the SMTP password into a rendered fan-out summary", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

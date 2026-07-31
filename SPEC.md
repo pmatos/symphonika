@@ -638,11 +638,13 @@ already proves commits ahead of base). `failures` sends only `state = failed`, n
 See ADR 0067.
 
 For a grouped Routine Fan-out summary, no per-target report output is reachable at the group level,
-so policy is defined in terms of the group's failure, issue, and pull-request counts (the same
-counters the summary subject reports): `always` sends regardless; `failures` sends only when the
-group's failure count is nonzero (a target skipped for overlap or a concurrency cap is not a
-failure, matching ADR 0069); `changes` sends when the failure, issue, or pull-request count is
-nonzero. A Routine's `notify: false` mutes the group summary the same way it mutes each target's own
+so policy is defined in terms of the group's failure and pull-request counts plus each target's own
+structured outcome action: `always` sends regardless; `failures` sends only when the group's failure
+count is nonzero (a target skipped for overlap or a concurrency cap is not a failure, matching ADR
+0069); `changes` sends when the failure or pull-request count is nonzero, or when any target's
+outcome action is `issue_opened` or `issue_closed`. The group's issue count itself is not read for
+this check — it stays ADR 0069's permanently-zero placeholder pending the structured-outcome slice.
+A Routine's `notify: false` mutes the group summary the same way it mutes each target's own
 per-firing notification, since the field is uniform across every target of one fan-out. A
 policy-suppressed or source-muted group is recorded with its own `notification_state = skipped` —
 distinct from `sent` and from the `pending` state an unconfigured `email:` block leaves it in for a

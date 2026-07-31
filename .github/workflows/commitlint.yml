@@ -21,7 +21,7 @@ jobs:
         with:
           node-version: lts/*
       - name: Install commitlint
-        run: npm install --no-save @commitlint/cli@21 @commitlint/config-conventional@21
+        run: npm install --no-save @commitlint/cli@21 @commitlint/config-conventional@21 # zizmor: ignore[adhoc-packages]
       - name: Lint pushed commits
         if: github.event.before != '0000000000000000000000000000000000000000'
         run: npx commitlint --from ${{ github.event.before }} --to ${{ github.sha }} --verbose

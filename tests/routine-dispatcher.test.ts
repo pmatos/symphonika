@@ -3072,6 +3072,86 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("keeps a fan-out pending for retry when the notification sink factory throws", async () => {
+    // Sink construction is best-effort (SPEC.md §5.5) and must never fail a
+    // daemon tick, which would otherwise also abort issue dispatch scheduled
+    // in the same tick and recur identically every subsequent tick.
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "legacy-routine",
+      prompt: "Report.",
+      provider: "codex" as const,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/legacy-routine.md"
+    };
+
+    try {
+      runStore.syncRoutines([{ ...declaration, projectName: "alpha" }]);
+      runStore.ensureRoutineFanout({
+        id: "fanout-sink-throws",
+        projectNames: ["alpha"],
+        routineName: "legacy-routine",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.claimRoutineFiring({
+        fanoutId: "fanout-sink-throws",
+        firedAt: "2026-05-22T10:00:01.000Z",
+        firingId: "fire-sink-throws",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "legacy-routine",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.completeRoutineFiring({
+        id: "fire-sink-throws",
+        state: "succeeded"
+      });
+
+      // If sink construction were not contained, this call itself would
+      // reject and fail the test.
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: {},
+        configDir: "/tmp",
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => {
+            throw new Error("custom sink factory misconfigured");
+          },
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:05:00.000Z"),
+        projects: new Map(),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.getRoutineFanout("fanout-sink-throws")).toMatchObject({
+        notificationState: "pending"
+      });
+      expect(runStore.listReadyRoutineFanouts()).toEqual([
+        expect.objectContaining({ id: "fanout-sink-throws" })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("fails a kind: git firing with no commits ahead of base", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

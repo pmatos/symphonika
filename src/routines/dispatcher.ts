@@ -795,15 +795,28 @@ async function deliverReadyRoutineFanouts(
   if (input.notification === undefined) {
     return;
   }
-  // Resolved once per tick, before any claim: an unconfigured email: block
-  // means "no sink to deliver through yet", not a policy decision, so every
-  // ready fan-out this tick must stay pending rather than being claimed and
-  // then abandoned (see ADR 0069 and ADR 0072).
-  const config = input.notification.resolveConfig();
-  if (config === undefined) {
+  let config: EmailNotificationConfig | undefined;
+  let sink: NotificationSink;
+  try {
+    // Resolved once per tick, before any claim: an unconfigured email: block
+    // means "no sink to deliver through yet", not a policy decision, so
+    // every ready fan-out this tick must stay pending rather than being
+    // claimed and then abandoned (see ADR 0069 and ADR 0072).
+    config = input.notification.resolveConfig();
+    if (config === undefined) {
+      return;
+    }
+    sink = input.notification.createSink(config);
+  } catch (error) {
+    // Sink construction is best-effort and must never fail a daemon tick
+    // (SPEC.md §5.5); every ready fan-out simply stays pending for the next
+    // tick to retry, exactly like an unconfigured email: block above.
+    input.logger?.warn(
+      { err: errorMessage(error) },
+      "symphonika routine fan-out notification sink construction failed"
+    );
     return;
   }
-  const sink = input.notification.createSink(config);
   // Derived from this SAME once-resolved config, not re-resolved per
   // fan-out: deliverRoutineFanoutNotification below awaits real SMTP I/O
   // (up to the configured delivery timeout, ADR 0067), so a mid-tick

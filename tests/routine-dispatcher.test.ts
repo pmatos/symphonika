@@ -2099,6 +2099,121 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("resolves notifyEnabled from the fan-out's own target, not an unrelated stale routine sharing its name", async () => {
+    // Routine names are unique only per (project_name, name): a routine
+    // removed from config is soft-disabled (or, via project-cascade,
+    // inactivated), never deleted, so its row can persist with a stale
+    // notify value while an unrelated later declaration reuses the same
+    // name elsewhere. "aaa-stale" sorts before "zzz-active" so an unscoped
+    // name-only lookup would incorrectly resolve notify from the stale row.
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const declaration = {
+      kind: "report" as const,
+      name: "shared-name",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/shared-name.md"
+    };
+    // Seed a stale, unrelated routine of the same name in a different,
+    // alphabetically-earlier project, with notify explicitly disabled, then
+    // never mention that project again — dispatchDueRoutines's own
+    // pruneRoutinesForUnknownProjects call (driven by the `projects` map
+    // below, which omits it) inactivates it without deleting the row.
+    runStore.syncRoutines([
+      { ...declaration, notify: false, projectName: "aaa-stale" }
+    ]);
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-name-reuse",
+        createFiringId: () => "fire-name-reuse",
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "zzz-active",
+            {
+              ...runStoreProjectFixture(),
+              name: "zzz-active",
+              routines: [{ ...declaration, projectName: "zzz-active" }]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      // Sanity check the reproduction setup: the stale row is inactivated
+      // but still present and still carries its old notify: false.
+      expect(
+        runStore.listRoutines({ includeInactive: true, project: "aaa-stale" })
+      ).toContainEqual(
+        expect.objectContaining({
+          name: "shared-name",
+          notify: false,
+          state: "inactive"
+        })
+      );
+      const fanoutMessages = delivered.filter((message) =>
+        message.subject.startsWith("[ptt]")
+      );
+      expect(fanoutMessages).toHaveLength(1);
+      expect(runStore.getRoutineFanout("fanout-name-reuse")).toMatchObject({
+        notificationState: "sent"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("skips the fan-out summary under on: failures when the group has no failures", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

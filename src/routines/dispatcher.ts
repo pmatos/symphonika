@@ -807,6 +807,9 @@ async function deliverReadyRoutineFanouts(
   // notify is uniform across every target of one fan-out (it lives on the
   // shared RoutineDeclaration, materialized identically per project — ADR
   // 0069), so any one target row's value is authoritative for the group.
+  // includeInactive: true is required here (not getRoutine's single-row
+  // lookup) so a target whose Project was since removed from config still
+  // resolves its notify setting instead of silently defaulting to enabled.
   const routines = input.runStore.listRoutines({ includeInactive: true });
   for (const fanout of input.runStore.listReadyRoutineFanouts()) {
     if (!input.runStore.claimRoutineFanoutNotification(fanout.id)) {
@@ -820,9 +823,21 @@ async function deliverReadyRoutineFanouts(
     if (claimed === undefined) {
       throw new Error("claimed routine fan-out could not be reloaded");
     }
+    // Routine names are unique only per (project_name, name) — a routine
+    // soft-disabled with disabled_reason "removed_from_config" is never
+    // deleted, so an unrelated, later-declared routine elsewhere can
+    // legitimately reuse its name. Matching by name alone could therefore
+    // resolve notify from that stale, unrelated row instead of this fan-out's
+    // own declaration; scoping to one of this fan-out's own target projects
+    // makes the "authoritative for the group" comment above actually true.
     const notifyEnabled =
-      routines.find((routine) => routine.name === claimed.routineName)
-        ?.notify !== false;
+      routines.find(
+        (routine) =>
+          routine.name === claimed.routineName &&
+          claimed.targets.some(
+            (target) => target.projectName === routine.projectName
+          )
+      )?.notify !== false;
     const outcome = await deliverRoutineFanoutNotification({
       config,
       fanout: claimed,

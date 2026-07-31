@@ -41,14 +41,29 @@ operator's own authored command carries all provider-specific flag knowledge; Sy
 TypeScript never hardcodes Codex's `-c` keys or OMP's flag names.
 
 An unrecognized or malformed template tag throws rather than passing through as literal text — the
-string is about to be spawned as a real child-process argv. Independent of that, `loadRuntimeConfigSnapshot`
-(`src/reload.ts`) cross-checks each routine's resolved `model`/`effort` against its resolved
-provider's authored command template at reload time: a routine declaring a field its provider's
+string is about to be spawned as a real child-process argv. Section validity is checked structurally
+(a stack keyed by field name), not by comparing per-field open/close counts: a reordered closer
+before its opener, or crossed different-field sections, throws instead of corrupting the rendered
+output with leftover literal template syntax.
+
+Independent of that, `loadRuntimeConfigSnapshot` (`src/reload.ts`) renders every configured
+`providers.<name>.command` against empty values unconditionally at reload time — whether or not any
+routine currently resolves to that provider — so a malformed tag on a provider used only by
+issue-driven Projects is still caught at config-load time. This sits at the same tier as a malformed
+`watchdog:`/`routine_defaults:` mapping: any failure here rejects the whole candidate snapshot
+through the normal Service Config last-known-good path, before per-routine attach ever runs.
+
+`loadRuntimeConfigSnapshot` separately cross-checks each routine's resolved `model`/`effort` against
+its resolved provider's authored command template: a routine declaring a field its provider's
 command template never references is a declaration-load error (the field would otherwise be
-silently inert), checked before the routine is attached — a template-invalid routine is dropped from
-the snapshot exactly like the existing tracker-less-host rejection, not left active. `permission_mode`
-is exempt from this check for the reason given in Context: it is redundant, not inert, when
-untemplated.
+silently inert), checked before the routine is attached. Unlike a malformed provider command, a
+rejected routine does not abort the whole snapshot — it is excluded from `project.routines` and
+tracked in a dedicated `project.templateRejectedRoutines` list (mirroring
+`project.trackerlessGitRoutines`), which `syncRoutines` soft-disables with `disabled_reason =
+"rejected_provider_template_mismatch"` instead of the generic `removed_from_config` a bare `continue`
+would otherwise produce — a still-configured-but-rejected routine must never be mistaken for one
+removed from `routines:`. `permission_mode` is exempt from this check for the reason given in
+Context: it is redundant, not inert, when untemplated.
 
 `permission_mode` currently accepts only `bypass`. This is the portable semantic shared by all
 providers and preserves ADR 0015's Full-Permission Agent Execution invariant. Codex and OMP base

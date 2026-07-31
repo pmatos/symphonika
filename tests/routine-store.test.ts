@@ -2693,6 +2693,108 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("soft-disables a template-rejected routine with a dedicated reason instead of removed_from_config", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      // The routine was previously valid and attached; confirm the fix
+      // demotes it to the dedicated reason on the reload where it starts
+      // failing the model/effort-vs-provider-template cross-check, not to
+      // the generic removed_from_config a still-configured routine must
+      // never receive (ADR 0067 amendment).
+      store.syncRoutines([
+        {
+          kind: "report",
+          model: "claude-opus-4-8",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-07-27T01:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      expect(
+        store.getRoutine({ name: "daily-report", projectName: "alpha" })
+      ).toMatchObject({ state: "active" });
+
+      store.syncRoutines([], {
+        now: new Date("2026-07-27T00:30:00.000Z"),
+        projects: ["alpha"],
+        templateRejectedRoutinesByProject: {
+          alpha: [
+            {
+              kind: "report",
+              model: "claude-opus-4-8",
+              name: "daily-report",
+              prompt: "Report.",
+              provider: "codex",
+              schedule: { at: "2026-07-27T01:00:00.000Z" },
+              sourcePath: "/tmp/daily-report.md",
+              projectName: "alpha"
+            }
+          ]
+        }
+      });
+
+      expect(
+        store.getRoutine({ name: "daily-report", projectName: "alpha" })
+      ).toMatchObject({
+        disabledReason: "rejected_provider_template_mismatch",
+        name: "daily-report",
+        state: "disabled"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("replaces an invalid identity stub with a provider-template rejection snapshot", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.upsertInvalidRoutineStub({
+        name: "daily-report",
+        projectName: "alpha",
+        sourcePath: "/tmp/broken-daily-report.md"
+      });
+
+      store.syncRoutines([], {
+        now: new Date("2026-07-27T00:30:00.000Z"),
+        projects: ["alpha"],
+        templateRejectedRoutinesByProject: {
+          alpha: [
+            {
+              kind: "report",
+              model: "claude-opus-4-8",
+              name: "daily-report",
+              prompt: "Report.",
+              projectName: "alpha",
+              provider: "codex",
+              schedule: { at: "2026-07-27T01:00:00.000Z" },
+              sourcePath: "/tmp/daily-report.md"
+            }
+          ]
+        }
+      });
+
+      expect(
+        store.getRoutine({ name: "daily-report", projectName: "alpha" })
+      ).toMatchObject({
+        disabledReason: "rejected_provider_template_mismatch",
+        kind: "report",
+        name: "daily-report",
+        prompt: "Report.",
+        provider: "codex",
+        scheduleAt: "2026-07-27T01:00:00.000Z",
+        sourcePath: "/tmp/daily-report.md",
+        state: "disabled"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("restores a dormant invalid stub to state=invalid when its still-broken declaration reappears", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

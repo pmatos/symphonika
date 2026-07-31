@@ -1946,6 +1946,37 @@ describe("RuntimeConfigReloader provider command template validation", () => {
 
     expect(reloader.getStatus()).toMatchObject({ ok: true, errors: [] });
   });
+
+  it("keeps the last-known-good snapshot when a later reload's provider command template becomes malformed", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md");
+    const configPath = path.join(root, "symphonika.yml");
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+    const firstSnapshot = reloader.getSnapshot();
+    expect(reloader.getStatus()).toMatchObject({ ok: true });
+
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original.replace(
+        '    command: "codex -p symphonika"',
+        '    command: "codex -p symphonika {{modle}}"'
+      )
+    );
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()).toBe(firstSnapshot);
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: true
+    });
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      "providers.codex.command is invalid"
+    );
+  });
 });
 
 describe("RuntimeConfigReloader routine model/effort/permission_mode template cross-check", () => {
@@ -1996,9 +2027,15 @@ describe("RuntimeConfigReloader routine model/effort/permission_mode template cr
     expect(project?.routines?.some((r) => r.name === "daily-report")).toBe(
       false
     );
+    // The rejected declaration is tracked separately (mirroring
+    // trackerlessGitRoutines) so syncRoutines soft-disables it with a
+    // dedicated reason instead of the generic removed_from_config.
+    expect(
+      project?.templateRejectedRoutines?.some((r) => r.name === "daily-report")
+    ).toBe(true);
   });
 
-  it("drops a routine whose provider command template is malformed from the attached snapshot instead of retaining it as active", async () => {
+  it("rejects the whole candidate snapshot when a provider command is malformed, before even reaching per-routine attach", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "WORKFLOW.md");
     await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
@@ -2041,15 +2078,17 @@ describe("RuntimeConfigReloader routine model/effort/permission_mode template cr
 
     expect(reloader.getStatus().ok).toBe(false);
     expect(reloader.getStatus().errors.join("\n")).toContain(
-      'routine "daily-report" at'
-    );
-    expect(reloader.getStatus().errors.join("\n")).toContain(
       "providers.codex.command is invalid"
     );
-    const project = reloader.projectsByName().get("symphonika");
-    expect(project?.routines?.some((r) => r.name === "daily-report")).toBe(
-      false
+    // The malformed provider command is rejected at the Service Config tier,
+    // before per-routine attach ever runs — so the per-routine cross-check's
+    // own error (naming "daily-report") never appears, and with no prior
+    // valid snapshot to fall back to, there is no snapshot at all yet.
+    expect(reloader.getStatus().errors.join("\n")).not.toContain(
+      'routine "daily-report" at'
     );
+    expect(reloader.getSnapshot()).toBeUndefined();
+    expect(reloader.projectsByName().get("symphonika")).toBeUndefined();
   });
 
   it("accepts a routine whose declared model is referenced by its resolved provider command template", async () => {

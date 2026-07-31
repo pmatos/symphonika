@@ -39,7 +39,7 @@ afterEach(async () => {
 });
 
 describe("Oh My Pi RPC provider", () => {
-  it("appends routine model and effort as OMP model and thinking flags", async () => {
+  it("renders routine model and effort through the command template as OMP model and thinking flags", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
     await mkdir(workspacePath, { recursive: true });
@@ -53,7 +53,7 @@ describe("Oh My Pi RPC provider", () => {
       provider.runAttempt({
         ...providerInputFixture(),
         provider: {
-          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve {{#model}}--model {{model}} {{/model}}{{#effort}}--thinking {{effort}} {{/effort}}`,
           name: "omp"
         },
         routine: {

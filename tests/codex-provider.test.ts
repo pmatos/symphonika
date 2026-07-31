@@ -83,7 +83,7 @@ afterEach(async () => {
 });
 
 describe("Codex JSON-RPC provider", () => {
-  it("inlines routine model and effort overrides before app-server", async () => {
+  it("renders routine model and effort overrides through the command template before app-server", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
     await mkdir(workspacePath, { recursive: true });
@@ -97,7 +97,7 @@ describe("Codex JSON-RPC provider", () => {
       provider.runAttempt({
         ...providerInputFixture(),
         provider: {
-          command: `${process.execPath} ${fakeServerPath} app-server`,
+          command: `${process.execPath} ${fakeServerPath} {{#model}}-c model={{model}} {{/model}}{{#effort}}-c model_reasoning_effort={{effort}} {{/effort}}app-server`,
           name: "codex"
         },
         routine: {

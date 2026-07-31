@@ -36,6 +36,7 @@ import {
   validateExpandedWorkflowReferences
 } from "./workflow/fsm-expansion.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
+import { renderProviderCommandTemplate } from "./provider-command-template.js";
 import type {
   RoutineExecutionOverrides,
   TargetedRoutineDeclaration
@@ -502,6 +503,32 @@ async function loadRuntimeConfigSnapshot(input: {
     return lastKnownGoodOrNothing(input.previous, errors);
   }
 
+  // Validate every configured provider's command template unconditionally,
+  // independent of whether any routine references it. Rendering a
+  // provider's command happens per-provider-name below (in the routine
+  // attach loop) and per-adapter at spawn time, but a provider used only by
+  // issue-driven dispatch Projects would otherwise never have its template
+  // rendered at reload time — an unrecognized/malformed tag would first
+  // surface deep in a provider adapter's runAttempt, well after an issue has
+  // been claimed and its workspace prepared, instead of failing loudly at
+  // config-load time.
+  const configuredProviderCommands: Array<[string, string]> = [
+    ["claude", parsed.data.providers.claude.command],
+    ["codex", parsed.data.providers.codex.command],
+    ...(parsed.data.providers.omp === undefined
+      ? []
+      : [["omp", parsed.data.providers.omp.command] as [string, string]])
+  ];
+  for (const [providerName, command] of configuredProviderCommands) {
+    try {
+      renderProviderCommandTemplate(command, {});
+    } catch (error) {
+      errors.push(
+        `providers.${providerName}.command is invalid: ${errorMessage(error)}`
+      );
+    }
+  }
+
   const pollingProjects: PollingProjectConfig[] = [];
   const dispatchProjects: RuntimeProjectConfig[] = [];
   const invalidRoutines: RuntimeConfigSnapshot["invalidRoutines"] = [];
@@ -509,6 +536,13 @@ async function loadRuntimeConfigSnapshot(input: {
   const routineDefaults = normalizeRoutineExecutionDefaults(
     parsed.data.routine_defaults
   );
+  const routineProviderCommandsByName: Partial<Record<string, string>> = {
+    claude: parsed.data.providers.claude.command,
+    codex: parsed.data.providers.codex.command,
+    ...(parsed.data.providers.omp === undefined
+      ? {}
+      : { omp: parsed.data.providers.omp.command })
+  };
 
   // First pass: validate each Project against its mode-specific schema and
   // build the runtime map. Dispatch Projects enter both `pollingProjects`
@@ -667,6 +701,36 @@ async function loadRuntimeConfigSnapshot(input: {
           );
           trackerlessGitRoutines.push(routine);
           continue;
+        }
+        // Cross-check the routine's resolved model/effort/permission_mode
+        // against its resolved provider's authored command template — the
+        // earliest point both routines: and providers:/routine_defaults: are
+        // known together. Runs BEFORE attaching, like the tracker-less check
+        // above — a template-invalid routine must not fire, so on failure it
+        // is never attached (`continue`s instead).
+        const routineProviderName = routine.provider ?? project.agent.provider;
+        const routineProviderCommand =
+          routineProviderCommandsByName[routineProviderName];
+        if (routineProviderCommand !== undefined) {
+          try {
+            const { unreferencedFields } = renderProviderCommandTemplate(
+              routineProviderCommand,
+              routine
+            );
+            if (unreferencedFields.length > 0) {
+              for (const field of unreferencedFields) {
+                errors.push(
+                  `routine "${routine.name}" at ${routine.sourcePath} declares ${field}, but providers.${routineProviderName}.command never references it`
+                );
+              }
+              continue;
+            }
+          } catch (error) {
+            errors.push(
+              `routine "${routine.name}" at ${routine.sourcePath} providers.${routineProviderName}.command is invalid: ${errorMessage(error)}`
+            );
+            continue;
+          }
         }
         attached.push(routine);
       }

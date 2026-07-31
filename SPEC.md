@@ -570,6 +570,14 @@ value, Symphonika leaves that aspect of the provider command as authored. Defaul
 Service Config; an invalid defaults mapping rejects the candidate snapshot through the normal
 Service Config last-known-good path.
 
+Independently of these per-field checks, reload renders the routine's resolved provider command
+template (§11.3) against its resolved `model`/`effort`: a routine declaring `model` or `effort` its
+resolved provider's command template never references is also a declaration-load error (the field
+would otherwise be silently inert) — checked before the routine attaches, so a template-invalid
+routine is dropped from the snapshot rather than left active with its tuning ignored, mirroring the
+kind:git-on-a-tracker-less-host rejection above it. `permission_mode` is exempt from this check; see
+§11.3.
+
 ### 5.5 Email Notifications
 
 The optional service-level `email:` block configures SMTP delivery for terminal Routine Firings:
@@ -1213,13 +1221,22 @@ negotiates protocol v2 chunking when the installed OMP advertises it. See ADR-00
 Provider commands may be overridden, but the replacement command must speak the provider adapter's
 expected protocol.
 
-Routine model and effort overrides use append-at-spawn delivery owned by each adapter; the persisted
-operator command is not rewritten. Claude appends `--model` / `--effort`; Codex inserts
-`-c model=...` / `-c model_reasoning_effort=...` before `app-server`; OMP appends `--model` /
-`--thinking`. `permission_mode: bypass` maps to Claude's
-`--dangerously-skip-permissions`; Codex and OMP retain their already-validated full-permission
-startup posture. Claude Routine Firings additionally append
-`--disallowedTools ScheduleWakeup Monitor CronCreate` and set
+Routine `model` and `effort` overrides are delivered by command templating, not append-at-spawn:
+`providers.<name>.command` may reference plain tags `{{model}}` / `{{effort}}`, substituted with the
+resolved value, and `{{#tag}}...{{/tag}}` conditional sections, whose enclosed text (delimiters
+included) is kept only when the field resolves to a value — the section form is what lets an
+operator omit a whole `--model X` segment when `X` is absent without leaving a dangling incomplete
+flag. Each provider adapter renders `input.provider.command` through this template — using the
+firing's resolved values for `runAttempt`, and empty values (so every section collapses) for
+`validate()` and for issue-driven Runs — before parsing the rendered string into argv. Symphonika's
+TypeScript never hardcodes a provider's flag vocabulary; the operator's own authored command carries
+that knowledge, exactly as it already does today for Codex's `-c sandbox_mode=...`. An unrecognized
+or malformed template tag throws rather than being passed through as literal text. `permission_mode`
+is not templated: `bypass` is the only value any provider currently supports, and every provider
+already independently hard-enforces it (Claude's protocol validation, Codex and OMP's already-
+validated full-permission startup posture), so declaring it has no templating story to speak of.
+Claude Routine Firings additionally append `--disallowedTools ScheduleWakeup Monitor CronCreate`
+(outside the template, appended by the adapter directly) and set
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child environment.
 
 Future sandboxing, if added, should be outside the provider through host, container, VM, network, or

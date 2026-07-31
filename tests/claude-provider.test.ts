@@ -75,7 +75,7 @@ afterEach(async () => {
 });
 
 describe("Claude stream-json provider", () => {
-  it("applies routine tuning and anti-backgrounding guards at spawn", async () => {
+  it("renders routine tuning through the command template and applies anti-backgrounding guards at spawn", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
     await mkdir(workspacePath, { recursive: true });
@@ -103,7 +103,7 @@ describe("Claude stream-json provider", () => {
       provider.runAttempt({
         ...providerInputFixture(),
         provider: {
-          command: `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
+          command: `${process.execPath} ${fakeClaudePath} -p {{#model}}--model {{model}} {{/model}}{{#effort}}--effort {{effort}} {{/effort}}--dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
           name: "claude"
         },
         routine: {

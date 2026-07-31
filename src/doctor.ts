@@ -33,8 +33,10 @@ import {
 import { emailNotificationConfigSchema } from "./notifications/config.js";
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 import type { AgentProviderName, AgentProviderRegistry } from "./provider.js";
+import { renderProviderCommandTemplate } from "./provider-command-template.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
+import type { RoutineExecutionOverrides } from "./routines/types.js";
 import { userUnitDir } from "./service.js";
 import { resolveStateRoot } from "./state.js";
 import type { ExpandedWorkflow } from "./workflow/types.js";
@@ -518,7 +520,8 @@ export async function runDoctor(
       parsedConfig.projects,
       projects,
       parsedConfig.providers,
-      agentProviders
+      agentProviders,
+      routineDefaultsFromParsed(parsedConfig.routine_defaults)
     ))
   );
 
@@ -650,12 +653,31 @@ async function readFileIfExists(filePath: string): Promise<string | undefined> {
   }
 }
 
+function routineDefaultsFromParsed(
+  raw: z.infer<typeof routineExecutionDefaultsSchema> | undefined
+): RoutineExecutionOverrides {
+  if (raw === undefined) {
+    return {};
+  }
+  return {
+    ...(raw.model === undefined ? {} : { model: raw.model }),
+    ...(raw.effort === undefined ? {} : { effort: raw.effort }),
+    ...(raw.permission_mode === undefined
+      ? {}
+      : { permissionMode: raw.permission_mode }),
+    ...(raw.timeout_minutes === undefined
+      ? {}
+      : { timeoutMinutes: raw.timeout_minutes })
+  };
+}
+
 async function validateServiceRoutines(
   entries: Array<{ projectNames: string[]; sourcePath: string }>,
   declaredProjects: ProjectConfig[],
   projectReports: DoctorProjectReport[],
   providers: ServiceConfig["providers"],
-  agentProviders: AgentProviderRegistry
+  agentProviders: AgentProviderRegistry,
+  routineDefaults: RoutineExecutionOverrides
 ): Promise<string[]> {
   const errors: string[] = [];
   const seenNames = new Map<string, string>();
@@ -744,8 +766,26 @@ async function validateServiceRoutines(
           `routine "${routine.name}" provider ${routine.provider} has no registered adapter`
         );
       } else {
+        const resolved: RoutineExecutionOverrides = {
+          ...routineDefaults,
+          ...(routine.effort === undefined ? {} : { effort: routine.effort }),
+          ...(routine.model === undefined ? {} : { model: routine.model }),
+          ...(routine.permissionMode === undefined
+            ? {}
+            : { permissionMode: routine.permissionMode }),
+          ...(routine.timeoutMinutes === undefined
+            ? {}
+            : { timeoutMinutes: routine.timeoutMinutes })
+        };
         try {
-          await providerAdapter.validate(providerConfig.command);
+          const { rendered, unreferencedFields } =
+            renderProviderCommandTemplate(providerConfig.command, resolved);
+          for (const field of unreferencedFields) {
+            errors.push(
+              `routine "${routine.name}" declares ${field}, but providers.${routine.provider}.command never references it`
+            );
+          }
+          await providerAdapter.validate(rendered);
         } catch (error) {
           errors.push(
             `routine "${routine.name}" providers.${routine.provider}.command is invalid: ${errorMessage(error)}`
@@ -847,7 +887,9 @@ async function validateWorkflowProviderReferences(
       continue;
     }
     try {
-      await adapter.validate(provider.command);
+      await adapter.validate(
+        renderProviderCommandTemplate(provider.command, {}).rendered
+      );
     } catch (error) {
       errors.push(
         `projects.${project.name} providers.${providerName}.command is invalid: ${errorMessage(error)}`
@@ -1973,7 +2015,9 @@ async function validateProject(
     providerOk = false;
   } else if (provider !== undefined) {
     try {
-      await providerAdapter.validate(provider.command);
+      await providerAdapter.validate(
+        renderProviderCommandTemplate(provider.command, {}).rendered
+      );
     } catch (error) {
       errors.push(
         `projects.${project.name}.providers.${project.agent.provider}.command is invalid: ${errorMessage(error)}`

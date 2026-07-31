@@ -44,13 +44,20 @@ retention:
 #   permission_mode: bypass
 #   timeout_minutes: 60
 
+# Provider commands may reference {{model}} and {{effort}} — plain tags
+# substitute the resolved value; the {{#tag}}...{{/tag}} section form omits
+# the enclosed text entirely when the field isn't resolved for a given call
+# (issue Runs never resolve these, so sections always collapse to nothing for
+# them). permission_mode is deliberately not templated here: every command
+# below already hardcodes full-permission execution unconditionally, so
+# permission_mode: bypass is redundant rather than inert. See ADR 0067.
 providers:
   codex:
-    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
+    command: 'codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never {{#model}}-c model="{{model}}" {{/model}}{{#effort}}-c model_reasoning_effort="{{effort}}" {{/effort}}--dangerously-bypass-approvals-and-sandbox app-server'
   claude:
-    command: "claude -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json"
+    command: "claude -p {{#model}}--model {{model}} {{/model}}{{#effort}}--effort {{effort}} {{/effort}}--dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json"
   omp:
-    command: "omp --mode rpc --auto-approve"
+    command: "omp --mode rpc --auto-approve {{#model}}--model {{model}} {{/model}}{{#effort}}--thinking {{effort}} {{/effort}}"
 
 projects:
   - name: symphonika
@@ -103,10 +110,10 @@ projects:
 # Routines live at service level and target an explicit, non-empty Project list.
 # The old singular `project:` field and nested Project `routines:` lists are invalid.
 # Per-Routine overrides use the same model, effort, permission_mode, and
-# timeout_minutes keys in the referenced Markdown file's YAML front matter.
-# Provider adapters append their native override flags when a firing spawns;
-# the configured commands above do not need template placeholders. Claude
-# Routine Firings also receive the one-shot anti-backgrounding guards.
+# timeout_minutes keys in the referenced Markdown file's YAML front matter,
+# delivered via the {{tag}} template placeholders in the provider commands
+# above (see ADR 0067) — not appended by Symphonika itself. Claude Routine
+# Firings also receive the one-shot anti-backgrounding guards.
 # routines:
 #   - path: ./routines/refactor-audit.md
 #     projects: [symphonika]

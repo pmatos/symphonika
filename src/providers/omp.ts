@@ -13,6 +13,7 @@ import type {
   ProviderEvent,
   ProviderRunInput
 } from "../provider.js";
+import { renderProviderCommandTemplate } from "../provider-command-template.js";
 import {
   providerProcessExitResult,
   shutdownProviderProcess,
@@ -126,12 +127,13 @@ export function createOmpProvider(
       };
       activeRuns.set(input.run.id, activeRun);
 
+      const renderedCommand = renderProviderCommandTemplate(
+        input.provider.command,
+        input.routine ?? {}
+      ).rendered;
       const command = await processScope.wrapForProviderScope(
         input.run,
-        applyRoutineOverrides(
-          parseCommand(input.provider.command),
-          input.routine
-        )
+        parseCommand(renderedCommand)
       );
       if (activeRun.cancelled) {
         activeRuns.delete(input.run.id);
@@ -295,7 +297,8 @@ export function createOmpProvider(
       }
     },
     validate: async (command) => {
-      const parsed = parseCommand(command);
+      const rendered = renderProviderCommandTemplate(command, {}).rendered;
+      const parsed = parseCommand(rendered);
       validateOmpProtocolFlags(parsed.args);
       await validateOmpRpcCommand(parsed);
     }
@@ -1330,41 +1333,6 @@ function parseCommand(command: string): {
     args: parts.slice(1),
     executable
   };
-}
-
-function applyRoutineOverrides(
-  command: { args: string[]; executable: string },
-  routine: ProviderRunInput["routine"]
-): { args: string[]; executable: string } {
-  if (routine === undefined) {
-    return command;
-  }
-  let args = command.args.slice();
-  if (routine.model !== undefined) {
-    args = withoutOption(args, "--model");
-    args.push("--model", routine.model);
-  }
-  if (routine.effort !== undefined) {
-    args = withoutOption(args, "--thinking");
-    args.push("--thinking", routine.effort);
-  }
-  return { args, executable: command.executable };
-}
-
-function withoutOption(args: string[], option: string): string[] {
-  const result: string[] = [];
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index]!;
-    if (arg === option) {
-      index += 1;
-      continue;
-    }
-    if (arg.startsWith(`${option}=`)) {
-      continue;
-    }
-    result.push(arg);
-  }
-  return result;
 }
 
 function splitCommand(command: string): string[] {

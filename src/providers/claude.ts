@@ -13,6 +13,7 @@ import type {
   ProviderEvent,
   ProviderRunInput
 } from "../provider.js";
+import { renderProviderCommandTemplate } from "../provider-command-template.js";
 import {
   providerProcessExitResult,
   shutdownProviderProcess,
@@ -96,13 +97,14 @@ export function createClaudeProvider(
       const activeRun: ActiveClaudeRun = { cancelled: false };
       activeRuns.set(input.run.id, activeRun);
 
+      const renderedCommand = renderProviderCommandTemplate(
+        input.provider.command,
+        input.routine ?? {}
+      ).rendered;
       const command = await processScope.wrapForProviderScope(
         input.run,
         withOutputSchema(
-          applyRoutineArguments(
-            parseCommand(input.provider.command),
-            input.routine
-          ),
+          applyRoutineArguments(parseCommand(renderedCommand), input.routine),
           input.outputSchema
         )
       );
@@ -171,7 +173,8 @@ export function createClaudeProvider(
       }
     },
     validate: async (command) => {
-      const parsed = parseCommand(command);
+      const rendered = renderProviderCommandTemplate(command, {}).rendered;
+      const parsed = parseCommand(rendered);
       validateClaudeProtocolFlags(parsed.args);
       await validateClaudeStreamJsonCommand(parsed);
     }
@@ -785,6 +788,10 @@ function parseCommand(command: string): { args: string[]; executable: string } {
   };
 }
 
+// model/effort/permissionMode reach the command via the operator's own
+// {{tag}} placement (see renderProviderCommandTemplate above) — this only
+// adds the anti-backgrounding guard, which is not a declared per-routine
+// field and must not be templated into a command shared with issue Runs.
 function applyRoutineArguments(
   command: { args: string[]; executable: string },
   routine: ProviderRunInput["routine"]
@@ -793,40 +800,16 @@ function applyRoutineArguments(
     return command;
   }
 
-  let args = command.args.slice();
-  if (routine.model !== undefined) {
-    args = withoutOption(args, "--model");
-    args.push("--model", routine.model);
-  }
-  if (routine.effort !== undefined) {
-    args = withoutOption(args, "--effort");
-    args.push("--effort", routine.effort);
-  }
-  if (routine.permissionMode === "bypass") {
-    args = withoutOption(args, "--permission-mode").filter(
-      (arg) => arg !== "--dangerously-skip-permissions"
-    );
-    args.push("--dangerously-skip-permissions");
-  }
-
-  args.push("--disallowedTools", "ScheduleWakeup", "Monitor", "CronCreate");
-  return { args, executable: command.executable };
-}
-
-function withoutOption(args: string[], option: string): string[] {
-  const result: string[] = [];
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index]!;
-    if (arg === option) {
-      index += 1;
-      continue;
-    }
-    if (arg.startsWith(`${option}=`)) {
-      continue;
-    }
-    result.push(arg);
-  }
-  return result;
+  return {
+    args: [
+      ...command.args,
+      "--disallowedTools",
+      "ScheduleWakeup",
+      "Monitor",
+      "CronCreate"
+    ],
+    executable: command.executable
+  };
 }
 
 function splitCommand(command: string): string[] {

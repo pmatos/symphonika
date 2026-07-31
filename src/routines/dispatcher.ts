@@ -838,9 +838,42 @@ async function deliverReadyRoutineFanouts(
             (target) => target.projectName === routine.projectName
           )
       )?.notify !== false;
+    // Defense-in-depth: terminalReason is already redacted when persisted
+    // (runRoutineFiring), but a fan-out claimed here can carry a target
+    // firing whose row predates that hardening, or that reached the store
+    // through a path that didn't have redactSecrets — this PR is the first
+    // one to ever actually deliver a rendered fan-out, so redact again
+    // before rendering rather than trust the persisted value.
+    const fanoutRedactSecrets = resolveRedactSecrets(
+      input.notification,
+      input.env ?? process.env
+    );
+    const redactedFanout =
+      fanoutRedactSecrets.length === 0
+        ? claimed
+        : {
+            ...claimed,
+            targets: claimed.targets.map((target) =>
+              target.firing === null
+                ? target
+                : {
+                    ...target,
+                    firing: {
+                      ...target.firing,
+                      terminalReason:
+                        target.firing.terminalReason === null
+                          ? null
+                          : redactAll(
+                              target.firing.terminalReason,
+                              fanoutRedactSecrets
+                            )
+                    }
+                  }
+            )
+          };
     const outcome = await deliverRoutineFanoutNotification({
       config,
-      fanout: claimed,
+      fanout: redactedFanout,
       notifyEnabled,
       sink,
       ...(input.notification.timeoutMs === undefined
@@ -848,13 +881,18 @@ async function deliverReadyRoutineFanouts(
         : { timeoutMs: input.notification.timeoutMs })
     });
     if (outcome.state === "failed") {
+      const error = redactNotificationError(
+        outcome.error,
+        config,
+        input.env ?? process.env
+      );
       input.runStore.completeRoutineFanoutNotification({
-        error: outcome.error,
+        error,
         id: claimed.id
       });
       input.logger?.warn(
         {
-          err: outcome.error,
+          err: error,
           fanout: claimed.id,
           routine: claimed.routineName
         },

@@ -2777,6 +2777,183 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("redacts a historical unredacted terminal reason before rendering a fan-out summary", async () => {
+    // Simulates a firing row written before terminal-reason redaction
+    // existed (or through a path that lacked redactSecrets), by persisting
+    // it directly through the store rather than through the dispatcher's own
+    // (already-redacting) completion path. This PR is the first one to ever
+    // actually deliver a rendered fan-out, so delivery must defensively
+    // re-redact rather than trust the persisted value.
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    const secret = "smtp-password-that-predates-terminal-reason-hardening";
+    const delivered: NotificationMessage[] = [];
+    const declaration = {
+      kind: "report" as const,
+      name: "legacy-routine",
+      prompt: "Report.",
+      provider: "codex" as const,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/legacy-routine.md"
+    };
+
+    try {
+      runStore.syncRoutines([{ ...declaration, projectName: "alpha" }]);
+      runStore.ensureRoutineFanout({
+        id: "fanout-legacy",
+        projectNames: ["alpha"],
+        routineName: "legacy-routine",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.claimRoutineFiring({
+        fanoutId: "fanout-legacy",
+        firedAt: "2026-05-22T10:00:01.000Z",
+        firingId: "fire-legacy",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "legacy-routine",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.completeRoutineFiring({
+        id: "fire-legacy",
+        state: "failed",
+        terminalReason: `provider crashed while holding ${secret}`
+      });
+
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: {},
+        configDir: "/tmp",
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:05:00.000Z"),
+        projects: new Map(),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]?.text).toContain("[REDACTED]");
+      expect(delivered[0]?.text).not.toContain(secret);
+      expect(delivered[0]?.html).not.toContain(secret);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("redacts a delivery error containing the SMTP password before persisting or logging a fan-out failure", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const secret = "smtp-password-that-must-never-leak-in-a-delivery-error";
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-error-redact",
+        createFiringId: () => "fire-error-redact",
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver() {
+              return Promise.reject(
+                new Error(`relay rejected credentials ${secret}`)
+              );
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      const fanout = runStore.getRoutineFanout("fanout-error-redact");
+      expect(fanout?.notificationError).not.toContain(secret);
+      expect(fanout?.notificationError).toContain("[REDACTED]");
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("fails a kind: git firing with no commits ahead of base", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

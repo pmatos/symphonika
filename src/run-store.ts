@@ -278,6 +278,7 @@ export type WatchdogSample = {
 };
 
 export type WatchdogCandidateRun = {
+  evidenceIgnore: readonly string[];
   issueNumber: number;
   normalizedLogPath: string;
   projectName: string;
@@ -304,6 +305,7 @@ export type OpenRunStoreOptions = {
 };
 
 export type CreateRunInput = {
+  evidenceIgnore?: readonly string[];
   id: string;
   issue: IssueSnapshot;
   projectName: string;
@@ -425,6 +427,7 @@ function mapProviderEventRow(row: ProviderEventRow): ProviderEventRecord {
 }
 
 type WatchdogCandidateRunRow = {
+  evidence_ignore_json: string;
   id: string;
   issue_number: number;
   normalized_log_path: string | null;
@@ -710,6 +713,9 @@ export class RunStore {
     }
   ): void {
     this.insertRunRow({
+      ...(input.evidenceIgnore === undefined
+        ? {}
+        : { evidenceIgnore: input.evidenceIgnore }),
       id: input.id,
       isContinuation: true,
       issue: input.issue,
@@ -891,7 +897,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, issue_number, state,",
+          "select id, project_name, issue_number, state, evidence_ignore_json,",
           "workspace_path, normalized_log_path",
           "from runs",
           // ADR 0054: only `running` Runs have a live provider that can wedge.
@@ -903,6 +909,7 @@ export class RunStore {
       )
       .all() as WatchdogCandidateRunRow[];
     return rows.map((row) => ({
+      evidenceIgnore: parseEvidenceIgnore(row.evidence_ignore_json),
       issueNumber: row.issue_number,
       normalizedLogPath: row.normalized_log_path ?? "",
       projectName: row.project_name,
@@ -1084,6 +1091,7 @@ export class RunStore {
   }
 
   private insertRunRow(input: {
+    evidenceIgnore?: readonly string[];
     id: string;
     isContinuation: boolean;
     issue: IssueSnapshot;
@@ -1099,11 +1107,13 @@ export class RunStore {
         [
           "insert into runs (",
           "id, project_name, issue_number, issue_title, state, issue_snapshot_json,",
-          "provider_name, provider_command, is_continuation, continuation_parent_run_id,",
+          "evidence_ignore_json, provider_name, provider_command,",
+          "is_continuation, continuation_parent_run_id,",
           "created_at, updated_at",
           ") values (",
           "@id, @project_name, @issue_number, @issue_title, @state, @issue_snapshot_json,",
-          "@provider_name, @provider_command, @is_continuation, @continuation_parent_run_id,",
+          "@evidence_ignore_json, @provider_name, @provider_command,",
+          "@is_continuation, @continuation_parent_run_id,",
           "@created_at, @updated_at",
           ")"
         ].join(" ")
@@ -1111,6 +1121,7 @@ export class RunStore {
       .run({
         continuation_parent_run_id: input.parentRunId,
         created_at: now,
+        evidence_ignore_json: JSON.stringify(input.evidenceIgnore ?? []),
         id: input.id,
         is_continuation: input.isContinuation ? 1 : 0,
         issue_number: input.issue.number,
@@ -3613,6 +3624,7 @@ export class RunStore {
         issue_title text not null,
         state text not null,
         issue_snapshot_json text not null,
+        evidence_ignore_json text not null default '[]',
         provider_name text,
         provider_command text,
         workspace_path text,
@@ -3870,6 +3882,7 @@ export class RunStore {
 
     const additions: Array<[string, string, string]> = [
       ["runs", "is_continuation", "integer not null default 0"],
+      ["runs", "evidence_ignore_json", "text not null default '[]'"],
       ["runs", "continuation_parent_run_id", "text"],
       ["runs", "retry_count", "integer not null default 0"],
       ["runs", "failure_classification", "text"],
@@ -4233,6 +4246,18 @@ function nextRoutineFiringTransitionSequence(
 
 function timestamp(): string {
   return new Date().toISOString();
+}
+
+function parseEvidenceIgnore(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) &&
+      parsed.every((entry): entry is string => typeof entry === "string")
+      ? parsed
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 function mapRunRow(row: RunRow): RunStatus {

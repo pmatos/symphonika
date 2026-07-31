@@ -1506,6 +1506,7 @@ export class RunController {
           workflow: {
             body: loadedWorkflow.body,
             contentHash: loadedWorkflow.contentHash,
+            evidence: loadedWorkflow.evidence,
             expandedWorkflow: loadedWorkflow.expandedWorkflow,
             format: loadedWorkflow.format,
             path: loadedWorkflow.path
@@ -2320,6 +2321,11 @@ export class RunController {
         });
       }
       const createInput = {
+        evidenceIgnore:
+          input.project.workflow !== undefined &&
+          "expandedWorkflow" in input.project.workflow
+            ? input.project.workflow.evidence.ignore
+            : [],
         id: input.runId,
         issue: input.issue,
         projectName: input.project.name,
@@ -2463,6 +2469,7 @@ export class RunController {
           workflow: {
             body: loadedWorkflow.body,
             contentHash: loadedWorkflow.contentHash,
+            evidence: loadedWorkflow.evidence,
             expandedWorkflow: loadedWorkflow.expandedWorkflow,
             format: loadedWorkflow.format,
             path: loadedWorkflow.path

@@ -24,7 +24,9 @@ const WORKSPACE_PROGRESS_THRESHOLD_MS = 1_000;
 export type ReconcileWatchdogInput = {
   activeRuns: ActiveRunRegistry;
   config: WatchdogConfig;
-  evidenceIgnoreForProject?: (projectName: string) => readonly string[];
+  evidenceIgnoreForProject?: (
+    projectName: string
+  ) => readonly string[] | undefined;
   logger?: Logger;
   now?: () => Date;
   projects?: WatchdogServiceConfig["projects"];
@@ -76,7 +78,8 @@ export async function reconcileWatchdog(
     const config = resolveWatchdogConfig(serviceConfig, run.projectName);
     const previous = input.runStore.getWatchdogSample(run.runId);
     const next = await sampleRun({
-      directoryIgnore: input.evidenceIgnoreForProject?.(run.projectName) ?? [],
+      directoryIgnore:
+        input.evidenceIgnoreForProject?.(run.projectName) ?? run.evidenceIgnore,
       mtimeIgnore: config.mtimeIgnore,
       previous,
       run,

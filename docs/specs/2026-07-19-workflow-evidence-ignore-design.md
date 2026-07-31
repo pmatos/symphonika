@@ -21,6 +21,11 @@ sampled Run's Project. The workspace walker compares each directory's workspace-
 with the declared set before reading metadata or descending. Built-in excludes are checked
 independently and therefore cannot be replaced by Workflow Contract configuration.
 
+Issue #266 extends this rule for graceful Project removal: new Runs persist their effective list,
+and the Watchdog falls back to that per-Run snapshot when a sampled Run's Project is absent from the
+current Service Config. While the Project remains present, its current valid Workflow Snapshot still
+wins. See `2026-07-31-per-run-evidence-ignore-persistence-design.md`.
+
 Raw-FSM workflow files are unchanged. Issue #201 and ADR 0054 define this policy as Markdown
 Workflow Contract front matter, and no raw-FSM location for prompt-adjacent policy is specified.
 

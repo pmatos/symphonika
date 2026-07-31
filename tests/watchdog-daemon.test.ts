@@ -143,6 +143,47 @@ describe("daemon watchdog", () => {
     }
   });
 
+  it("stales a removed Project's active Run using its persisted evidence ignore", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root, {
+      evidenceIgnore: ["vendor/"],
+      graceMinutes: 10
+    });
+    const prepared = preparedWorkspaceFixture(root);
+    await mkdir(path.join(prepared.workspacePath, "vendor"), {
+      recursive: true
+    });
+    const provider = workspaceMtimeProvider("vendor/heartbeat.txt");
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => "run-watchdog-removed-project",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: githubIssuesApiFixture(),
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: prepareWorkspace(prepared)
+    });
+
+    try {
+      await waitForRunState(daemon.url, "running");
+      await replaceProjectWithRoutineHost(root);
+
+      const run = await waitForRunState(daemon.url, "stale", {
+        timeoutMs: 1_000
+      });
+      expect(run).toMatchObject({
+        id: "run-watchdog-removed-project",
+        state: "stale",
+        terminalReason: "no_progress"
+      });
+    } finally {
+      provider.stopAll();
+      await daemon.stop();
+    }
+  });
+
   it("keeps a provider alive when normal workspace changes accompany ignored output", async () => {
     const root = await makeTempRoot();
     await writeProject(root, { evidenceIgnore: ["out/"] });
@@ -434,7 +475,7 @@ function prepareWorkspace(prepared: PreparedIssueWorkspace) {
 
 async function writeProject(
   root: string,
-  options: { evidenceIgnore?: string[] } = {}
+  options: { evidenceIgnore?: string[]; graceMinutes?: number } = {}
 ): Promise<void> {
   await writeFile(
     path.join(root, "symphonika.yml"),
@@ -445,7 +486,7 @@ async function writeProject(
       "  interval_ms: 20",
       "watchdog:",
       "  enabled: true",
-      "  grace_minutes: 0.001",
+      `  grace_minutes: ${options.graceMinutes ?? 0.001}`,
       "  sample_interval_seconds: 0.02",
       "providers:",
       "  codex:",
@@ -492,6 +533,38 @@ async function writeProject(
           "Work on #{{issue.number}}.",
           ""
         ].join("\n")
+  );
+}
+
+async function replaceProjectWithRoutineHost(root: string): Promise<void> {
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "polling:",
+      "  interval_ms: 20",
+      "watchdog:",
+      "  enabled: true",
+      "  grace_minutes: 0.001",
+      "  sample_interval_seconds: 0.02",
+      "providers:",
+      "  codex:",
+      '    command: "codex fake"',
+      "  claude:",
+      '    command: "claude fake"',
+      "projects:",
+      "  - name: survivor",
+      "    mode: routine_host",
+      "    workspace:",
+      "      root: ./.symphonika/workspaces/survivor",
+      "      git:",
+      "        remote: git@github.com:pmatos/survivor.git",
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      ""
+    ].join("\n")
   );
 }
 

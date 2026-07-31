@@ -12,3 +12,9 @@
 
 - A Routine declaration can fan out to multiple explicit Projects. Sibling firings share a durable
   correlation id and produce one grouped per-Project summary after every target finishes or skips.
+
+### Fixed
+
+- A due recurring Routine Target now holds its original clock event when its selected provider
+  adapter is not registered, warns on each daemon tick, and resumes that event after registration
+  instead of silently advancing the schedule.

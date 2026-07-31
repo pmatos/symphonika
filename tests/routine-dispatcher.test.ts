@@ -1420,6 +1420,7 @@ describe("RoutineFiringDispatcher", () => {
       expect(listPullRequestsForBranch).toHaveBeenCalledTimes(2);
       expect(runStore.listRoutineFirings()).toEqual([
         expect.objectContaining({
+          commitsAhead: true,
           id: "01JABCDEFGHJKMNPQRSTVWXYZ12",
           branchName,
           outcome: {
@@ -1756,6 +1757,238 @@ describe("RoutineFiringDispatcher", () => {
         })
       ]);
       expect(listPullRequestsForBranch).toHaveBeenCalledTimes(2);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("protects commits ahead when a kind: git provider fails", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await createGitWorkspaceAhead({
+      branchName: "sym/alpha/routine/dependency-update/fire-failed",
+      workspacePath
+    });
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        throw new Error("provider process failed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns: new ActiveRunRegistry(),
+          provider,
+          root,
+          routine: {
+            kind: "git",
+            name: "dependency-update",
+            prompt: "Update dependencies.",
+            provider: null,
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: path.join(root, "dependency-update.md")
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-failed"
+      });
+
+      expect(runStore.getRoutineFiring("fire-failed")).toMatchObject({
+        commitsAhead: true,
+        state: "failed",
+        terminalReason: "provider process failed"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("retains a failed kind: git workspace when commits-ahead inspection fails", async () => {
+    const root = await makeTempRoot();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        throw new Error("provider process failed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const inspectWorkspaceCommitsAhead = vi
+      .fn()
+      .mockRejectedValue(new Error("git rev-list failed"));
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns: new ActiveRunRegistry(),
+          provider,
+          root,
+          routine: {
+            kind: "git",
+            name: "dependency-update",
+            prompt: "Update dependencies.",
+            provider: null,
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: path.join(root, "dependency-update.md")
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-inspection-failed",
+        inspectWorkspaceCommitsAhead
+      });
+
+      expect(inspectWorkspaceCommitsAhead).toHaveBeenCalledWith({
+        baseBranch: "main",
+        workspacePath: path.join(root, "workspace")
+      });
+      expect(runStore.getRoutineFiring("fire-inspection-failed")).toMatchObject(
+        {
+          commitsAhead: true,
+          state: "failed",
+          terminalReason: "provider process failed"
+        }
+      );
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("reclassifies a provider failure when cancellation lands during commit inspection", async () => {
+    const root = await makeTempRoot();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { code: 1, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const inspectWorkspaceCommitsAhead = vi.fn(async () => {
+      await activeRuns.requestCancel(
+        "fire-cancel-during-classified-inspection",
+        "operator"
+      );
+      return true;
+    });
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine: {
+            kind: "git",
+            name: "dependency-update",
+            prompt: "Update dependencies.",
+            provider: null,
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: path.join(root, "dependency-update.md")
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-cancel-during-classified-inspection",
+        inspectWorkspaceCommitsAhead
+      });
+
+      expect(inspectWorkspaceCommitsAhead).toHaveBeenCalledOnce();
+      expect(
+        runStore.getRoutineFiring("fire-cancel-during-classified-inspection")
+      ).toMatchObject({
+        cancelReason: "operator",
+        commitsAhead: true,
+        state: "cancelled",
+        terminalReason: "cancelled"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("reclassifies a thrown failure when cancellation lands during commit inspection", async () => {
+    const root = await makeTempRoot();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        throw new Error("provider process failed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const inspectWorkspaceCommitsAhead = vi.fn(async () => {
+      await activeRuns.requestCancel(
+        "fire-cancel-during-thrown-inspection",
+        "operator"
+      );
+      return true;
+    });
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine: {
+            kind: "git",
+            name: "dependency-update",
+            prompt: "Update dependencies.",
+            provider: null,
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: path.join(root, "dependency-update.md")
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-cancel-during-thrown-inspection",
+        inspectWorkspaceCommitsAhead
+      });
+
+      expect(inspectWorkspaceCommitsAhead).toHaveBeenCalledOnce();
+      expect(
+        runStore.getRoutineFiring("fire-cancel-during-thrown-inspection")
+      ).toMatchObject({
+        cancelReason: "operator",
+        commitsAhead: true,
+        state: "cancelled",
+        terminalReason: "cancelled"
+      });
     } finally {
       runStore.close();
     }
@@ -2955,6 +3188,7 @@ describe("RoutineFiringDispatcher", () => {
       expect(listPullRequestsForBranch).toHaveBeenCalledTimes(2);
       expect(runStore.listRoutineFirings()).toEqual([
         expect.objectContaining({
+          commitsAhead: true,
           id: "fire-cancel-after-snapshot",
           cancelReason: "operator",
           state: "cancelled",

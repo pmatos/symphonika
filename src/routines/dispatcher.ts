@@ -4,7 +4,10 @@ import path from "node:path";
 import type { Logger } from "pino";
 
 import type { ActiveRunRegistry } from "../lifecycle/active-runs.js";
-import { classifyFailure } from "../lifecycle/classify-failure.js";
+import {
+  classifyFailure,
+  inspectWorkspaceCommitsAhead
+} from "../lifecycle/classify-failure.js";
 import {
   resolveEnvBackedValue,
   tryListIssues,
@@ -71,6 +74,7 @@ export type DispatchDueRoutinesInput = {
   env?: NodeJS.ProcessEnv;
   globalConcurrency: { maxInFlight: number | undefined };
   githubIssuesApi?: GitHubIssuesApi;
+  inspectWorkspaceCommitsAhead?: typeof inspectWorkspaceCommitsAhead;
   logger?: Logger;
   notification?: {
     createSink: (config: EmailNotificationConfig) => NotificationSink;
@@ -301,6 +305,8 @@ export function fireRoutineNow(
     env: input.env ?? process.env,
     firingId,
     githubIssuesApi: input.githubIssuesApi,
+    inspectWorkspaceCommitsAhead:
+      input.inspectWorkspaceCommitsAhead ?? inspectWorkspaceCommitsAhead,
     logger: input.logger,
     now: new Date(),
     prepareRoutineWorkspace:
@@ -716,6 +722,8 @@ export async function dispatchDueRoutines(
         firingId,
         env: input.env ?? process.env,
         githubIssuesApi: input.githubIssuesApi,
+        inspectWorkspaceCommitsAhead:
+          input.inspectWorkspaceCommitsAhead ?? inspectWorkspaceCommitsAhead,
         logger: input.logger,
         now,
         prepareRoutineWorkspace,
@@ -809,6 +817,7 @@ async function runRoutineFiring(input: {
   env: NodeJS.ProcessEnv;
   firingId: string;
   githubIssuesApi: GitHubIssuesApi | undefined;
+  inspectWorkspaceCommitsAhead: typeof inspectWorkspaceCommitsAhead;
   logger: Logger | undefined;
   now: Date;
   prepareRoutineWorkspace: (
@@ -996,9 +1005,8 @@ async function runRoutineFiring(input: {
           );
     // A cancel can also land DURING the snapshot read just above, after
     // `outcome` above was already classified as succeeded/failed. Downgrade
-    // here so a `kind: git` firing cancelled in this window cannot still
-    // report commitsAhead and let reconcileRoutineOutcome's git-evidence
-    // override mint a verified commit outcome for a cancelled run.
+    // the lifecycle state here; the independent retention inspection below
+    // still protects any commits already created in the workspace.
     const cancelAfterGithubAfter = input.activeRuns.get(input.firingId);
     if (cancelAfterGithubAfter?.cancelRequested === true) {
       outcome = { kind: "cancelled", reason: "cancelled" };
@@ -1037,6 +1045,24 @@ async function runRoutineFiring(input: {
     }
     // Re-check for a cancel that landed during discovery: an operator cancel
     // still wins even though the provider itself already finished (ADR 0060).
+    const cancelBeforeCommitInspection = input.activeRuns.get(input.firingId);
+    if (cancelBeforeCommitInspection?.cancelRequested === true) {
+      outcome = { kind: "cancelled", reason: "cancelled" };
+    }
+    const commitsAhead =
+      outcome.kind === "succeeded"
+        ? input.routine.kind === "git"
+        : await inspectRoutineCommitsAhead({
+            baseBranch: input.project.workspace.git.base_branch,
+            kind: input.routine.kind,
+            logger: input.logger,
+            routineName: input.routine.name,
+            inspectWorkspaceCommitsAhead: input.inspectWorkspaceCommitsAhead,
+            workspacePath: prepared.workspacePath
+          });
+    // The failed/cancelled retention inspection above shells out to Git. A
+    // cancel can land while that subprocess is running, so use a fresh entry
+    // for both lifecycle classification and its matching cancel reason.
     const completionCancelEntry = input.activeRuns.get(input.firingId);
     if (completionCancelEntry?.cancelRequested === true) {
       outcome = { kind: "cancelled", reason: "cancelled" };
@@ -1052,11 +1078,11 @@ async function runRoutineFiring(input: {
         ? null
         : redactAll(outcome.reason, input.redactSecrets);
     input.runStore.completeRoutineFiring({
+      commitsAhead,
       id: input.firingId,
       outcome: reconcileRoutineOutcome({
         claim: parseRoutineOutcomeClaim(events),
-        commitsAhead:
-          input.routine.kind === "git" && outcome.kind === "succeeded",
+        commitsAhead,
         githubObservationAvailable: githubObservation.available,
         observedAction: githubObservation.action,
         provider: input.providerName,
@@ -1126,26 +1152,45 @@ async function runRoutineFiring(input: {
     // discovered by the snapshot race takes precedence over both, matching
     // `timedOut`'s precedence over `cancelled` above.
     const cancelAfterFailureSnapshot = input.activeRuns.get(input.firingId);
-    const finalCancelled =
-      !failureSnapshotTimedOut &&
-      (cancelled || cancelAfterFailureSnapshot?.cancelRequested === true);
-    const finalReason = failureSnapshotTimedOut
-      ? "firing_timeout"
-      : finalCancelled
-        ? "cancelled"
-        : reason;
-    const redactedFinalReason = redactAll(finalReason, input.redactSecrets);
     const githubObservation = routineGithubObservation(
       githubBefore,
       githubAfter,
       input.routine.kind,
       githubSnapshotSince
     );
+    const commitsAhead =
+      prepared === undefined
+        ? false
+        : await inspectRoutineCommitsAhead({
+            baseBranch: input.project.workspace.git.base_branch,
+            kind: input.routine.kind,
+            logger: input.logger,
+            routineName: input.routine.name,
+            inspectWorkspaceCommitsAhead: input.inspectWorkspaceCommitsAhead,
+            workspacePath: prepared.workspacePath
+          });
+    // Re-read after the Git subprocess for the same reason as the try path.
+    // Either timeout signal still wins over a cancellation that arrived
+    // during snapshot capture or commit inspection.
+    const completionCancelEntry = input.activeRuns.get(input.firingId);
+    const timeoutWon = timedOut || failureSnapshotTimedOut;
+    const finalCancelled =
+      !timeoutWon &&
+      (cancelled ||
+        cancelAfterFailureSnapshot?.cancelRequested === true ||
+        completionCancelEntry?.cancelRequested === true);
+    const finalReason = timeoutWon
+      ? "firing_timeout"
+      : finalCancelled
+        ? "cancelled"
+        : reason;
+    const redactedFinalReason = redactAll(finalReason, input.redactSecrets);
     input.runStore.completeRoutineFiring({
+      commitsAhead,
       id: input.firingId,
       outcome: reconcileRoutineOutcome({
         claim: parseRoutineOutcomeClaim(events),
-        commitsAhead: false,
+        commitsAhead,
         githubObservationAvailable: githubObservation.available,
         observedAction: githubObservation.action,
         provider: input.providerName,
@@ -1154,9 +1199,9 @@ async function runRoutineFiring(input: {
       }),
       state: finalCancelled ? "cancelled" : "failed",
       terminalReason: redactedFinalReason,
-      ...(cancelAfterFailureSnapshot?.cancelReason === undefined
+      ...(completionCancelEntry?.cancelReason === undefined
         ? {}
-        : { cancelReason: cancelAfterFailureSnapshot.cancelReason }),
+        : { cancelReason: completionCancelEntry.cancelReason }),
       ...(prepared === undefined
         ? {}
         : { workspacePath: prepared.workspacePath })
@@ -1165,6 +1210,35 @@ async function runRoutineFiring(input: {
     deadline.clear();
   }
   return { events, prepared };
+}
+
+async function inspectRoutineCommitsAhead(input: {
+  baseBranch: string;
+  kind: RoutineStatus["kind"];
+  logger: Logger | undefined;
+  routineName: string;
+  inspectWorkspaceCommitsAhead: typeof inspectWorkspaceCommitsAhead;
+  workspacePath: string;
+}): Promise<boolean> {
+  if (input.kind !== "git") {
+    return false;
+  }
+  try {
+    return await input.inspectWorkspaceCommitsAhead({
+      baseBranch: input.baseBranch,
+      workspacePath: input.workspacePath
+    });
+  } catch (error) {
+    input.logger?.warn(
+      {
+        err: error,
+        routine: input.routineName,
+        workspacePath: input.workspacePath
+      },
+      "symphonika routine commits-ahead inspection failed; retaining workspace conservatively"
+    );
+    return true;
+  }
 }
 
 async function recordRoutineFiringNotification(

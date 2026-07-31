@@ -1,9 +1,10 @@
+import Database from "better-sqlite3";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { openRunStore } from "../src/run-store.js";
+import { databasePath, openRunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -1642,6 +1643,203 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("keeps the latest canonical outcome visible while a newer firing is non-terminal", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const latestOutcome = {
+      action: "pr" as const,
+      source: "gh" as const,
+      status: "success" as const,
+      summary: "Observed via GitHub state diff.",
+      title: "Extract retry policy",
+      url: "https://github.com/pmatos/rightkey/pull/42",
+      verified: true
+    };
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { cron: "0 9 * * *", tz: "UTC" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-terminal",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.completeRoutineFiring({
+        id: "fire-terminal",
+        outcome: latestOutcome,
+        state: "succeeded"
+      });
+      store.createRoutineFiring({
+        id: "fire-active",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+
+      const expectLatestOutcome = () => {
+        expect(store.listRoutines()[0]?.latestOutcome).toEqual(latestOutcome);
+        expect(
+          store.getRoutine({
+            name: "daily-report",
+            projectName: "alpha"
+          })?.latestOutcome
+        ).toEqual(latestOutcome);
+      };
+
+      expectLatestOutcome();
+      store.updateRoutineFiringState("fire-active", "preparing_workspace");
+      expectLatestOutcome();
+      store.updateRoutineFiringState("fire-active", "running");
+      expectLatestOutcome();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("conservatively backfills historical git workspaces only when adding commits-ahead evidence", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const gitRoutine = {
+      kind: "git" as const,
+      name: "dependency-update",
+      prompt: "Update dependencies.",
+      provider: "codex" as const,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/dependency-update.md",
+      projectName: "alpha"
+    };
+    const reportRoutine = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: "codex" as const,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/daily-report.md",
+      projectName: "alpha"
+    };
+    try {
+      store.syncRoutines([gitRoutine, reportRoutine]);
+      for (const firing of [
+        {
+          id: "legacy-git-pr",
+          routineName: gitRoutine.name,
+          state: "succeeded" as const
+        },
+        {
+          id: "legacy-git-failed",
+          routineName: gitRoutine.name,
+          state: "failed" as const
+        },
+        {
+          id: "legacy-git-cancelled",
+          routineName: gitRoutine.name,
+          state: "cancelled" as const
+        },
+        {
+          id: "legacy-report",
+          routineName: reportRoutine.name,
+          state: "succeeded" as const
+        }
+      ]) {
+        store.createRoutineFiring({
+          id: firing.id,
+          projectName: "alpha",
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName: firing.routineName
+        });
+        store.completeRoutineFiring({
+          id: firing.id,
+          ...(firing.id === "legacy-git-pr"
+            ? {
+                outcome: {
+                  action: "pr" as const,
+                  source: "gh" as const,
+                  status: "success" as const,
+                  summary: "Observed via GitHub state diff.",
+                  title: "Dependency update",
+                  url: "https://example.test/pull/1",
+                  verified: true
+                }
+              }
+            : {}),
+          state: firing.state,
+          workspacePath: `/tmp/${firing.id}`
+        });
+      }
+    } finally {
+      store.close();
+    }
+
+    const legacyDatabase = new Database(databasePath(stateRoot));
+    try {
+      legacyDatabase.exec(
+        "alter table routine_firings drop column commits_ahead"
+      );
+    } finally {
+      legacyDatabase.close();
+    }
+
+    const migrated = openRunStore({ stateRoot });
+    try {
+      for (const firingId of [
+        "legacy-git-pr",
+        "legacy-git-failed",
+        "legacy-git-cancelled"
+      ]) {
+        expect(migrated.getRoutineFiring(firingId)).toMatchObject({
+          commitsAhead: true
+        });
+      }
+      expect(migrated.getRoutineFiring("legacy-report")).toMatchObject({
+        commitsAhead: false
+      });
+      const future = "9999-12-31T23:59:59.999Z";
+      expect(
+        migrated
+          .listRoutineWorkspacePruneCandidates({
+            cancelledBefore: future,
+            failedBefore: future,
+            succeededBefore: future
+          })
+          .map((firing) => firing.id)
+      ).toEqual(["legacy-report"]);
+    } finally {
+      migrated.close();
+    }
+
+    const inspectedDatabase = new Database(databasePath(stateRoot));
+    try {
+      inspectedDatabase
+        .prepare(
+          "update routine_firings set commits_ahead = 0 where id = 'legacy-git-failed'"
+        )
+        .run();
+    } finally {
+      inspectedDatabase.close();
+    }
+
+    const reopened = openRunStore({ stateRoot });
+    try {
+      expect(reopened.getRoutineFiring("legacy-git-failed")).toMatchObject({
+        commitsAhead: false
+      });
+    } finally {
+      reopened.close();
+    }
+  });
+
   it("records workspace reclamation only for an eligible terminal firing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -1722,6 +1920,52 @@ describe("RunStore routines", () => {
       store.close();
     }
   });
+
+  it.each(["failed", "cancelled"] as const)(
+    "withholds commits ahead from age-based pruning for a %s firing",
+    async (state) => {
+      const stateRoot = await makeTempRoot();
+      const store = openRunStore({ stateRoot });
+      try {
+        store.syncRoutines([
+          {
+            kind: "git",
+            name: "dependency-update",
+            prompt: "Update dependencies.",
+            provider: "codex",
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: "/tmp/dependency-update.md",
+            projectName: "alpha"
+          }
+        ]);
+        store.createRoutineFiring({
+          id: `fire-${state}`,
+          projectName: "alpha",
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName: "dependency-update"
+        });
+        store.completeRoutineFiring({
+          commitsAhead: true,
+          id: `fire-${state}`,
+          state,
+          terminalReason: state,
+          workspacePath: `/tmp/workspace-${state}`
+        });
+
+        const future = "9999-12-31T23:59:59.999Z";
+        expect(
+          store.listRoutineWorkspacePruneCandidates({
+            cancelledBefore: future,
+            failedBefore: future,
+            succeededBefore: future
+          })
+        ).toEqual([]);
+      } finally {
+        store.close();
+      }
+    }
+  );
 
   it("claimRoutineFiring inserts the firing only when the claim wins", async () => {
     const stateRoot = await makeTempRoot();
@@ -1974,6 +2218,77 @@ describe("RunStore routines", () => {
           .listRoutineFiringTransitions("leaked-fire")
           .map((entry) => entry.state)
       ).toEqual(["queued", "running", "failed"]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("protects an uninspected git workspace after its routine kind changes", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "leaked-git-fire",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.updateRoutineFiringWorkspace({
+        id: "leaked-git-fire",
+        workspacePath: "/tmp/leaked-git-workspace"
+      });
+      store.updateRoutineFiringState("leaked-git-fire", "running");
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "dependency-update",
+          prompt: "Report on dependencies.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
+        }
+      ]);
+      expect(
+        store.getRoutine({
+          name: "dependency-update",
+          projectName: "alpha"
+        })
+      ).toMatchObject({ kind: "report" });
+
+      store.markRoutineFiringsFailed([
+        {
+          firingId: "leaked-git-fire",
+          previousState: "running",
+          reason: "leaked_routine_firing"
+        }
+      ]);
+
+      expect(store.getRoutineFiring("leaked-git-fire")).toMatchObject({
+        commitsAhead: true,
+        state: "failed",
+        terminalReason: "leaked_routine_firing"
+      });
+      const future = "9999-12-31T23:59:59.999Z";
+      expect(
+        store.listRoutineWorkspacePruneCandidates({
+          cancelledBefore: future,
+          failedBefore: future,
+          succeededBefore: future
+        })
+      ).toEqual([]);
     } finally {
       store.close();
     }

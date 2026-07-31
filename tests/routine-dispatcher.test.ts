@@ -2613,6 +2613,357 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("redacts the SMTP password from a provider's structured outcome claim before persistence and notification", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const secret = "smtp-password-that-must-never-leak-in-a-claim";
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const claim = JSON.stringify({
+      action: "none",
+      status: "no_action",
+      summary: `leaked env value ${secret} in summary`,
+      title: `leaked env value ${secret} in title`,
+      url: `https://example.com/${secret}`
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { message: claim, type: "message" },
+          raw: { delta: claim }
+        };
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-redact-claim",
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      const firing = runStore.getRoutineFiring("fire-redact-claim");
+      expect(firing?.state).toBe("succeeded");
+      expect(firing?.outcome?.title).not.toContain(secret);
+      expect(firing?.outcome?.summary).not.toContain(secret);
+      expect(firing?.outcome?.url).not.toContain(secret);
+      expect(firing?.outcome?.title).toContain("[REDACTED]");
+      expect(firing?.outcome?.summary).toContain("[REDACTED]");
+      expect(firing?.outcome?.url).toContain("[REDACTED]");
+
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]?.text).not.toContain(secret);
+      expect(delivered[0]?.html).not.toContain(secret);
+
+      const database = await readFile(path.join(stateRoot, "symphonika.db"));
+      expect(database.includes(Buffer.from(secret))).toBe(false);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("redacts a JSON-escaped SMTP password from persisted provider evidence", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    // Contains a quote and a backslash, both of which JSON.stringify escapes
+    // — a naive redact-after-serialize implementation would miss this.
+    const secret = 'smtp-"password"-with-a-\\backslash-that-must-never-leak';
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: {
+            message: `inherited env leaked password ${secret}`,
+            type: "message"
+          },
+          raw: { delta: `inherited env leaked password ${secret}` }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-redact-json-escaped",
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({ deliver: () => Promise.resolve() }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      const rawLog = await readFile(
+        path.join(
+          stateRoot,
+          "logs",
+          "routines",
+          "fire-redact-json-escaped",
+          "provider.raw.jsonl"
+        ),
+        "utf8"
+      );
+      const normalizedLog = await readFile(
+        path.join(
+          stateRoot,
+          "logs",
+          "routines",
+          "fire-redact-json-escaped",
+          "provider.normalized.jsonl"
+        ),
+        "utf8"
+      );
+      // A JSON.stringify-escaped copy of the secret must not survive either:
+      // check both the raw secret and its escaped form are absent.
+      const escapedSecret = JSON.stringify(secret).slice(1, -1);
+      expect(rawLog).toContain("[REDACTED]");
+      expect(rawLog).not.toContain(secret);
+      expect(rawLog).not.toContain(escapedSecret);
+      expect(normalizedLog).toContain("[REDACTED]");
+      expect(normalizedLog).not.toContain(secret);
+      expect(normalizedLog).not.toContain(escapedSecret);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("refreshes redaction secrets from a mid-firing Service Config reload instead of a dispatch-time snapshot", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const oldSecret = "smtp-password-active-at-dispatch-time";
+    const newSecret = "smtp-password-active-after-reload";
+    const runStore = openRunStore({ stateRoot });
+    // Simulates a Service Config reload landing mid-firing: resolveConfig()
+    // starts by pointing at the old password env var, then a later call
+    // (once the provider is already running) switches to the new one.
+    let reloaded = false;
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        reloaded = true;
+        yield {
+          normalized: {
+            message: `inherited env leaked password ${newSecret}`,
+            type: "message"
+          },
+          raw: { delta: `inherited env leaked password ${newSecret}` }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-redact-reload",
+        env: {
+          SMTP_TEST_PASSWORD_NEW: newSecret,
+          SMTP_TEST_PASSWORD_OLD: oldSecret
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({ deliver: () => Promise.resolve() }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: reloaded
+              ? "SMTP_TEST_PASSWORD_NEW"
+              : "SMTP_TEST_PASSWORD_OLD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      const rawLog = await readFile(
+        path.join(
+          stateRoot,
+          "logs",
+          "routines",
+          "fire-redact-reload",
+          "provider.raw.jsonl"
+        ),
+        "utf8"
+      );
+      // The event was emitted after the simulated reload, using the new
+      // password env var — a dispatch-time-only redaction snapshot (taken
+      // before the provider ran, while resolveConfig() still pointed at the
+      // old var) would miss it.
+      expect(rawLog).toContain("[REDACTED]");
+      expect(rawLog).not.toContain(newSecret);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("releases the concurrency slot before notification delivery finishes", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

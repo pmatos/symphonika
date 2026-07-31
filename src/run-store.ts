@@ -44,6 +44,9 @@ export type RunState =
 export type FailureClassification =
   "transient" | "deterministic" | "input_required";
 
+export type RunNotificationState =
+  "skipped" | "pending" | "sending" | "sent" | "failed";
+
 export type CancelReason =
   | "closed_issue"
   | "daemon_shutdown"
@@ -1053,6 +1056,8 @@ export class RunStore {
           "state = 'stale',",
           "terminal_reason = 'no_progress',",
           "failure_classification = 'deterministic',",
+          "notification_state = 'pending',",
+          "notification_error = null,",
           "updated_at = ?",
           "where id = ?",
           "and state = 'running'",
@@ -2761,8 +2766,21 @@ export class RunStore {
   updateRunState(runId: string, state: RunState): void {
     const now = timestamp();
     this.database
-      .prepare("update runs set state = ?, updated_at = ? where id = ?")
-      .run(state, now, runId);
+      .prepare(
+        [
+          "update runs set state = @state,",
+          "notification_state = case",
+          "when @state in ('succeeded', 'failed', 'blocked', 'cancelled', 'stale', 'input_required')",
+          "and not (@state = 'failed' and failure_classification = 'transient')",
+          "then 'pending' else notification_state end,",
+          "notification_error = case",
+          "when @state in ('succeeded', 'failed', 'blocked', 'cancelled', 'stale', 'input_required')",
+          "and not (@state = 'failed' and failure_classification = 'transient')",
+          "then null else notification_error end,",
+          "updated_at = @updated_at where id = @id"
+        ].join(" ")
+      )
+      .run({ id: runId, state, updated_at: now });
     this.recordRunTransition(runId, state, now);
     if (state === "waiting") {
       // ADR 0054: idle_since is a persisted wall-clock timestamp and the
@@ -2776,6 +2794,92 @@ export class RunStore {
         )
         .run(runId);
     }
+  }
+
+  listPendingRunNotifications(): RunStatus[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select id from runs",
+          "where notification_state = 'pending'",
+          "order by updated_at asc, id asc"
+        ].join(" ")
+      )
+      .all() as Array<{ id: string }>;
+    return rows.flatMap((row) => {
+      const run = this.getRun(row.id);
+      return run === undefined ? [] : [run];
+    });
+  }
+
+  markRunNotificationPending(runId: string): void {
+    this.database
+      .prepare(
+        "update runs set notification_state = 'pending', notification_error = null where id = ?"
+      )
+      .run(runId);
+  }
+
+  claimRunNotifications(runIds: readonly string[]): boolean {
+    if (runIds.length === 0) {
+      return false;
+    }
+    const claimConflict = new Error("run notification claim conflict");
+    const claim = this.database.transaction(() => {
+      const update = this.database.prepare(
+        "update runs set notification_state = 'sending', notification_error = null where id = ? and notification_state = 'pending'"
+      );
+      let claimed = 0;
+      for (const runId of runIds) {
+        claimed += update.run(runId).changes;
+      }
+      if (claimed !== runIds.length) {
+        throw claimConflict;
+      }
+    });
+    try {
+      claim();
+      return true;
+    } catch (error) {
+      if (error === claimConflict) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  completeRunNotifications(input: {
+    error?: string;
+    runIds: readonly string[];
+    state: Extract<RunNotificationState, "failed" | "sent" | "skipped">;
+  }): void {
+    if (input.runIds.length === 0) {
+      return;
+    }
+    const complete = this.database.transaction(() => {
+      const update = this.database.prepare(
+        [
+          "update runs set notification_state = ?, notification_error = ?",
+          "where id = ? and notification_state in ('pending', 'sending')"
+        ].join(" ")
+      );
+      for (const runId of input.runIds) {
+        update.run(input.state, input.error ?? null, runId);
+      }
+    });
+    complete();
+  }
+
+  releaseInterruptedRunNotifications(): number {
+    return this.database
+      .prepare(
+        [
+          "update runs set notification_state = 'pending',",
+          "notification_error = 'delivery interrupted by daemon restart'",
+          "where notification_state = 'sending'"
+        ].join(" ")
+      )
+      .run().changes;
   }
 
   updateRunEvidence(runId: string, evidence: RunEvidenceInput): void {
@@ -3500,6 +3604,8 @@ export class RunStore {
         "update runs set",
         "state = 'stale',",
         "terminal_reason = ?,",
+        "notification_state = 'pending',",
+        "notification_error = null,",
         "updated_at = ?",
         "where id = ?"
       ].join(" ")
@@ -3634,6 +3740,8 @@ export class RunStore {
         "state = 'failed',",
         "terminal_reason = ?,",
         "failure_classification = 'input_required',",
+        "notification_state = 'pending',",
+        "notification_error = null,",
         "updated_at = ?",
         "where id = ?"
       ].join(" ")
@@ -3673,6 +3781,8 @@ export class RunStore {
         issue_snapshot_path text,
         raw_log_path text,
         normalized_log_path text,
+        notification_state text not null default 'skipped',
+        notification_error text,
         created_at text not null,
         updated_at text not null
       );
@@ -3932,6 +4042,8 @@ export class RunStore {
       ["runs", "current_state_id", "text"],
       ["runs", "terminal_state_id", "text"],
       ["runs", "state_transition_reason", "text"],
+      ["runs", "notification_state", "text not null default 'skipped'"],
+      ["runs", "notification_error", "text"],
       [
         "tracked_pull_requests",
         "review_followup_cap_reached",

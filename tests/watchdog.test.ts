@@ -415,6 +415,7 @@ describe("reconcileWatchdog", () => {
         workspaceMtimeMax
       });
       const cancel = vi.fn().mockResolvedValue(undefined);
+      const onTerminated = vi.fn();
       const activeRuns = new ActiveRunRegistry();
       activeRuns.register({
         cancel,
@@ -433,6 +434,7 @@ describe("reconcileWatchdog", () => {
         },
         logger,
         now: () => new Date("2026-05-22T10:00:00.000Z"),
+        onTerminated,
         runStore: store
       });
 
@@ -443,6 +445,11 @@ describe("reconcileWatchdog", () => {
       });
       expect(cancel).toHaveBeenCalledOnce();
       expect(activeRuns.get("run-idle")?.cancelReason).toBe("no_progress");
+      expect(onTerminated).toHaveBeenCalledWith({
+        issueNumber: 198,
+        projectName: "symphonika",
+        runId: "run-idle"
+      });
     } finally {
       store.close();
     }

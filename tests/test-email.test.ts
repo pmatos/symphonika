@@ -72,11 +72,27 @@ describe("test-email", () => {
       to: "operator@example.com"
     });
   });
+
+  it("forces delivery when Routine Firing notifications are muted", async () => {
+    const root = await makeTempRoot();
+    const configPath = await writeEmailConfig(root, "always", false);
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    const report = await runTestEmail({
+      configPath,
+      createSink: () => ({ deliver }),
+      env: {}
+    });
+
+    expect(report.ok).toBe(true);
+    expect(deliver).toHaveBeenCalledOnce();
+  });
 });
 
 async function writeEmailConfig(
   root: string,
-  on: "always" | "changes" | "failures"
+  on: "always" | "changes" | "failures",
+  routineFirings = true
 ): Promise<string> {
   const configPath = path.join(root, "symphonika.yml");
   await writeFile(
@@ -86,6 +102,10 @@ async function writeEmailConfig(
       '  from: "symphonika@example.com"',
       '  to: "operator@example.com"',
       `  on: ${on}`,
+      "  sources:",
+      `    routine_firings: ${routineFirings}`,
+      "    issue_runs: true",
+      "    daemon_health: true",
       '  smtp_host: "smtp.example.com"',
       ""
     ].join("\n")

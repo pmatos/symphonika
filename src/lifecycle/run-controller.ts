@@ -2789,6 +2789,20 @@ export class RunController {
           effectiveOutcome.classification === "transient" &&
           this.runStore.runRetryCount(input.runId) <
             this.lifecyclePolicy.retry.cap;
+        if (!willRetry) {
+          // updateRunState deliberately defers transient failures because the
+          // same Run row is reused by retries. Once the budget is exhausted,
+          // this is the point that makes the genuinely-terminal attempt
+          // visible to the durable notification digest (ADR 0071).
+          try {
+            this.runStore.markRunNotificationPending(input.runId);
+          } catch (error) {
+            this.logger?.warn(
+              { err: error, runId: input.runId },
+              "symphonika issue Run notification evidence write failed"
+            );
+          }
+        }
 
         this.logger?.info(
           {

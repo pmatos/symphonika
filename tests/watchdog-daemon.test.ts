@@ -36,10 +36,11 @@ afterEach(async () => {
 describe("daemon watchdog", () => {
   it("stales a provider that only emits non-progress usage and rate-limit events", async () => {
     const root = await makeTempRoot();
-    await writeProject(root);
+    await writeProject(root, { daemonHealthEmail: true });
     const prepared = preparedWorkspaceFixture(root);
     await mkdir(prepared.workspacePath, { recursive: true });
     const provider = idleUsageProvider();
+    const deliver = vi.fn().mockResolvedValue(undefined);
 
     const daemon = await startDaemon({
       agentProviders: { codex: provider },
@@ -48,6 +49,7 @@ describe("daemon watchdog", () => {
       env: { GITHUB_TOKEN: "secret-token" },
       githubIssuesApi: githubIssuesApiFixture(),
       logger: pino({ enabled: false }),
+      notificationSink: { deliver },
       port: 0,
       prepareIssueWorkspace: prepareWorkspace(prepared)
     });
@@ -60,6 +62,10 @@ describe("daemon watchdog", () => {
         terminalReason: "no_progress"
       });
       expect(provider.cancel).toHaveBeenCalledWith("run-watchdog-idle");
+      await waitForNotification(
+        deliver,
+        "[Symphonika] Watchdog terminated 1 issue Run"
+      );
 
       await new Promise((resolve) => setTimeout(resolve, 100));
       const after = await getRun(daemon.url, "run-watchdog-idle");
@@ -475,7 +481,11 @@ function prepareWorkspace(prepared: PreparedIssueWorkspace) {
 
 async function writeProject(
   root: string,
-  options: { evidenceIgnore?: string[]; graceMinutes?: number } = {}
+  options: {
+    daemonHealthEmail?: boolean;
+    evidenceIgnore?: string[];
+    graceMinutes?: number;
+  } = {}
 ): Promise<void> {
   await writeFile(
     path.join(root, "symphonika.yml"),
@@ -488,6 +498,18 @@ async function writeProject(
       "  enabled: true",
       `  grace_minutes: ${options.graceMinutes ?? 0.001}`,
       "  sample_interval_seconds: 0.02",
+      ...(options.daemonHealthEmail === true
+        ? [
+            "email:",
+            '  from: "symphonika@example.com"',
+            '  to: "operator@example.com"',
+            '  smtp_host: "smtp.example.com"',
+            "  sources:",
+            "    routine_firings: false",
+            "    issue_runs: false",
+            "    daemon_health: true"
+          ]
+        : []),
       "providers:",
       "  codex:",
       '    command: "codex fake"',
@@ -534,6 +556,25 @@ async function writeProject(
           ""
         ].join("\n")
   );
+}
+
+async function waitForNotification(
+  deliver: ReturnType<typeof vi.fn>,
+  subject: string,
+  timeoutMs = 4_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (
+      deliver.mock.calls.some(
+        (call) => (call[0] as { subject?: string }).subject === subject
+      )
+    ) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`notification ${subject} was not delivered`);
 }
 
 async function replaceProjectWithRoutineHost(root: string): Promise<void> {

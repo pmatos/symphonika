@@ -29,6 +29,11 @@ export type ReconcileWatchdogInput = {
   ) => readonly string[] | undefined;
   logger?: Logger;
   now?: () => Date;
+  onTerminated?: (run: {
+    issueNumber: number;
+    projectName: string;
+    runId: string;
+  }) => void;
   projects?: WatchdogServiceConfig["projects"];
   runStore: RunStore;
 };
@@ -124,6 +129,18 @@ export async function reconcileWatchdog(
       input.activeRuns.requestCancel(run.runId, CANCEL_REASONS.NO_PROGRESS)
     );
     terminated += 1;
+    try {
+      input.onTerminated?.({
+        issueNumber: run.issueNumber,
+        projectName: run.projectName,
+        runId: run.runId
+      });
+    } catch (error) {
+      input.logger?.warn(
+        { err: error, runId: run.runId },
+        "symphonika watchdog termination observer failed"
+      );
+    }
     input.logger?.warn(
       {
         issueNumber: run.issueNumber,

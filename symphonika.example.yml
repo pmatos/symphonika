@@ -24,12 +24,18 @@ retention:
 # global:
 #   max_in_flight: 8
 
-# Optional best-effort Routine Firing notifications (ADR 0067). The password
-# value comes only from the named environment variable.
+# Optional best-effort Routine Firing, terminal issue Run, and daemon-health
+# notifications (ADR 0067 / ADR 0071). The password value comes only from the
+# named environment variable.
 # email:
 #   from: "symphonika@example.com"
 #   to: "operator@example.com"
 #   on: changes
+#   digest_window_seconds: 60
+#   sources:
+#     routine_firings: true
+#     issue_runs: true
+#     daemon_health: true
 #   smtp_host: "smtp.postmarkapp.com"
 #   smtp_security: starttls
 #   smtp_port: 587

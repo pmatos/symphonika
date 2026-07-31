@@ -232,6 +232,16 @@ The best-effort delivery outcome for one terminal **Routine Firing**, recorded a
 or `failed` without changing the firing's terminal state.
 _Avoid_: Routine Firing when referring only to delivery state
 
+**Issue Run Notification Delivery**:
+The durable best-effort delivery outcome for one terminal issue **Run**, claimed into a bounded
+digest and recorded without changing the Run's terminal state.
+_Avoid_: Run lifecycle state, one-email-per-Run
+
+**Daemon Health Notification**:
+An edge-triggered best-effort message for daemon start, configuration-health transitions,
+invalid-new-Routine transitions, or grouped Watchdog terminations.
+_Avoid_: daemon log line, issue Run digest
+
 **Run Lifecycle**:
 The stateful progression of one Run from dispatch selection through provider execution, scheduling,
 waiting, cancellation, or terminal labels.
@@ -355,6 +365,8 @@ _Avoid_: chat session
   **Watchdog**'s progress-liveness decision
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
 - A terminal **Routine Firing** may produce one best-effort **Routine Notification Delivery**
+- A terminal issue **Run** may produce one durable **Issue Run Notification Delivery**
+- A daemon start, health transition, or Watchdog pass may produce one **Daemon Health Notification**
 - A **Notification Sink** delivers a rendered message without owning event-specific policy
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
 - A **Watchdog** samples a **Progress Signal** for each active **Run** during daemon reconciliation and may mark no-progress work `stale`, preserving **Workspace** contents

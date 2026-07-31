@@ -70,8 +70,17 @@ export async function runTestEmail(
     options.createSink ??
     ((email, currentEnv) =>
       createSmtpNotificationSink(email, { env: currentEnv }));
+  const forcedConfig: EmailNotificationConfig = {
+    ...config,
+    on: "always",
+    sources: {
+      daemonHealth: config.sources?.daemonHealth ?? true,
+      issueRuns: config.sources?.issueRuns ?? true,
+      routineFirings: true
+    }
+  };
   const outcome = await deliverRoutineFiringNotification({
-    config: { ...config, on: "always" },
+    config: forcedConfig,
     firing: {
       branchName: "main",
       durationMs: 0,

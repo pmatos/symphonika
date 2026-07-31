@@ -159,6 +159,39 @@ describe("RuntimeConfigReloader workflow validation", () => {
     });
   });
 
+  it("loads independent email event sources and the issue Run digest window", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "email:",
+        '  from: "symphonika@example.com"',
+        '  to: "operator@example.com"',
+        '  smtp_host: "smtp.example.com"',
+        "  digest_window_seconds: 120",
+        "  sources:",
+        "    routine_firings: true",
+        "    issue_runs: false",
+        "    daemon_health: true"
+      ]
+    });
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getStatus().errors).toEqual([]);
+    expect(reloader.emailConfig()).toMatchObject({
+      digestWindowMs: 120_000,
+      sources: {
+        daemonHealth: true,
+        issueRuns: false,
+        routineFirings: true
+      }
+    });
+  });
+
   it("rejects SMTP credentials over an unencrypted non-loopback connection", async () => {
     const root = await makeTempRoot();
     await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");

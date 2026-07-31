@@ -274,8 +274,8 @@ no `routine_firings` row is created. The Routine instead records `last_attempted
 ### 4.14 Notification Sink
 
 A Notification Sink is a transport-neutral delivery boundary for a rendered subject, plain-text
-body, and HTML alternative. SMTP is the first sink. Routine Firing policy and rendering remain
-outside the transport so later issue-Run and daemon-health notification sources can reuse it.
+body, and HTML alternative. SMTP is the first sink. Routine Firing, terminal issue-Run, and
+daemon-health policy and rendering remain outside the transport.
 
 ## 5. Config Files
 
@@ -596,13 +596,19 @@ runs.
 
 ### 5.5 Email Notifications
 
-The optional service-level `email:` block configures SMTP delivery for terminal Routine Firings:
+The optional service-level `email:` block configures SMTP delivery for terminal Routine Firings,
+terminal issue Runs, and daemon health events:
 
 ```yaml
 email:
   from: "symphonika@example.com"
   to: "operator@example.com"
   on: changes
+  digest_window_seconds: 60
+  sources:
+    routine_firings: true
+    issue_runs: true
+    daemon_health: true
   smtp_host: "smtp.postmarkapp.com"
   smtp_security: starttls
   smtp_port: 587
@@ -620,10 +626,35 @@ An SMTP username over `smtp_security: none` is invalid unless the host is loopba
 `127.0.0.1`, or `::1`). Project-level email overrides are not supported. Routine front matter may
 set `notify: false` to opt out entirely; omission defaults to enabled.
 
+The three `sources` switches are independent and default to `true`. This lets an operator keep
+Routine Firing delivery while muting issue-Run or daemon-health mail. `digest_window_seconds` is a
+positive integer from 1 through 3600 and defaults to 60.
+
 For terminal Routine Firings, `always` sends every outcome, including cancellation. `changes` sends
 non-empty `kind: report` provider message output and succeeded `kind: git` firings (whose success
 already proves commits ahead of base). `failures` sends only `state = failed`, not cancellation.
 See ADR 0067.
+
+For terminal issue Runs, `always` includes every terminal outcome, including blocked outcomes and
+cancellation. `changes` includes succeeded Runs, whose success proves commits ahead of base.
+`failures` is keyed by `terminal_reason`, not `RunState`: `no_workspace_changes` and
+`workflow_terminal_blocked` are not failures, while `no_progress`, `cap_reached:*`, orphan
+recovery, provider failures, and infrastructure failures are. Cancellation is not a failure.
+Terminal issue Runs are durably claimed into at most one digest per window. A digest renders at
+most 50 Run details and reports the omitted count, bounding both mail frequency and message size.
+Interrupted digest claims return to pending on daemon restart; delivery success, policy/source
+suppression, and final delivery failure are stored separately from Run state.
+
+Daemon-health delivery is not filtered by `on`. It reports daemon start (including orphaned Run and
+Routine Firing reconciliation counts), Watchdog terminations, transition into and out of
+last-known-good Service Config fallback, and transition into and out of one-or-more invalid-new
+Routine declarations. Reload and invalid-Routine health are separate edge-triggered components, so
+a persistently broken configuration sends once rather than once per tick, followed by one recovery
+message. Watchdog terminations from one reconciliation pass are grouped.
+
+All notification delivery gets two total attempts within one 30-second orchestration deadline.
+Sink construction, rendering, delivery, and delivery-evidence failures are best-effort and cannot
+change a Run or Routine Firing state or fail a daemon tick. See ADR 0071.
 
 ## 6. Credentials
 
@@ -689,6 +720,7 @@ SQLite stores durable orchestration state:
 - canonical Routine Outcomes for terminal firings
 - Routine Firing commits-ahead evidence, independent of canonical Routine Outcome
 - Routine Notification Delivery state and sanitized delivery error
+- Issue Run Notification Delivery state and sanitized delivery error
 - Routine Firing workspace-reclamation timestamps
 - Routine Fan-outs, their expected Project targets, and grouped-notification delivery state
 - exact-timestamp Routine skip counters used to compute rolling 24-hour per-reason totals
@@ -787,6 +819,9 @@ On daemon startup:
 8. Schedule interval polling.
 
 Default poll interval: `30000` ms.
+
+After the initial reload and endpoint startup, configured daemon-health delivery emits one daemon
+start event with the orphaned issue-Run and Routine Firing reconciliation counts from steps 3-5.
 
 Manual poll-now triggers may exist in CLI or UI/API. They run the same daemon reconcile, polling,
 and dispatch gates as interval ticks, and may queue or coalesce when another manual poll is already
@@ -1312,6 +1347,11 @@ Normalized lifecycle states:
 
 Terminal run state does not necessarily match GitHub issue state.
 
+Every genuinely terminal issue Run is made pending for the durable notification digest. A
+transient failed attempt remains deferred while a retry is scheduled against the same Run row and
+becomes pending only when the retry budget is exhausted. Notification state is delivery evidence,
+not Run lifecycle state; see §5.5 and ADR 0071.
+
 ### 12.1 Success
 
 On provider exit code 0:
@@ -1674,8 +1714,9 @@ Deterministic artifact paths are rendered even when retention has removed the fi
 `clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
 
 `test-email` renders a representative fake Routine Firing and sends it through the configured
-renderer, retry policy, and SMTP sink. It forces delivery regardless of `email.on`, reports the
-configured recipient on success, and reports the final sanitized SMTP failure on error.
+renderer, retry policy, and SMTP sink. It forces delivery regardless of `email.on` and
+`email.sources.routine_firings`, reports the configured recipient on success, and reports the final
+sanitized SMTP failure on error.
 
 ## 14. Local Web UI and API
 

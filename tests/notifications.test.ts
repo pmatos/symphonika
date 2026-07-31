@@ -250,6 +250,33 @@ describe("Routine Firing notifications", () => {
     });
   });
 
+  it("can mute Routine Firing mail independently of other email sources", async () => {
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    const outcome = await deliverRoutineFiringNotification({
+      config: {
+        from: "symphonika@example.com",
+        on: "always",
+        sources: {
+          daemonHealth: true,
+          issueRuns: true,
+          routineFirings: false
+        },
+        smtpHost: "smtp.example.com",
+        smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+        smtpPort: 587,
+        smtpSecurity: "starttls",
+        to: "operator@example.com"
+      },
+      firing: routineFiringFixture(),
+      notifyEnabled: true,
+      sink: { deliver }
+    });
+
+    expect(outcome).toEqual({ reason: "disabled", state: "skipped" });
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
   it("bounds the complete best-effort delivery attempt", async () => {
     const outcome = await deliverRoutineFiringNotification({
       config: {

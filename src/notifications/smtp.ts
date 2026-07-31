@@ -1,7 +1,7 @@
 import nodemailer from "nodemailer";
 
-import { DEFAULT_DELIVERY_TIMEOUT_MS } from "./routine-firing.js";
 import type { EmailNotificationConfig } from "./config.js";
+import { DEFAULT_DELIVERY_TIMEOUT_MS } from "./delivery.js";
 import type { NotificationMessage, NotificationSink } from "./types.js";
 
 type SmtpTransportOptions = {
@@ -55,8 +55,8 @@ export function createSmtpNotificationSink(
       }
 
       // Bound the transport's own connection/greeting/socket timeouts to the
-      // same delivery-timeout contract deliverRoutineFiringNotification races
-      // against — without this, nodemailer's own (much longer) defaults let a
+      // same best-effort delivery deadline every notification source uses —
+      // without this, nodemailer's own (much longer) defaults let a
       // stalled relay hold the underlying socket open well past the point the
       // caller has already given up and reported failure.
       const transport = createTransport({

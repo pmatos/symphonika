@@ -53,6 +53,8 @@ import { detectStaleClaims } from "./lifecycle/stale-claims.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { createSmtpNotificationSink } from "./notifications/smtp.js";
+import { DaemonHealthNotifier } from "./notifications/daemon-health.js";
+import { IssueRunNotificationCoordinator } from "./notifications/issue-run.js";
 import type { NotificationSink } from "./notifications/types.js";
 import {
   runPullRequestFollowup,
@@ -146,6 +148,14 @@ export async function startDaemon(
   const runStore = openRunStore({
     stateRoot: state.stateRoot
   });
+  const recoveredRunNotifications =
+    runStore.releaseInterruptedRunNotifications();
+  if (recoveredRunNotifications > 0) {
+    logger.warn(
+      { recovered: recoveredRunNotifications },
+      "symphonika startup: released interrupted issue Run notification claims"
+    );
+  }
   const recoveredRoutineFanoutNotifications =
     runStore.releaseInterruptedRoutineFanoutNotifications();
   if (recoveredRoutineFanoutNotifications > 0) {
@@ -313,6 +323,19 @@ export async function startDaemon(
     configPath: state.configPath,
     logger
   });
+  const issueRunNotifications = new IssueRunNotificationCoordinator({
+    createSink: (config) =>
+      options.notificationSink ?? createSmtpNotificationSink(config, { env }),
+    logger,
+    resolveConfig: () => runtimeConfig.emailConfig(),
+    runStore
+  });
+  const daemonHealthNotifications = new DaemonHealthNotifier({
+    createSink: (config) =>
+      options.notificationSink ?? createSmtpNotificationSink(config, { env }),
+    logger,
+    resolveConfig: () => runtimeConfig.emailConfig()
+  });
   const activeRuns = new ActiveRunRegistry();
   const dispatchMutex = createAsyncMutex();
   // launchWork is explicitly re-entrant per tick (see comment at its
@@ -432,6 +455,14 @@ export async function startDaemon(
     try {
       const snapshot = await runtimeConfig.reload();
       const reloadStatus = runtimeConfig.getStatus();
+      daemonHealthNotifications.observeReload({
+        broken:
+          snapshot === undefined || reloadStatus.usingLastKnownGood === true,
+        errors: reloadStatus.errors
+      });
+      daemonHealthNotifications.observeInvalidRoutines(
+        snapshot?.invalidRoutines ?? []
+      );
       if (snapshot !== undefined) {
         // A brand-new routine declaration with no prior valid snapshot gets
         // a state = 'invalid' identity here (see docs/adr/0060). Reload
@@ -486,6 +517,7 @@ export async function startDaemon(
       }
       lastPollErrorsKey = errorsKey;
     }
+    issueRunNotifications.schedulePending();
   };
   const reconcile = async (): Promise<void> => {
     if (!state.configExists) {
@@ -542,6 +574,11 @@ export async function startDaemon(
         nowMs - lastWatchdogSampleAt >= watchdog.sampleIntervalSeconds * 1_000
       ) {
         lastWatchdogSampleAt = nowMs;
+        const watchdogTerminations: Array<{
+          issueNumber: number;
+          projectName: string;
+          runId: string;
+        }> = [];
         await reconcileWatchdog({
           activeRuns,
           config: watchdog,
@@ -553,9 +590,15 @@ export async function startDaemon(
           },
           logger,
           now: () => new Date(nowMs),
+          onTerminated: (run) => {
+            watchdogTerminations.push(run);
+          },
           projects: serviceConfig.projects,
           runStore
         });
+        daemonHealthNotifications.notifyWatchdogTerminations(
+          watchdogTerminations
+        );
       }
     } catch (error) {
       logger.error({ err: error }, "symphonika watchdog reconcile failed");
@@ -976,6 +1019,10 @@ export async function startDaemon(
     },
     "symphonika daemon started"
   );
+  daemonHealthNotifications.notifyDaemonStarted({
+    orphanedRoutineFirings: firingOutcomes.length,
+    orphanedRuns: runOutcomes.length
+  });
   // Defense in depth: createDaemonHeartbeat's own notify functions already
   // swallow a failed systemd-notify call, but daemonHeartbeat is injectable
   // (options.daemonHeartbeat), so a caller-supplied implementation isn't
@@ -1065,6 +1112,7 @@ export async function startDaemon(
         clearTimeout(legacyRecheckTimer);
         legacyRecheckTimer = undefined;
       }
+      issueRunNotifications.stop();
       for (const entry of activeRuns.list()) {
         if (runStore.getRun(entry.runId) !== undefined) {
           runStore.markCancelRequested(
@@ -1083,6 +1131,7 @@ export async function startDaemon(
       await activeRuns.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
       await scheduledWork;
       await Promise.allSettled(Array.from(inflightDispatches));
+      await daemonHealthNotifications.settled();
       try {
         await stopServer(server, logger);
         await removeDaemonEndpoint(state.stateRoot);

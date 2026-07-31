@@ -44,7 +44,8 @@ import {
   parseRoutineOutcomeClaim,
   reconcileRoutineOutcome,
   ROUTINE_OUTCOME_JSON_SCHEMA,
-  type RoutineGithubSnapshot
+  type RoutineGithubSnapshot,
+  type RoutineOutcomeClaim
 } from "./outcome.js";
 import {
   renderRoutinePrompt,
@@ -315,10 +316,13 @@ export function fireRoutineNow(
     provider,
     providerCommand,
     providerName,
-    redactSecrets: resolveRedactSecrets(
-      input.notification,
-      input.env ?? process.env
-    ),
+    // A closure, not a snapshot: resolved fresh on every call so a Service
+    // Config reload mid-firing (changing smtp_password_env or its value) is
+    // honored by evidence recorded after the reload, matching the delivery
+    // config's own re-resolution in recordRoutineFiringNotification (ADR
+    // 0067).
+    redactSecrets: () =>
+      resolveRedactSecrets(input.notification, input.env ?? process.env),
     routine: detail,
     runStore: input.runStore,
     stateRoot: input.stateRoot
@@ -376,10 +380,8 @@ export async function dispatchDueRoutines(
   const projects = [...input.projects.values()];
   const fanoutIds = new Map<string, string>();
   const firingTasks: Promise<void>[] = [];
-  const redactSecrets = resolveRedactSecrets(
-    input.notification,
-    input.env ?? process.env
-  );
+  const redactSecrets = (): string[] =>
+    resolveRedactSecrets(input.notification, input.env ?? process.env);
 
   for (const project of projects) {
     if (project.disabled === true) {
@@ -827,7 +829,7 @@ async function runRoutineFiring(input: {
   provider: NonNullable<AgentProviderRegistry[AgentProviderName]>;
   providerCommand: string;
   providerName: AgentProviderName;
-  redactSecrets: string[];
+  redactSecrets: () => string[];
   routine: RoutineStatus & { prompt: string };
   runStore: RunStore;
   stateRoot: string;
@@ -1073,15 +1075,19 @@ async function runRoutineFiring(input: {
       input.routine.kind,
       githubSnapshotSince
     );
+    const resolvedRedactSecrets = input.redactSecrets();
     const redactedTerminalReason =
       outcome.reason.length === 0
         ? null
-        : redactAll(outcome.reason, input.redactSecrets);
+        : redactAll(outcome.reason, resolvedRedactSecrets);
     input.runStore.completeRoutineFiring({
       commitsAhead,
       id: input.firingId,
       outcome: reconcileRoutineOutcome({
-        claim: parseRoutineOutcomeClaim(events),
+        claim: redactRoutineOutcomeClaim(
+          parseRoutineOutcomeClaim(events),
+          resolvedRedactSecrets
+        ),
         commitsAhead,
         githubObservationAvailable: githubObservation.available,
         observedAction: githubObservation.action,
@@ -1184,12 +1190,16 @@ async function runRoutineFiring(input: {
       : finalCancelled
         ? "cancelled"
         : reason;
-    const redactedFinalReason = redactAll(finalReason, input.redactSecrets);
+    const resolvedRedactSecrets = input.redactSecrets();
+    const redactedFinalReason = redactAll(finalReason, resolvedRedactSecrets);
     input.runStore.completeRoutineFiring({
       commitsAhead,
       id: input.firingId,
       outcome: reconcileRoutineOutcome({
-        claim: parseRoutineOutcomeClaim(events),
+        claim: redactRoutineOutcomeClaim(
+          parseRoutineOutcomeClaim(events),
+          resolvedRedactSecrets
+        ),
         commitsAhead,
         githubObservationAvailable: githubObservation.available,
         observedAction: githubObservation.action,
@@ -1695,17 +1705,18 @@ async function appendRoutineEvent(input: {
   event: ProviderEvent;
   normalizedLogPath: string;
   rawLogPath: string;
-  redactSecrets: string[];
+  redactSecrets: () => string[];
 }): Promise<void> {
+  const redactSecrets = input.redactSecrets();
   await Promise.all([
-    appendJsonl(input.rawLogPath, input.event.raw, input.redactSecrets),
+    appendJsonl(input.rawLogPath, input.event.raw, redactSecrets),
     ...(input.event.normalized === undefined
       ? []
       : [
           appendJsonl(
             input.normalizedLogPath,
             input.event.normalized,
-            input.redactSecrets
+            redactSecrets
           )
         ])
   ]);
@@ -1992,8 +2003,13 @@ async function appendJsonl(
   value: unknown,
   redactSecrets: string[]
 ): Promise<void> {
-  const serialized = redactAll(JSON.stringify(value), redactSecrets);
-  await appendFile(filePath, `${serialized}\n`, "utf8");
+  // Redact string values BEFORE serializing, not after: JSON.stringify
+  // escapes quotes, backslashes, and control characters, so a secret
+  // containing any of them no longer appears as a contiguous substring of
+  // the serialized text and a post-serialization redact silently misses it.
+  const redacted =
+    redactSecrets.length === 0 ? value : redactValueDeep(value, redactSecrets);
+  await appendFile(filePath, `${JSON.stringify(redacted)}\n`, "utf8");
 }
 
 // A provider's own output can echo back environment values it inherited
@@ -2005,6 +2021,39 @@ function redactAll(message: string, redactSecrets: string[]): string {
       secret.length === 0 ? acc : acc.split(secret).join("[REDACTED]"),
     message
   );
+}
+
+function redactRoutineOutcomeClaim(
+  claim: RoutineOutcomeClaim | null,
+  redactSecrets: string[]
+): RoutineOutcomeClaim | null {
+  if (claim === null) {
+    return null;
+  }
+  return {
+    ...claim,
+    summary: redactAll(claim.summary, redactSecrets),
+    title: redactAll(claim.title, redactSecrets),
+    url: claim.url === null ? null : redactAll(claim.url, redactSecrets)
+  };
+}
+
+function redactValueDeep(value: unknown, redactSecrets: string[]): unknown {
+  if (typeof value === "string") {
+    return redactAll(value, redactSecrets);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactValueDeep(entry, redactSecrets));
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        redactValueDeep(entry, redactSecrets)
+      ])
+    );
+  }
+  return value;
 }
 
 function resolveRedactSecrets(

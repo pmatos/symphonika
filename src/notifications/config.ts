@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export type EmailDeliveryPolicy = "always" | "changes" | "failures";
 export type EmailNotificationSource =
-  "daemon_health" | "issue_runs" | "routine_firings";
+  "daemon_health" | "issue_runs" | "routine_fanouts" | "routine_firings";
 type SmtpSecurity = "starttls" | "ssl" | "none";
 
 export type EmailNotificationConfig = {
@@ -12,6 +12,7 @@ export type EmailNotificationConfig = {
   sources?: {
     daemonHealth: boolean;
     issueRuns: boolean;
+    routineFanouts: boolean;
     routineFirings: boolean;
   };
   smtpHost: string;
@@ -42,6 +43,7 @@ export const emailNotificationConfigSchema = z
       .object({
         daemon_health: z.boolean().default(true),
         issue_runs: z.boolean().default(true),
+        routine_fanouts: z.boolean().default(true),
         routine_firings: z.boolean().default(true)
       })
       .strict()
@@ -87,6 +89,7 @@ export const emailNotificationConfigSchema = z
           sources: {
             daemonHealth: email.sources.daemon_health,
             issueRuns: email.sources.issue_runs,
+            routineFanouts: email.sources.routine_fanouts,
             routineFirings: email.sources.routine_firings
           }
         }),
@@ -112,6 +115,9 @@ export function emailNotificationSourceEnabled(
   }
   if (source === "issue_runs") {
     return config.sources.issueRuns;
+  }
+  if (source === "routine_fanouts") {
+    return config.sources.routineFanouts;
   }
   return config.sources.routineFirings;
 }

@@ -22,7 +22,6 @@ import {
   fireRoutineNow
 } from "../src/routines/dispatcher.js";
 import type { TargetedRoutineDeclaration } from "../src/routines/types.js";
-import type { RoutineFanoutNotification } from "../src/routines/fanout-summary.js";
 import type {
   PreparedRoutineWorkspace,
   PrepareRoutineWorkspaceInput
@@ -742,13 +741,7 @@ describe("RoutineFiringDispatcher", () => {
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
     const firingIds = ["fire-alpha", "fire-beta"];
-    const notifications: RoutineFanoutNotification[] = [];
-    const notifyRoutineFanout = vi.fn(
-      (notification: RoutineFanoutNotification): Promise<void> => {
-        notifications.push(notification);
-        return Promise.resolve();
-      }
-    );
+    const delivered: NotificationMessage[] = [];
     const provider = {
       cancel: vi.fn().mockResolvedValue(undefined),
       name: "codex",
@@ -778,7 +771,23 @@ describe("RoutineFiringDispatcher", () => {
         createFanoutId: () => "fanout-1",
         createFiringId: () => firingIds.shift()!,
         globalConcurrency: { maxInFlight: undefined },
-        notifyRoutineFanout,
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
         now: new Date("2026-05-22T10:00:01.000Z"),
         prepareRoutineWorkspace: ({ project }) =>
           Promise.resolve({
@@ -829,17 +838,28 @@ describe("RoutineFiringDispatcher", () => {
           state: "succeeded"
         })
       ]);
-      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
-      expect(notifications[0]?.fanout.id).toBe("fanout-1");
-      expect(notifications[0]?.fanout.routineName).toBe("refactor-audit");
-      expect(
-        notifications[0]?.fanout.targets.map((target) => target.projectName)
-      ).toEqual(["alpha", "beta"]);
-      expect(notifications[0]?.subject).toBe(
+      // Each firing's own per-firing notification is delivered in addition
+      // to the one grouped fan-out summary — under on: "always" both send
+      // (see ADR 0072); the default "changes" policy is what usually keeps
+      // this from doubling up in practice for a quiet report firing.
+      expect(delivered).toHaveLength(3);
+      const fanoutMessages = delivered.filter((message) =>
+        message.subject.startsWith("[ptt]")
+      );
+      expect(fanoutMessages).toHaveLength(1);
+      expect(runStore.getRoutineFanout("fanout-1")).toMatchObject({
+        notificationState: "sent",
+        routineName: "refactor-audit",
+        targets: [
+          expect.objectContaining({ projectName: "alpha" }),
+          expect.objectContaining({ projectName: "beta" })
+        ]
+      });
+      expect(fanoutMessages[0]?.subject).toBe(
         "[ptt] refactor-audit — 0 PR, 0 issue, 0 failed"
       );
-      expect(notifications[0]?.text).toContain("- alpha: succeeded");
-      expect(notifications[0]?.text).toContain("- beta: succeeded");
+      expect(fanoutMessages[0]?.text).toContain("- alpha: succeeded");
+      expect(fanoutMessages[0]?.text).toContain("- beta: succeeded");
     } finally {
       runStore.close();
     }
@@ -849,7 +869,7 @@ describe("RoutineFiringDispatcher", () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
-    const notifications: RoutineFanoutNotification[] = [];
+    const delivered: NotificationMessage[] = [];
     const declaration = {
       kind: "report" as const,
       name: "refactor-audit",
@@ -858,34 +878,47 @@ describe("RoutineFiringDispatcher", () => {
       schedule: { at: "2026-05-22T10:00:00.000Z" },
       sourcePath: path.join(root, "refactor-audit.md")
     };
-    const notifyRoutineFanout = vi.fn(
-      (notification: RoutineFanoutNotification): Promise<void> => {
-        notifications.push(notification);
-        // Simulate a re-entrant reload (ADR 0052) adding a Project to this
-        // Routine while this notification is already in flight. The
-        // original clock event's expected membership is immutable, so beta
-        // must not join this fan-out.
-        if (notifications.length === 1) {
-          runStore.syncRoutines([
-            { ...declaration, projectName: "alpha" },
-            { ...declaration, projectName: "beta" }
-          ]);
-          runStore.ensureRoutineFanout({
-            id: "fanout-1-ignored-because-already-exists",
-            projectNames: ["alpha", "beta"],
-            routineName: "refactor-audit",
-            scheduledAt: "2026-05-22T10:00:00.000Z"
-          });
-          expect(
-            runStore.hasRoutineFanoutTarget({
-              id: "fanout-1",
-              projectName: "beta"
-            })
-          ).toBe(false);
+    const notification = {
+      createSink: () => ({
+        deliver(message: NotificationMessage) {
+          delivered.push(message);
+          // Simulate a re-entrant reload (ADR 0052) adding a Project to this
+          // Routine while this notification is already in flight. The
+          // original clock event's expected membership is immutable, so beta
+          // must not join this fan-out. Keyed on the fan-out summary's
+          // subject (not just "the first delivery") since this routine's own
+          // per-firing notification is now also delivered through this sink.
+          if (message.subject.startsWith("[ptt]")) {
+            runStore.syncRoutines([
+              { ...declaration, projectName: "alpha" },
+              { ...declaration, projectName: "beta" }
+            ]);
+            runStore.ensureRoutineFanout({
+              id: "fanout-1-ignored-because-already-exists",
+              projectNames: ["alpha", "beta"],
+              routineName: "refactor-audit",
+              scheduledAt: "2026-05-22T10:00:00.000Z"
+            });
+            expect(
+              runStore.hasRoutineFanoutTarget({
+                id: "fanout-1",
+                projectName: "beta"
+              })
+            ).toBe(false);
+          }
+          return Promise.resolve();
         }
-        return Promise.resolve();
-      }
-    );
+      }),
+      resolveConfig: () => ({
+        from: "symphonika@example.com",
+        on: "always" as const,
+        smtpHost: "smtp.example.com",
+        smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+        smtpPort: 587,
+        smtpSecurity: "starttls" as const,
+        to: "operator@example.com"
+      })
+    };
     const provider = {
       cancel: vi.fn().mockResolvedValue(undefined),
       name: "codex",
@@ -907,7 +940,7 @@ describe("RoutineFiringDispatcher", () => {
         createFanoutId: () => "fanout-1",
         createFiringId: () => "fire-alpha",
         globalConcurrency: { maxInFlight: undefined },
-        notifyRoutineFanout,
+        notification,
         now: new Date("2026-05-22T10:00:01.000Z"),
         prepareRoutineWorkspace: ({ project }) =>
           Promise.resolve({
@@ -936,10 +969,9 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       expect(result.fired).toEqual(["fire-alpha"]);
-      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
       expect(
-        notifications[0]?.fanout.targets.map((target) => target.projectName)
-      ).toEqual(["alpha"]);
+        delivered.filter((message) => message.subject.startsWith("[ptt]"))
+      ).toHaveLength(1);
 
       // beta was configured after this clock event began, so the alpha-only
       // fan-out is delivered exactly once and remains immutable.
@@ -963,7 +995,7 @@ describe("RoutineFiringDispatcher", () => {
         createFanoutId: () => "fanout-1-unused",
         createFiringId: () => "fire-beta-must-not-run",
         globalConcurrency: { maxInFlight: undefined },
-        notifyRoutineFanout,
+        notification,
         now: new Date("2026-05-22T10:05:00.000Z"),
         prepareRoutineWorkspace: ({ project }) =>
           Promise.resolve({
@@ -1005,7 +1037,9 @@ describe("RoutineFiringDispatcher", () => {
         reason: "catch_up_window",
         routineName: "refactor-audit"
       });
-      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
+      expect(
+        delivered.filter((message) => message.subject.startsWith("[ptt]"))
+      ).toHaveLength(1);
       expect(runStore.listRoutines({ project: "beta" })[0]).toMatchObject({
         lastSkipReason: "catch_up_window",
         state: "expired"
@@ -1019,13 +1053,24 @@ describe("RoutineFiringDispatcher", () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
-    const notifications: RoutineFanoutNotification[] = [];
-    const notifyRoutineFanout = vi.fn(
-      (notification: RoutineFanoutNotification): Promise<void> => {
-        notifications.push(notification);
-        return Promise.resolve();
-      }
-    );
+    const delivered: NotificationMessage[] = [];
+    const notification = {
+      createSink: () => ({
+        deliver(message: NotificationMessage) {
+          delivered.push(message);
+          return Promise.resolve();
+        }
+      }),
+      resolveConfig: () => ({
+        from: "symphonika@example.com",
+        on: "always" as const,
+        smtpHost: "smtp.example.com",
+        smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+        smtpPort: 587,
+        smtpSecurity: "starttls" as const,
+        to: "operator@example.com"
+      })
+    };
     const provider = {
       cancel: vi.fn().mockResolvedValue(undefined),
       name: "codex",
@@ -1055,7 +1100,7 @@ describe("RoutineFiringDispatcher", () => {
         createFanoutId: () => "fanout-cap",
         createFiringId: () => "fire-alpha",
         globalConcurrency: { maxInFlight: 1 },
-        notifyRoutineFanout,
+        notification,
         now: new Date("2026-05-22T10:00:01.000Z"),
         prepareRoutineWorkspace: ({ project }) =>
           Promise.resolve({
@@ -1097,9 +1142,12 @@ describe("RoutineFiringDispatcher", () => {
         reason: "concurrency_cap",
         routineName: "refactor-audit"
       });
-      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
+      const fanoutMessages = delivered.filter((message) =>
+        message.subject.startsWith("[ptt]")
+      );
+      expect(fanoutMessages).toHaveLength(1);
       expect(
-        notifications[0]?.fanout.targets.map((target) => ({
+        runStore.getRoutineFanout("fanout-cap")?.targets.map((target) => ({
           disposition: target.disposition,
           projectName: target.projectName,
           skipReason: target.skipReason
@@ -1116,7 +1164,7 @@ describe("RoutineFiringDispatcher", () => {
           skipReason: "concurrency_cap"
         }
       ]);
-      expect(notifications[0]?.text).toContain(
+      expect(fanoutMessages[0]?.text).toContain(
         "- beta: skipped (concurrency_cap)"
       );
       expect(runStore.listRoutines({ project: "beta" })[0]).toMatchObject({
@@ -1132,13 +1180,24 @@ describe("RoutineFiringDispatcher", () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
-    const notifications: RoutineFanoutNotification[] = [];
-    const notifyRoutineFanout = vi.fn(
-      (notification: RoutineFanoutNotification): Promise<void> => {
-        notifications.push(notification);
-        return Promise.resolve();
-      }
-    );
+    const delivered: NotificationMessage[] = [];
+    const notification = {
+      createSink: () => ({
+        deliver(message: NotificationMessage) {
+          delivered.push(message);
+          return Promise.resolve();
+        }
+      }),
+      resolveConfig: () => ({
+        from: "symphonika@example.com",
+        on: "always" as const,
+        smtpHost: "smtp.example.com",
+        smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+        smtpPort: 587,
+        smtpSecurity: "starttls" as const,
+        to: "operator@example.com"
+      })
+    };
     const codexProvider = {
       cancel: vi.fn().mockResolvedValue(undefined),
       name: "codex",
@@ -1207,7 +1266,7 @@ describe("RoutineFiringDispatcher", () => {
         createFanoutId: () => "fanout-provider-gap",
         createFiringId: () => firingIds.shift()!,
         globalConcurrency: { maxInFlight: undefined },
-        notifyRoutineFanout,
+        notification,
         now: new Date("2026-05-22T10:00:01.000Z"),
         prepareRoutineWorkspace: ({ project }) =>
           Promise.resolve({
@@ -1232,7 +1291,9 @@ describe("RoutineFiringDispatcher", () => {
         reason: "provider_not_registered: omp",
         routineName: "refactor-audit"
       });
-      expect(notifyRoutineFanout).not.toHaveBeenCalled();
+      expect(
+        delivered.filter((message) => message.subject.startsWith("[ptt]"))
+      ).toHaveLength(0);
       expect(runStore.getRoutineFanout("fanout-provider-gap")?.targets).toEqual(
         [
           expect.objectContaining({
@@ -1261,7 +1322,7 @@ describe("RoutineFiringDispatcher", () => {
         createFanoutId: () => "fanout-provider-gap-unused",
         createFiringId: () => firingIds.shift()!,
         globalConcurrency: { maxInFlight: undefined },
-        notifyRoutineFanout,
+        notification,
         now: new Date("2026-05-22T10:05:00.000Z"),
         prepareRoutineWorkspace: ({ project }) =>
           Promise.resolve({
@@ -1282,19 +1343,23 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       expect(tickTwo.fired).toEqual(["fire-beta"]);
-      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
-      expect(notifications[0]?.fanout.id).toBe("fanout-provider-gap");
+      const fanoutMessages = delivered.filter((message) =>
+        message.subject.startsWith("[ptt]")
+      );
+      expect(fanoutMessages).toHaveLength(1);
       expect(
-        notifications[0]?.fanout.targets.map((target) => ({
-          disposition: target.disposition,
-          projectName: target.projectName
-        }))
+        runStore
+          .getRoutineFanout("fanout-provider-gap")
+          ?.targets.map((target) => ({
+            disposition: target.disposition,
+            projectName: target.projectName
+          }))
       ).toEqual([
         { disposition: "firing", projectName: "alpha" },
         { disposition: "firing", projectName: "beta" }
       ]);
-      expect(notifications[0]?.text).toContain("- alpha: succeeded");
-      expect(notifications[0]?.text).toContain("- beta: succeeded");
+      expect(fanoutMessages[0]?.text).toContain("- alpha: succeeded");
+      expect(fanoutMessages[0]?.text).toContain("- beta: succeeded");
     } finally {
       runStore.close();
     }
@@ -1571,13 +1636,24 @@ describe("RoutineFiringDispatcher", () => {
     });
     const listPullRequestsForBranch = vi.fn(() => discoveryGate);
 
-    const notifications: RoutineFanoutNotification[] = [];
-    const notifyRoutineFanout = vi.fn(
-      (notification: RoutineFanoutNotification): Promise<void> => {
-        notifications.push(notification);
-        return Promise.resolve();
-      }
-    );
+    const delivered: NotificationMessage[] = [];
+    const notification = {
+      createSink: () => ({
+        deliver(message: NotificationMessage) {
+          delivered.push(message);
+          return Promise.resolve();
+        }
+      }),
+      resolveConfig: () => ({
+        from: "symphonika@example.com",
+        on: "always" as const,
+        smtpHost: "smtp.example.com",
+        smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+        smtpPort: 587,
+        smtpSecurity: "starttls" as const,
+        to: "operator@example.com"
+      })
+    };
     const provider = {
       cancel: vi.fn().mockResolvedValue(undefined),
       name: "codex",
@@ -1615,7 +1691,7 @@ describe("RoutineFiringDispatcher", () => {
         },
         globalConcurrency: { maxInFlight: undefined },
         logger: pino({ enabled: false }),
-        notifyRoutineFanout,
+        notification,
         now: new Date("2026-05-22T10:00:01.000Z"),
         prepareRoutineWorkspace,
         projects: new Map([
@@ -1655,7 +1731,7 @@ describe("RoutineFiringDispatcher", () => {
         expect.objectContaining({ id: "fire-race", state: "running" })
       ]);
       expect(runStore.listReadyRoutineFanouts()).toEqual([]);
-      expect(notifyRoutineFanout).not.toHaveBeenCalled();
+      expect(delivered).toHaveLength(0);
 
       releasePullRequests([
         { head: { ref: branchName, sha: "abc123" }, number: 42, state: "open" }
@@ -1669,10 +1745,1487 @@ describe("RoutineFiringDispatcher", () => {
           state: "succeeded"
         })
       ]);
-      expect(notifyRoutineFanout).toHaveBeenCalledTimes(1);
-      expect(notifications[0]?.subject).toBe(
+      const fanoutMessages = delivered.filter((message) =>
+        message.subject.startsWith("[ptt]")
+      );
+      expect(fanoutMessages).toHaveLength(1);
+      expect(fanoutMessages[0]?.subject).toBe(
         "[ptt] dependency-update — 1 PR, 0 issue, 0 failed"
       );
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("leaves the fan-out summary pending when no notification wiring is provided", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-no-wiring",
+        createFiringId: () => "fire-no-wiring",
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      // No wiring at all means "not configured yet", not a policy decision:
+      // the fan-out must stay pending so a later reload/restart can still
+      // pick it up (ADR 0069/0072), never "skipped".
+      expect(runStore.getRoutineFanout("fanout-no-wiring")).toMatchObject({
+        notificationState: "pending"
+      });
+      expect(runStore.listReadyRoutineFanouts()).toEqual([
+        expect.objectContaining({ id: "fanout-no-wiring" })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("leaves the fan-out summary pending when no email: block is configured", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-no-config",
+        createFiringId: () => "fire-no-config",
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({ deliver: () => Promise.resolve() }),
+          resolveConfig: () => undefined
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.getRoutineFanout("fanout-no-config")).toMatchObject({
+        notificationState: "pending"
+      });
+      expect(runStore.listReadyRoutineFanouts()).toEqual([
+        expect.objectContaining({ id: "fanout-no-config" })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("records a policy-skipped fan-out when email.sources.routine_fanouts is disabled", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-source-muted",
+        createFiringId: () => "fire-source-muted",
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            sources: {
+              daemonHealth: true,
+              issueRuns: true,
+              routineFanouts: false,
+              routineFirings: true
+            },
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(
+        delivered.filter((message) => message.subject.startsWith("[ptt]"))
+      ).toHaveLength(0);
+      expect(runStore.getRoutineFanout("fanout-source-muted")).toMatchObject({
+        notificationState: "skipped"
+      });
+      // A policy-suppressed group is terminal, not retried forever.
+      expect(runStore.listReadyRoutineFanouts()).toEqual([]);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("records a policy-skipped fan-out when the routine declaration sets notify: false", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-notify-false",
+        createFiringId: () => "fire-notify-false",
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  notify: false,
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      // notify: false is uniform across every target of a fan-out (it lives
+      // on the shared RoutineDeclaration), so it mutes both the per-firing
+      // and the grouped notification — the sink is never touched at all.
+      expect(delivered).toHaveLength(0);
+      expect(runStore.getRoutineFanout("fanout-notify-false")).toMatchObject({
+        notificationState: "skipped"
+      });
+      expect(runStore.listReadyRoutineFanouts()).toEqual([]);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("resolves notifyEnabled from the fan-out's own target, not an unrelated stale routine sharing its name", async () => {
+    // Routine names are unique only per (project_name, name): a routine
+    // removed from config is soft-disabled (or, via project-cascade,
+    // inactivated), never deleted, so its row can persist with a stale
+    // notify value while an unrelated later declaration reuses the same
+    // name elsewhere. "aaa-stale" sorts before "zzz-active" so an unscoped
+    // name-only lookup would incorrectly resolve notify from the stale row.
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const declaration = {
+      kind: "report" as const,
+      name: "shared-name",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/shared-name.md"
+    };
+    // Seed a stale, unrelated routine of the same name in a different,
+    // alphabetically-earlier project, with notify explicitly disabled, then
+    // never mention that project again — dispatchDueRoutines's own
+    // pruneRoutinesForUnknownProjects call (driven by the `projects` map
+    // below, which omits it) inactivates it without deleting the row.
+    runStore.syncRoutines([
+      { ...declaration, notify: false, projectName: "aaa-stale" }
+    ]);
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-name-reuse",
+        createFiringId: () => "fire-name-reuse",
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "zzz-active",
+            {
+              ...runStoreProjectFixture(),
+              name: "zzz-active",
+              routines: [{ ...declaration, projectName: "zzz-active" }]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      // Sanity check the reproduction setup: the stale row is inactivated
+      // but still present and still carries its old notify: false.
+      expect(
+        runStore.listRoutines({ includeInactive: true, project: "aaa-stale" })
+      ).toContainEqual(
+        expect.objectContaining({
+          name: "shared-name",
+          notify: false,
+          state: "inactive"
+        })
+      );
+      const fanoutMessages = delivered.filter((message) =>
+        message.subject.startsWith("[ptt]")
+      );
+      expect(fanoutMessages).toHaveLength(1);
+      expect(runStore.getRoutineFanout("fanout-name-reuse")).toMatchObject({
+        notificationState: "sent"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("skips the fan-out summary under on: failures when the group has no failures", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-no-failures",
+        createFiringId: () => "fire-no-failures",
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "failures",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(
+        delivered.filter((message) => message.subject.startsWith("[ptt]"))
+      ).toHaveLength(0);
+      expect(runStore.getRoutineFanout("fanout-no-failures")).toMatchObject({
+        notificationState: "skipped"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("sends the fan-out summary under on: failures when a target failed", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { message: "crashing", type: "message" },
+          raw: { delta: "crashing" }
+        };
+        throw new Error("provider crashed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-with-failure",
+        createFiringId: () => "fire-with-failure",
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "failures",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      const fanoutMessages = delivered.filter((message) =>
+        message.subject.startsWith("[ptt]")
+      );
+      expect(fanoutMessages).toHaveLength(1);
+      expect(fanoutMessages[0]?.subject).toBe(
+        "[ptt] daily-report — 0 PR, 0 issue, 1 failed"
+      );
+      expect(runStore.getRoutineFanout("fanout-with-failure")).toMatchObject({
+        notificationState: "sent"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("skips the fan-out summary under the default changes policy when nothing changed", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-no-changes",
+        createFiringId: () => "fire-no-changes",
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "changes",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      // No failures, no PRs, no issues: the group has nothing to report.
+      expect(
+        delivered.filter((message) => message.subject.startsWith("[ptt]"))
+      ).toHaveLength(0);
+      expect(runStore.getRoutineFanout("fanout-no-changes")).toMatchObject({
+        notificationState: "skipped"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("sends the fan-out summary under the default changes policy when a pull request was discovered", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/dependency-update/01JCHANGESPOLICY";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const listPullRequestsForBranch = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { head: { ref: branchName, sha: "abc123" }, number: 7, state: "open" }
+      ]);
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-changes-pr",
+        createFiringId: () => "fire-changes-pr",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "changes",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "dependency-update",
+                  prompt: "Commit on {{branch.name}}.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "dependency-update.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      const fanoutMessages = delivered.filter((message) =>
+        message.subject.startsWith("[ptt]")
+      );
+      expect(fanoutMessages).toHaveLength(1);
+      expect(fanoutMessages[0]?.subject).toBe(
+        "[ptt] dependency-update — 1 PR, 0 issue, 0 failed"
+      );
+      expect(runStore.getRoutineFanout("fanout-changes-pr")).toMatchObject({
+        notificationState: "sent"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("sends the fan-out summary under the default changes policy when a target's outcome is an issue action", async () => {
+    // fanout.issueCount is permanently 0 (ADR 0069's deferred structured-
+    // outcome slice — see getRoutineFanout in run-store.ts), so this proves
+    // "changes" detects an issue-only change via each target's own
+    // RoutineOutcome.action instead of relying on that counter.
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const listIssues = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          html_url: "https://github.com/pmatos/alpha/issues/17",
+          number: 17,
+          state: "open",
+          title: "Superseded dependency issue"
+        }
+      ])
+      .mockResolvedValueOnce([
+        {
+          html_url: "https://github.com/pmatos/alpha/issues/17",
+          number: 17,
+          state: "closed",
+          title: "Superseded dependency issue"
+        }
+      ]);
+    const provider = quietProvider();
+
+    try {
+      await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns: new ActiveRunRegistry(),
+          provider,
+          root,
+          routine: {
+            ...minuteRoutine(root),
+            schedule: { at: "2026-05-22T10:00:00.000Z" }
+          },
+          runStore
+        }),
+        createFanoutId: () => "fanout-issue-outcome",
+        createFiringId: () => "fire-issue-outcome",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "changes",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        }
+      });
+
+      expect(runStore.getRoutineFiring("fire-issue-outcome")?.outcome).toEqual(
+        expect.objectContaining({ action: "issue_closed" })
+      );
+      const fanoutMessages = delivered.filter((message) =>
+        message.subject.startsWith("[ptt]")
+      );
+      expect(fanoutMessages).toHaveLength(1);
+      expect(runStore.getRoutineFanout("fanout-issue-outcome")).toMatchObject({
+        notificationState: "sent"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("never leaks the SMTP password into a rendered fan-out summary", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const secret = "smtp-password-that-must-never-leak-into-a-fanout";
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { message: "crashing", type: "message" },
+          raw: { delta: "crashing" }
+        };
+        throw new Error(`provider crashed while holding ${secret}`);
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-redact",
+        createFiringId: () => "fire-redact-fanout",
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      const fanoutMessages = delivered.filter((message) =>
+        message.subject.startsWith("[ptt]")
+      );
+      expect(fanoutMessages).toHaveLength(1);
+      expect(fanoutMessages[0]?.text).toContain("[REDACTED]");
+      expect(fanoutMessages[0]?.text).not.toContain(secret);
+      expect(fanoutMessages[0]?.html).not.toContain(secret);
+      expect(JSON.stringify(fanoutMessages)).not.toContain(secret);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("redacts a historical unredacted terminal reason before rendering a fan-out summary", async () => {
+    // Simulates a firing row written before terminal-reason redaction
+    // existed (or through a path that lacked redactSecrets), by persisting
+    // it directly through the store rather than through the dispatcher's own
+    // (already-redacting) completion path. This PR is the first one to ever
+    // actually deliver a rendered fan-out, so delivery must defensively
+    // re-redact rather than trust the persisted value.
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    const secret = "smtp-password-that-predates-terminal-reason-hardening";
+    const delivered: NotificationMessage[] = [];
+    const declaration = {
+      kind: "report" as const,
+      name: "legacy-routine",
+      prompt: "Report.",
+      provider: "codex" as const,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/legacy-routine.md"
+    };
+
+    try {
+      runStore.syncRoutines([{ ...declaration, projectName: "alpha" }]);
+      runStore.ensureRoutineFanout({
+        id: "fanout-legacy",
+        projectNames: ["alpha"],
+        routineName: "legacy-routine",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.claimRoutineFiring({
+        fanoutId: "fanout-legacy",
+        firedAt: "2026-05-22T10:00:01.000Z",
+        firingId: "fire-legacy",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "legacy-routine",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.completeRoutineFiring({
+        id: "fire-legacy",
+        state: "failed",
+        terminalReason: `provider crashed while holding ${secret}`
+      });
+
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: {},
+        configDir: "/tmp",
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:05:00.000Z"),
+        projects: new Map(),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]?.text).toContain("[REDACTED]");
+      expect(delivered[0]?.text).not.toContain(secret);
+      expect(delivered[0]?.html).not.toContain(secret);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("redacts a delivery error containing the SMTP password before persisting or logging a fan-out failure", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const secret = "smtp-password-that-must-never-leak-in-a-delivery-error";
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-error-redact",
+        createFiringId: () => "fire-error-redact",
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver() {
+              return Promise.reject(
+                new Error(`relay rejected credentials ${secret}`)
+              );
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      const fanout = runStore.getRoutineFanout("fanout-error-redact");
+      expect(fanout?.notificationError).not.toContain(secret);
+      expect(fanout?.notificationError).toContain("[REDACTED]");
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("redacts every fan-out this tick using the config resolved before the delivery loop, not a mid-tick reload", async () => {
+    // deliverRoutineFanoutNotification awaits real delivery, so a Service
+    // Config reload (ADR 0052) can land between two ready fan-outs in the
+    // same tick's loop. Redaction secrets must come from the SAME
+    // once-resolved config that `sink` actually delivers through for the
+    // rest of this tick, not be re-resolved per fan-out.
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    const oldSecret = "smtp-password-active-before-reload";
+    const newSecret = "smtp-password-active-after-reload";
+    const delivered: NotificationMessage[] = [];
+    let reloaded = false;
+    const declaration = {
+      kind: "report" as const,
+      prompt: "Report.",
+      provider: "codex" as const,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/legacy-routine.md"
+    };
+    const legacyFanouts = [
+      {
+        fanoutId: "fanout-a",
+        firingId: "fire-a",
+        projectName: "alpha",
+        routineName: "legacy-a"
+      },
+      {
+        fanoutId: "fanout-b",
+        firingId: "fire-b",
+        projectName: "beta",
+        routineName: "legacy-b"
+      }
+    ];
+
+    try {
+      runStore.syncRoutines(
+        legacyFanouts.map(({ projectName, routineName }) => ({
+          ...declaration,
+          name: routineName,
+          projectName
+        }))
+      );
+      for (const {
+        fanoutId,
+        firingId,
+        projectName,
+        routineName
+      } of legacyFanouts) {
+        runStore.ensureRoutineFanout({
+          id: fanoutId,
+          projectNames: [projectName],
+          routineName,
+          scheduledAt: "2026-05-22T10:00:00.000Z"
+        });
+        runStore.claimRoutineFiring({
+          fanoutId,
+          firedAt: "2026-05-22T10:00:01.000Z",
+          firingId,
+          projectName,
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName,
+          scheduledAt: "2026-05-22T10:00:00.000Z"
+        });
+        runStore.completeRoutineFiring({
+          id: firingId,
+          state: "failed",
+          terminalReason: `provider crashed while holding ${oldSecret}`
+        });
+      }
+
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: {},
+        configDir: "/tmp",
+        env: { SMTP_NEW: newSecret, SMTP_OLD: oldSecret },
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              // Simulate a reload landing after the first fan-out's
+              // delivery, mid-tick, before the second is processed.
+              reloaded = true;
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: reloaded ? "SMTP_NEW" : "SMTP_OLD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:05:00.000Z"),
+        projects: new Map(),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(delivered).toHaveLength(2);
+      for (const message of delivered) {
+        expect(message.text).toContain("[REDACTED]");
+        expect(message.text).not.toContain(oldSecret);
+      }
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("keeps a fan-out pending for retry when the notification sink factory throws", async () => {
+    // Sink construction is best-effort (SPEC.md §5.5) and must never fail a
+    // daemon tick, which would otherwise also abort issue dispatch scheduled
+    // in the same tick and recur identically every subsequent tick.
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "legacy-routine",
+      prompt: "Report.",
+      provider: "codex" as const,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/legacy-routine.md"
+    };
+
+    try {
+      runStore.syncRoutines([{ ...declaration, projectName: "alpha" }]);
+      runStore.ensureRoutineFanout({
+        id: "fanout-sink-throws",
+        projectNames: ["alpha"],
+        routineName: "legacy-routine",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.claimRoutineFiring({
+        fanoutId: "fanout-sink-throws",
+        firedAt: "2026-05-22T10:00:01.000Z",
+        firingId: "fire-sink-throws",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "legacy-routine",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.completeRoutineFiring({
+        id: "fire-sink-throws",
+        state: "succeeded"
+      });
+
+      // If sink construction were not contained, this call itself would
+      // reject and fail the test.
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: {},
+        configDir: "/tmp",
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => {
+            throw new Error("custom sink factory misconfigured");
+          },
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:05:00.000Z"),
+        projects: new Map(),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.getRoutineFanout("fanout-sink-throws")).toMatchObject({
+        notificationState: "pending"
+      });
+      expect(runStore.listReadyRoutineFanouts()).toEqual([
+        expect.objectContaining({ id: "fanout-sink-throws" })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("redacts the SMTP password from a sink-factory construction error before logging it", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    const secret = "smtp-password-that-must-never-leak-from-a-sink-factory";
+    const logger = pino({ enabled: false });
+    const logWarn = vi.spyOn(logger, "warn");
+    const declaration = {
+      kind: "report" as const,
+      name: "legacy-routine",
+      prompt: "Report.",
+      provider: "codex" as const,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/legacy-routine.md"
+    };
+
+    try {
+      runStore.syncRoutines([{ ...declaration, projectName: "alpha" }]);
+      runStore.ensureRoutineFanout({
+        id: "fanout-sink-throws-secret",
+        projectNames: ["alpha"],
+        routineName: "legacy-routine",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.claimRoutineFiring({
+        fanoutId: "fanout-sink-throws-secret",
+        firedAt: "2026-05-22T10:00:01.000Z",
+        firingId: "fire-sink-throws-secret",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "legacy-routine",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.completeRoutineFiring({
+        id: "fire-sink-throws-secret",
+        state: "succeeded"
+      });
+
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: {},
+        configDir: "/tmp",
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        logger,
+        notification: {
+          createSink: () => {
+            throw new Error(`custom sink factory misconfigured: ${secret}`);
+          },
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:05:00.000Z"),
+        projects: new Map(),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(logWarn).toHaveBeenCalledTimes(1);
+      const [logPayload] = logWarn.mock.calls[0]!;
+      expect(JSON.stringify(logPayload)).not.toContain(secret);
+      expect(JSON.stringify(logPayload)).toContain("[REDACTED]");
     } finally {
       runStore.close();
     }
@@ -2420,6 +3973,16 @@ describe("RoutineFiringDispatcher", () => {
             smtpPort: 587,
             smtpSecurity: "starttls",
             smtpUsername: "server-token",
+            // This test is about firing-level redaction/failure handling,
+            // not the grouped fan-out summary that the same clock event also
+            // durably creates (ADR 0069) — mute it so it doesn't add its own
+            // delivery attempts to `delivered`.
+            sources: {
+              daemonHealth: true,
+              issueRuns: true,
+              routineFanouts: false,
+              routineFirings: true
+            },
             to: "operator@example.com"
           })
         },
@@ -2531,6 +4094,14 @@ describe("RoutineFiringDispatcher", () => {
             smtpPort: 587,
             smtpSecurity: "starttls",
             smtpUsername: "server-token",
+            // Scoped to firing-level redaction, not the grouped fan-out
+            // summary the same clock event also durably creates (ADR 0069).
+            sources: {
+              daemonHealth: true,
+              issueRuns: true,
+              routineFanouts: false,
+              routineFirings: true
+            },
             to: "operator@example.com"
           })
         },
@@ -2671,6 +4242,14 @@ describe("RoutineFiringDispatcher", () => {
             smtpPort: 587,
             smtpSecurity: "starttls",
             smtpUsername: "server-token",
+            // Scoped to firing-level redaction, not the grouped fan-out
+            // summary the same clock event also durably creates (ADR 0069).
+            sources: {
+              daemonHealth: true,
+              issueRuns: true,
+              routineFanouts: false,
+              routineFirings: true
+            },
             to: "operator@example.com"
           })
         },
@@ -3110,6 +4689,15 @@ describe("RoutineFiringDispatcher", () => {
             smtpPasswordEnv: "SMTP_TEST_PASSWORD",
             smtpPort: 587,
             smtpSecurity: "starttls",
+            // Scoped to firing-level config resolution timing, not the
+            // grouped fan-out summary the same clock event also durably
+            // creates (ADR 0069).
+            sources: {
+              daemonHealth: true,
+              issueRuns: true,
+              routineFanouts: false,
+              routineFirings: true
+            },
             to: currentTo
           })
         },

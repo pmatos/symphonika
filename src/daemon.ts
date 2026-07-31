@@ -67,7 +67,6 @@ import {
   type RunState,
   type SyncProjectStateInput
 } from "./run-store.js";
-import type { RoutineFanoutNotification } from "./routines/fanout-summary.js";
 import { dispatchDueRoutines, fireRoutineNow } from "./routines/dispatcher.js";
 import type { RoutineFiringState } from "./routines/types.js";
 import type {
@@ -106,9 +105,6 @@ export type StartDaemonOptions = {
   ) => Promise<PreparedIssueWorkspace>;
   createRoutineFanoutId?: () => string;
   createRoutineFiringId?: () => string;
-  notifyRoutineFanout?: (
-    notification: RoutineFanoutNotification
-  ) => Promise<void>;
   prepareRoutineWorkspace?: (
     input: PrepareRoutineWorkspaceInput
   ) => Promise<PreparedRoutineWorkspace>;
@@ -706,9 +702,6 @@ export async function startDaemon(
             // for that firing's own notification (ADR 0067).
             resolveConfig: () => runtimeConfig.emailConfig()
           },
-          ...(options.notifyRoutineFanout === undefined
-            ? {}
-            : { notifyRoutineFanout: options.notifyRoutineFanout }),
           ...(options.prepareRoutineWorkspace === undefined
             ? {}
             : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),

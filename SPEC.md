@@ -597,7 +597,7 @@ runs.
 ### 5.5 Email Notifications
 
 The optional service-level `email:` block configures SMTP delivery for terminal Routine Firings,
-terminal issue Runs, and daemon health events:
+grouped Routine Fan-out summaries, terminal issue Runs, and daemon health events:
 
 ```yaml
 email:
@@ -607,6 +607,7 @@ email:
   digest_window_seconds: 60
   sources:
     routine_firings: true
+    routine_fanouts: true
     issue_runs: true
     daemon_health: true
   smtp_host: "smtp.postmarkapp.com"
@@ -626,14 +627,31 @@ An SMTP username over `smtp_security: none` is invalid unless the host is loopba
 `127.0.0.1`, or `::1`). Project-level email overrides are not supported. Routine front matter may
 set `notify: false` to opt out entirely; omission defaults to enabled.
 
-The three `sources` switches are independent and default to `true`. This lets an operator keep
-Routine Firing delivery while muting issue-Run or daemon-health mail. `digest_window_seconds` is a
-positive integer from 1 through 3600 and defaults to 60.
+The four `sources` switches are independent and default to `true`. This lets an operator keep
+Routine Firing delivery while muting the Routine Fan-out summary, issue-Run, or daemon-health mail
+(or any other combination). `digest_window_seconds` is a positive integer from 1 through 3600 and
+defaults to 60.
 
 For terminal Routine Firings, `always` sends every outcome, including cancellation. `changes` sends
 non-empty `kind: report` provider message output and succeeded `kind: git` firings (whose success
 already proves commits ahead of base). `failures` sends only `state = failed`, not cancellation.
 See ADR 0067.
+
+For a grouped Routine Fan-out summary, no per-target report output is reachable at the group level,
+so policy is defined in terms of the group's failure and pull-request counts plus each target's own
+structured outcome action: `always` sends regardless; `failures` sends only when the group's failure
+count is nonzero (a target skipped for overlap or a concurrency cap is not a failure, matching ADR
+0069); `changes` sends when the failure or pull-request count is nonzero, or when any target's
+outcome action is `issue_opened` or `issue_closed`. The group's issue count itself is not read for
+this check — it stays ADR 0069's permanently-zero placeholder pending the structured-outcome slice.
+A Routine's `notify: false` mutes the group summary the same way it mutes each target's own
+per-firing notification, since the field is uniform across every target of one fan-out. A
+policy-suppressed or source-muted group is recorded with its own `notification_state = skipped` —
+distinct from `sent` and from the `pending` state an unconfigured `email:` block leaves it in for a
+later reload or restart to pick up. Every clock-matched Routine creates a fan-out even when it
+targets a single Project, so under `on: always` a single-target Routine sends both its own
+per-firing notification and a one-target summary; set `sources.routine_fanouts: false` to keep only
+one message per firing. See ADR 0072.
 
 For terminal issue Runs, `always` includes every terminal outcome, including blocked outcomes and
 cancellation. `changes` includes succeeded Runs, whose success proves commits ahead of base.

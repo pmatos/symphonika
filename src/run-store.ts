@@ -194,7 +194,7 @@ export type RoutineFanoutStatus = {
   id: string;
   issueCount: number;
   notificationError: string | null;
-  notificationState: "pending" | "sending" | "sent";
+  notificationState: "pending" | "sending" | "sent" | "skipped";
   notifiedAt: string | null;
   pullRequestCount: number;
   routineName: string;
@@ -1803,12 +1803,24 @@ export class RunStore {
     return claim();
   }
 
-  completeRoutineFanoutNotification(input: {
-    error?: string;
-    id: string;
-  }): void {
+  completeRoutineFanoutNotification(
+    input:
+      { error: string; id: string } | { id: string; state: "sent" | "skipped" }
+  ): void {
     const now = timestamp();
-    if (input.error === undefined) {
+    if ("error" in input) {
+      this.database
+        .prepare(
+          [
+            "update routine_fanouts set notification_state = 'pending',",
+            "notification_error = ?, updated_at = ?",
+            "where id = ? and notification_state = 'sending'"
+          ].join(" ")
+        )
+        .run(input.error, now, input.id);
+      return;
+    }
+    if (input.state === "sent") {
       this.database
         .prepare(
           [
@@ -1823,12 +1835,12 @@ export class RunStore {
     this.database
       .prepare(
         [
-          "update routine_fanouts set notification_state = 'pending',",
-          "notification_error = ?, updated_at = ?",
+          "update routine_fanouts set notification_state = 'skipped',",
+          "notification_error = null, updated_at = ?",
           "where id = ? and notification_state = 'sending'"
         ].join(" ")
       )
-      .run(input.error, now, input.id);
+      .run(now, input.id);
   }
 
   releaseInterruptedRoutineFanoutNotifications(): number {

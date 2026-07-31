@@ -152,6 +152,91 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("sends an SMTP notification for a manually-fired routine", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = quietProvider();
+    const routine = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-23T10:00:00.000Z" },
+      sourcePath: path.join(root, "daily-report.md"),
+      projectName: "alpha"
+    };
+    runStore.syncRoutines([routine]);
+    const delivered: NotificationMessage[] = [];
+
+    try {
+      const result = fireRoutineNow({
+        activeRuns,
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "manual-fire-notify",
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [routine]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        request: { routineName: "daily-report" },
+        runStore,
+        stateRoot
+      });
+
+      if (result.kind !== "accepted") {
+        throw new Error("manual firing was not accepted");
+      }
+      await result.completion;
+
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]?.subject).toContain("daily-report");
+      expect(runStore.getRoutineFiring("manual-fire-notify")).toMatchObject({
+        notificationState: "sent",
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("refuses a manual firing when its Project concurrency cap is full", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
@@ -2156,6 +2241,138 @@ describe("RoutineFiringDispatcher", () => {
         terminalReason: null
       });
       expect(logs).not.toContain(secret);
+      const database = await readFile(path.join(stateRoot, "symphonika.db"));
+      expect(database.includes(Buffer.from(secret))).toBe(false);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("redacts the SMTP password from persisted provider evidence and a provider-derived terminal reason", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const secret = "smtp-password-that-must-never-leak";
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // A full-permission provider process can inherit the daemon's env and
+      // echo it back — this simulates that leak path to prove evidence and
+      // the terminal reason both come out redacted regardless of source.
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: {
+            message: `inherited env leaked password ${secret}`,
+            type: "message"
+          },
+          raw: { delta: `inherited env leaked password ${secret}` }
+        };
+        throw new Error(`provider crashed while holding ${secret}`);
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-redact-evidence",
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      const firing = runStore.getRoutineFiring("fire-redact-evidence");
+      expect(firing?.state).toBe("failed");
+      expect(firing?.terminalReason).toBe(
+        "provider crashed while holding [REDACTED]"
+      );
+      expect(firing?.terminalReason).not.toContain(secret);
+
+      const rawLog = await readFile(
+        path.join(
+          stateRoot,
+          "logs",
+          "routines",
+          "fire-redact-evidence",
+          "provider.raw.jsonl"
+        ),
+        "utf8"
+      );
+      const normalizedLog = await readFile(
+        path.join(
+          stateRoot,
+          "logs",
+          "routines",
+          "fire-redact-evidence",
+          "provider.normalized.jsonl"
+        ),
+        "utf8"
+      );
+      expect(rawLog).toContain("[REDACTED]");
+      expect(rawLog).not.toContain(secret);
+      expect(normalizedLog).toContain("[REDACTED]");
+      expect(normalizedLog).not.toContain(secret);
+
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]?.text).not.toContain(secret);
+      expect(delivered[0]?.html).not.toContain(secret);
+
       const database = await readFile(path.join(stateRoot, "symphonika.db"));
       expect(database.includes(Buffer.from(secret))).toBe(false);
     } finally {

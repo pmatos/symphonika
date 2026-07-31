@@ -853,6 +853,14 @@ export async function startDaemon(
         globalConcurrency: runtimeConfig.globalConcurrency(),
         githubIssuesApi,
         logger,
+        notification: {
+          createSink: (config) =>
+            options.notificationSink ??
+            createSmtpNotificationSink(config, { env }),
+          // Resolved at delivery time so a reload mid-firing is honored
+          // for that firing's own notification (ADR 0067).
+          resolveConfig: () => runtimeConfig.emailConfig()
+        },
         ...(options.prepareRoutineWorkspace === undefined
           ? {}
           : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),

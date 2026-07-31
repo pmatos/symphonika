@@ -288,7 +288,10 @@ describe("RunStore routines", () => {
         expect.objectContaining({ id: "fanout-1" })
       ]);
       expect(store.claimRoutineFanoutNotification("fanout-1")).toBe(true);
-      store.completeRoutineFanoutNotification({ id: "fanout-1" });
+      store.completeRoutineFanoutNotification({
+        id: "fanout-1",
+        state: "sent"
+      });
       expect(store.getRoutineFanout("fanout-1")).toMatchObject({
         notificationState: "sent"
       });
@@ -320,6 +323,54 @@ describe("RunStore routines", () => {
           projectName: "beta"
         })
       ).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("records a policy-skipped fan-out notification as a distinct terminal state", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      const declaration = {
+        kind: "report" as const,
+        name: "refactor-audit",
+        prompt: "Audit.",
+        provider: "codex" as const,
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: "/tmp/refactor-audit.md"
+      };
+      store.syncRoutines([{ ...declaration, projectName: "alpha" }]);
+      store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      store.claimRoutineFiring({
+        fanoutId: "fanout-1",
+        firedAt: "2026-05-22T10:00:01.000Z",
+        firingId: "fire-alpha",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "refactor-audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      store.completeRoutineFiring({ id: "fire-alpha", state: "succeeded" });
+
+      expect(store.claimRoutineFanoutNotification("fanout-1")).toBe(true);
+      store.completeRoutineFanoutNotification({
+        id: "fanout-1",
+        state: "skipped"
+      });
+
+      expect(store.getRoutineFanout("fanout-1")).toMatchObject({
+        notificationState: "skipped",
+        notifiedAt: null
+      });
+      // A skipped notification is terminal, not retried on the next tick.
+      expect(store.listReadyRoutineFanouts()).toEqual([]);
     } finally {
       store.close();
     }
@@ -454,7 +505,10 @@ describe("RunStore routines", () => {
           projectName: "beta"
         })
       ).toBe(false);
-      store.completeRoutineFanoutNotification({ id: "fanout-1" });
+      store.completeRoutineFanoutNotification({
+        id: "fanout-1",
+        state: "sent"
+      });
 
       expect(store.getRoutineFanout("fanout-1")).toMatchObject({
         notificationState: "sent",

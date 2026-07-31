@@ -260,6 +260,7 @@ describe("Routine Firing notifications", () => {
         sources: {
           daemonHealth: true,
           issueRuns: true,
+          routineFanouts: true,
           routineFirings: false
         },
         smtpHost: "smtp.example.com",

@@ -187,6 +187,7 @@ describe("RuntimeConfigReloader workflow validation", () => {
       sources: {
         daemonHealth: true,
         issueRuns: false,
+        routineFanouts: true,
         routineFirings: true
       }
     });

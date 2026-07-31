@@ -27,13 +27,10 @@ import type {
   RunControllerProvidersConfig
 } from "../lifecycle/run-controller.js";
 import type { EmailNotificationConfig } from "../notifications/config.js";
+import { deliverRoutineFanoutNotification } from "../notifications/routine-fanout.js";
 import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
 import type { NotificationSink } from "../notifications/types.js";
 import type { RunStore } from "../run-store.js";
-import {
-  renderRoutineFanoutNotification,
-  type RoutineFanoutNotification
-} from "./fanout-summary.js";
 import {
   evaluateRoutineSchedule,
   nextRecurringFireAt,
@@ -82,9 +79,6 @@ export type DispatchDueRoutinesInput = {
     resolveConfig: () => EmailNotificationConfig | undefined;
     timeoutMs?: number;
   };
-  notifyRoutineFanout?: (
-    notification: RoutineFanoutNotification
-  ) => Promise<void>;
   now?: Date;
   prepareRoutineWorkspace?: (
     input: PrepareRoutineWorkspaceInput
@@ -798,9 +792,22 @@ type RoutineFiringResult = {
 async function deliverReadyRoutineFanouts(
   input: DispatchDueRoutinesInput
 ): Promise<void> {
-  if (input.notifyRoutineFanout === undefined) {
+  if (input.notification === undefined) {
     return;
   }
+  // Resolved once per tick, before any claim: an unconfigured email: block
+  // means "no sink to deliver through yet", not a policy decision, so every
+  // ready fan-out this tick must stay pending rather than being claimed and
+  // then abandoned (see ADR 0069 and ADR 0072).
+  const config = input.notification.resolveConfig();
+  if (config === undefined) {
+    return;
+  }
+  const sink = input.notification.createSink(config);
+  // notify is uniform across every target of one fan-out (it lives on the
+  // shared RoutineDeclaration, materialized identically per project — ADR
+  // 0069), so any one target row's value is authoritative for the group.
+  const routines = input.runStore.listRoutines({ includeInactive: true });
   for (const fanout of input.runStore.listReadyRoutineFanouts()) {
     if (!input.runStore.claimRoutineFanoutNotification(fanout.id)) {
       continue;
@@ -813,22 +820,37 @@ async function deliverReadyRoutineFanouts(
     if (claimed === undefined) {
       throw new Error("claimed routine fan-out could not be reloaded");
     }
-    try {
-      await input.notifyRoutineFanout(renderRoutineFanoutNotification(claimed));
+    const notifyEnabled =
+      routines.find((routine) => routine.name === claimed.routineName)
+        ?.notify !== false;
+    const outcome = await deliverRoutineFanoutNotification({
+      config,
+      fanout: claimed,
+      notifyEnabled,
+      sink,
+      ...(input.notification.timeoutMs === undefined
+        ? {}
+        : { timeoutMs: input.notification.timeoutMs })
+    });
+    if (outcome.state === "failed") {
       input.runStore.completeRoutineFanoutNotification({
-        id: claimed.id
-      });
-    } catch (error) {
-      const message = errorMessage(error);
-      input.runStore.completeRoutineFanoutNotification({
-        error: message,
+        error: outcome.error,
         id: claimed.id
       });
       input.logger?.warn(
-        { err: error, fanout: claimed.id, routine: claimed.routineName },
+        {
+          err: outcome.error,
+          fanout: claimed.id,
+          routine: claimed.routineName
+        },
         "symphonika routine fan-out notification failed"
       );
+      continue;
     }
+    input.runStore.completeRoutineFanoutNotification({
+      id: claimed.id,
+      state: outcome.state
+    });
   }
 }
 

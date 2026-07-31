@@ -76,6 +76,7 @@ export async function runTestEmail(
     sources: {
       daemonHealth: config.sources?.daemonHealth ?? true,
       issueRuns: config.sources?.issueRuns ?? true,
+      routineFanouts: config.sources?.routineFanouts ?? true,
       routineFirings: true
     }
   };

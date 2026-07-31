@@ -237,19 +237,25 @@ one-shot is consumed as an ungrouped `catch_up_window` skip instead of reopening
 summary, while a recurring target begins with its next future clock event.
 
 A Routine Firing is one durable execution of a Routine Target. It records the Routine, its target
-Project, fan-out id, provider, workspace path, prompt evidence, provider logs, terminal reason,
-lifecycle state, its canonical Routine Outcome, and any pull requests discovered from a `kind: git`
-firing branch. The Routine Outcome records `status`, `action`, `url`, `title`, `summary`,
-`verified`, and `source` without replacing lifecycle state or terminal reason; see ADR 0068. Its
-trigger source is `scheduled` or `manual`; a scheduled firing carries the fan-out id of the Routine
-Fan-out it belongs to, while a manual firing targets one Routine Target directly and has no fan-out
-id. A one-shot `schedule.at` target becomes `expired` after its firing is claimed and must not fire
-again on daemon restart. A recurring target remains active and advances to its next clock event
-after every scheduled firing. A manual firing does not consume a scheduled clock event.
+Project, fan-out id, provider, nominal scheduled clock time, workspace path, branch name and ref,
+prompt evidence, provider logs, terminal reason, lifecycle state, its canonical Routine Outcome, and
+any pull requests discovered from a `kind: git` firing branch. The Routine Outcome records `status`,
+`action`, `url`, `title`, `summary`, `verified`, and `source` without replacing lifecycle state or
+terminal reason; see ADR 0068. Its trigger source is `scheduled` or `manual`; a scheduled firing
+carries the fan-out id of the Routine Fan-out it belongs to, while a manual firing targets one
+Routine Target directly and has no fan-out id. A one-shot `schedule.at` target becomes `expired`
+after its firing is claimed and must not fire again on daemon restart. A recurring target remains
+active and advances to its next clock event after every scheduled firing. A manual firing does not
+consume or correspond to a scheduled clock event, so its nominal scheduled-time evidence is unknown.
+New firings persist their deterministic workspace and branch plan when claimed, before workspace
+preparation. Legacy firings that predate scheduled-time or branch-identity evidence leave those
+fields unknown; operator surfaces must not reconstruct historical evidence from the claim time or
+mutable live configuration.
 
 When Routine Workspace Retention reclaims a terminal firing's worktree, the firing keeps its
 historical workspace path and records `workspace_pruned_at`. State-root logs and prompt evidence are
-not part of workspace retention.
+not part of workspace retention. A planned workspace that was never created because preparation
+failed is treated as already reclaimed when its repository cache is also absent or unusable.
 
 A Routine Firing with an effective `timeout_minutes` has an absolute wall-clock deadline beginning
 when execution of the claimed firing starts. Exceeding it terminates the provider process tree and
@@ -1511,7 +1517,9 @@ Bootstrap CLI commands:
 - `symphonika runs [--config <path>]`
 - `symphonika routines [--config <path>] [--project <project>] [--include-inactive]`
 - `symphonika prune-workspaces [--config <path>] [--dry-run]`
+- `symphonika firings <routine> [--config <path>] [--project <project>] [--limit <n>]`
 - `symphonika show-run <run-id> [--config <path>]`
+- `symphonika show-firing <firing-id> [--config <path>] [--events <n>]`
 - `symphonika cancel <run-id> [--config <path>]`
 - `symphonika clear-stale <project> <issue-number> [--config <path>] --yes`
 
@@ -1580,6 +1588,15 @@ title, URL, and an `(unverified)` marker when applicable. Inactive targets are h
 `prune-workspaces` reclaims terminal Routine Firing worktrees eligible under the effective
 service-level retention policy. `--dry-run` lists candidates without changing Git registrations,
 directories, or Run Store rows. The command remains available when automatic retention is disabled.
+
+`firings <routine>` lists the Routine's firing history newest first, bounded to 25 rows by default.
+When the name matches current or historical targets in multiple Projects, the command lists every
+candidate and requires `--project`; `--limit` selects another positive bound.
+
+`show-firing <firing-id>` renders the Routine Firing's identity, lifecycle timing, workspace and
+branch identity, deterministic prompt and provider-log paths, terminal/cancellation evidence,
+discovered pull requests, and recent Normalized Event Log entries. `--events` defaults to 25.
+Deterministic artifact paths are rendered even when retention has removed the files.
 
 `clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
 

@@ -56,6 +56,17 @@ describe("RoutineFiringDispatcher", () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const workspacePath = path.join(root, "workspace");
+    const preparedWorkspace = {
+      branchName: "main",
+      branchRef: "refs/remotes/origin/main",
+      cachePath: path.join(root, ".cache", "repo.git"),
+      reused: false,
+      workspacePath
+    };
+    let finishPreparation!: (value: PreparedRoutineWorkspace) => void;
+    const preparation = new Promise<PreparedRoutineWorkspace>((resolve) => {
+      finishPreparation = resolve;
+    });
     const runStore = openRunStore({ stateRoot });
     const activeRuns = new ActiveRunRegistry();
     const provider = quietProvider();
@@ -77,14 +88,7 @@ describe("RoutineFiringDispatcher", () => {
         configDir: root,
         createFiringId: () => "manual-fire",
         globalConcurrency: { maxInFlight: undefined },
-        prepareRoutineWorkspace: () =>
-          Promise.resolve({
-            branchName: "main",
-            branchRef: "refs/remotes/origin/main",
-            cachePath: path.join(root, ".cache", "repo.git"),
-            reused: false,
-            workspacePath
-          }),
+        prepareRoutineWorkspace: () => preparation,
         projects: new Map([
           [
             "alpha",
@@ -113,6 +117,21 @@ describe("RoutineFiringDispatcher", () => {
         throw new Error("manual firing was not accepted");
       }
       expect(activeRuns.countInFlight()).toBe(1);
+      expect(runStore.getRoutineFiring("manual-fire")).toMatchObject({
+        branchName: "main",
+        branchRef: "refs/remotes/origin/main",
+        state: "preparing_workspace",
+        workspacePath: path.join(
+          root,
+          ".symphonika",
+          "workspaces",
+          "alpha",
+          "routines",
+          "daily-report",
+          "manual-fire"
+        )
+      });
+      finishPreparation(preparedWorkspace);
       await result.completion;
 
       expect(provider.runAttempt).toHaveBeenCalledOnce();
@@ -128,6 +147,7 @@ describe("RoutineFiringDispatcher", () => {
       });
       expect(activeRuns.countInFlight()).toBe(0);
     } finally {
+      finishPreparation(preparedWorkspace);
       runStore.close();
     }
   });
@@ -299,7 +319,8 @@ describe("RoutineFiringDispatcher", () => {
         projectName: "expired",
         providerCommand: "codex fake",
         providerName: "codex",
-        routineName: "daily-report"
+        routineName: "daily-report",
+        scheduledAt: "2026-05-23T10:00:00.000Z"
       })
     ).toBe(true);
     runStore.completeRoutineFiring({
@@ -1315,6 +1336,7 @@ describe("RoutineFiringDispatcher", () => {
       expect(runStore.listRoutineFirings()).toEqual([
         expect.objectContaining({
           id: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+          branchName,
           outcome: {
             action: "pr",
             source: "gh",
@@ -1328,6 +1350,7 @@ describe("RoutineFiringDispatcher", () => {
             expect.objectContaining({ prNumber: 17 }),
             expect.objectContaining({ prNumber: 18 })
           ],
+          scheduledAt: "2026-05-22T10:00:00.000Z",
           state: "succeeded",
           terminalReason: null
         })
@@ -2984,7 +3007,8 @@ describe("RoutineFiringDispatcher", () => {
           projectName: "alpha",
           providerCommand: "codex fake",
           providerName: "codex",
-          routineName: "minute-report"
+          routineName: "minute-report",
+          scheduledAt: "2026-05-22T10:00:00.000Z"
         })
       ).toBe(true);
       runStore.completeRoutineFiring({
@@ -3035,7 +3059,8 @@ describe("RoutineFiringDispatcher", () => {
         projectName: "alpha",
         providerCommand: "codex fake",
         providerName: "codex",
-        routineName: "minute-report"
+        routineName: "minute-report",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
       })
     ).toBe(true);
     runStore.completeRoutineFiring({
@@ -3099,7 +3124,8 @@ describe("RoutineFiringDispatcher", () => {
         projectName: "alpha",
         providerCommand: "codex fake",
         providerName: "codex",
-        routineName: "minute-report"
+        routineName: "minute-report",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
       })
     ).toBe(true);
     runStore.completeRoutineFiring({

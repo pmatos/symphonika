@@ -519,6 +519,7 @@ async function loadRuntimeConfigSnapshot(input: {
       ? []
       : [["omp", parsed.data.providers.omp.command] as [string, string]])
   ];
+  const errorsBeforeProviderTemplateCheck = errors.length;
   for (const [providerName, command] of configuredProviderCommands) {
     try {
       renderProviderCommandTemplate(command, {});
@@ -528,7 +529,7 @@ async function loadRuntimeConfigSnapshot(input: {
       );
     }
   }
-  if (errors.length > 0) {
+  if (errors.length > errorsBeforeProviderTemplateCheck) {
     // A malformed providers.<name>.command sits at the same Service Config
     // tier as a malformed watchdog/routine_defaults mapping — reject the
     // candidate snapshot through the normal last-known-good path (like the

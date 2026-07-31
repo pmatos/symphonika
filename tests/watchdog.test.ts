@@ -574,6 +574,81 @@ describe("reconcileWatchdog", () => {
     }
   });
 
+  it("prefers the current Project evidence ignore over the persisted Run value", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    const vendorPath = path.join(workspacePath, "vendor");
+    await mkdir(vendorPath, { recursive: true });
+    const generated = path.join(vendorPath, "generated.txt");
+    await writeFile(generated, "generated\n");
+    const rootTime = new Date("2026-05-22T09:00:00.000Z");
+    const generatedTime = new Date("2026-05-22T09:50:00.000Z");
+    await utimes(workspacePath, rootTime, rootTime);
+    await utimes(generated, generatedTime, generatedTime);
+    await utimes(vendorPath, generatedTime, generatedTime);
+    const normalizedLogPath = path.join(root, "provider.normalized.jsonl");
+    await writeFile(normalizedLogPath, "");
+
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      seedRun(store, "run-current-policy", "symphonika", 198, ["vendor/"]);
+      store.updateRunEvidence("run-current-policy", {
+        branchName: "sym/symphonika/198-watchdog",
+        branchRef: "refs/heads/sym/symphonika/198-watchdog",
+        issueSnapshotPath: path.join(root, "issue.json"),
+        metadataPath: path.join(root, "metadata.json"),
+        normalizedLogPath,
+        promptPath: path.join(root, "prompt.md"),
+        rawLogPath: path.join(root, "raw.jsonl"),
+        workflowGraphPath: path.join(root, "workflow.json"),
+        workspacePath
+      });
+      store.updateRunState("run-current-policy", "running");
+      store.upsertWatchdogSample({
+        idleSince: "2026-05-22T09:00:00.000Z",
+        lastMessageAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath,
+        outputTokensTotal: 0,
+        runId: "run-current-policy",
+        sampledAt: "2026-05-22T09:00:00.000Z",
+        turnIdSetSize: 0,
+        workspaceMtimeMax: rootTime.getTime()
+      });
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel,
+        issueNumber: 198,
+        projectName: "symphonika",
+        runId: "run-current-policy"
+      });
+
+      await reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          mtimeIgnore: [],
+          sampleIntervalSeconds: 60
+        },
+        evidenceIgnoreForProject: () => [],
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore: store
+      });
+
+      expect(store.getRun("run-current-policy")?.state).toBe("running");
+      expect(
+        store.getWatchdogSample("run-current-policy")?.idleSince
+      ).toBeNull();
+      expect(cancel).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
+
   it("starts normalized-log sampling at the stored offset", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -1329,9 +1404,11 @@ function seedRun(
   store: RunStore,
   id: string,
   projectName = "symphonika",
-  issueNumber = 198
+  issueNumber = 198,
+  evidenceIgnore: readonly string[] = []
 ): void {
   store.createRun({
+    evidenceIgnore,
     id,
     issue: {
       body: "",

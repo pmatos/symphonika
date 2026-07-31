@@ -152,10 +152,14 @@ must not overwrite it with `no_progress` — this mirrors the existing `reconcil
    (when it is still unset) so the grace clock starts on first idle and survives restarts.
 
 The evidence-ignore follow-up resolves the current valid Workflow Contract snapshot for each Run's
-Project on every daemon reconciliation tick. Invalid `evidence.ignore` edits use the same
-operator-visible reload error and last-known-good snapshot behavior as other Workflow Contract
-validation failures. Declared entries prune matching directory entries before metadata reads or
-descent; the service-config `mtime_ignore` glob layer continues to filter individual files.
+Project on every daemon reconciliation tick while that Project remains configured. Every newly
+created Run also persists its effective `evidence.ignore` list. If the Project is removed while the
+Run remains active under ADR 0021, reconciliation falls back to the persisted list, so removal and
+an Orchestrator restart cannot turn ignored output churn into progress. Legacy rows safely default
+to an empty list. Invalid `evidence.ignore` edits use the same operator-visible reload error and
+last-known-good snapshot behavior as other Workflow Contract validation failures. Declared entries
+prune matching directory entries before metadata reads or descent; the service-config
+`mtime_ignore` glob layer continues to filter individual files.
 
 Separately from the per-tick steps above, `idle_since` is cleared as a transition-time hook
 whenever a Run leaves `running` for `waiting`. This cannot be a step of the sampling loop, which

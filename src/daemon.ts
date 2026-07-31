@@ -549,7 +549,7 @@ export async function startDaemon(
             const workflow = projects.get(projectName)?.workflow;
             return workflow !== undefined && "expandedWorkflow" in workflow
               ? workflow.evidence.ignore
-              : [];
+              : undefined;
           },
           logger,
           now: () => new Date(nowMs),

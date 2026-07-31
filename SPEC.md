@@ -460,7 +460,11 @@ Each `evidence.ignore` entry must be a non-empty string, must not start with `/`
 contain `..`. The list is additive to the Watchdog's built-in directory excludes; it cannot disable
 them. Invalid entries make the Workflow Contract invalid through the normal doctor and defensive
 reload surfaces. Unlike the rendered prompt captured for an attempt, the current valid
-`evidence.ignore` policy is resolved for active Runs on every Watchdog reconciliation tick.
+`evidence.ignore` policy is resolved for active Runs on every Watchdog reconciliation tick while
+their Project remains in the Service Config. Each new Run also persists the effective list at
+creation time. If the Project is later removed while the Run remains active under §8.4, the
+Watchdog falls back to that per-Run snapshot, including after an Orchestrator restart. Pre-existing
+rows without captured policy use an empty list.
 
 Workflow contracts are re-read as part of the daemon's defensive service-config reload. A valid
 workflow edit applies to future attempts. In-flight attempts keep the rendered prompt and workflow
@@ -664,6 +668,7 @@ SQLite stores durable orchestration state:
 - rendered prompt metadata
 - provider/session IDs
 - workspace paths
+- per-Run Workflow Contract `evidence.ignore` snapshots
 - normalized event metadata
 - Watchdog samples for no-progress detection
 - raw log file paths
@@ -1400,9 +1405,11 @@ output-token baseline are reset whenever `normalized_log_path` changes and the n
 are read from the start. The hard-coded v1 exclude set is `.git/`, `target/`, and `node_modules/`,
 skipped at the directory-entry level and not descended. The current per-Project Workflow Contract's
 `evidence.ignore` list adds workspace-relative directory trees that are also skipped before descent;
-the hard-coded set always remains active. Separately, `watchdog.mtime_ignore` adds workspace-relative
-globs whose matching files are dropped from the mtime walk at the individual-file level, so
-build-output churn (e.g. `*.log`) cannot keep a wedged Run alive.
+when an active Run's Project has been removed from the Service Config, the Watchdog uses the list
+captured on that Run instead. The hard-coded set always remains active. Separately,
+`watchdog.mtime_ignore` adds workspace-relative globs whose matching files are dropped from the
+mtime walk at the individual-file level, so build-output churn (e.g. `*.log`) cannot keep a wedged
+Run alive.
 
 A sampled Run is making progress when any one signal advances since the previous sample:
 

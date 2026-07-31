@@ -33,10 +33,18 @@ function columnNames(database: Database.Database, table: string): string[] {
 
 function seedRun(
   store: ReturnType<typeof openRunStore>,
-  overrides: { id?: string; issueNumber?: number; projectName?: string } = {}
+  overrides: {
+    evidenceIgnore?: readonly string[];
+    id?: string;
+    issueNumber?: number;
+    projectName?: string;
+  } = {}
 ): string {
   const id = overrides.id ?? "run-1";
   store.createRun({
+    ...(overrides.evidenceIgnore === undefined
+      ? {}
+      : { evidenceIgnore: overrides.evidenceIgnore }),
     id,
     issue: {
       body: "",
@@ -543,6 +551,34 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("retains a running Run's evidence ignore policy across store reopen", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      seedRun(store, {
+        evidenceIgnore: ["vendor/", "out/"],
+        id: "running",
+        issueNumber: 2
+      });
+      store.updateRunState("running", "running");
+      store.updateRunEvidence("running", evidence("branch-running"));
+    } finally {
+      store.close();
+    }
+
+    const reopened = openRunStore({ stateRoot: root });
+    try {
+      expect(reopened.listWatchdogCandidateRuns()).toEqual([
+        expect.objectContaining({
+          evidenceIgnore: ["vendor/", "out/"],
+          runId: "running"
+        })
+      ]);
+    } finally {
+      reopened.close();
+    }
+  });
+
   it("findLeakedRuns detects non-terminal runs without changing state", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });
@@ -1026,6 +1062,7 @@ describe("run-store schema migration", () => {
     try {
       expect(columnNames(reader, "runs")).toEqual(
         expect.arrayContaining([
+          "evidence_ignore_json",
           "is_continuation",
           "retry_count",
           "cancel_requested"
@@ -1036,12 +1073,18 @@ describe("run-store schema migration", () => {
       );
       const row = reader
         .prepare(
-          "select id, retry_count, is_continuation from runs where id = ?"
+          "select id, retry_count, is_continuation, evidence_ignore_json from runs where id = ?"
         )
         .get("legacy-run") as
-        | { id: string; retry_count: number; is_continuation: number }
+        | {
+            evidence_ignore_json: string;
+            id: string;
+            retry_count: number;
+            is_continuation: number;
+          }
         | undefined;
       expect(row).toEqual({
+        evidence_ignore_json: "[]",
         id: "legacy-run",
         retry_count: 0,
         is_continuation: 0

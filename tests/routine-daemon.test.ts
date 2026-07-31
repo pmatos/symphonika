@@ -12,7 +12,10 @@ import type {
   ProviderEvent,
   ProviderRunInput
 } from "../src/provider.js";
-import type { PreparedRoutineWorkspace } from "../src/routines/workspace.js";
+import type {
+  PreparedRoutineWorkspace,
+  PrepareRoutineWorkspaceInput
+} from "../src/routines/workspace.js";
 
 const tempRoots: string[] = [];
 
@@ -39,6 +42,197 @@ afterEach(async () => {
 });
 
 describe("daemon routine firing", () => {
+  it("fires a not-due Routine through the daemon without consuming its scheduled event", async () => {
+    const root = await makeTempRoot();
+    const fireAt = new Date(Date.now() + 500).toISOString();
+    await writeRoutineProject(root, fireAt);
+    const provider = quietProvider();
+    const firingIds = ["manual-fire", "scheduled-fire"];
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRoutineFiringId: () => firingIds.shift() ?? "unexpected-fire",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareRoutineWorkspace: vi.fn(
+        (
+          input: PrepareRoutineWorkspaceInput
+        ): Promise<PreparedRoutineWorkspace> =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, input.firingId)
+          })
+      )
+    });
+
+    try {
+      await waitForRoutine(daemon.url, "active");
+      const response = await fetch(
+        `${daemon.url}/api/routines/daily-report/fire?project=alpha`,
+        { method: "POST" }
+      );
+      expect(response.status).toBe(202);
+      expect(await response.json()).toEqual({
+        firingId: "manual-fire",
+        kind: "accepted",
+        projectName: "alpha",
+        routineName: "daily-report",
+        state: "queued"
+      });
+
+      const manual = await waitForFiringState(
+        daemon.url,
+        "daily-report",
+        "alpha",
+        "succeeded",
+        "manual-fire"
+      );
+      expect(manual).toMatchObject({
+        id: "manual-fire",
+        triggerSource: "manual"
+      });
+      const afterManual = await waitForRoutine(daemon.url, "active");
+      expect(afterManual[0]).toMatchObject({
+        lastFiredAt: null,
+        nextFireAt: fireAt
+      });
+
+      await waitForRoutine(daemon.url, "expired");
+      await vi.waitFor(() => {
+        expect(provider.runAttempt).toHaveBeenCalledTimes(2);
+      });
+      const history = (await fetch(
+        `${daemon.url}/api/routines/daily-report/firings?project=alpha`
+      ).then((historyResponse) => historyResponse.json())) as {
+        firings: RoutineFiringApiRow[];
+      };
+      expect(history.firings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "manual-fire",
+            triggerSource: "manual"
+          }),
+          expect.objectContaining({
+            id: "scheduled-fire",
+            triggerSource: "scheduled"
+          })
+        ])
+      );
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("runs automatic Routine Firing workspace retention with the effective service policy", async () => {
+    const root = await makeTempRoot();
+    await writeRoutineProject(
+      root,
+      new Date(Date.now() + 60 * 60_000).toISOString()
+    );
+    const pruneRoutineWorkspaces = vi.fn().mockResolvedValue({
+      candidates: [],
+      failures: [],
+      pruned: []
+    });
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: quietProvider() },
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      pruneRoutineWorkspaces
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(pruneRoutineWorkspaces).toHaveBeenCalled();
+      });
+      expect(pruneRoutineWorkspaces).toHaveBeenCalledWith(
+        expect.objectContaining({
+          policy: {
+            cancelledDays: 14,
+            enabled: true,
+            failedDays: 14,
+            succeededDays: 1
+          }
+        })
+      );
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("serializes automatic Routine Firing workspace retention against re-entrant ticks", async () => {
+    const root = await makeTempRoot();
+    await writeRoutineProject(
+      root,
+      new Date(Date.now() + 60 * 60_000).toISOString()
+    );
+    let releaseFirstPrune: (() => void) | undefined;
+    const holdFirstPrune = new Promise<void>((resolve) => {
+      releaseFirstPrune = resolve;
+    });
+    const pruneRoutineWorkspaces = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        await holdFirstPrune;
+        return { candidates: [], failures: [], pruned: [] };
+      })
+      .mockResolvedValue({ candidates: [], failures: [], pruned: [] });
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: quietProvider() },
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      pruneRoutineWorkspaces
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(pruneRoutineWorkspaces).toHaveBeenCalledTimes(1);
+      });
+
+      // polling.interval_ms is 25 (see writeProjectConfig), so several more
+      // ticks fire while the first retention pass is still held open. A
+      // re-entrant launchWork must skip starting an overlapping pass rather
+      // than calling pruneRoutineWorkspaces again.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(pruneRoutineWorkspaces).toHaveBeenCalledTimes(1);
+
+      releaseFirstPrune?.();
+      await vi.waitFor(() => {
+        expect(pruneRoutineWorkspaces.mock.calls.length).toBeGreaterThanOrEqual(
+          2
+        );
+      });
+    } finally {
+      releaseFirstPrune?.();
+      await daemon.stop();
+    }
+  });
+
   it("fires a one-shot kind: report routine once after the scheduled time", async () => {
     const root = await makeTempRoot();
     const fireAt = new Date(Date.now() + 50).toISOString();
@@ -951,7 +1145,7 @@ function routineLines(projectName: string, routines: string[]): string[] {
   return [
     "routines:",
     ...routines.map(
-      (routine) => `  - project: ${projectName}\n    path: ${routine}`
+      (routine) => `  - projects: [${projectName}]\n    path: ${routine}`
     )
   ];
 }
@@ -991,6 +1185,7 @@ type RoutineFiringApiRow = {
   cancelReason: string | null;
   id: string;
   state: string;
+  triggerSource: string;
   workspacePath: string;
 };
 
@@ -998,7 +1193,8 @@ async function waitForFiringState(
   baseUrl: string,
   routineName: string,
   project: string,
-  state: string
+  state: string,
+  firingId?: string
 ): Promise<RoutineFiringApiRow> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
@@ -1007,7 +1203,11 @@ async function waitForFiringState(
     ).then((response) => response.json())) as {
       firings: RoutineFiringApiRow[];
     };
-    const match = body.firings.find((firing) => firing.state === state);
+    const match = body.firings.find(
+      (firing) =>
+        firing.state === state &&
+        (firingId === undefined || firing.id === firingId)
+    );
     if (match !== undefined) {
       return match;
     }

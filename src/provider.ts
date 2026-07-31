@@ -24,15 +24,10 @@ export type ProviderEvent = {
   raw: unknown;
 };
 
-type ProviderExecutionOptions = {
-  disableBackgroundTasks?: boolean;
-  disallowedTools?: readonly string[];
-};
-
 export type ProviderRunInput = {
   branchName: string;
-  executionOptions?: ProviderExecutionOptions;
   issue: IssueSnapshot;
+  outputSchema?: object;
   prompt: string;
   promptPath: string;
   provider: {
@@ -42,6 +37,14 @@ export type ProviderRunInput = {
   run: {
     attempt: number;
     id: string;
+  };
+  // Present only for one-shot Routine Firings. Provider adapters use this
+  // boundary to add routine-only argv/environment guards without changing
+  // the operator-authored base command used by issue Runs.
+  routine?: {
+    effort?: string;
+    model?: string;
+    permissionMode?: "bypass";
   };
   workspacePath: string;
 };

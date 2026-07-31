@@ -13,6 +13,7 @@ import type {
   ProviderEvent,
   ProviderRunInput
 } from "../provider.js";
+import { renderProviderCommandTemplate } from "../provider-command-template.js";
 import {
   providerProcessExitResult,
   shutdownProviderProcess,
@@ -22,8 +23,10 @@ import {
 type JsonObject = Record<string, unknown>;
 
 type ActiveOmpRun = {
+  assistantText?: string;
   cancelled: boolean;
   child?: ChildProcessWithoutNullStreams;
+  completedAssistantText?: string;
   nextRequestId: number;
   promptDispatched: boolean;
   queue?: ProcessQueue;
@@ -124,9 +127,13 @@ export function createOmpProvider(
       };
       activeRuns.set(input.run.id, activeRun);
 
+      const renderedCommand = renderProviderCommandTemplate(
+        input.provider.command,
+        input.routine ?? {}
+      ).rendered;
       const command = await processScope.wrapForProviderScope(
         input.run,
-        parseCommand(input.provider.command)
+        parseCommand(renderedCommand)
       );
       if (activeRun.cancelled) {
         activeRuns.delete(input.run.id);
@@ -290,7 +297,8 @@ export function createOmpProvider(
       }
     },
     validate: async (command) => {
-      const parsed = parseCommand(command);
+      const rendered = renderProviderCommandTemplate(command, {}).rendered;
+      const parsed = parseCommand(rendered);
       validateOmpProtocolFlags(parsed.args);
       await validateOmpRpcCommand(parsed);
     }
@@ -365,9 +373,13 @@ function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
     const update = objectField(raw, "assistantMessageEvent");
     const updateType = stringField(update, "type");
     if (updateType === "text_delta" || updateType === "thinking_delta") {
+      const delta = stringField(update, "delta") ?? "";
+      if (updateType === "text_delta") {
+        activeRun.assistantText = (activeRun.assistantText ?? "") + delta;
+      }
       return {
         normalized: {
-          message: stringField(update, "delta") ?? "",
+          message: delta,
           messageKind: updateType === "text_delta" ? "text" : "thinking",
           sessionId: activeRun.sessionId,
           type: "message"
@@ -401,6 +413,13 @@ function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
 
   if (type === "message_end") {
     const message = objectField(raw, "message");
+    if (
+      stringField(message, "role") === "assistant" &&
+      activeRun.assistantText !== undefined
+    ) {
+      activeRun.completedAssistantText = activeRun.assistantText;
+      delete activeRun.assistantText;
+    }
     const usage = objectField(message, "usage");
     if (stringField(message, "role") === "assistant" && usage !== undefined) {
       return {
@@ -434,8 +453,15 @@ function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
   }
 
   if (type === "turn_end") {
+    const result = activeRun.assistantText ?? activeRun.completedAssistantText;
+    // OMP does not expose a stable turn id, and a session can emit more than
+    // one turn_end before its terminal agent_end. Clearing the completed
+    // text once consumed here stops a later, textless turn from reporting an
+    // earlier turn's stale result.
+    delete activeRun.completedAssistantText;
     return {
       normalized: {
+        ...(result === undefined ? {} : { result }),
         sessionId: activeRun.sessionId,
         type: "turn_completed"
       },

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { InvalidArgumentError, Command } from "commander";
 import { realpathSync } from "node:fs";
+import { open, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -23,7 +24,10 @@ import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
 import type { InitOptions, InitProvider, InitReport } from "./init.js";
 import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
+import { routineEvidencePaths } from "./routines/evidence.js";
+import { formatRoutineOutcomeLine } from "./routines/outcome.js";
 import type { RoutineKind, RoutineStatus } from "./routines/types.js";
+import { pruneRoutineWorkspaces } from "./routines/workspace-retention.js";
 import {
   resolveWatchdogConfig,
   RuntimeConfigReloader,
@@ -33,8 +37,8 @@ import {
 import type {
   ListRunsFilter,
   OpenRunStoreOptions,
-  RunDetail,
   ProjectState,
+  RunDetail,
   RunArtifactDescriptor,
   RunState,
   RunStatus,
@@ -45,6 +49,8 @@ import type { ServiceInstallOptions, ServiceInstallReport } from "./service.js";
 import { runServiceInstall as runServiceInstallReal } from "./service.js";
 import type { SmokeOptions, SmokeReport } from "./smoke.js";
 import { runSmoke } from "./smoke.js";
+import type { TestEmailOptions, TestEmailReport } from "./test-email.js";
+import { runTestEmail } from "./test-email.js";
 import {
   formatCapReachedReason,
   parseCapReachedReason
@@ -59,9 +65,9 @@ import {
 import { VERSION } from "./version.js";
 import {
   explainWorkflow,
-  loadProjectWorkflow,
-  type ExpandedWorkflow
-} from "./workflow.js";
+  loadProjectWorkflow
+} from "./workflow/fsm-expansion.js";
+import type { ExpandedWorkflow } from "./workflow/types.js";
 import {
   planWorkspacePaths,
   type WorkspacePathPlan
@@ -69,7 +75,9 @@ import {
 import {
   buildWatchdogIdleStatus,
   buildWatchdogStatus,
+  formatAge,
   formatWatchdogDuration,
+  resolveWatchdogNowMs,
   type WatchdogIdleStatus,
   type WatchdogStatus
 } from "./watchdog-status.js";
@@ -87,6 +95,7 @@ export type CliDependencies = {
     options: ServiceInstallOptions
   ) => Promise<ServiceInstallReport>;
   runSmoke?: (options: SmokeOptions) => Promise<SmokeReport>;
+  runTestEmail?: (options: TestEmailOptions) => Promise<TestEmailReport>;
   startDaemon?: (options: StartDaemonOptions) => Promise<DaemonHandle>;
 };
 
@@ -122,6 +131,26 @@ type PollNowResponse = {
   state: "dispatching" | "idle";
 };
 
+type FireRoutineResponse = {
+  firingId: string;
+  kind: "accepted";
+  projectName: string;
+  routineName: string;
+  state: "queued";
+};
+
+type RoutineFiringWaitStatus = {
+  id: string;
+  state:
+    | "queued"
+    | "preparing_workspace"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "cancelled";
+  terminalReason: string | null;
+};
+
 type RoutinesOptions = {
   config?: string;
   includeInactive?: boolean;
@@ -139,6 +168,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   const serviceInstall =
     dependencies.runServiceInstall ?? runServiceInstallReal;
   const smoke = dependencies.runSmoke ?? runSmoke;
+  const testEmail = dependencies.runTestEmail ?? runTestEmail;
   const start = dependencies.startDaemon ?? startDaemon;
   const openRunStore = dependencies.openRunStore ?? openRunStoreReal;
   const fetcher = dependencies.fetch ?? fetch;
@@ -178,6 +208,26 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       printStaleSection(program, report.projects);
       printWarningsSection(program, report.warnings);
       process.exitCode = 1;
+    });
+
+  program
+    .command("test-email")
+    .description("send a representative notification through configured SMTP")
+    .option("--config <path>", "service config path")
+    .action(async (options: { config?: string }) => {
+      const result = await testEmail(withConfigPath(options.config));
+      if (!result.ok) {
+        writeErr(
+          program,
+          `test email failed: ${result.error ?? "unknown SMTP failure"}\n`
+        );
+        process.exitCode = 1;
+        return;
+      }
+      writeOut(
+        program,
+        `test email sent to ${result.to ?? "configured recipient"}\n`
+      );
     });
 
   program
@@ -876,6 +926,100 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     });
 
   program
+    .command("fire-now")
+    .description("fire a Routine immediately through the running daemon")
+    .argument("<routine>", "Routine name")
+    .option("--project <project>", "target Project name")
+    .option("--force", "override an explicitly disabled Routine")
+    .option("--wait", "wait for the firing to reach a terminal state")
+    .option("--config <path>", "service config path")
+    .option("--daemon-url <url>", "local daemon base URL")
+    .action(
+      async (
+        routine: string,
+        options: {
+          config?: string;
+          daemonUrl?: string;
+          force?: boolean;
+          project?: string;
+          wait?: boolean;
+        }
+      ) => {
+        const stateRoot = resolveStateRoot(
+          withConfigPath(options.config)
+        ).stateRoot;
+        const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
+        if (daemonUrl === undefined) {
+          const descriptorPath = daemonEndpointPath(stateRoot);
+          writeErr(
+            program,
+            `fire-now failed: daemon endpoint not found at ${descriptorPath}\n`
+          );
+          program.error("fire-now failed: daemon endpoint not found", {
+            exitCode: 1
+          });
+          return;
+        }
+
+        const daemonStatus = await fetchDaemonStatus(
+          fetcher,
+          daemonUrl,
+          stateRoot
+        );
+        if (daemonStatus.kind === "unavailable") {
+          writeErr(program, `fire-now failed: ${daemonStatus.error}\n`);
+          program.error(`fire-now failed: ${daemonStatus.error}`, {
+            exitCode: 1
+          });
+          return;
+        }
+
+        const outcome = await postFireRoutine(fetcher, daemonUrl, routine, {
+          force: options.force === true,
+          ...(options.project === undefined
+            ? {}
+            : { projectName: options.project })
+        });
+        if (!outcome.ok) {
+          writeErr(program, `fire-now failed: ${outcome.error}\n`);
+          program.error(`fire-now failed: ${outcome.error}`, { exitCode: 1 });
+          return;
+        }
+        writeOut(
+          program,
+          `fired ${outcome.response.routineName} for ${outcome.response.projectName}: ${outcome.response.firingId}\n`
+        );
+        if (options.wait !== true) {
+          return;
+        }
+        const firing = await waitForRoutineFiring(
+          fetcher,
+          daemonUrl,
+          outcome.response
+        );
+        if (!firing.ok) {
+          writeErr(program, `fire-now failed: ${firing.error}\n`);
+          program.error(`fire-now failed: ${firing.error}`, { exitCode: 1 });
+          return;
+        }
+        const reason =
+          firing.status.terminalReason ??
+          (firing.status.state === "cancelled"
+            ? "cancelled"
+            : firing.status.state);
+        writeOut(
+          program,
+          `firing ${firing.status.id} ${firing.status.state}${
+            firing.status.state === "succeeded" ? "" : `: ${reason}`
+          }\n`
+        );
+        if (firing.status.state !== "succeeded") {
+          program.error(`fire-now failed: ${reason}`, { exitCode: 1 });
+        }
+      }
+    );
+
+  program
     .command("runs")
     .description("list runs from the run store")
     .option("--config <path>", "service config path")
@@ -942,32 +1086,187 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           writeOut(program, "(no routines)\n");
           return;
         }
-        writeOut(
-          program,
-          "project  routine  state  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests\n"
-        );
+        const groups = new Map<string, RoutineStatus[]>();
         for (const routine of routines) {
+          const targets = groups.get(routine.name);
+          if (targets === undefined) {
+            groups.set(routine.name, [routine]);
+          } else {
+            targets.push(routine);
+          }
+        }
+        for (const [routineName, targets] of [...groups].sort(
+          ([left], [right]) => left.localeCompare(right)
+        )) {
+          targets.sort((left, right) =>
+            left.projectName.localeCompare(right.projectName)
+          );
           writeOut(
             program,
-            [
-              routine.projectName,
-              routine.name,
-              routine.state,
-              routine.disabledReason ?? "-",
-              routine.nextFireAt ?? "-",
-              routine.lastFiredAt ?? "-",
-              routine.lastAttemptedAt ?? "-",
-              routine.lastSkipReason ?? "-",
-              routine.lastSkipAt ?? "-",
-              formatRoutineSkipCounts(routine.skipCounts24h),
-              formatRoutinePullRequestNumbers(routine.pullRequestNumbers)
-            ].join("  ") + "\n"
+            `${routineName}  targets=[${targets.map((target) => target.projectName).join(",")}]\n`
           );
+          writeOut(
+            program,
+            "  project  state  latest_outcome  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests\n"
+          );
+          for (const routine of targets) {
+            writeOut(
+              program,
+              [
+                `  ${routine.projectName}`,
+                routine.state,
+                routine.latestOutcome === null
+                  ? "-"
+                  : formatRoutineOutcomeLine(
+                      routine.projectName,
+                      routine.latestOutcome
+                    ),
+                routine.disabledReason ?? "-",
+                routine.nextFireAt ?? "-",
+                routine.lastFiredAt ?? "-",
+                routine.lastAttemptedAt ?? "-",
+                routine.lastSkipReason ?? "-",
+                routine.lastSkipAt ?? "-",
+                formatRoutineSkipCounts(routine.skipCounts24h),
+                formatRoutinePullRequestNumbers(routine.pullRequestNumbers)
+              ].join("  ") + "\n"
+            );
+          }
         }
       } finally {
         store.close();
       }
     });
+
+  program
+    .command("prune-workspaces")
+    .description(
+      "reclaim terminal Routine Firing workspaces eligible under the retention policy"
+    )
+    .option("--config <path>", "service config path")
+    .option("--dry-run", "list eligible workspaces without reclaiming them")
+    .action(async (options: { config?: string; dryRun?: boolean }) => {
+      const state = resolveStateRoot(withConfigPath(options.config));
+      const reloader = new RuntimeConfigReloader({
+        configPath: state.configPath
+      });
+      const snapshot = await reloader.reload();
+      if (snapshot === undefined) {
+        const errors = reloader.getStatus().errors;
+        writeErr(program, "prune-workspaces failed:\n");
+        for (const error of errors) {
+          writeErr(program, `- ${error}\n`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      const store = openRunStore({ stateRoot: state.stateRoot });
+      try {
+        const report = await pruneRoutineWorkspaces({
+          dryRun: options.dryRun === true,
+          policy: snapshot.routineWorkspaceRetention,
+          runStore: store
+        });
+        const entries =
+          options.dryRun === true ? report.candidates : report.pruned;
+        for (const entry of entries) {
+          writeOut(
+            program,
+            `${options.dryRun === true ? "would prune" : "pruned"}: ${entry.firingId}  ${entry.workspacePath}\n`
+          );
+        }
+        for (const failure of report.failures) {
+          writeErr(
+            program,
+            `failed: ${failure.firingId}  ${failure.workspacePath}: ${failure.error}\n`
+          );
+        }
+        if (report.candidates.length === 0) {
+          writeOut(program, "(no eligible Routine Firing workspaces)\n");
+        }
+        if (report.failures.length > 0) {
+          process.exitCode = 1;
+        }
+      } finally {
+        store.close();
+      }
+    });
+
+  program
+    .command("firings")
+    .description("list a routine's firing history")
+    .argument("<routine>", "routine name")
+    .option("--config <path>", "service config path")
+    .option("--project <project>", "filter by project name")
+    .option("--limit <n>", "max rows", parsePositiveInt, 25)
+    .action(
+      (
+        routine: string,
+        options: { config?: string; limit: number; project?: string }
+      ) => {
+        const stateRoot = resolveStateRoot(
+          withConfigPath(options.config)
+        ).stateRoot;
+        const store = openRunStore({ stateRoot });
+        try {
+          const targetProjects =
+            options.project === undefined
+              ? store.listRoutineTargetProjects(routine)
+              : [options.project];
+          if (targetProjects.length > 1) {
+            const candidates = targetProjects
+              .map((projectName) => `${projectName}/${routine}`)
+              .join(", ");
+            const message = `routine ${routine} is ambiguous; candidates: ${candidates}; provide --project`;
+            writeErr(program, `${message}\n`);
+            program.error(message, { exitCode: 1 });
+            return;
+          }
+          const project = targetProjects[0];
+          const firings = store.listRoutineFirings({
+            limit: options.limit,
+            ...(project === undefined ? {} : { project }),
+            routineName: routine
+          });
+          if (firings.length === 0) {
+            writeOut(program, "(no firings)\n");
+            return;
+          }
+          writeOut(
+            program,
+            "id  project  routine  state  provider  scheduled  started  ended  duration\n"
+          );
+          for (const firing of firings) {
+            const transitions = store.listRoutineFiringTransitions(firing.id);
+            const startedAt = transitions.find(
+              (transition) => transition.state === "queued"
+            )?.createdAt;
+            const endedAt = [...transitions]
+              .reverse()
+              .find((transition) =>
+                ["succeeded", "failed", "cancelled"].includes(transition.state)
+              )?.createdAt;
+            writeOut(
+              program,
+              [
+                firing.id,
+                firing.projectName,
+                firing.routineName,
+                firing.state,
+                firing.provider,
+                firing.scheduledAt ?? "-",
+                startedAt ?? "-",
+                endedAt ?? "-",
+                formatFiringDuration(startedAt, endedAt, firing.state)
+              ].join("  ") + "\n"
+            );
+          }
+        } finally {
+          store.close();
+        }
+      }
+    );
 
   program
     .command("show-run")
@@ -1061,7 +1360,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           const watchdogService = await loadWatchdogServiceConfig(
             state.configPath
           );
-          const nowMs = Date.now();
+          const nowMs = resolveWatchdogNowMs({
+            liveNowMs: Date.now(),
+            runId: detail.id,
+            runState: detail.state,
+            runStore: store
+          });
           const watchdog = buildWatchdogStatus({
             config: resolveWatchdogConfig(watchdogService, detail.project),
             nowMs,
@@ -1081,6 +1385,128 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           const events = store.listProviderEvents(id, {
             limit: options.events
           });
+          writeOut(program, `\nnormalized events (last ${events.length}):\n`);
+          if (events.length === 0) {
+            writeOut(program, "  (no events recorded)\n");
+          }
+          for (const event of events) {
+            const message =
+              typeof event.normalized.message === "string"
+                ? event.normalized.message
+                : JSON.stringify(event.normalized);
+            writeOut(
+              program,
+              `  ${event.sequence}. ${event.type}  ${message}\n`
+            );
+          }
+        } finally {
+          store.close();
+        }
+      }
+    );
+
+  program
+    .command("show-firing")
+    .description("show routine firing detail and recent normalized events")
+    .argument("<id>", "routine firing id")
+    .option("--config <path>", "service config path")
+    .option("--events <n>", "max recent events", parsePositiveInt, 25)
+    .action(
+      async (id: string, options: { config?: string; events: number }) => {
+        const state = resolveStateRoot(withConfigPath(options.config));
+        const store = openRunStore({ stateRoot: state.stateRoot });
+        try {
+          const detail = store.getRoutineFiring(id);
+          if (detail === undefined) {
+            writeErr(program, `routine firing ${id} not found\n`);
+            process.exitCode = 1;
+            program.error(`routine firing ${id} not found`, { exitCode: 1 });
+            return;
+          }
+          const displayDetail = detail;
+          const transitions = store.listRoutineFiringTransitions(id);
+          const startedAt = transitions.find(
+            (transition) => transition.state === "queued"
+          )?.createdAt;
+          const endedAt = [...transitions]
+            .reverse()
+            .find((transition) =>
+              ["succeeded", "failed", "cancelled"].includes(transition.state)
+            )?.createdAt;
+          const evidence = routineEvidencePaths(state.stateRoot, id);
+
+          writeFiringField(program, "id", displayDetail.id);
+          writeFiringField(program, "routine", displayDetail.routineName);
+          writeFiringField(program, "project", displayDetail.projectName);
+          writeFiringField(program, "state", displayDetail.state);
+          writeFiringField(program, "provider", displayDetail.provider);
+          writeFiringField(program, "trigger", displayDetail.triggerSource);
+          writeFiringField(
+            program,
+            "scheduled",
+            displayDetail.scheduledAt ?? "-"
+          );
+          writeFiringField(program, "started", startedAt ?? "-");
+          writeFiringField(program, "ended", endedAt ?? "-");
+          writeFiringField(
+            program,
+            "duration",
+            formatFiringDuration(startedAt, endedAt, displayDetail.state)
+          );
+          writeFiringField(
+            program,
+            "workspace",
+            formatPath(displayDetail.workspacePath)
+          );
+          writeFiringField(
+            program,
+            "branch",
+            formatPath(displayDetail.branchName)
+          );
+          writeFiringField(
+            program,
+            "branch ref",
+            formatPath(displayDetail.branchRef)
+          );
+          writeFiringField(program, "prompt", formatPath(evidence.promptPath));
+          writeFiringField(
+            program,
+            "prompt metadata",
+            formatPath(evidence.promptMetadataPath)
+          );
+          writeFiringField(program, "raw log", formatPath(evidence.rawLogPath));
+          writeFiringField(
+            program,
+            "normalized log",
+            formatPath(evidence.normalizedLogPath)
+          );
+          if (displayDetail.terminalReason !== null) {
+            writeFiringField(program, "terminal", displayDetail.terminalReason);
+          }
+          if (displayDetail.cancelReason !== null) {
+            writeFiringField(
+              program,
+              "cancel reason",
+              displayDetail.cancelReason
+            );
+          }
+          writeFiringField(
+            program,
+            "pull requests",
+            displayDetail.pullRequests.length === 0
+              ? "-"
+              : displayDetail.pullRequests
+                  .map(
+                    (pullRequest) =>
+                      `#${pullRequest.prNumber} ${pullRequest.headSha}`
+                  )
+                  .join(", ")
+          );
+
+          const events = await readRecentRoutineEvents(
+            evidence.normalizedLogPath,
+            options.events
+          );
           writeOut(program, `\nnormalized events (last ${events.length}):\n`);
           if (events.length === 0) {
             writeOut(program, "  (no events recorded)\n");
@@ -1351,6 +1777,171 @@ async function postPollNow(
     };
   }
   return { ok: true, response: parsed };
+}
+
+async function postFireRoutine(
+  fetcher: FetchFn,
+  daemonUrl: string,
+  routineName: string,
+  options: { force: boolean; projectName?: string }
+): Promise<
+  { ok: false; error: string } | { ok: true; response: FireRoutineResponse }
+> {
+  const query = new URLSearchParams();
+  if (options.projectName !== undefined) {
+    query.set("project", options.projectName);
+  }
+  if (options.force) {
+    query.set("force", "true");
+  }
+  const suffix = query.size === 0 ? "" : `?${query.toString()}`;
+  let response: Response;
+  try {
+    response = await fetcher(
+      `${daemonUrl}/api/routines/${encodeURIComponent(routineName)}/fire${suffix}`,
+      { method: "POST" }
+    );
+  } catch (error) {
+    return { error: errorMessage(error), ok: false };
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    body = undefined;
+  }
+  if (!response.ok) {
+    return {
+      error:
+        isObject(body) && typeof body.error === "string"
+          ? body.error
+          : `daemon returned HTTP ${response.status}`,
+      ok: false
+    };
+  }
+  const parsed = readFireRoutineResponse(body);
+  if (parsed === undefined) {
+    return {
+      error: "daemon returned an unexpected fire-now response",
+      ok: false
+    };
+  }
+  return { ok: true, response: parsed };
+}
+
+async function waitForRoutineFiring(
+  fetcher: FetchFn,
+  daemonUrl: string,
+  firing: FireRoutineResponse
+): Promise<
+  { error: string; ok: false } | { ok: true; status: RoutineFiringWaitStatus }
+> {
+  const query = new URLSearchParams({
+    include_inactive: "true",
+    project: firing.projectName
+  });
+  const url = `${daemonUrl}/api/routines/${encodeURIComponent(
+    firing.routineName
+  )}/firings?${query.toString()}`;
+  for (;;) {
+    let response: Response;
+    try {
+      response = await fetcher(url);
+    } catch (error) {
+      return { error: errorMessage(error), ok: false };
+    }
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      body = undefined;
+    }
+    if (!response.ok) {
+      return {
+        error:
+          isObject(body) && typeof body.error === "string"
+            ? body.error
+            : `daemon returned HTTP ${response.status}`,
+        ok: false
+      };
+    }
+    const status = readRoutineFiringWaitStatus(body, firing.firingId);
+    if (status === undefined) {
+      return {
+        error: `daemon did not return firing ${firing.firingId}`,
+        ok: false
+      };
+    }
+    if (
+      status.state === "succeeded" ||
+      status.state === "failed" ||
+      status.state === "cancelled"
+    ) {
+      return { ok: true, status };
+    }
+    await sleep(100);
+  }
+}
+
+function readRoutineFiringWaitStatus(
+  value: unknown,
+  firingId: string
+): RoutineFiringWaitStatus | undefined {
+  if (!isObject(value) || !Array.isArray(value.firings)) {
+    return undefined;
+  }
+  const firings = value.firings as unknown[];
+  const firing: unknown = firings.find(
+    (candidate) => isObject(candidate) && candidate.id === firingId
+  );
+  if (
+    !isObject(firing) ||
+    typeof firing.id !== "string" ||
+    !isRoutineFiringState(firing.state)
+  ) {
+    return undefined;
+  }
+  return {
+    id: firing.id,
+    state: firing.state,
+    terminalReason:
+      typeof firing.terminalReason === "string" ? firing.terminalReason : null
+  };
+}
+
+function isRoutineFiringState(
+  value: unknown
+): value is RoutineFiringWaitStatus["state"] {
+  return (
+    value === "queued" ||
+    value === "preparing_workspace" ||
+    value === "running" ||
+    value === "succeeded" ||
+    value === "failed" ||
+    value === "cancelled"
+  );
+}
+
+function readFireRoutineResponse(
+  value: unknown
+): FireRoutineResponse | undefined {
+  if (
+    !isObject(value) ||
+    value.kind !== "accepted" ||
+    typeof value.firingId !== "string" ||
+    typeof value.projectName !== "string" ||
+    typeof value.routineName !== "string" ||
+    value.state !== "queued"
+  ) {
+    return undefined;
+  }
+  return {
+    firingId: value.firingId,
+    kind: "accepted",
+    projectName: value.projectName,
+    routineName: value.routineName,
+    state: "queued"
+  };
 }
 
 function readPollNowResponse(value: unknown): PollNowResponse | undefined {
@@ -1770,6 +2361,104 @@ function formatPath(value: string): string {
   return value.length === 0 ? "<not yet recorded>" : value;
 }
 
+function writeFiringField(
+  program: Command,
+  label: string,
+  value: string
+): void {
+  writeOut(program, `${`${label}:`.padEnd(17)}${value}\n`);
+}
+
+function formatFiringDuration(
+  startedAt: string | undefined,
+  endedAt: string | undefined,
+  state: string
+): string {
+  if (startedAt === undefined) {
+    return "-";
+  }
+  const startMs = Date.parse(startedAt);
+  const terminal = ["succeeded", "failed", "cancelled"].includes(state);
+  const endMs =
+    endedAt === undefined
+      ? terminal
+        ? Number.NaN
+        : Date.now()
+      : Date.parse(endedAt);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+    return "-";
+  }
+  return formatWatchdogDuration(Math.max(0, endMs - startMs));
+}
+
+type RecentRoutineEvent = {
+  normalized: Record<string, unknown>;
+  sequence: number;
+  type: string;
+};
+
+async function readRecentRoutineEvents(
+  normalizedLogPath: string,
+  limit: number
+): Promise<RecentRoutineEvent[]> {
+  const recentLines: { line: string; sequence: number }[] = [];
+  let nextSlot = 0;
+  let sequence = 0;
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(normalizedLogPath, "r");
+    for await (const line of handle.readLines({ autoClose: false })) {
+      if (line.length === 0) {
+        continue;
+      }
+      sequence += 1;
+      const entry = { line, sequence };
+      if (recentLines.length < limit) {
+        recentLines.push(entry);
+      } else {
+        recentLines[nextSlot] = entry;
+        nextSlot = (nextSlot + 1) % limit;
+      }
+    }
+  } catch {
+    return [];
+  } finally {
+    await handle?.close();
+  }
+
+  const orderedLines =
+    nextSlot === 0
+      ? recentLines
+      : [...recentLines.slice(nextSlot), ...recentLines.slice(0, nextSlot)];
+  return orderedLines.map(({ line, sequence }) => {
+    try {
+      const normalized = JSON.parse(line) as unknown;
+      if (
+        typeof normalized === "object" &&
+        normalized !== null &&
+        "type" in normalized &&
+        typeof normalized.type === "string"
+      ) {
+        return {
+          normalized,
+          sequence,
+          type: normalized.type
+        };
+      }
+    } catch {
+      // Preserve the line position as diagnosable malformed log evidence.
+    }
+    return {
+      normalized: {
+        message: "could not parse normalized event",
+        type: "malformed_event"
+      },
+      sequence,
+      type: "malformed_event"
+    };
+  });
+}
+
 function formatArtifactKinds(artifacts: RunArtifactDescriptor[]): string {
   const present = artifacts
     .filter((artifact) => artifact.present)
@@ -1818,19 +2507,6 @@ function formatProgressSignal(
     );
   }
   return `${lines.join("\n")}\n`;
-}
-
-function formatAge(
-  timestamp: string | null | undefined,
-  nowMs: number
-): string {
-  if (timestamp === null || timestamp === undefined) {
-    return "never";
-  }
-  const ageMs = nowMs - Date.parse(timestamp);
-  return ageMs < 0
-    ? `in ${formatWatchdogDuration(-ageMs)}`
-    : `${formatWatchdogDuration(ageMs)} ago`;
 }
 
 function collectWatchdogIdleStatuses(

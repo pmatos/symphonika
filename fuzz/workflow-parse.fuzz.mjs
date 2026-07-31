@@ -1,9 +1,9 @@
 import { workflowReferenceSchema } from "../dist/config-schemas.js";
 import {
-  expandWorkflowDefinition,
   parseWorkflowContract,
   validateWorkflowTemplate
-} from "../dist/workflow.js";
+} from "../dist/workflow/contract-loading.js";
+import { expandWorkflowDefinition } from "../dist/workflow/fsm-expansion.js";
 
 /**
  * @param {import("node:buffer").Buffer} data

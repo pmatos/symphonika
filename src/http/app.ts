@@ -13,7 +13,7 @@ import {
   type RuntimeReloadStatus,
   type WatchdogConfig
 } from "../reload.js";
-import type { RoutineFiringState } from "../routines/types.js";
+import type { RoutineFiringState, RoutineState } from "../routines/types.js";
 import type { StatusSnapshot } from "../status.js";
 import type {
   ListRunsFilter,
@@ -24,7 +24,8 @@ import type {
 } from "../run-store.js";
 import {
   buildWatchdogIdleStatus,
-  buildWatchdogStatus
+  buildWatchdogStatus,
+  resolveWatchdogNowMs
 } from "../watchdog-status.js";
 import { buildPullRequestFollowupAttention, registerPages } from "./pages.js";
 
@@ -56,12 +57,44 @@ export type PollNowResult = {
 
 type PollNowFn = () => PollNowResult | Promise<PollNowResult>;
 
+type FireRoutineRequest = {
+  force: boolean;
+  projectName?: string;
+  routineName: string;
+};
+
+export type FireRoutineResult =
+  | {
+      firingId: string;
+      kind: "accepted";
+      projectName: string;
+      routineName: string;
+      state: "queued";
+    }
+  | {
+      candidates: Array<{ projectName: string; routineName: string }>;
+      error: string;
+      kind: "ambiguous";
+    }
+  | { error: string; kind: "not_found" }
+  | {
+      error: string;
+      kind: "refused";
+      reason: RoutineState | "concurrency_cap" | "daemon_shutdown" | "overlap";
+    }
+  | { error: string; kind: "unavailable" };
+
+type FireRoutineFn = (
+  request: FireRoutineRequest
+) => FireRoutineResult | Promise<FireRoutineResult>;
+
 export type HttpAppOptions = {
   cancelRun?: CancelRunFn;
   dispatchRuntime?: {
     dispatching: boolean;
     inFlight?: number;
   };
+  fireRoutine?: FireRoutineFn;
   // Per-Slice-2: cap snapshot + live in-flight counts. See ADR 0053.
   getConcurrency?: () => {
     global: { inFlight: number; maxInFlight: number | null };
@@ -231,6 +264,38 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     return context.json(await Promise.resolve(options.pollNow()));
   });
 
+  app.post("/api/routines/:id/fire", async (context) => {
+    if (options.fireRoutine === undefined) {
+      return context.json(
+        { error: "manual Routine trigger unavailable", kind: "unavailable" },
+        503
+      );
+    }
+    const projectName = context.req.query("project");
+    const result = await Promise.resolve(
+      options.fireRoutine({
+        force: context.req.query("force") === "true",
+        ...(projectName === undefined ? {} : { projectName }),
+        routineName: context.req.param("id")
+      })
+    );
+    switch (result.kind) {
+      case "accepted":
+        return context.json(result, 202);
+      case "not_found":
+        return context.json(result, 404);
+      case "ambiguous":
+        return context.json(result, 409);
+      case "unavailable":
+        return context.json(result, 503);
+      case "refused":
+        return context.json(
+          result,
+          result.reason === "concurrency_cap" ? 429 : 409
+        );
+    }
+  });
+
   if (runStore !== undefined) {
     app.get("/api/runs", (context) => {
       const filter: ListRunsFilter = {};
@@ -274,22 +339,12 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       if (matches.length === 0) {
         return context.json({ error: "routine not found" }, 404);
       }
-      if (matches.length > 1) {
-        return context.json(
-          {
-            error:
-              "routine name is ambiguous; provide the project query parameter"
-          },
-          409
-        );
-      }
-      const routine = matches[0]!;
       return context.json({
         firings: runStore.listRoutineFirings({
-          project: routine.projectName,
-          routineName: routine.name
+          ...(project === undefined ? {} : { project }),
+          routineName
         }),
-        routine
+        targets: matches
       });
     });
 
@@ -316,7 +371,12 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         watchdog: buildWatchdogStatus({
           config:
             options.getWatchdogConfig?.(run.project) ?? DEFAULT_WATCHDOG_CONFIG,
-          nowMs: now(),
+          nowMs: resolveWatchdogNowMs({
+            liveNowMs: now(),
+            runId: run.id,
+            runState: run.state,
+            runStore
+          }),
           runId: run.id,
           runStore
         })
@@ -430,8 +490,12 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.getStatusSnapshot === undefined
         ? {}
         : { getStatusSnapshot: options.getStatusSnapshot }),
+      ...(options.getWatchdogConfig === undefined
+        ? {}
+        : { getWatchdogConfig: options.getWatchdogConfig }),
       issuePollStatus,
       monotonicNow,
+      now,
       runStore,
       version: options.version
     });

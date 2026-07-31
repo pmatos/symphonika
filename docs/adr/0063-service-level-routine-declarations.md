@@ -2,6 +2,9 @@
 
 Status: Accepted
 
+Superseded in part by ADR 0069, which replaces the transitional `project:` field with the explicit
+`projects:` target list, implements fan-out and grouped summaries, and rejects wildcards.
+
 ## Context
 
 #290's acceptance requires a Routine Host to "host Routine Firings targeted at it by a service-level
@@ -70,5 +73,5 @@ that Project."
   name, satisfying #290's acceptance.
 - The per-Project `routines:` key is gone; existing configs must move routine entries to the
   top-level block.
-- #295 extends this with fan-out (`projects: [<list>]`, wildcards, grouped summaries) without
+- ADR 0069 extends this with fan-out (`projects: [<list>]`, grouped summaries) without
   re-introducing per-Project declarations.

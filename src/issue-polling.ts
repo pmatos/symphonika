@@ -11,6 +11,11 @@ export type GitHubIssueRepositoryInput = {
   token: string;
 };
 
+export type GitHubIssuesListInput = GitHubIssueRepositoryInput & {
+  since?: string;
+  state: "all" | "closed" | "open";
+};
+
 export type GitHubIssueLabelInput = GitHubIssueRepositoryInput & {
   issueNumber: number;
   labels: string[];
@@ -18,6 +23,7 @@ export type GitHubIssueLabelInput = GitHubIssueRepositoryInput & {
 
 export type RawGitHubIssue = {
   body?: string | null;
+  closed_at?: string | null;
   created_at?: string | null;
   html_url?: string | null;
   id?: number;
@@ -41,6 +47,7 @@ export type RawGitHubPullRequest = {
   merged_at?: string | null;
   number?: number;
   state?: string;
+  title?: string;
 };
 
 type RawGitHubPullRequestReviewComment = {
@@ -101,6 +108,7 @@ export type GitHubIssuesApi = {
   listBranchCommits?: (
     input: GitHubBranchCommitsInput
   ) => Promise<RawGitHubCommit[] | null>;
+  listIssues?: (input: GitHubIssuesListInput) => Promise<RawGitHubIssue[]>;
   listOpenIssues: (
     input: GitHubIssueRepositoryInput
   ) => Promise<RawGitHubIssue[]>;
@@ -299,6 +307,17 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
     });
 
     return issues;
+  }
+
+  async listIssues(input: GitHubIssuesListInput): Promise<RawGitHubIssue[]> {
+    const octokit = this.octokit(input.token);
+    return octokit.paginate(octokit.rest.issues.listForRepo, {
+      owner: input.owner,
+      per_page: 100,
+      repo: input.repo,
+      ...(input.since === undefined ? {} : { since: input.since }),
+      state: input.state
+    });
   }
 
   async listPullRequestsForBranch(
@@ -618,6 +637,16 @@ export async function tryListBranchCommits(
     return undefined;
   }
   return api.listBranchCommits(input);
+}
+
+export async function tryListIssues(
+  api: GitHubIssuesApi,
+  input: GitHubIssuesListInput
+): Promise<RawGitHubIssue[] | undefined> {
+  if (api.listIssues === undefined) {
+    return undefined;
+  }
+  return api.listIssues(input);
 }
 
 export async function tryListPullRequestsForBranch(

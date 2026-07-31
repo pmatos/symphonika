@@ -7,9 +7,7 @@ import type { AgentProviderName } from "../provider.js";
 import { isIanaTimezone, normalizeRoutineCron } from "./schedule.js";
 import type {
   RoutineDeclaration,
-  RoutineEffort,
   RoutineKind,
-  RoutinePermissionMode,
   RoutineSchedule
 } from "./types.js";
 
@@ -21,8 +19,6 @@ export type RoutineDeclarationLoadResult = {
 
 const providerNames = new Set(["codex", "claude", "omp"]);
 const routineKinds = new Set(["git", "report"]);
-const routineEfforts = new Set(["low", "medium", "high", "xhigh", "max"]);
-const routinePermissionModes = new Set(["bypass"]);
 
 export async function loadRoutineDeclaration(
   routinePath: string
@@ -109,44 +105,6 @@ export function parseRoutineDeclaration(
     }
   }
 
-  const modelValue = stringField(frontMatter, "model");
-  if (Object.hasOwn(frontMatter, "model") && modelValue === undefined) {
-    errors.push(`routine at ${routinePath} model must be a non-empty string`);
-  }
-
-  const effortValue = stringField(frontMatter, "effort");
-  if (
-    Object.hasOwn(frontMatter, "effort") &&
-    (effortValue === undefined || !routineEfforts.has(effortValue))
-  ) {
-    errors.push(
-      `routine at ${routinePath} effort must be one of low, medium, high, xhigh, max`
-    );
-  }
-
-  const permissionModeValue = stringField(frontMatter, "permission_mode");
-  if (
-    Object.hasOwn(frontMatter, "permission_mode") &&
-    (permissionModeValue === undefined ||
-      !routinePermissionModes.has(permissionModeValue))
-  ) {
-    errors.push(`routine at ${routinePath} permission_mode must be bypass`);
-  }
-
-  const timeoutMinutesValue = frontMatter.timeout_minutes;
-  if (
-    Object.hasOwn(frontMatter, "timeout_minutes") &&
-    !(
-      typeof timeoutMinutesValue === "number" &&
-      Number.isInteger(timeoutMinutesValue) &&
-      timeoutMinutesValue > 0
-    )
-  ) {
-    errors.push(
-      `routine at ${routinePath} timeout_minutes must be a positive integer`
-    );
-  }
-
   const schedule = recordField(frontMatter, "schedule");
   const parsedSchedule = parseRoutineSchedule(schedule, routinePath, errors);
 
@@ -175,6 +133,44 @@ export function parseRoutineDeclaration(
     errors.push(`routine at ${routinePath} disabled must be a boolean`);
   }
 
+  const notifyValue = frontMatter.notify;
+  if (
+    Object.hasOwn(frontMatter, "notify") &&
+    typeof notifyValue !== "boolean"
+  ) {
+    errors.push(`routine at ${routinePath} notify must be a boolean`);
+  }
+
+  const model = executionStringField(frontMatter, "model", routinePath, errors);
+  const effort = executionStringField(
+    frontMatter,
+    "effort",
+    routinePath,
+    errors
+  );
+  const permissionModeValue = stringField(frontMatter, "permission_mode");
+  if (
+    Object.hasOwn(frontMatter, "permission_mode") &&
+    permissionModeValue !== "bypass"
+  ) {
+    errors.push(`routine at ${routinePath} permission_mode must be bypass`);
+  }
+  const timeoutMinutesValue = frontMatter.timeout_minutes;
+  let timeoutMinutes: number | undefined;
+  if (Object.hasOwn(frontMatter, "timeout_minutes")) {
+    if (
+      typeof timeoutMinutesValue !== "number" ||
+      !Number.isFinite(timeoutMinutesValue) ||
+      timeoutMinutesValue <= 0
+    ) {
+      errors.push(
+        `routine at ${routinePath} timeout_minutes must be a positive number`
+      );
+    } else {
+      timeoutMinutes = timeoutMinutesValue;
+    }
+  }
+
   if (prompt.trim().length === 0) {
     errors.push(`routine at ${routinePath} prompt body must not be empty`);
   }
@@ -195,24 +191,34 @@ export function parseRoutineDeclaration(
       catchUp:
         catchUpValue === "fire_once_if_missed" ? "fire_once_if_missed" : "skip",
       disabled: typeof disabledValue === "boolean" ? disabledValue : false,
-      ...(effortValue === undefined
-        ? {}
-        : { effort: effortValue as RoutineEffort }),
+      ...(effort === undefined ? {} : { effort }),
       kind: kind as RoutineKind,
-      ...(modelValue === undefined ? {} : { model: modelValue }),
+      ...(model === undefined ? {} : { model }),
       name: name!,
-      ...(permissionModeValue === undefined
-        ? {}
-        : { permissionMode: permissionModeValue as RoutinePermissionMode }),
+      ...(typeof notifyValue === "boolean" ? { notify: notifyValue } : {}),
+      ...(permissionModeValue === "bypass"
+        ? { permissionMode: permissionModeValue }
+        : {}),
       prompt,
       provider,
       schedule: parsedSchedule!,
       sourcePath: routinePath,
-      ...(typeof timeoutMinutesValue === "number"
-        ? { timeoutMinutes: timeoutMinutesValue }
-        : {})
+      ...(timeoutMinutes === undefined ? {} : { timeoutMinutes })
     }
   };
+}
+
+function executionStringField(
+  frontMatter: Record<string, unknown>,
+  key: "effort" | "model",
+  routinePath: string,
+  errors: string[]
+): string | undefined {
+  const value = stringField(frontMatter, key);
+  if (Object.hasOwn(frontMatter, key) && value === undefined) {
+    errors.push(`routine at ${routinePath} ${key} must be a non-empty string`);
+  }
+  return value;
 }
 
 function parseRoutineSchedule(

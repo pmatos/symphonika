@@ -75,6 +75,66 @@ afterEach(async () => {
 });
 
 describe("Claude stream-json provider", () => {
+  it("renders routine tuning through the command template and applies anti-backgrounding guards at spawn", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const capturePath = path.join(root, "routine-spawn.json");
+    const fakeClaudePath = path.join(root, "fake-routine-claude.mjs");
+    await writeFile(
+      fakeClaudePath,
+      [
+        "import { writeFile } from 'node:fs/promises';",
+        "import readline from 'node:readline';",
+        "if (process.argv.includes('--help')) { process.stdout.write('stream-json'); process.exit(0); }",
+        "for await (const line of readline.createInterface({ input: process.stdin })) {",
+        "  JSON.parse(line);",
+        `  await writeFile(${JSON.stringify(capturePath)}, JSON.stringify({ args: process.argv.slice(2), disableBackgroundTasks: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS }));`,
+        "  process.stdout.write(`${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 'routine-session' })}\\n`);",
+        "  process.exit(0);",
+        "}",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
+
+    await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeClaudePath} -p {{#model}}--model {{model}} {{/model}}{{#effort}}--effort {{effort}} {{/effort}}--dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
+          name: "claude"
+        },
+        routine: {
+          effort: "xhigh",
+          model: "claude-opus-4-8",
+          permissionMode: "bypass"
+        },
+        workspacePath
+      })
+    );
+
+    const capture = JSON.parse(await readFile(capturePath, "utf8")) as {
+      args: string[];
+      disableBackgroundTasks?: string;
+    };
+    expect(capture.args).toEqual(
+      expect.arrayContaining([
+        "--model",
+        "claude-opus-4-8",
+        "--effort",
+        "xhigh",
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        "ScheduleWakeup",
+        "Monitor",
+        "CronCreate"
+      ])
+    );
+    expect(capture.disableBackgroundTasks).toBe("1");
+  });
+
   it("launches the configured command in the workspace and maps a completed turn", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -215,6 +275,55 @@ describe("Claude stream-json provider", () => {
         type: "process_exit"
       }
     ]);
+  });
+
+  it("reinforces a routine claim schema and normalizes Claude's structured output", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeClaudePath = path.join(root, "fake-claude.mjs");
+    await writeFakeClaudeStreamJson(fakeClaudePath, transcriptPath);
+    const processScope = noopProcessScope();
+    const provider = createClaudeProvider({ processScope });
+    const outputSchema = {
+      properties: {
+        status: { enum: ["success", "no_action", "error"], type: "string" }
+      },
+      required: ["status"],
+      type: "object"
+    };
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        outputSchema,
+        provider: {
+          command: `${process.execPath} ${fakeClaudePath} --scenario=structured -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
+          name: "claude"
+        },
+        workspacePath
+      })
+    );
+
+    expect(processScope.wrapCalls[0]?.command.args).toContain("--json-schema");
+    expect(processScope.wrapCalls[0]?.command.args).toContain(
+      JSON.stringify(outputSchema)
+    );
+    expect(
+      events
+        .map((event) => event.normalized)
+        .find((event) => event?.type === "turn_completed")
+    ).toMatchObject({
+      structuredOutput: {
+        action: "pr",
+        status: "success",
+        summary: "Opened the pull request.",
+        title: "Extract retry policy",
+        url: "https://github.com/pmatos/rightkey/pull/42"
+      },
+      type: "turn_completed"
+    });
   });
 
   it("wraps the spawned command via the injected process scope and stops the scope when the run completes normally", async () => {
@@ -658,99 +767,6 @@ describe("Claude stream-json provider", () => {
       )
     ).rejects.toThrow("--verbose");
   });
-
-  it("appends --disallowedTools last when executionOptions.disallowedTools is set", async () => {
-    const root = await makeTempRoot();
-    const workspacePath = path.join(root, "workspace");
-    await mkdir(workspacePath, { recursive: true });
-    const transcriptPath = path.join(root, "requests.jsonl");
-    const fakeClaudePath = path.join(root, "fake-claude.mjs");
-    await writeFakeClaudeStreamJson(fakeClaudePath, transcriptPath);
-    const processScope = noopProcessScope();
-    const provider = createClaudeProvider({ processScope });
-
-    await collectProviderEvents(
-      provider.runAttempt({
-        ...providerInputFixture(),
-        executionOptions: {
-          disallowedTools: ["ScheduleWakeup", "Monitor", "CronCreate"]
-        },
-        provider: {
-          command: `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
-          name: "claude"
-        },
-        workspacePath
-      })
-    );
-
-    expect(processScope.wrapCalls).toHaveLength(1);
-    const args = processScope.wrapCalls[0]?.command.args ?? [];
-    expect(args.slice(-4)).toEqual([
-      "--disallowedTools",
-      "ScheduleWakeup",
-      "Monitor",
-      "CronCreate"
-    ]);
-  });
-
-  it("does not append --disallowedTools when executionOptions is absent", async () => {
-    const root = await makeTempRoot();
-    const workspacePath = path.join(root, "workspace");
-    await mkdir(workspacePath, { recursive: true });
-    const transcriptPath = path.join(root, "requests.jsonl");
-    const fakeClaudePath = path.join(root, "fake-claude.mjs");
-    await writeFakeClaudeStreamJson(fakeClaudePath, transcriptPath);
-    const processScope = noopProcessScope();
-    const provider = createClaudeProvider({ processScope });
-
-    await collectProviderEvents(
-      provider.runAttempt({
-        ...providerInputFixture(),
-        provider: {
-          command: `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
-          name: "claude"
-        },
-        workspacePath
-      })
-    );
-
-    const args = processScope.wrapCalls[0]?.command.args ?? [];
-    expect(args).not.toContain("--disallowedTools");
-  });
-
-  it("sets CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 in the spawned env when executionOptions.disableBackgroundTasks is true", async () => {
-    const root = await makeTempRoot();
-    const workspacePath = path.join(root, "workspace");
-    await mkdir(workspacePath, { recursive: true });
-    const fakeClaudePath = path.join(root, "fake-claude-env.mjs");
-    await writeFakeClaudeEnvReporter(fakeClaudePath);
-    const provider = createClaudeProvider({
-      processScope: noopProcessScope()
-    });
-
-    const events = await collectProviderEvents(
-      provider.runAttempt({
-        ...providerInputFixture(),
-        executionOptions: { disableBackgroundTasks: true },
-        provider: {
-          command: `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
-          name: "claude"
-        },
-        workspacePath
-      })
-    );
-
-    const initEvent = events.find(
-      (event) =>
-        typeof event.raw === "object" &&
-        event.raw !== null &&
-        "disableBackgroundTasksEnv" in event.raw
-    );
-    expect(
-      (initEvent?.raw as { disableBackgroundTasksEnv: string | null })
-        .disableBackgroundTasksEnv
-    ).toBe("1");
-  });
 });
 
 async function collectProviderEvents(
@@ -866,6 +882,10 @@ async function writeFakeClaudeStreamJson(
       "  if (scenario === 'wait') {",
       "    await new Promise(() => {});",
       "  }",
+      "  if (scenario === 'structured') {",
+      "    send({ type: 'result', subtype: 'success', duration_ms: 123, duration_api_ms: 90, is_error: false, num_turns: 1, result: '{\"status\":\"success\"}', structured_output: { status: 'success', action: 'pr', url: 'https://github.com/pmatos/rightkey/pull/42', title: 'Extract retry policy', summary: 'Opened the pull request.' }, session_id: 'session-10', total_cost_usd: 0.01 });",
+      "    process.exit(0);",
+      "  }",
       "  send({ type: 'assistant', session_id: 'session-10', message: { id: 'msg_10', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 11, output_tokens: 7 } } });",
       "  send({ type: 'result', subtype: 'success', duration_ms: 123, duration_api_ms: 90, is_error: false, num_turns: 1, result: 'done', session_id: 'session-10', total_cost_usd: 0.01 });",
       "  process.exit(0);",
@@ -960,30 +980,6 @@ function hasErrorCode(error: unknown, code: string): boolean {
     error !== null &&
     "code" in error &&
     error.code === code
-  );
-}
-
-async function writeFakeClaudeEnvReporter(filePath: string): Promise<void> {
-  await writeFile(
-    filePath,
-    [
-      "import readline from 'node:readline';",
-      "",
-      "if (process.argv.includes('--help')) {",
-      "  process.stdout.write('Usage: fake-claude -p --input-format stream-json --output-format stream-json\\n');",
-      "  process.exit(0);",
-      "}",
-      "",
-      "const rl = readline.createInterface({ input: process.stdin });",
-      "for await (const _line of rl) {",
-      "  process.stdout.write(`${JSON.stringify({ type: 'system', subtype: 'init', session_id: 'session-env', cwd: process.cwd(), tools: [], model: 'claude-sonnet-4-6', permissionMode: 'bypassPermissions', disableBackgroundTasksEnv: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS ?? null })}\\n`);",
-      "  process.stdout.write(`${JSON.stringify({ type: 'assistant', session_id: 'session-env', message: { id: 'msg_env', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 1, output_tokens: 1 } } })}\\n`);",
-      "  process.stdout.write(`${JSON.stringify({ type: 'result', subtype: 'success', duration_ms: 1, duration_api_ms: 1, is_error: false, num_turns: 1, result: 'done', session_id: 'session-env', total_cost_usd: 0 })}\\n`);",
-      "  process.exit(0);",
-      "}",
-      ""
-    ].join("\n"),
-    "utf8"
   );
 }
 

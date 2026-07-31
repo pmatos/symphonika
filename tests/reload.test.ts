@@ -125,6 +125,101 @@ async function writeProjectConfigWithoutWorkspaceRoot(
 }
 
 describe("RuntimeConfigReloader workflow validation", () => {
+  it("loads service-level SMTP email configuration with security-specific defaults", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "email:",
+        '  from: "symphonika@example.com"',
+        '  to: "operator@example.com"',
+        "  on: changes",
+        '  smtp_host: "smtp.example.com"',
+        "  smtp_security: ssl",
+        '  smtp_username: "server-token"',
+        '  smtp_password_env: "SYMPHONIKA_SMTP_PASSWORD"'
+      ]
+    });
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getStatus().errors).toEqual([]);
+    expect(reloader.emailConfig()).toEqual({
+      from: "symphonika@example.com",
+      on: "changes",
+      smtpHost: "smtp.example.com",
+      smtpPasswordEnv: "SYMPHONIKA_SMTP_PASSWORD",
+      smtpPort: 465,
+      smtpSecurity: "ssl",
+      smtpUsername: "server-token",
+      to: "operator@example.com"
+    });
+  });
+
+  it("rejects SMTP credentials over an unencrypted non-loopback connection", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "email:",
+        '  from: "symphonika@example.com"',
+        '  to: "operator@example.com"',
+        '  smtp_host: "smtp.example.com"',
+        "  smtp_security: none",
+        '  smtp_username: "server-token"'
+      ]
+    });
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({
+      errors: [
+        expect.stringContaining(
+          "email.smtp_security: refuses credentials over an unencrypted connection"
+        )
+      ],
+      ok: false
+    });
+    expect(reloader.getSnapshot()).toBeUndefined();
+  });
+
+  it.each([
+    [
+      "from",
+      ['  to: "operator@example.com"', '  smtp_host: "smtp.example.com"']
+    ],
+    [
+      "to",
+      ['  from: "symphonika@example.com"', '  smtp_host: "smtp.example.com"']
+    ],
+    [
+      "smtp_host",
+      ['  from: "symphonika@example.com"', '  to: "operator@example.com"']
+    ]
+  ])("rejects an email block missing %s", async (field, emailLines) => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: ["email:", ...emailLines]
+    });
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({
+      errors: [expect.stringContaining(`email.${field}`)],
+      ok: false
+    });
+  });
+
   it("loads an OMP Project while keeping the provider command optional globally", async () => {
     const root = await makeTempRoot();
     await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
@@ -819,7 +914,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./daily-report.md"
         ].join("\n")
       )
@@ -836,6 +931,246 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         name: "daily-report",
         provider: null,
         schedule: { at: "2026-05-22T10:00:00.000Z" }
+      })
+    ]);
+  });
+
+  it("fans one service-level Routine declaration out to every named Project", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work.\n");
+    await writeFile(
+      path.join(root, "refactor-audit.md"),
+      [
+        "---",
+        "name: refactor-audit",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "---",
+        "Audit {{project.name}}.",
+        ""
+      ].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      [
+        original.trimEnd(),
+        "  - name: vow",
+        "    mode: routine_host",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/vow",
+        "      git:",
+        "        remote: git@github.com:vow-lang/vow.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "routines:",
+        "  - path: ./refactor-audit.md",
+        "    projects: [symphonika, vow]",
+        ""
+      ].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({ ok: true });
+    expect(reloader.projectsByName().get("symphonika")?.routines).toEqual([
+      expect.objectContaining({
+        name: "refactor-audit",
+        projectName: "symphonika"
+      })
+    ]);
+    expect(reloader.projectsByName().get("vow")?.routines).toEqual([
+      expect.objectContaining({
+        name: "refactor-audit",
+        projectName: "vow"
+      })
+    ]);
+  });
+
+  it("rejects the transitional service-level project target with the projects-list replacement", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work.\n");
+    await writeFile(
+      path.join(root, "daily-report.md"),
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      [
+        original.trimEnd(),
+        "routines:",
+        "  - path: ./daily-report.md",
+        "    project: symphonika",
+        ""
+      ].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    expect(reloader.getStatus().ok).toBe(false);
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      "service-level `project:` was replaced by the explicit `projects: [<name>, ...]` target list"
+    );
+  });
+
+  it("requires an explicit non-empty target list without duplicate Project names", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work.\n");
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      [
+        original.trimEnd(),
+        "routines:",
+        "  - path: ./daily-report.md",
+        "    projects: [symphonika, symphonika]",
+        ""
+      ].join("\n")
+    );
+
+    const duplicateReloader = new RuntimeConfigReloader({ configPath });
+    await duplicateReloader.reload();
+    expect(duplicateReloader.getStatus().errors.join("\n")).toContain(
+      'duplicate target project "symphonika"'
+    );
+
+    await writeFile(
+      configPath,
+      [
+        original.trimEnd(),
+        "routines:",
+        "  - path: ./daily-report.md",
+        "    projects: all",
+        ""
+      ].join("\n")
+    );
+    const wildcardReloader = new RuntimeConfigReloader({ configPath });
+    await wildcardReloader.reload();
+    expect(wildcardReloader.getStatus().errors.join("\n")).toMatch(
+      /routines\.0\.projects.*expected array/i
+    );
+  });
+
+  it("resolves omitted routine execution settings from service defaults", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work.\n");
+    const routinePath = path.join(root, "daily-report.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "provider: claude",
+        "model: claude-opus-4-8",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      original
+        .replace(
+          '    command: "claude -p"',
+          '    command: "claude -p {{#model}}--model {{model}} {{/model}}{{#effort}}--effort {{effort}} {{/effort}}"'
+        )
+        .replace(
+          "providers:",
+          [
+            "routine_defaults:",
+            "  model: claude-sonnet-5",
+            "  effort: high",
+            "  permission_mode: bypass",
+            "  timeout_minutes: 60",
+            "",
+            "providers:"
+          ].join("\n")
+        )
+        .concat(
+          [
+            "",
+            "routines:",
+            "  - projects: [symphonika]",
+            "    path: ./daily-report.md",
+            ""
+          ].join("\n")
+        )
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    const snapshot = await reloader.reload();
+
+    expect(reloader.getStatus().errors).toEqual([]);
+    expect(snapshot?.routineDefaults).toEqual({
+      effort: "high",
+      model: "claude-sonnet-5",
+      permissionMode: "bypass",
+      timeoutMinutes: 60
+    });
+    expect(reloader.projectsByName().get("symphonika")?.routines).toEqual([
+      expect.objectContaining({
+        effort: "high",
+        model: "claude-opus-4-8",
+        permissionMode: "bypass",
+        timeoutMinutes: 60
+      })
+    ]);
+
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "timeout_minutes: 0",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: false
+    });
+    expect(reloader.getStatus().errors.join("\n")).toContain(
+      "timeout_minutes must be a positive number"
+    );
+    expect(reloader.projectsByName().get("symphonika")?.routines).toEqual([
+      expect.objectContaining({
+        effort: "high",
+        model: "claude-opus-4-8",
+        permissionMode: "bypass",
+        timeoutMinutes: 60
       })
     ]);
   });
@@ -884,9 +1219,9 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./daily-report.md",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./weekly-report.md"
         ].join("\n")
       )
@@ -942,7 +1277,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: s11",
+          "  - projects: [s11]",
           "    path: ./broken-routine.md"
         ].join("\n")
       );
@@ -980,7 +1315,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./new-invalid.md"
         ].join("\n")
       )
@@ -1019,7 +1354,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./unnamed.md"
         ].join("\n")
       )
@@ -1070,7 +1405,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./routine-a.md"
         ].join("\n")
       )
@@ -1107,7 +1442,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         "    path: ./routine-a.md",
         [
           "    path: ./routine-a.md",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./routine-b.md"
         ].join("\n")
       )
@@ -1152,9 +1487,9 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./daily-report.md",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./daily-report-2.md"
         ].join("\n")
       )
@@ -1217,7 +1552,7 @@ describe("RuntimeConfigReloader concurrency caps", () => {
         .concat(
           [
             "routines:",
-            "  - project: disabled-project",
+            "  - projects: [disabled-project]",
             "    path: ./broken-routine.md",
             ""
           ].join("\n")
@@ -1235,6 +1570,74 @@ describe("RuntimeConfigReloader concurrency caps", () => {
     expect(reloader.projectsByName().get("disabled-project")?.routines).toEqual(
       []
     );
+  });
+});
+
+describe("RuntimeConfigReloader routine workspace retention", () => {
+  it("defaults automatic cleanup to short success and longer forensic windows", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    const snapshot = await reloader.reload();
+
+    expect(snapshot?.routineWorkspaceRetention).toEqual({
+      cancelledDays: 14,
+      enabled: true,
+      failedDays: 14,
+      succeededDays: 1
+    });
+  });
+
+  it("loads an operator-tuned service-level policy", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "retention:",
+        "  routine_workspaces:",
+        "    enabled: false",
+        "    succeeded_days: 2",
+        "    failed_days: 30",
+        "    cancelled_days: 7"
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    const snapshot = await reloader.reload();
+
+    expect(snapshot?.routineWorkspaceRetention).toEqual({
+      cancelledDays: 7,
+      enabled: false,
+      failedDays: 30,
+      succeededDays: 2
+    });
+  });
+
+  it("rejects a retention window large enough to overflow Date math", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "retention:",
+        "  routine_workspaces:",
+        "    succeeded_days: 1000000000"
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.getStatus().ok).toBe(false);
   });
 });
 
@@ -1545,59 +1948,7 @@ describe("RuntimeConfigReloader provider command template validation", () => {
   });
 });
 
-describe("RuntimeConfigReloader routine_defaults config", () => {
-  it("parses a routine_defaults block and exposes it via routineDefaultsConfig()", async () => {
-    const root = await makeTempRoot();
-    await writeProjectConfig(root, "WORKFLOW.md", {
-      serviceLines: [
-        "routine_defaults:",
-        "  permission_mode: bypass",
-        "  timeout_minutes: 60"
-      ]
-    });
-    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
-
-    const reloader = new RuntimeConfigReloader({
-      configPath: path.join(root, "symphonika.yml")
-    });
-    await reloader.reload();
-
-    expect(reloader.getStatus()).toMatchObject({ ok: true });
-    expect(reloader.routineDefaultsConfig()).toEqual({
-      permissionMode: "bypass",
-      timeoutMinutes: 60
-    });
-  });
-
-  it("returns an empty config when no routine_defaults block is declared", async () => {
-    const root = await makeTempRoot();
-    await writeProjectConfig(root, "WORKFLOW.md", {});
-    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
-
-    const reloader = new RuntimeConfigReloader({
-      configPath: path.join(root, "symphonika.yml")
-    });
-    await reloader.reload();
-
-    expect(reloader.routineDefaultsConfig()).toEqual({});
-  });
-
-  it("rejects an invalid routine_defaults.effort value", async () => {
-    const root = await makeTempRoot();
-    await writeProjectConfig(root, "WORKFLOW.md", {
-      serviceLines: ["routine_defaults:", "  effort: extreme"]
-    });
-    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
-
-    const reloader = new RuntimeConfigReloader({
-      configPath: path.join(root, "symphonika.yml")
-    });
-    await reloader.reload();
-
-    expect(reloader.getStatus()).toMatchObject({ ok: false });
-    expect(reloader.getStatus().errors.join("\n")).toMatch(/routine_defaults/);
-  });
-
+describe("RuntimeConfigReloader routine model/effort/permission_mode template cross-check", () => {
   it("rejects a routine that declares model but whose resolved provider command never references it", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "WORKFLOW.md");
@@ -1625,7 +1976,7 @@ describe("RuntimeConfigReloader routine_defaults config", () => {
         [
           "    workflow: ./WORKFLOW.md",
           "routines:",
-          "  - project: symphonika",
+          "  - projects: [symphonika]",
           "    path: ./daily-report.md"
         ].join("\n")
       )
@@ -1679,7 +2030,7 @@ describe("RuntimeConfigReloader routine_defaults config", () => {
           [
             "    workflow: ./WORKFLOW.md",
             "routines:",
-            "  - project: symphonika",
+            "  - projects: [symphonika]",
             "    path: ./daily-report.md"
           ].join("\n")
         )
@@ -1733,7 +2084,7 @@ describe("RuntimeConfigReloader routine_defaults config", () => {
           [
             "    workflow: ./WORKFLOW.md",
             "routines:",
-            "  - project: symphonika",
+            "  - projects: [symphonika]",
             "    path: ./daily-report.md"
           ].join("\n")
         )
@@ -1786,7 +2137,7 @@ describe("RuntimeConfigReloader routine_defaults config", () => {
           [
             "    workflow: ./WORKFLOW.md",
             "routines:",
-            "  - project: symphonika",
+            "  - projects: [symphonika]",
             "    path: ./refactor-audit.md"
           ].join("\n")
         )

@@ -83,6 +83,45 @@ afterEach(async () => {
 });
 
 describe("Codex JSON-RPC provider", () => {
+  it("renders routine model and effort overrides through the command template before app-server", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+    const processScope = noopProcessScope();
+    const provider = createCodexProvider({ processScope });
+
+    await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeServerPath} {{#model}}-c model={{model}} {{/model}}{{#effort}}-c model_reasoning_effort={{effort}} {{/effort}}app-server`,
+          name: "codex"
+        },
+        routine: {
+          effort: "xhigh",
+          model: "gpt-5.6-codex",
+          permissionMode: "bypass"
+        },
+        workspacePath
+      })
+    );
+
+    expect(processScope.wrapCalls[0]?.command).toEqual({
+      args: [
+        fakeServerPath,
+        "-c",
+        "model=gpt-5.6-codex",
+        "-c",
+        "model_reasoning_effort=xhigh",
+        "app-server"
+      ],
+      executable: process.execPath
+    });
+  });
+
   it("launches the configured app-server in the workspace and maps a completed turn", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -253,6 +292,7 @@ describe("Codex JSON-RPC provider", () => {
         type: "rate_limit_updated"
       },
       {
+        result: "done",
         status: "completed",
         threadId: "thread-9",
         turnId: "turn-9",

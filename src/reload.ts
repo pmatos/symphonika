@@ -16,6 +16,10 @@ import type {
   PollingServiceConfig
 } from "./issue-polling.js";
 import { DEFAULT_POLLING_INTERVAL_MS } from "./issue-polling.js";
+import {
+  emailNotificationConfigSchema,
+  type EmailNotificationConfig
+} from "./notifications/config.js";
 import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig,
@@ -26,22 +30,26 @@ import {
   pullRequestFollowupPolicyFromRaw,
   type PullRequestFollowupPolicy
 } from "./pull-request-followup.js";
+import { parseWorkflowContract } from "./workflow/contract-loading.js";
 import {
   expandWorkflowDefinition,
-  parseWorkflowContract,
   validateExpandedWorkflowReferences
-} from "./workflow.js";
+} from "./workflow/fsm-expansion.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import { renderProviderCommandTemplate } from "./provider-command-template.js";
 import type {
-  RoutineEffort,
-  RoutinePermissionMode,
-  RoutineStatus,
+  RoutineExecutionOverrides,
   TargetedRoutineDeclaration
 } from "./routines/types.js";
+import {
+  DEFAULT_ROUTINE_WORKSPACE_RETENTION,
+  MAX_ROUTINE_WORKSPACE_RETENTION_DAYS,
+  type RoutineWorkspaceRetentionPolicy
+} from "./routines/workspace-retention.js";
 
 export type RuntimeConfigSnapshot = {
   configPath: string;
+  email: EmailNotificationConfig | undefined;
   // Global concurrency cap snapshot. `maxInFlight: undefined` means
   // unbounded. See ADR 0053.
   globalConcurrency: { maxInFlight: number | undefined };
@@ -61,7 +69,8 @@ export type RuntimeConfigSnapshot = {
   projects: RuntimeProjectConfig[];
   providers: RunControllerProvidersConfig;
   pullRequestPolicy: PullRequestFollowupPolicy;
-  routineDefaults: RoutineDefaultsConfig;
+  routineDefaults?: RoutineExecutionOverrides;
+  routineWorkspaceRetention: RoutineWorkspaceRetentionPolicy;
   watchdog: WatchdogConfig;
 };
 
@@ -115,6 +124,15 @@ const providerCommandSchema = z
   })
   .passthrough();
 
+const routineExecutionDefaultsSchema = z
+  .object({
+    model: z.string().trim().min(1).optional(),
+    effort: z.string().trim().min(1).optional(),
+    permission_mode: z.literal("bypass").optional(),
+    timeout_minutes: z.number().positive().optional()
+  })
+  .strict();
+
 const watchdogConfigSchema = z
   .object({
     enabled: z.boolean().default(DEFAULT_WATCHDOG_CONFIG.enabled),
@@ -138,15 +156,27 @@ const projectWatchdogConfigSchema = z
   })
   .strict();
 
-// Service-level fallback for per-routine model/effort/permission_mode/
-// timeout_minutes (issue #291): a routine's own front-matter value wins,
-// else this block, else the provider command as authored (no timeout).
-const routineDefaultsSchema = z
+const routineWorkspaceRetentionSchema = z
   .object({
-    model: z.string().trim().min(1).optional(),
-    effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
-    permission_mode: z.literal("bypass").optional(),
-    timeout_minutes: z.number().int().positive().optional()
+    enabled: z.boolean().default(DEFAULT_ROUTINE_WORKSPACE_RETENTION.enabled),
+    succeeded_days: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(MAX_ROUTINE_WORKSPACE_RETENTION_DAYS)
+      .default(DEFAULT_ROUTINE_WORKSPACE_RETENTION.succeededDays),
+    failed_days: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(MAX_ROUTINE_WORKSPACE_RETENTION_DAYS)
+      .default(DEFAULT_ROUTINE_WORKSPACE_RETENTION.failedDays),
+    cancelled_days: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(MAX_ROUTINE_WORKSPACE_RETENTION_DAYS)
+      .default(DEFAULT_ROUTINE_WORKSPACE_RETENTION.cancelledDays)
   })
   .passthrough();
 
@@ -262,18 +292,52 @@ const runtimeRoutineHostDetailSchema = z
   })
   .passthrough();
 
-// A service-level routine entry: targets one declared Project by name and
-// points at a routine declaration file. Single target only; fan-out is #295.
-// See ADR 0063.
+// A service-level routine entry fans one declaration file out to an explicit,
+// non-empty list of declared Projects. The transitional ADR 0063 `project:`
+// spelling is rejected below with a migration error. See ADR 0069.
 const serviceRoutineSchema = z
   .object({
-    project: z.string().trim().min(1),
+    projects: z.array(z.string().trim().min(1)).min(1).optional(),
     path: pathStringSchema
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((entry, ctx) => {
+    if ("project" in entry) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "service-level `project:` was replaced by the explicit `projects: [<name>, ...]` target list (see ADR 0069)",
+        path: ["project"]
+      });
+    }
+    if (entry.projects === undefined) {
+      if (!("project" in entry)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "an explicit non-empty `projects: [<name>, ...]` target list is required",
+          path: ["projects"]
+        });
+      }
+      return;
+    }
+    const seen = new Set<string>();
+    for (const [index, projectName] of entry.projects.entries()) {
+      if (seen.has(projectName)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `duplicate target project "${projectName}"`,
+          path: ["projects", index]
+        });
+      }
+      seen.add(projectName);
+    }
+  })
+  .transform((entry) => ({ ...entry, projects: entry.projects! }));
 
 const serviceConfigSchema = z
   .object({
+    email: emailNotificationConfigSchema.optional(),
     polling: z
       .object({
         interval_ms: z.number().int().positive().optional()
@@ -288,7 +352,12 @@ const serviceConfigSchema = z
       .passthrough()
       .optional(),
     watchdog: watchdogConfigSchema.optional(),
-    routine_defaults: routineDefaultsSchema.optional(),
+    retention: z
+      .object({
+        routine_workspaces: routineWorkspaceRetentionSchema.optional()
+      })
+      .passthrough()
+      .optional(),
     providers: z
       .object({
         codex: providerCommandSchema,
@@ -296,8 +365,9 @@ const serviceConfigSchema = z
         omp: providerCommandSchema.optional()
       })
       .passthrough(),
+    routine_defaults: routineExecutionDefaultsSchema.optional(),
     // Service-level routine declarations targeting declared Projects. See
-    // ADR 0063. Optional; omitted means no routines.
+    // ADR 0069. Optional; omitted means no routines.
     routines: z.array(serviceRoutineSchema).optional(),
     projects: z.array(z.unknown()).min(1)
   })
@@ -357,15 +427,15 @@ export class RuntimeConfigReloader {
     return this.snapshot?.globalConcurrency ?? { maxInFlight: undefined };
   }
 
+  emailConfig(): EmailNotificationConfig | undefined {
+    return this.snapshot?.email;
+  }
+
   watchdogServiceConfig(): WatchdogServiceConfig {
     return {
       projects: this.snapshot?.projects ?? [],
       watchdog: this.snapshot?.watchdog ?? DEFAULT_WATCHDOG_CONFIG
     };
-  }
-
-  routineDefaultsConfig(): RoutineDefaultsConfig {
-    return this.snapshot?.routineDefaults ?? {};
   }
 
   async reload(): Promise<RuntimeConfigSnapshot | undefined> {
@@ -434,14 +504,14 @@ async function loadRuntimeConfigSnapshot(input: {
   }
 
   // Validate every configured provider's command template unconditionally,
-  // independent of whether any routine references it (review follow-up on
-  // issue #291). Without this, a provider used only by issue-driven dispatch
-  // Projects never has its command template rendered at reload time — the
-  // routine-scoped check a few lines below only renders a provider's command
-  // when at least one routine resolves to it — so an unknown/malformed tag
-  // first surfaces deep in run-controller.ts's Run lifecycle, after an issue
-  // has already been claimed and its workspace prepared, instead of failing
-  // loudly at config-load time like the templating design intends.
+  // independent of whether any routine references it. Rendering a
+  // provider's command happens per-provider-name below (in the routine
+  // attach loop) and per-adapter at spawn time, but a provider used only by
+  // issue-driven dispatch Projects would otherwise never have its template
+  // rendered at reload time — an unrecognized/malformed tag would first
+  // surface deep in a provider adapter's runAttempt, well after an issue has
+  // been claimed and its workspace prepared, instead of failing loudly at
+  // config-load time.
   const configuredProviderCommands: Array<[string, string]> = [
     ["claude", parsed.data.providers.claude.command],
     ["codex", parsed.data.providers.codex.command],
@@ -463,6 +533,16 @@ async function loadRuntimeConfigSnapshot(input: {
   const dispatchProjects: RuntimeProjectConfig[] = [];
   const invalidRoutines: RuntimeConfigSnapshot["invalidRoutines"] = [];
   const projectIndexByProject = new Map<RuntimeProjectConfig, number>();
+  const routineDefaults = normalizeRoutineExecutionDefaults(
+    parsed.data.routine_defaults
+  );
+  const routineProviderCommandsByName: Partial<Record<string, string>> = {
+    claude: parsed.data.providers.claude.command,
+    codex: parsed.data.providers.codex.command,
+    ...(parsed.data.providers.omp === undefined
+      ? {}
+      : { omp: parsed.data.providers.omp.command })
+  };
 
   // First pass: validate each Project against its mode-specific schema and
   // build the runtime map. Dispatch Projects enter both `pollingProjects`
@@ -515,22 +595,12 @@ async function loadRuntimeConfigSnapshot(input: {
   // ADR 0062 / 0063.
   const serviceRoutines = parsed.data.routines ?? [];
   if (serviceRoutines.length > 0) {
-    const routineDefaults = normalizeRoutineDefaults(
-      parsed.data.routine_defaults
-    );
-    const routineProviderCommandsByName: Partial<Record<string, string>> = {
-      claude: parsed.data.providers.claude.command,
-      codex: parsed.data.providers.codex.command,
-      ...(parsed.data.providers.omp === undefined
-        ? {}
-        : { omp: parsed.data.providers.omp.command })
-    };
     const previousRoutines =
       input.previous?.projects.flatMap((project) => project.routines ?? []) ??
       [];
     const routineResult = await readRoutineDeclarations(
       serviceRoutines.map((entry) => ({
-        projectName: entry.project,
+        projectNames: entry.projects,
         sourcePath: path.resolve(input.configDir, entry.path)
       })),
       previousRoutines,
@@ -550,7 +620,8 @@ async function loadRuntimeConfigSnapshot(input: {
     // with ALL-invalid routines still gets invalidRoutineNames — otherwise
     // syncRoutines would treat them as removed, not state=invalid.
     const routinesByProject = new Map<string, TargetedRoutineDeclaration[]>();
-    for (const routine of routineResult.routines) {
+    for (const declaration of routineResult.routines) {
+      const routine = { ...routineDefaults, ...declaration };
       const list = routinesByProject.get(routine.projectName);
       if (list === undefined) {
         routinesByProject.set(routine.projectName, [routine]);
@@ -632,30 +703,19 @@ async function loadRuntimeConfigSnapshot(input: {
           continue;
         }
         // Cross-check the routine's resolved model/effort/permission_mode
-        // against its resolved provider's authored command template — this is
-        // the reload-time surface that satisfies "validated at declaration
-        // load" (issue #291): a routine can only know its own front-matter
-        // fields, and providers:/routine_defaults: are parsed in this same
-        // function, so this is the earliest point both are known together.
-        // Runs BEFORE attaching, like the tracker-less check above — a
-        // template-invalid routine must not fire, so on failure it is never
-        // attached (`continue`s instead), falling through to `syncRoutines`'s
-        // existing removed_from_config demotion/restore path rather than
-        // silently keeping the misconfigured routine active.
+        // against its resolved provider's authored command template — the
+        // earliest point both routines: and providers:/routine_defaults: are
+        // known together. Runs BEFORE attaching, like the tracker-less check
+        // above — a template-invalid routine must not fire, so on failure it
+        // is never attached (`continue`s instead).
         const routineProviderName = routine.provider ?? project.agent.provider;
         const routineProviderCommand =
           routineProviderCommandsByName[routineProviderName];
         if (routineProviderCommand !== undefined) {
-          const resolved = resolveRoutineExecutionConfig(routineDefaults, {
-            effort: routine.effort ?? null,
-            model: routine.model ?? null,
-            permissionMode: routine.permissionMode ?? null,
-            timeoutMinutes: routine.timeoutMinutes ?? null
-          });
           try {
             const { unreferencedFields } = renderProviderCommandTemplate(
               routineProviderCommand,
-              resolved
+              routine
             );
             if (unreferencedFields.length > 0) {
               for (const field of unreferencedFields) {
@@ -703,6 +763,7 @@ async function loadRuntimeConfigSnapshot(input: {
     errors,
     snapshot: {
       configPath: input.configPath,
+      email: parsed.data.email,
       globalConcurrency: {
         maxInFlight: parsed.data.global?.max_in_flight
       },
@@ -722,10 +783,52 @@ async function loadRuntimeConfigSnapshot(input: {
       pullRequestPolicy:
         pullRequestFollowupPolicyFromRaw(raw) ??
         DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY,
-      routineDefaults: normalizeRoutineDefaults(parsed.data.routine_defaults),
+      routineDefaults,
+      routineWorkspaceRetention: normalizeRoutineWorkspaceRetention(
+        parsed.data.retention?.routine_workspaces
+      ),
       watchdog: normalizeWatchdogConfig(parsed.data.watchdog)
     },
     usingLastKnownGood: false
+  };
+}
+
+function normalizeRoutineWorkspaceRetention(
+  config: z.infer<typeof routineWorkspaceRetentionSchema> | undefined
+): RoutineWorkspaceRetentionPolicy {
+  if (config === undefined) {
+    return { ...DEFAULT_ROUTINE_WORKSPACE_RETENTION };
+  }
+  return {
+    cancelledDays: config.cancelled_days,
+    enabled: config.enabled,
+    failedDays: config.failed_days,
+    succeededDays: config.succeeded_days
+  };
+}
+
+function normalizeRoutineExecutionDefaults(
+  defaults:
+    | {
+        effort?: string | undefined;
+        model?: string | undefined;
+        permission_mode?: "bypass" | undefined;
+        timeout_minutes?: number | undefined;
+      }
+    | undefined
+): RoutineExecutionOverrides {
+  if (defaults === undefined) {
+    return {};
+  }
+  return {
+    ...(defaults.effort === undefined ? {} : { effort: defaults.effort }),
+    ...(defaults.model === undefined ? {} : { model: defaults.model }),
+    ...(defaults.permission_mode === undefined
+      ? {}
+      : { permissionMode: defaults.permission_mode }),
+    ...(defaults.timeout_minutes === undefined
+      ? {}
+      : { timeoutMinutes: defaults.timeout_minutes })
   };
 }
 
@@ -769,7 +872,7 @@ function optionalWatchdogOf(rawProject: unknown): unknown {
 // schemas use `.passthrough()`, so without this a legacy `routines:` list
 // would validate silently and then be ignored — its routines would stop
 // firing with no error. Force a migration error pointing at the top-level
-// block. See ADR 0063.
+// block. See ADR 0069.
 function rejectPerProjectRoutines(
   rawProject: unknown,
   ctx: z.RefinementCtx
@@ -782,7 +885,7 @@ function rejectPerProjectRoutines(
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message:
-        "per-project `routines:` was removed; move routine entries to the top-level `routines:` block with a `project:` target (see ADR 0063)",
+        "per-project `routines:` was removed; move routine entries to the top-level `routines:` block with a `projects: [<name>, ...]` target list (see ADR 0069)",
       path: ["routines"]
     });
   }
@@ -990,21 +1093,6 @@ function normalizeWatchdogConfig(
   };
 }
 
-function normalizeRoutineDefaults(
-  raw: z.infer<typeof routineDefaultsSchema> | undefined
-): RoutineDefaultsConfig {
-  return {
-    ...(raw?.model === undefined ? {} : { model: raw.model }),
-    ...(raw?.effort === undefined ? {} : { effort: raw.effort }),
-    ...(raw?.permission_mode === undefined
-      ? {}
-      : { permissionMode: raw.permission_mode }),
-    ...(raw?.timeout_minutes === undefined
-      ? {}
-      : { timeoutMinutes: raw.timeout_minutes })
-  };
-}
-
 export function resolveWatchdogConfig(
   serviceConfig: WatchdogServiceConfig,
   projectName: string
@@ -1018,32 +1106,6 @@ export function resolveWatchdogConfig(
   return {
     ...serviceConfig.watchdog,
     graceMinutes: projectOverride.graceMinutes
-  };
-}
-
-export type RoutineDefaultsConfig = {
-  effort?: RoutineEffort;
-  model?: string;
-  permissionMode?: RoutinePermissionMode;
-  timeoutMinutes?: number;
-};
-
-export function resolveRoutineExecutionConfig(
-  defaults: RoutineDefaultsConfig,
-  routine: Pick<
-    RoutineStatus,
-    "effort" | "model" | "permissionMode" | "timeoutMinutes"
-  >
-): RoutineDefaultsConfig {
-  const effort = routine.effort ?? defaults.effort;
-  const model = routine.model ?? defaults.model;
-  const permissionMode = routine.permissionMode ?? defaults.permissionMode;
-  const timeoutMinutes = routine.timeoutMinutes ?? defaults.timeoutMinutes;
-  return {
-    ...(effort === undefined ? {} : { effort }),
-    ...(model === undefined ? {} : { model }),
-    ...(permissionMode === undefined ? {} : { permissionMode }),
-    ...(timeoutMinutes === undefined ? {} : { timeoutMinutes })
   };
 }
 
@@ -1134,7 +1196,7 @@ async function readWorkflowSnapshot(
 }
 
 async function readRoutineDeclarations(
-  entries: Array<{ projectName: string; sourcePath: string }>,
+  entries: Array<{ projectNames: string[]; sourcePath: string }>,
   previousRoutines: TargetedRoutineDeclaration[],
   errors: string[]
 ): Promise<{
@@ -1174,14 +1236,19 @@ async function readRoutineDeclarations(
           );
         } else {
           seenNames.set(previous.name, previous.sourcePath);
-          routines.push({ ...previous, projectName: entry.projectName });
+          routines.push(
+            ...entry.projectNames.map((projectName) => ({
+              ...previous,
+              projectName
+            }))
+          );
         }
       } else {
         // Reserve a brand-new invalid declaration's recovered name too —
         // otherwise a later declaration in this same pass (especially one
         // targeting another Project) can legitimately claim the same name
         // while this file remains broken, violating the service-level
-        // global-name uniqueness requirement (ADR 0063).
+        // global-name uniqueness requirement (ADR 0069).
         if (result.partialName !== undefined) {
           const existingForPartialName = seenNames.get(result.partialName);
           if (existingForPartialName !== undefined) {
@@ -1192,25 +1259,33 @@ async function readRoutineDeclarations(
             seenNames.set(result.partialName, entry.sourcePath);
           }
         }
-        invalidNew.push({
-          ...(result.partialName === undefined
-            ? {}
-            : { name: result.partialName }),
-          path: entry.sourcePath,
-          projectName: entry.projectName
-        });
+        invalidNew.push(
+          ...entry.projectNames.map((projectName) => ({
+            ...(result.partialName === undefined
+              ? {}
+              : { name: result.partialName }),
+            path: entry.sourcePath,
+            projectName
+          }))
+        );
       }
       continue;
     }
-    const existing = seenNames.get(result.routine.name);
+    const routine = result.routine;
+    const existing = seenNames.get(routine.name);
     if (existing !== undefined) {
       errors.push(
-        `duplicate routine name "${result.routine.name}" declared by ${existing} and ${result.routine.sourcePath}`
+        `duplicate routine name "${routine.name}" declared by ${existing} and ${routine.sourcePath}`
       );
       continue;
     }
-    seenNames.set(result.routine.name, result.routine.sourcePath);
-    routines.push({ ...result.routine, projectName: entry.projectName });
+    seenNames.set(routine.name, routine.sourcePath);
+    routines.push(
+      ...entry.projectNames.map((projectName) => ({
+        ...routine,
+        projectName
+      }))
+    );
   }
   return { invalidNew, routines };
 }

@@ -4,23 +4,16 @@ import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
-describe("CONTEXT prospective domain model", () => {
-  it("warns readers that service-level Routine Fan-out is not implemented yet", async () => {
+describe("CONTEXT Routine fan-out domain model", () => {
+  it("documents service-level Routine Fan-out as implemented", async () => {
     const context = await readFile(path.join(repoRoot, "CONTEXT.md"), "utf8");
-    const notice = context.match(
-      /> \*\*Prospective model:\*\*[\s\S]*?(?=\n\n## Language)/
-    )?.[0];
 
-    expect(notice).toEqual(
-      [
-        "> **Prospective model:** Service-level Routine **Fan-out** — a Routine targeting more than one",
-        "> Project via a `projects:` list (or wildcard), with per-Project **Routine Target** state and",
-        "> per-clock-event **Routine Fan-out** — is target-state vocabulary for",
-        "> [#295](https://github.com/pmatos/symphonika/issues/295), not the current implementation contract.",
-        "> The **Dispatch Project** / **Routine Host** mode split (ADR 0062) and single-target service-level",
-        "> **Routine** declarations (ADR 0063) below are implemented: a Routine currently targets exactly one",
-        "> declared Project by name."
-      ].join("\n")
+    expect(context).not.toContain("**Prospective model:**");
+    expect(context).toContain(
+      "The materialized per-Project state for one Routine, durably keyed by `(project_name, name)`"
+    );
+    expect(context).toContain(
+      "The durable group created when one Routine clock event matches one or more Routine Targets"
     );
   });
 
@@ -35,14 +28,14 @@ describe("CONTEXT prospective domain model", () => {
     );
   });
 
-  it("documents the Routine as single-target, per ADR 0063", async () => {
+  it("documents explicit multi-project targets and grouping, per ADR 0069", async () => {
     const context = await readFile(path.join(repoRoot, "CONTEXT.md"), "utf8");
 
     expect(context).toContain(
-      "A service-level scheduled prompt declaration that targets one declared Project by name"
+      "targets an explicit,\nnon-empty list of declared Projects"
     );
     expect(context).toContain(
-      "A **Routine** targets one declared **Project** by name and may create zero or more **Routine Firings**"
+      "A **Routine Fan-out** produces one grouped notification after all target legs complete"
     );
   });
 });

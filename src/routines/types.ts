@@ -1,4 +1,5 @@
 import type { AgentProviderName } from "../provider.js";
+import type { RoutineOutcome } from "./outcome.js";
 
 export type RoutineKind = "git" | "report";
 
@@ -16,6 +17,10 @@ export type RoutineFiringState =
   | "failed"
   | "cancelled";
 
+export type RoutineNotificationState = "sent" | "skipped" | "failed";
+
+export type RoutineFiringTriggerSource = "manual" | "scheduled";
+
 export type RoutineCatchUpPolicy = "skip" | "fire_once_if_missed";
 
 export type RoutineSkipReason =
@@ -23,30 +28,30 @@ export type RoutineSkipReason =
 
 export type RoutineSchedule = { at: string } | { cron: string; tz: string };
 
-export type RoutineEffort = "low" | "medium" | "high" | "xhigh" | "max";
-
-export type RoutinePermissionMode = "bypass";
+export type RoutineExecutionOverrides = {
+  effort?: string;
+  model?: string;
+  permissionMode?: "bypass";
+  timeoutMinutes?: number;
+};
 
 export type RoutineDeclaration = {
   allowOverlap?: boolean;
   catchUp?: RoutineCatchUpPolicy;
   disabled?: boolean;
-  effort?: RoutineEffort;
   kind: RoutineKind;
-  model?: string;
   name: string;
-  permissionMode?: RoutinePermissionMode;
+  notify?: boolean;
   prompt: string;
   provider: AgentProviderName | null;
   schedule: RoutineSchedule;
   sourcePath: string;
-  timeoutMinutes?: number;
-};
+} & RoutineExecutionOverrides;
 
 // A RoutineDeclaration bound to its declared target Project. The file-level
 // `RoutineDeclaration` has no project target (a file cannot know it); the
 // service-level `routines:` entry supplies `projectName`. Used by reload,
-// the runtime map, and the run store. See ADR 0063.
+// the runtime map, and the run store. See ADR 0069.
 export type TargetedRoutineDeclaration = RoutineDeclaration & {
   projectName: string;
 };
@@ -63,16 +68,15 @@ export type RoutineStatus = {
   allowOverlap: boolean;
   catchUp: RoutineCatchUpPolicy;
   disabledReason: RoutineDisabledReason | null;
-  effort: RoutineEffort | null;
   kind: RoutineKind;
+  latestOutcome: RoutineOutcome | null;
   lastAttemptedAt: string | null;
   lastFiredAt: string | null;
   lastSkipAt: string | null;
   lastSkipReason: RoutineSkipReason | null;
-  model: string | null;
   name: string;
   nextFireAt: string | null;
-  permissionMode: RoutinePermissionMode | null;
+  notify?: boolean;
   projectName: string;
   provider: AgentProviderName | null;
   pullRequestNumbers: number[];
@@ -82,5 +86,4 @@ export type RoutineStatus = {
   skipCounts24h: Record<RoutineSkipReason, number>;
   sourcePath: string;
   state: RoutineState;
-  timeoutMinutes: number | null;
-};
+} & RoutineExecutionOverrides;

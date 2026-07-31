@@ -6,7 +6,11 @@ import type { Logger } from "pino";
 import pino from "pino";
 import { parse } from "yaml";
 
-import { createHttpApp, type PollNowResult } from "./http/app.js";
+import {
+  createHttpApp,
+  type FireRoutineResult,
+  type PollNowResult
+} from "./http/app.js";
 import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
@@ -48,6 +52,8 @@ import {
 import { detectStaleClaims } from "./lifecycle/stale-claims.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
+import { createSmtpNotificationSink } from "./notifications/smtp.js";
+import type { NotificationSink } from "./notifications/types.js";
 import {
   runPullRequestFollowup,
   type PullRequestFollowupPolicy
@@ -59,12 +65,17 @@ import {
   type RunState,
   type SyncProjectStateInput
 } from "./run-store.js";
-import { dispatchDueRoutines } from "./routines/dispatcher.js";
+import type { RoutineFanoutNotification } from "./routines/fanout-summary.js";
+import { dispatchDueRoutines, fireRoutineNow } from "./routines/dispatcher.js";
 import type { RoutineFiringState } from "./routines/types.js";
 import type {
   PreparedRoutineWorkspace,
   PrepareRoutineWorkspaceInput
 } from "./routines/workspace.js";
+import {
+  pruneRoutineWorkspaces as pruneRoutineWorkspacesReal,
+  type RoutineWorkspaceRetentionPolicy
+} from "./routines/workspace-retention.js";
 import { resolveStateRoot } from "./state.js";
 import { buildStatusSnapshot } from "./status.js";
 import { VERSION } from "./version.js";
@@ -85,15 +96,21 @@ export type StartDaemonOptions = {
   legacyInputRequiredRecheckDelayMs?: number;
   lifecyclePolicy?: LifecyclePolicy;
   logger?: Logger;
+  notificationSink?: NotificationSink;
   port?: number;
   processScope?: ProcessScope;
   prepareIssueWorkspace?: (
     input: PrepareIssueWorkspaceInput
   ) => Promise<PreparedIssueWorkspace>;
+  createRoutineFanoutId?: () => string;
   createRoutineFiringId?: () => string;
+  notifyRoutineFanout?: (
+    notification: RoutineFanoutNotification
+  ) => Promise<void>;
   prepareRoutineWorkspace?: (
     input: PrepareRoutineWorkspaceInput
   ) => Promise<PreparedRoutineWorkspace>;
+  pruneRoutineWorkspaces?: typeof pruneRoutineWorkspacesReal;
 };
 
 export type DaemonHandle = {
@@ -114,6 +131,8 @@ export async function startDaemon(
     options.daemonHeartbeat ?? createDaemonHeartbeat({ env, logger });
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 3000;
+  const pruneRoutineWorkspaces =
+    options.pruneRoutineWorkspaces ?? pruneRoutineWorkspacesReal;
   const stateRootOptions: Parameters<typeof resolveStateRoot>[0] = {};
   if (options.configPath !== undefined) {
     stateRootOptions.configPath = options.configPath;
@@ -127,6 +146,14 @@ export async function startDaemon(
   const runStore = openRunStore({
     stateRoot: state.stateRoot
   });
+  const recoveredRoutineFanoutNotifications =
+    runStore.releaseInterruptedRoutineFanoutNotifications();
+  if (recoveredRoutineFanoutNotifications > 0) {
+    logger.warn(
+      { recovered: recoveredRoutineFanoutNotifications },
+      "symphonika startup: released interrupted routine fan-out notification claims"
+    );
+  }
   const failedLegacyInputRequired = runStore.failLegacyInputRequiredRuns();
   if (failedLegacyInputRequired.length > 0) {
     logger.info(
@@ -288,6 +315,13 @@ export async function startDaemon(
   });
   const activeRuns = new ActiveRunRegistry();
   const dispatchMutex = createAsyncMutex();
+  // launchWork is explicitly re-entrant per tick (see comment at its
+  // definition), so a retention pass that outlives one polling interval
+  // would otherwise overlap with the next tick's pass, running concurrent
+  // `git worktree remove`/`prune`/branch-delete against the same cache.
+  // Narrow skip-if-in-flight guard, consistent with ADR 0052's per-operation
+  // (not whole-tick) locking scope.
+  const retentionMutex = createAsyncMutex();
   // After Slice 1 narrowing, dispatchMutex is held only during the brief
   // claim section, so consumers that want "is a provider run active" should
   // read inFlight instead. The legacy dispatching boolean is preserved as a
@@ -556,6 +590,22 @@ export async function startDaemon(
     // ADR 0052.
     const promise = (async () => {
       try {
+        const retentionSnapshot = runtimeConfig.getSnapshot();
+        if (
+          retentionSnapshot?.routineWorkspaceRetention.enabled === true &&
+          retentionMutex.tryAcquire()
+        ) {
+          try {
+            await runAutomaticRoutineWorkspaceRetention({
+              logger,
+              policy: retentionSnapshot.routineWorkspaceRetention,
+              pruneRoutineWorkspaces,
+              runStore
+            });
+          } finally {
+            retentionMutex.release();
+          }
+        }
         const now = Date.now();
         let prResult: Awaited<ReturnType<typeof runPullRequestFollowup>>;
         if (
@@ -595,6 +645,9 @@ export async function startDaemon(
           activeRuns,
           agentProviders,
           configDir: state.configDir,
+          ...(options.createRoutineFanoutId === undefined
+            ? {}
+            : { createFanoutId: options.createRoutineFanoutId }),
           ...(options.createRoutineFiringId === undefined
             ? {}
             : { createFiringId: options.createRoutineFiringId }),
@@ -602,13 +655,23 @@ export async function startDaemon(
           globalConcurrency: runtimeConfig.globalConcurrency(),
           githubIssuesApi,
           logger,
+          notification: {
+            createSink: (config) =>
+              options.notificationSink ??
+              createSmtpNotificationSink(config, { env }),
+            // Resolved at delivery time so a reload mid-firing is honored
+            // for that firing's own notification (ADR 0067).
+            resolveConfig: () => runtimeConfig.emailConfig()
+          },
+          ...(options.notifyRoutineFanout === undefined
+            ? {}
+            : { notifyRoutineFanout: options.notifyRoutineFanout }),
           ...(options.prepareRoutineWorkspace === undefined
             ? {}
             : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),
           projects: runtimeConfig.projectsByName(),
           providersConfig: runtimeConfig.providersConfig(),
           recomputeSchedulesFromNow,
-          routineDefaults: runtimeConfig.routineDefaultsConfig(),
           runStore,
           stateRoot: state.stateRoot
         });
@@ -778,6 +841,37 @@ export async function startDaemon(
   const app = createHttpApp({
     cancelRun: cancelViaUi,
     dispatchRuntime,
+    fireRoutine: (request): FireRoutineResult => {
+      const result = fireRoutineNow({
+        activeRuns,
+        agentProviders,
+        configDir: state.configDir,
+        ...(options.createRoutineFiringId === undefined
+          ? {}
+          : { createFiringId: options.createRoutineFiringId }),
+        env,
+        globalConcurrency: runtimeConfig.globalConcurrency(),
+        githubIssuesApi,
+        logger,
+        ...(options.prepareRoutineWorkspace === undefined
+          ? {}
+          : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),
+        projects: runtimeConfig.projectsByName(),
+        providersConfig: runtimeConfig.providersConfig(),
+        request,
+        runStore,
+        stateRoot: state.stateRoot
+      });
+      if (result.kind !== "accepted") {
+        return result;
+      }
+      const { completion, ...response } = result;
+      inflightDispatches.add(completion);
+      void completion.finally(() => {
+        inflightDispatches.delete(completion);
+      });
+      return response;
+    },
     getActiveRuns: () =>
       activeRuns.list().map((entry) => ({
         cancelReason: entry.cancelReason ?? null,
@@ -1127,6 +1221,41 @@ async function rollbackDaemonStartup(
     logger.warn(
       { error: errorMessage(error) },
       "symphonika daemon startup rollback failed to close run store"
+    );
+  }
+}
+
+async function runAutomaticRoutineWorkspaceRetention(input: {
+  logger: Logger;
+  policy: RoutineWorkspaceRetentionPolicy;
+  pruneRoutineWorkspaces: typeof pruneRoutineWorkspacesReal;
+  runStore: ReturnType<typeof openRunStore>;
+}): Promise<void> {
+  try {
+    const report = await input.pruneRoutineWorkspaces({
+      policy: input.policy,
+      runStore: input.runStore
+    });
+    if (report.pruned.length > 0) {
+      input.logger.info(
+        { firingIds: report.pruned.map((entry) => entry.firingId) },
+        "symphonika pruned Routine Firing workspaces"
+      );
+    }
+    for (const failure of report.failures) {
+      input.logger.warn(
+        {
+          err: failure.error,
+          firingId: failure.firingId,
+          workspacePath: failure.workspacePath
+        },
+        "symphonika failed to prune Routine Firing workspace"
+      );
+    }
+  } catch (error) {
+    input.logger.error(
+      { err: error },
+      "symphonika Routine Firing workspace retention failed"
     );
   }
 }

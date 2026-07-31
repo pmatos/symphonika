@@ -9,30 +9,55 @@ watchdog:
   grace_minutes: 30
   sample_interval_seconds: 60
 
+# Automatic Routine Firing workspace reclamation. Successful workspaces have
+# a short inspection window; failed/cancelled workspaces retain longer
+# forensic value. State-root logs and prompt evidence are never removed.
+retention:
+  routine_workspaces:
+    enabled: true
+    succeeded_days: 1
+    failed_days: 14
+    cancelled_days: 14
+
 # Optional global cap on the total number of concurrent provider runs across
 # all projects. Omit (or comment out) for unbounded. See ADR 0053.
 # global:
 #   max_in_flight: 8
 
-# Service-level fallback for per-routine model/effort/permission_mode/
-# timeout_minutes (a routine's own front matter wins per-field; omitting this
-# block entirely means no defaults and no wall-clock timeout). See ADR 0067.
+# Optional best-effort Routine Firing notifications (ADR 0067). The password
+# value comes only from the named environment variable.
+# email:
+#   from: "symphonika@example.com"
+#   to: "operator@example.com"
+#   on: changes
+#   smtp_host: "smtp.postmarkapp.com"
+#   smtp_security: starttls
+#   smtp_port: 587
+#   smtp_username: "<postmark-server-token>"
+#   smtp_password_env: "SYMPHONIKA_SMTP_PASSWORD"
+
+# Optional Routine execution defaults. A Routine's Markdown front matter wins;
+# when both levels omit a value, the provider command below stays as authored.
 # routine_defaults:
+#   model: claude-sonnet-5
+#   effort: high
 #   permission_mode: bypass
 #   timeout_minutes: 60
 
-# Provider commands may reference {{model}}, {{effort}}, and
-# {{permission_mode}} — plain tags substitute the resolved value; the
-# {{#tag}}...{{/tag}} section form omits the enclosed text entirely when the
-# field isn't resolved for a given call (issue Runs never resolve these, so
-# sections always collapse to nothing for them). See SPEC §5.1 / ADR 0067.
+# Provider commands may reference {{model}} and {{effort}} — plain tags
+# substitute the resolved value; the {{#tag}}...{{/tag}} section form omits
+# the enclosed text entirely when the field isn't resolved for a given call
+# (issue Runs never resolve these, so sections always collapse to nothing for
+# them). permission_mode is deliberately not templated here: every command
+# below already hardcodes full-permission execution unconditionally, so
+# permission_mode: bypass is redundant rather than inert. See ADR 0067.
 providers:
   codex:
     command: 'codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never {{#model}}-c model="{{model}}" {{/model}}{{#effort}}-c model_reasoning_effort="{{effort}}" {{/effort}}--dangerously-bypass-approvals-and-sandbox app-server'
   claude:
     command: "claude -p {{#model}}--model {{model}} {{/model}}{{#effort}}--effort {{effort}} {{/effort}}--dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json"
   omp:
-    command: "omp --mode rpc --auto-approve"
+    command: "omp --mode rpc --auto-approve {{#model}}--model {{model}} {{/model}}{{#effort}}--thinking {{effort}} {{/effort}}"
 
 projects:
   - name: symphonika
@@ -81,3 +106,14 @@ projects:
     agent:
       provider: codex
     workflow: ./WORKFLOW.md
+
+# Routines live at service level and target an explicit, non-empty Project list.
+# The old singular `project:` field and nested Project `routines:` lists are invalid.
+# Per-Routine overrides use the same model, effort, permission_mode, and
+# timeout_minutes keys in the referenced Markdown file's YAML front matter.
+# Provider adapters append their native override flags when a firing spawns;
+# the configured commands above do not need template placeholders. Claude
+# Routine Firings also receive the one-shot anti-backgrounding guards.
+# routines:
+#   - path: ./routines/refactor-audit.md
+#     projects: [symphonika]

@@ -2,14 +2,6 @@
 
 Symphonika is a fresh orchestrator for turning tracked project work into isolated coding-agent runs.
 
-> **Prospective model:** Service-level Routine **Fan-out** — a Routine targeting more than one
-> Project via a `projects:` list (or wildcard), with per-Project **Routine Target** state and
-> per-clock-event **Routine Fan-out** — is target-state vocabulary for
-> [#295](https://github.com/pmatos/symphonika/issues/295), not the current implementation contract.
-> The **Dispatch Project** / **Routine Host** mode split (ADR 0062) and single-target service-level
-> **Routine** declarations (ADR 0063) below are implemented: a Routine currently targets exactly one
-> declared Project by name.
-
 ## Language
 
 **Orchestrator**:
@@ -154,22 +146,63 @@ One orchestrator-managed execution lifecycle for one issue in one workspace.
 _Avoid_: issue when referring to execution status
 
 **Routine**:
-A service-level scheduled prompt declaration that targets one declared Project by name and can launch
-a Coding Agent without a GitHub Issue. A Routine Host owns no routines — Routines point *at* it.
-When a Routine's target Project is disabled or omitted from the current valid Service Config
-snapshot, the Routine is inactive: it is hidden from default operator listings while its firing
-state remains durable for later re-enable. See ADR 0063.
+A service-level scheduled prompt declaration with a globally unique name that targets an explicit,
+non-empty list of declared Projects and can launch Coding Agents without GitHub Issues. A Routine
+Host owns no routines — Routines point *at* it. There is no target wildcard. See ADR 0069.
 _Avoid_: workflow contract when referring to recurring or one-shot scheduled work
 
+**Routine Target**:
+The materialized per-Project state for one Routine, durably keyed by `(project_name, name)`. Each
+target owns its schedule position, lifecycle state, and skip counters. When its Project is disabled
+or omitted from the current valid Service Config snapshot, only that target becomes inactive while
+sibling targets continue normally.
+_Avoid_: Routine when referring to one Project-specific leg
+
+**Routine Fan-out**:
+The durable group created when one Routine clock event matches one or more Routine Targets. It has a
+shared correlation id and immutable expected Project membership captured before work begins; each
+target is completed by either a Routine Firing or a recorded Routine Skip before one grouped
+notification is delivered.
+_Avoid_: Routine Firing when referring to the whole clock event
+
 **Routine Firing**:
-One durable execution attempt of a Routine, with its own workspace, provider logs, prompt evidence,
-and lifecycle state.
+One durable execution attempt for a Routine Target, with its own workspace, provider logs, prompt
+evidence, lifecycle state, terminal reason, optional canonical Routine Outcome, and an independent
+record of whether its prepared `kind: git` workspace held commits ahead of base at completion. A
+scheduled firing is correlated to its Routine Fan-out; its trigger source is scheduled or manual,
+and a manual firing targets one Routine Target directly, using the same execution lifecycle without
+consuming the Routine's next clock event or creating a Routine Fan-out.
 _Avoid_: run when specifically referring to non-issue scheduled execution
+
+**Routine Outcome Claim**:
+The provider-reported `{status, action, url, title, summary}` object parsed from the final normalized
+event of a Routine Firing. It is evidence to reconcile, not proof that the claimed action happened.
+_Avoid_: Routine Outcome when referring to the provider's unverified input
+
+**Routine Outcome**:
+The canonical per-firing result produced by reconciling a Routine Outcome Claim with observed
+GitHub and workspace state. It adds `verified` and `source` and remains separate from Routine
+Firing lifecycle state and terminal reason.
+_Avoid_: terminal reason, provider final message
+
+**Routine Workspace Retention**:
+The Service Config policy that reclaims terminal Routine Firing worktrees after outcome-specific
+age windows while preserving their Run Store rows and state-root evidence. Firings with persisted
+commits-ahead evidence are withheld until a separate durable-publication signal exists. Only a
+verified zero-commits inspection permits age-based reclamation; an inspection failure is retained
+conservatively.
+_Avoid_: evidence retention, issue Workspace cleanup
+
+**Routine Firing Deadline**:
+An optional declared absolute wall-clock bound for one Routine Firing. It expires regardless of
+continued provider progress and fails the firing with terminal reason `firing_timeout`.
+_Avoid_: Watchdog timeout, no-progress grace
 
 **Routine Skip**:
 An operator-visible clock attempt that did not create a Routine Firing because of a catch-up window,
 an overlapping non-terminal firing, or a concurrency cap. It updates the Routine's latest skip
-evidence and rolling counters but creates no `routine_firings` row.
+evidence and rolling counters but creates no `routine_firings` row. A refused manual firing is not a
+Routine Skip because no clock event was attempted.
 _Avoid_: Routine Firing when no provider execution was launched
 
 **Routine Pull Request**:
@@ -177,6 +210,20 @@ An informational association discovered from a succeeded `kind: git` Routine Fir
 branch. It records the PR number and head SHA but never enters PR Follow-up, review re-dispatch, or
 auto-merge.
 _Avoid_: PR Follow-up when referring to Routine-opened pull requests
+
+**Notification Sink**:
+A transport-neutral boundary that delivers a rendered plain-text plus HTML **Notification Message**.
+SMTP is the first implementation; event-specific policy and rendering stay outside the sink.
+_Avoid_: emailer when referring to the provider-neutral boundary
+
+**Notification Message**:
+A rendered delivery payload containing a subject, plain-text body, and escaped HTML alternative.
+_Avoid_: provider output when referring to the operator-facing rendered payload
+
+**Routine Notification Delivery**:
+The best-effort delivery outcome for one terminal **Routine Firing**, recorded as `sent`, `skipped`,
+or `failed` without changing the firing's terminal state.
+_Avoid_: Routine Firing when referring only to delivery state
 
 **Run Lifecycle**:
 The stateful progression of one Run from dispatch selection through provider execution, scheduling,
@@ -237,6 +284,13 @@ _Avoid_: agent when referring to the adapter boundary
 The execution posture where coding agents run without provider approval prompts or provider sandbox restrictions.
 _Avoid_: safe mode, yolo mode in formal docs
 
+**Provider PID Isolation**:
+The host-level process boundary that runs each Agent Provider's process tree inside its own Linux
+PID namespace, so one Run's provider cannot observe or signal PIDs belonging to a different Run's
+provider tree. Decided in ADR 0067 as a boundary adjacent to, not a change of, Full-Permission Agent
+Execution.
+_Avoid_: sandboxing, approval policy when referring to this PID-visibility boundary
+
 **Autonomous Run**:
 A coding-agent run expected to proceed without asking the operator for interactive input.
 _Avoid_: chat session
@@ -276,10 +330,23 @@ _Avoid_: chat session
 - A **Normalized Event Log** is derived from a **Provider Event Log**
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
-- A **Routine** targets one declared **Project** by name and may create zero or more **Routine Firings**
-- A **Routine** may record **Routine Skips** without creating Routine Firings
+- A **Routine** targets one or more explicitly named **Projects** and materializes one **Routine
+  Target** for each
+- A matched clock event creates one **Routine Fan-out** across the currently due Routine Targets
+- Each **Routine Target** completes its fan-out leg with either one **Routine Firing** or one
+  **Routine Skip**
+- A **Routine Fan-out** produces one grouped notification after all target legs complete
 - A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
+- A **Routine Firing** may contain one canonical **Routine Outcome** reconciled from a **Routine
+  Outcome Claim** and externally observed state
+- A manual **Routine Firing** leaves the Routine's next scheduled clock event unchanged
+- **Routine Workspace Retention** may reclaim only terminal **Routine Firing** worktrees without
+  persisted commits-ahead evidence
+- A **Routine Firing Deadline** terminates an over-time **Routine Firing** independently of the
+  **Watchdog**'s progress-liveness decision
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
+- A terminal **Routine Firing** may produce one best-effort **Routine Notification Delivery**
+- A **Notification Sink** delivers a rendered message without owning event-specific policy
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
 - A **Watchdog** samples a **Progress Signal** for each active **Run** during daemon reconciliation and may mark no-progress work `stale`, preserving **Workspace** contents
 - A **Continuation** is capped so an eligible issue cannot loop forever
@@ -287,6 +354,8 @@ _Avoid_: chat session
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete
 - A **Project Cursor** belongs to exactly one **Dispatch Project**
 - **Full-Permission Agent Execution** is the default and assumed provider posture
+- **Provider PID Isolation** bounds what an **Agent Provider** can see and signal without changing
+  **Full-Permission Agent Execution**
 - An **Autonomous Run** fails if the provider requests interactive input
 
 ## Example dialogue

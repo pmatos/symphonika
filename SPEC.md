@@ -24,7 +24,7 @@ repository as one real Project well enough to help implement later Symphonika is
 - A separate/standalone rich frontend application (SPA). Self-contained, read-only
   interactive visualizations embedded in a server-rendered operator page (e.g. the
   workflow-graph view) are permitted — see §14 and ADR-0056.
-- Automatic workspace deletion.
+- Automatic issue Workspace deletion.
 - GitHub Projects board integration.
 - Parsing issue-body dependency syntax.
 
@@ -196,10 +196,10 @@ Symphonika stores both:
 
 ### 4.12 Routine
 
-A Routine is a service-level scheduled prompt declaration that targets one declared Project by name
-(Dispatch Project or Routine Host). Routines are declared in a top-level `routines:` block in
-`symphonika.yml`, not under a Project; see §5.4. A Routine Host owns no routines — Routines point
-*at* it. See ADR 0063.
+A Routine is a service-level scheduled prompt declaration with a globally unique name that targets
+an explicit, non-empty list of declared Projects (Dispatch Projects or Routine Hosts). Routines are
+declared in a top-level `routines:` block in `symphonika.yml`, not under a Project; see §5.4. A
+Routine Host owns no routines — Routines point *at* it. See ADR 0069.
 
 Symphonika supports hand-authored Markdown routine files with YAML front matter:
 
@@ -207,16 +207,11 @@ Symphonika supports hand-authored Markdown routine files with YAML front matter:
 - exactly one schedule shape: `schedule.at` or `schedule.cron` with optional `schedule.tz`
 - `kind: report` or `kind: git`
 - optional `provider`
+- optional `model` and `effort` provider settings
+- optional `permission_mode: bypass`
+- optional positive `timeout_minutes`
 - optional `catch_up: fire_once_if_missed` (omitted means missed clock events are skipped)
 - optional `allow_overlap: true` (omitted means overlapping firings are skipped)
-- optional `model`, `effort`, `permission_mode`, `timeout_minutes` — per-routine provider tuning and
-  a wall-clock firing deadline. Each falls back to the service-level `routine_defaults:` block
-  (§5.1), then to the provider command as authored (no flag, no timeout). Delivered to the provider
-  via command templating, not argv injection: `providers.<name>.command` may reference `{{model}}`,
-  `{{effort}}`, and `{{permission_mode}}` (see §5.1); a routine that declares `model` or `effort`
-  its resolved provider's command never references is a declaration-load error (§5.4).
-  `permission_mode` is exempt from this check — every provider already independently enforces bypass
-  permissions, so an untemplated `permission_mode` is redundant, not silently ignored. See ADR 0067.
 
 Recurring schedules use five-field POSIX cron. They accept the `hourly`, `daily`, `weekly`,
 `monthly`, and `yearly` aliases with or without an `@` prefix. `schedule.tz` defaults to `Etc/UTC`.
@@ -224,30 +219,63 @@ Aliases are expanded during validation without rewriting the declaration file.
 
 The Markdown body is the routine prompt template. `name` must be safe as a single workspace path
 segment because routine firing workspaces live under `<workspace.root>/routines/<name>/<firing-id>/`.
-Routine names are globally unique across the `routines:` block. Routine states are `active`,
-`expired`, and `inactive`. `inactive` means the Routine's target Project is disabled or omitted from
-the current valid Service Config snapshot (ADR 0021 cascade); the row remains durable but is hidden
-from default operator listings. Routine-level scheduling control also uses `disabled` and `invalid`
-as defined in §8.5.
+Routine names are globally unique across the `routines:` block. One declaration materializes a
+**Routine Target** row for each named Project, keyed `(project_name, name)`. Target states are
+`active`, `expired`, and `inactive`. `inactive` means that target's Project is disabled or omitted
+from the current valid Service Config snapshot (ADR 0021 cascade); the row remains durable but is
+hidden from default operator listings while sibling targets keep running. Routine-level scheduling
+control also uses `disabled` and `invalid` as defined in §8.5.
 
 ### 4.13 Routine Firing
 
-A Routine Firing is one durable execution of a Routine. It records the Routine, its target Project,
-provider, workspace path, prompt evidence, provider logs, terminal reason, lifecycle state, and any
-pull requests discovered from a `kind: git` firing branch. A one-shot `schedule.at` Routine becomes
-`expired` after its firing is claimed and must not fire again on daemon restart. A recurring Routine
-remains active and advances to its next clock event after every firing.
+A **Routine Fan-out** is the durable group for one Routine clock event. It stores a shared
+correlation id and the expected Project targets before work begins. Each target is completed by a
+Routine Firing or a Routine Skip, and the group produces one summary only after every target
+completes. Expected membership is immutable after the fan-out is created. A Routine Target
+configured only after that clock event began does not join the existing group; an already-due
+one-shot is consumed as an ungrouped `catch_up_window` skip instead of reopening a delivered
+summary, while a recurring target begins with its next future clock event.
+
+A Routine Firing is one durable execution of a Routine Target. It records the Routine, its target
+Project, fan-out id, provider, nominal scheduled clock time, workspace path, branch name and ref,
+prompt evidence, provider logs, terminal reason, lifecycle state, its canonical Routine Outcome,
+whether its prepared `kind: git` workspace held commits ahead of the configured base branch at
+completion, and any pull requests discovered from a `kind: git` firing branch. The commits-ahead
+signal is independent of the canonical action: a verified GitHub issue or pull-request action may
+legitimately be the Routine Outcome while the workspace still has local commits to protect. The
+Routine Outcome records `status`, `action`, `url`, `title`, `summary`, `verified`, and `source`
+without replacing lifecycle state or terminal reason; see ADR 0068. Its trigger source is
+`scheduled` or `manual`; a scheduled firing carries the fan-out id of the Routine Fan-out it belongs
+to, while a manual firing targets one Routine Target directly and has no fan-out id. A one-shot
+`schedule.at` target becomes `expired` after its firing is claimed and must not fire again on daemon
+restart. A recurring target remains active and advances to its next clock event after every
+scheduled firing. A manual firing does not consume or correspond to a scheduled clock event, so its
+nominal scheduled-time evidence is unknown. New firings persist their deterministic workspace and
+branch plan when claimed, before workspace preparation. Legacy firings that predate scheduled-time
+or branch-identity evidence leave those fields unknown; operator surfaces must not reconstruct
+historical evidence from the claim time or mutable live configuration.
+
+When Routine Workspace Retention reclaims a terminal firing's worktree, the firing keeps its
+historical workspace path and records `workspace_pruned_at`. State-root logs and prompt evidence are
+not part of workspace retention. A firing with persisted commits-ahead evidence is never an
+age-based prune candidate until Symphonika can separately verify durable publication. A planned
+workspace that was never created because preparation failed is treated as already reclaimed when its
+repository cache is also absent or unusable.
+
+A Routine Firing with an effective `timeout_minutes` has an absolute wall-clock deadline beginning
+when execution of the claimed firing starts. Exceeding it terminates the provider process tree and
+records `state = failed` with `terminal_reason = "firing_timeout"`. This declared deadline is
+independent of Watchdog progress-liveness: useful progress does not extend it.
 
 A clock event skipped for catch-up policy, overlap, or a concurrency cap is not a Routine Firing:
 no `routine_firings` row is created. The Routine instead records `last_attempted_at`,
 `last_skip_reason`, and `last_skip_at`, together with rolling 24-hour counts for each skip reason.
 
-A Firing whose declared `timeout_minutes` elapses is terminated (the whole provider process group,
-reusing the same kill mechanism as operator cancellation) and completes as `state: failed` with the
-distinct `terminal_reason: firing_timeout` — never the generic `cancelled`/`process_exit_*` reasons
-another cancel or ordinary exit produces. This bounds only the provider's execution window, not
-workspace preparation; it is a declared deadline, complementary to (not a duplicate of) the Watchdog's
-progress-liveness check (ADR 0054), which does not observe Routine Firings at all. See §8.5.
+### 4.14 Notification Sink
+
+A Notification Sink is a transport-neutral delivery boundary for a rendered subject, plain-text
+body, and HTML alternative. SMTP is the first sink. Routine Firing policy and rendering remain
+outside the transport so later issue-Run and daemon-health notification sources can reuse it.
 
 ## 5. Config Files
 
@@ -308,12 +336,12 @@ watchdog:
   sample_interval_seconds: 60
   mtime_ignore: []
 
-# Service-level fallback for per-routine model/effort/permission_mode/
-# timeout_minutes; a routine's own front matter wins per-field. See §4.12,
-# §5.4, ADR 0067.
-routine_defaults:
-  permission_mode: bypass
-  timeout_minutes: 60
+retention:
+  routine_workspaces:
+    enabled: true
+    succeeded_days: 1
+    failed_days: 14
+    cancelled_days: 14
 
 pull_requests:
   enabled: true
@@ -325,16 +353,17 @@ pull_requests:
     require_status_success: true
     require_review_decision: false
 
-# Provider commands may reference {{model}}, {{effort}}, {{permission_mode}}
-# — plain tags substitute the resolved value, and {{#tag}}...{{/tag}}
-# sections omit the enclosed text entirely when the field isn't resolved for
-# a given call (an issue Run never resolves these, so sections always
-# collapse to nothing). An unrecognized tag is a declaration-load error.
+# Optional defaults inherited by Routine declarations. A front-matter value
+# wins; if both are omitted, the provider command remains operator-authored.
+routine_defaults:
+  permission_mode: bypass
+  timeout_minutes: 60
+
 providers:
   codex:
-    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never {{#model}}-c model=\"{{model}}\" {{/model}}{{#effort}}-c model_reasoning_effort=\"{{effort}}\" {{/effort}}--dangerously-bypass-approvals-and-sandbox app-server"
+    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
   claude:
-    command: "claude -p {{#model}}--model {{model}} {{/model}}{{#effort}}--effort {{effort}} {{/effort}}--dangerously-skip-permissions --input-format stream-json --output-format stream-json"
+    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"
   omp:
     command: "omp --mode rpc --auto-approve"
 
@@ -378,14 +407,9 @@ projects:
       provider: claude
 
 routines:
-  - project: new-composer-host
-    path: ./daily-report.md
+  - path: ./daily-report.md
+    projects: [symphonika, new-composer-host]
 ```
-
-`daily-report.md`'s front matter may add `model: claude-sonnet-5` and `effort: high` (overriding this
-service config's `routine_defaults:` for this one routine only), inheriting `permission_mode: bypass`
-and `timeout_minutes: 60` from the block above — this is exactly the `new-composer` ptt routine's
-live settings (issue #291 / ADR 0067).
 
 The bootstrap slice must use this final multi-project shape even with one configured Project. The
 intermediate global config written before the first `init-project` invocation intentionally has an
@@ -406,6 +430,12 @@ scope, so a Project can lengthen its grace window but cannot opt into a daemon-d
 Project overrides are part of the defensive Service Config reload snapshot: any invalid value or
 unknown key rejects the candidate snapshot for all Projects and leaves the last known-good snapshot
 live.
+
+Routine Workspace Retention is a service-level policy under `retention.routine_workspaces`.
+Automatic reclamation defaults to enabled. Successful firing workspaces are retained for `1` day;
+failed and cancelled firing workspaces are retained for `14` days. Each day value is a non-negative
+integer. Operators may tune the windows or set `enabled: false`; the manual cleanup command still
+uses the configured windows when automatic reclamation is disabled. See ADR 0067.
 
 ### 5.2 Workflow Contract
 
@@ -465,7 +495,9 @@ Available top-level objects:
 Symphonika prepends a standard autonomy preamble to every rendered workflow prompt.
 
 Routine prompt rendering uses the same strict templating rules and the same standard autonomy
-preamble. For every Routine kind, available top-level objects are:
+preamble, plus a provider-neutral notice that each firing is one-shot, will not be re-invoked, and
+must not schedule background work or depend on a later wake-up. For every Routine kind, available
+top-level objects are:
 
 - `project`
 - `workspace`
@@ -476,6 +508,12 @@ preamble. For every Routine kind, available top-level objects are:
 `kind: git` additionally exposes `branch.name` and `branch.ref`. `branch` is unavailable to
 `kind: report`; `issue` and `run` are unavailable to every Routine kind. Referencing an unavailable
 object fails rendering with terminal reason `prompt_render_error`.
+
+Every rendered Routine prompt also requires a final JSON Routine Outcome Claim with
+`status`, `action`, `url`, `title`, and `summary`. This prompt-level contract applies to every
+provider. Claude additionally receives the same JSON Schema through `--json-schema`, but the
+provider-specific flag is reinforcement rather than the parsing mechanism. A missing, non-JSON, or
+schema-invalid final claim does not fail the firing.
 
 The preamble tells the agent:
 
@@ -488,21 +526,19 @@ The preamble tells the agent:
 - it should use the prepared workspace and issue branch
 - it should operate on the assigned issue unless the workflow says otherwise
 
-Routine prompt rendering additionally appends a routine-only notice — kept separate from the shared
-autonomy preamble above so it does not apply to issue Run prompts, which do support continuation via
-`previousAttemptNotice` — stating that the firing is one-shot, will not be re-invoked, and must run
-verification synchronously to completion rather than in the background. This is provider-neutral
-prose, distinct from the Claude-only `--disallowedTools`/`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`
-guards described in §8.5. See ADR 0067.
-
 ### 5.4 Routine Declarations
 
-The service config defines a top-level `routines:` sequence. Each entry is an object with a required
-`project: <name>` target naming a declared Project (Dispatch Project or Routine Host) and a `path:`
-pointing at a hand-authored Markdown routine file. Paths are resolved relative to the service config
-directory and are re-read on every daemon tick with the rest of the runtime snapshot. Routine names
-are globally unique across the `routines:` block. The per-Project `routines:` key is not supported;
-routines point at Projects by name rather than being owned by them. See ADR 0063.
+The service config defines a top-level `routines:` sequence. Each entry is an object with a `path:`
+pointing at a hand-authored Markdown routine file and a required, non-empty
+`projects: [<name>, ...]` list. Every target names a declared Dispatch Project or Routine Host.
+Targets are explicit: duplicates and wildcard values such as `all` are invalid, so adding a Project
+never expands a Routine's blast radius implicitly. Paths are resolved relative to the service
+config directory and are re-read on every daemon tick with the rest of the runtime snapshot.
+
+Routine names are globally unique across the complete `routines:` block, including declarations
+with different target lists. The per-Project `routines:` key is not supported; routines point at
+Projects by name rather than being owned by them. ADR 0063's transitional singular `project:` form
+is also rejected with a validation error pointing to `projects: [<name>, ...]`. See ADR 0069.
 
 Invalid routine declarations are reported through the same reload-error surface as invalid workflow
 contracts. Unlike a workflow contract or Project-detail error, an invalid routine declaration does
@@ -523,19 +559,47 @@ boolean. Their omitted defaults are missed-event skip and `false`, respectively.
 present, must be a boolean; omitted defaults to `false`. `disabled: true` stops future scheduling
 for that routine on the next reload without affecting an in-flight firing; see §8.4.
 
-`model`, when present, must be a non-empty string. `effort`, when present, must be one of `low`,
-`medium`, `high`, `xhigh`, `max`. `permission_mode`, when present, must be `bypass` — the only value
-any provider currently supports (Claude's protocol validation already hard-requires full-permission
-mode; Codex and OMP already run full-bypass unconditionally). `timeout_minutes`, when present, must
-be a positive integer. Each falls back to the service-level `routine_defaults:` block (§5.1) when
-omitted from the routine's own front matter, then to no value at all (no flag appended, no timeout
-armed). Independently of these per-field checks, reload additionally renders the routine's resolved
-provider command template (§5.1) against its resolved `model`/`effort`/`permission_mode`: an
-unrecognized template tag or malformed section is a declaration-load error, and a routine declaring
-`model` or `effort` its resolved provider's command template never references is also a
-declaration-load error (the field would otherwise be silently inert). `permission_mode` is exempt from
-this last check — its value is already independently enforced by every provider regardless of
-templating, so an untemplated `permission_mode` is redundant rather than inert. See ADR 0067.
+`model` and `effort`, when present, must be non-empty strings. `permission_mode`, when present, must
+be `bypass`, preserving the Full-Permission Agent Execution invariant. `timeout_minutes`, when
+present, must be a finite positive number. Invalid values are deterministic declaration-load
+errors and use the same per-Routine last-known-good reload path as an invalid cron expression.
+
+The Service Config may declare the same optional fields in a top-level `routine_defaults:` mapping.
+Resolution is front matter, then `routine_defaults`, then no override: when neither level supplies a
+value, Symphonika leaves that aspect of the provider command as authored. Defaults are validated as
+Service Config; an invalid defaults mapping rejects the candidate snapshot through the normal
+Service Config last-known-good path.
+
+### 5.5 Email Notifications
+
+The optional service-level `email:` block configures SMTP delivery for terminal Routine Firings:
+
+```yaml
+email:
+  from: "symphonika@example.com"
+  to: "operator@example.com"
+  on: changes
+  smtp_host: "smtp.postmarkapp.com"
+  smtp_security: starttls
+  smtp_port: 587
+  smtp_username: "<postmark-server-token>"
+  smtp_password_env: "SYMPHONIKA_SMTP_PASSWORD"
+```
+
+`from`, `to`, and `smtp_host` are required when the block is present. `on` is `always`, `changes`,
+or `failures` and defaults to `always`. `smtp_security` is `starttls`, `ssl`, or `none` and defaults
+to `starttls`; an omitted `smtp_port` defaults respectively to 587, 465, or 25.
+`smtp_password_env` names an environment variable and defaults to
+`SYMPHONIKA_SMTP_PASSWORD`.
+
+An SMTP username over `smtp_security: none` is invalid unless the host is loopback (`localhost`,
+`127.0.0.1`, or `::1`). Project-level email overrides are not supported. Routine front matter may
+set `notify: false` to opt out entirely; omission defaults to enabled.
+
+For terminal Routine Firings, `always` sends every outcome, including cancellation. `changes` sends
+non-empty `kind: report` provider message output and succeeded `kind: git` firings (whose success
+already proves commits ahead of base). `failures` sends only `state = failed`, not cancellation.
+See ADR 0067.
 
 ## 6. Credentials
 
@@ -546,6 +610,11 @@ GitHub credentials are environment-backed.
 - Literal tokens should not be stored in YAML
 - Tokens must not be stored in SQLite
 - Token-like values must be redacted from logs
+
+SMTP passwords are also environment-backed. Service Config stores only `email.smtp_password_env`,
+never a literal password. The named variable is resolved only for SMTP authentication and its value
+must not be written to SQLite, logs, rendered notification content, or prompt evidence. SMTP
+transport errors are redacted before logging or durable failure recording.
 
 Codex, Claude, and OMP use their native local authentication.
 
@@ -592,6 +661,11 @@ SQLite stores durable orchestration state:
 - raw log file paths
 - routines
 - routine firings
+- canonical Routine Outcomes for terminal firings
+- Routine Firing commits-ahead evidence, independent of canonical Routine Outcome
+- Routine Notification Delivery state and sanitized delivery error
+- Routine Firing workspace-reclamation timestamps
+- Routine Fan-outs, their expected Project targets, and grouped-notification delivery state
 - exact-timestamp Routine skip counters used to compute rolling 24-hour per-reason totals
 
 The run store is not a replacement for GitHub as the canonical tracker. It is durable runtime
@@ -718,13 +792,14 @@ Invalid Projects are disabled. Valid Projects may continue running.
 Existing runs continue by default. Removing a Project from service config marks it inactive rather
 than killing active full-permission agents. Operators can explicitly cancel runs.
 
-Routine rows for Projects disabled or omitted from the current valid Service Config snapshot are
-marked `inactive` and pruned from default operator listings on reload. Historical `routine_firings`
-rows and `last_fired_at` remain durable Run Store evidence. Re-enabling a Project restores its
-configured Routines to `active` or `expired` without re-firing an already-fired one-shot. A one-shot
-Routine whose `at` elapsed while its Project was disabled and that never fired is restored to
-`expired`, not `active`, on re-enable — it does not fire retroactively, mirroring the same guarantee
-a routine-level `disabled` restore gives (§8.5).
+Routine Target rows for Projects disabled or omitted from the current valid Service Config snapshot
+are marked `inactive` and pruned from default operator listings on reload. Other targets of the same
+Routine remain active. Historical `routine_firings` rows and `last_fired_at` remain durable Run
+Store evidence. Re-enabling a Project restores its configured Routine Targets to `active` or
+`expired` without re-firing an already-fired one-shot. A one-shot target whose `at` elapsed while
+its Project was disabled and that never fired is restored to `expired`, not `active`, on re-enable
+— it does not fire retroactively, mirroring the same guarantee a routine-level `disabled` restore
+gives (§8.5).
 
 `inactive` is a Project-cascade state and is distinct from a Routine's own `disabled` or `invalid`
 state (§8.5): a Routine can be `disabled` while its Project stays fully enabled, and `disabled`
@@ -733,7 +808,8 @@ ones.
 
 ### 8.5 Routines
 
-On each daemon tick, Symphonika evaluates loaded active Routines. `ScheduleEvaluator` supports:
+On each daemon tick, Symphonika evaluates loaded active Routine Targets. `ScheduleEvaluator`
+supports:
 
 - `wait_until` when `now < at`
 - `fire_now` when `now >= at` and the Routine has not fired
@@ -741,7 +817,13 @@ On each daemon tick, Symphonika evaluates loaded active Routines. `ScheduleEvalu
 - recurring five-field cron evaluated in the Routine's IANA timezone, returning the next fire time
   strictly after `now`
 
-When a Routine fires, Symphonika allocates a ULID firing id and prepares a workspace at
+When one or more targets for a globally named Routine match the same scheduled clock event,
+Symphonika first creates a durable Routine Fan-out with a shared ULID correlation id and expected
+Project membership. It then admits each target independently against overlap and concurrency gates.
+That membership snapshot remains immutable across re-entrant reloads and notification delivery. A
+later target with the same already-due one-shot timestamp is catch-up-skipped without joining the
+existing fan-out, so one clock event still produces at most one grouped summary.
+For every admitted target, Symphonika allocates a ULID firing id and prepares a workspace at
 `<workspace.root>/routines/<routine-name>/<firing-id>/`. A `kind: report` workspace is detached at
 the Project base branch. A `kind: git` workspace is checked out on
 `sym/<project>/routine/<routine-name>/<first-10-firing-id-chars>`, created from the Project base.
@@ -751,6 +833,16 @@ row. One-shot Routines become `expired`; recurring Routines remain active and at
 clock event visible. Routine Firings use states `queued`, `preparing_workspace`, `running`,
 `succeeded`, `failed`, and `cancelled`.
 
+When `timeout_minutes` is effective, one absolute deadline bounds how long the dispatcher waits
+on workspace preparation, provider validation, provider streaming, and terminal outcome
+classification, and completes the firing as `failed` with `terminal_reason = "firing_timeout"`
+rather than classifying the cancellation-produced exit event as `process_exit_*` or `cancelled`.
+Once a provider process exists, expiry invokes the provider's cancellation path, which stops the
+full process group (ADR 0064 / #341) and preserves workspace and logs. Expiry during workspace
+preparation does not cancel the in-flight `git` subprocesses: the dispatcher stops waiting on
+`prepareRoutineWorkspace`, but the abandoned clone/fetch keeps running and can delay a later
+firing that shares the same per-project repository cache (tracked in #353).
+
 For `kind: report`, provider exit code 0 succeeds without requiring commits. For `kind: git`, exit
 code 0 applies the same commits-ahead-of-base inspection as §12.1: zero commits fails with
 `no_workspace_changes`, inspection failure fails with `workspace_inspection_failed`, and one or
@@ -758,61 +850,129 @@ more commits succeeds. On the succeeded transition, Symphonika lists every open 
 head is the firing branch and records its PR number and head SHA. Routine PR discovery is
 informational only: it never enters PR Follow-up, review re-dispatch, or auto-merge.
 
+The dispatcher asks every provider for the same Routine Outcome Claim
+`{status, action, url, title, summary}` and parses it only from the final normalized
+`turn_completed` event. When tracker configuration and GitHub reads are available, it snapshots
+repository issues before and after provider execution, bounded to a window sized for a single firing
+rather than the repository's full history; `kind: git` firings also snapshot open pull requests on
+the firing branch. It observes newly opened pull requests, newly opened issues, and issues that
+change to closed, using each issue's own creation/closure timestamp — not mere absence from the
+bounded before-snapshot — to tell an issue created or closed inside the window apart from a
+pre-existing issue merely touched inside it. Issue and pull-request entries are distinguished before
+diffing. A comparison is complete only when every channel relevant to the routine's kind succeeded
+on both reads (issues alone for a report routine; issues and pull requests for a `kind: git`
+routine), so a silently failed channel is never mistaken for "checked and found nothing changed". A
+tracker-less Project skips GitHub observation with an informational log line; unavailable or failed
+optional observation is also non-fatal.
+
+One pure reconciliation step persists a canonical result with `verified` and `source`. An observed
+GitHub action wins over an absent, error, no-action, or commit claim and is sourced to `gh`. A
+claimed PR or issue action is verified only when the same action kind was observed; an unobserved
+claim is retained but marked unverified. A claimed no-action (`none`) is verified only when the
+before/after GitHub comparison completed and found nothing; an unavailable comparison leaves it
+unverified. A successful `kind: git` firing with commits ahead of base can verify or derive a
+`commit` outcome regardless of the claim's own reported status, and this git evidence overrides a
+`none` claim or an unconfirmed pull-request/issue claim that under-reports it so a self-reported
+"nothing to do", an external action no GitHub observation corroborates, or an "error" never
+suppresses the retention signal below. A successful firing with neither claim nor observation records
+`no_action`; it is verified and sourced to `gh` only when the before/after GitHub reads completed,
+otherwise it is unverified and sourced to `symphonika`. Omission alone is not a failure. Failed and
+cancelled firings retain their terminal reason independently of the reconciled outcome.
+
+Every prepared `kind: git` workspace is inspected for commits ahead independently of terminal
+lifecycle classification and the canonical Routine Outcome. Routine Workspace Retention withholds
+every positive inspection from age-based collection, including failed and cancelled firings and
+succeeded firings whose reconciliation correctly selects a verified `pr`, `issue_opened`, or
+`issue_closed` action. Only a verified zero-commits inspection permits age-based collection; an
+inspection failure is unknown and conservatively persists the protection signal. Symphonika does
+not yet persist a separate durable-publication transition, so the conservative v1 behavior retains
+every commits-ahead workspace indefinitely rather than infer publication from an unrelated
+canonical action. A future publication signal or explicit destructive operator override may
+release that protection; age alone must never delete the only copy.
+
+When a pre-signal database first gains commits-ahead evidence, the column addition and backfill are
+atomic. Every historical firing not known to be a `kind: report` firing is conservatively protected;
+subsequent startups do not repeat the backfill and therefore cannot overwrite a newly inspected
+zero. Startup reconciliation similarly protects a prepared `kind: git` workspace when a daemon
+crash prevents the ordinary terminal inspection from running. Because a Routine declaration can
+change kind while its firing is active and the firing row does not retain execution-time kind,
+reconciliation treats every leaked firing with a recorded workspace path as unknown and protected.
+
+After a Routine Firing reaches a terminal state, Symphonika evaluates its Routine notification
+policy. Delivery occurs after `kind: git` PR discovery, uses both plain text and an escaped HTML
+alternative, and includes the canonical outcome as one ptt-style line with action, title, URL, and
+an unverified marker when applicable. The final claim JSON is excluded from report-output content.
+Delivery gets two total attempts within one 30-second orchestration deadline and runs after the
+firing releases its concurrency slot. Delivery failure or timeout never changes the firing state:
+`notification_state = failed` and the final sanitized `notification_error` remain durable. Policy
+or `notify: false` suppression records `notification_state = skipped`; success records `sent`.
+
 On daemon startup, a recurring Routine with `catch_up: fire_once_if_missed` preserves a due
 `next_fire_at` and fires at most once even when the outage spans several clock events. The claim
 then advances `next_fire_at` strictly beyond the current clock. Without the opt-in, startup advances
 past the missed window without firing and records a `catch_up_window` skip. Timezone and DST
 behavior comes from `cron-parser`; the Orchestrator does not implement separate DST rules.
 
-Routine Firings consume the same per-Project and global `max_in_flight` slots as issue Runs. If a
-cap is already full, the daemon records a `concurrency_cap` skip. If an earlier firing of the same
-Routine remains non-terminal, the daemon records an `overlap` skip unless `allow_overlap: true` is
-configured; overlap opt-in does not bypass concurrency caps. Every skip atomically advances the
-clock event, updates the Routine's latest-attempt/skip fields and rolling counter evidence, writes no
-Routine Firing row, and emits `routine.skipped` with `reason`, `routine`, and `scheduled_at` fields.
+Routine Firings consume the same per-Project and global `max_in_flight` slots as issue Runs.
+Fan-out admission is per target rather than atomic: admitted siblings start concurrently, while a
+target whose cap is full records a `concurrency_cap` skip. If an earlier firing of the same Routine
+Target remains non-terminal, that target records an `overlap` skip unless `allow_overlap: true` is
+configured; overlap opt-in does not bypass concurrency caps. A partial group is therefore normal.
+Every skip atomically advances only that target's clock event, updates its latest-attempt/skip
+fields and per-Project rolling counter evidence, completes its fan-out leg, writes no Routine
+Firing row, and emits `routine.skipped` with `reason`, `routine`, and `scheduled_at` fields. A
+skipped one-shot expires rather than remaining due.
+
+A Routine Fan-out is summary-ready only after every expected target is skipped or has a terminal
+firing. Symphonika then claims one durable grouped-notification delivery with a per-Project result
+and subject
+`[ptt] <routine> — <PR count> PR, <issue count> issue, <failure count> failed`. Skips remain visible
+but do not count as failures; failed and cancelled firings do. Delivery failures return to pending
+for retry. Startup releases interrupted delivery claims and existing orphan-firing reconciliation
+makes claimed legs lost across a daemon restart terminal. A pending leg whose Routine Target becomes
+disabled or inactive before it can be claimed is settled as `target_unavailable` without adding a
+skip counter, so configuration changes cannot strand the group. There is no separate
+partial-summary deadline: the firing timeout bounds live provider work, and the summary waits for
+every admitted firing.
+
+`symphonika fire-now <routine>` asks the daemon to claim a manual Routine Firing even when the
+Routine is not due. The manual claim records `trigger_source = "manual"` and otherwise uses the
+normal Routine Firing workspace, provider, evidence, cancellation, overlap, and concurrency paths.
+It does not update the Routine's `next_fire_at`, `last_fired_at`, `last_attempted_at`, or state, so a
+future one-shot or recurring clock event still fires normally. A manual overlap or cap refusal
+creates neither a firing row nor Routine Skip evidence because it did not attempt a clock event.
+
+Manual firing accepts active Routines. It refuses `inactive`, `invalid`, and `expired` Routines with
+their specific state. It also refuses `disabled` by default; `--force` overrides only a
+`disabled_reason = "operator"` Routine declared with `disabled: true`, not a removed declaration or
+a tracker-less-host rejection. Ambiguous names return every Project/Routine candidate and require
+`--project`. `--wait` blocks on the accepted firing id until terminal and exits non-zero for
+`failed` or `cancelled`.
 
 `symphonika cancel <id>` accepts a `run_id` or a Routine Firing id. A non-terminal Routine Firing
 transitions to `cancelled` with `cancel_reason = "operator"`; the provider process is killed and the
-workspace and logs are preserved, matching issue Run cancellation. Cancelling an unknown id or a
-Routine Firing already in a terminal state (`succeeded`, `failed`, `cancelled`) returns a clear
-error and makes no state change.
+workspace and logs are not deleted as part of cancellation, matching issue Run cancellation.
+Routine Workspace Retention may later reclaim the terminal workspace after the cancelled window;
+state-root logs remain. Cancelling an unknown id or a Routine Firing already in a terminal state
+(`succeeded`, `failed`, `cancelled`) returns a clear error and makes no state change.
 
 Graceful daemon shutdown cancels every in-flight Routine Firing through the same provider
 cancellation path before waiting for dispatch work to drain, recording
 `cancel_reason = "daemon_shutdown"`. This is distinct from disabling or removing a Routine while
 the daemon remains active, which does not cancel its in-flight firing.
 
-A third, independent termination path is the per-Routine declared `timeout_minutes` deadline
-(§4.12): a wall-clock timer, armed once the Firing's provider begins running, calls the identical
-cancel path as `symphonika cancel` — killing the whole provider process group — but records
-`cancel_reason = "firing_timeout"` and completes the Firing as `state = failed`,
-`terminal_reason = "firing_timeout"`, not the `cancelled` state an operator or shutdown cancel
-produces. This is a declared deadline, not a liveness check: it fires at N minutes regardless of
-progress, and it bounds only the provider's execution window (workspace preparation is unbounded).
-It is unrelated to and does not touch the Watchdog's progress-liveness reconciliation (ADR 0054),
-which samples only the `runs` table and never observes Routine Firings. If shutdown's
-`cancel_reason = "daemon_shutdown"` reaches a Firing before its timeout would have fired, the
-shutdown reason sticks; a timeout that fires after shutdown has already begun cancelling is a safe
-no-op. See ADR 0067.
-
-For a Claude Routine Firing specifically, every run additionally passes `--disallowedTools
-ScheduleWakeup Monitor CronCreate` and sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child
-environment, unconditionally — closing the schedule-and-wait and `run_in_background` paths that
-would otherwise let the model end its turn expecting a re-invocation that never comes, since a
-Routine Firing is exactly a one-shot headless run. This is Claude-specific and does not apply to
-issue-driven Runs, which do support continuation. See §5.3 for the accompanying provider-neutral
-one-shot prompt notice, and ADR 0067.
-
-A Routine with `disabled: true` in its own front matter transitions to `state = disabled`,
-`disabled_reason = "operator"` on the next reload; future scheduling stops but an in-flight firing
-continues to completion under the snapshot it started with — the daemon never cancels it as a side
-effect of the routine becoming disabled. Removing a Routine's entry from the top-level `routines:`
-block (or its target Project) has the same in-flight-continues behavior, with `disabled_reason =
-"removed_from_config"`. Restoring a Routine — removing `disabled: true` or re-adding its entry —
-un-disables it on the next reload and recomputes `next_fire_at` strictly after the current clock; a
-one-shot Routine whose `at` elapsed while disabled is marked `expired` instead of firing
-retroactively. `catch_up: fire_once_if_missed` does not apply to a routine-level restore — that
-policy is for daemon outage, not deliberate operator disable.
+A Routine with `disabled: true` in its own front matter transitions every Routine Target to
+`state = disabled`, `disabled_reason = "operator"` on the next reload; future scheduling stops but
+in-flight firings continue under the snapshot they started with — the daemon never cancels them as
+a side effect of the Routine becoming disabled. Removing the declaration from the top-level
+`routines:` block likewise soft-disables every target with `disabled_reason =
+"removed_from_config"`. Removing one Project from its `projects:` list soft-disables only that
+target with the same reason, leaving siblings active. Restoring a Routine or target — removing
+`disabled: true`, re-adding the entry, or restoring the target name — un-disables it on the next
+reload and recomputes `next_fire_at` strictly after the current clock; a one-shot target whose `at`
+elapsed while disabled is marked `expired` instead of firing retroactively.
+`catch_up: fire_once_if_missed` does not apply to a routine-level restore — that policy is for
+daemon outage, not deliberate operator disable.
 
 A previously persisted `kind: git` Routine rejected because its Routine Host has no tracker is
 soft-disabled with `disabled_reason = "rejected_tracker_less_host"`. This is distinct from
@@ -834,6 +994,18 @@ last known good value. A Routine with no prior valid declaration — a newly add
 the start — is `state = invalid` and does not fire until a valid reload succeeds. A declaration with
 no parseable `name` field cannot be represented as a `routines` row at all (the table's primary key
 is `(project_name, name)`) and is reported only through the reload-error and `doctor` surfaces.
+
+On every daemon tick, enabled Routine Workspace Retention selects only terminal firings whose
+terminal update time has crossed the configured outcome window and whose persisted commits-ahead
+signal is false. Canonical Routine Outcome does not substitute for this predicate. Reclamation runs
+`git worktree remove --force` followed by `git worktree prune` against the Project cache, so both
+the checkout and its registration are removed; for a `kind: git` firing, reclamation also deletes
+its deterministic local branch (`git branch -D`) from the Project cache, since that branch has no
+other purpose once the worktree is gone. A failed removal remains unmarked and is retried on
+a later tick. The Run Store preserves `workspace_path` and writes `workspace_pruned_at`; no
+state-root provider log, normalized event, or prompt artifact is removed. The manual
+`symphonika prune-workspaces [--dry-run]` command evaluates the same policy even when automatic
+retention is disabled. See ADR 0067.
 
 ## 9. GitHub Tracker Behavior
 
@@ -966,6 +1138,9 @@ Retry or continuation:
 
 Workspace conflicts are deterministic failures unless explicitly resolved by an operator.
 
+Issue Workspaces are not deleted automatically. Terminal Routine Firing workspaces are the narrow
+exception governed by Routine Workspace Retention in §8.5 and ADR 0067.
+
 ## 11. Agent Providers
 
 ### 11.1 Common Provider Interface
@@ -1000,6 +1175,9 @@ Required normalized events:
 - `malformed_event`
 
 Provider adapters must persist raw stream entries and derive normalized events.
+The final `turn_completed` event may include provider-neutral final-result text and structured
+output used to parse a Routine Outcome Claim. Provider-specific event shapes do not escape the
+adapter.
 
 ### 11.3 Full-Permission Execution
 
@@ -1034,6 +1212,15 @@ negotiates protocol v2 chunking when the installed OMP advertises it. See ADR-00
 
 Provider commands may be overridden, but the replacement command must speak the provider adapter's
 expected protocol.
+
+Routine model and effort overrides use append-at-spawn delivery owned by each adapter; the persisted
+operator command is not rewritten. Claude appends `--model` / `--effort`; Codex inserts
+`-c model=...` / `-c model_reasoning_effort=...` before `app-server`; OMP appends `--model` /
+`--thinking`. `permission_mode: bypass` maps to Claude's
+`--dangerously-skip-permissions`; Codex and OMP retain their already-validated full-permission
+startup posture. Claude Routine Firings additionally append
+`--disallowedTools ScheduleWakeup Monitor CronCreate` and set
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child environment.
 
 Future sandboxing, if added, should be outside the provider through host, container, VM, network, or
 credential isolation.
@@ -1341,14 +1528,19 @@ Bootstrap CLI commands:
 - `symphonika init [--yes] [--force]`
 - `symphonika add-routine <name> --project <project> (--schedule <expr> | --at <iso8601>) --kind <git|report> [--provider <codex|claude|omp>] [--tz <iana>] [--config <path>]`
 - `symphonika doctor [--config <path>]`
+- `symphonika test-email [--config <path>]`
 - `symphonika init-project [--config <path>] [--yes] [--force]`
 - `symphonika daemon [--config <path>] [--port <port>]`
 - `symphonika service install [--config <path>] [--force] [--print] [--no-reload]`
 - `symphonika status [--config <path>] [--dashboard] [--watch] [--interval-ms <ms>] [--doctor-ttl-ms <ms>]`
 - `symphonika poll-now [--config <path>]`
+- `symphonika fire-now <routine> [--project <project>] [--force] [--wait] [--config <path>]`
 - `symphonika runs [--config <path>]`
 - `symphonika routines [--config <path>] [--project <project>] [--include-inactive]`
+- `symphonika prune-workspaces [--config <path>] [--dry-run]`
+- `symphonika firings <routine> [--config <path>] [--project <project>] [--limit <n>]`
 - `symphonika show-run <run-id> [--config <path>]`
+- `symphonika show-firing <firing-id> [--config <path>] [--events <n>]`
 - `symphonika cancel <run-id> [--config <path>]`
 - `symphonika clear-stale <project> <issue-number> [--config <path>] --yes`
 
@@ -1370,6 +1562,7 @@ config path and points the operator to `symphonika init`.
   routines targeting a tracker-less Routine Host
 - database path
 - workspace root
+- SMTP password environment-variable availability when authenticated email is configured
 
 `init` writes only the user Service Config and never inspects or mutates a repository or GitHub.
 
@@ -1379,10 +1572,11 @@ after the interactive review or explicit `--yes` selection. In `routine-host` mo
 Workflow Contract and no labels. See §5.1 and ADR 0062.
 
 `add-routine` writes `<cwd>/routines/<name>.md` with validated YAML front matter and a placeholder
-prompt, then registers the declaration as a top-level `routines:` block entry targeting the named
-Project. It preserves the Service Config's YAML comments and key ordering where supported by the
-YAML document parser, refuses missing Projects, unsafe names, duplicate names, invalid schedules,
-and existing target files, and never contacts GitHub or triggers a daemon reload. An unrelated
+prompt, then registers the declaration as a top-level `routines:` block entry with
+`projects: [<named Project>]`. It preserves the Service Config's YAML comments and key ordering
+where supported by the YAML document parser, refuses missing Projects, unsafe names, service-wide
+duplicate names, invalid schedules, and existing target files, and never contacts GitHub or
+triggers a daemon reload. An unrelated
 existing Routine declaration that cannot be loaded does not block registration. If the loader can
 recover a path-safe name from an otherwise-invalid declaration, that name still participates in the
 duplicate-name check; declarations whose names cannot be recovered remain visible through `doctor`.
@@ -1405,12 +1599,31 @@ mtime ages, observed turn-id count, five-minute output-token growth, and `idle_s
 grace remaining when idle. `status` and its dashboard render an idle indicator only for active Runs
 whose latest sample has `idle_since` set.
 
-`routines` lists Routine status per Project with `state`, `next_fire_at`, `last_fired_at`,
-`last_attempted_at`, `last_skip_reason`, `last_skip_at`, rolling 24-hour skip counts per reason, and
-PR numbers discovered for the latest firing. Inactive Routines are hidden by default;
-`--include-inactive` includes them.
+`routines` groups Routine Targets under their globally unique Routine name and target list, then
+shows each Project's `state`, `next_fire_at`, `last_fired_at`, `last_attempted_at`,
+`last_skip_reason`, `last_skip_at`, rolling 24-hour skip counts per reason, and the latest canonical
+Routine Outcome plus PR numbers discovered for the latest firing. Outcome rendering includes action,
+title, URL, and an `(unverified)` marker when applicable. Inactive targets are hidden by default;
+`--include-inactive` includes them. `--project` narrows the grouped view to one target.
+
+`prune-workspaces` reclaims terminal Routine Firing worktrees eligible under the effective
+service-level retention policy. `--dry-run` lists candidates without changing Git registrations,
+directories, or Run Store rows. The command remains available when automatic retention is disabled.
+
+`firings <routine>` lists the Routine's firing history newest first, bounded to 25 rows by default.
+When the name matches current or historical targets in multiple Projects, the command lists every
+candidate and requires `--project`; `--limit` selects another positive bound.
+
+`show-firing <firing-id>` renders the Routine Firing's identity, lifecycle timing, workspace and
+branch identity, deterministic prompt and provider-log paths, terminal/cancellation evidence,
+discovered pull requests, and recent Normalized Event Log entries. `--events` defaults to 25.
+Deterministic artifact paths are rendered even when retention has removed the files.
 
 `clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
+
+`test-email` renders a representative fake Routine Firing and sends it through the configured
+renderer, retry policy, and SMTP sink. It forces delivery regardless of `email.on`, reports the
+configured recipient on success, and reports the final sanitized SMTP failure on error.
 
 ## 14. Local Web UI and API
 
@@ -1435,8 +1648,8 @@ The UI is primarily read-only. It shows:
 - raw log links or content
 - rendered prompt links
 - retry and continuation state
-- routines with firing/attempt timestamps, latest skip evidence, rolling 24-hour skip counts, and
-  discovered PR numbers
+- routines with firing/attempt timestamps, latest Routine Outcome, latest skip evidence, rolling
+  24-hour skip counts, and discovered PR numbers
 - a per-run interactive workflow graph
 
 Operator pages stay server-rendered and primarily read-only, but a page may embed a
@@ -1450,21 +1663,47 @@ instead of a blank canvas — and must not introduce mutating actions beyond the
 below. This narrows — it does not remove — the §2 non-goal: Symphonika still does not ship a
 separate frontend application. See ADR-0056.
 
-The v1 mutating web actions are explicit active-run cancellation and a manual poll-now trigger that
-uses the normal daemon scheduler path.
+The v1 mutating local HTTP API actions are explicit active-run cancellation, a manual poll-now
+trigger that uses the normal daemon scheduler path, and daemon-owned manual Routine firing. The
+server-rendered dashboard exposes only cancellation and poll-now controls; manual Routine firing is
+a CLI/API action (ADR 0067).
 
 The HTTP API exposes `GET /api/routines` with the same Routine status shape as the CLI and
-dashboard, including latest-attempt/skip fields and per-reason `skipCounts24h`. Inactive Routines
-are hidden by default; `?include_inactive=true` includes them, and the
-server-rendered dashboard accepts the same query parameter. `GET /api/routines/:id/firings` returns
-firing history and linked PRs for the named Routine; callers use `?project=<name>` to disambiguate
-the same Routine name across Projects and `?include_inactive=true` to resolve an inactive Routine and
-reach its durable firing history.
+dashboard, including `latestOutcome`, latest-attempt/skip fields, and per-reason `skipCounts24h`.
+Inactive Routines are hidden by default; `?include_inactive=true` includes them, and the
+server-rendered dashboard accepts the same query parameter. Because Routine names are globally
+unique, `GET /api/routines/:id/firings` returns firing history with each canonical `outcome`,
+linked PRs, and `notificationState` / `notificationError` delivery evidence across every target,
+along with the target list. Callers may use `?project=<name>` to narrow the result and
+`?include_inactive=true` to include an inactive target and reach its durable firing history.
+
+`POST /api/routines/:id/fire` claims a manual Routine Firing. The optional `project` query
+parameter disambiguates a target and `force=true` applies the narrow disabled-Routine override from
+§8.5. An accepted request returns HTTP 202 with the queued firing id. State, overlap, cap,
+ambiguity, and availability refusals return a specific error without advancing the Routine clock.
 
 `GET /api/runs/:id` exposes the latest sample as a camel-cased top-level `watchdog` object, including
 the effective `graceMs` and server-computed `graceRemainingMs`. `GET /api/status` adds a `watchdog`
 object to each active Run with `idleSince` and `graceRemainingMs` when idle. When the effective
 Watchdog policy is disabled, both endpoints return exactly `{ "enabled": false }` for that object.
+
+The server-rendered dashboard and `/runs` list surface the same idle/grace state as a small
+"watchdog idle since X (Y remaining)" badge next to the state pill, shown only for active
+(non-terminal) Runs with `idleSince` set. The Run-detail page gains a Watchdog section directly under
+the run-state summary, rendering `last tool_call age`, `workspace mtime age`, `turn_ids observed`,
+`output tokens / 5m`, and (when set) `idle_since` and `grace remaining` — the same fields `show-run`
+exposes. For any Run not in the `running` state — a terminal state (including `terminal_reason =
+"no_progress"`), `queued`, `preparing_workspace`, or `waiting` — all three Progress Signal surfaces
+— `show-run`, `GET /api/runs/:id`, and the Run-detail page — compute ages and grace remaining
+against the Run's last persisted watchdog sample rather than the live clock. A Run's watchdog sample
+only ever advances while it is `running`, so a live clock against any other state's sample is a
+misleading, ever-drifting countdown for data that no longer describes what the Run is currently
+doing — most visibly for a terminated Run revisited days later (a stable, final signal instead of an
+ever-more-negative live countdown), but equally for a retried Run sitting in `preparing_workspace`
+with the prior failed attempt's sample still on record. (`runs.updated_at` is not used for this:
+it can keep advancing after termination for unrelated reasons, e.g. pull-request-discovery polling
+for succeeded Runs.) Both HTTP surfaces read the same `watchdog` object and render nothing (badge
+absent, section hidden) when the effective Watchdog policy is disabled.
 
 For a waiting Run whose tracked PR has unresolved review feedback after the configured dispatch
 cap, `GET /api/runs/:id` also exposes a top-level `pullRequestFollowup` object with
@@ -1496,6 +1735,8 @@ The bootstrap slice is accepted when:
 - durable run state is updated in SQLite
 - a configured recurring `kind: report` Routine fires on its clock tick, records a Routine Firing,
   and exposes its next clock event
+- automatic and manual Routine Workspace Retention reclaim registered terminal worktrees without
+  deleting state-root evidence
 - CLI and local status page show Projects, runs, failures, input-required events, stale state, and
   log links
 
@@ -1503,7 +1744,6 @@ The bootstrap slice is accepted when:
 
 - remote workers
 - external sandboxing
-- workspace cleanup commands
 - stale-claim TTLs
 - GitHub Projects board support
 - webhook-based PR subscriptions

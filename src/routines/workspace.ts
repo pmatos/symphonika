@@ -25,9 +25,11 @@ export type PreparedRoutineWorkspace = {
   workspacePath: string;
 };
 
-export async function prepareRoutineWorkspace(
+export type RoutineWorkspacePathPlan = Omit<PreparedRoutineWorkspace, "reused">;
+
+export function planRoutineWorkspacePaths(
   input: PrepareRoutineWorkspaceInput
-): Promise<PreparedRoutineWorkspace> {
+): RoutineWorkspacePathPlan {
   const workspaceRoot = path.resolve(
     input.configDir,
     input.project.workspace.root
@@ -42,15 +44,26 @@ export async function prepareRoutineWorkspace(
   const baseRef = `refs/remotes/origin/${input.project.workspace.git.base_branch}`;
   const branchName =
     input.kind === "git"
-      ? [
-          "sym",
-          slugifyWorkspaceSegment(input.project.name, "project"),
-          "routine",
-          slugifyWorkspaceSegment(input.routineName, "routine"),
-          input.firingId.slice(0, 10)
-        ].join("/")
+      ? routineFiringBranchName({
+          firingId: input.firingId,
+          projectName: input.project.name,
+          routineName: input.routineName
+        })
       : input.project.workspace.git.base_branch;
   const branchRef = input.kind === "git" ? `refs/heads/${branchName}` : baseRef;
+  return {
+    branchName,
+    branchRef,
+    cachePath,
+    workspacePath
+  };
+}
+
+export async function prepareRoutineWorkspace(
+  input: PrepareRoutineWorkspaceInput
+): Promise<PreparedRoutineWorkspace> {
+  const { branchName, branchRef, cachePath, workspacePath } =
+    planRoutineWorkspacePaths(input);
   await ensureRepositoryCache(input.project, cachePath);
   if (await exists(workspacePath)) {
     return {
@@ -94,6 +107,20 @@ export async function prepareRoutineWorkspace(
     reused: false,
     workspacePath
   };
+}
+
+export function routineFiringBranchName(input: {
+  firingId: string;
+  projectName: string;
+  routineName: string;
+}): string {
+  return [
+    "sym",
+    slugifyWorkspaceSegment(input.projectName, "project"),
+    "routine",
+    slugifyWorkspaceSegment(input.routineName, "routine"),
+    input.firingId.slice(0, 10)
+  ].join("/");
 }
 
 async function exists(filePath: string): Promise<boolean> {

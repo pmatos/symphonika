@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { isMap, isSeq, parseDocument, type YAMLMap } from "yaml";
+import { isMap, isScalar, isSeq, parseDocument, type YAMLMap } from "yaml";
 
 import { loadRoutineDeclaration } from "./declaration-loader.js";
 
@@ -16,9 +16,11 @@ export type AddRoutineConfigResult = {
 };
 
 // Writes service-level routine declarations into the top-level `routines:`
-// block of `symphonika.yml`. Each entry is `{ project: <name>, path: <file> }`.
-// The per-project `routines:` key was removed (ADR 0063); routine names are
-// globally unique across the block.
+// block of `symphonika.yml`. Each entry is
+// `{ projects: [<name>], path: <file> }`. `add-routine --project X` creates a
+// declaration targeting exactly X; operators can extend the explicit list by
+// editing the Service Config. Routine names are globally unique across the
+// block (ADR 0069).
 export class RoutineConfigEditor {
   constructor(private readonly configPath: string) {}
 
@@ -80,7 +82,9 @@ export class RoutineConfigEditor {
     if (routines === undefined) {
       (document.contents as YAMLMap).set(
         "routines",
-        document.createNode([{ path: input.routinePath, project: projectName }])
+        document.createNode([
+          { path: input.routinePath, projects: [projectName] }
+        ])
       );
     } else if (!isSeq(routines)) {
       throw new Error("service config routines must be a sequence");
@@ -90,15 +94,13 @@ export class RoutineConfigEditor {
           throw new Error("service config routines entries must be mappings");
         }
         const existingPath = path.resolve(configDir, readEntryPath(item));
-        const existingProject = readEntryProject(item);
+        const existingProjects = readEntryProjects(item);
         if (existingPath === requestedPath) {
-          if (existingProject === projectName) {
+          if (existingProjects.includes(projectName)) {
             return { changed: false, routineName: declaration.routine.name };
           }
-          // Same file targeted at a different project — refuse rather than
-          // silently leave the wrong target. The operator must edit the block.
           throw new Error(
-            `routine at ${input.routinePath} is already targeted at project "${existingProject}" in the top-level routines block; remove that entry before targeting "${projectName}"`
+            `routine at ${input.routinePath} already exists in the top-level routines block with targets [${existingProjects.join(", ")}]; edit its projects list to change the fan-out`
           );
         }
         const existing = await loadRoutineDeclaration(existingPath);
@@ -112,7 +114,7 @@ export class RoutineConfigEditor {
       routines.add(
         document.createNode({
           path: input.routinePath,
-          project: projectName
+          projects: [projectName]
         })
       );
     }
@@ -127,7 +129,20 @@ function readEntryPath(item: YAMLMap): string {
   return typeof value === "string" ? value : "";
 }
 
-function readEntryProject(item: YAMLMap): string {
-  const value = item.get("project");
-  return typeof value === "string" ? value.trim() : "";
+function readEntryProjects(item: YAMLMap): string[] {
+  const value = item.get("projects", true);
+  if (!isSeq(value)) {
+    throw new Error(
+      "service config routines entry projects must be a sequence"
+    );
+  }
+  return value.items.map((project) => {
+    const name = isScalar(project) ? project.value : undefined;
+    if (typeof name !== "string" || name.trim().length === 0) {
+      throw new Error(
+        "service config routines entry projects must contain non-empty project names"
+      );
+    }
+    return name.trim();
+  });
 }

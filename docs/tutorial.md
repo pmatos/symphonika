@@ -38,8 +38,8 @@ Both mechanisms launch autonomous agents, but their triggers and lifecycles diff
 | Run weekly repository maintenance and open a PR | Routine with `kind: git` |
 
 A Workflow belongs to a Dispatch Project and starts from an issue selected by label filters. A
-Routine is declared at service level, points at either a Dispatch Project or Routine Host, and
-starts from a clock event. Routines are not YAML Workflow states.
+Routine is declared at service level, points at one or more explicit Dispatch Projects or Routine
+Hosts, and starts from a clock event. Routines are not YAML Workflow states.
 
 # Part I: your first issue Run
 
@@ -780,7 +780,8 @@ Useful authoring rules:
 
 ## 18. What a Routine does
 
-A Routine is a service-level scheduled prompt declaration. It points at a Project for:
+A Routine is a service-level scheduled prompt declaration. Its globally unique name can point at
+one or more Projects, each of which supplies:
 
 - a Git repository and base branch;
 - a workspace root; and
@@ -793,8 +794,9 @@ Routine kinds differ:
 | `report` | Detached at the base branch | Provider exits successfully; no commit required | Status summaries, audits, analysis |
 | `git` | Dedicated deterministic branch | Provider exits successfully and commits are ahead of base | Dependency updates, cleanup, generated files |
 
-A Routine may target an existing Dispatch Project. Use a **Routine Host** when a repository should
-run scheduled work but never poll issues.
+A Routine may target existing Dispatch Projects, Routine Hosts, or both. Use a **Routine Host** when
+a repository should run scheduled work but never poll issues. Target lists are always explicit;
+there is no `all` wildcard, so registering a new Project never gives it scheduled work silently.
 
 ## 19. Add a recurring report Routine
 
@@ -821,13 +823,27 @@ The Service Config entry is:
 
 ```yaml
 routines:
-  - project: my-app
-    path: /home/you/dev/my-app/routines/daily-status.md
+  - path: /home/you/dev/my-app/routines/daily-status.md
+    projects: [my-app]
 ```
 
 With the default user config, the Routine file is outside the config directory, so `add-routine`
 registers an absolute path. It uses a `./`-prefixed relative path when the file is inside the
-Service Config directory.
+Service Config directory. `add-routine --project my-app` deliberately creates exactly this
+single-item target list. Add further declared Project names to `projects:` to fan out the same
+Routine:
+
+```yaml
+routines:
+  - path: ~/prompts/refactor-audit.md
+    projects: [s11, rightkey, petovita, jsse, vow, forseti, pewpew]
+```
+
+The declaration file is loaded once and remains Project-independent. One clock event materializes
+one firing per admitted Project, each with its own workspace, branch, logs, and prompt evidence.
+Routine names must be unique across the whole Service Config. The former singular service-level
+`project:` field and nested per-Project `routines:` lists are breaking migration errors; `doctor`
+points them to the `projects: [<name>, ...]` replacement.
 
 Edit the generated Routine file:
 
@@ -992,10 +1008,15 @@ disabled: true
 - Omitted `allow_overlap` is `false`; a clock event is skipped if the previous firing is still
   active.
 - Overlap opt-in does not bypass global or per-Project concurrency caps.
-- `disabled: true` stops future scheduling after reload without cancelling an active firing.
+- `disabled: true` stops every target after reload without cancelling active firings.
 
 Skipped clock events create no firing row, but Routine status records the attempt, reason, time, and
-rolling 24-hour counts.
+rolling 24-hour counts per Project. Fan-out admission is per Project: siblings that have capacity
+run concurrently while a capped or overlapping Project is recorded as skipped. Once every sibling
+is terminal or skipped, Symphonika sends one grouped summary with a per-Project result and a subject
+such as `[ptt] refactor-audit — 3 PR, 0 issue, 1 failed`. The correlation and pending delivery are
+durable across daemon restarts. There is no early partial-summary deadline; the configured firing
+timeout and startup reconciliation bound unfinished provider work.
 
 ## 23. Routine prompt variables
 
@@ -1025,10 +1046,12 @@ symphonika routines --project maintenance-target
 symphonika routines --include-inactive
 ```
 
-The listing includes state, next fire time, last firing and attempt, skip evidence, and discovered
-PR numbers. Routine states include `active`, `expired`, `disabled`, `inactive`, and `invalid`. The
-dashboard and `GET /api/routines/:id/firings?project=<name>` expose firing history. Firing evidence
-is stored under `<state.root>/logs/routines/<firing-id>/`.
+The listing groups all Project targets under one Routine name, then includes each target's state,
+next fire time, last firing and attempt, skip evidence, and discovered PR numbers. Routine Target
+states include `active`, `expired`, `disabled`, `inactive`, and `invalid`. The dashboard and
+`GET /api/routines/:id/firings` expose firing history across all targets;
+`?project=<name>` narrows it to one. Firing evidence is stored under
+`<state.root>/logs/routines/<firing-id>/`.
 
 Cancel an active Routine Firing with the same command used for issue Runs:
 
@@ -1036,7 +1059,31 @@ Cancel an active Routine Firing with the same command used for issue Runs:
 symphonika cancel <firing-id>
 ```
 
-Cancellation kills an active provider but preserves its workspace and logs.
+Cancellation kills an active provider and does not immediately delete its workspace or logs.
+
+Routine Firing workspaces use outcome-aware retention by default:
+
+```yaml
+retention:
+  routine_workspaces:
+    enabled: true
+    succeeded_days: 1
+    failed_days: 14
+    cancelled_days: 14
+```
+
+The daemon automatically reclaims eligible terminal workspaces. It never reclaims a queued,
+preparing, or running firing. Preview or run the same policy manually:
+
+```sh
+symphonika prune-workspaces --dry-run
+symphonika prune-workspaces
+```
+
+Reclamation removes only the registered Git worktree. The firing row keeps the historical workspace
+path and records it as pruned. Provider logs, normalized events, and prompt evidence under
+`<state.root>/logs/routines/<firing-id>/` are untouched; their retention is a separate concern.
+Set `enabled: false` to disable automatic reclamation while keeping the manual command available.
 
 # Part IV: operating and extending the setup
 
@@ -1137,4 +1184,4 @@ Start it with `--port <n>` and pass
 - Review [ADR-0058](./adr/0058-routine-catch-up-overlap-and-skip-accounting.md),
   [ADR-0060](./adr/0060-routine-lifecycle-control.md),
   [ADR-0062](./adr/0062-routine-hosts.md), and
-  [ADR-0063](./adr/0063-service-level-routine-declarations.md) for Routine behavior.
+  [ADR-0069](./adr/0069-service-level-routine-fan-out.md) for Routine behavior.

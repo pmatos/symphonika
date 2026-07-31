@@ -30,23 +30,21 @@ import {
   DEFAULT_GITHUB_ISSUES_API,
   type GitHubIssuesApi
 } from "./issue-polling.js";
+import { emailNotificationConfigSchema } from "./notifications/config.js";
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 import type { AgentProviderName, AgentProviderRegistry } from "./provider.js";
 import { renderProviderCommandTemplate } from "./provider-command-template.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
-import {
-  resolveRoutineExecutionConfig,
-  type RoutineDefaultsConfig
-} from "./reload.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
+import type { RoutineExecutionOverrides } from "./routines/types.js";
 import { userUnitDir } from "./service.js";
 import { resolveStateRoot } from "./state.js";
-import type { ExpandedWorkflow } from "./workflow.js";
+import type { ExpandedWorkflow } from "./workflow/types.js";
 import {
   loadExpandedWorkflow,
   resolveWorkflowFormat,
   validateExpandedWorkflowReferences
-} from "./workflow.js";
+} from "./workflow/fsm-expansion.js";
 
 export { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 
@@ -267,7 +265,7 @@ const agentSchema = z
 
 // Explicitly reject the removed per-project `routines:` key so a legacy config
 // fails loudly with a migration pointer instead of silently stopping firing.
-// See ADR 0063.
+// See ADR 0069.
 function rejectPerProjectRoutines(
   rawProject: unknown,
   ctx: z.RefinementCtx
@@ -280,7 +278,7 @@ function rejectPerProjectRoutines(
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message:
-        "per-project `routines:` was removed; move routine entries to the top-level `routines:` block with a `project:` target (see ADR 0063)",
+        "per-project `routines:` was removed; move routine entries to the top-level `routines:` block with a `projects: [<name>, ...]` target list (see ADR 0069)",
       path: ["routines"]
     });
   }
@@ -346,24 +344,56 @@ const projectSchema = z.union([
 
 const serviceRoutineSchema = z
   .object({
-    project: z.string().trim().min(1),
+    projects: z.array(z.string().trim().min(1)).min(1).optional(),
     path: pathStringSchema
   })
-  .passthrough();
-
-// Service-level fallback for per-routine model/effort/permission_mode/
-// timeout_minutes (issue #291); mirrors reload.ts's routineDefaultsSchema.
-const routineDefaultsSchema = z
-  .object({
-    model: z.string().trim().min(1).optional(),
-    effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
-    permission_mode: z.literal("bypass").optional(),
-    timeout_minutes: z.number().int().positive().optional()
+  .passthrough()
+  .superRefine((entry, ctx) => {
+    if ("project" in entry) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "service-level `project:` was replaced by the explicit `projects: [<name>, ...]` target list (see ADR 0069)",
+        path: ["project"]
+      });
+    }
+    if (entry.projects === undefined) {
+      if (!("project" in entry)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "an explicit non-empty `projects: [<name>, ...]` target list is required",
+          path: ["projects"]
+        });
+      }
+      return;
+    }
+    const seen = new Set<string>();
+    for (const [index, projectName] of entry.projects.entries()) {
+      if (seen.has(projectName)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `duplicate target project "${projectName}"`,
+          path: ["projects", index]
+        });
+      }
+      seen.add(projectName);
+    }
   })
-  .passthrough();
+  .transform((entry) => ({ ...entry, projects: entry.projects! }));
+
+const routineExecutionDefaultsSchema = z
+  .object({
+    effort: z.string().trim().min(1).optional(),
+    model: z.string().trim().min(1).optional(),
+    permission_mode: z.literal("bypass").optional(),
+    timeout_minutes: z.number().positive().optional()
+  })
+  .strict();
 
 const serviceConfigSchema = z
   .object({
+    email: emailNotificationConfigSchema.optional(),
     state: z
       .object({
         root: pathStringSchema.optional()
@@ -383,8 +413,8 @@ const serviceConfigSchema = z
         omp: providerCommandSchema.optional()
       })
       .passthrough(),
+    routine_defaults: routineExecutionDefaultsSchema.optional(),
     routines: z.array(serviceRoutineSchema).optional(),
-    routine_defaults: routineDefaultsSchema.optional(),
     projects: z.array(projectSchema).min(1)
   })
   .passthrough();
@@ -421,6 +451,16 @@ export async function runDoctor(
   const parsedConfig = parseServiceConfig(rawConfig, errors);
   if (parsedConfig === undefined) {
     return report(configPath, errors, projects, warnings);
+  }
+
+  const email = parsedConfig.email;
+  if (
+    email?.smtpUsername !== undefined &&
+    (env[email.smtpPasswordEnv]?.trim().length ?? 0) === 0
+  ) {
+    errors.push(
+      `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . /path/to/symphonika.env; set +a)`
+    );
   }
 
   for (const project of parsedConfig.projects) {
@@ -474,7 +514,7 @@ export async function runDoctor(
   errors.push(
     ...(await validateServiceRoutines(
       (parsedConfig.routines ?? []).map((entry) => ({
-        projectName: entry.project,
+        projectNames: entry.projects,
         sourcePath: path.resolve(path.dirname(configPath), entry.path)
       })),
       parsedConfig.projects,
@@ -614,27 +654,30 @@ async function readFileIfExists(filePath: string): Promise<string | undefined> {
 }
 
 function routineDefaultsFromParsed(
-  raw: z.infer<typeof routineDefaultsSchema> | undefined
-): RoutineDefaultsConfig {
+  raw: z.infer<typeof routineExecutionDefaultsSchema> | undefined
+): RoutineExecutionOverrides {
+  if (raw === undefined) {
+    return {};
+  }
   return {
-    ...(raw?.model === undefined ? {} : { model: raw.model }),
-    ...(raw?.effort === undefined ? {} : { effort: raw.effort }),
-    ...(raw?.permission_mode === undefined
+    ...(raw.model === undefined ? {} : { model: raw.model }),
+    ...(raw.effort === undefined ? {} : { effort: raw.effort }),
+    ...(raw.permission_mode === undefined
       ? {}
       : { permissionMode: raw.permission_mode }),
-    ...(raw?.timeout_minutes === undefined
+    ...(raw.timeout_minutes === undefined
       ? {}
       : { timeoutMinutes: raw.timeout_minutes })
   };
 }
 
 async function validateServiceRoutines(
-  entries: Array<{ projectName: string; sourcePath: string }>,
+  entries: Array<{ projectNames: string[]; sourcePath: string }>,
   declaredProjects: ProjectConfig[],
   projectReports: DoctorProjectReport[],
   providers: ServiceConfig["providers"],
   agentProviders: AgentProviderRegistry,
-  routineDefaults: RoutineDefaultsConfig
+  routineDefaults: RoutineExecutionOverrides
 ): Promise<string[]> {
   const errors: string[] = [];
   const seenNames = new Map<string, string>();
@@ -663,19 +706,23 @@ async function validateServiceRoutines(
     // simultaneously diagnosable errors. Checking this first means both
     // surface in the same `doctor` pass instead of requiring a
     // fix-and-rerun cycle to find the second one.
-    const isDuplicateTarget =
-      (projectNameCounts.get(entry.projectName) ?? 0) > 1;
-    const declared = isDuplicateTarget
-      ? undefined
-      : declaredProjects.find((p) => p.name === entry.projectName);
-    if (isDuplicateTarget) {
-      errors.push(
-        `routines entry targets project "${entry.projectName}" (declared at ${entry.sourcePath}), but "${entry.projectName}" is declared more than once; routine targets require a unique project name`
-      );
-    } else if (declared === undefined) {
-      errors.push(
-        `routines entry targets project "${entry.projectName}" (declared at ${entry.sourcePath}), but no project with that name is declared`
-      );
+    const declaredTargets = new Map<string, ProjectConfig>();
+    for (const projectName of entry.projectNames) {
+      const isDuplicateTarget = (projectNameCounts.get(projectName) ?? 0) > 1;
+      const declared = isDuplicateTarget
+        ? undefined
+        : declaredProjects.find((p) => p.name === projectName);
+      if (isDuplicateTarget) {
+        errors.push(
+          `routines entry targets project "${projectName}" (declared at ${entry.sourcePath}), but "${projectName}" is declared more than once; routine targets require a unique project name`
+        );
+      } else if (declared === undefined) {
+        errors.push(
+          `routines entry targets project "${projectName}" (declared at ${entry.sourcePath}), but no project with that name is declared`
+        );
+      } else {
+        declaredTargets.set(projectName, declared);
+      }
     }
 
     const result = await loadRoutineDeclaration(entry.sourcePath);
@@ -684,7 +731,7 @@ async function validateServiceRoutines(
       // Reserve an invalid declaration's recovered name too — otherwise a
       // later declaration in this pass can legitimately claim the same name
       // while this file remains broken, violating the service-level
-      // global-name uniqueness requirement (ADR 0063).
+      // global-name uniqueness requirement (ADR 0069).
       if (result.partialName !== undefined) {
         const existingForPartialName = seenNames.get(result.partialName);
         if (existingForPartialName !== undefined) {
@@ -719,12 +766,17 @@ async function validateServiceRoutines(
           `routine "${routine.name}" provider ${routine.provider} has no registered adapter`
         );
       } else {
-        const resolved = resolveRoutineExecutionConfig(routineDefaults, {
-          effort: routine.effort ?? null,
-          model: routine.model ?? null,
-          permissionMode: routine.permissionMode ?? null,
-          timeoutMinutes: routine.timeoutMinutes ?? null
-        });
+        const resolved: RoutineExecutionOverrides = {
+          ...routineDefaults,
+          ...(routine.effort === undefined ? {} : { effort: routine.effort }),
+          ...(routine.model === undefined ? {} : { model: routine.model }),
+          ...(routine.permissionMode === undefined
+            ? {}
+            : { permissionMode: routine.permissionMode }),
+          ...(routine.timeoutMinutes === undefined
+            ? {}
+            : { timeoutMinutes: routine.timeoutMinutes })
+        };
         try {
           const { rendered, unreferencedFields } =
             renderProviderCommandTemplate(providerConfig.command, resolved);
@@ -742,27 +794,23 @@ async function validateServiceRoutines(
       }
     }
 
-    if (declared === undefined) {
-      continue;
-    }
-
     // kind: git on a tracker-less Routine Host is a declaration-time error
     // (ADR 0062). Flip the host's validForHosting false so the report is not
     // self-contradictory.
-    const host = hostsByName.get(entry.projectName);
-    if (
-      routine.kind === "git" &&
-      host !== undefined &&
-      host.tracker === undefined
-    ) {
-      errors.push(
-        `routine "${routine.name}" (kind: git) targets routine host "${entry.projectName}" which declares no tracker; a kind: git routine requires a tracker for PR discovery`
-      );
-      const reportEntry = projectReports.find(
-        (p) => p.name === entry.projectName
-      );
-      if (reportEntry !== undefined) {
-        reportEntry.validForHosting = false;
+    for (const projectName of declaredTargets.keys()) {
+      const host = hostsByName.get(projectName);
+      if (
+        routine.kind === "git" &&
+        host !== undefined &&
+        host.tracker === undefined
+      ) {
+        errors.push(
+          `routine "${routine.name}" (kind: git) targets routine host "${projectName}" which declares no tracker; a kind: git routine requires a tracker for PR discovery`
+        );
+        const reportEntry = projectReports.find((p) => p.name === projectName);
+        if (reportEntry !== undefined) {
+          reportEntry.validForHosting = false;
+        }
       }
     }
   }

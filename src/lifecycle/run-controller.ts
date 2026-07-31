@@ -136,6 +136,12 @@ export type RunControllerProjectConfig = {
   // persist a disabled row so a later tracker restoration follows the normal
   // one-shot/cron restore rules. See ADR 0066.
   trackerlessGitRoutines?: TargetedRoutineDeclaration[] | undefined;
+  // Routines whose resolved model/effort the resolved provider's command
+  // template never references (or whose resolved template is malformed).
+  // Persisted rows are soft-disabled with a precise reason so a
+  // still-configured routine is never mistaken for one removed from
+  // routines:, mirroring trackerlessGitRoutines above. See ADR 0067.
+  templateRejectedRoutines?: TargetedRoutineDeclaration[] | undefined;
   watchdog?: { graceMinutes: number } | undefined;
 };
 

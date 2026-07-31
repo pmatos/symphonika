@@ -125,4 +125,48 @@ describe("renderProviderCommandTemplate", () => {
       "claude --model claude-sonnet-5 --permission-mode bypass"
     );
   });
+
+  it("throws ProviderCommandTemplateError for a closing tag that precedes its opener", () => {
+    expect(() =>
+      renderProviderCommandTemplate("claude {{/model}}x{{#model}}", {
+        model: "claude-opus-4-8"
+      })
+    ).toThrow(ProviderCommandTemplateError);
+  });
+
+  it("throws ProviderCommandTemplateError for crossed sections of different fields", () => {
+    expect(() =>
+      renderProviderCommandTemplate(
+        "claude {{#model}}{{#effort}}x{{/model}}{{/effort}}",
+        { model: "claude-opus-4-8", effort: "high" }
+      )
+    ).toThrow(ProviderCommandTemplateError);
+  });
+
+  it("throws ProviderCommandTemplateError for a field section nested inside itself", () => {
+    expect(() =>
+      renderProviderCommandTemplate(
+        "claude {{#model}}{{#model}}x{{/model}}{{/model}}",
+        { model: "claude-opus-4-8" }
+      )
+    ).toThrow(ProviderCommandTemplateError);
+  });
+
+  it("correctly nests one field's section inside a different field's section", () => {
+    const result = renderProviderCommandTemplate(
+      "claude {{#model}}--model {{model}} {{#effort}}--effort {{effort}} {{/effort}}{{/model}}",
+      { model: "claude-sonnet-5", effort: "high" }
+    );
+    expect(result.rendered).toBe(
+      "claude --model claude-sonnet-5 --effort high "
+    );
+  });
+
+  it("drops a nested section when the inner field is absent but the outer field is present", () => {
+    const result = renderProviderCommandTemplate(
+      "claude {{#model}}--model {{model}} {{#effort}}--effort {{effort}} {{/effort}}{{/model}}",
+      { model: "claude-sonnet-5" }
+    );
+    expect(result.rendered).toBe("claude --model claude-sonnet-5 ");
+  });
 });

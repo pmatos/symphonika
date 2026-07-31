@@ -7,7 +7,10 @@ export type RoutineState =
   "active" | "expired" | "inactive" | "disabled" | "invalid";
 
 export type RoutineDisabledReason =
-  "operator" | "removed_from_config" | "rejected_tracker_less_host";
+  | "operator"
+  | "removed_from_config"
+  | "rejected_tracker_less_host"
+  | "rejected_provider_template_mismatch";
 
 export type RoutineFiringState =
   | "queued"

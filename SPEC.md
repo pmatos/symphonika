@@ -578,9 +578,21 @@ Independently of these per-field checks, reload renders the routine's resolved p
 template (§11.3) against its resolved `model`/`effort`: a routine declaring `model` or `effort` its
 resolved provider's command template never references is also a declaration-load error (the field
 would otherwise be silently inert) — checked before the routine attaches, so a template-invalid
-routine is dropped from the snapshot rather than left active with its tuning ignored, mirroring the
-kind:git-on-a-tracker-less-host rejection above it. `permission_mode` is exempt from this check; see
-§11.3.
+routine is never attached with its tuning silently ignored. Unlike a per-field validation error, a
+template-cross-check failure does not retain the routine's last known good declaration: the
+rejection instead mirrors the kind:git-on-a-tracker-less-host rejection above it exactly — a
+previously persisted Routine rejected by this check is soft-disabled with `disabled_reason =
+"rejected_provider_template_mismatch"`, distinct from `removed_from_config`, so a still-configured
+routine is never mistaken for one removed from `routines:`. `permission_mode` is exempt from this
+check; see §11.3.
+
+Independently of both the per-routine checks above, reload also renders every configured
+`providers.<name>.command` unconditionally against empty values, whether or not any routine
+currently resolves to that provider — a provider used only by issue-driven Projects would otherwise
+never have its template rendered at reload time. This check sits at the same tier as a malformed
+`watchdog:` or `routine_defaults:` mapping: a malformed provider command rejects the whole candidate
+snapshot through the normal Service Config last-known-good path, before per-routine attach ever
+runs.
 
 ### 5.5 Email Notifications
 
@@ -1008,6 +1020,13 @@ host's tracker therefore returns the Routine to the normal upsert path and the e
 rules above in every case: a recurring Routine reactivates, while an elapsed one-shot is marked
 `expired` instead of firing retroactively — even when its schedule was edited while rejected or
 inactive. See ADR 0066.
+
+A previously persisted Routine rejected by the model/effort-vs-provider-command-template
+cross-check (§5.4/§11.3) is soft-disabled with `disabled_reason =
+"rejected_provider_template_mismatch"`, following exactly the same distinctness-from-
+`removed_from_config`, `invalidRoutineNames`-exclusion, first-appearance-persistence, and
+restore-on-fix rules as the tracker-less-host rejection immediately above — the two categories share
+the same underlying mechanism, keyed on a different rejection cause. See ADR 0067 amendment.
 
 An invalid Routine declaration on reload does not abort reload for the rest of the fleet (§5.4): the
 daemon logs the error and surfaces it in the operator status surface and `doctor`. A Routine with a

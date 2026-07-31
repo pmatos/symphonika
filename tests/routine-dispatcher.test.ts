@@ -3152,6 +3152,85 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("redacts the SMTP password from a sink-factory construction error before logging it", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    const secret = "smtp-password-that-must-never-leak-from-a-sink-factory";
+    const logger = pino({ enabled: false });
+    const logWarn = vi.spyOn(logger, "warn");
+    const declaration = {
+      kind: "report" as const,
+      name: "legacy-routine",
+      prompt: "Report.",
+      provider: "codex" as const,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/legacy-routine.md"
+    };
+
+    try {
+      runStore.syncRoutines([{ ...declaration, projectName: "alpha" }]);
+      runStore.ensureRoutineFanout({
+        id: "fanout-sink-throws-secret",
+        projectNames: ["alpha"],
+        routineName: "legacy-routine",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.claimRoutineFiring({
+        fanoutId: "fanout-sink-throws-secret",
+        firedAt: "2026-05-22T10:00:01.000Z",
+        firingId: "fire-sink-throws-secret",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "legacy-routine",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.completeRoutineFiring({
+        id: "fire-sink-throws-secret",
+        state: "succeeded"
+      });
+
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: {},
+        configDir: "/tmp",
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        logger,
+        notification: {
+          createSink: () => {
+            throw new Error(`custom sink factory misconfigured: ${secret}`);
+          },
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:05:00.000Z"),
+        projects: new Map(),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(logWarn).toHaveBeenCalledTimes(1);
+      const [logPayload] = logWarn.mock.calls[0]!;
+      expect(JSON.stringify(logPayload)).not.toContain(secret);
+      expect(JSON.stringify(logPayload)).toContain("[REDACTED]");
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("fails a kind: git firing with no commits ahead of base", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

@@ -810,9 +810,17 @@ async function deliverReadyRoutineFanouts(
   } catch (error) {
     // Sink construction is best-effort and must never fail a daemon tick
     // (SPEC.md §5.5); every ready fan-out simply stays pending for the next
-    // tick to retry, exactly like an unconfigured email: block above.
+    // tick to retry, exactly like an unconfigured email: block above. A
+    // custom createSink can echo the SMTP password back in its thrown
+    // error, so redact it the same way a delivery failure already is below
+    // — secretsForEmailConfig tolerates config still being undefined if
+    // resolveConfig() itself is what threw.
+    const message = redactAll(
+      errorMessage(error),
+      secretsForEmailConfig(config, input.env ?? process.env)
+    );
     input.logger?.warn(
-      { err: errorMessage(error) },
+      { err: message },
       "symphonika routine fan-out notification sink construction failed"
     );
     return;

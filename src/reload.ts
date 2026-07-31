@@ -528,6 +528,14 @@ async function loadRuntimeConfigSnapshot(input: {
       );
     }
   }
+  if (errors.length > 0) {
+    // A malformed providers.<name>.command sits at the same Service Config
+    // tier as a malformed watchdog/routine_defaults mapping — reject the
+    // candidate snapshot through the normal last-known-good path (like the
+    // `!parsed.success` branch above) instead of continuing to build and
+    // return a "live" snapshot with an already-invalid provider command.
+    return lastKnownGoodOrNothing(input.previous, errors);
+  }
 
   const pollingProjects: PollingProjectConfig[] = [];
   const dispatchProjects: RuntimeProjectConfig[] = [];
@@ -689,6 +697,7 @@ async function loadRuntimeConfigSnapshot(input: {
         project.mode === "routine_host" && project.tracker === undefined;
       const attached: TargetedRoutineDeclaration[] = [];
       const trackerlessGitRoutines: TargetedRoutineDeclaration[] = [];
+      const templateRejectedRoutines: TargetedRoutineDeclaration[] = [];
       for (const routine of routines) {
         if (needsTracker && routine.kind === "git") {
           const projectIndex = projectIndexByProject.get(project);
@@ -707,7 +716,12 @@ async function loadRuntimeConfigSnapshot(input: {
         // earliest point both routines: and providers:/routine_defaults: are
         // known together. Runs BEFORE attaching, like the tracker-less check
         // above — a template-invalid routine must not fire, so on failure it
-        // is never attached (`continue`s instead).
+        // is never attached. Unlike a bare `continue`, the rejected routine
+        // is tracked separately (mirroring trackerlessGitRoutines) so
+        // syncRoutines can soft-disable it with a dedicated disabled_reason
+        // instead of the generic removed_from_config, which would otherwise
+        // misreport a still-configured-but-rejected routine as removed from
+        // the top-level routines: list entirely (see ADR 0067 amendment).
         const routineProviderName = routine.provider ?? project.agent.provider;
         const routineProviderCommand =
           routineProviderCommandsByName[routineProviderName];
@@ -723,12 +737,14 @@ async function loadRuntimeConfigSnapshot(input: {
                   `routine "${routine.name}" at ${routine.sourcePath} declares ${field}, but providers.${routineProviderName}.command never references it`
                 );
               }
+              templateRejectedRoutines.push(routine);
               continue;
             }
           } catch (error) {
             errors.push(
               `routine "${routine.name}" at ${routine.sourcePath} providers.${routineProviderName}.command is invalid: ${errorMessage(error)}`
             );
+            templateRejectedRoutines.push(routine);
             continue;
           }
         }
@@ -737,6 +753,9 @@ async function loadRuntimeConfigSnapshot(input: {
       project.routines = attached;
       if (trackerlessGitRoutines.length > 0) {
         project.trackerlessGitRoutines = trackerlessGitRoutines;
+      }
+      if (templateRejectedRoutines.length > 0) {
+        project.templateRejectedRoutines = templateRejectedRoutines;
       }
       const invalidNames = invalidNamesByProject.get(projectName) ?? [];
       if (invalidNames.length > 0) {

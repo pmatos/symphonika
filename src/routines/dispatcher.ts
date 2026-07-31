@@ -385,7 +385,8 @@ export async function dispatchDueRoutines(
     if (project.disabled === true) {
       input.runStore.markRoutinesInactiveForProject(project.name, {
         now,
-        trackerlessGitRoutines: project.trackerlessGitRoutines ?? []
+        trackerlessGitRoutines: project.trackerlessGitRoutines ?? [],
+        templateRejectedRoutines: project.templateRejectedRoutines ?? []
       });
       continue;
     }
@@ -444,6 +445,10 @@ export async function dispatchDueRoutines(
     string,
     TargetedRoutineDeclaration[]
   > = {};
+  const templateRejectedRoutinesByProject: Record<
+    string,
+    TargetedRoutineDeclaration[]
+  > = {};
   const syncedProjects: string[] = [];
   for (const project of projects) {
     if (project.disabled === true) {
@@ -460,6 +465,10 @@ export async function dispatchDueRoutines(
       trackerlessGitRoutinesByProject[project.name] =
         project.trackerlessGitRoutines ?? [];
     }
+    if ((project.templateRejectedRoutines ?? []).length > 0) {
+      templateRejectedRoutinesByProject[project.name] =
+        project.templateRejectedRoutines ?? [];
+    }
   }
   input.runStore.syncRoutines(allRoutines, {
     now,
@@ -468,6 +477,7 @@ export async function dispatchDueRoutines(
     projects: syncedProjects,
     protectedNamesByProject,
     trackerlessGitRoutinesByProject,
+    templateRejectedRoutinesByProject,
     recomputeRecurring: input.recomputeSchedulesFromNow === true
   });
   input.runStore.pruneRoutinesForUnknownProjects(

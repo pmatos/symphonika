@@ -908,30 +908,48 @@ async function deliverReadyRoutineFanouts(
         ? {}
         : { timeoutMs: input.notification.timeoutMs })
     });
-    if (outcome.state === "failed") {
-      const error = redactNotificationError(
-        outcome.error,
-        config,
-        input.env ?? process.env
-      );
+    try {
+      if (outcome.state === "failed") {
+        const error = redactNotificationError(
+          outcome.error,
+          config,
+          input.env ?? process.env
+        );
+        input.runStore.completeRoutineFanoutNotification({
+          error,
+          id: claimed.id
+        });
+        input.logger?.warn(
+          {
+            err: error,
+            fanout: claimed.id,
+            routine: claimed.routineName
+          },
+          "symphonika routine fan-out notification failed"
+        );
+        continue;
+      }
       input.runStore.completeRoutineFanoutNotification({
-        error,
-        id: claimed.id
+        id: claimed.id,
+        state: outcome.state
       });
+    } catch (error) {
+      // Delivery-evidence writes are best-effort too (SPEC.md §5.5): a
+      // disk-full or SQLite I/O error here must not abort this tick or its
+      // subsequent issue dispatch. The row is left at 'sending' and
+      // released back to 'pending' by releaseInterruptedRoutineFanoutNotifications
+      // on the next daemon restart, so a message that already sent can be
+      // retried and duplicated — the price of failing open here rather than
+      // aborting orchestration.
       input.logger?.warn(
         {
-          err: error,
+          err: errorMessage(error),
           fanout: claimed.id,
           routine: claimed.routineName
         },
-        "symphonika routine fan-out notification failed"
+        "symphonika routine fan-out notification evidence write failed"
       );
-      continue;
     }
-    input.runStore.completeRoutineFanoutNotification({
-      id: claimed.id,
-      state: outcome.state
-    });
   }
 }
 

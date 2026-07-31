@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { InvalidArgumentError, Command } from "commander";
 import { realpathSync } from "node:fs";
+import { open, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -23,6 +24,7 @@ import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
 import type { InitOptions, InitProvider, InitReport } from "./init.js";
 import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
+import { routineEvidencePaths } from "./routines/evidence.js";
 import { formatRoutineOutcomeLine } from "./routines/outcome.js";
 import type { RoutineKind, RoutineStatus } from "./routines/types.js";
 import { pruneRoutineWorkspaces } from "./routines/workspace-retention.js";
@@ -35,8 +37,8 @@ import {
 import type {
   ListRunsFilter,
   OpenRunStoreOptions,
-  RunDetail,
   ProjectState,
+  RunDetail,
   RunArtifactDescriptor,
   RunState,
   RunStatus,
@@ -1192,6 +1194,81 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     });
 
   program
+    .command("firings")
+    .description("list a routine's firing history")
+    .argument("<routine>", "routine name")
+    .option("--config <path>", "service config path")
+    .option("--project <project>", "filter by project name")
+    .option("--limit <n>", "max rows", parsePositiveInt, 25)
+    .action(
+      (
+        routine: string,
+        options: { config?: string; limit: number; project?: string }
+      ) => {
+        const stateRoot = resolveStateRoot(
+          withConfigPath(options.config)
+        ).stateRoot;
+        const store = openRunStore({ stateRoot });
+        try {
+          const targetProjects =
+            options.project === undefined
+              ? store.listRoutineTargetProjects(routine)
+              : [options.project];
+          if (targetProjects.length > 1) {
+            const candidates = targetProjects
+              .map((projectName) => `${projectName}/${routine}`)
+              .join(", ");
+            const message = `routine ${routine} is ambiguous; candidates: ${candidates}; provide --project`;
+            writeErr(program, `${message}\n`);
+            program.error(message, { exitCode: 1 });
+            return;
+          }
+          const project = targetProjects[0];
+          const firings = store.listRoutineFirings({
+            limit: options.limit,
+            ...(project === undefined ? {} : { project }),
+            routineName: routine
+          });
+          if (firings.length === 0) {
+            writeOut(program, "(no firings)\n");
+            return;
+          }
+          writeOut(
+            program,
+            "id  project  routine  state  provider  scheduled  started  ended  duration\n"
+          );
+          for (const firing of firings) {
+            const transitions = store.listRoutineFiringTransitions(firing.id);
+            const startedAt = transitions.find(
+              (transition) => transition.state === "queued"
+            )?.createdAt;
+            const endedAt = [...transitions]
+              .reverse()
+              .find((transition) =>
+                ["succeeded", "failed", "cancelled"].includes(transition.state)
+              )?.createdAt;
+            writeOut(
+              program,
+              [
+                firing.id,
+                firing.projectName,
+                firing.routineName,
+                firing.state,
+                firing.provider,
+                firing.scheduledAt ?? "-",
+                startedAt ?? "-",
+                endedAt ?? "-",
+                formatFiringDuration(startedAt, endedAt, firing.state)
+              ].join("  ") + "\n"
+            );
+          }
+        } finally {
+          store.close();
+        }
+      }
+    );
+
+  program
     .command("show-run")
     .description("show run detail, attempts, transitions, and recent events")
     .argument("<id>", "run id")
@@ -1308,6 +1385,128 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           const events = store.listProviderEvents(id, {
             limit: options.events
           });
+          writeOut(program, `\nnormalized events (last ${events.length}):\n`);
+          if (events.length === 0) {
+            writeOut(program, "  (no events recorded)\n");
+          }
+          for (const event of events) {
+            const message =
+              typeof event.normalized.message === "string"
+                ? event.normalized.message
+                : JSON.stringify(event.normalized);
+            writeOut(
+              program,
+              `  ${event.sequence}. ${event.type}  ${message}\n`
+            );
+          }
+        } finally {
+          store.close();
+        }
+      }
+    );
+
+  program
+    .command("show-firing")
+    .description("show routine firing detail and recent normalized events")
+    .argument("<id>", "routine firing id")
+    .option("--config <path>", "service config path")
+    .option("--events <n>", "max recent events", parsePositiveInt, 25)
+    .action(
+      async (id: string, options: { config?: string; events: number }) => {
+        const state = resolveStateRoot(withConfigPath(options.config));
+        const store = openRunStore({ stateRoot: state.stateRoot });
+        try {
+          const detail = store.getRoutineFiring(id);
+          if (detail === undefined) {
+            writeErr(program, `routine firing ${id} not found\n`);
+            process.exitCode = 1;
+            program.error(`routine firing ${id} not found`, { exitCode: 1 });
+            return;
+          }
+          const displayDetail = detail;
+          const transitions = store.listRoutineFiringTransitions(id);
+          const startedAt = transitions.find(
+            (transition) => transition.state === "queued"
+          )?.createdAt;
+          const endedAt = [...transitions]
+            .reverse()
+            .find((transition) =>
+              ["succeeded", "failed", "cancelled"].includes(transition.state)
+            )?.createdAt;
+          const evidence = routineEvidencePaths(state.stateRoot, id);
+
+          writeFiringField(program, "id", displayDetail.id);
+          writeFiringField(program, "routine", displayDetail.routineName);
+          writeFiringField(program, "project", displayDetail.projectName);
+          writeFiringField(program, "state", displayDetail.state);
+          writeFiringField(program, "provider", displayDetail.provider);
+          writeFiringField(program, "trigger", displayDetail.triggerSource);
+          writeFiringField(
+            program,
+            "scheduled",
+            displayDetail.scheduledAt ?? "-"
+          );
+          writeFiringField(program, "started", startedAt ?? "-");
+          writeFiringField(program, "ended", endedAt ?? "-");
+          writeFiringField(
+            program,
+            "duration",
+            formatFiringDuration(startedAt, endedAt, displayDetail.state)
+          );
+          writeFiringField(
+            program,
+            "workspace",
+            formatPath(displayDetail.workspacePath)
+          );
+          writeFiringField(
+            program,
+            "branch",
+            formatPath(displayDetail.branchName)
+          );
+          writeFiringField(
+            program,
+            "branch ref",
+            formatPath(displayDetail.branchRef)
+          );
+          writeFiringField(program, "prompt", formatPath(evidence.promptPath));
+          writeFiringField(
+            program,
+            "prompt metadata",
+            formatPath(evidence.promptMetadataPath)
+          );
+          writeFiringField(program, "raw log", formatPath(evidence.rawLogPath));
+          writeFiringField(
+            program,
+            "normalized log",
+            formatPath(evidence.normalizedLogPath)
+          );
+          if (displayDetail.terminalReason !== null) {
+            writeFiringField(program, "terminal", displayDetail.terminalReason);
+          }
+          if (displayDetail.cancelReason !== null) {
+            writeFiringField(
+              program,
+              "cancel reason",
+              displayDetail.cancelReason
+            );
+          }
+          writeFiringField(
+            program,
+            "pull requests",
+            displayDetail.pullRequests.length === 0
+              ? "-"
+              : displayDetail.pullRequests
+                  .map(
+                    (pullRequest) =>
+                      `#${pullRequest.prNumber} ${pullRequest.headSha}`
+                  )
+                  .join(", ")
+          );
+
+          const events = await readRecentRoutineEvents(
+            evidence.normalizedLogPath,
+            options.events
+          );
           writeOut(program, `\nnormalized events (last ${events.length}):\n`);
           if (events.length === 0) {
             writeOut(program, "  (no events recorded)\n");
@@ -2160,6 +2359,104 @@ function parseNonNegativeInt(value: string): number {
 
 function formatPath(value: string): string {
   return value.length === 0 ? "<not yet recorded>" : value;
+}
+
+function writeFiringField(
+  program: Command,
+  label: string,
+  value: string
+): void {
+  writeOut(program, `${`${label}:`.padEnd(17)}${value}\n`);
+}
+
+function formatFiringDuration(
+  startedAt: string | undefined,
+  endedAt: string | undefined,
+  state: string
+): string {
+  if (startedAt === undefined) {
+    return "-";
+  }
+  const startMs = Date.parse(startedAt);
+  const terminal = ["succeeded", "failed", "cancelled"].includes(state);
+  const endMs =
+    endedAt === undefined
+      ? terminal
+        ? Number.NaN
+        : Date.now()
+      : Date.parse(endedAt);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+    return "-";
+  }
+  return formatWatchdogDuration(Math.max(0, endMs - startMs));
+}
+
+type RecentRoutineEvent = {
+  normalized: Record<string, unknown>;
+  sequence: number;
+  type: string;
+};
+
+async function readRecentRoutineEvents(
+  normalizedLogPath: string,
+  limit: number
+): Promise<RecentRoutineEvent[]> {
+  const recentLines: { line: string; sequence: number }[] = [];
+  let nextSlot = 0;
+  let sequence = 0;
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(normalizedLogPath, "r");
+    for await (const line of handle.readLines({ autoClose: false })) {
+      if (line.length === 0) {
+        continue;
+      }
+      sequence += 1;
+      const entry = { line, sequence };
+      if (recentLines.length < limit) {
+        recentLines.push(entry);
+      } else {
+        recentLines[nextSlot] = entry;
+        nextSlot = (nextSlot + 1) % limit;
+      }
+    }
+  } catch {
+    return [];
+  } finally {
+    await handle?.close();
+  }
+
+  const orderedLines =
+    nextSlot === 0
+      ? recentLines
+      : [...recentLines.slice(nextSlot), ...recentLines.slice(0, nextSlot)];
+  return orderedLines.map(({ line, sequence }) => {
+    try {
+      const normalized = JSON.parse(line) as unknown;
+      if (
+        typeof normalized === "object" &&
+        normalized !== null &&
+        "type" in normalized &&
+        typeof normalized.type === "string"
+      ) {
+        return {
+          normalized,
+          sequence,
+          type: normalized.type
+        };
+      }
+    } catch {
+      // Preserve the line position as diagnosable malformed log evidence.
+    }
+    return {
+      normalized: {
+        message: "could not parse normalized event",
+        type: "malformed_event"
+      },
+      sequence,
+      type: "malformed_event"
+    };
+  });
 }
 
 function formatArtifactKinds(artifacts: RunArtifactDescriptor[]): string {

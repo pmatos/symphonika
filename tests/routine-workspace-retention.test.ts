@@ -244,6 +244,154 @@ describe("routine firing workspace retention", () => {
     ).resolves.toBe(false);
   });
 
+  it.each(["missing", "invalid"] as const)(
+    "marks an absent planned workspace reclaimed when its cache is %s",
+    async (cacheState) => {
+      const root = await makeTempRoot();
+      const stateRoot = path.join(root, "state");
+      const workspaceRoot = path.join(root, "workspaces", "alpha");
+      const firingId = `fire-${cacheState}-cache`;
+      const workspacePath = path.join(
+        workspaceRoot,
+        "routines",
+        "daily-report",
+        firingId
+      );
+      if (cacheState === "invalid") {
+        const cachePath = path.join(workspaceRoot, ".cache", "repo.git");
+        await mkdir(cachePath, { recursive: true });
+        await writeFile(path.join(cachePath, "partial-clone"), "not a repo\n");
+      }
+
+      const store = openRunStore({ stateRoot });
+      try {
+        store.syncRoutines([
+          {
+            kind: "report",
+            name: "daily-report",
+            prompt: "Report.",
+            projectName: "alpha",
+            provider: null,
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: "/tmp/daily-report.md"
+          }
+        ]);
+        store.createRoutineFiring({
+          id: firingId,
+          projectName: "alpha",
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName: "daily-report",
+          workspacePath
+        });
+        store.completeRoutineFiring({ id: firingId, state: "failed" });
+
+        const first = await pruneRoutineWorkspaces({
+          now: new Date("2100-01-01T00:00:00.000Z"),
+          policy: {
+            cancelledDays: 0,
+            enabled: true,
+            failedDays: 0,
+            succeededDays: 0
+          },
+          runStore: store
+        });
+
+        expect(first).toEqual({
+          candidates: [{ firingId, workspacePath }],
+          failures: [],
+          pruned: [{ firingId, workspacePath }]
+        });
+        expect(store.getRoutineFiring(firingId)).toMatchObject({
+          workspacePath,
+          workspacePrunedAt: "2100-01-01T00:00:00.000Z"
+        });
+
+        const second = await pruneRoutineWorkspaces({
+          now: new Date("2100-01-02T00:00:00.000Z"),
+          policy: {
+            cancelledDays: 0,
+            enabled: true,
+            failedDays: 0,
+            succeededDays: 0
+          },
+          runStore: store
+        });
+        expect(second).toEqual({
+          candidates: [],
+          failures: [],
+          pruned: []
+        });
+      } finally {
+        store.close();
+      }
+    }
+  );
+
+  it("does not mark an existing planned workspace reclaimed when its cache is invalid", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, "state");
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const firingId = "fire-existing-workspace";
+    const workspacePath = path.join(
+      workspaceRoot,
+      "routines",
+      "daily-report",
+      firingId
+    );
+    const cachePath = path.join(workspaceRoot, ".cache", "repo.git");
+    await mkdir(workspacePath, { recursive: true });
+    await mkdir(cachePath, { recursive: true });
+    await writeFile(path.join(cachePath, "partial-clone"), "not a repo\n");
+
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          projectName: "alpha",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: firingId,
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report",
+        workspacePath
+      });
+      store.completeRoutineFiring({ id: firingId, state: "failed" });
+
+      const report = await pruneRoutineWorkspaces({
+        now: new Date("2100-01-01T00:00:00.000Z"),
+        policy: {
+          cancelledDays: 0,
+          enabled: true,
+          failedDays: 0,
+          succeededDays: 0
+        },
+        runStore: store
+      });
+
+      expect(report.pruned).toEqual([]);
+      expect(report.failures).toEqual([
+        expect.objectContaining({ firingId, workspacePath })
+      ]);
+      expect(store.getRoutineFiring(firingId)).toMatchObject({
+        workspacePath,
+        workspacePrunedAt: null
+      });
+      await expect(access(workspacePath)).resolves.toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
   it("reports a firing as pruned when a concurrent pruner already marked it, instead of dropping it silently", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

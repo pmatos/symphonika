@@ -146,6 +146,8 @@ export type ProjectState = {
 };
 
 export type RoutineFiringStatus = {
+  branchName: string;
+  branchRef: string;
   cancelReason: CancelReason | null;
   cancelRequested: boolean;
   commitsAhead: boolean;
@@ -160,6 +162,7 @@ export type RoutineFiringStatus = {
   providerCommand: string;
   pullRequests: RoutinePullRequestStatus[];
   routineName: string;
+  scheduledAt: string | null;
   state: RoutineFiringState;
   terminalReason: string | null;
   triggerSource: RoutineFiringTriggerSource;
@@ -524,6 +527,8 @@ type RoutineRow = {
 };
 
 type RoutineFiringRow = {
+  branch_name: string | null;
+  branch_ref: string | null;
   cancel_reason: CancelReason | null;
   cancel_requested: number;
   commits_ahead: number;
@@ -543,6 +548,7 @@ type RoutineFiringRow = {
   provider_command: string;
   provider_name: AgentProviderName;
   routine_name: string;
+  scheduled_at: string;
   state: RoutineFiringState;
   terminal_reason: string | null;
   trigger_source: RoutineFiringTriggerSource;
@@ -2189,26 +2195,32 @@ export class RunStore {
   }
 
   createRoutineFiring(input: {
+    branchName?: string;
+    branchRef?: string;
     fanoutId?: string;
     id: string;
     projectName: string;
     providerCommand: string;
     providerName: AgentProviderName;
     routineName: string;
+    scheduledAt?: string | null;
     triggerSource?: RoutineFiringTriggerSource;
+    workspacePath?: string;
   }): void {
     const now = timestamp();
     this.database
       .prepare(
         [
           "insert into routine_firings (",
-          "id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, created_at, updated_at",
+          "id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, branch_name, branch_ref, created_at, updated_at",
           ") values (",
-          "@id, @fanout_id, @project_name, @routine_name, 'queued', @provider_name, @provider_command, @trigger_source, @created_at, @updated_at",
+          "@id, @fanout_id, @project_name, @routine_name, 'queued', @provider_name, @provider_command, @trigger_source, @scheduled_at, @workspace_path, @branch_name, @branch_ref, @created_at, @updated_at",
           ")"
         ].join(" ")
       )
       .run({
+        branch_name: input.branchName ?? null,
+        branch_ref: input.branchRef ?? null,
         created_at: now,
         fanout_id: input.fanoutId ?? null,
         id: input.id,
@@ -2216,13 +2228,17 @@ export class RunStore {
         provider_command: input.providerCommand,
         provider_name: input.providerName,
         routine_name: input.routineName,
+        scheduled_at: input.scheduledAt ?? "",
         trigger_source: input.triggerSource ?? "scheduled",
-        updated_at: now
+        updated_at: now,
+        workspace_path: input.workspacePath ?? null
       });
     this.recordRoutineFiringTransition(input.id, "queued", now);
   }
 
   claimRoutineFiring(input: {
+    branchName?: string;
+    branchRef?: string;
     fanoutId?: string;
     firedAt: string;
     firingId: string;
@@ -2231,15 +2247,31 @@ export class RunStore {
     providerCommand: string;
     providerName: AgentProviderName;
     routineName: string;
+    scheduledAt: string;
+    triggerSource?: RoutineFiringTriggerSource;
+    workspacePath?: string;
   }): boolean {
     const claim = this.database.transaction(() => {
       this.createRoutineFiring({
+        ...(input.branchName === undefined
+          ? {}
+          : { branchName: input.branchName }),
+        ...(input.branchRef === undefined
+          ? {}
+          : { branchRef: input.branchRef }),
         ...(input.fanoutId === undefined ? {} : { fanoutId: input.fanoutId }),
         id: input.firingId,
         projectName: input.projectName,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
-        routineName: input.routineName
+        routineName: input.routineName,
+        scheduledAt: input.scheduledAt,
+        ...(input.triggerSource === undefined
+          ? {}
+          : { triggerSource: input.triggerSource }),
+        ...(input.workspacePath === undefined
+          ? {}
+          : { workspacePath: input.workspacePath })
       });
       const result = this.database
         .prepare(
@@ -2292,12 +2324,15 @@ export class RunStore {
   }
 
   claimManualRoutineFiring(input: {
+    branchName?: string;
+    branchRef?: string;
     firingId: string;
     forceOperatorDisabled?: boolean;
     projectName: string;
     providerCommand: string;
     providerName: AgentProviderName;
     routineName: string;
+    workspacePath?: string;
   }): boolean {
     const claim = this.database.transaction(() => {
       const eligible = this.database
@@ -2318,12 +2353,22 @@ export class RunStore {
         throw new RoutineAlreadyClaimedError();
       }
       this.createRoutineFiring({
+        ...(input.branchName === undefined
+          ? {}
+          : { branchName: input.branchName }),
+        ...(input.branchRef === undefined
+          ? {}
+          : { branchRef: input.branchRef }),
         id: input.firingId,
         projectName: input.projectName,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
         routineName: input.routineName,
-        triggerSource: "manual"
+        scheduledAt: null,
+        triggerSource: "manual",
+        ...(input.workspacePath === undefined
+          ? {}
+          : { workspacePath: input.workspacePath })
       });
     });
     try {
@@ -2406,7 +2451,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings where id = ?"
         ].join(" ")
       )
@@ -2444,6 +2489,8 @@ export class RunStore {
   }
 
   updateRoutineFiringWorkspace(input: {
+    branchName?: string;
+    branchRef?: string;
     id: string;
     normalizedLogPath?: string;
     promptPath?: string;
@@ -2455,6 +2502,8 @@ export class RunStore {
         [
           "update routine_firings set",
           "workspace_path = @workspace_path,",
+          "branch_name = coalesce(@branch_name, branch_name),",
+          "branch_ref = coalesce(@branch_ref, branch_ref),",
           "prompt_path = coalesce(@prompt_path, prompt_path),",
           "raw_log_path = coalesce(@raw_log_path, raw_log_path),",
           "normalized_log_path = coalesce(@normalized_log_path, normalized_log_path),",
@@ -2463,6 +2512,8 @@ export class RunStore {
         ].join(" ")
       )
       .run({
+        branch_name: input.branchName ?? null,
+        branch_ref: input.branchRef ?? null,
         id: input.id,
         normalized_log_path: input.normalizedLogPath ?? null,
         prompt_path: input.promptPath ?? null,
@@ -2473,7 +2524,7 @@ export class RunStore {
   }
 
   listRoutineFirings(
-    filter: { project?: string; routineName?: string } = {}
+    filter: { limit?: number; project?: string; routineName?: string } = {}
   ): RoutineFiringStatus[] {
     const conditions: string[] = [];
     const params: Record<string, unknown> = {};
@@ -2485,15 +2536,20 @@ export class RunStore {
       conditions.push("routine_name = @routine_name");
       params.routine_name = filter.routineName;
     }
+    if (filter.limit !== undefined) {
+      params.limit = Math.max(0, Math.floor(filter.limit));
+    }
     const where =
       conditions.length === 0 ? "" : `where ${conditions.join(" and ")}`;
+    const limit = filter.limit === undefined ? "" : "limit @limit";
     const rows = this.database
       .prepare(
         [
-          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           where,
-          "order by created_at desc, id desc"
+          "order by created_at desc, id desc",
+          limit
         ]
           .filter((part) => part.length > 0)
           .join(" ")
@@ -2505,6 +2561,20 @@ export class RunStore {
     }));
   }
 
+  listRoutineTargetProjects(routineName: string): string[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select project_name from routines where name = @routine_name",
+          "union",
+          "select project_name from routine_firings where routine_name = @routine_name",
+          "order by project_name asc"
+        ].join(" ")
+      )
+      .all({ routine_name: routineName }) as Array<{ project_name: string }>;
+    return rows.map((row) => row.project_name);
+  }
+
   listRoutineWorkspacePruneCandidates(input: {
     cancelledBefore: string;
     failedBefore: string;
@@ -2513,7 +2583,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, workspace_path, workspace_pruned_at, terminal_reason, commits_ahead, trigger_source, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           "where workspace_path is not null and workspace_path <> ''",
           "and workspace_pruned_at is null",
@@ -3722,8 +3792,12 @@ export class RunStore {
         state text not null,
         provider_name text not null,
         provider_command text not null,
+        trigger_source text not null default 'scheduled',
+        scheduled_at text not null,
         workspace_path text,
         workspace_pruned_at text,
+        branch_name text,
+        branch_ref text,
         prompt_path text,
         raw_log_path text,
         normalized_log_path text,
@@ -3738,7 +3812,6 @@ export class RunStore {
         outcome_source text,
         notification_state text,
         notification_error text,
-        trigger_source text not null default 'scheduled',
         cancel_requested integer not null default 0,
         cancel_reason text,
         created_at text not null,
@@ -3848,6 +3921,9 @@ export class RunStore {
         "trigger_source",
         "text not null default 'scheduled'"
       ],
+      ["routine_firings", "scheduled_at", "text not null default ''"],
+      ["routine_firings", "branch_name", "text"],
+      ["routine_firings", "branch_ref", "text"],
       ["routine_firings", "cancel_requested", "integer not null default 0"],
       ["routine_firings", "cancel_reason", "text"],
       ["routine_firings", "notification_state", "text"],
@@ -4364,6 +4440,8 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
 
 function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
   return {
+    branchName: row.branch_name ?? "",
+    branchRef: row.branch_ref ?? "",
     cancelReason: row.cancel_reason ?? null,
     cancelRequested: row.cancel_requested === 1,
     commitsAhead: row.commits_ahead === 1,
@@ -4382,6 +4460,7 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
     providerCommand: row.provider_command,
     pullRequests: [],
     routineName: row.routine_name,
+    scheduledAt: row.scheduled_at.length === 0 ? null : row.scheduled_at,
     state: row.state,
     terminalReason: row.terminal_reason ?? null,
     triggerSource: row.trigger_source,

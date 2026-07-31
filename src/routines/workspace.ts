@@ -25,9 +25,11 @@ export type PreparedRoutineWorkspace = {
   workspacePath: string;
 };
 
-export async function prepareRoutineWorkspace(
+export type RoutineWorkspacePathPlan = Omit<PreparedRoutineWorkspace, "reused">;
+
+export function planRoutineWorkspacePaths(
   input: PrepareRoutineWorkspaceInput
-): Promise<PreparedRoutineWorkspace> {
+): RoutineWorkspacePathPlan {
   const workspaceRoot = path.resolve(
     input.configDir,
     input.project.workspace.root
@@ -49,6 +51,19 @@ export async function prepareRoutineWorkspace(
         })
       : input.project.workspace.git.base_branch;
   const branchRef = input.kind === "git" ? `refs/heads/${branchName}` : baseRef;
+  return {
+    branchName,
+    branchRef,
+    cachePath,
+    workspacePath
+  };
+}
+
+export async function prepareRoutineWorkspace(
+  input: PrepareRoutineWorkspaceInput
+): Promise<PreparedRoutineWorkspace> {
+  const { branchName, branchRef, cachePath, workspacePath } =
+    planRoutineWorkspacePaths(input);
   await ensureRepositoryCache(input.project, cachePath);
   if (await exists(workspacePath)) {
     return {

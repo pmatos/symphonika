@@ -2954,6 +2954,124 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("redacts every fan-out this tick using the config resolved before the delivery loop, not a mid-tick reload", async () => {
+    // deliverRoutineFanoutNotification awaits real delivery, so a Service
+    // Config reload (ADR 0052) can land between two ready fan-outs in the
+    // same tick's loop. Redaction secrets must come from the SAME
+    // once-resolved config that `sink` actually delivers through for the
+    // rest of this tick, not be re-resolved per fan-out.
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    const oldSecret = "smtp-password-active-before-reload";
+    const newSecret = "smtp-password-active-after-reload";
+    const delivered: NotificationMessage[] = [];
+    let reloaded = false;
+    const declaration = {
+      kind: "report" as const,
+      prompt: "Report.",
+      provider: "codex" as const,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/legacy-routine.md"
+    };
+    const legacyFanouts = [
+      {
+        fanoutId: "fanout-a",
+        firingId: "fire-a",
+        projectName: "alpha",
+        routineName: "legacy-a"
+      },
+      {
+        fanoutId: "fanout-b",
+        firingId: "fire-b",
+        projectName: "beta",
+        routineName: "legacy-b"
+      }
+    ];
+
+    try {
+      runStore.syncRoutines(
+        legacyFanouts.map(({ projectName, routineName }) => ({
+          ...declaration,
+          name: routineName,
+          projectName
+        }))
+      );
+      for (const {
+        fanoutId,
+        firingId,
+        projectName,
+        routineName
+      } of legacyFanouts) {
+        runStore.ensureRoutineFanout({
+          id: fanoutId,
+          projectNames: [projectName],
+          routineName,
+          scheduledAt: "2026-05-22T10:00:00.000Z"
+        });
+        runStore.claimRoutineFiring({
+          fanoutId,
+          firedAt: "2026-05-22T10:00:01.000Z",
+          firingId,
+          projectName,
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName,
+          scheduledAt: "2026-05-22T10:00:00.000Z"
+        });
+        runStore.completeRoutineFiring({
+          id: firingId,
+          state: "failed",
+          terminalReason: `provider crashed while holding ${oldSecret}`
+        });
+      }
+
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: {},
+        configDir: "/tmp",
+        env: { SMTP_NEW: newSecret, SMTP_OLD: oldSecret },
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              // Simulate a reload landing after the first fan-out's
+              // delivery, mid-tick, before the second is processed.
+              reloaded = true;
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: reloaded ? "SMTP_NEW" : "SMTP_OLD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:05:00.000Z"),
+        projects: new Map(),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(delivered).toHaveLength(2);
+      for (const message of delivered) {
+        expect(message.text).toContain("[REDACTED]");
+        expect(message.text).not.toContain(oldSecret);
+      }
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("fails a kind: git firing with no commits ahead of base", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

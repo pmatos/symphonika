@@ -804,6 +804,17 @@ async function deliverReadyRoutineFanouts(
     return;
   }
   const sink = input.notification.createSink(config);
+  // Derived from this SAME once-resolved config, not re-resolved per
+  // fan-out: deliverRoutineFanoutNotification below awaits real SMTP I/O
+  // (up to the configured delivery timeout, ADR 0067), so a mid-tick
+  // Service Config reload (ADR 0052) can land between one fan-out's
+  // delivery and the next. Re-resolving here would let a later fan-out's
+  // redaction secret drift from the config `sink` above actually delivers
+  // through for the rest of this tick.
+  const fanoutRedactSecrets = secretsForEmailConfig(
+    config,
+    input.env ?? process.env
+  );
   // notify is uniform across every target of one fan-out (it lives on the
   // shared RoutineDeclaration, materialized identically per project — ADR
   // 0069), so any one target row's value is authoritative for the group.
@@ -844,10 +855,6 @@ async function deliverReadyRoutineFanouts(
     // through a path that didn't have redactSecrets — this PR is the first
     // one to ever actually deliver a rendered fan-out, so redact again
     // before rendering rather than trust the persisted value.
-    const fanoutRedactSecrets = resolveRedactSecrets(
-      input.notification,
-      input.env ?? process.env
-    );
     const redactedFanout =
       fanoutRedactSecrets.length === 0
         ? claimed
@@ -2157,7 +2164,13 @@ function resolveRedactSecrets(
   if (notification === undefined) {
     return [];
   }
-  const config = notification.resolveConfig();
+  return secretsForEmailConfig(notification.resolveConfig(), env);
+}
+
+function secretsForEmailConfig(
+  config: EmailNotificationConfig | undefined,
+  env: NodeJS.ProcessEnv
+): string[] {
   if (config === undefined || config.smtpUsername === undefined) {
     return [];
   }

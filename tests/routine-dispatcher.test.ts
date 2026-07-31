@@ -3231,6 +3231,88 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("keeps the tick alive when persisting a fan-out delivery outcome throws", async () => {
+    // Simulates a disk-full/SQLite I/O error on the evidence write itself,
+    // after the sink has already delivered the summary successfully.
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "legacy-routine",
+      prompt: "Report.",
+      provider: "codex" as const,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/legacy-routine.md"
+    };
+
+    try {
+      runStore.syncRoutines([{ ...declaration, projectName: "alpha" }]);
+      runStore.ensureRoutineFanout({
+        id: "fanout-evidence-throws",
+        projectNames: ["alpha"],
+        routineName: "legacy-routine",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.claimRoutineFiring({
+        fanoutId: "fanout-evidence-throws",
+        firedAt: "2026-05-22T10:00:01.000Z",
+        firingId: "fire-evidence-throws",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "legacy-routine",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.completeRoutineFiring({
+        id: "fire-evidence-throws",
+        state: "succeeded"
+      });
+      vi.spyOn(
+        runStore,
+        "completeRoutineFanoutNotification"
+      ).mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+
+      // If evidence-write failures were not contained, this call itself
+      // would reject and fail the test.
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: {},
+        configDir: "/tmp",
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({ deliver: () => Promise.resolve() }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:05:00.000Z"),
+        projects: new Map(),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      // The row stays at 'sending' — releaseInterruptedRoutineFanoutNotifications
+      // is what recovers it, on the next daemon restart.
+      expect(runStore.getRoutineFanout("fanout-evidence-throws")).toMatchObject(
+        { notificationState: "sending" }
+      );
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("fails a kind: git firing with no commits ahead of base", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

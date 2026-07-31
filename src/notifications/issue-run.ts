@@ -149,9 +149,7 @@ export function shouldNotifyIssueRun(
   );
 }
 
-export function renderIssueRunDigest(
-  runs: readonly RunStatus[]
-): NotificationMessage {
+function renderIssueRunDigest(runs: readonly RunStatus[]): NotificationMessage {
   const title = `${runs.length} terminal issue ${
     runs.length === 1 ? "Run" : "Runs"
   }`;

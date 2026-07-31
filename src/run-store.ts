@@ -150,6 +150,7 @@ export type RoutineFiringStatus = {
   branchRef: string;
   cancelReason: CancelReason | null;
   cancelRequested: boolean;
+  commitsAhead: boolean;
   createdAt: string;
   fanoutId: string | null;
   id: string;
@@ -530,6 +531,7 @@ type RoutineFiringRow = {
   branch_ref: string | null;
   cancel_reason: CancelReason | null;
   cancel_requested: number;
+  commits_ahead: number;
   created_at: string;
   fanout_id: string | null;
   id: string;
@@ -2096,6 +2098,7 @@ export class RunStore {
         [
           "select outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source",
           "from routine_firings where project_name = ? and routine_name = ?",
+          "and outcome_status is not null",
           "order by created_at desc, id desc limit 1"
         ].join(" ")
       )
@@ -2391,6 +2394,7 @@ export class RunStore {
 
   completeRoutineFiring(input: {
     cancelReason?: CancelReason;
+    commitsAhead?: boolean;
     id: string;
     outcome?: RoutineOutcome;
     state: Extract<RoutineFiringState, "succeeded" | "failed" | "cancelled">;
@@ -2411,6 +2415,10 @@ export class RunStore {
           "outcome_summary = @outcome_summary,",
           "outcome_verified = @outcome_verified,",
           "outcome_source = @outcome_source,",
+          "commits_ahead = case",
+          "when @commits_ahead is not null then @commits_ahead",
+          "when @outcome_action = 'commit' and @outcome_verified = 1 then 1",
+          "else commits_ahead end,",
           "cancel_reason = case when cancel_reason = @shutdown_preemptive then cancel_reason else coalesce(@cancel_reason, cancel_reason) end,",
           "workspace_path = coalesce(@workspace_path, workspace_path),",
           "updated_at = @updated_at",
@@ -2419,6 +2427,8 @@ export class RunStore {
       )
       .run({
         cancel_reason: input.cancelReason ?? null,
+        commits_ahead:
+          input.commitsAhead === undefined ? null : Number(input.commitsAhead),
         shutdown_preemptive: SHUTDOWN_PREEMPTIVE_REASON,
         id: input.id,
         outcome_action: input.outcome?.action ?? null,
@@ -2441,7 +2451,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings where id = ?"
         ].join(" ")
       )
@@ -2535,7 +2545,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           where,
           "order by created_at desc, id desc",
@@ -2573,17 +2583,15 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           "where workspace_path is not null and workspace_path <> ''",
           "and workspace_pruned_at is null",
-          // A verified commit-only outcome is the sole retention signal for that
-          // commit (ADR 0068): pruning its workspace on age alone would delete the
-          // only copy, so it is withheld from age-based candidates entirely.
-          // coalesce guards firings with no recorded outcome (most existing rows):
-          // NULL = 'commit' is NULL in SQLite, and `not (NULL and ...)` is also
-          // NULL, which WHERE treats as excluding the row rather than keeping it.
-          "and not (coalesce(outcome_action, '') = 'commit' and coalesce(outcome_verified, 0) = 1)",
+          // Canonical Routine Outcome and local commit evidence are independent:
+          // a verified issue/PR action may legitimately win reconciliation while
+          // the firing branch still contains the only copy of commits. Withhold
+          // every commits-ahead firing until publication is separately verified.
+          "and commits_ahead = 0",
           "and (",
           "(state = 'succeeded' and updated_at <= @succeeded_before)",
           "or (state = 'failed' and updated_at <= @failed_before)",
@@ -3519,6 +3527,9 @@ export class RunStore {
         "update routine_firings set",
         "state = 'failed',",
         "terminal_reason = ?,",
+        "commits_ahead = case",
+        "when workspace_path is not null and workspace_path <> '' then 1",
+        "else commits_ahead end,",
         "updated_at = ?",
         "where id = ?"
       ].join(" ")
@@ -3791,6 +3802,7 @@ export class RunStore {
         raw_log_path text,
         normalized_log_path text,
         terminal_reason text,
+        commits_ahead integer not null default 0,
         outcome_status text,
         outcome_action text,
         outcome_url text,
@@ -3896,6 +3908,7 @@ export class RunStore {
       ["routine_firings", "prompt_path", "text"],
       ["routine_firings", "raw_log_path", "text"],
       ["routine_firings", "normalized_log_path", "text"],
+      ["routine_firings", "commits_ahead", "integer not null default 0"],
       ["routine_firings", "outcome_status", "text"],
       ["routine_firings", "outcome_action", "text"],
       ["routine_firings", "outcome_url", "text"],
@@ -3920,8 +3933,35 @@ export class RunStore {
     ];
 
     const apply = this.database.transaction(() => {
+      let addedCommitsAhead = false;
       for (const [table, column, decl] of additions) {
-        this.ensureColumn(table, column, decl);
+        const added = this.ensureColumn(table, column, decl);
+        if (
+          added &&
+          table === "routine_firings" &&
+          column === "commits_ahead"
+        ) {
+          addedCommitsAhead = true;
+        }
+      }
+
+      if (addedCommitsAhead) {
+        // Rows written before commits_ahead existed were never inspected on
+        // every terminal path. Only a known report routine is a verified
+        // negative; git and unclassifiable historical rows are protected.
+        // Keep this in the column-add transaction so a crash cannot expose
+        // the default zero before the one-time backfill finishes.
+        this.database.exec(`
+          update routine_firings
+          set commits_ahead = 1
+          where not exists (
+            select 1
+            from routines
+            where routines.project_name = routine_firings.project_name
+              and routines.name = routine_firings.routine_name
+              and routines.kind = 'report'
+          );
+        `);
       }
     });
     apply();
@@ -3987,15 +4027,16 @@ export class RunStore {
     apply();
   }
 
-  private ensureColumn(table: string, column: string, decl: string): void {
+  private ensureColumn(table: string, column: string, decl: string): boolean {
     const existing = this.database
       .prepare("select name from pragma_table_info(?)")
       .all(table) as { name: string }[];
     if (existing.some((row) => row.name === column)) {
-      return;
+      return false;
     }
 
     this.database.exec(`alter table ${table} add column ${column} ${decl};`);
+    return true;
   }
 
   private recordRunTransition(
@@ -4403,6 +4444,7 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
     branchRef: row.branch_ref ?? "",
     cancelReason: row.cancel_reason ?? null,
     cancelRequested: row.cancel_requested === 1,
+    commitsAhead: row.commits_ahead === 1,
     createdAt: row.created_at,
     fanoutId: row.fanout_id ?? null,
     id: row.id,

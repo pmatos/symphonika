@@ -23,6 +23,11 @@ export type ClassifiedTerminal = {
   reason: string;
 };
 
+export type WorkspaceCommitInspectionInput = {
+  baseBranch: string;
+  workspacePath: string;
+};
+
 export async function classifyFailure(
   input: ClassifyFailureInput
 ): Promise<ClassifiedTerminal> {
@@ -107,20 +112,7 @@ async function verifyWorkspaceSuccess(
   }
 
   try {
-    const baseRef = `refs/remotes/origin/${workspace.baseBranch}`;
-    const { stdout } = await execFileAsync("git", [
-      "-C",
-      workspace.workspacePath,
-      "rev-list",
-      "--count",
-      `${baseRef}..HEAD`
-    ]);
-    const trimmed = stdout.trim();
-    if (!/^\d+$/.test(trimmed)) {
-      return workspaceInspectionFailed();
-    }
-    const aheadCount = Number(trimmed);
-    if (aheadCount === 0) {
+    if (!(await inspectWorkspaceCommitsAhead(workspace))) {
       return {
         classification: "deterministic",
         kind: "failed",
@@ -134,6 +126,24 @@ async function verifyWorkspaceSuccess(
   } catch {
     return workspaceInspectionFailed();
   }
+}
+
+export async function inspectWorkspaceCommitsAhead(
+  workspace: WorkspaceCommitInspectionInput
+): Promise<boolean> {
+  const baseRef = `refs/remotes/origin/${workspace.baseBranch}`;
+  const { stdout } = await execFileAsync("git", [
+    "-C",
+    workspace.workspacePath,
+    "rev-list",
+    "--count",
+    `${baseRef}..HEAD`
+  ]);
+  const trimmed = stdout.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error(`invalid git rev-list count: ${trimmed}`);
+  }
+  return Number(trimmed) > 0;
 }
 
 function workspaceInspectionFailed(): ClassifiedTerminal {

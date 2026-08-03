@@ -33,7 +33,7 @@
     "@hono/node-server": "^2.0.12",
     "@octokit/rest": "^22.0.1",
     "@types/better-sqlite3": "^7.6.13",
-    "better-sqlite3": "^13.0.1",
+    "better-sqlite3": "^13.0.2",
     "commander": "^15.0.0",
     "cron-parser": "^5.6.2",
     "hono": "^4.12.32",

@@ -25,6 +25,20 @@ Symphony reference spec.
   architecture decision.
 - Do not silently change the upstream `symphony/` submodule unless the task explicitly asks for it.
 
+## Quality Gate
+
+Before opening a PR, run each of these as a separate command (never `&&`-chained):
+
+- `npm run lint`
+- `npm run typecheck`
+- `npm run format:check`
+- `npm test`
+- `npm run build`
+
+`format:check` (prettier) is easy to miss since it's not part of `lint` here — a diff can pass lint
+and typecheck while still failing it. If it flags a file the current change didn't touch, leave that
+file alone; only fix formatting in files the diff already modifies.
+
 ## Agent skills
 
 ### Issue tracker

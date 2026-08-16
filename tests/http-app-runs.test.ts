@@ -2371,6 +2371,44 @@ describe("HTTP app — project detail page (#303)", () => {
     }
   });
 
+  it("shows a blocked Run's terminalReason as its detail, not a blank cell", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.createRun({
+        id: "run-blocked",
+        issue: sampleIssue({ number: 400, title: "Blocked by workflow" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      // Mirrors lifecycle/run-controller.ts's own
+      // `recordTerminalReason(runId, "workflow_terminal_blocked", ...)`
+      // followed by `updateRunState(runId, "blocked")` — a blocked Run's
+      // reason lives in terminalReason, not stateTransitionReason.
+      test.runStore.recordTerminalReason(
+        "run-blocked",
+        "workflow_terminal_blocked",
+        "deterministic"
+      );
+      test.runStore.updateRunState("run-blocked", "blocked");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/projects/alpha")).text();
+
+      expect(body).toContain("Blocked by workflow");
+      expect(body).toContain("workflow_terminal_blocked");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("shows an issue closed since the last poll — a Run but no snapshot row — as terminal", async () => {
     const test = await setup();
     try {

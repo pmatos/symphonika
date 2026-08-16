@@ -27,7 +27,11 @@ import {
   buildWatchdogStatus,
   resolveWatchdogNowMs
 } from "../watchdog-status.js";
-import { buildPullRequestFollowupAttention, registerPages } from "./pages.js";
+import {
+  buildPullRequestFollowupAttention,
+  registerPages,
+  type ScheduledCallback
+} from "./pages.js";
 
 type CancelRunFn = (
   runId: string,
@@ -122,11 +126,7 @@ export type HttpAppOptions = {
   };
   getRuns?: () => RunStatus[];
   getReloadStatus?: () => RuntimeReloadStatus;
-  getScheduled?: () => Array<{
-    dueAt: number;
-    kind: "retry" | "continuation" | "state_advance" | "wait_park";
-    runId: string;
-  }>;
+  getScheduled?: () => ScheduledCallback[];
   getStatusSnapshot?: () => StatusSnapshot;
   getWatchdogConfig?: (
     projectName: string

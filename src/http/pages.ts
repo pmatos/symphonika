@@ -40,6 +40,16 @@ import {
 import type { ExpandedWorkflow } from "../workflow/types.js";
 import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 
+// Shared by RegisterPagesOptions.getScheduled and buildProjectIssueRow's
+// input — one shape, matching HttpAppOptions.getScheduled's own (src/http/
+// app.ts), rather than three independent inline copies of the same four
+// fields.
+export type ScheduledCallback = {
+  dueAt: number;
+  kind: "retry" | "continuation" | "state_advance" | "wait_park";
+  runId: string;
+};
+
 export type RegisterPagesOptions = {
   app: Hono;
   // Per-Slice-2 live cap snapshot; #303's capacity strip. See ADR 0053.
@@ -58,11 +68,7 @@ export type RegisterPagesOptions = {
     maxReviewDispatchesPerPr: number;
   };
   // #303's "retry ETA" detail for a waiting Run.
-  getScheduled?: () => Array<{
-    dueAt: number;
-    kind: "retry" | "continuation" | "state_advance" | "wait_park";
-    runId: string;
-  }>;
+  getScheduled?: () => ScheduledCallback[];
   getStatusSnapshot?: () => StatusSnapshot;
   getWatchdogConfig?: (
     projectName: string
@@ -1395,11 +1401,7 @@ function buildProjectIssueRow(input: {
   projectName: string;
   run: RunStatus | undefined;
   runStore: RunStore;
-  scheduled: Array<{
-    dueAt: number;
-    kind: "retry" | "continuation" | "state_advance" | "wait_park";
-    runId: string;
-  }>;
+  scheduled: ScheduledCallback[];
   snapshot: ProjectIssueSnapshotRow | undefined;
 }): ProjectIssueRow {
   if (input.run !== undefined) {
@@ -1423,7 +1425,11 @@ function buildProjectIssueRow(input: {
             (run.state === "input_required" ? "needs operator input" : ""));
       return { detail, issueNumber: input.issueNumber, pillHtml, title: run.issueTitle };
     }
-    if (bucket === "terminal") {
+    if (bucket === "terminal" || bucket === "blocked") {
+      // A blocked Run's own reason is recorded as its terminalReason (e.g.
+      // "workflow_terminal_blocked" — see recordTerminalReason call sites
+      // in lifecycle/run-controller.ts), the same field a "terminal" Run
+      // uses — not stateTransitionReason, which stays unset on that path.
       const tracked = input.runStore.findTrackedPullRequestByIssue({
         issueNumber: input.issueNumber,
         projectName: input.projectName
@@ -1440,10 +1446,13 @@ function buildProjectIssueRow(input: {
         title: run.issueTitle
       };
     }
-    // "claimed" and "blocked" — both may carry a transition reason, but
-    // neither is one of the AC's four required-reason buckets.
+    // "claimed" (queued/preparing_workspace): no terminalReason exists yet
+    // (the Run hasn't terminated), so fall back to a plain description of
+    // what's happening rather than leaving the AC's required detail blank.
     return {
-      detail: run.stateTransitionReason ?? "",
+      detail:
+        run.stateTransitionReason ??
+        (run.state === "queued" ? "queued for dispatch" : "preparing workspace"),
       issueNumber: input.issueNumber,
       pillHtml,
       title: run.issueTitle
@@ -1470,7 +1479,9 @@ function buildProjectIssueRow(input: {
   const atCap =
     input.maxInFlight !== undefined && input.inFlight >= input.maxInFlight;
   return {
-    detail: atCap ? `queued behind cap (${input.inFlight}/${input.maxInFlight})` : "",
+    detail: atCap
+      ? `queued behind cap (${input.inFlight}/${input.maxInFlight})`
+      : "within cap, next by priority",
     issueNumber: input.issueNumber,
     pillHtml: labelPill("eligible", "neutral"),
     title: snapshot.title

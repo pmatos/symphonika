@@ -133,6 +133,75 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("persists the issue poll snapshot across a daemon restart and renders it as pre-restart evidence on /projects/:name (#303, ADR 0073)", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 40,
+          title: "Survives a restart"
+        }),
+        issueFixture({
+          labels: ["blocked"],
+          number: 41,
+          title: "Filtered before restart"
+        })
+      ])
+    };
+
+    const firstDaemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+    try {
+      const firstBody = await (
+        await fetch(`${firstDaemon.url}/projects/symphonika`)
+      ).text();
+      expect(firstBody).toContain("Survives a restart");
+      expect(firstBody).toContain("Filtered before restart");
+    } finally {
+      await firstDaemon.stop();
+    }
+
+    // Disable the project for the second process: readProjectStateInputs
+    // still writes a project_states row for it (from the raw config parse,
+    // #302's precedent), but pollProject is never called, so this tick
+    // neither touches last_poll_finished_at nor calls
+    // replaceProjectIssueSnapshots — deterministically proving the *first*
+    // process's snapshot is what's still on screen, not a lucky race with
+    // the second process's own first poll.
+    await writeValidProject(root, { disabled: true });
+
+    const secondDaemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: { listOpenIssues: vi.fn().mockResolvedValue([]) },
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+    try {
+      const secondBody = await (
+        await fetch(`${secondDaemon.url}/projects/symphonika`)
+      ).text();
+      // The candidate and filtered rows from the first process are still
+      // rendered — the snapshot survived the restart.
+      expect(secondBody).toContain("Survives a restart");
+      expect(secondBody).toContain("eligible");
+      expect(secondBody).toContain("Filtered before restart");
+      expect(secondBody).toContain("blocked");
+      // The capacity strip's poll age marks this as carried-over state,
+      // not a fresh poll by the current process.
+      expect(secondBody).toContain("(pre-restart)");
+    } finally {
+      await secondDaemon.stop();
+    }
+  });
+
   it("shows a tracker-less Routine Host targeted by a git Routine as invalid on the live dashboard", async () => {
     const root = await makeTempRoot();
     await writeTrackerLessGitRoutineHost(root);
@@ -603,7 +672,7 @@ function issueFixture(overrides: {
 
 async function writeValidProject(
   root: string,
-  options: { pollingIntervalMs?: number } = {}
+  options: { disabled?: boolean; pollingIntervalMs?: number } = {}
 ): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(
@@ -620,7 +689,7 @@ async function writeValidProject(
       '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
       "projects:",
       "  - name: symphonika",
-      "    disabled: false",
+      `    disabled: ${options.disabled === true ? "true" : "false"}`,
       "    weight: 1",
       "    tracker:",
       "      kind: github",

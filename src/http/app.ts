@@ -471,9 +471,15 @@ export function createHttpApp(options: HttpAppOptions): Hono {
 
     registerPages({
       app,
+      ...(options.getConcurrency === undefined
+        ? {}
+        : { getConcurrency: options.getConcurrency }),
       ...(options.getLastTickAtMonotonic === undefined
         ? {}
         : { getLastTickAtMonotonic: options.getLastTickAtMonotonic }),
+      ...(options.getScheduled === undefined
+        ? {}
+        : { getScheduled: options.getScheduled }),
       ...(options.getPollingIntervalMs === undefined
         ? {}
         : { getPollingIntervalMs: options.getPollingIntervalMs }),
@@ -497,6 +503,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       monotonicNow,
       now,
       runStore,
+      startedAtMs,
       version: options.version
     });
   }

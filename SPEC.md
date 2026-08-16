@@ -1773,6 +1773,22 @@ Projects (eligible/in-flight counts, last terminal-run outcome) and a visually s
 Hosts group, since a Routine Host is never polled and never dispatches (ADR-0062). The flat
 "recent runs" list this superseded now lives only at `/runs`. See #302.
 
+Each Project name links to its own drill-in page, `GET /projects/:name`. For a Dispatch Project
+this is a capacity strip — validity, in-flight vs. per-Project cap, global cap, poll age (marked
+`(pre-restart)` when the last successful poll predates the current process), and next poll — over
+one issue-keyed table: a union of the persisted issue poll snapshot (candidate and filtered issues,
+ADR-0073) and this Project's Runs, keyed by issue number. Every row's state pill collapses to
+`eligible`, the Run's own state (`queued`/`preparing_workspace` render as a claimed-but-not-yet-
+running Run, `waiting`/`input_required` as parked, `blocked`, or a terminal RunState), or
+`filtered`; the detail column carries the specific reason — cap pressure for a capped eligible
+issue, the retry/recheck ETA for a waiting Run, the excluded label for a filtered issue, or the
+terminal reason (plus a tracked PR, when one exists) for a terminal Run. An issue closed since the
+last poll — a Run exists but no snapshot row does — still renders, driven entirely by its Run; an
+issue with neither a Run nor a snapshot row does not appear. Below the table, a Routine Firings
+block lists every Firing that has targeted this Project. A Routine Host's page skips the capacity
+strip's poll/cap fields (a Host is never polled) and the issue table entirely, showing only the
+Routine Firings block and an explanation. See #303, ADR-0073.
+
 Operator pages stay server-rendered and primarily read-only, but a page may embed a
 self-contained, client-side interactive visualization to make evidence explorable — for
 example the workflow-graph view at `GET /runs/:id/graph`, which renders a run's expanded FSM

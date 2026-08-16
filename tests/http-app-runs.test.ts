@@ -2131,8 +2131,357 @@ describe("HTTP app — dashboard IA shell (#302)", () => {
       expect(hostsSection).not.toContain("<th>Eligible</th>");
       expect(hostsSection).toContain("<th>In-flight</th>");
       expect(hostsSection).toMatch(
-        /<tr><td>s11-host<\/td><td>.*?<\/td><td>1<\/td><\/tr>/
+        /<tr><td><a href="\/projects\/s11-host">s11-host<\/a><\/td><td>.*?<\/td><td>1<\/td><\/tr>/
       );
+    } finally {
+      test.cleanup();
+    }
+  });
+});
+
+describe("HTTP app — project detail page (#303)", () => {
+  it("404s for an unconfigured Project name", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/projects/nope");
+      expect(response.status).toBe(404);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("renders the capacity strip and every issue-keyed row bucket with its reason, for a Dispatch Project", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            issueNumber: 286,
+            kind: "candidate",
+            priority: 1,
+            reasons: [],
+            title: "Eligible issue"
+          },
+          {
+            issueNumber: 231,
+            kind: "filtered",
+            priority: 1,
+            reasons: ["needs-human"],
+            title: "Filtered issue"
+          }
+        ]
+      });
+
+      test.runStore.createRun({
+        id: "run-running",
+        issue: sampleIssue({ number: 291, title: "Running issue" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-running", "running");
+
+      test.runStore.createRun({
+        id: "run-waiting",
+        issue: sampleIssue({ number: 285, title: "Waiting issue" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-waiting", "waiting");
+
+      test.runStore.createRun({
+        id: "run-blocked",
+        issue: sampleIssue({ number: 279, title: "Blocked issue" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-blocked", "blocked");
+
+      test.runStore.createRun({
+        id: "run-succeeded",
+        issue: sampleIssue({ number: 259, title: "Succeeded issue" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-succeeded", "succeeded");
+      test.runStore.trackPullRequest({
+        branchName: "sym/259",
+        headSha: "abc123",
+        issueNumber: 259,
+        prNumber: 248,
+        prUrl: "https://github.com/pmatos/symphonika/pull/248",
+        projectName: "alpha",
+        runId: "run-succeeded"
+      });
+
+      const app = createHttpApp({
+        getConcurrency: () => ({
+          global: { inFlight: 1, maxInFlight: null },
+          perProject: [
+            { inFlight: 1, maxInFlight: 2, projectName: "alpha" }
+          ]
+        }),
+        getScheduled: () => [
+          {
+            dueAt: Date.now() + 3 * 60_000,
+            kind: "wait_park",
+            runId: "run-waiting"
+          }
+        ],
+        getStatusSnapshot: () => ({
+          configPath: "/tmp/symphonika.yml",
+          doctorErrors: [],
+          issuePolling: {
+            candidateIssues: [],
+            errors: [],
+            filteredIssues: [],
+            projects: []
+          },
+          projectModes: new Map([["alpha", "dispatch"]]),
+          projectStates: test.runStore.listProjectStates(),
+          projects: [],
+          reload: {
+            errors: [],
+            lastAttemptedAt: null,
+            lastLoadedAt: null,
+            ok: true,
+            usingLastKnownGood: false
+          },
+          runs: { active: [], failed: [], recent: [], stale: [] },
+          stateRoot: test.stateRoot
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/projects/alpha")).text();
+
+      // Eligible: a candidate snapshot row with no Run yet.
+      expect(body).toContain("Eligible issue");
+      expect(body).toMatch(/#286[\s\S]{0,200}eligible/);
+      // Filtered: excluded-label reason carried into the detail column.
+      expect(body).toContain("Filtered issue");
+      expect(body).toContain("needs-human");
+      // Running: the Run's own state pill, with an attempt/duration detail.
+      expect(body).toContain("Running issue");
+      expect(body).toContain("attempt 1");
+      // Waiting: retry ETA sourced from the scheduled wait_park callback.
+      expect(body).toContain("Waiting issue");
+      expect(body).toContain("recheck");
+      // Blocked: the Run's own blocked pill.
+      expect(body).toContain("Blocked issue");
+      // Terminal: succeeded, with the tracked PR surfaced in the detail.
+      expect(body).toContain("Succeeded issue");
+      expect(body).toContain("PR #248 open");
+      // The capacity strip is present and load-bearing.
+      expect(body).toContain('class="capacity-strip"');
+      expect(body).toContain("1/2");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows a capped Project's eligible issue as capped, not idle", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            issueNumber: 300,
+            kind: "candidate",
+            priority: 1,
+            reasons: [],
+            title: "Blocked behind cap"
+          }
+        ]
+      });
+      test.runStore.createRun({
+        id: "run-a",
+        issue: sampleIssue({ number: 1 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-a", "running");
+      test.runStore.createRun({
+        id: "run-b",
+        issue: sampleIssue({ number: 2 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-b", "running");
+
+      const app = createHttpApp({
+        getConcurrency: () => ({
+          global: { inFlight: 2, maxInFlight: null },
+          perProject: [
+            { inFlight: 2, maxInFlight: 2, projectName: "alpha" }
+          ]
+        }),
+        getStatusSnapshot: () => ({
+          configPath: "/tmp/symphonika.yml",
+          doctorErrors: [],
+          issuePolling: {
+            candidateIssues: [],
+            errors: [],
+            filteredIssues: [],
+            projects: []
+          },
+          projectModes: new Map([["alpha", "dispatch"]]),
+          projectStates: test.runStore.listProjectStates(),
+          projects: [],
+          reload: {
+            errors: [],
+            lastAttemptedAt: null,
+            lastLoadedAt: null,
+            ok: true,
+            usingLastKnownGood: false
+          },
+          runs: { active: [], failed: [], recent: [], stale: [] },
+          stateRoot: test.stateRoot
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/projects/alpha")).text();
+
+      expect(body).toContain("queued behind cap (2/2)");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows an issue closed since the last poll — a Run but no snapshot row — as terminal", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      // No replaceProjectIssueSnapshots call: this issue never has a
+      // snapshot row, matching "closed since the last poll."
+      test.runStore.createRun({
+        id: "run-closed",
+        issue: sampleIssue({ number: 900, title: "Closed since last poll" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-closed", "succeeded");
+
+      const app = createHttpApp({
+        getStatusSnapshot: () => ({
+          configPath: "/tmp/symphonika.yml",
+          doctorErrors: [],
+          issuePolling: {
+            candidateIssues: [],
+            errors: [],
+            filteredIssues: [],
+            projects: []
+          },
+          projectModes: new Map([["alpha", "dispatch"]]),
+          projectStates: test.runStore.listProjectStates(),
+          projects: [],
+          reload: {
+            errors: [],
+            lastAttemptedAt: null,
+            lastLoadedAt: null,
+            ok: true,
+            usingLastKnownGood: false
+          },
+          runs: { active: [], failed: [], recent: [], stale: [] },
+          stateRoot: test.stateRoot
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/projects/alpha")).text();
+
+      expect(body).toContain("Closed since last poll");
+      expect(body).toContain("succeeded");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows a Routine Host's firings and explains the absence of issue work", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "s11-host", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit.",
+          provider: null,
+          projectName: "s11-host",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        }
+      ]);
+      test.runStore.createRoutineFiring({
+        id: "fire-s11",
+        projectName: "s11-host",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "audit"
+      });
+      test.runStore.updateRoutineFiringState("fire-s11", "running");
+
+      const app = createHttpApp({
+        getStatusSnapshot: () => ({
+          configPath: "/tmp/symphonika.yml",
+          doctorErrors: [],
+          issuePolling: {
+            candidateIssues: [],
+            errors: [],
+            filteredIssues: [],
+            projects: []
+          },
+          projectModes: new Map([["s11-host", "routine_host"]]),
+          projectStates: test.runStore.listProjectStates(),
+          projects: [],
+          reload: {
+            errors: [],
+            lastAttemptedAt: null,
+            lastLoadedAt: null,
+            ok: true,
+            usingLastKnownGood: false
+          },
+          runs: { active: [], failed: [], recent: [], stale: [] },
+          stateRoot: test.stateRoot
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/projects/s11-host")).text();
+
+      expect(body).toContain("No issues — this is a Routine Host");
+      expect(body).toContain("audit");
+      expect(body).not.toContain('class="capacity-strip"><span class="kv"><span class="k">in-flight</span><span class="v">1/');
     } finally {
       test.cleanup();
     }

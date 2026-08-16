@@ -251,6 +251,34 @@ export type ProjectPollOutcomeInput = {
   projectName: string;
 };
 
+export type ProjectIssueSnapshotKind = "candidate" | "filtered";
+
+export type ProjectIssueSnapshotRow = {
+  issueNumber: number;
+  kind: ProjectIssueSnapshotKind;
+  polledAt: string;
+  priority: number;
+  reasons: string[];
+  title: string;
+};
+
+// Persists #303's per-project issue poll snapshot (ADR 0073): the daemon
+// replaces a project's rows wholesale on every *successful* poll for that
+// project, so an issue that stops being returned (closed, relabeled) ages
+// out on the next successful tick rather than needing a separate retention
+// sweep. A failed poll leaves prior rows untouched — see the ADR for why.
+export type ReplaceProjectIssueSnapshotsInput = {
+  polledAt: string;
+  projectName: string;
+  rows: Array<{
+    issueNumber: number;
+    kind: ProjectIssueSnapshotKind;
+    priority: number;
+    reasons: string[];
+    title: string;
+  }>;
+};
+
 export type ProjectDispatchSelectionInput = {
   issueNumber: number;
   projectName: string;
@@ -534,6 +562,15 @@ type ProjectStateRow = {
   validation_message: string | null;
   validation_state: ProjectValidationState;
   weight: number;
+};
+
+type ProjectIssueSnapshotDbRow = {
+  issue_number: number;
+  kind: ProjectIssueSnapshotKind;
+  polled_at: string;
+  priority: number;
+  reasons: string | null;
+  title: string;
 };
 
 type RoutineRow = {
@@ -1342,6 +1379,60 @@ export class RunStore {
       )
       .all() as ProjectStateRow[];
     return rows.map((row) => mapProjectStateRow(row));
+  }
+
+  replaceProjectIssueSnapshots(input: ReplaceProjectIssueSnapshotsInput): void {
+    const now = timestamp();
+    const apply = this.database.transaction(() => {
+      this.database
+        .prepare("delete from project_issue_snapshots where project_name = ?")
+        .run(input.projectName);
+      const insert = this.database.prepare(
+        [
+          "insert into project_issue_snapshots (",
+          "project_name, issue_number, kind, title, priority, reasons,",
+          "polled_at, created_at, updated_at",
+          ") values (",
+          "@project_name, @issue_number, @kind, @title, @priority, @reasons,",
+          "@polled_at, @created_at, @updated_at",
+          ")"
+        ].join(" ")
+      );
+      for (const row of input.rows) {
+        insert.run({
+          created_at: now,
+          issue_number: row.issueNumber,
+          kind: row.kind,
+          polled_at: input.polledAt,
+          priority: row.priority,
+          project_name: input.projectName,
+          reasons: row.reasons.length === 0 ? null : JSON.stringify(row.reasons),
+          title: row.title,
+          updated_at: now
+        });
+      }
+    });
+    apply();
+  }
+
+  listProjectIssueSnapshots(projectName: string): ProjectIssueSnapshotRow[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select issue_number, kind, title, priority, reasons, polled_at",
+          "from project_issue_snapshots where project_name = ?",
+          "order by issue_number asc"
+        ].join(" ")
+      )
+      .all(projectName) as ProjectIssueSnapshotDbRow[];
+    return rows.map((row) => ({
+      issueNumber: row.issue_number,
+      kind: row.kind,
+      polledAt: row.polled_at,
+      priority: row.priority,
+      reasons: row.reasons === null ? [] : (JSON.parse(row.reasons) as string[]),
+      title: row.title
+    }));
   }
 
   // Synchronizes service-level routine declarations into the routines table.
@@ -3961,6 +4052,19 @@ export class RunStore {
         last_dispatched_issue_number integer,
         created_at text not null,
         updated_at text not null
+      );
+
+      create table if not exists project_issue_snapshots (
+        project_name text not null,
+        issue_number integer not null,
+        kind text not null,
+        title text not null,
+        priority integer not null default 0,
+        reasons text,
+        polled_at text not null,
+        created_at text not null,
+        updated_at text not null,
+        primary key (project_name, issue_number)
       );
 
       create table if not exists watchdog_samples (

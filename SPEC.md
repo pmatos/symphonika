@@ -1805,6 +1805,24 @@ schedule — `resolveRoutineDeclaration` tries every non-invalid target first �
 mentioning the Routine's name is shown alongside it. Enable/disable and manual-fire controls are
 deferred to #306's write-surface plumbing; this page is read-only until then. See #304.
 
+Each firing row on `/routines/:name` links to `GET /firings/:id`, `/runs/:id`'s counterpart for a
+Routine Firing: state, terminal reason, timings (started/ended derived from its own state
+transitions), workspace path, branch, state transitions, and a provider event tail — sharing
+`renderTransitionsTable`/`coalesceEvents`/`renderEventsTable`/`renderRunFileLinks` with the Run
+pages rather than forking them. A Firing's evidence is a normalized-log file on disk at a path
+`routineEvidencePaths` derives from the state root and firing id (`src/routines/evidence.ts`), not
+the DB-backed `provider_events` table a Run's attempts use, and carries no per-event timestamp of
+its own — the shared event renderers were widened to a smaller structural type
+(`{normalized, sequence, type, createdAt?}`) that both satisfy, rather than fabricating one.
+`GET /logs/firings/:id/:kind` streams the four evidence files that apply to a Firing (prompt,
+prompt metadata, raw and normalized provider logs — a Firing has no issue snapshot and no workflow
+graph), 404ing for a kind that doesn't apply or a file that was never written. A discovered Routine
+Pull Request renders as plain informational text (`RoutinePullRequestStatus` carries no URL to link
+to, matching the `show-firing` CLI command's own precedent) explicitly labelled as not a PR
+Follow-up, per `CONTEXT.md`'s read-only-association rule. Cancelling a live firing is deferred to
+#306 alongside `/routines/:name`'s write actions; the page states this and stays read-only. See
+#304.
+
 Operator pages stay server-rendered and primarily read-only, but a page may embed a
 self-contained, client-side interactive visualization to make evidence explorable — for
 example the workflow-graph view at `GET /runs/:id/graph`, which renders a run's expanded FSM

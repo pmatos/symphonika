@@ -1,3 +1,4 @@
+import { createReadStream } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { Readable } from "node:stream";
 
@@ -13,6 +14,11 @@ import {
   type RuntimeReloadStatus,
   type WatchdogConfig
 } from "../reload.js";
+import {
+  routineEvidencePaths,
+  statRoutineEvidenceFile,
+  type RoutineEvidencePaths
+} from "../routines/evidence.js";
 import type { RoutineFiringState, RoutineState } from "../routines/types.js";
 import type { StatusSnapshot } from "../status.js";
 import type {
@@ -437,6 +443,21 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       )
     );
 
+    // Firing evidence lives on disk at a path routineEvidencePaths derives
+    // from stateRoot + firing id (see routines/evidence.ts) — a Firing has
+    // no attempts model and no DB-backed artifact registry the way a Run's
+    // openArtifactStream reads, so this streams straight off the
+    // filesystem, mirroring the show-firing CLI command's own approach.
+    app.get("/logs/firings/:id/:kind", async (context) =>
+      streamRoutineFiringArtifact(
+        context,
+        runStore,
+        options.stateRoot,
+        context.req.param("id"),
+        parseRunArtifactKind(context.req.param("kind"))
+      )
+    );
+
     app.post("/api/runs/:id/cancel", async (context) => {
       const id = context.req.param("id");
       const wantsRedirect = (
@@ -504,6 +525,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       now,
       runStore,
       startedAtMs,
+      stateRoot: options.stateRoot,
       version: options.version
     });
   }
@@ -570,6 +592,60 @@ async function streamAttemptArtifact(
 
 function parseRunArtifactKind(value: string): RunArtifactKind | undefined {
   return RUN_ARTIFACT_KINDS.has(value) ? (value as RunArtifactKind) : undefined;
+}
+
+// Only these four RunArtifactKind values have a Firing evidence-path
+// analogue — issue_snapshot and workflow_graph are Run-only concepts (a
+// Firing has no issue and no workflow graph) and fall through to 404.
+function resolveRoutineEvidenceFilePath(
+  paths: RoutineEvidencePaths,
+  kind: RunArtifactKind
+): string | undefined {
+  switch (kind) {
+    case "prompt":
+      return paths.promptPath;
+    case "prompt_metadata":
+      return paths.promptMetadataPath;
+    case "provider_raw":
+      return paths.rawLogPath;
+    case "provider_normalized":
+      return paths.normalizedLogPath;
+    default:
+      return undefined;
+  }
+}
+
+async function streamRoutineFiringArtifact(
+  context: Context,
+  runStore: RunStore,
+  stateRoot: string,
+  firingId: string,
+  kind: RunArtifactKind | undefined
+): Promise<Response> {
+  if (kind === undefined) {
+    return context.json({ error: "unknown file kind" }, 404);
+  }
+  if (runStore.getRoutineFiring(firingId) === undefined) {
+    return context.json({ error: "routine firing not found" }, 404);
+  }
+  const filePath = resolveRoutineEvidenceFilePath(
+    routineEvidencePaths(stateRoot, firingId),
+    kind
+  );
+  if (filePath === undefined) {
+    return context.json({ error: "unknown file kind" }, 404);
+  }
+  const size = await statRoutineEvidenceFile(filePath);
+  if (size === undefined) {
+    return context.json({ error: "file not found" }, 404);
+  }
+  return new Response(
+    Readable.toWeb(createReadStream(filePath)) as ReadableStream,
+    {
+      headers: { "content-type": RUN_ARTIFACT_CONTENT_TYPES[kind] },
+      status: 200
+    }
+  );
 }
 
 const TERMINAL_FIRING_STATES: ReadonlySet<RoutineFiringState> = new Set([

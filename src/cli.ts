@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { InvalidArgumentError, Command } from "commander";
 import { realpathSync } from "node:fs";
-import { open, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -24,7 +23,10 @@ import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
 import type { InitOptions, InitProvider, InitReport } from "./init.js";
 import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
-import { routineEvidencePaths } from "./routines/evidence.js";
+import {
+  readRecentRoutineEvents,
+  routineEvidencePaths
+} from "./routines/evidence.js";
 import { formatRoutineOutcomeLine } from "./routines/outcome.js";
 import type { RoutineKind, RoutineStatus } from "./routines/types.js";
 import { pruneRoutineWorkspaces } from "./routines/workspace-retention.js";
@@ -2389,74 +2391,6 @@ function formatFiringDuration(
     return "-";
   }
   return formatWatchdogDuration(Math.max(0, endMs - startMs));
-}
-
-type RecentRoutineEvent = {
-  normalized: Record<string, unknown>;
-  sequence: number;
-  type: string;
-};
-
-async function readRecentRoutineEvents(
-  normalizedLogPath: string,
-  limit: number
-): Promise<RecentRoutineEvent[]> {
-  const recentLines: { line: string; sequence: number }[] = [];
-  let nextSlot = 0;
-  let sequence = 0;
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(normalizedLogPath, "r");
-    for await (const line of handle.readLines({ autoClose: false })) {
-      if (line.length === 0) {
-        continue;
-      }
-      sequence += 1;
-      const entry = { line, sequence };
-      if (recentLines.length < limit) {
-        recentLines.push(entry);
-      } else {
-        recentLines[nextSlot] = entry;
-        nextSlot = (nextSlot + 1) % limit;
-      }
-    }
-  } catch {
-    return [];
-  } finally {
-    await handle?.close();
-  }
-
-  const orderedLines =
-    nextSlot === 0
-      ? recentLines
-      : [...recentLines.slice(nextSlot), ...recentLines.slice(0, nextSlot)];
-  return orderedLines.map(({ line, sequence }) => {
-    try {
-      const normalized = JSON.parse(line) as unknown;
-      if (
-        typeof normalized === "object" &&
-        normalized !== null &&
-        "type" in normalized &&
-        typeof normalized.type === "string"
-      ) {
-        return {
-          normalized,
-          sequence,
-          type: normalized.type
-        };
-      }
-    } catch {
-      // Preserve the line position as diagnosable malformed log evidence.
-    }
-    return {
-      normalized: {
-        message: "could not parse normalized event",
-        type: "malformed_event"
-      },
-      sequence,
-      type: "malformed_event"
-    };
-  });
 }
 
 function formatArtifactKinds(artifacts: RunArtifactDescriptor[]): string {

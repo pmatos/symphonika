@@ -915,6 +915,7 @@ describe("RunStore detail queries", () => {
           {
             issueNumber: 10,
             kind: "candidate",
+            labels: [],
             priority: 1,
             reasons: [],
             title: "Still open"
@@ -922,6 +923,7 @@ describe("RunStore detail queries", () => {
           {
             issueNumber: 11,
             kind: "filtered",
+            labels: ["needs-human"],
             priority: 1,
             reasons: ["needs-human"],
             title: "Closes before next poll"
@@ -938,6 +940,7 @@ describe("RunStore detail queries", () => {
           {
             issueNumber: 20,
             kind: "candidate",
+            labels: [],
             priority: 1,
             reasons: [],
             title: "Beta issue"
@@ -955,6 +958,7 @@ describe("RunStore detail queries", () => {
           {
             issueNumber: 10,
             kind: "candidate",
+            labels: [],
             priority: 1,
             reasons: [],
             title: "Still open"
@@ -985,6 +989,7 @@ describe("RunStore detail queries", () => {
           {
             issueNumber: 30,
             kind: "filtered",
+            labels: ["needs-human", "bug"],
             priority: 2,
             reasons: ["needs-human", "blocked"],
             title: "Multiple filter reasons"
@@ -997,6 +1002,7 @@ describe("RunStore detail queries", () => {
         {
           issueNumber: 30,
           kind: "filtered",
+          labels: ["needs-human", "bug"],
           polledAt: "2026-05-22T10:00:00.000Z",
           priority: 2,
           reasons: ["needs-human", "blocked"],

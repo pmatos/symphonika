@@ -12,6 +12,7 @@ import {
   ensureSession,
   type CsrfSecret
 } from "./csrf.js";
+import { describeIssueVerdict } from "../issues/verdict.js";
 import { setRoutineDisabled } from "../routines/declaration-editor.js";
 import { parseRoutineDeclaration } from "../routines/declaration-loader.js";
 import { validateWorkflowContractContent } from "../workflow/fsm-expansion.js";
@@ -229,6 +230,15 @@ const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
 ]);
 
 const FAILURE_STATES: ReadonlySet<RunState> = new Set(["failed", "stale"]);
+
+// #308's triage search: the only two verdict-filter values the page's own
+// <select> ever submits — an unrecognized value (hand-edited URL) is treated
+// as "no filter" rather than silently matching nothing, mirroring how /runs
+// treats an unrecognized ?state= (KNOWN_RUN_STATES, above).
+const KNOWN_ISSUE_VERDICT_FILTERS: ReadonlySet<string> = new Set([
+  "eligible",
+  "filtered"
+]);
 
 // Runs whose outcome banner should render, but with the calmer "blocked"
 // family/copy rather than the alarming "failed" one — see issue #271.
@@ -555,6 +565,38 @@ export function registerPages(options: RegisterPagesOptions): void {
         renderWorkflowGraphPage(detail.id, graph)
       )
     );
+  });
+
+  options.app.get("/issues", (context) => {
+    const verdictParam = normalizeQueryParam(context.req.query("verdict"));
+    const filters: IssueSearchFilters = {
+      label: normalizeQueryParam(context.req.query("label")),
+      project: normalizeQueryParam(context.req.query("project")),
+      q: normalizeQueryParam(context.req.query("q")),
+      verdict:
+        verdictParam !== undefined &&
+        KNOWN_ISSUE_VERDICT_FILTERS.has(verdictParam)
+          ? verdictParam
+          : undefined
+    };
+    const nowMs = now();
+    const projectNames = Array.from(
+      new Set(
+        options.runStore.listProjectStates().map((state) => state.projectName)
+      )
+    ).sort();
+    const rows = searchIssueSnapshots({
+      filters,
+      nowMs,
+      projectNames,
+      runStore: options.runStore,
+      startedAtMs: options.startedAtMs
+    });
+    const html = layout(
+      "Issue triage",
+      renderIssueSearchPage({ filters, nowMs, projectNames, rows })
+    );
+    return context.html(html);
   });
 
   options.app.get("/projects/:name", (context) => {
@@ -2007,6 +2049,30 @@ td code { color: var(--ink-2); }
 .diff-line { display: block; white-space: pre-wrap; }
 .diff-add { color: var(--ok-ink); background: var(--ok-bg); }
 .diff-del { color: var(--fail-ink); background: var(--fail-bg); }
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--sp-3) var(--sp-4);
+  margin: 0 0 var(--sp-5);
+}
+.filters label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  color: var(--ink-muted);
+}
+.filters input, .filters select {
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+}
 
 @media (prefers-reduced-motion: no-preference) {
   .pill--progress.is-running .pill-dot { animation: pulse 1.8s ease-in-out infinite; }
@@ -2034,7 +2100,7 @@ function layout(title: string, body: string): string {
 <body>
 <header class="topbar">
   <div class="brand"><a href="/">Symphonika</a></div>
-  <nav class="nav" aria-label="Primary"><a href="/">Dashboard</a><a href="/runs">Runs</a><a href="/config/edit">Config</a></nav>
+  <nav class="nav" aria-label="Primary"><a href="/">Dashboard</a><a href="/runs">Runs</a><a href="/issues">Issues</a><a href="/config/edit">Config</a></nav>
 </header>
 <main>
 ${body}
@@ -2597,6 +2663,199 @@ function renderProjectIssuesTable(rows: ProjectIssueRow[]): string {
     "<tr><th>#</th><th>Title</th><th>State</th><th>Detail</th></tr>",
     body
   );
+}
+
+// #308's cross-project triage search (ADR 0077): filter query params, all
+// optional and combined with AND. `verdict` is coarse (matches the
+// snapshot's own `kind`, not the rendered verdict string) so it stays a
+// cheap equality check rather than parsing the human-readable verdict back
+// apart.
+type IssueSearchFilters = {
+  label: string | undefined;
+  project: string | undefined;
+  q: string | undefined;
+  verdict: string | undefined;
+};
+
+type IssueSearchRow = {
+  issueNumber: number;
+  labels: string[];
+  polledAt: string;
+  preRestart: boolean;
+  projectName: string;
+  title: string;
+  verdict: string;
+};
+
+function normalizeQueryParam(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
+}
+
+// A claim-shaped operational-label reason (sym:claimed/sym:running) gets its
+// Run id resolved through the Run Store — a local read, not a GitHub call —
+// so describeIssueVerdict (src/issues/verdict.ts) can stay pure and DB-free.
+// The most recent Run for the issue is the one holding the claim; an issue
+// can only be claimed by one Run at a time in practice.
+const CLAIM_REASON = /^has operational label sym:(claimed|running)$/;
+
+function resolveClaimedRunId(
+  runStore: RunStore,
+  projectName: string,
+  issueNumber: number,
+  reasons: string[]
+): string | undefined {
+  if (!reasons.some((reason) => CLAIM_REASON.test(reason))) {
+    return undefined;
+  }
+  return runStore.listRuns({ issueNumber, limit: 1, project: projectName })[0]
+    ?.id;
+}
+
+// #303's own pre-restart check (renderProjectCapacityStrip, above) inlined
+// here for a single row's polledAt rather than a project's lastPollFinishedAt
+// — same rule (ADR 0073): a snapshot row timestamped before this process
+// started hasn't been refreshed since the daemon came up.
+function isPreRestartSnapshot(
+  polledAt: string,
+  startedAtMs: number | undefined
+): boolean {
+  return startedAtMs !== undefined && Date.parse(polledAt) < startedAtMs;
+}
+
+function searchIssueSnapshots(input: {
+  filters: IssueSearchFilters;
+  nowMs: number;
+  projectNames: string[];
+  runStore: RunStore;
+  startedAtMs: number | undefined;
+}): IssueSearchRow[] {
+  const targetProjects =
+    input.filters.project === undefined
+      ? input.projectNames
+      : input.projectNames.filter((name) => name === input.filters.project);
+  const q = input.filters.q?.toLowerCase();
+  const rows: IssueSearchRow[] = [];
+  for (const projectName of targetProjects) {
+    for (const snapshot of input.runStore.listProjectIssueSnapshots(
+      projectName
+    )) {
+      if (
+        input.filters.verdict === "eligible" &&
+        snapshot.kind !== "candidate"
+      ) {
+        continue;
+      }
+      if (
+        input.filters.verdict === "filtered" &&
+        snapshot.kind !== "filtered"
+      ) {
+        continue;
+      }
+      if (
+        input.filters.label !== undefined &&
+        !snapshot.labels.includes(input.filters.label)
+      ) {
+        continue;
+      }
+      if (q !== undefined && !snapshot.title.toLowerCase().includes(q)) {
+        continue;
+      }
+      const claimedRunId = resolveClaimedRunId(
+        input.runStore,
+        projectName,
+        snapshot.issueNumber,
+        snapshot.reasons
+      );
+      rows.push({
+        issueNumber: snapshot.issueNumber,
+        labels: snapshot.labels,
+        polledAt: snapshot.polledAt,
+        preRestart: isPreRestartSnapshot(snapshot.polledAt, input.startedAtMs),
+        projectName,
+        title: snapshot.title,
+        verdict: describeIssueVerdict(snapshot, claimedRunId)
+      });
+    }
+  }
+  rows.sort(
+    (a, b) =>
+      a.projectName.localeCompare(b.projectName) ||
+      b.issueNumber - a.issueNumber
+  );
+  return rows;
+}
+
+function issueVerdictFamily(
+  verdict: string
+): "ok" | "fail" | "blocked" | "progress" | "neutral" {
+  if (verdict === "eligible") {
+    return "ok";
+  }
+  if (verdict.startsWith("blocked:")) {
+    return "blocked";
+  }
+  if (verdict.startsWith("claimed by run")) {
+    return "progress";
+  }
+  return "neutral";
+}
+
+function renderIssueSearchFilters(
+  filters: IssueSearchFilters,
+  projectNames: string[]
+): string {
+  const projectOptions = projectNames
+    .map(
+      (name) =>
+        `<option value="${escapeHtml(name)}"${filters.project === name ? " selected" : ""}>${escapeHtml(name)}</option>`
+    )
+    .join("");
+  const verdictOption = (value: string, label: string) =>
+    `<option value="${escapeHtml(value)}"${filters.verdict === value ? " selected" : ""}>${escapeHtml(label)}</option>`;
+  return `<form class="filters" method="get" action="/issues">
+<label>Search<input type="text" name="q" value="${escapeHtml(filters.q ?? "")}" placeholder="issue title"></label>
+<label>Project<select name="project"><option value="">All projects</option>${projectOptions}</select></label>
+<label>Verdict<select name="verdict">${verdictOption("", "Any")}${verdictOption("eligible", "Eligible")}${verdictOption("filtered", "Filtered")}</select></label>
+<label>Label<input type="text" name="label" value="${escapeHtml(filters.label ?? "")}" placeholder="exact label"></label>
+<button class="btn" type="submit">Search</button>
+</form>`;
+}
+
+function renderIssueSearchPage(input: {
+  filters: IssueSearchFilters;
+  nowMs: number;
+  projectNames: string[];
+  rows: IssueSearchRow[];
+}): string {
+  const filterForm = renderIssueSearchFilters(
+    input.filters,
+    input.projectNames
+  );
+  const note = `<p class="note">Reads Symphonika's own poll snapshot (ADR 0073): open issues only, at most ~30s stale in steady state, scoped to configured Projects' repos. No GitHub Search API calls; search is over issue titles only.</p>`;
+  if (input.rows.length === 0) {
+    return `<h1 class="page-title">Issue triage</h1>${note}${filterForm}<div class="empty"><strong>No matching issues</strong>No polled issue matches these filters.</div>`;
+  }
+  const body = input.rows
+    .map((row) => {
+      const age = formatAge(row.polledAt, input.nowMs);
+      const preRestart = row.preRestart
+        ? ' <span class="muted">(pre-restart)</span>'
+        : "";
+      const labels =
+        row.labels.length === 0
+          ? "—"
+          : row.labels.map((label) => escapeHtml(label)).join(", ");
+      return `<tr><td>${escapeHtml(row.projectName)}</td><td>#${row.issueNumber}</td><td class="c-title">${escapeHtml(row.title)}</td><td>${labelPill(row.verdict, issueVerdictFamily(row.verdict))}</td><td>${labels}</td><td>${escapeHtml(age)}${preRestart}</td></tr>`;
+    })
+    .join("");
+  const table = tableSection(
+    "Issues",
+    input.rows.length,
+    "<tr><th>Project</th><th>#</th><th>Title</th><th>Verdict</th><th>Labels</th><th>Polled</th></tr>",
+    body
+  );
+  return `<h1 class="page-title">Issue triage</h1>${note}${filterForm}${table}`;
 }
 
 // A Routine name is globally unique across the *current* declared config

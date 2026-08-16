@@ -2169,6 +2169,7 @@ describe("HTTP app — project detail page (#303)", () => {
           {
             issueNumber: 286,
             kind: "candidate",
+            labels: [],
             priority: 1,
             reasons: [],
             title: "Eligible issue"
@@ -2176,6 +2177,7 @@ describe("HTTP app — project detail page (#303)", () => {
           {
             issueNumber: 231,
             kind: "filtered",
+            labels: ["needs-human"],
             priority: 1,
             reasons: ["needs-human"],
             title: "Filtered issue"
@@ -2306,6 +2308,7 @@ describe("HTTP app — project detail page (#303)", () => {
           {
             issueNumber: 300,
             kind: "candidate",
+            labels: [],
             priority: 1,
             reasons: [],
             title: "Blocked behind cap"

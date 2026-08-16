@@ -60,6 +60,37 @@ export type CancelReason =
 // every row that was live when shutdown began. See SPEC 12.3.
 const SHUTDOWN_PREEMPTIVE_REASON: CancelReason = "daemon_shutdown";
 
+// Shared by listRuns/listRoutineFirings so both accept either a single state
+// or a state set (e.g. the dashboard's active-now band, which spans several
+// non-terminal states) without each call site hand-rolling an IN clause. An
+// empty array is a deliberate "match nothing" rather than "no filter" — the
+// dashboard should render an empty band, not every row, if ever called with
+// an empty state set.
+function pushStateCondition<State extends string>(
+  conditions: string[],
+  params: Record<string, unknown>,
+  paramPrefix: string,
+  state: State | State[] | undefined
+): void {
+  if (state === undefined) {
+    return;
+  }
+  if (!Array.isArray(state)) {
+    conditions.push(`state = @${paramPrefix}`);
+    params[paramPrefix] = state;
+    return;
+  }
+  if (state.length === 0) {
+    conditions.push("0 = 1");
+    return;
+  }
+  const placeholders = state.map((_, index) => `@${paramPrefix}${index}`);
+  conditions.push(`state in (${placeholders.join(", ")})`);
+  state.forEach((value, index) => {
+    params[`${paramPrefix}${index}`] = value;
+  });
+}
+
 export type RunStatus = {
   branchName: string;
   cancelReason: CancelReason | null;
@@ -300,7 +331,7 @@ export type ListRunsFilter = {
   issueNumber?: number;
   limit?: number;
   project?: string;
-  state?: RunState;
+  state?: RunState | RunState[];
 };
 
 export type OpenRunStoreOptions = {
@@ -2590,10 +2621,16 @@ export class RunStore {
   }
 
   listRoutineFirings(
-    filter: { limit?: number; project?: string; routineName?: string } = {}
+    filter: {
+      limit?: number;
+      project?: string;
+      routineName?: string;
+      state?: RoutineFiringState | RoutineFiringState[];
+    } = {}
   ): RoutineFiringStatus[] {
     const conditions: string[] = [];
     const params: Record<string, unknown> = {};
+    pushStateCondition(conditions, params, "state", filter.state);
     if (filter.project !== undefined) {
       conditions.push("project_name = @project");
       params.project = filter.project;
@@ -2996,10 +3033,7 @@ export class RunStore {
   listRuns(filter?: ListRunsFilter): RunStatus[] {
     const conditions: string[] = [];
     const params: Record<string, unknown> = {};
-    if (filter?.state !== undefined) {
-      conditions.push("state = @state");
-      params.state = filter.state;
-    }
+    pushStateCondition(conditions, params, "state", filter?.state);
     if (filter?.project !== undefined) {
       conditions.push("project_name = @project");
       params.project = filter.project;

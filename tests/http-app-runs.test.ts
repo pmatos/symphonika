@@ -1893,3 +1893,202 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 });
+
+describe("HTTP app — dashboard IA shell (#302)", () => {
+  it("lists in-flight Runs and Routine Firings in the active-now band, labelled by kind, and excludes waiting Runs", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "run-running",
+        issue: sampleIssue({ number: 11, title: "In flight" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-running", "running");
+
+      test.runStore.createRun({
+        id: "run-waiting",
+        issue: sampleIssue({ number: 12, title: "Parked for review" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-waiting", "waiting");
+
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "refactor-audit",
+          prompt: "Audit.",
+          provider: null,
+          projectName: "beta",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/refactor-audit.md"
+        }
+      ]);
+      test.runStore.createRoutineFiring({
+        id: "fire-running",
+        projectName: "beta",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "refactor-audit"
+      });
+      test.runStore.updateRoutineFiringState("fire-running", "running");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/")).text();
+
+      expect(body).toContain("Active now");
+      expect(body).toContain('<span class="count">2</span>');
+      expect(body).toContain('<h3 class="subhead">Runs</h3>');
+      expect(body).toContain("run-running");
+      expect(body).toContain('<h3 class="subhead">Routine firings</h3>');
+      expect(body).toContain("refactor-audit");
+      expect(body).toContain("beta");
+      // A waiting Run is parked for external state, not "happening right
+      // now" — it must not appear in the band, only on /runs.
+      expect(body).not.toContain("run-waiting");
+      const runsListBody = await (await app.request("/runs")).text();
+      expect(runsListBody).toContain("run-waiting");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows a domain-teaching empty state when nothing is active", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/")).text();
+
+      expect(body).toContain("Active now");
+      expect(body).toContain("Nothing running right now");
+      expect(body).toContain("Routine Firing");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("renders an N-target Routine as one row with a target count linking to its page", async () => {
+    const test = await setup();
+    try {
+      const declaration = {
+        kind: "report" as const,
+        name: "refactor-audit",
+        prompt: "Audit.",
+        provider: null,
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: "/tmp/refactor-audit.md"
+      };
+      test.runStore.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" },
+        { ...declaration, projectName: "gamma" }
+      ]);
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/")).text();
+
+      // The routine name link contributes it twice (href + link text); the
+      // target-count link's href contributes a third — one row, not three.
+      expect(body.match(/refactor-audit/g)).toHaveLength(3);
+      expect(body).toContain('<a href="/routines/refactor-audit">3</a>');
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("splits Projects into Dispatch Projects and a subdued Routine Hosts group", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "run-alpha",
+        issue: sampleIssue({ number: 21, title: "Working" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-alpha", "running");
+
+      const app = createHttpApp({
+        getStatusSnapshot: () => ({
+          configPath: "/tmp/symphonika.yml",
+          doctorErrors: [],
+          issuePolling: {
+            candidateIssues: [
+              { issue: sampleIssue({ number: 22 }), project: "alpha" }
+            ],
+            errors: [],
+            filteredIssues: [],
+            projects: []
+          },
+          projectStates: [],
+          projects: [
+            {
+              missingEligibilityLabels: [],
+              missingOperationalLabels: [],
+              mode: "dispatch",
+              name: "alpha",
+              staleIssues: [],
+              validForDispatch: true,
+              validForHosting: false
+            },
+            {
+              missingEligibilityLabels: [],
+              missingOperationalLabels: [],
+              mode: "routine_host",
+              name: "s11-host",
+              staleIssues: [],
+              validForDispatch: false,
+              validForHosting: true
+            }
+          ],
+          reload: {
+            errors: [],
+            lastAttemptedAt: null,
+            lastLoadedAt: null,
+            ok: true,
+            usingLastKnownGood: false
+          },
+          runs: { active: [], failed: [], recent: [], stale: [] },
+          stateRoot: test.stateRoot
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/")).text();
+
+      const projectsIndex = body.indexOf(">Projects<");
+      const hostsIndex = body.indexOf(">Routine hosts<");
+      expect(projectsIndex).toBeGreaterThan(-1);
+      expect(hostsIndex).toBeGreaterThan(projectsIndex);
+      expect(body).toContain('class="subdued"');
+      expect(body).toContain("alpha");
+      expect(body).toContain("s11-host");
+      // Dispatch Projects carries eligible/in-flight counts sourced from
+      // issue polling and the active-now query; Routine Hosts never
+      // dispatch, so its table omits those columns entirely.
+      const dispatchSection = body.slice(projectsIndex, hostsIndex);
+      expect(dispatchSection).toContain("<th>Eligible</th>");
+      expect(dispatchSection).toContain("<th>In-flight</th>");
+      const hostsSection = body.slice(hostsIndex);
+      expect(hostsSection).not.toContain("<th>Eligible</th>");
+    } finally {
+      test.cleanup();
+    }
+  });
+});

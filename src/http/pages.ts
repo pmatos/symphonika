@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 
+import type { DoctorProjectReport } from "../doctor.js";
 import {
   DEFAULT_POLLING_INTERVAL_MS,
   type FilteredProjectIssueSnapshot,
@@ -14,13 +15,18 @@ import type {
   ListRunsFilter,
   ProjectState,
   ProviderEventRecord,
+  RoutineFiringStatus,
   RunArtifactDescriptor,
   RunState,
   RunStatus,
   RunStore
 } from "../run-store.js";
-import type { RoutineStatus } from "../routines/types.js";
-import { formatRoutineOutcomeLine } from "../routines/outcome.js";
+import type {
+  RoutineFiringState,
+  RoutineKind,
+  RoutineState,
+  RoutineStatus
+} from "../routines/types.js";
 import type { StatusSnapshot } from "../status.js";
 import {
   buildWatchdogIdleStatus,
@@ -69,6 +75,24 @@ const ACTIVE_WATCHDOG_STATES: ReadonlySet<RunState> = new Set([
   "running",
   "waiting"
 ]);
+
+// The dashboard's "active now" band (#302, docs/adr's PRODUCT.md brief):
+// queued, preparing_workspace, or running is "happening right now" and
+// belongs above the drill-in. `waiting` is deliberately excluded — a waiting
+// Run is parked for external state (e.g. PR review) with no provider process
+// running, so it reads as dormant, not active; it still shows up on /runs.
+// Kept as both a Set (fast membership checks) and the array better-sqlite3's
+// `listRuns`/`listRoutineFirings` filters want.
+const ACTIVE_NOW_RUN_STATES_LIST: RunState[] = [
+  "queued",
+  "preparing_workspace",
+  "running"
+];
+const ACTIVE_NOW_FIRING_STATES_LIST: RoutineFiringState[] = [
+  "queued",
+  "preparing_workspace",
+  "running"
+];
 
 // Floor for the banner's threshold, well beyond a typical polling interval
 // but far below the multi-hour wedges that motivated this banner (see
@@ -160,11 +184,16 @@ export function registerPages(options: RegisterPagesOptions): void {
 
   options.app.get("/", (context) => {
     const snapshot = options.getStatusSnapshot?.();
-    const recentRuns = options.runStore.listRuns({ limit: 25 });
+    const activeRuns = options.runStore.listRuns({
+      state: ACTIVE_NOW_RUN_STATES_LIST
+    });
+    const activeFirings = options.runStore.listRoutineFirings({
+      state: ACTIVE_NOW_FIRING_STATES_LIST
+    });
     const nowMs = now();
     const watchdogByRun = collectActiveWatchdogIdleStatuses(
       options.runStore,
-      recentRuns,
+      activeRuns,
       getWatchdogConfig,
       nowMs
     );
@@ -189,14 +218,22 @@ export function registerPages(options: RegisterPagesOptions): void {
         `<h1 class="page-title">Dashboard</h1>`,
         renderDaemonStaleBanner(tickAgeMs, pollingIntervalMs),
         renderHeader(options.version, snapshot),
-        renderProjectsCard(snapshot, options.issuePollStatus),
-        renderRoutinesTable(
-          options.runStore.listRoutines({
-            includeInactive: context.req.query("include_inactive") === "true"
-          })
+        renderActiveNowBand(activeRuns, activeFirings, watchdogByRun, nowMs),
+        renderRoutinesSection(
+          groupRoutinesByName(
+            options.runStore.listRoutines({
+              includeInactive: context.req.query("include_inactive") === "true"
+            })
+          )
         ),
-        renderStaleIssuesCard(options.issuePollStatus?.filteredIssues ?? []),
-        renderRunsTable("Recent runs", recentRuns, watchdogByRun, nowMs)
+        renderProjectsSection(
+          snapshot,
+          options.issuePollStatus,
+          activeRuns,
+          options.runStore,
+          nowMs
+        ),
+        renderStaleIssuesCard(options.issuePollStatus?.filteredIssues ?? [])
       ].join("")
     );
     return context.html(html);
@@ -205,11 +242,12 @@ export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/runs", (context) => {
     const filter: ListRunsFilter = {};
     const stateParam = context.req.query("state");
-    if (
-      stateParam !== undefined &&
-      KNOWN_RUN_STATES.has(stateParam as RunState)
-    ) {
-      filter.state = stateParam as RunState;
+    const validState =
+      stateParam !== undefined && KNOWN_RUN_STATES.has(stateParam as RunState)
+        ? (stateParam as RunState)
+        : undefined;
+    if (validState !== undefined) {
+      filter.state = validState;
     }
     const project = context.req.query("project");
     if (project !== undefined) {
@@ -224,7 +262,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       nowMs
     );
     const title =
-      filter.state === undefined ? "All runs" : `Runs (${filter.state})`;
+      validState === undefined ? "All runs" : `Runs (${validState})`;
     const html = layout(
       title,
       `<h1 class="page-title">Runs</h1>${renderRunsTable(title, runs, watchdogByRun, nowMs)}`
@@ -535,6 +573,31 @@ section { margin: 0 0 var(--sp-6); }
   padding: 0.05rem 0.45rem;
 }
 
+/* The active-now band is the one section that must not read as "just
+   another table" — a visible border keeps "what's happening right now"
+   glance-able without a decorative hero treatment (PRODUCT.md anti-refs). */
+.active-now {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: var(--sp-4);
+  background: var(--raised);
+}
+.active-now .table-wrap { margin: 0 0 var(--sp-4); }
+.active-now .table-wrap:last-child { margin: 0; }
+.subhead {
+  font-size: var(--fs-label);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-muted);
+  margin: 0 0 var(--sp-2);
+}
+
+/* Routine Hosts never dispatch, so their group stays visually subordinate
+   to Dispatch Projects rather than competing for the same attention. */
+.subdued { opacity: 0.82; }
+.subdued .section-head h2 { color: var(--ink-2); font-weight: 500; }
+
 .table-wrap {
   overflow-x: auto;
   border: 1px solid var(--border);
@@ -742,7 +805,7 @@ ${body}
 }
 
 function stateFamily(
-  state: RunState
+  state: RunState | RoutineFiringState
 ): "ok" | "fail" | "blocked" | "progress" | "neutral" {
   switch (state) {
     case "succeeded":
@@ -764,10 +827,36 @@ function stateFamily(
   }
 }
 
-function statePill(state: RunState): string {
+function statePill(state: RunState | RoutineFiringState): string {
   const family = stateFamily(state);
   const running = state === "running" ? " is-running" : "";
   return `<span class="pill pill--${family}${running}"><span class="pill-dot" aria-hidden="true"></span>${escapeHtml(state)}</span>`;
+}
+
+// Routine (not Routine Firing) lifecycle states are a separate, smaller enum
+// — active/expired/inactive/disabled/invalid — with no direct RunState
+// analogue, so it gets its own family mapping rather than widening
+// stateFamily further.
+function routineStateFamily(
+  state: RoutineState
+): "ok" | "fail" | "progress" | "neutral" {
+  switch (state) {
+    case "active":
+      return "progress";
+    case "expired":
+    case "invalid":
+      return "fail";
+    case "inactive":
+    case "disabled":
+      return "neutral";
+    default:
+      return "neutral";
+  }
+}
+
+function routineStatePill(state: RoutineState): string {
+  const family = routineStateFamily(state);
+  return `<span class="pill pill--${family}"><span class="pill-dot" aria-hidden="true"></span>${escapeHtml(state)}</span>`;
 }
 
 function renderHeader(
@@ -809,10 +898,127 @@ function tableSection(
   return `<section>${sectionHead(title, count)}<div class="table-wrap"><table><thead>${head}</thead><tbody>${rows}</tbody></table></div></section>`;
 }
 
-function renderProjectsCard(
-  snapshot: StatusSnapshot | undefined,
-  issuePollStatus: IssuePollStatus | undefined
+// One row of the new Projects section, joined from the DoctorProjectReport
+// (identity + mode + validity — the only source of `mode`), issue polling
+// (eligible count), and the active-now query already fetched for the band
+// above (in-flight count) so this section doesn't re-derive its own notion
+// of "in flight". See ADR 0062 for the Dispatch Project / Routine Host split
+// this groups by.
+type ProjectRow = {
+  eligible: number;
+  inFlight: number;
+  lastRun: RunStatus | undefined;
+  mode: "dispatch" | "routine_host";
+  name: string;
+  valid: boolean;
+};
+
+function buildProjectRows(
+  projects: DoctorProjectReport[],
+  issuePollStatus: IssuePollStatus | undefined,
+  activeRuns: RunStatus[],
+  runStore: RunStore
+): ProjectRow[] {
+  const inFlightByProject = new Map<string, number>();
+  for (const run of activeRuns) {
+    inFlightByProject.set(
+      run.project,
+      (inFlightByProject.get(run.project) ?? 0) + 1
+    );
+  }
+  const eligibleByProject = new Map<string, number>();
+  for (const candidate of issuePollStatus?.candidateIssues ?? []) {
+    eligibleByProject.set(
+      candidate.project,
+      (eligibleByProject.get(candidate.project) ?? 0) + 1
+    );
+  }
+  return projects.map((project) => ({
+    eligible: eligibleByProject.get(project.name) ?? 0,
+    inFlight: inFlightByProject.get(project.name) ?? 0,
+    lastRun: runStore.listRuns({ limit: 1, project: project.name })[0],
+    mode: project.mode,
+    name: project.name,
+    valid:
+      project.mode === "routine_host"
+        ? project.validForHosting
+        : project.validForDispatch
+  }));
+}
+
+function renderValidityPill(valid: boolean): string {
+  const family = valid ? "ok" : "fail";
+  const label = valid ? "valid" : "invalid";
+  return `<span class="pill pill--${family}"><span class="pill-dot" aria-hidden="true"></span>${label}</span>`;
+}
+
+function renderDispatchProjectsTable(
+  rows: ProjectRow[],
+  nowMs: number
 ): string {
+  if (rows.length === 0) {
+    return `<section>${sectionHead("Projects", 0)}<div class="empty"><strong>No Dispatch Projects configured</strong>A Dispatch Project polls its issue tracker and dispatches eligible Issues to a Coding Agent. Add one to the service config to see it here.</div></section>`;
+  }
+  const bodyRows = rows
+    .map((row) => {
+      const lastRun =
+        row.lastRun === undefined
+          ? '<span class="muted">never</span>'
+          : `${statePill(row.lastRun.state)} <code>${escapeHtml(formatAge(row.lastRun.updatedAt, nowMs))}</code>`;
+      return `<tr><td>${escapeHtml(row.name)}</td><td>${renderValidityPill(row.valid)}</td><td>${row.eligible}</td><td>${row.inFlight}</td><td class="c-detail">${lastRun}</td></tr>`;
+    })
+    .join("");
+  return tableSection(
+    "Projects",
+    rows.length,
+    "<tr><th>Name</th><th>Validation</th><th>Eligible</th><th>In-flight</th><th>Last run</th></tr>",
+    bodyRows
+  );
+}
+
+// Routine Hosts never dispatch (ADR 0062), so "eligible"/"in-flight" issue
+// columns would only ever read zero — a subdued, minimal table keeps seven
+// permanently-idle hosts from diluting the Dispatch Projects section instead
+// of repeating columns that mean nothing for them.
+function renderRoutineHostsTable(rows: ProjectRow[]): string {
+  if (rows.length === 0) {
+    return "";
+  }
+  const bodyRows = rows
+    .map(
+      (row) =>
+        `<tr><td>${escapeHtml(row.name)}</td><td>${renderValidityPill(row.valid)}</td></tr>`
+    )
+    .join("");
+  return `<section class="subdued">${sectionHead("Routine hosts", rows.length)}<div class="table-wrap"><table><thead><tr><th>Name</th><th>Validation</th></tr></thead><tbody>${bodyRows}</tbody></table></div></section>`;
+}
+
+function renderProjectsSection(
+  snapshot: StatusSnapshot | undefined,
+  issuePollStatus: IssuePollStatus | undefined,
+  activeRuns: RunStatus[],
+  runStore: RunStore,
+  nowMs: number
+): string {
+  if (snapshot !== undefined && snapshot.projects.length > 0) {
+    // Read eligible counts off the snapshot's own issuePolling, matching
+    // renderHeader — not the separately-threaded issuePollStatus option,
+    // which is only a fallback for the poll-status-only tier below.
+    const rows = buildProjectRows(
+      snapshot.projects,
+      snapshot.issuePolling,
+      activeRuns,
+      runStore
+    );
+    return [
+      renderDispatchProjectsTable(
+        rows.filter((row) => row.mode === "dispatch"),
+        nowMs
+      ),
+      renderRoutineHostsTable(rows.filter((row) => row.mode === "routine_host"))
+    ].join("");
+  }
+
   const projectStates = snapshot?.projectStates ?? [];
   if (projectStates.length > 0) {
     const rows = projectStates
@@ -825,40 +1031,6 @@ function renderProjectsCard(
       "Projects",
       projectStates.length,
       "<tr><th>Name</th><th>Weight</th><th>Validation</th><th>Last poll</th><th>Last dispatch</th></tr>",
-      rows
-    );
-  }
-
-  if (snapshot !== undefined && snapshot.projects.length > 0) {
-    const rows = snapshot.projects
-      .map((project) => {
-        const missingEligibility =
-          project.missingEligibilityLabels.length === 0
-            ? "&mdash;"
-            : escapeHtml(project.missingEligibilityLabels.join(", "));
-        const missingOperational =
-          project.missingOperationalLabels.length === 0
-            ? "&mdash;"
-            : escapeHtml(project.missingOperationalLabels.join(", "));
-        const valid =
-          project.mode === "routine_host"
-            ? project.validForHosting
-              ? "valid"
-              : "invalid"
-            : project.validForDispatch
-              ? "valid"
-              : "invalid";
-        const workflowCell =
-          project.workflowPath === undefined
-            ? "&mdash;"
-            : `<code>${escapeHtml(project.workflowPath)}</code>`;
-        return `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(valid)}</td><td>${workflowCell}</td><td class="c-detail">${missingEligibility}</td><td class="c-detail">${missingOperational}</td></tr>`;
-      })
-      .join("");
-    return tableSection(
-      "Projects",
-      snapshot.projects.length,
-      "<tr><th>Name</th><th>Validation</th><th>Workflow</th><th>Missing required eligibility labels</th><th>Missing operational labels</th></tr>",
       rows
     );
   }
@@ -936,34 +1108,93 @@ function renderStaleIssuesCard(
   );
 }
 
-function renderRoutinesTable(routines: RoutineStatus[]): string {
-  if (routines.length === 0) {
-    return "";
+// A Routine name is globally unique but materializes one RoutineStatus row
+// per targeted Project (ADR 0069's Routine Target). Grouping by name here is
+// what lets an N-target Routine render as one row instead of N
+// unrelated-looking ones — the failure mode #302 exists to prevent. Full
+// per-target detail (skip counters, firing history, latest outcome) moves to
+// /routines/:name (#304); this row only needs enough to answer "is it
+// scheduled, and when does it next run."
+type RoutineGroup = {
+  kind: RoutineKind;
+  name: string;
+  scheduleAt: string | null;
+  scheduleCron: string | null;
+  scheduleTz: string | null;
+  targets: RoutineStatus[];
+};
+
+function groupRoutinesByName(routines: RoutineStatus[]): RoutineGroup[] {
+  const byName = new Map<string, RoutineGroup>();
+  for (const routine of routines) {
+    let group = byName.get(routine.name);
+    if (group === undefined) {
+      group = {
+        kind: routine.kind,
+        name: routine.name,
+        scheduleAt: routine.scheduleAt,
+        scheduleCron: routine.scheduleCron,
+        scheduleTz: routine.scheduleTz,
+        targets: []
+      };
+      byName.set(routine.name, group);
+    }
+    group.targets.push(routine);
   }
-  const rows = routines
-    .map(
-      (routine) =>
-        `<tr><td>${escapeHtml(routine.projectName)}</td><td>${escapeHtml(routine.name)}</td><td>${escapeHtml(routine.state)}</td><td>${escapeHtml(routine.latestOutcome === null ? "-" : formatRoutineOutcomeLine(routine.projectName, routine.latestOutcome))}</td><td>${escapeHtml(routine.disabledReason ?? "-")}</td><td><code>${escapeHtml(routine.nextFireAt ?? "-")}</code></td><td><code>${escapeHtml(routine.lastFiredAt ?? "-")}</code></td><td><code>${escapeHtml(routine.lastAttemptedAt ?? "-")}</code></td><td>${escapeHtml(routine.lastSkipReason ?? "-")}</td><td><code>${escapeHtml(routine.lastSkipAt ?? "-")}</code></td><td>${escapeHtml(formatRoutineSkipCounts(routine.skipCounts24h))}</td><td>${escapeHtml(formatRoutinePullRequestNumbers(routine.pullRequestNumbers))}</td></tr>`
-    )
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function formatRoutineSchedule(group: RoutineGroup): string {
+  if (group.scheduleCron !== null) {
+    return `${group.scheduleCron} (${group.scheduleTz ?? "UTC"})`;
+  }
+  return group.scheduleAt ?? "-";
+}
+
+// A group with no active target shows its shared lifecycle state (plus
+// reason, when the representative target has one) instead of a next-fire
+// time that will never come.
+function renderRoutineGroupStatus(group: RoutineGroup): string {
+  const active = group.targets.filter((target) => target.state === "active");
+  if (active.length > 0) {
+    const nextFireAt = active
+      .map((target) => target.nextFireAt)
+      .filter((value): value is string => value !== null)
+      .sort()[0];
+    const partial =
+      active.length === group.targets.length
+        ? ""
+        : ` <span class="muted">(${active.length}/${group.targets.length} active)</span>`;
+    return `<code>${escapeHtml(nextFireAt ?? "-")}</code>${partial}`;
+  }
+  const [representative] = group.targets;
+  if (representative === undefined) {
+    return "-";
+  }
+  const reason =
+    representative.disabledReason === null
+      ? ""
+      : ` <span class="muted">(${escapeHtml(representative.disabledReason)})</span>`;
+  return `${routineStatePill(representative.state)}${reason}`;
+}
+
+function renderRoutinesSection(groups: RoutineGroup[]): string {
+  if (groups.length === 0) {
+    return `<section>${sectionHead("Routines", 0)}<div class="empty"><strong>No Routines configured</strong>A Routine is a scheduled prompt that can launch a Coding Agent against one or more Projects without a GitHub Issue. Declare one in the service config's top-level <code>routines:</code> block to see it here.</div></section>`;
+  }
+  const rows = groups
+    .map((group) => {
+      const routineLink = `<a href="/routines/${encodeURIComponent(group.name)}">${escapeHtml(group.name)}</a>`;
+      const targetsLink = `<a href="/routines/${encodeURIComponent(group.name)}">${group.targets.length}</a>`;
+      return `<tr><td>${routineLink}</td><td>${escapeHtml(group.kind)}</td><td class="c-detail"><code>${escapeHtml(formatRoutineSchedule(group))}</code></td><td>${targetsLink}</td><td>${renderRoutineGroupStatus(group)}</td></tr>`;
+    })
     .join("");
   return tableSection(
     "Routines",
-    routines.length,
-    "<tr><th>Project</th><th>Routine</th><th>State</th><th>Latest outcome</th><th>Disabled reason</th><th>next_fire_at</th><th>last_fired_at</th><th>last_attempted_at</th><th>last_skip_reason</th><th>last_skip_at</th><th>skips_24h</th><th>Pull requests</th></tr>",
+    groups.length,
+    "<tr><th>Routine</th><th>Kind</th><th>Schedule</th><th>Targets</th><th>Next fire</th></tr>",
     rows
   );
-}
-
-function formatRoutinePullRequestNumbers(numbers: number[]): string {
-  return numbers.length === 0
-    ? "-"
-    : numbers.map((number) => `#${number}`).join(", ");
-}
-
-function formatRoutineSkipCounts(
-  counts: RoutineStatus["skipCounts24h"]
-): string {
-  return `overlap=${counts.overlap},concurrency_cap=${counts.concurrency_cap},catch_up_window=${counts.catch_up_window}`;
 }
 
 function collectActiveWatchdogIdleStatuses(
@@ -1007,6 +1238,17 @@ function renderWatchdogIdleBadge(
   return ` <span class="badge badge--watchdog">watchdog idle since ${escapeHtml(formatAge(watchdog.idleSince, nowMs))} (${escapeHtml(formatWatchdogDuration(watchdog.graceRemainingMs))} remaining)</span>`;
 }
 
+const RUNS_TABLE_HEAD =
+  "<tr><th>Run id</th><th>Project</th><th>Issue</th><th>State</th><th>Provider</th><th>Started</th><th>Updated</th><th>Branch</th></tr>";
+
+function runRowHtml(
+  run: RunStatus,
+  watchdogByRun: Map<string, WatchdogIdleStatus>,
+  nowMs: number
+): string {
+  return `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td class="c-title">#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td>${statePill(run.state)}${renderWatchdogIdleBadge(watchdogByRun.get(run.id), nowMs)}</td><td>${escapeHtml(run.provider)}</td><td><code>${escapeHtml(run.createdAt)}</code></td><td><code>${escapeHtml(run.updatedAt)}</code></td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`;
+}
+
 function renderRunsTable(
   title: string,
   runs: RunStatus[],
@@ -1021,17 +1263,45 @@ function renderRunsTable(
   }
 
   const rows = runs
-    .map(
-      (run) =>
-        `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td class="c-title">#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td>${statePill(run.state)}${renderWatchdogIdleBadge(watchdogByRun.get(run.id), nowMs)}</td><td>${escapeHtml(run.provider)}</td><td><code>${escapeHtml(run.createdAt)}</code></td><td><code>${escapeHtml(run.updatedAt)}</code></td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`
-    )
+    .map((run) => runRowHtml(run, watchdogByRun, nowMs))
     .join("");
-  return tableSection(
-    title,
-    runs.length,
-    "<tr><th>Run id</th><th>Project</th><th>Issue</th><th>State</th><th>Provider</th><th>Started</th><th>Updated</th><th>Branch</th></tr>",
-    rows
-  );
+  return tableSection(title, runs.length, RUNS_TABLE_HEAD, rows);
+}
+
+const ROUTINE_FIRINGS_TABLE_HEAD =
+  "<tr><th>Routine</th><th>Project</th><th>State</th><th>Started</th></tr>";
+
+function firingRowHtml(firing: RoutineFiringStatus): string {
+  return `<tr><td><a href="/routines/${encodeURIComponent(firing.routineName)}">${escapeHtml(firing.routineName)}</a></td><td>${escapeHtml(firing.projectName)}</td><td>${statePill(firing.state)}</td><td><code>${escapeHtml(firing.createdAt)}</code></td></tr>`;
+}
+
+// The active-now band (#302): every in-flight Run and Routine Firing,
+// labelled by kind, above the drill-in. "In-flight" is defined as queued,
+// preparing_workspace, or running — see ACTIVE_NOW_RUN_STATES_LIST /
+// ACTIVE_NOW_FIRING_STATES_LIST for the deliberate exclusion of `waiting`.
+// Rendered as two sub-tables under one heading, reusing the exact Runs row
+// markup /runs uses (including the watchdog idle badge) rather than a
+// bespoke component, per PRODUCT.md's "keep them legible tables" anti-
+// reference against card-grid decoration.
+function renderActiveNowBand(
+  runs: RunStatus[],
+  firings: RoutineFiringStatus[],
+  watchdogByRun: Map<string, WatchdogIdleStatus>,
+  nowMs: number
+): string {
+  const total = runs.length + firings.length;
+  if (total === 0) {
+    return `<section class="active-now">${sectionHead("Active now", 0)}<div class="empty"><strong>Nothing running right now</strong>This band lists every in-flight Run and Routine Firing — queued, preparing its workspace, or running. A waiting Run (parked for external state, such as PR review) is not active right now; it still appears on <a href="/runs">Runs</a>.</div></section>`;
+  }
+  const runsBlock =
+    runs.length === 0
+      ? ""
+      : `<h3 class="subhead">Runs</h3><div class="table-wrap"><table><thead>${RUNS_TABLE_HEAD}</thead><tbody>${runs.map((run) => runRowHtml(run, watchdogByRun, nowMs)).join("")}</tbody></table></div>`;
+  const firingsBlock =
+    firings.length === 0
+      ? ""
+      : `<h3 class="subhead">Routine firings</h3><div class="table-wrap"><table><thead>${ROUTINE_FIRINGS_TABLE_HEAD}</thead><tbody>${firings.map((firing) => firingRowHtml(firing)).join("")}</tbody></table></div>`;
+  return `<section class="active-now">${sectionHead("Active now", total)}${runsBlock}${firingsBlock}</section>`;
 }
 
 type CapContext = {

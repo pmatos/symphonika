@@ -123,10 +123,14 @@ describe("routine operator surfaces", () => {
         }
       });
 
+      // The dashboard's Routines section (#302) renders one condensed row
+      // per Routine name; skip counters and last-attempted timestamps move
+      // to the per-Routine page (#304). The API and CLI dashboard above
+      // still carry the full skip metadata this test is named for.
       const pageResponse = await app.request("/");
       const page = await pageResponse.text();
-      expect(page).toContain("last_attempted_at");
-      expect(page).toContain("overlap=1");
+      expect(page).toContain("Routines");
+      expect(page).toContain("minute-report");
 
       const dashboard = renderStatusDashboard({
         daemon: "running",
@@ -393,13 +397,13 @@ describe("routine operator surfaces", () => {
       const response = await app.request("/");
       const body = await response.text();
 
+      // Latest outcome (#42 "Extract retry policy", unverified) moves to the
+      // per-Routine page (#304); the dashboard's condensed row only carries
+      // enough to answer "is it scheduled, and when does it next run."
       expect(response.status).toBe(200);
       expect(body).toContain("Routines");
       expect(body).toContain("daily-report");
-      expect(body).toContain("next_fire_at");
-      expect(body).toContain("#42");
-      expect(body).toContain("Extract retry policy");
-      expect(body).toContain("(unverified)");
+      expect(body).toContain('<a href="/routines/daily-report">');
     } finally {
       store.close();
     }
@@ -430,8 +434,12 @@ describe("routine operator surfaces", () => {
       const response = await app.request("/");
       const body = await response.text();
 
+      // The condensed row (#302) shows a disabled routine's state pill with
+      // its reason inline, replacing the old dedicated "Disabled reason"
+      // column that a single-target routine no longer has room for.
       expect(response.status).toBe(200);
-      expect(body).toContain("Disabled reason");
+      expect(body).toContain("pill--neutral");
+      expect(body).toContain("disabled");
       expect(body).toContain("operator");
     } finally {
       store.close();

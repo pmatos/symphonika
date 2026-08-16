@@ -121,6 +121,11 @@ describe("routine declaration editor (#307 part 1, ADR 0075/0076)", () => {
       expect(extractHidden(html, "expected_content_hash")).toBe(
         contentHash(VALID_DECLARATION)
       );
+      // #307 AC: "Routine declaration -> which Routine Targets, and their
+      // next fire times."
+      expect(html).toContain("This save affects");
+      expect(html).toContain("alpha");
+      expect(html).toContain("2026-05-22T10:00:00.000Z");
     } finally {
       test.cleanup();
     }

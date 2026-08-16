@@ -740,8 +740,9 @@ export function registerPages(options: RegisterPagesOptions): void {
     const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
     const html = layout(
       `Edit ${name}`,
-      renderRoutineEditorForm({
+      renderEditorForm({
         action: `/routines/${encodeURIComponent(name)}/edit/preview`,
+        blastRadiusHtml: renderRoutineEditBlastRadius(resolved.group.targets),
         content,
         contentHash: contentHash(content),
         csrfToken,
@@ -794,7 +795,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       );
       const html = layout(
         `Confirm changes to ${name}`,
-        renderRoutineEditorPreview({
+        renderEditorPreview({
           confirmAction: `/routines/${encodeURIComponent(name)}/edit/confirm`,
           content,
           csrfToken,
@@ -877,7 +878,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         return context.html(
           layout(
             `Confirm changes to ${name}`,
-            renderRoutineEditorPreview({
+            renderEditorPreview({
               confirmAction: `/routines/${encodeURIComponent(name)}/edit/confirm`,
               content,
               csrfToken,
@@ -2286,15 +2287,23 @@ function readRequiredFormField(
   return value;
 }
 
-function renderRoutineEditorForm(input: {
+// Shared by every #307 editor (routine declaration, workflow contract,
+// service config): the raw-text-with-hidden-hash form each GET .../edit
+// route renders. blastRadiusHtml is caller-rendered rather than a fixed
+// shape here, since what a save affects differs per artifact (#307's issue
+// text: Routine Targets + next fire times; a Project's next dispatch;
+// the whole daemon) -- forcing one shared shape onto three different
+// disclosures would be the wrong abstraction.
+function renderEditorForm(input: {
   action: string;
+  blastRadiusHtml: string;
   content: string;
   contentHash: string;
   csrfToken: string;
   name: string;
   projectParam: string | undefined;
 }): string {
-  return `<h1 class="page-title">Edit ${escapeHtml(input.name)}</h1><p class="note">Raw text editing — this is the exact YAML front matter and prompt body written to disk; comments and key ordering elsewhere in the file are untouched by a save. Saving takes you to a diff review before anything is written.</p><form method="post" action="${escapeHtml(input.action)}">
+  return `<h1 class="page-title">Edit ${escapeHtml(input.name)}</h1><p class="note">Raw text editing — this is the exact content written to disk; comments and key ordering elsewhere in the file are untouched by a save. Saving takes you to a diff review before anything is written.</p>${input.blastRadiusHtml}<form method="post" action="${escapeHtml(input.action)}">
   <input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">
   <input type="hidden" name="expected_content_hash" value="${escapeHtml(input.contentHash)}">
   ${input.projectParam === undefined ? "" : `<input type="hidden" name="project_param" value="${escapeHtml(input.projectParam)}">`}
@@ -2303,7 +2312,22 @@ function renderRoutineEditorForm(input: {
 </form>`;
 }
 
-function renderRoutineEditorPreview(input: {
+// #307 AC: "Routine declaration → which Routine Targets, and their next
+// fire times." Targets share the same declaration (ADR 0069's fan-out), so
+// every one of them is affected by a save to this file -- listed
+// individually because "every target" without the list is exactly the
+// vague disclosure the AC asks editors not to give.
+function renderRoutineEditBlastRadius(targets: RoutineStatus[]): string {
+  const items = targets
+    .map(
+      (target) =>
+        `<li>${escapeHtml(target.projectName)} — next fire: <code>${target.nextFireAt === null ? "—" : escapeHtml(target.nextFireAt)}</code></li>`
+    )
+    .join("");
+  return `<div class="empty"><strong>This save affects</strong>Every target below picks up the edited schedule and prompt on the next dispatch tick.<ul>${items}</ul></div>`;
+}
+
+function renderEditorPreview(input: {
   confirmAction: string;
   content: string;
   csrfToken: string;

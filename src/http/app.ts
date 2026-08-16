@@ -141,6 +141,12 @@ export type HttpAppOptions = {
   getPullRequestFollowupPolicy?: () => {
     maxReviewDispatchesPerPr: number;
   };
+  // #307's workflow-contract editor: a Dispatch Project's current resolved
+  // workflow path, or undefined for a Routine Host (no workflow) or an
+  // unknown Project name.
+  getProjectWorkflowPath?: (
+    projectName: string
+  ) => { path: string } | undefined;
   getRuns?: () => RunStatus[];
   getReloadStatus?: () => RuntimeReloadStatus;
   getScheduled?: () => ScheduledCallback[];
@@ -579,6 +585,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         : {
             getPullRequestFollowupPolicy: options.getPullRequestFollowupPolicy
           }),
+      ...(options.getProjectWorkflowPath === undefined
+        ? {}
+        : { getProjectWorkflowPath: options.getProjectWorkflowPath }),
       ...(options.getStatusSnapshot === undefined
         ? {}
         : { getStatusSnapshot: options.getStatusSnapshot }),

@@ -983,6 +983,15 @@ export async function startDaemon(
       };
     },
     getPullRequestFollowupPolicy: () => runtimeConfig.pullRequestPolicy(),
+    getProjectWorkflowPath: (projectName) => {
+      const workflow = runtimeConfig
+        .projectsByName()
+        .get(projectName)?.workflow;
+      if (workflow === undefined || !("expandedWorkflow" in workflow)) {
+        return undefined;
+      }
+      return { path: workflow.path };
+    },
     getRuns: () => runStore.listRuns(),
     getWatchdogConfig: (projectName) =>
       resolveWatchdogConfig(runtimeConfig.watchdogServiceConfig(), projectName),

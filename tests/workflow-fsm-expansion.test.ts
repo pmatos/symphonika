@@ -29,6 +29,19 @@ afterEach(async () => {
 });
 
 describe("state machine workflow definitions", () => {
+  it("locates a YAML syntax error in a raw_fsm workflow definition (#307, ADR 0076)", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      ["workflow:", "  name: [unterminated", ""].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath, "raw_fsm");
+
+    expect(result.errors[0]).toMatch(/\(line \d+, column \d+\)/);
+  });
+
   it("compiles Markdown workflow contracts to the single-agent compatibility graph", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "WORKFLOW.md");

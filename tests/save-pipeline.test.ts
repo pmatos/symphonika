@@ -133,6 +133,65 @@ describe("runSavePipeline (#306 part 2/3, ADR 0075)", () => {
     expect(await readdir(root)).toEqual(["workflow.md"]);
   });
 
+  it("accepts a raw_fsm workflow (.yml) that opens with --- without misreading it as unterminated front matter (#307)", async () => {
+    const root = await makeTempRoot();
+    const filePath = path.join(root, "workflow.yml");
+    const original = "original: true\n";
+    await writeFile(filePath, original, "utf8");
+    const rawFsmContent = [
+      "---",
+      "workflow:",
+      "  name: minimal",
+      "  initial: done",
+      "  states:",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n");
+    const reload = vi.fn(OK_RELOAD);
+
+    const result = await runSavePipeline({
+      content: rawFsmContent,
+      expectedContentHash: contentHash(original),
+      filePath,
+      kind: "workflow_contract",
+      reload
+    });
+
+    expect(result.kind).toBe("saved");
+    expect(await readFile(filePath, "utf8")).toBe(rawFsmContent);
+  });
+
+  it("refuses raw_fsm content with a dangling initial-state reference", async () => {
+    const root = await makeTempRoot();
+    const filePath = path.join(root, "workflow.yml");
+    const original = "original: true\n";
+    await writeFile(filePath, original, "utf8");
+    const brokenContent = [
+      "workflow:",
+      "  name: minimal",
+      "  initial: nonexistent",
+      "  states:",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n");
+
+    const result = await runSavePipeline({
+      content: brokenContent,
+      expectedContentHash: contentHash(original),
+      filePath,
+      kind: "workflow_contract",
+      reload: OK_RELOAD
+    });
+
+    expect(result.kind).toBe("invalid");
+    if (result.kind === "invalid") {
+      expect(result.errors.join("\n")).toContain("initial state nonexistent");
+    }
+    expect(await readFile(filePath, "utf8")).toBe(original);
+  });
+
   it("reports a real reload failure on a schema-valid file, not a bare 'saved'", async () => {
     const root = await makeTempRoot();
     const filePath = path.join(root, "workflow.md");

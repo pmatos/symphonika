@@ -59,6 +59,41 @@ distinct error sources exist per editor, and only one carries a position:
   parser position — `parseRoutineDeclaration`'s hand-written checks operate on the already-parsed
   JS object, not source text. These stay plain strings, exactly the issue text's own carve-out.
 
+`locatedYamlErrorMessage` now wires into all three real syntax-error sites a #307 editor can
+actually trigger: `parseRoutineDeclaration`'s front matter (part 1), `parseWorkflowContract`'s
+front matter and `parseExplicitWorkflowDefinition`'s raw-FSM document (part 2, `src/workflow/`).
+A fourth site, workflow *template* files (`.symphonika/workflow-templates/*.yml`, referenced via a
+raw-FSM contract's `use:`), is deliberately left unlocated — #307's editable-artifact table doesn't
+include templates, and a location reported against a different file than the one open in the editor
+would misdirect rather than help.
+
+### Workflow contract validation dispatches on format, matching `readWorkflowSnapshot`
+
+`#306`'s save pipeline wired `workflow_contract` to bare `parseWorkflowContract`, which only
+understands the Markdown-with-front-matter shape. A raw-FSM contract can legitimately open with
+`---` (YAML's own document-start marker), which `parseWorkflowContract` would misread as
+unterminated Markdown front matter — a real latent bug, invisible until `#307` gave it a real
+caller. `validateWorkflowContractContent` (`src/workflow/fsm-expansion.ts`) fixes this by mirroring
+`readWorkflowSnapshot`'s own branch (`src/reload.ts`): call `expandWorkflowDefinition`, and only
+fall through to `parseWorkflowContract`-shaped errors when the resolved source kind isn't
+`raw_fsm` — matching exactly what reload does, content-based instead of file-based so it can
+validate a submitted edit before anything is written.
+
+Format resolution always passes `"auto"` (extension-based inference), not the Project's actual
+configured `format:` override — the generic `(contents, filePath)` shape `runSavePipeline`'s
+`VALIDATORS` map calls through carries no room for a third parameter, and `getProjectWorkflowPath`
+(the callback that resolves a Project name to its workflow path for the editor route) doesn't
+thread `format` through either, once it became clear nothing downstream read it. This is correct
+for every Project that doesn't deliberately declare a format contradicting its own file's
+extension — the unusual case, per `resolveWorkflowFormat`'s own fallback design (an explicit
+`format:` exists to *override* the extension guess, not to be the common path).
+
+Deliberately not shared with `readWorkflowSnapshot`'s own near-identical branch: that function also
+assembles a full `WorkflowSnapshot` (body, evidence, contentHash) for the live runtime map, not
+just errors, and extracting a shared seam out of it is the same kind of speculative surgery on a
+large critical-path function ADR-0075 already declined to do for `reload.ts`'s service-config
+schema. The ~10-line branch shape is duplicated once, not built as an abstraction with one caller.
+
 ### Preview reads and diffs; only confirm resolves and writes
 
 `resolveWritePath` (path confinement, `src/path-safety.ts` via ADR-0075) gates the confirm step
@@ -97,3 +132,12 @@ operator the routine doesn't exist, when it does, just not uniquely by name.
   `--ok-ink`/`--ok-bg`/`--fail-ink`/`--fail-bg` tokens for add/remove coloring rather than
   introducing new ones — an addition reads as the same "ok" green a succeeded Run pill already
   uses, a removal the same "fail" red, in both the light and dark palettes.
+- `renderEditorForm`/`renderEditorPreview` (renamed from routine-specific names once a second
+  caller existed) are the shared form/diff shape all three editors render through; only the
+  blast-radius disclosure and validator differ per artifact, passed in by the caller rather than
+  hard-coded into the shared renderer.
+- `save-pipeline.ts`'s `VALIDATORS` map is now `(contents, filePath) => {errors} | Promise<{errors}>`
+  — widened from synchronous-only once `workflow_contract`'s real validator needed to be async
+  (`expandWorkflowDefinition` and `validateExpandedWorkflowReferences` both are). `runSavePipeline`
+  awaits the result unconditionally; a still-synchronous validator like `parseRoutineDeclaration`
+  is unaffected.

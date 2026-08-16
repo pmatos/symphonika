@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { contentHash } from "../content-hash.js";
 import { parseRoutineDeclaration } from "../routines/declaration-loader.js";
-import { parseWorkflowContract } from "../workflow/contract-loading.js";
+import { validateWorkflowContractContent } from "../workflow/fsm-expansion.js";
 
 // `service_config` is a third real kind (#306's issue text: "routine
 // declaration paths, workflow contract paths, the service config
@@ -48,10 +48,13 @@ export type SavePipelineResult =
 
 const VALIDATORS: Record<
   SaveContentKind,
-  (contents: string, filePath: string) => { errors: string[] }
+  (
+    contents: string,
+    filePath: string
+  ) => { errors: string[] } | Promise<{ errors: string[] }>
 > = {
   routine_declaration: parseRoutineDeclaration,
-  workflow_contract: parseWorkflowContract
+  workflow_contract: validateWorkflowContractContent
 };
 
 // The one path every editor's save button calls through (#306): validate
@@ -64,7 +67,10 @@ const VALIDATORS: Record<
 export async function runSavePipeline(
   input: SavePipelineInput
 ): Promise<SavePipelineResult> {
-  const validation = VALIDATORS[input.kind](input.content, input.filePath);
+  const validation = await VALIDATORS[input.kind](
+    input.content,
+    input.filePath
+  );
   if (validation.errors.length > 0) {
     return { errors: validation.errors, kind: "invalid" };
   }

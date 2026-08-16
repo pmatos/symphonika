@@ -694,7 +694,12 @@ export type ChangeEvent =
       sequence: number;
       state: RoutineFiringState;
     }
-  | { finishedAt: string; kind: "project-poll"; ok: boolean; projectName: string }
+  | {
+      finishedAt: string;
+      kind: "project-poll";
+      ok: boolean;
+      projectName: string;
+    }
   | { errors: string[]; kind: "reload-outcome"; ok: boolean };
 
 export class RunStore {

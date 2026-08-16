@@ -409,7 +409,10 @@ describe("daemon hot reload", () => {
       const decoder = new TextDecoder();
       let buffer = "";
       const deadline = Date.now() + 2_000;
-      while (!buffer.includes("event: reload-outcome") && Date.now() < deadline) {
+      while (
+        !buffer.includes("event: reload-outcome") &&
+        Date.now() < deadline
+      ) {
         const { done, value } = await reader!.read();
         if (done) {
           break;

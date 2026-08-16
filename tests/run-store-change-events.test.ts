@@ -58,8 +58,18 @@ describe("RunStore — change notification path (#305, ADR 0074)", () => {
       runStore.updateRunState("run-a", "running");
 
       expect(events).toEqual([
-        { kind: "run-transition", runId: "run-a", sequence: 1, state: "queued" },
-        { kind: "run-transition", runId: "run-a", sequence: 2, state: "running" }
+        {
+          kind: "run-transition",
+          runId: "run-a",
+          sequence: 1,
+          state: "queued"
+        },
+        {
+          kind: "run-transition",
+          runId: "run-a",
+          sequence: 2,
+          state: "running"
+        }
       ]);
     } finally {
       runStore.close();
@@ -130,7 +140,11 @@ describe("RunStore — change notification path (#305, ADR 0074)", () => {
       expect(events).toHaveLength(1);
       const event = events[0];
       expect(event?.kind).toBe("project-poll");
-      expect(event).toMatchObject({ kind: "project-poll", ok: true, projectName: "alpha" });
+      expect(event).toMatchObject({
+        kind: "project-poll",
+        ok: true,
+        projectName: "alpha"
+      });
     } finally {
       runStore.close();
     }

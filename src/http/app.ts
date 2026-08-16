@@ -598,6 +598,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     registerPages({
       app,
       csrfSecret,
+      ...(options.getActiveRuns === undefined
+        ? {}
+        : { getActiveRuns: options.getActiveRuns }),
       ...(options.getConcurrency === undefined
         ? {}
         : { getConcurrency: options.getConcurrency }),

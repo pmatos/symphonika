@@ -86,6 +86,17 @@ export type RegisterPagesOptions = {
   // Every mutating form embeds a token derived from this secret. See
   // docs/adr/0075-mutation-authentication-and-superseding-0027.md.
   csrfSecret: CsrfSecret;
+  // #308 part 3's clear-stale-claim liveness gate: the in-process registry
+  // source `collectLiveKeys` (src/lifecycle/stale-claims.ts) unions with
+  // runStore.listActiveRunIds/listWaitingRunIds. See HttpAppOptions.getActiveRuns
+  // (src/http/app.ts).
+  getActiveRuns?: () => Array<{
+    cancelReason: string | null;
+    cancelRequested: boolean;
+    issueNumber: number;
+    projectName: string;
+    runId: string;
+  }>;
   // Per-Slice-2 live cap snapshot; #303's capacity strip. See ADR 0053.
   getConcurrency?: () => {
     global: { inFlight: number; maxInFlight: number | null };
@@ -649,12 +660,19 @@ export function registerPages(options: RegisterPagesOptions): void {
 
     let banner: IssueLabelWriteBanner;
     if (label.length === 0) {
-      banner = { action, label, ok: false, error: "a label is required" };
+      banner = {
+        action,
+        error: "a label is required",
+        kind: "label_write",
+        label,
+        ok: false
+      };
     } else if (isOrchestratorLabel(label)) {
       banner = {
         action,
         error:
           "sym:* labels are managed by Symphonika and can't be edited here (ADR 0002/0024)",
+        kind: "label_write",
         label,
         ok: false
       };
@@ -662,6 +680,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       banner = {
         action,
         error: "label writes are unavailable",
+        kind: "label_write",
         label,
         ok: false
       };
@@ -673,8 +692,14 @@ export function registerPages(options: RegisterPagesOptions): void {
         remove: action === "remove" ? [label] : []
       });
       banner = result.ok
-        ? { action, label, ok: true }
-        : { action, error: result.error, label, ok: false };
+        ? { action, kind: "label_write", label, ok: true }
+        : {
+            action,
+            error: result.error,
+            kind: "label_write",
+            label,
+            ok: false
+          };
     }
 
     const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
@@ -710,6 +735,91 @@ export function registerPages(options: RegisterPagesOptions): void {
         context.req.param("project"),
         context.req.param("number"),
         "remove"
+      )
+  );
+
+  async function handleClearStaleClaim(
+    context: Context,
+    projectName: string,
+    issueNumberParam: string
+  ): Promise<Response> {
+    const issueNumber = Number.parseInt(issueNumberParam, 10);
+    const detail = loadIssueDetail(options.runStore, projectName, issueNumber);
+    if (detail === undefined) {
+      return context.html(
+        renderIssueNotFound(projectName, issueNumberParam),
+        404
+      );
+    }
+
+    const presentClaimLabels = detail.snapshot.labels.filter((label) =>
+      STALE_CLEAR_LABELS.has(label)
+    );
+
+    let banner: IssueClearStaleClaimBanner;
+    if (presentClaimLabels.length === 0) {
+      banner = {
+        error: "This issue has no stale-claim labels to clear.",
+        kind: "clear_stale_claim",
+        ok: false
+      };
+    } else {
+      const liveRunId = findLiveRunIdForIssue({
+        getActiveRuns: options.getActiveRuns,
+        issueNumber,
+        projectName,
+        runStore: options.runStore
+      });
+      if (liveRunId !== undefined) {
+        banner = {
+          error: `Refused: run ${liveRunId} is live for this issue.`,
+          kind: "clear_stale_claim",
+          ok: false
+        };
+      } else if (options.writeIssueLabels === undefined) {
+        banner = {
+          error: "label writes are unavailable",
+          kind: "clear_stale_claim",
+          ok: false
+        };
+      } else {
+        const result = await options.writeIssueLabels({
+          add: [],
+          issueNumber,
+          projectName,
+          remove: presentClaimLabels
+        });
+        banner = result.ok
+          ? {
+              clearedLabels: presentClaimLabels,
+              kind: "clear_stale_claim",
+              ok: true
+            }
+          : { error: result.error, kind: "clear_stale_claim", ok: false };
+      }
+    }
+
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const html = layout(
+      `#${issueNumber} ${detail.snapshot.title}`,
+      renderIssueDetailPage({
+        banner,
+        csrfToken,
+        detail,
+        pollNowAvailable: options.pollNow !== undefined
+      })
+    );
+    return context.html(html);
+  }
+
+  options.app.post(
+    "/issues/:project/:number/clear-stale-claim",
+    requireAuthorizedMutation,
+    (context) =>
+      handleClearStaleClaim(
+        context,
+        context.req.param("project"),
+        context.req.param("number")
       )
   );
 
@@ -2843,6 +2953,35 @@ function resolveClaimedRunId(
     ?.id;
 }
 
+// #308 part 3's clear-stale-claim liveness gate: the same three-source union
+// detectStaleClaims's own collectLiveKeys uses (src/lifecycle/stale-claims.ts)
+// — the in-process registry (getActiveRuns), queued/preparing_workspace/
+// running Run rows, and parked `waiting` rows (which still wear sym:claimed
+// across the wait, ADR 0047). Missing the waiting set would let an operator
+// clear a claim on a parked-but-live Run — the exact double dispatch ADR
+// 0077 exists to prevent.
+function findLiveRunIdForIssue(input: {
+  getActiveRuns:
+    | (() => Array<{ issueNumber: number; projectName: string; runId: string }>)
+    | undefined;
+  issueNumber: number;
+  projectName: string;
+  runStore: RunStore;
+}): string | undefined {
+  const matches = (entry: { issueNumber: number; projectName: string }) =>
+    entry.projectName === input.projectName &&
+    entry.issueNumber === input.issueNumber;
+  const active = input.getActiveRuns?.().find(matches);
+  if (active !== undefined) {
+    return active.runId;
+  }
+  const activeRun = input.runStore.listActiveRunIds().find(matches);
+  if (activeRun !== undefined) {
+    return activeRun.runId;
+  }
+  return input.runStore.listWaitingRunIds().find(matches)?.runId;
+}
+
 // #303's own pre-restart check (renderProjectCapacityStrip, above) inlined
 // here for a single row's polledAt rather than a project's lastPollFinishedAt
 // — same rule (ADR 0073): a snapshot row timestamped before this process
@@ -3052,9 +3191,23 @@ function renderIssueNotFound(projectName: string, issueNumber: string): string {
 type IssueLabelWriteBanner = {
   action: "add" | "remove";
   error?: string;
+  kind: "label_write";
   label: string;
   ok: boolean;
 };
+
+// #308 part 3's clear-stale-claim action: its own named banner, distinct
+// from a single label add/remove, since it clears a set of labels together
+// and carries a distinct refusal reason (a live Run) a plain label write
+// never has. See ADR 0077.
+type IssueClearStaleClaimBanner = {
+  clearedLabels?: string[];
+  error?: string;
+  kind: "clear_stale_claim";
+  ok: boolean;
+};
+
+type IssueActionBanner = IssueClearStaleClaimBanner | IssueLabelWriteBanner;
 
 function renderIssueLabelWriteBanner(banner: IssueLabelWriteBanner): string {
   const verb = banner.action === "add" ? "Add" : "Remove";
@@ -3065,8 +3218,57 @@ function renderIssueLabelWriteBanner(banner: IssueLabelWriteBanner): string {
   return `<div class="alert alert--ok" role="status"><strong>${past} label "${escapeHtml(banner.label)}" on GitHub</strong><p>This page shows the last poll snapshot; the label list below and the verdict won't reflect this until the next poll.</p></div>`;
 }
 
+function renderIssueClearStaleClaimBanner(
+  banner: IssueClearStaleClaimBanner
+): string {
+  if (!banner.ok) {
+    return `<div class="alert" role="alert"><strong>Clear stale claim failed</strong>${banner.error === undefined ? "" : `<p>${escapeHtml(banner.error)}</p>`}<p>The labels shown below are unchanged.</p></div>`;
+  }
+  const cleared = (banner.clearedLabels ?? []).map(escapeHtml).join(", ");
+  return `<div class="alert alert--ok" role="status"><strong>Cleared stale claim on GitHub</strong><p>Removed ${cleared}. This page shows the last poll snapshot; the label list below and the verdict won't reflect this until the next poll.</p></div>`;
+}
+
+function renderIssueActionBanner(banner: IssueActionBanner): string {
+  return banner.kind === "label_write"
+    ? renderIssueLabelWriteBanner(banner)
+    : renderIssueClearStaleClaimBanner(banner);
+}
+
 function renderPollNowForm(csrfToken: string): string {
   return `<form method="post" action="/issues/poll-now"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}"><button class="btn" type="submit">Poll now</button></form>`;
+}
+
+// #308 part 3: the same three labels ADR 0038 / doctor.ts's `clear-stale`
+// CLI command removes together (STALE_CLEAR_LABELS, src/doctor.ts) — kept
+// as its own copy here rather than importing doctor.ts's private constant,
+// since that module is CLI-only machinery this HTTP surface shouldn't
+// couple to. See ADR 0077.
+const STALE_CLEAR_LABELS: ReadonlySet<string> = new Set([
+  "sym:stale",
+  "sym:claimed",
+  "sym:running"
+]);
+
+function renderClearStaleClaimSection(input: {
+  csrfToken: string;
+  issueNumber: number;
+  labels: string[];
+  projectName: string;
+}): string {
+  const hasClaimLabel = input.labels.some((label) =>
+    STALE_CLEAR_LABELS.has(label)
+  );
+  if (!hasClaimLabel) {
+    return "";
+  }
+  const action = `/issues/${encodeURIComponent(input.projectName)}/${input.issueNumber}/clear-stale-claim`;
+  return `<section><h2>Clear stale claim</h2><p class="note">Removes ${Array.from(
+    STALE_CLEAR_LABELS
+  )
+    .map((label) => `<code>${escapeHtml(label)}</code>`)
+    .join(
+      ", "
+    )} together (ADR 0038) — refused if a live Run still holds this issue, so it never invites a double dispatch.</p><form method="post" action="${escapeHtml(action)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}"><button class="btn" type="submit">Clear stale claim</button></form></section>`;
 }
 
 function renderIssueLabelsSection(input: {
@@ -3092,7 +3294,7 @@ function renderIssueLabelsSection(input: {
 }
 
 function renderIssueDetailPage(input: {
-  banner: IssueLabelWriteBanner | undefined;
+  banner: IssueActionBanner | undefined;
   csrfToken: string;
   detail: IssueDetail;
   pollNowAvailable: boolean;
@@ -3101,7 +3303,7 @@ function renderIssueDetailPage(input: {
   const bannerHtml =
     input.banner === undefined
       ? ""
-      : `${renderIssueLabelWriteBanner(input.banner)}${input.banner.ok && input.pollNowAvailable ? renderPollNowForm(input.csrfToken) : ""}`;
+      : `${renderIssueActionBanner(input.banner)}${input.banner.ok && input.pollNowAvailable ? renderPollNowForm(input.csrfToken) : ""}`;
   return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${renderIssueLabelsSection(
     {
       csrfToken: input.csrfToken,
@@ -3109,7 +3311,12 @@ function renderIssueDetailPage(input: {
       labels: detail.snapshot.labels,
       projectName: detail.projectName
     }
-  )}<p class="note"><a href="/issues">← Back to search</a></p>`;
+  )}${renderClearStaleClaimSection({
+    csrfToken: input.csrfToken,
+    issueNumber: detail.issueNumber,
+    labels: detail.snapshot.labels,
+    projectName: detail.projectName
+  })}<p class="note"><a href="/issues">← Back to search</a></p>`;
 }
 
 // A Routine name is globally unique across the *current* declared config

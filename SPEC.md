@@ -2020,6 +2020,18 @@ the same rule `/projects/:name`'s capacity strip already uses. Filters — Proje
 optional query parameters; an unrecognized `?verdict=` value is treated as no filter, matching how
 `/runs`'s `?state=` handles an unrecognized value.
 
+Each search result links to `GET /issues/:project/:number` (`#308` part 2), showing the issue's full
+label set — orchestrator-owned `sym:*` labels render as read-only pills with an explanation (ADR
+0002/0024), never a Remove control — plus an "Add a label" form and a per-label Remove form for
+every other label. Both write through `writeIssueLabels` (`src/daemon.ts`), which resolves the
+Project's tracker token, calls `GitHubIssuesApi.addLabelsToIssue` / `removeLabelsFromIssue`, and
+surfaces a thrown error as a plain-text failure banner — the page's label list is always read from
+the persisted snapshot, never mutated in memory on either a success or a failure, so "the issue's
+displayed labels unchanged" holds for both. A successful write's banner offers `POST
+/issues/poll-now`, a page-facing wrapper around the same `pollNow` trigger `/api/poll-now` already
+exposes to the CLI — submitted separately by the operator, never auto-fired by the write itself, so
+labelling an issue never bypasses the dispatch gates (ADR 0036) by triggering a poll as a side effect.
+
 Label creation, stale-claim reset, and workspace cleanup remain CLI-only.
 
 ## 15. Bootstrap Acceptance Bar

@@ -9,7 +9,8 @@ import { parse } from "yaml";
 import {
   createHttpApp,
   type FireRoutineResult,
-  type PollNowResult
+  type PollNowResult,
+  type WriteIssueLabelsResult
 } from "./http/app.js";
 import {
   removeDaemonEndpoint,
@@ -22,10 +23,13 @@ import {
   emptyIssuePollStatus,
   pollConfiguredGitHubIssuesFromConfig,
   readConfiguredPollingIntervalMs,
-  replaceIssuePollStatus
+  replaceIssuePollStatus,
+  tryAddLabelsToIssue,
+  tryRemoveLabelsFromIssue
 } from "./issue-polling.js";
 import { ActiveRunRegistry, CANCEL_REASONS } from "./lifecycle/active-runs.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
+import { resolveToken } from "./lifecycle/token.js";
 import {
   createDaemonHeartbeat,
   isTickRecentEnoughForSystemdWatchdog,
@@ -992,6 +996,60 @@ export async function startDaemon(
         return undefined;
       }
       return { format: workflow.format, path: workflow.path };
+    },
+    writeIssueLabels: async (input): Promise<WriteIssueLabelsResult> => {
+      const project = runtimeConfig.projectsByName().get(input.projectName);
+      if (project?.tracker === undefined) {
+        return {
+          error: `projects.${input.projectName}.tracker is not configured`,
+          ok: false
+        };
+      }
+      const token = resolveToken(project.tracker.token, env);
+      if (token === undefined) {
+        return {
+          error: `projects.${input.projectName}.tracker.token is not available`,
+          ok: false
+        };
+      }
+      const repository = {
+        owner: project.tracker.owner,
+        repo: project.tracker.repo,
+        token
+      };
+      try {
+        if (input.add.length > 0) {
+          const added = await tryAddLabelsToIssue(githubIssuesApi, {
+            ...repository,
+            issueNumber: input.issueNumber,
+            labels: input.add
+          });
+          if (!added) {
+            return {
+              error:
+                "adding labels is not supported by the configured GitHub API",
+              ok: false
+            };
+          }
+        }
+        if (input.remove.length > 0) {
+          const removed = await tryRemoveLabelsFromIssue(githubIssuesApi, {
+            ...repository,
+            issueNumber: input.issueNumber,
+            labels: input.remove
+          });
+          if (!removed) {
+            return {
+              error:
+                "removing labels is not supported by the configured GitHub API",
+              ok: false
+            };
+          }
+        }
+        return { ok: true };
+      } catch (error) {
+        return { error: errorMessage(error), ok: false };
+      }
     },
     getRuns: () => runStore.listRuns(),
     getWatchdogConfig: (projectName) =>

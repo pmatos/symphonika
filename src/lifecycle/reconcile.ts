@@ -40,6 +40,17 @@ export async function reconcileActiveRuns(
     if (project === undefined || !isDispatchProject(project)) {
       continue;
     }
+    if (input.runStore.getRun(entry.runId) === undefined) {
+      // Not an issue-driven Run. Routine Firings share this registry (and a
+      // synthetic issue number) purely for per-project concurrency-slot
+      // bookkeeping -- see reserveSlot in routines/dispatcher.ts -- and have
+      // no GitHub issue to reconcile against; the routine dispatcher
+      // supervises their cancellation instead. Without this check, a
+      // Routine Firing on a project that is also a Dispatch Project has its
+      // synthetic issue number looked up on GitHub, resolves to "not
+      // found", and is incorrectly cancelled with CLOSED_ISSUE.
+      continue;
+    }
 
     const snapshot = findIssueSnapshot(
       input.pollStatus,

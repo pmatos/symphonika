@@ -394,6 +394,63 @@ describe("reconcileActiveRuns", () => {
     });
   });
 
+  it("does not cancel a Routine Firing sharing a Dispatch Project's concurrency slot", async () => {
+    // Routine Firings register into the same ActiveRunRegistry as
+    // issue-driven Runs (with a synthetic issue number, see reserveSlot in
+    // routines/dispatcher.ts) so per-project concurrency caps see both kinds
+    // of work. Deliberately no store.createRun() here -- this entry is a
+    // Routine Firing, not a Run, and must not be reconciled against GitHub.
+    await withRunStore(async (store) => {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "refactor-audit",
+          prompt: "Audit the codebase.",
+          provider: "codex",
+          schedule: { cron: "0 1 * * 1-5", tz: "Etc/UTC" },
+          projectName: project.name,
+          sourcePath: "/tmp/refactor-audit.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "firing-a",
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex",
+        routineName: "refactor-audit"
+      });
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const registry = new ActiveRunRegistry();
+      registry.register({
+        cancel,
+        // A synthetic issue number, as reserveSlot assigns for a Routine
+        // Firing -- deliberately not present in any poll snapshot.
+        issueNumber: -1,
+        projectName: project.name,
+        runId: "firing-a"
+      });
+
+      const githubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue(null),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+
+      await reconcileActiveRuns({
+        activeRuns: registry,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi,
+        logger,
+        pollStatus: pollStatus([]),
+        projects: new Map([[project.name, project]]),
+        runStore: store
+      });
+
+      expect(githubIssuesApi.getIssue).not.toHaveBeenCalled();
+      expect(cancel).not.toHaveBeenCalled();
+      expect(registry.get("firing-a")?.cancelReason).toBeUndefined();
+    });
+  });
+
   it("preserves `this` when calling getIssue on a class-based API", async () => {
     await withRunStore(async (store) => {
       store.createRun({

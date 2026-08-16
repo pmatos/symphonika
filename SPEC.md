@@ -1913,6 +1913,21 @@ affects the Project's *next* dispatch only — an in-flight Run keeps the workfl
 with (ADR-0045's per-Run persisted expanded graph), which the issue text calls out as the direction
 an operator would otherwise reasonably assume wrong.
 
+`GET /config/edit` closes the same shape over `symphonika.yml` itself, linked from every page's
+primary navigation rather than a Project- or Routine-scoped page. Validation
+(`validateServiceConfigContent`, `src/reload.ts`) runs the submitted content through the exact same
+schema-parse-and-cross-reference path a real reload does — the previously-deferred extraction from
+`#306` (ADR-0075), driven now that `#307` gives it a real caller: the submitted content is written
+to a throwaway file in the same directory as the real config (so relative `routines:`/`workflow:`
+paths resolve correctly) and validated there, never touching the live file. An invalid edit is
+refused with each error located to its offending field path; the daemon's own last-good snapshot is
+untouched either way, since nothing is written until validation passes. Editing any of
+`providers.codex.command`, `providers.claude.command`, or `providers.omp.command` — the three
+provider names the schema allows — requires an explicit checkbox distinct from the ordinary
+"Confirm save" button, checked both client-side (a required HTML checkbox) and server-side (the
+confirm route independently re-derives the same before/after comparison and refuses the write
+outright if the box wasn't submitted).
+
 `detectGitFileState` (`src/http/git-status.ts`, ADR-0075) gives a future editor the git context the
 issue requires before a save: whether the target path sits inside a git repo, its repo root and
 branch (or, if detached, the current SHA), the whole working tree's dirty state and — separately —

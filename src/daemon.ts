@@ -983,6 +983,7 @@ export async function startDaemon(
       };
     },
     getPullRequestFollowupPolicy: () => runtimeConfig.pullRequestPolicy(),
+    getConfigPath: () => state.configPath,
     getProjectWorkflowPath: (projectName) => {
       const workflow = runtimeConfig
         .projectsByName()

@@ -5,18 +5,11 @@ import path from "node:path";
 import { contentHash } from "../content-hash.js";
 import type { WorkflowFormat } from "../config-schemas.js";
 import { parseRoutineDeclaration } from "../routines/declaration-loader.js";
+import { validateServiceConfigContent } from "../reload.js";
 import { validateWorkflowContractContent } from "../workflow/fsm-expansion.js";
 
-// `service_config` is a third real kind (#306's issue text: "routine
-// declaration paths, workflow contract paths, the service config
-// itself"), deliberately not wired here. Reusing RuntimeConfigReloader's
-// own validators for it needs an extraction out of loadRuntimeConfigSnapshot
-// in src/reload.ts (schema parse -> provider-command-template rendering ->
-// routine attach -> previous-snapshot merge, not a clean parse-only seam
-// today) that should be driven by #307's actual service-config editor
-// route, not done speculatively against no caller. See
-// docs/adr/0075-mutation-authentication-and-superseding-0027.md.
-type SaveContentKind = "routine_declaration" | "workflow_contract";
+type SaveContentKind =
+  "routine_declaration" | "service_config" | "workflow_contract";
 
 export type ReloadOutcome = { errors: string[]; ok: boolean };
 
@@ -61,6 +54,7 @@ const VALIDATORS: Record<
   ) => { errors: string[] } | Promise<{ errors: string[] }>
 > = {
   routine_declaration: parseRoutineDeclaration,
+  service_config: validateServiceConfigContent,
   workflow_contract: (contents, filePath, workflowFormat) =>
     validateWorkflowContractContent(
       contents,

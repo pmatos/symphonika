@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { Logger } from "pino";
@@ -478,6 +478,40 @@ export class RuntimeConfigReloader {
     }
 
     return this.snapshot;
+  }
+}
+
+// #307's service-config editor: validates submitted symphonika.yml content
+// the same way a real reload would, before anything is written. Deferred
+// in #306 (ADR 0075) for lack of a real caller and a clean seam --
+// loadRuntimeConfigSnapshot already reads from a caller-given configPath
+// and configDir independently, so the seam turns out to be a temp file
+// written into the SAME directory as the real config (never system tmpdir
+// -- relative paths in routines:/projects[].workflow entries must resolve
+// against the real directory tree, exactly like the live reload). The temp
+// file is validation-only scratch: never the write target, always removed
+// before this returns. loadRuntimeConfigSnapshot itself never writes
+// anything and has no side effects beyond its return value, so calling it
+// against a throwaway path is safe even while a real reload is in flight.
+export async function validateServiceConfigContent(
+  content: string,
+  configPath: string
+): Promise<{ errors: string[] }> {
+  const configDir = path.dirname(configPath);
+  const tempPath = path.join(
+    configDir,
+    `.${path.basename(configPath)}.editor-validate-${process.pid}-${Date.now()}`
+  );
+  await writeFile(tempPath, content, "utf8");
+  try {
+    const result = await loadRuntimeConfigSnapshot({
+      attemptedAt: new Date().toISOString(),
+      configDir,
+      configPath: tempPath
+    });
+    return { errors: result.errors };
+  } finally {
+    await rm(tempPath, { force: true });
   }
 }
 

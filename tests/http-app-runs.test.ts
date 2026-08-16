@@ -2523,3 +2523,261 @@ describe("HTTP app — project detail page (#303)", () => {
     }
   });
 });
+
+describe("HTTP app — routine detail page (#304)", () => {
+  it("404s for an unknown Routine name", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/routines/nope");
+      expect(response.status).toBe(404);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows the declaration, prompt, per-target row, skip counters, and firing history for a single-target Routine", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          allowOverlap: true,
+          catchUp: "fire_once_if_missed",
+          kind: "report",
+          name: "audit",
+          prompt: "Audit the codebase for smells.",
+          provider: "codex",
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        }
+      ]);
+      test.runStore.createRoutineFiring({
+        id: "fire-1",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "audit"
+      });
+      test.runStore.updateRoutineFiringState("fire-1", "succeeded");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/routines/audit")).text();
+
+      expect(body).toContain("Audit the codebase for smells.");
+      expect(body).toContain("report");
+      expect(body).toContain("codex");
+      expect(body).toContain("2026-05-22T10:00:00.000Z");
+      expect(body).toContain(">yes<"); // allow overlap
+      expect(body).toContain("fire_once_if_missed");
+      expect(body).toContain("/tmp/audit.md");
+      expect(body).toContain("alpha");
+      expect(body).toContain("overlap 0 · cap 0 · catch-up 0");
+      expect(body).toContain("fire-1");
+      expect(body).toContain("single");
+      expect(body).toContain(
+        "Enable/disable and manual-fire controls land with #306"
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows sibling firings from one clock event as one event, not N unrelated rows", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        },
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit.",
+          provider: null,
+          projectName: "beta",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        }
+      ]);
+      test.runStore.createRoutineFiring({
+        fanoutId: "fanout-1",
+        id: "fire-alpha",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "audit"
+      });
+      test.runStore.createRoutineFiring({
+        fanoutId: "fanout-1",
+        id: "fire-beta",
+        projectName: "beta",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "audit"
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/routines/audit")).text();
+
+      const firingHistoryIndex = body.indexOf(">Firing history<");
+      const historySection = body.slice(firingHistoryIndex);
+      expect(historySection.match(/fan-out · 2 targets/g)).toHaveLength(2);
+      expect(historySection).toContain("fire-alpha");
+      expect(historySection).toContain("fire-beta");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows an operator-disabled target's disabled_reason", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          disabled: true,
+          kind: "report",
+          name: "audit",
+          prompt: "Audit.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        }
+      ]);
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/routines/audit")).text();
+
+      expect(body).toContain("operator");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows an invalid target's stub state without losing a sibling target's real schedule and prompt", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Real prompt body.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        }
+      ]);
+      // A second target for the same (name, sourcePath) declaration that
+      // failed reload — upsertInvalidRoutineStub's placeholder row has
+      // prompt_body/schedule_at = ''. Sharing sourcePath is what keeps it
+      // in the same group as "alpha" rather than groupRoutinesByName's
+      // stale-name-reuse case.
+      test.runStore.upsertInvalidRoutineStub({
+        name: "audit",
+        projectName: "beta",
+        sourcePath: "/tmp/audit.md"
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/routines/audit")).text();
+
+      // The group's declaration card must resolve from "alpha" (the real
+      // target), not blank out because "beta" is invalid and alphabetically
+      // first.
+      expect(body).toContain("Real prompt body.");
+      expect(body).toContain("2026-05-22T10:00:00.000Z");
+      // Both targets still appear in the per-target table.
+      expect(body).toContain("alpha");
+      expect(body).toContain("beta");
+      expect(body).toContain("invalid");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("lists a disambiguation page when two unrelated declarations share a name, resolved by ?project=", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Old declaration.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/old-audit.md"
+        }
+      ]);
+      // Remove it from config (soft-disables to disabled_reason
+      // 'removed_from_config', not 'inactive' — still visible by default)
+      // and declare an unrelated Routine reusing the same name for a
+      // different Project.
+      test.runStore.syncRoutines(
+        [
+          {
+            kind: "report",
+            name: "audit",
+            prompt: "New declaration.",
+            provider: null,
+            projectName: "gamma",
+            schedule: { at: "2026-05-22T11:00:00.000Z" },
+            sourcePath: "/tmp/new-audit.md"
+          }
+        ],
+        { projects: ["alpha", "gamma"] }
+      );
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const disambigBody = await (await app.request("/routines/audit")).text();
+      expect(disambigBody).toContain("Multiple declarations share this name");
+      expect(disambigBody).toContain("/tmp/old-audit.md");
+      expect(disambigBody).toContain("/tmp/new-audit.md");
+
+      const gammaBody = await (
+        await app.request("/routines/audit?project=gamma")
+      ).text();
+      expect(gammaBody).toContain("New declaration.");
+      expect(gammaBody).not.toContain("Old declaration.");
+
+      const alphaBody = await (
+        await app.request("/routines/audit?project=alpha")
+      ).text();
+      expect(alphaBody).toContain("removed_from_config");
+    } finally {
+      test.cleanup();
+    }
+  });
+});

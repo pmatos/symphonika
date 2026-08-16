@@ -759,6 +759,150 @@ describe("RunStore detail queries", () => {
       store.close();
     }
   });
+
+  it("listRuns accepts a state array, matching any of the listed states", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.createRun({
+        id: "r-queued",
+        issue: sampleIssue({ number: 1 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      store.createRun({
+        id: "r-running",
+        issue: sampleIssue({ number: 2 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      store.updateRunState("r-running", "running");
+      store.createRun({
+        id: "r-waiting",
+        issue: sampleIssue({ number: 3 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      store.updateRunState("r-waiting", "waiting");
+
+      const active = store.listRuns({ state: ["queued", "running"] });
+      expect(active.map((run) => run.id).sort()).toEqual([
+        "r-queued",
+        "r-running"
+      ]);
+
+      // An empty array is "match nothing", not "no filter" — the dashboard's
+      // active-now band must render empty rather than every run if it is
+      // ever called with an empty state set.
+      expect(store.listRuns({ state: [] })).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("listRoutineFirings accepts a state array, matching any of the listed states", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-running",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "audit"
+      });
+      store.updateRoutineFiringState("fire-running", "running");
+      store.createRoutineFiring({
+        id: "fire-queued",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "audit"
+      });
+
+      const active = store.listRoutineFirings({
+        state: ["queued", "preparing_workspace", "running"]
+      });
+      expect(active.map((firing) => firing.id).sort()).toEqual([
+        "fire-queued",
+        "fire-running"
+      ]);
+      expect(store.listRoutineFirings({ state: [] })).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("listLatestRunsByProject returns each project's newest matching run in one query", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      // Named so id-desc tie-breaking (listRuns' own order for a
+      // same-millisecond created_at) agrees with creation order — the
+      // window function's `order by created_at desc, id desc` must not be
+      // able to flip which one counts as "newest" on a fast test machine.
+      store.createRun({
+        id: "alpha-run-1-older",
+        issue: sampleIssue({ number: 1 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      store.updateRunState("alpha-run-1-older", "failed");
+      store.createRun({
+        id: "alpha-run-2-newer",
+        issue: sampleIssue({ number: 2 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      store.updateRunState("alpha-run-2-newer", "succeeded");
+      // A currently-running run must not win "last run" over a prior
+      // terminal one — the dashboard shows terminal outcomes there, not the
+      // in-flight state the active-now band already carries.
+      store.createRun({
+        id: "alpha-running",
+        issue: sampleIssue({ number: 3 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      store.updateRunState("alpha-running", "running");
+      store.createRun({
+        id: "beta-only",
+        issue: sampleIssue({ number: 4 }),
+        projectName: "beta",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      store.updateRunState("beta-only", "cancelled");
+
+      const latest = store.listLatestRunsByProject({
+        projectNames: ["alpha", "beta", "gamma"],
+        states: ["succeeded", "failed", "cancelled"]
+      });
+
+      expect(latest.get("alpha")?.id).toBe("alpha-run-2-newer");
+      expect(latest.get("beta")?.id).toBe("beta-only");
+      expect(latest.has("gamma")).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
 });
 
 async function streamText(

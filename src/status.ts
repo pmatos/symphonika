@@ -13,6 +13,15 @@ export type StatusSnapshot = {
   configPath: string;
   doctorErrors: string[];
   issuePolling: IssuePollStatus;
+  // The daemon derives this from a raw config parse, the same source
+  // `project_states`' validationState uses (#302) — not from the validated
+  // runtime config, which a project that fails validation (e.g. a Routine
+  // Host missing the tracker its own git Routine requires, ADR 0062) never
+  // enters, and not from `projects`/DoctorProjectReport, which the daemon's
+  // hot getStatusSnapshot path never populates. Reading mode from the same
+  // place validity comes from keeps the two in sync for every row this
+  // snapshot can render, valid or not.
+  projectModes: ReadonlyMap<string, "dispatch" | "routine_host">;
   projectStates: ProjectState[];
   projects: DoctorProjectReport[];
   reload: RuntimeReloadStatus;
@@ -30,6 +39,7 @@ export type BuildStatusSnapshotInput = {
   configPath: string;
   doctorReport?: DoctorReport;
   issuePollStatus: IssuePollStatus;
+  projectModes?: ReadonlyMap<string, "dispatch" | "routine_host">;
   projectsByName?: ReadonlyMap<string, WorkspacePathInputs["project"]>;
   reloadStatus?: RuntimeReloadStatus;
   runStore: RunStore;
@@ -60,6 +70,7 @@ export function buildStatusSnapshot(
     configPath: input.configPath,
     doctorErrors: input.doctorReport?.errors ?? [],
     issuePolling: input.issuePollStatus,
+    projectModes: input.projectModes ?? new Map(),
     projectStates: input.runStore.listProjectStates(),
     projects: input.doctorReport?.projects ?? [],
     reload: input.reloadStatus ?? emptyReloadStatus(),

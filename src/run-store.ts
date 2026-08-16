@@ -65,29 +65,29 @@ const SHUTDOWN_PREEMPTIVE_REASON: CancelReason = "daemon_shutdown";
 // non-terminal states) without each call site hand-rolling an IN clause. An
 // empty array is a deliberate "match nothing" rather than "no filter" — the
 // dashboard should render an empty band, not every row, if ever called with
-// an empty state set.
+// an empty state set — and it must be special-cased regardless, since
+// `state in ()` is invalid SQL.
 function pushStateCondition<State extends string>(
   conditions: string[],
   params: Record<string, unknown>,
-  paramPrefix: string,
   state: State | State[] | undefined
 ): void {
   if (state === undefined) {
     return;
   }
   if (!Array.isArray(state)) {
-    conditions.push(`state = @${paramPrefix}`);
-    params[paramPrefix] = state;
+    conditions.push("state = @state");
+    params.state = state;
     return;
   }
   if (state.length === 0) {
     conditions.push("0 = 1");
     return;
   }
-  const placeholders = state.map((_, index) => `@${paramPrefix}${index}`);
+  const placeholders = state.map((_, index) => `@state${index}`);
   conditions.push(`state in (${placeholders.join(", ")})`);
   state.forEach((value, index) => {
-    params[`${paramPrefix}${index}`] = value;
+    params[`state${index}`] = value;
   });
 }
 
@@ -2630,7 +2630,7 @@ export class RunStore {
   ): RoutineFiringStatus[] {
     const conditions: string[] = [];
     const params: Record<string, unknown> = {};
-    pushStateCondition(conditions, params, "state", filter.state);
+    pushStateCondition(conditions, params, filter.state);
     if (filter.project !== undefined) {
       conditions.push("project_name = @project");
       params.project = filter.project;
@@ -3033,7 +3033,7 @@ export class RunStore {
   listRuns(filter?: ListRunsFilter): RunStatus[] {
     const conditions: string[] = [];
     const params: Record<string, unknown> = {};
-    pushStateCondition(conditions, params, "state", filter?.state);
+    pushStateCondition(conditions, params, filter?.state);
     if (filter?.project !== undefined) {
       conditions.push("project_name = @project");
       params.project = filter.project;
@@ -3069,6 +3069,55 @@ export class RunStore {
       .all(params) as RunRow[];
 
     return rows.map((row) => mapRunRow(row));
+  }
+
+  // One query for "each project's most recent run in one of `states`",
+  // keyed by project name — the dashboard's Projects section wants this per
+  // row, and a per-project listRuns(limit:1) call would be an N+1 query
+  // against the number of configured Projects.
+  listLatestRunsByProject(input: {
+    projectNames: string[];
+    states: RunState[];
+  }): Map<string, RunStatus> {
+    const result = new Map<string, RunStatus>();
+    if (input.projectNames.length === 0 || input.states.length === 0) {
+      return result;
+    }
+    const projectPlaceholders = input.projectNames.map(
+      (_, index) => `@project${index}`
+    );
+    const statePlaceholders = input.states.map(
+      (_, index) => `@state${index}`
+    );
+    const params: Record<string, unknown> = {};
+    input.projectNames.forEach((name, index) => {
+      params[`project${index}`] = name;
+    });
+    input.states.forEach((state, index) => {
+      params[`state${index}`] = state;
+    });
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, issue_number, issue_title, state, provider_name,",
+          "workspace_path, branch_name,",
+          "current_state_id, terminal_state_id, state_transition_reason,",
+          "is_continuation, continuation_parent_run_id, retry_count,",
+          "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
+          "created_at, updated_at from (",
+          "select *, row_number() over (",
+          "partition by project_name order by created_at desc, id desc",
+          ") as rn from runs",
+          `where project_name in (${projectPlaceholders.join(", ")})`,
+          `and state in (${statePlaceholders.join(", ")})`,
+          ") where rn = 1"
+        ].join(" ")
+      )
+      .all(params) as RunRow[];
+    for (const row of rows) {
+      result.set(row.project_name, mapRunRow(row));
+    }
+    return result;
   }
 
   getRun(id: string): RunDetail | undefined {

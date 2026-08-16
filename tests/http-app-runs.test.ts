@@ -1972,7 +1972,9 @@ describe("HTTP app — dashboard IA shell (#302)", () => {
 
       expect(body).toContain("Active now");
       expect(body).toContain("Nothing running right now");
-      expect(body).toContain("Routine Firing");
+      expect(body).toContain(
+        "Active means queued, preparing its workspace, or running."
+      );
     } finally {
       test.cleanup();
     }
@@ -2023,6 +2025,56 @@ describe("HTTP app — dashboard IA shell (#302)", () => {
       });
       test.runStore.updateRunState("run-alpha", "running");
 
+      // A Routine Host has no Runs, only Routine Firings — but a Firing
+      // consumes the same in-flight capacity slot (ADR 0053/0069), so it
+      // must still show up as "in-flight" for the host.
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit.",
+          provider: null,
+          projectName: "s11-host",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        }
+      ]);
+      test.runStore.createRoutineFiring({
+        id: "fire-s11",
+        projectName: "s11-host",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "audit"
+      });
+      test.runStore.updateRoutineFiringState("fire-s11", "running");
+
+      function projectState(
+        overrides: Partial<
+          ReturnType<RunStore["listProjectStates"]>[number]
+        > = {}
+      ): ReturnType<RunStore["listProjectStates"]>[number] {
+        return {
+          active: true,
+          createdAt: "2026-05-22T10:00:00.000Z",
+          lastCandidateIssues: 0,
+          lastDispatchedAt: null,
+          lastDispatchedIssueNumber: null,
+          lastFetchedIssues: 0,
+          lastFilteredIssues: 0,
+          lastPollError: null,
+          lastPollFinishedAt: null,
+          lastPollOk: null,
+          lastPollStartedAt: null,
+          projectName: "alpha",
+          schedulerCurrentWeight: 0,
+          updatedAt: "2026-05-22T10:00:00.000Z",
+          validationMessage: null,
+          validationState: "valid",
+          weight: 1,
+          ...overrides
+        };
+      }
+
       const app = createHttpApp({
         getStatusSnapshot: () => ({
           configPath: "/tmp/symphonika.yml",
@@ -2035,27 +2087,15 @@ describe("HTTP app — dashboard IA shell (#302)", () => {
             filteredIssues: [],
             projects: []
           },
-          projectStates: [],
-          projects: [
-            {
-              missingEligibilityLabels: [],
-              missingOperationalLabels: [],
-              mode: "dispatch",
-              name: "alpha",
-              staleIssues: [],
-              validForDispatch: true,
-              validForHosting: false
-            },
-            {
-              missingEligibilityLabels: [],
-              missingOperationalLabels: [],
-              mode: "routine_host",
-              name: "s11-host",
-              staleIssues: [],
-              validForDispatch: false,
-              validForHosting: true
-            }
+          projectModes: new Map([
+            ["alpha", "dispatch"],
+            ["s11-host", "routine_host"]
+          ]),
+          projectStates: [
+            projectState({ projectName: "alpha" }),
+            projectState({ projectName: "s11-host" })
           ],
+          projects: [],
           reload: {
             errors: [],
             lastAttemptedAt: null,
@@ -2080,13 +2120,19 @@ describe("HTTP app — dashboard IA shell (#302)", () => {
       expect(body).toContain("alpha");
       expect(body).toContain("s11-host");
       // Dispatch Projects carries eligible/in-flight counts sourced from
-      // issue polling and the active-now query; Routine Hosts never
-      // dispatch, so its table omits those columns entirely.
+      // issue polling and the active-now query. Routine Hosts never
+      // dispatch, so "Eligible" is dropped there, but "In-flight" stays —
+      // a Host has no Runs, only Routine Firings, and a Firing consumes the
+      // same in-flight capacity slot.
       const dispatchSection = body.slice(projectsIndex, hostsIndex);
       expect(dispatchSection).toContain("<th>Eligible</th>");
       expect(dispatchSection).toContain("<th>In-flight</th>");
       const hostsSection = body.slice(hostsIndex);
       expect(hostsSection).not.toContain("<th>Eligible</th>");
+      expect(hostsSection).toContain("<th>In-flight</th>");
+      expect(hostsSection).toMatch(
+        /<tr><td>s11-host<\/td><td>.*?<\/td><td>1<\/td><\/tr>/
+      );
     } finally {
       test.cleanup();
     }

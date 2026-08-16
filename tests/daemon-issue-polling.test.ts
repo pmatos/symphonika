@@ -147,9 +147,18 @@ describe("daemon GitHub issue polling", () => {
       const response = await fetch(daemon.url);
       const html = await response.text();
 
-      expect(html).toContain(
-        '<tr><td>audit-host</td><td>1</td><td class="c-detail">invalid'
-      );
+      // #302: audit-host is a Routine Host (mode parsed straight from the
+      // raw config, so this holds even though the host itself fails
+      // validation), rendered in the subdued Routine Hosts group with an
+      // invalid pill and its reason inline rather than the old flat
+      // weight-table row.
+      const hostsIndex = html.indexOf(">Routine hosts<");
+      expect(hostsIndex).toBeGreaterThan(-1);
+      const hostsSection = html.slice(hostsIndex);
+      expect(hostsSection).toContain("audit-host");
+      expect(hostsSection).toContain("pill--fail");
+      expect(hostsSection).toContain("invalid");
+      expect(hostsSection).toContain("declares no tracker");
     } finally {
       await daemon.stop();
     }
@@ -171,9 +180,18 @@ describe("daemon GitHub issue polling", () => {
       const response = await fetch(daemon.url);
       const html = await response.text();
 
-      expect(html).toContain(
-        '<tr><td>audit-host</td><td>1</td><td class="c-detail">invalid'
-      );
+      // #302: audit-host is a Routine Host (mode parsed straight from the
+      // raw config, so this holds even though the host itself fails
+      // validation), rendered in the subdued Routine Hosts group with an
+      // invalid pill and its reason inline rather than the old flat
+      // weight-table row.
+      const hostsIndex = html.indexOf(">Routine hosts<");
+      expect(hostsIndex).toBeGreaterThan(-1);
+      const hostsSection = html.slice(hostsIndex);
+      expect(hostsSection).toContain("audit-host");
+      expect(hostsSection).toContain("pill--fail");
+      expect(hostsSection).toContain("invalid");
+      expect(hostsSection).toContain("declares no tracker");
     } finally {
       await daemon.stop();
     }

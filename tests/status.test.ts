@@ -164,6 +164,7 @@ describe("buildStatusSnapshot", () => {
           [
             "alpha",
             {
+              mode: "dispatch",
               name: "Alpha Project",
               workspace: {
                 root: "./workspaces/alpha"

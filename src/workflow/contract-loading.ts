@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { parse } from "yaml";
 
+import { contentHash } from "../content-hash.js";
 import type { WorkflowFormat } from "../config-schemas.js";
 import { validatePromptTemplateExpressions } from "./autonomous-prompt.js";
 
@@ -289,10 +289,6 @@ function parseFrontMatter(
     return undefined;
   }
   return parsed;
-}
-
-function contentHash(contents: string): string {
-  return `sha256:${createHash("sha256").update(contents).digest("hex")}`;
 }
 
 function errorMessage(error: unknown): string {

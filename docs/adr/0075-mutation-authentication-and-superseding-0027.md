@@ -85,12 +85,87 @@ exactly as capable of triggering agent execution as the other two and sits behin
 threat model — `requireAuthorizedMutation` is applied to all three as one Hono middleware, not
 per-route bespoke checks.
 
-## Save pipeline and git-aware writes
+## Save pipeline
 
-Deferred to `#306`'s second and third stacked PRs (`symphonika/issue306-save`,
-`symphonika/issue306-git`) — validate → stale-write check → atomic write → reload-and-report, and
-git repo/branch/dirty detection with an optional scoped commit, respectively. Both build on the
-authentication boundary this PR fixes first; this section will be filled in as each lands.
+`runSavePipeline` (`src/http/save-pipeline.ts`) is the one path every future editor's save button
+calls through: validate → stale-write check → atomic write → reload-and-report, matching the
+issue's five numbered steps exactly. No editor route calls it yet (`#307`); this PR ships it as a
+dependency-injected, independently-tested module a route wires up once one exists — the same shape
+`#305`'s SSE transport shipped in before the dashboard consumed it.
+
+### Two real content kinds wired; the third deferred, and named as such
+
+`kind: "routine_declaration" | "workflow_contract"` dispatches to `parseRoutineDeclaration`
+(`src/routines/declaration-loader.ts`) and `parseWorkflowContract`
+(`src/workflow/contract-loading.ts`) respectively — both already the exact `(contents, path) =>
+{errors}` shape `RuntimeConfigReloader.reload()` itself uses, so "the same validators reload uses"
+is literally true for these two, not merely similar logic re-implemented.
+
+The issue's third named kind, the service config itself, is **not** wired. `reload.ts`'s
+`loadRuntimeConfigSnapshot` is not a validator with a disk-read stapled on: schema parse, then
+provider-command-template rendering, then routine attach loops, then previous-snapshot merging and
+`usingLastKnownGood` fallback, all in one function. Extracting a clean parse-only seam out of that
+~1000-line critical path is real, non-trivial surgery, and doing it now would be speculative — there
+is no service-config editor route to drive the design of where that seam belongs. `#307`'s
+service-config editor is what should decide that extraction, against a real caller. This is a
+deliberate, named deferral, not a silent gap.
+
+### Stale-write check reuses the one hashing convention that already exists
+
+`WorkflowContract` already carried a `contentHash` field (`sha256:<hex>`, `src/workflow/
+contract-loading.ts`) before this slice. Rather than invent a second hash for the same purpose, that
+function moved to `src/content-hash.ts` and both the workflow loader and the save pipeline import
+the same one. A stale-write check that hashed differently from the value an editor reads at open
+would be a bug the two call sites could silently disagree about.
+
+The check itself: read the file fresh at save time, hash it, compare against the hash the caller
+captured when the editor opened. A mismatch (including "the file no longer exists" — deleted since
+open, reported as `currentContentHash: null`, distinct from a content mismatch) refuses the write
+and returns the current on-disk content so the caller can show the difference, per the acceptance
+criterion. **This is a compare-then-write, not a lock**: a second writer landing between the
+compare and this pipeline's own write is a real, unclosed race window. Acceptable for a
+single-operator local tool the same way the CSRF secret's restart-invalidates-tokens trade was
+acceptable above — flagged here as a chosen consequence, not an oversight.
+
+### Atomic write: mode captured and applied before the rename, fsync before the rename
+
+Temp file in the same directory as the target (same filesystem, so the rename is atomic), written,
+`chmod`'d to the *existing* file's mode, `fsync`'d, then renamed over the target — in that order.
+Applying the captured mode after the rename instead would leave a real window where the live file
+has the wrong permissions; not fsyncing before the rename means the write could survive a concurrent
+reader but not a crash between rename and the containing directory's own next fsync. No prior
+atomic-write helper existed anywhere in this codebase to reuse — even `RoutineConfigEditor`
+(`src/routines/config-editor.ts`, the CLI's `add-routine` command) does a plain non-atomic
+`writeFile`, acceptable there because it's a single CLI invocation, not a browser editor that can
+race a concurrent save.
+
+### Path confinement: a referenced-paths set, not a directory boundary
+
+The acceptance criterion is "a path not referenced by the current config is rejected" — a member-of-
+a-specific-set check, not "somewhere under the config directory." `isPathInside`
+(`src/path-safety.ts`, pre-existing) only answers the directory question; a new
+`resolveConfinedWritePath(candidatePath, referencedRealPaths)` resolves the candidate through
+symlinks (`fs.realpath`) and checks it against a set built by `computeReferencedRealPaths` from the
+service config path, every routine's `sourcePath`, and every project's workflow path — each also
+realpath'd, so a symlinked reference and a symlinked write target still compare equal correctly, and
+a symlink that *escapes* the referenced set is rejected even if it sits right next to a legitimate
+target. A path that doesn't exist on disk is always rejected: every kind this pipeline edits is an
+existing file by construction, so "doesn't exist" can never be a legitimate save target.
+
+### Reload-outcome push: the save path must call the same publish `#305` gave the daemon's tick
+
+`#305`'s `runStore.publishReloadOutcome` (ADR 0074) currently has exactly one caller —
+`daemon.ts`'s periodic tick. When `#307` wires a route to `runSavePipeline`, that route's `reload`
+callback must call `publishReloadOutcome` with the same outcome it returns, the same shape as
+`daemon.ts`'s own call — otherwise a save-triggered reload is invisible to every dashboard tab's live
+stream even though it's exactly the kind of transition ADR 0074 says pushes immediately. Noted here
+so `#307` doesn't have to rediscover it.
+
+## Git-aware writes
+
+Deferred to `#306`'s third stacked PR (`symphonika/issue306-git`) — repo/branch/dirty detection and
+the optional scoped commit. Builds on the save pipeline above; this section will be filled in when
+that PR lands.
 
 ## Consequences
 
@@ -107,3 +182,12 @@ authentication boundary this PR fixes first; this section will be filled in as e
   through `HttpAppOptions`/`RegisterPagesOptions`) specifically so a future token gate for remote,
   non-loopback access (out of scope for `#301`) can be added as a second check inside the same
   function without redesigning the mutating routes themselves.
+- The save pipeline validates two of the three content kinds the issue names; service-config
+  validation-reuse is deferred, by design, to whichever slice first adds a service-config editor
+  route. Until then, nothing in this app writes `symphonika.yml` through this pipeline at all — the
+  CLI's `RoutineConfigEditor` remains the only writer, unchanged.
+- The stale-write check has a real, accepted race window (compare-then-write, not a lock) — the same
+  category of trade as the CSRF secret's restart-invalidation, made explicit rather than implied.
+- `#307`'s save routes must call `runStore.publishReloadOutcome` from their `reload` callback, or a
+  save-triggered reload silently doesn't reach `#305`'s live dashboard the way the daemon's own tick
+  does. This ADR is where that requirement is recorded; nothing enforces it automatically yet.

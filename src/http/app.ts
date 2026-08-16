@@ -538,10 +538,23 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         const wantsRedirect = (
           context.req.header("content-type") ?? ""
         ).startsWith("application/x-www-form-urlencoded");
+        // This route id-sniffs a Run vs. a Routine Firing (ADR 0060: one
+        // cancel endpoint, generalized server-side); a form-post redirect
+        // must sniff the same way, or cancelling from /firings/:id would
+        // bounce the operator to a /runs/:id page for an id that was never
+        // a Run. Falls back to /runs/:id when neither lookup matches (a
+        // stale id in an already-rendered form) -- /runs/:id renders a
+        // proper 404 either way.
+        const redirectPath = `${
+          runStore.getRun(id) === undefined &&
+          runStore.getRoutineFiring(id) !== undefined
+            ? "/firings/"
+            : "/runs/"
+        }${encodeURIComponent(id)}`;
 
         if (cancelRun === undefined) {
           if (wantsRedirect) {
-            return context.redirect(`/runs/${encodeURIComponent(id)}`, 303);
+            return context.redirect(redirectPath, 303);
           }
           return context.json({ kind: "unavailable" }, 503);
         }
@@ -555,12 +568,12 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         }
         if (outcome.kind === "already-terminal") {
           if (wantsRedirect) {
-            return context.redirect(`/runs/${encodeURIComponent(id)}`, 303);
+            return context.redirect(redirectPath, 303);
           }
           return context.json(outcome, 409);
         }
         if (wantsRedirect) {
-          return context.redirect(`/runs/${encodeURIComponent(id)}`, 303);
+          return context.redirect(redirectPath, 303);
         }
         return context.json(outcome, 200);
       }

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 
-import { Hono, type MiddlewareHandler } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { parse } from "yaml";
 
 import { contentHash } from "../content-hash.js";
@@ -12,6 +12,7 @@ import {
   ensureSession,
   type CsrfSecret
 } from "./csrf.js";
+import { setRoutineDisabled } from "../routines/declaration-editor.js";
 import { parseRoutineDeclaration } from "../routines/declaration-loader.js";
 import { validateWorkflowContractContent } from "../workflow/fsm-expansion.js";
 import { runSavePipeline, type ReloadOutcome } from "./save-pipeline.js";
@@ -207,6 +208,12 @@ const TERMINAL_STATES: ReadonlySet<RunState> = new Set([
   "input_required",
   "stale",
   "succeeded"
+]);
+
+const TERMINAL_FIRING_STATES: ReadonlySet<RoutineFiringState> = new Set([
+  "succeeded",
+  "failed",
+  "cancelled"
 ]);
 
 const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
@@ -1153,6 +1160,10 @@ export function registerPages(options: RegisterPagesOptions): void {
       options.getStatusSnapshot?.()?.reload.errors ?? []
     ).filter((error) => error.includes(name));
 
+    const lifecycleCsrfToken = csrfTokenFor(
+      options.csrfSecret,
+      ensureSession(context)
+    );
     const html = layout(
       name,
       [
@@ -1161,7 +1172,13 @@ export function registerPages(options: RegisterPagesOptions): void {
         renderRoutineTargetsTable(group),
         renderRoutineFiringHistory(firings),
         `<p class="note"><a href="/routines/${encodeURIComponent(name)}/edit${projectParam === undefined ? "" : `?project=${encodeURIComponent(projectParam)}`}">Edit declaration →</a></p>`,
-        `<p class="note">Manual-fire controls land with a later slice — this page is read-only for firing besides Edit.</p>`
+        renderRoutineLifecycleControls(
+          name,
+          group,
+          projectParam,
+          lifecycleCsrfToken
+        ),
+        `<p class="note">Manual-fire controls land with a later slice.</p>`
       ].join("")
     );
     return context.html(html);
@@ -1397,6 +1414,97 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
   );
 
+  // #307's disable/enable action: a targeted structured edit (setRoutineDisabled)
+  // rather than the raw-text editor -- the operator picks a state, not text
+  // to type. Renders through the SAME diff-before-write confirmation page
+  // and the SAME /edit/confirm route the raw-text editor uses (#307 AC:
+  // "Every save goes through #306's pipeline -- no editor writes files
+  // directly"), just pre-filled with programmatically computed content
+  // instead of a submitted textarea.
+  async function renderRoutineDisabledTogglePreview(
+    context: Context,
+    name: string,
+    disabled: boolean
+  ): Promise<Response> {
+    const body = await context.req.parseBody();
+    const projectParam = readOptionalFormField(body, "project_param");
+    const resolved = resolveNamedRoutineGroup(
+      options.runStore,
+      name,
+      projectParam
+    );
+    if (resolved.kind !== "ok") {
+      return context.html(
+        renderUneditableRoutine(name, resolved),
+        resolved.kind === "ambiguous" ? 200 : 404
+      );
+    }
+    const declaration = resolveRoutineDeclaration(
+      options.runStore,
+      resolved.group
+    );
+    const onDisk = await readFile(declaration.sourcePath, "utf8").catch(
+      () => null
+    );
+    if (onDisk === null) {
+      return context.html(
+        layout(
+          "Routine declaration unreadable",
+          `<h1 class="page-title">Routine declaration unreadable</h1><p class="lede">${escapeHtml(declaration.sourcePath)}</p>`
+        ),
+        404
+      );
+    }
+    const toggled = setRoutineDisabled(onDisk, disabled);
+    if (toggled.kind === "error") {
+      return context.html(
+        layout(
+          "Could not toggle routine",
+          `<h1 class="page-title">Could not toggle routine</h1><p class="lede">${escapeHtml(toggled.error)}</p>`
+        ),
+        422
+      );
+    }
+
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const html = layout(
+      `Confirm ${disabled ? "disabling" : "enabling"} ${name}`,
+      renderEditorPreview({
+        confirmAction: `/routines/${encodeURIComponent(name)}/edit/confirm`,
+        content: toggled.content,
+        csrfToken,
+        errors: [],
+        expectedContentHash: contentHash(onDisk),
+        name,
+        onDisk,
+        projectParam,
+        reviewAction: `/routines/${encodeURIComponent(name)}`
+      })
+    );
+    return context.html(html);
+  }
+
+  options.app.post(
+    "/routines/:name/disable",
+    requireAuthorizedMutation,
+    (context) =>
+      renderRoutineDisabledTogglePreview(
+        context,
+        context.req.param("name"),
+        true
+      )
+  );
+  options.app.post(
+    "/routines/:name/enable",
+    requireAuthorizedMutation,
+    (context) =>
+      renderRoutineDisabledTogglePreview(
+        context,
+        context.req.param("name"),
+        false
+      )
+  );
+
   options.app.get("/firings/:id", async (context) => {
     const id = context.req.param("id");
     const detail = options.runStore.getRoutineFiring(id);
@@ -1425,6 +1533,10 @@ export function registerPages(options: RegisterPagesOptions): void {
     const eventsTruncated =
       lastEvent !== undefined && lastEvent.sequence > rawEvents.length;
     const artifacts = await buildFiringArtifactDescriptors(evidence);
+    const firingCsrfToken = csrfTokenFor(
+      options.csrfSecret,
+      ensureSession(context)
+    );
 
     const html = layout(
       `Firing ${detail.id}`,
@@ -1433,7 +1545,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         `<p class="note">A Routine Firing has no GitHub Issue, no retried attempts, and no per-run workflow graph — a Firing is one execution of a scheduled prompt, not the issue-dispatch lifecycle a Run models.</p>`,
         renderFiringSummary(detail, transitions),
         renderFiringPullRequests(detail.pullRequests),
-        `<p class="note">Cancelling a live firing is deferred to #306's write-surface plumbing — this page is read-only until then.</p>`,
+        renderFiringCancelForm(detail, firingCsrfToken),
         renderTransitionsTable(transitions),
         renderEventsTable(rawEvents, eventsTruncated),
         renderRunFileLinks(detail.id, artifacts, "firings")
@@ -3007,6 +3119,33 @@ function renderRoutineDeclarationCard(
 </dl></section><section>${sectionHead("Prompt")}${promptSection}</section>`;
 }
 
+// #307 AC: "Disable/enable a Routine from its page affects every target; a
+// live firing is unaffected until it terminates (ADR 0060)." Every target
+// in a group shares one declaration file (ADR 0069's fan-out), so their
+// disabledReason is expected to agree; the representative target decides
+// which action (or none, for removed_from_config -- re-enabling that isn't
+// this action's job, it's controlled by config file inclusion) to offer.
+function renderRoutineLifecycleControls(
+  name: string,
+  group: RoutineGroup,
+  projectParam: string | undefined,
+  csrfToken: string
+): string {
+  const [representative] = group.targets;
+  const projectField =
+    projectParam === undefined
+      ? ""
+      : `<input type="hidden" name="project_param" value="${escapeHtml(projectParam)}">`;
+  const csrfField = `<input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}">`;
+  if (representative?.disabledReason === "operator") {
+    return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/enable">${csrfField}${projectField}<button class="btn" type="submit">Enable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
+  }
+  if (representative?.disabledReason === "removed_from_config") {
+    return "";
+  }
+  return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/disable">${csrfField}${projectField}<button class="btn" type="submit">Disable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
+}
+
 function renderRoutineTargetsTable(group: RoutineGroup): string {
   const rows = group.targets
     .map((target) => {
@@ -3093,9 +3232,7 @@ function renderFiringSummary(
   const endedAt = [...transitions]
     .reverse()
     .find((transition) =>
-      (["succeeded", "failed", "cancelled"] as RoutineFiringState[]).includes(
-        transition.state
-      )
+      TERMINAL_FIRING_STATES.has(transition.state)
     )?.createdAt;
   const terminalRow =
     detail.terminalReason === null
@@ -3390,6 +3527,21 @@ function renderCancelForm(
     return "";
   }
   return `<section><form method="post" action="/api/runs/${encodeURIComponent(detail.id)}/cancel"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}"><button class="btn" type="submit">Cancel run</button></form></section>`;
+}
+
+// #307's routine-lifecycle controls: cancellation already generalized
+// server-side (ADR 0060 -- /api/runs/:id/cancel id-sniffs a Run vs. a
+// Routine Firing and cancelViaUi/cancelRunInStore already handle both), so
+// this is the same form as renderCancelForm posting to the same endpoint,
+// not a new cancel mechanism.
+function renderFiringCancelForm(
+  detail: { id: string; state: RoutineFiringState },
+  csrfToken: string
+): string {
+  if (TERMINAL_FIRING_STATES.has(detail.state)) {
+    return "";
+  }
+  return `<section><form method="post" action="/api/runs/${encodeURIComponent(detail.id)}/cancel"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}"><button class="btn" type="submit">Cancel firing</button></form></section>`;
 }
 
 function renderAttemptsTable(

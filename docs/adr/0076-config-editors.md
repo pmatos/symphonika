@@ -133,6 +133,41 @@ without the checkbox having been submitted. The second check exists because the 
 trusted — a hand-crafted request to `POST /config/edit/confirm` skipping the preview step entirely
 must still be caught, not just steered away from by UI affordance.
 
+### Disable/enable reuses the raw-text editor's confirm route, not a new write path
+
+`#307`'s issue text names disable/enable as exactly the case where structured editing helps: "the
+operator picks a state, not text to type." `setRoutineDisabled`
+(`src/routines/declaration-editor.ts`) is the targeted edit — `parseDocument`'s CST-aware model
+(the same one `RoutineConfigEditor` already uses on `symphonika.yml`, `src/routines/config-editor.ts`),
+scoped to only the front-matter substring so the prompt body after the closing `---` is carried
+through byte-for-byte, never re-parsed as YAML. `POST /routines/:name/disable` (and `/enable`)
+compute the toggled content and hand it to the *same* `renderEditorPreview` and the *same*
+`POST /routines/:name/edit/confirm` route the raw-text editor's preview step posts to — the only
+difference is who produced `content`: a submitted textarea, or `setRoutineDisabled`. This is not
+incidental reuse; it is the mechanism by which "every save goes through #306's pipeline" (`#307`
+AC) and "a diff against on-disk content is shown before every write" (`#307` AC) hold for the
+toggle too, without a second write path to keep in sync with the first.
+
+The toggle button offered on `/routines/:name` is decided from the representative target's
+`disabledReason`: `operator` → "Enable routine"; `removed_from_config` → neither button (that state
+is controlled by config file inclusion, not an operator action here); anything else → "Disable
+routine". Every target sharing a declaration is expected to agree on `disabledReason` (ADR-0069's
+fan-out — one file, one shared row per target), so the representative is sufficient.
+
+### Firing cancellation needed a UI control and a redirect fix, not a new cancel mechanism
+
+Cancellation was already fully generalized server-side before `#307`: `cancelRunInStore`
+(`src/http/app.ts`) already tries `runStore.getRun(id)` then falls back to
+`runStore.getRoutineFiring(id)`, and `POST /api/runs/:id/cancel` already accepts a Firing id (ADR
+0060 built this when Firing cancellation via `symphonika cancel <id>` shipped). The `#304`-era stub
+note on `/firings/:id` ("deferred to #306's write-surface plumbing") was stale by the time `#307`
+landed — the actual gap was narrower: no cancel *button* existed on the Firing page, and the
+route's own form-post redirect was hardcoded to `/runs/${id}` regardless of which kind of id it
+cancelled, so cancelling from `/firings/:id` would have bounced the operator to a `/runs/:id` page
+for an id that was never a Run. `renderFiringCancelForm` mirrors `renderCancelForm`'s existing shape
+posting to the same endpoint; the redirect now id-sniffs the same way the cancel logic itself
+already does.
+
 ### Preview reads and diffs; only confirm resolves and writes
 
 `resolveWritePath` (path confinement, `src/path-safety.ts` via ADR-0075) gates the confirm step
@@ -188,3 +223,8 @@ operator the routine doesn't exist, when it does, just not uniquely by name.
   A harness that doesn't wire `getConfigPath` gets a 404 behind that link rather than a hidden one;
   no route handler has the caller context needed to conditionally suppress a nav item shared across
   every page.
+- This closes `#307`: all three editors, all nine acceptance criteria. Disable/enable and firing
+  cancellation are the ADR-0060 lifecycle controls #304's stub notes deferred; both landed as thin
+  wiring on top of infrastructure that already existed (the save pipeline and diff-preview shape for
+  the toggle, `cancelRunInStore`'s existing Run/Firing generalization for cancellation) rather than
+  new mechanisms.

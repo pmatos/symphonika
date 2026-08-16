@@ -1834,6 +1834,21 @@ instead of a blank canvas — and must not introduce mutating actions beyond the
 below. This narrows — it does not remove — the §2 non-goal: Symphonika still does not ship a
 separate frontend application. See ADR-0056.
 
+`GET /events` is a long-lived server-sent-events stream, one connection per browser tab, carrying
+`RunStore`'s change-notification path (ADR-0074): `run-transition`, `firing-transition`,
+`project-poll`, and `reload-outcome` events, plus a periodic `heartbeat` when idle. Events are
+invalidation signals — an id and a new state, not a rendered fragment — so a client that misses
+events during a disconnect reconciles once on reconnect rather than replaying what it missed. A Run
+or Firing transition, and a reload outcome, push the instant they happen; a `project-poll` event
+fires at the daemon's existing ~30-second poll cadence (ADR-0036) and only invalidates the poll-age
+display already on the page — receiving one never means issue eligibility itself just became live.
+Each connection subscribes and unsubscribes independently, so concurrent tabs do not share a cursor
+and a disconnect (tab close, navigation, network drop) cannot leak a listener. The client-side
+fragment patching that consumes this stream — reconnect with backoff, a stream-down banner with
+manual refresh, and preserving an open editor's text and scroll position across a live update — is
+delivered in a follow-on slice; this page ships the notification path and its transport only. See
+#305, ADR-0074.
+
 The v1 mutating local HTTP API actions are explicit active-run cancellation, a manual poll-now
 trigger that uses the normal daemon scheduler path, and daemon-owned manual Routine firing. The
 server-rendered dashboard exposes only cancellation and poll-now controls; manual Routine firing is

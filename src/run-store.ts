@@ -682,7 +682,23 @@ class RoutineAlreadyClaimedError extends Error {
   }
 }
 
+// See docs/adr/0074-live-notification-path.md: these are invalidation
+// signals (identity + new state), not a replay log. A listener that
+// misses events during a disconnect is expected to reconcile once on
+// reconnect rather than replay what it missed.
+export type ChangeEvent =
+  | { kind: "run-transition"; runId: string; sequence: number; state: RunState }
+  | {
+      firingId: string;
+      kind: "firing-transition";
+      sequence: number;
+      state: RoutineFiringState;
+    }
+  | { finishedAt: string; kind: "project-poll"; ok: boolean; projectName: string }
+  | { errors: string[]; kind: "reload-outcome"; ok: boolean };
+
 export class RunStore {
+  private readonly changeListeners = new Set<(event: ChangeEvent) => void>();
   private readonly database: SqliteDatabase;
   private readonly stateRoot: string;
 
@@ -690,6 +706,39 @@ export class RunStore {
     this.database = database;
     this.stateRoot = path.resolve(options.stateRoot ?? process.cwd());
     this.migrate();
+  }
+
+  // Every listener runs even if an earlier one throws, since a broken SSE
+  // connection must never take down a state-transition write.
+  private publishChange(event: ChangeEvent): void {
+    for (const listener of this.changeListeners) {
+      try {
+        listener(event);
+      } catch {
+        // Isolated per docs/adr/0074: a subscriber's failure is its own.
+      }
+    }
+  }
+
+  publishReloadOutcome(input: { errors: string[]; ok: boolean }): void {
+    this.publishChange({
+      errors: input.errors,
+      kind: "reload-outcome",
+      ok: input.ok
+    });
+  }
+
+  subscribeToChanges(listener: (event: ChangeEvent) => void): () => void {
+    this.changeListeners.add(listener);
+    return () => {
+      this.changeListeners.delete(listener);
+    };
+  }
+
+  // Exposed for the "daemon does not leak streams on disconnect"
+  // acceptance criterion (#305) — not otherwise used at runtime.
+  get changeListenerCount(): number {
+    return this.changeListeners.size;
   }
 
   close(): void {
@@ -1324,6 +1373,12 @@ export class RunStore {
         validation_message: message,
         validation_state: validationState
       });
+    this.publishChange({
+      finishedAt: now,
+      kind: "project-poll",
+      ok: input.ok,
+      projectName: input.projectName
+    });
   }
 
   recordProjectDispatchSelection(input: ProjectDispatchSelectionInput): void {
@@ -4412,6 +4467,7 @@ export class RunStore {
         "insert into run_state_transitions (run_id, sequence, state, created_at) values (?, ?, ?, ?)"
       )
       .run(runId, sequence, state, createdAt);
+    this.publishChange({ kind: "run-transition", runId, sequence, state });
   }
 
   private recordRoutineFiringTransition(
@@ -4428,6 +4484,12 @@ export class RunStore {
         "insert into routine_firing_state_transitions (firing_id, sequence, state, created_at) values (?, ?, ?, ?)"
       )
       .run(firingId, sequence, state, createdAt);
+    this.publishChange({
+      firingId,
+      kind: "firing-transition",
+      sequence,
+      state
+    });
   }
 
   private latestRoutinePullRequestNumbers(

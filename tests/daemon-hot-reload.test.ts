@@ -374,6 +374,56 @@ describe("daemon hot reload", () => {
       await daemon.stop();
     }
   });
+
+  it("pushes a reload-outcome event over /events on every poll tick (#305, ADR 0074)", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root, { pollingIntervalMs: 60_000 });
+    const githubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      // The startup-time refreshIssuePollStatus() already ran before this
+      // subscription exists, so its reload-outcome was already published
+      // and missed by design (ADR 0074: no replay on reconnect). Trigger a
+      // fresh tick via /api/poll-now after connecting.
+      const eventsResponse = await fetch(`${daemon.url}/events`);
+      expect(eventsResponse.status).toBe(200);
+      const reader = eventsResponse.body?.getReader();
+      expect(reader).toBeDefined();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const deadline = Date.now() + 2_000;
+      while (!buffer.includes("event: reload-outcome") && Date.now() < deadline) {
+        const { done, value } = await reader!.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+      }
+      await reader?.cancel();
+
+      expect(buffer).toContain("event: reload-outcome");
+      expect(buffer).toContain('"ok":true');
+    } finally {
+      await daemon.stop();
+    }
+  });
 });
 
 function issueFixture(overrides: {

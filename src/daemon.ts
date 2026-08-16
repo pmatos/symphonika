@@ -455,10 +455,15 @@ export async function startDaemon(
     try {
       const snapshot = await runtimeConfig.reload();
       const reloadStatus = runtimeConfig.getStatus();
+      const reloadBroken =
+        snapshot === undefined || reloadStatus.usingLastKnownGood === true;
       daemonHealthNotifications.observeReload({
-        broken:
-          snapshot === undefined || reloadStatus.usingLastKnownGood === true,
+        broken: reloadBroken,
         errors: reloadStatus.errors
+      });
+      runStore.publishReloadOutcome({
+        errors: reloadStatus.errors,
+        ok: !reloadBroken
       });
       daemonHealthNotifications.observeInvalidRoutines(
         snapshot?.invalidRoutines ?? []

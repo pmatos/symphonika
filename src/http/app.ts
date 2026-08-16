@@ -26,6 +26,7 @@ import {
   type RoutineEvidencePaths
 } from "../routines/evidence.js";
 import type { RoutineFiringState, RoutineState } from "../routines/types.js";
+import type { ReloadOutcome } from "./save-pipeline.js";
 import type { StatusSnapshot } from "../status.js";
 import type {
   ChangeEvent,
@@ -152,6 +153,12 @@ export type HttpAppOptions = {
   // Wall clock used by human/API-facing timestamps and ages.
   now?: () => number;
   pollNow?: PollNowFn;
+  // #307's editors: confines a save target to a path the current valid
+  // config actually references (routine declaration, workflow contract, or
+  // symphonika.yml itself) -- see src/path-safety.ts and
+  // docs/adr/0075-mutation-authentication-and-superseding-0027.md. Returns
+  // the resolved (symlink-following) path on success, undefined otherwise.
+  resolveWritePath?: (candidatePath: string) => Promise<string | undefined>;
   runStore?: RunStore;
   // Aborted by stopServer before it calls server.close(), so open /events
   // streams exit their loop instead of holding the shutdown open forever.
@@ -161,6 +168,11 @@ export type HttpAppOptions = {
   sseHeartbeatMs?: number;
   startedAtMs?: number;
   stateRoot: string;
+  // #307's editors: the same reload path #305 wired to the daemon's poll
+  // tick, driven synchronously by an editor save so an invalid edit (or one
+  // that's schema-valid but fails reload) is reported on save, not on the
+  // next tick. See src/http/save-pipeline.ts.
+  triggerReload?: () => Promise<ReloadOutcome>;
   version: string;
 };
 
@@ -576,9 +588,15 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       issuePollStatus,
       monotonicNow,
       now,
+      ...(options.resolveWritePath === undefined
+        ? {}
+        : { resolveWritePath: options.resolveWritePath }),
       runStore,
       startedAtMs,
       stateRoot: options.stateRoot,
+      ...(options.triggerReload === undefined
+        ? {}
+        : { triggerReload: options.triggerReload }),
       version: options.version
     });
   }

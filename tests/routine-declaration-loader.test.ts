@@ -646,4 +646,22 @@ describe("RoutineDeclarationLoader", () => {
     expect(result.routine).toBeNull();
     expect(result.partialName).toBeUndefined();
   });
+
+  it("locates a YAML syntax error with the front matter's real file line (#307, ADR 0076)", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "broken-syntax.md");
+    await writeFile(
+      routinePath,
+      ["---", "name: broken-syntax", "kind: [report", "---", "Body", ""].join(
+        "\n"
+      )
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.routine).toBeNull();
+    // The broken flow sequence is on the front matter's own line 2, which
+    // is line 3 of the routine file (line 1 is the opening ---).
+    expect(result.errors[0]).toMatch(/\(line 3, column \d+\)/);
+  });
 });

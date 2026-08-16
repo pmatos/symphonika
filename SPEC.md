@@ -1866,6 +1866,15 @@ trigger that uses the normal daemon scheduler path, and daemon-owned manual Rout
 server-rendered dashboard exposes only cancellation and poll-now controls; manual Routine firing is
 a CLI/API action (ADR 0067).
 
+Every mutating route — the three above and every one a later slice adds — requires the request to
+either carry no browser fetch-metadata (`Origin`/`Sec-Fetch-Site` both absent, the CLI's own bare
+`fetch()` calls) or be same-origin and carry a valid CSRF token (ADR-0075). A page GET that renders
+a mutating form (today, only the Run-detail page's cancel form) mints a session cookie on first
+visit and embeds a token derived from it; the token travels as a hidden form field for a
+form-encoded submission, or an `X-CSRF-Token` header otherwise. A cross-origin request, or a
+same-origin one with a missing or stale token, gets `403`. The token's lifetime is the daemon
+process's — a restart invalidates every open tab's token until it reloads.
+
 The HTTP API exposes `GET /api/routines` with the same Routine status shape as the CLI and
 dashboard, including `latestOutcome`, latest-attempt/skip fields, and per-reason `skipCounts24h`.
 Inactive Routines are hidden by default; `?include_inactive=true` includes them, and the

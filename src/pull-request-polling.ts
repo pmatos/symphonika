@@ -40,7 +40,7 @@ export function classifyPullRequestBranchOrigin(
 // unsupported by this GitHubIssuesApi" from "GitHub genuinely reported
 // unknown" — both would otherwise collapse to the same null/"unknown"
 // fields and silently misrepresent the row.
-export type ProjectPullRequestSnapshot = {
+type ProjectPullRequestSnapshot = {
   branchOrigin: PullRequestBranchOrigin;
   checks: PullRequestState["checks"] | null;
   draft: boolean;
@@ -59,7 +59,7 @@ export type ProjectPullRequestSnapshot = {
   url: string | null;
 };
 
-export type ProjectPullRequestPollReport = {
+type ProjectPullRequestPollReport = {
   error?: string;
   fetchedPullRequests: number;
   lastPolledAt?: string;
@@ -73,7 +73,7 @@ export type PullRequestPollStatus = {
   pullRequests: ProjectPullRequestSnapshot[];
 };
 
-export function emptyPullRequestPollStatus(): PullRequestPollStatus {
+function emptyPullRequestPollStatus(): PullRequestPollStatus {
   return { errors: [], projects: [], pullRequests: [] };
 }
 

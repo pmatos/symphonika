@@ -17,7 +17,7 @@ import { parseWorkflowContract } from "../workflow/contract-loading.js";
 // docs/adr/0075-mutation-authentication-and-superseding-0027.md.
 type SaveContentKind = "routine_declaration" | "workflow_contract";
 
-type ReloadOutcome = { errors: string[]; ok: boolean };
+export type ReloadOutcome = { errors: string[]; ok: boolean };
 
 export type SavePipelineInput = {
   content: string;

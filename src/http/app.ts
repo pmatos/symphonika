@@ -2,9 +2,14 @@ import { createReadStream } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { Readable } from "node:stream";
 
-import { Hono, type Context } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { streamSSE } from "hono/streaming";
 
+import {
+  checkMutationAuthorized,
+  createCsrfSecret,
+  type CsrfSecret
+} from "./csrf.js";
 import type {
   IssuePollStatus,
   ProjectIssuePollReport
@@ -102,6 +107,9 @@ type FireRoutineFn = (
 
 export type HttpAppOptions = {
   cancelRun?: CancelRunFn;
+  // Test-only override; production always mints a fresh secret per
+  // process. See docs/adr/0075-mutation-authentication-and-superseding-0027.md.
+  csrfSecret?: CsrfSecret;
   dispatchRuntime?: {
     dispatching: boolean;
     inFlight?: number;
@@ -211,6 +219,17 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     (runStore === undefined
       ? undefined
       : (runId: string) => cancelRunInStore(runStore, runId));
+  const csrfSecret = options.csrfSecret ?? createCsrfSecret();
+  const requireAuthorizedMutation: MiddlewareHandler = async (
+    context,
+    next
+  ) => {
+    const authorization = await checkMutationAuthorized(context, csrfSecret);
+    if (!authorization.ok) {
+      return context.json({ error: authorization.reason }, 403);
+    }
+    await next();
+  };
 
   app.get("/health", (context) =>
     context.json({
@@ -269,7 +288,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     });
   });
 
-  app.post("/api/poll-now", async (context) => {
+  app.post("/api/poll-now", requireAuthorizedMutation, async (context) => {
     if (options.pollNow === undefined) {
       return context.json(
         { error: "poll-now trigger unavailable", kind: "unavailable" },
@@ -280,37 +299,44 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     return context.json(await Promise.resolve(options.pollNow()));
   });
 
-  app.post("/api/routines/:id/fire", async (context) => {
-    if (options.fireRoutine === undefined) {
-      return context.json(
-        { error: "manual Routine trigger unavailable", kind: "unavailable" },
-        503
-      );
-    }
-    const projectName = context.req.query("project");
-    const result = await Promise.resolve(
-      options.fireRoutine({
-        force: context.req.query("force") === "true",
-        ...(projectName === undefined ? {} : { projectName }),
-        routineName: context.req.param("id")
-      })
-    );
-    switch (result.kind) {
-      case "accepted":
-        return context.json(result, 202);
-      case "not_found":
-        return context.json(result, 404);
-      case "ambiguous":
-        return context.json(result, 409);
-      case "unavailable":
-        return context.json(result, 503);
-      case "refused":
+  app.post(
+    "/api/routines/:id/fire",
+    requireAuthorizedMutation,
+    async (context) => {
+      if (options.fireRoutine === undefined) {
         return context.json(
-          result,
-          result.reason === "concurrency_cap" ? 429 : 409
+          {
+            error: "manual Routine trigger unavailable",
+            kind: "unavailable"
+          },
+          503
         );
+      }
+      const projectName = context.req.query("project");
+      const result = await Promise.resolve(
+        options.fireRoutine({
+          force: context.req.query("force") === "true",
+          ...(projectName === undefined ? {} : { projectName }),
+          routineName: context.req.param("id")
+        })
+      );
+      switch (result.kind) {
+        case "accepted":
+          return context.json(result, 202);
+        case "not_found":
+          return context.json(result, 404);
+        case "ambiguous":
+          return context.json(result, 409);
+        case "unavailable":
+          return context.json(result, 503);
+        case "refused":
+          return context.json(
+            result,
+            result.reason === "concurrency_cap" ? 429 : 409
+          );
+      }
     }
-  });
+  );
 
   if (runStore !== undefined) {
     app.get("/api/runs", (context) => {
@@ -480,40 +506,45 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       )
     );
 
-    app.post("/api/runs/:id/cancel", async (context) => {
-      const id = context.req.param("id");
-      const wantsRedirect = (
-        context.req.header("content-type") ?? ""
-      ).startsWith("application/x-www-form-urlencoded");
+    app.post(
+      "/api/runs/:id/cancel",
+      requireAuthorizedMutation,
+      async (context) => {
+        const id = context.req.param("id");
+        const wantsRedirect = (
+          context.req.header("content-type") ?? ""
+        ).startsWith("application/x-www-form-urlencoded");
 
-      if (cancelRun === undefined) {
+        if (cancelRun === undefined) {
+          if (wantsRedirect) {
+            return context.redirect(`/runs/${encodeURIComponent(id)}`, 303);
+          }
+          return context.json({ kind: "unavailable" }, 503);
+        }
+
+        const outcome = await Promise.resolve(cancelRun(id, "ui"));
+        if (outcome.kind === "not-found") {
+          if (wantsRedirect) {
+            return context.redirect("/", 303);
+          }
+          return context.json({ kind: "not-found" }, 404);
+        }
+        if (outcome.kind === "already-terminal") {
+          if (wantsRedirect) {
+            return context.redirect(`/runs/${encodeURIComponent(id)}`, 303);
+          }
+          return context.json(outcome, 409);
+        }
         if (wantsRedirect) {
           return context.redirect(`/runs/${encodeURIComponent(id)}`, 303);
         }
-        return context.json({ kind: "unavailable" }, 503);
+        return context.json(outcome, 200);
       }
-
-      const outcome = await Promise.resolve(cancelRun(id, "ui"));
-      if (outcome.kind === "not-found") {
-        if (wantsRedirect) {
-          return context.redirect("/", 303);
-        }
-        return context.json({ kind: "not-found" }, 404);
-      }
-      if (outcome.kind === "already-terminal") {
-        if (wantsRedirect) {
-          return context.redirect(`/runs/${encodeURIComponent(id)}`, 303);
-        }
-        return context.json(outcome, 409);
-      }
-      if (wantsRedirect) {
-        return context.redirect(`/runs/${encodeURIComponent(id)}`, 303);
-      }
-      return context.json(outcome, 200);
-    });
+    );
 
     registerPages({
       app,
+      csrfSecret,
       ...(options.getConcurrency === undefined
         ? {}
         : { getConcurrency: options.getConcurrency }),

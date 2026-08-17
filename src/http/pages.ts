@@ -1,6 +1,12 @@
 import { Hono } from "hono";
 
 import {
+  CSRF_FIELD_NAME,
+  csrfTokenFor,
+  ensureSession,
+  type CsrfSecret
+} from "./csrf.js";
+import {
   DEFAULT_POLLING_INTERVAL_MS,
   type FilteredProjectIssueSnapshot,
   type IssuePollStatus
@@ -61,6 +67,9 @@ export type ScheduledCallback = {
 
 export type RegisterPagesOptions = {
   app: Hono;
+  // Every mutating form embeds a token derived from this secret. See
+  // docs/adr/0075-mutation-authentication-and-superseding-0027.md.
+  csrfSecret: CsrfSecret;
   // Per-Slice-2 live cap snapshot; #303's capacity strip. See ADR 0053.
   getConcurrency?: () => {
     global: { inFlight: number; maxInFlight: number | null };
@@ -451,6 +460,7 @@ export function registerPages(options: RegisterPagesOptions): void {
             new Date(Date.parse(watchdog.sampledAt) - 5 * 60_000).toISOString()
           )
         : 0;
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
     const sections = [
       `<h1 class="page-title">Run <code>${escapeHtml(detail.id)}</code></h1>`,
       renderOutcomeBanner(detail, failureEvent, exitEvent),
@@ -458,7 +468,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       renderRunSummary(detail, capContext),
       renderWatchdogSection(watchdog, outputTokenGrowth5m, detailNowMs),
       renderWorkflowGraphSummary(detail.id, workflowGraph),
-      renderCancelForm(detail),
+      renderCancelForm(detail, csrfToken),
       renderAttemptsTable(detail.attempts),
       renderTransitionsTable(detail.transitions),
       renderEventsTable(events, eventsTruncated),
@@ -2337,11 +2347,14 @@ function renderWatchdogSection(
 </dl></section>`;
 }
 
-function renderCancelForm(detail: { id: string; state: RunState }): string {
+function renderCancelForm(
+  detail: { id: string; state: RunState },
+  csrfToken: string
+): string {
   if (TERMINAL_STATES.has(detail.state)) {
     return "";
   }
-  return `<section><form method="post" action="/api/runs/${encodeURIComponent(detail.id)}/cancel"><button class="btn" type="submit">Cancel run</button></form></section>`;
+  return `<section><form method="post" action="/api/runs/${encodeURIComponent(detail.id)}/cancel"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}"><button class="btn" type="submit">Cancel run</button></form></section>`;
 }
 
 function renderAttemptsTable(

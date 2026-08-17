@@ -162,4 +162,62 @@ describe("daemon health notifications", () => {
     await expect(notifier.settled()).resolves.toBeUndefined();
     expect(deliver).toHaveBeenCalledTimes(2);
   });
+
+  it("notifies once across repeated self-update failures and once on recovery (ADR 0079)", async () => {
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const notifier = new DaemonHealthNotifier({
+      createSink: () => ({ deliver }),
+      resolveConfig: () => ({
+        from: "symphonika@example.com",
+        on: "always",
+        smtpHost: "smtp.example.com",
+        smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+        smtpPort: 587,
+        smtpSecurity: "starttls",
+        to: "operator@example.com"
+      })
+    });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      notifier.observeUpdateFailure({
+        broken: true,
+        detail: "checksum mismatch"
+      });
+    }
+    await notifier.settled();
+
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(deliver.mock.calls[0]?.[0]).toMatchObject({
+      subject: "[Symphonika] Self-update failed"
+    });
+
+    notifier.observeUpdateFailure({ broken: false });
+    await notifier.settled();
+
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver.mock.calls[1]?.[0]).toMatchObject({
+      subject: "[Symphonika] Self-update recovered"
+    });
+  });
+
+  it("never notifies on a first, successful self-update", async () => {
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const notifier = new DaemonHealthNotifier({
+      createSink: () => ({ deliver }),
+      resolveConfig: () => ({
+        from: "symphonika@example.com",
+        on: "always",
+        smtpHost: "smtp.example.com",
+        smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+        smtpPort: 587,
+        smtpSecurity: "starttls",
+        to: "operator@example.com"
+      })
+    });
+
+    notifier.observeUpdateFailure({ broken: false });
+    await notifier.settled();
+
+    expect(deliver).not.toHaveBeenCalled();
+  });
 });

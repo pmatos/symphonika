@@ -48,11 +48,18 @@ import type {
 } from "./run-store.js";
 import { openRunStore as openRunStoreReal } from "./run-store.js";
 import type { ServiceInstallOptions, ServiceInstallReport } from "./service.js";
-import { runServiceInstall as runServiceInstallReal } from "./service.js";
+import {
+  defaultScriptPath,
+  runServiceInstall as runServiceInstallReal
+} from "./service.js";
 import type { SmokeOptions, SmokeReport } from "./smoke.js";
 import { runSmoke } from "./smoke.js";
 import type { TestEmailOptions, TestEmailReport } from "./test-email.js";
 import { runTestEmail } from "./test-email.js";
+import type { RollbackResult } from "./update/cutover.js";
+import { rollbackToPreviousRelease as rollbackToPreviousReleaseReal } from "./update/cutover.js";
+import type { SelfCheckResult } from "./update/self-check.js";
+import { runSelfCheck as runSelfCheckReal } from "./update/self-check.js";
 import {
   formatCapReachedReason,
   parseCapReachedReason
@@ -93,6 +100,8 @@ export type CliDependencies = {
   runDoctor?: (options: DoctorOptions) => Promise<DoctorReport>;
   runInit?: (options: InitOptions) => Promise<InitReport>;
   runInitProject?: (options: InitProjectOptions) => Promise<InitProjectReport>;
+  runRollback?: (scriptPath: string) => Promise<RollbackResult>;
+  runSelfCheck?: (options: { stateRoot: string }) => Promise<SelfCheckResult>;
   runServiceInstall?: (
     options: ServiceInstallOptions
   ) => Promise<ServiceInstallReport>;
@@ -171,6 +180,8 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     dependencies.runServiceInstall ?? runServiceInstallReal;
   const smoke = dependencies.runSmoke ?? runSmoke;
   const testEmail = dependencies.runTestEmail ?? runTestEmail;
+  const selfCheck = dependencies.runSelfCheck ?? runSelfCheckReal;
+  const rollback = dependencies.runRollback ?? rollbackToPreviousReleaseReal;
   const start = dependencies.startDaemon ?? startDaemon;
   const openRunStore = dependencies.openRunStore ?? openRunStoreReal;
   const fetcher = dependencies.fetch ?? fetch;
@@ -455,16 +466,39 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .description("start the local Symphonika daemon without dispatching work")
     .option("--config <path>", "service config path")
     .option("--port <port>", "local HTTP port", parsePort, 3000)
-    .action(async (options: { config?: string; port: number }) => {
-      const daemon = await start({
-        ...withConfigPath(options.config),
-        port: options.port
-      });
+    .option(
+      "--self-check <state-root>",
+      "internal: verify this build starts cleanly against a throwaway state root, then exit (used by self-update, ADR 0079)"
+    )
+    .action(
+      async (options: {
+        config?: string;
+        port: number;
+        selfCheck?: string;
+      }) => {
+        if (options.selfCheck !== undefined) {
+          const result = await selfCheck({ stateRoot: options.selfCheck });
+          if (!result.ok) {
+            for (const error of result.errors) {
+              writeErr(program, `self-check failed: ${error}\n`);
+            }
+            process.exitCode = 1;
+            return;
+          }
+          writeOut(program, "self-check ok\n");
+          return;
+        }
 
-      if (registerSignalHandlers) {
-        registerShutdownHandlers(daemon);
+        const daemon = await start({
+          ...withConfigPath(options.config),
+          port: options.port
+        });
+
+        if (registerSignalHandlers) {
+          registerShutdownHandlers(daemon);
+        }
       }
-    });
+    );
 
   program
     .command("smoke")
@@ -603,6 +637,36 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         writeOut(program, "then:   journalctl --user -u symphonika -f\n");
       }
     );
+
+  serviceCommand
+    .command("rollback")
+    .description(
+      "restore the previous install generation after a self-update (ADR 0079)"
+    )
+    .action(async () => {
+      const result = await rollback(defaultScriptPath());
+
+      if (result.kind === "no-previous-generation") {
+        writeErr(
+          program,
+          "service rollback failed: no previous install generation found (.previous)\n"
+        );
+        process.exitCode = 1;
+        return;
+      }
+
+      if (result.kind === "error") {
+        writeErr(program, `service rollback failed: ${result.error}\n`);
+        process.exitCode = 1;
+        return;
+      }
+
+      writeOut(
+        program,
+        `service rollback ok: restored ${result.installPath}\n`
+      );
+      writeOut(program, "run: systemctl --user restart symphonika.service\n");
+    });
 
   const workflowCommand = program
     .command("workflow")

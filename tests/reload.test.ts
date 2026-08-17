@@ -2299,6 +2299,65 @@ describe("RuntimeConfigReloader pull_requests policy validation", () => {
   });
 });
 
+describe("self_update config (ADR 0079)", () => {
+  it("defaults to false when omitted", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()?.selfUpdate).toBe(false);
+    expect(reloader.selfUpdateEnabled()).toBe(false);
+  });
+
+  it("parses self_update: true into the snapshot", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: ["self_update: true"]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()?.selfUpdate).toBe(true);
+    expect(reloader.selfUpdateEnabled()).toBe(true);
+  });
+
+  it("rejects a non-boolean self_update and keeps the last-known-good snapshot", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: ["self_update: true"]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const firstSnapshot = reloader.getSnapshot();
+    expect(firstSnapshot?.selfUpdate).toBe(true);
+
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: ["self_update: not-a-boolean"]
+    });
+    await reloader.reload();
+
+    expect(reloader.getSnapshot()).toBe(firstSnapshot);
+    expect(reloader.selfUpdateEnabled()).toBe(true);
+    expect(reloader.getStatus()).toMatchObject({
+      ok: false,
+      usingLastKnownGood: true,
+      errors: [expect.stringContaining("self_update")]
+    });
+  });
+});
+
 describe("validateServiceConfigContent (#307 editor save-preview validation)", () => {
   it("reports the same state.root error the live reload would report", async () => {
     const root = await makeTempRoot();

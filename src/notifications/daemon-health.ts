@@ -11,6 +11,7 @@ export class DaemonHealthNotifier {
   private readonly inFlight = new Set<Promise<void>>();
   private invalidRoutines: boolean | undefined;
   private reloadBroken: boolean | undefined;
+  private updateBroken: boolean | undefined;
 
   constructor(
     private readonly input: {
@@ -63,6 +64,28 @@ export class DaemonHealthNotifier {
       subject: broken
         ? "Routine declarations became invalid"
         : "Routine declarations recovered"
+    });
+  }
+
+  // Edge-triggered, same shape as observeReload (ADR 0079): reports once on
+  // transition into a failing self-update cycle, once on transition back to
+  // a successful one, and never on a repeated same-state result -- a
+  // persistently unreachable release source sends once, not every check.
+  observeUpdateFailure(input: { broken: boolean; detail?: string }): void {
+    const previous = this.updateBroken;
+    this.updateBroken = input.broken;
+    if (
+      previous === input.broken ||
+      (previous === undefined && !input.broken)
+    ) {
+      return;
+    }
+    this.enqueue({
+      details:
+        input.broken && input.detail !== undefined
+          ? [input.detail]
+          : ["Self-update completed successfully."],
+      subject: input.broken ? "Self-update failed" : "Self-update recovered"
     });
   }
 

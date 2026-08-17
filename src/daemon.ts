@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
 
 import { serve, type ServerType } from "@hono/node-server";
@@ -91,8 +92,13 @@ import {
   pruneRoutineWorkspaces as pruneRoutineWorkspacesReal,
   type RoutineWorkspaceRetentionPolicy
 } from "./routines/workspace-retention.js";
+import { defaultScriptPath } from "./service.js";
 import { resolveStateRoot } from "./state.js";
 import { buildStatusSnapshot } from "./status.js";
+import {
+  createDefaultUpdateOps,
+  UpdateCoordinator
+} from "./update/coordinator.js";
 import { VERSION } from "./version.js";
 import type {
   PreparedIssueWorkspace,
@@ -351,6 +357,23 @@ export async function startDaemon(
     resolveConfig: () => runtimeConfig.emailConfig()
   });
   const activeRuns = new ActiveRunRegistry();
+  // Drain gate read by launchWork and the fireRoutine HTTP handler (ADR
+  // 0079): blocks NEW dispatch admission only, never cancels in-flight
+  // work. Constructed before launchWork below so both readers close over
+  // the same instance.
+  const updateCoordinator = new UpdateCoordinator({
+    activeRuns,
+    currentVersion: VERSION,
+    daemonHealthNotifier: daemonHealthNotifications,
+    isSelfUpdateEnabled: () => runtimeConfig.selfUpdateEnabled(),
+    logger,
+    ops: createDefaultUpdateOps({
+      env,
+      homeDir: homedir(),
+      scriptPath: defaultScriptPath(),
+      stateRoot: state.stateRoot
+    })
+  });
   const dispatchMutex = createAsyncMutex();
   // launchWork is explicitly re-entrant per tick (see comment at its
   // definition), so a retention pass that outlives one polling interval
@@ -709,7 +732,11 @@ export async function startDaemon(
     }
   };
   const launchWork = (): void => {
-    if (!state.configExists || !hasRegisteredProviders(agentProviders)) {
+    if (
+      !state.configExists ||
+      !hasRegisteredProviders(agentProviders) ||
+      updateCoordinator.isDrainRequested()
+    ) {
       return;
     }
     // The mutex is acquired INSIDE runController.dispatchOneFresh (and inside
@@ -830,6 +857,7 @@ export async function startDaemon(
     refreshPollingInterval();
     await reconcile();
     launchWork();
+    updateCoordinator.tick();
     logger.debug(
       {
         candidates: issuePollStatus.candidateIssues.length,
@@ -974,6 +1002,17 @@ export async function startDaemon(
     claimMutex: dispatchMutex,
     dispatchRuntime,
     fireRoutine: (request): FireRoutineResult => {
+      // fireRoutineNow is a second admission path outside launchWork's
+      // drain check above -- a manual `symphonika fire-now` during a
+      // self-update drain must be refused too, or drain could wait forever
+      // on work the drain gate never saw coming (ADR 0079).
+      if (updateCoordinator.isDrainRequested()) {
+        return {
+          error: "self-update is draining in-flight work before cutover",
+          kind: "refused",
+          reason: "self_update_draining"
+        };
+      }
       const result = fireRoutineNow({
         activeRuns,
         agentProviders,

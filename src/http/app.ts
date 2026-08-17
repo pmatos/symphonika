@@ -143,7 +143,12 @@ export type FireRoutineResult =
   | {
       error: string;
       kind: "refused";
-      reason: RoutineState | "concurrency_cap" | "daemon_shutdown" | "overlap";
+      reason:
+        | RoutineState
+        | "concurrency_cap"
+        | "daemon_shutdown"
+        | "overlap"
+        | "self_update_draining";
     }
   | { error: string; kind: "unavailable" };
 

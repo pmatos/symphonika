@@ -353,6 +353,8 @@ pull_requests:
     require_status_success: true
     require_review_decision: false
 
+self_update: false
+
 # Optional defaults inherited by Routine declarations. A front-matter value
 # wins; if both are omitted, the provider command remains operator-authored.
 routine_defaults:
@@ -436,6 +438,15 @@ Automatic reclamation defaults to enabled. Successful firing workspaces are reta
 failed and cancelled firing workspaces are retained for `14` days. Each day value is a non-negative
 integer. Operators may tune the windows or set `enabled: false`; the manual cleanup command still
 uses the configured windows when automatic reclamation is disabled. See ADR 0067.
+
+`self_update` is a service-level boolean, defaulting to `false`. When `true`, the daemon
+periodically checks GitHub Releases for a newer Symphonika version, stages and smoke-checks it in
+an isolated location, drains in-flight work without cancelling it, and cuts over with a
+`systemctl --user restart`-driven restart once the drain completes. This slice exposes no check-interval
+or channel configuration beyond the boolean; toggling it to `false` mid-flight halts any in-progress
+update before its next phase, per the defensive reload model in §5.1. See ADR 0079 for the full
+design, including the deferred edges (no prebuilt native-module binaries, no automatic rollback
+after a post-cutover crash-loop) and `symphonika service rollback` for manual recovery.
 
 ### 5.2 Workflow Contract
 
@@ -821,6 +832,7 @@ The daemon owns:
 - PR follow-up polling for Symphonika-owned PRs
 - local UI/API
 - routine schedule evaluation and firing dispatch
+- self-update checks and staged cutover, when `self_update: true` (§5.1, ADR 0079)
 
 ### 8.2 Startup Sequence
 

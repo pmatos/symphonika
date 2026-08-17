@@ -3,6 +3,7 @@ import { performance } from "node:perf_hooks";
 import { Readable } from "node:stream";
 
 import { Hono, type Context } from "hono";
+import { streamSSE } from "hono/streaming";
 
 import type {
   IssuePollStatus,
@@ -22,6 +23,7 @@ import {
 import type { RoutineFiringState, RoutineState } from "../routines/types.js";
 import type { StatusSnapshot } from "../status.js";
 import type {
+  ChangeEvent,
   ListRunsFilter,
   RunArtifactKind,
   RunState,
@@ -143,10 +145,18 @@ export type HttpAppOptions = {
   now?: () => number;
   pollNow?: PollNowFn;
   runStore?: RunStore;
+  // Aborted by stopServer before it calls server.close(), so open /events
+  // streams exit their loop instead of holding the shutdown open forever.
+  shutdownSignal?: AbortSignal;
+  // Test-only override; production always uses SSE_HEARTBEAT_MS. See
+  // docs/adr/0074-live-notification-path.md.
+  sseHeartbeatMs?: number;
   startedAtMs?: number;
   stateRoot: string;
   version: string;
 };
+
+const SSE_HEARTBEAT_MS = 20_000;
 
 const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
   "queued",
@@ -458,6 +468,18 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       )
     );
 
+    // One long-lived SSE stream per client; each connection gets its own
+    // subscription so multiple tabs are independent. See
+    // docs/adr/0074-live-notification-path.md.
+    app.get("/events", (context) =>
+      streamChangeEvents(
+        context,
+        runStore,
+        options.sseHeartbeatMs ?? SSE_HEARTBEAT_MS,
+        options.shutdownSignal
+      )
+    );
+
     app.post("/api/runs/:id/cancel", async (context) => {
       const id = context.req.param("id");
       const wantsRedirect = (
@@ -646,6 +668,78 @@ async function streamRoutineFiringArtifact(
       status: 200
     }
   );
+}
+
+// Events are invalidation signals (identity + new state), not a replay
+// log: a client that misses events while disconnected is expected to
+// reconcile once on reconnect rather than be caught up here. Idle
+// connections only wake on the heartbeat interval, never on a poll —
+// see docs/adr/0074-live-notification-path.md.
+function streamChangeEvents(
+  context: Context,
+  runStore: RunStore,
+  heartbeatMs: number,
+  shutdownSignal: AbortSignal | undefined
+): Response {
+  return streamSSE(context, async (stream) => {
+    const queue: ChangeEvent[] = [];
+    let wake: (() => void) | undefined;
+    let done = shutdownSignal?.aborted ?? false;
+    stream.onAbort(() => {
+      done = true;
+      wake?.();
+    });
+    // Node's server.close() waits for every open connection to end on its
+    // own; an SSE stream never does that by itself, so without this a
+    // daemon shutdown would hang as long as any /events tab stayed open.
+    // stopServer aborts this signal before calling close() (daemon.ts).
+    const onShutdown = () => {
+      done = true;
+      wake?.();
+    };
+    shutdownSignal?.addEventListener("abort", onShutdown);
+    const unsubscribe = runStore.subscribeToChanges((event) => {
+      queue.push(event);
+      wake?.();
+    });
+    try {
+      let id = 0;
+      while (!done && !stream.aborted && !stream.closed) {
+        if (queue.length === 0) {
+          await Promise.race([
+            new Promise<void>((resolve) => {
+              wake = resolve;
+            }),
+            stream.sleep(heartbeatMs)
+          ]);
+          wake = undefined;
+          if (done || stream.aborted || stream.closed) {
+            break;
+          }
+          if (queue.length === 0) {
+            await stream.writeSSE({
+              data: "",
+              event: "heartbeat",
+              id: String(id++)
+            });
+            continue;
+          }
+        }
+        const event = queue.shift();
+        if (event === undefined) {
+          continue;
+        }
+        await stream.writeSSE({
+          data: JSON.stringify(event),
+          event: event.kind,
+          id: String(id++)
+        });
+      }
+    } finally {
+      unsubscribe();
+      shutdownSignal?.removeEventListener("abort", onShutdown);
+    }
+  });
 }
 
 const TERMINAL_FIRING_STATES: ReadonlySet<RoutineFiringState> = new Set([

@@ -163,9 +163,53 @@ so `#307` doesn't have to rediscover it.
 
 ## Git-aware writes
 
-Deferred to `#306`'s third stacked PR (`symphonika/issue306-git`) — repo/branch/dirty detection and
-the optional scoped commit. Builds on the save pipeline above; this section will be filled in when
-that PR lands.
+`src/http/git-status.ts` gives every future editor the state the issue requires be shown before a
+save, and the optional commit action, over the same `git -C <dir> ...` invocation pattern
+`src/workspace.ts` already uses for Run workspaces (no new dependency).
+
+### Two independent signals, not one "dirty" flag
+
+`GitFileState` carries both a whole-working-tree `dirty` boolean and a file-specific `fileStatus`
+(`clean | untracked | modified_staged | modified_unstaged | modified_staged_and_unstaged`). The
+issue explicitly separates "dirty state" (shown in the editor) from "staged-but-uncommitted changes
+to the same file" as one of the named awkward states — collapsing both into a single flag would
+hide exactly the distinction an operator needs: a repo can be dirty from unrelated work while the
+file under edit is untouched, and a file can carry staged-and-unstaged changes to itself
+simultaneously (a partial `git add` followed by more edits), which is a materially different
+situation from either alone when it comes to what an "optional commit" button would actually do.
+
+### The awkward states, detected honestly rather than assumed away
+
+- **Detached HEAD** surfaces as `branch: null` plus `detachedHeadSha` — not blocked, since a
+  detached-HEAD commit is legitimate git, just worth showing plainly.
+- **Mid-rebase** is detected by checking for `<git-dir>/rebase-merge` or `<git-dir>/rebase-apply`
+  (git's own on-disk markers; there is no porcelain flag for this), and is the one state
+  `commitFile` actively refuses rather than merely displays — a commit issued mid-rebase through an
+  editor is confusing enough to block outright, with a reason string the caller can render verbatim
+  rather than a raw git error.
+- **Gitignored** is a separate boolean (`git check-ignore --quiet`) from `fileStatus`, because a
+  gitignored file never appears in `git status` output at all — reporting it as `fileStatus: "clean"`
+  alongside `gitignored: true` is the honest combination; `fileStatus` alone would misleadingly
+  imply the file is tracked and unmodified.
+
+### A real, non-speculative bug the test suite caught: porcelain output must not be trimmed
+
+`git status --porcelain=v1`'s index-status column is a **leading space** when nothing is staged —
+the codebase's existing `git()` test/production helpers all call `.trim()` on stdout, which silently
+eats that leading space and turns "modified, unstaged only" into what parses as "modified, staged."
+A dedicated `tryGitRawOutput` (trailing-newline-only trim) exists specifically for this one call
+site; `detectGitFileState`'s own test — asserting `modified_unstaged` specifically, not just
+"modified" — caught this exact bug during implementation, before it reached review.
+
+### Commit is scoped via `commit -- <path>`, and there is no push call in this module
+
+`commitFile` stages and commits exactly the target file (`git add -- <path>`, `git commit -m
+<message> -- <path>`), so a separately staged, unrelated file already sitting in the index is never
+swept into the editor's commit. **"Never push" is a structural property, not a policy**: this module
+contains no `git push` invocation anywhere, and nothing it exports can reach one — a future
+regression would have to add a new push call from scratch, not merely fail to skip an existing one.
+A no-op save (content identical to what's already committed) returns `{ kind: "nothing_to_commit" }`
+rather than surfacing git's own error text.
 
 ## Consequences
 
@@ -191,3 +235,8 @@ that PR lands.
 - `#307`'s save routes must call `runStore.publishReloadOutcome` from their `reload` callback, or a
   save-triggered reload silently doesn't reach `#305`'s live dashboard the way the daemon's own tick
   does. This ADR is where that requirement is recorded; nothing enforces it automatically yet.
+- `detectGitFileState` re-runs on every call rather than caching, including inside `commitFile`
+  (which calls it fresh to check `midRebase`, not trusting a caller-supplied state object that could
+  be stale by the time the commit button is actually pressed). Correct for a low-frequency,
+  operator-triggered action; not something to call in a hot path without reconsidering the cost of
+  five-plus `git` subprocess spawns per invocation.

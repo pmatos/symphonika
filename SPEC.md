@@ -1887,6 +1887,16 @@ config actually references (`resolveConfinedWritePath`/`computeReferencedRealPat
 pipeline yet; it ships ahead of its first caller the same way `#305`'s `GET /events` shipped ahead
 of the dashboard that first consumed it.
 
+`detectGitFileState` (`src/http/git-status.ts`, ADR-0075) gives a future editor the git context the
+issue requires before a save: whether the target path sits inside a git repo, its repo root and
+branch (or, if detached, the current SHA), the whole working tree's dirty state and — separately —
+the target file's own staged/unstaged status, whether it's mid-rebase, and whether it's gitignored.
+`commitFile` optionally stages and commits exactly that one file (`git ... -- <path>`, never
+sweeping in an unrelated already-staged file), refusing outright while mid-rebase and reporting
+`nothing_to_commit` for a no-op save rather than surfacing a raw git error. There is no `git push`
+call anywhere in this module — "never push" is structural, not a convention a caller has to
+remember.
+
 The HTTP API exposes `GET /api/routines` with the same Routine status shape as the CLI and
 dashboard, including `latestOutcome`, latest-attempt/skip fields, and per-reason `skipCounts24h`.
 Inactive Routines are hidden by default; `?include_inactive=true` includes them, and the

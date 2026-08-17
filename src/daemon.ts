@@ -911,6 +911,11 @@ export async function startDaemon(
   const shutdownController = new AbortController();
   const app = createHttpApp({
     cancelRun: cancelViaUi,
+    // Shares RunController's own claim-serialization primitive so
+    // clear-stale-claim can't wipe a claim landing mid-check (ADR 0052) --
+    // same mutex detectStaleClaims already gates its own automatic sweep
+    // behind (dispatchMutex.held, above).
+    claimMutex: dispatchMutex,
     dispatchRuntime,
     fireRoutine: (request): FireRoutineResult => {
       const result = fireRoutineNow({

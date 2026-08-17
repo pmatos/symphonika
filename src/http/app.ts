@@ -16,6 +16,7 @@ import type {
   ProjectIssuePollReport
 } from "../issue-polling.js";
 import { emptyIssuePollStatus } from "../issue-polling.js";
+import type { AsyncMutex } from "../lifecycle/async-mutex.js";
 import {
   DEFAULT_WATCHDOG_CONFIG,
   type RuntimeReloadStatus,
@@ -185,6 +186,12 @@ export type HttpAppOptions = {
   // the resolved (symlink-following) path on success, undefined otherwise.
   resolveWritePath?: (candidatePath: string) => Promise<string | undefined>;
   runStore?: RunStore;
+  // #308 part 3's clear-stale-claim: the same mutex RunController's retry
+  // path serializes its own claim (reserveSlot + sym:claimed label add)
+  // through (src/lifecycle/run-controller.ts, ADR 0052). Clearing a claim
+  // without it would let a claim landing between the liveness check and
+  // the label-removal write get silently wiped as "stale".
+  claimMutex?: AsyncMutex;
   // Aborted by stopServer before it calls server.close(), so open /events
   // streams exit their loop instead of holding the shutdown open forever.
   shutdownSignal?: AbortSignal;
@@ -632,6 +639,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.getStatusSnapshot === undefined
         ? {}
         : { getStatusSnapshot: options.getStatusSnapshot }),
+      ...(options.claimMutex === undefined
+        ? {}
+        : { claimMutex: options.claimMutex }),
       ...(options.getWatchdogConfig === undefined
         ? {}
         : { getWatchdogConfig: options.getWatchdogConfig }),

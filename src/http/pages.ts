@@ -13,6 +13,7 @@ import {
   type CsrfSecret
 } from "./csrf.js";
 import type { PollNowFn, WriteIssueLabelsFn } from "./app.js";
+import type { AsyncMutex } from "../lifecycle/async-mutex.js";
 import { describeIssueVerdict } from "../issues/verdict.js";
 import { setRoutineDisabled } from "../routines/declaration-editor.js";
 import { parseRoutineDeclaration } from "../routines/declaration-loader.js";
@@ -125,6 +126,9 @@ export type RegisterPagesOptions = {
   // #303's "retry ETA" detail for a waiting Run.
   getScheduled?: () => ScheduledCallback[];
   getStatusSnapshot?: () => StatusSnapshot;
+  // #308 part 3's clear-stale-claim. See HttpAppOptions.claimMutex
+  // (src/http/app.ts).
+  claimMutex?: AsyncMutex;
   getWatchdogConfig?: (
     projectName: string
   ) => Pick<WatchdogConfig, "enabled" | "graceMinutes">;
@@ -764,38 +768,48 @@ export function registerPages(options: RegisterPagesOptions): void {
         ok: false
       };
     } else {
-      const liveRunId = findLiveRunIdForIssue({
-        getActiveRuns: options.getActiveRuns,
-        issueNumber,
-        projectName,
-        runStore: options.runStore
-      });
-      if (liveRunId !== undefined) {
-        banner = {
-          error: `Refused: run ${liveRunId} is live for this issue.`,
-          kind: "clear_stale_claim",
-          ok: false
-        };
-      } else if (options.writeIssueLabels === undefined) {
-        banner = {
-          error: "label writes are unavailable",
-          kind: "clear_stale_claim",
-          ok: false
-        };
-      } else {
-        const result = await options.writeIssueLabels({
-          add: [],
+      // RunController's own retry-claim path (reserveSlot + the sym:claimed
+      // label add) serializes through this same mutex (ADR 0052) — without
+      // it, a claim could land between the liveness check below and the
+      // label-removal write, and get wiped out as "stale" even though a
+      // live Run now genuinely owns this issue.
+      await options.claimMutex?.acquire();
+      try {
+        const liveRunId = findLiveRunIdForIssue({
+          getActiveRuns: options.getActiveRuns,
           issueNumber,
           projectName,
-          remove: presentClaimLabels
+          runStore: options.runStore
         });
-        banner = result.ok
-          ? {
-              clearedLabels: presentClaimLabels,
-              kind: "clear_stale_claim",
-              ok: true
-            }
-          : { error: result.error, kind: "clear_stale_claim", ok: false };
+        if (liveRunId !== undefined) {
+          banner = {
+            error: `Refused: run ${liveRunId} is live for this issue.`,
+            kind: "clear_stale_claim",
+            ok: false
+          };
+        } else if (options.writeIssueLabels === undefined) {
+          banner = {
+            error: "label writes are unavailable",
+            kind: "clear_stale_claim",
+            ok: false
+          };
+        } else {
+          const result = await options.writeIssueLabels({
+            add: [],
+            issueNumber,
+            projectName,
+            remove: presentClaimLabels
+          });
+          banner = result.ok
+            ? {
+                clearedLabels: presentClaimLabels,
+                kind: "clear_stale_claim",
+                ok: true
+              }
+            : { error: result.error, kind: "clear_stale_claim", ok: false };
+        }
+      } finally {
+        options.claimMutex?.release();
       }
     }
 

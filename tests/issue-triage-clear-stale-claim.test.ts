@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createHttpApp } from "../src/http/app.js";
 import { csrfTokenFor, type CsrfSecret } from "../src/http/csrf.js";
 import type { IssueSnapshot } from "../src/issue-polling.js";
+import { createAsyncMutex } from "../src/lifecycle/async-mutex.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
@@ -176,6 +177,48 @@ describe("POST /issues/:project/:number/clear-stale-claim (#308 part 3)", () => 
         projectName: "alpha",
         remove: ["sym:stale", "sym:claimed"]
       });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("waits for the claim mutex before checking liveness, so a claim landing concurrently isn't wiped", async () => {
+    const test = await setup(["sym:stale", "sym:claimed"]);
+    try {
+      const claimMutex = createAsyncMutex();
+      let writeIssueLabelsCalled = false;
+      const app = createHttpApp({
+        claimMutex,
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0",
+        writeIssueLabels: () => {
+          writeIssueLabelsCalled = true;
+          return Promise.resolve({ ok: true });
+        }
+      });
+      // Simulates RunController's retry-claim path already holding the
+      // mutex (ADR 0052) when the clear-stale-claim request arrives.
+      await claimMutex.acquire();
+      const responsePromise = app.request("/issues/alpha/9/clear-stale-claim", {
+        body: formBody({ csrf_token: VALID_TOKEN }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      // Still blocked on the mutex — the liveness check hasn't run yet, so
+      // it can't have raced the (still in-flight, in this scenario) claim.
+      expect(writeIssueLabelsCalled).toBe(false);
+
+      claimMutex.release();
+      const response = await responsePromise;
+      const html = await response.text();
+      expect(html).toContain("Cleared stale claim on GitHub");
+      expect(writeIssueLabelsCalled).toBe(true);
     } finally {
       test.cleanup();
     }

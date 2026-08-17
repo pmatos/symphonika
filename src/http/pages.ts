@@ -12,8 +12,13 @@ import {
   ensureSession,
   type CsrfSecret
 } from "./csrf.js";
-import type { PollNowFn, WriteIssueLabelsFn } from "./app.js";
+import type {
+  MergePullRequestFn,
+  PollNowFn,
+  WriteIssueLabelsFn
+} from "./app.js";
 import type { AsyncMutex } from "../lifecycle/async-mutex.js";
+import type { PullRequestState } from "../pull-request-state.js";
 import { describeIssueVerdict } from "../issues/verdict.js";
 import { setRoutineDisabled } from "../routines/declaration-editor.js";
 import { parseRoutineDeclaration } from "../routines/declaration-loader.js";
@@ -136,6 +141,9 @@ export type RegisterPagesOptions = {
     projectName: string
   ) => Pick<WatchdogConfig, "enabled" | "graceMinutes">;
   issuePollStatus?: IssuePollStatus;
+  // #309 part 3's guarded-merge action. See HttpAppOptions.mergePullRequest
+  // (src/http/app.ts).
+  mergePullRequest?: MergePullRequestFn;
   monotonicNow: () => number;
   now?: () => number;
   // #308 part 2's "poll now" offer after a label write. See
@@ -909,6 +917,12 @@ export function registerPages(options: RegisterPagesOptions): void {
         banner: undefined,
         csrfToken,
         detail,
+        liveOwnerRunId: livePullRequestOwnerRunId({
+          getActiveRuns: options.getActiveRuns,
+          issueNumber: detail.issueNumber,
+          projectName: detail.projectName,
+          runStore: options.runStore
+        }),
         pollNowAvailable: options.pollNow !== undefined
       })
     );
@@ -939,12 +953,19 @@ export function registerPages(options: RegisterPagesOptions): void {
 
     let banner: PullRequestLabelWriteBanner;
     if (label.length === 0) {
-      banner = { action, error: "a label is required", label, ok: false };
+      banner = {
+        action,
+        error: "a label is required",
+        kind: "label_write",
+        label,
+        ok: false
+      };
     } else if (isOrchestratorLabel(label)) {
       banner = {
         action,
         error:
           "sym:* labels are managed by Symphonika and can't be edited here (ADR 0002/0024)",
+        kind: "label_write",
         label,
         ok: false
       };
@@ -952,6 +973,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       banner = {
         action,
         error: "label writes are unavailable",
+        kind: "label_write",
         label,
         ok: false
       };
@@ -964,8 +986,14 @@ export function registerPages(options: RegisterPagesOptions): void {
         subjectNumber: prNumber
       });
       banner = result.ok
-        ? { action, label, ok: true }
-        : { action, error: result.error, label, ok: false };
+        ? { action, kind: "label_write", label, ok: true }
+        : {
+            action,
+            error: result.error,
+            kind: "label_write",
+            label,
+            ok: false
+          };
     }
 
     const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
@@ -975,6 +1003,12 @@ export function registerPages(options: RegisterPagesOptions): void {
         banner,
         csrfToken,
         detail,
+        liveOwnerRunId: livePullRequestOwnerRunId({
+          getActiveRuns: options.getActiveRuns,
+          issueNumber: detail.issueNumber,
+          projectName: detail.projectName,
+          runStore: options.runStore
+        }),
         pollNowAvailable: options.pollNow !== undefined
       })
     );
@@ -1001,6 +1035,100 @@ export function registerPages(options: RegisterPagesOptions): void {
         context.req.param("project"),
         context.req.param("number"),
         "remove"
+      )
+  );
+
+  async function handlePullRequestMerge(
+    context: Context,
+    projectName: string,
+    prNumberParam: string
+  ): Promise<Response> {
+    const prNumber = Number.parseInt(prNumberParam, 10);
+    const detail = loadPullRequestDetail(
+      options.runStore,
+      projectName,
+      prNumber
+    );
+    if (detail === undefined) {
+      return context.html(
+        renderPullRequestNotFound(projectName, prNumberParam),
+        404
+      );
+    }
+
+    const liveOwnerRunId = livePullRequestOwnerRunId({
+      getActiveRuns: options.getActiveRuns,
+      issueNumber: detail.issueNumber,
+      projectName: detail.projectName,
+      runStore: options.runStore
+    });
+
+    // The SHA the merge is pinned to is whatever the operator's page
+    // actually showed (submitted from the GET page's hidden field), not a
+    // fresh re-read of the snapshot -- a poll landing between page-load
+    // and the click would otherwise let this validate a commit the
+    // operator never saw. Missing/blank means the GET page had no headSha
+    // to pin either (same permissive case as before this field existed).
+    const body = await context.req.parseBody();
+    const submittedHeadSha = readOptionalFormField(body, "expected_head_sha");
+    const expectedHeadSha =
+      submittedHeadSha === undefined || submittedHeadSha === ""
+        ? undefined
+        : submittedHeadSha;
+
+    let banner: PullRequestMergeBanner;
+    if (liveOwnerRunId !== undefined) {
+      banner = {
+        error: `Refused: run ${liveOwnerRunId} is live for this PR.`,
+        freshState: undefined,
+        kind: "merge",
+        ok: false
+      };
+    } else if (options.mergePullRequest === undefined) {
+      banner = {
+        error: "merge is unavailable",
+        freshState: undefined,
+        kind: "merge",
+        ok: false
+      };
+    } else {
+      const result = await options.mergePullRequest({
+        ...(expectedHeadSha === undefined ? {} : { expectedHeadSha }),
+        prNumber,
+        projectName
+      });
+      banner = result.ok
+        ? { freshState: result.freshState, kind: "merge", ok: true }
+        : {
+            error: result.error,
+            freshState: result.freshState,
+            kind: "merge",
+            ok: false
+          };
+    }
+
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const html = layout(
+      `PR #${prNumber} ${detail.snapshot.title}`,
+      renderPullRequestDetailPage({
+        banner,
+        csrfToken,
+        detail,
+        liveOwnerRunId,
+        pollNowAvailable: options.pollNow !== undefined
+      })
+    );
+    return context.html(html);
+  }
+
+  options.app.post(
+    "/prs/:project/:number/merge",
+    requireAuthorizedMutation,
+    (context) =>
+      handlePullRequestMerge(
+        context,
+        context.req.param("project"),
+        context.req.param("number")
       )
   );
 
@@ -3128,6 +3256,26 @@ function resolveClaimedRunId(
 // across the wait, ADR 0047). Missing the waiting set would let an operator
 // clear a claim on a parked-but-live Run — the exact double dispatch ADR
 // 0077 exists to prevent.
+// Shared by findLiveRunIdForIssue (#308) and isRunIdLive (#309): the same
+// three-source union collectLiveKeys (src/lifecycle/stale-claims.ts) uses,
+// concatenated in priority order (in-process registry, then
+// queued/preparing_workspace/running rows, then parked `waiting` rows,
+// which keep sym:claimed across the wait per ADR 0047 and still own a PR
+// under a merge_pr FSM state). A single shared read means both callers
+// filter one union rather than each re-deriving it.
+function collectLiveRunEntries(input: {
+  getActiveRuns:
+    | (() => Array<{ issueNumber: number; projectName: string; runId: string }>)
+    | undefined;
+  runStore: RunStore;
+}): Array<{ issueNumber: number; projectName: string; runId: string }> {
+  return [
+    ...(input.getActiveRuns?.() ?? []),
+    ...input.runStore.listActiveRunIds(),
+    ...input.runStore.listWaitingRunIds()
+  ];
+}
+
 function findLiveRunIdForIssue(input: {
   getActiveRuns:
     | (() => Array<{ issueNumber: number; projectName: string; runId: string }>)
@@ -3136,18 +3284,45 @@ function findLiveRunIdForIssue(input: {
   projectName: string;
   runStore: RunStore;
 }): string | undefined {
-  const matches = (entry: { issueNumber: number; projectName: string }) =>
-    entry.projectName === input.projectName &&
-    entry.issueNumber === input.issueNumber;
-  const active = input.getActiveRuns?.().find(matches);
-  if (active !== undefined) {
-    return active.runId;
+  return collectLiveRunEntries(input).find(
+    (entry) =>
+      entry.projectName === input.projectName &&
+      entry.issueNumber === input.issueNumber
+  )?.runId;
+}
+
+// #309's merge guard/display (AC6/AC7): a tracked-but-not-live PR (its
+// owning Run already terminated) is treated the same as an untracked PR —
+// merge is offered — since AC6's rule is "no *live* Run owns the PR," not
+// "no Run has ever owned the PR." Shared by the GET route (what the merge
+// section renders) and the POST route (the actual refusal), so the button
+// an operator sees always matches what the guard will do.
+//
+// Keyed by the PR's originating issueNumber, not just
+// TrackedPullRequest.runId: a Run that re-engages an already-tracked PR
+// (a review-dispatch retry, or a merge_pr-state waiting Run) can be a
+// *different*, currently-live Run than the one that originally discovered
+// it. Checking only the original runId's liveness would read this PR as
+// unowned the moment that first Run terminates, even while a successor
+// Run for the same issue is actively working it — findLiveRunIdForIssue
+// already finds any live Run for that issue, including that successor.
+function livePullRequestOwnerRunId(input: {
+  getActiveRuns:
+    | (() => Array<{ issueNumber: number; projectName: string; runId: string }>)
+    | undefined;
+  issueNumber: number | undefined;
+  projectName: string;
+  runStore: RunStore;
+}): string | undefined {
+  if (input.issueNumber === undefined) {
+    return undefined;
   }
-  const activeRun = input.runStore.listActiveRunIds().find(matches);
-  if (activeRun !== undefined) {
-    return activeRun.runId;
-  }
-  return input.runStore.listWaitingRunIds().find(matches)?.runId;
+  return findLiveRunIdForIssue({
+    getActiveRuns: input.getActiveRuns,
+    issueNumber: input.issueNumber,
+    projectName: input.projectName,
+    runStore: input.runStore
+  });
 }
 
 // #303's own pre-restart check (renderProjectCapacityStrip, above) inlined
@@ -3781,6 +3956,11 @@ function renderPullRequestSearchPage(input: {
 }
 
 type PullRequestDetail = {
+  // The issue this PR was originally discovered from (TrackedPullRequest,
+  // undefined when untracked) -- used to find whether ANY Run is currently
+  // live for that issue, not just the one that originally discovered the
+  // PR. See livePullRequestOwnerRunId.
+  issueNumber: number | undefined;
   prNumber: number;
   projectName: string;
   snapshot: ProjectPullRequestSnapshotRow;
@@ -3808,6 +3988,7 @@ function loadPullRequestDetail(
       (row) => row.projectName === projectName && row.prNumber === prNumber
     );
   return {
+    issueNumber: tracked?.issueNumber,
     prNumber,
     projectName,
     snapshot,
@@ -3827,16 +4008,32 @@ function renderPullRequestNotFound(
 }
 
 // #309 part 2's label-write outcome banner for a PR — structurally identical
-// to #308's IssueLabelWriteBanner, but a distinct type since the PR detail
-// page's banner union will grow independently (a guarded-merge banner in
-// part 3, matching how #308 part 3 widened its own banner union only when
-// clear-stale-claim actually needed it).
+// to #308's IssueLabelWriteBanner. Widened into a union with
+// PullRequestMergeBanner in part 3, the same point #308 part 3 widened its
+// own banner union — only once a second action actually needed it.
 type PullRequestLabelWriteBanner = {
   action: "add" | "remove";
   error?: string;
+  kind: "label_write";
   label: string;
   ok: boolean;
 };
+
+// #309 part 3's guarded-merge outcome banner (AC6-AC9). `freshState` is
+// carried through from MergePullRequestResult regardless of `ok` — a
+// thrown merge error doesn't prove nothing changed, so both branches show
+// whatever the post-attempt re-fetch actually found (AC8).
+type PullRequestMergeBanner =
+  | { freshState: PullRequestState | undefined; kind: "merge"; ok: true }
+  | {
+      error: string;
+      freshState: PullRequestState | undefined;
+      kind: "merge";
+      ok: false;
+    };
+
+type PullRequestActionBanner =
+  PullRequestLabelWriteBanner | PullRequestMergeBanner;
 
 function renderPullRequestLabelWriteBanner(
   banner: PullRequestLabelWriteBanner
@@ -3847,6 +4044,57 @@ function renderPullRequestLabelWriteBanner(
   }
   const past = banner.action === "add" ? "Added" : "Removed";
   return `<div class="alert alert--ok" role="status"><strong>${past} label "${escapeHtml(banner.label)}" on GitHub</strong><p>This page shows the last poll snapshot; the label list below won't reflect this until the next poll.</p></div>`;
+}
+
+// Renders the freshly re-derived Pull Request State a merge attempt
+// produced (AC8) — never the persisted, possibly-stale snapshot. Absent
+// `freshState` means the re-fetch itself failed or is unsupported, said
+// plainly rather than silently falling back to stale data.
+function renderPullRequestFreshStateNote(
+  freshState: PullRequestState | undefined
+): string {
+  if (freshState === undefined) {
+    return `<p class="note">Current state could not be re-derived after this attempt.</p>`;
+  }
+  return `<p class="note">Re-derived current state: <strong>${escapeHtml(freshState.trackingState)}</strong> · mergeable: ${escapeHtml(freshState.mergeable)} · checks: ${escapeHtml(freshState.checks)} · review: ${escapeHtml(freshState.reviewDecision)} · ${freshState.unresolvedReviewThreads} unresolved.</p>`;
+}
+
+function renderPullRequestMergeBanner(banner: PullRequestMergeBanner): string {
+  if (!banner.ok) {
+    return `<div class="alert" role="alert"><strong>Merge failed</strong><p>${escapeHtml(banner.error)}</p>${renderPullRequestFreshStateNote(banner.freshState)}</div>`;
+  }
+  return `<div class="alert alert--ok" role="status"><strong>Merge attempted on GitHub</strong>${renderPullRequestFreshStateNote(banner.freshState)}</div>`;
+}
+
+function renderPullRequestActionBanner(
+  banner: PullRequestActionBanner
+): string {
+  return banner.kind === "label_write"
+    ? renderPullRequestLabelWriteBanner(banner)
+    : renderPullRequestMergeBanner(banner);
+}
+
+function renderPullRequestMergeSection(input: {
+  csrfToken: string;
+  headSha: string | null;
+  liveOwnerRunId: string | undefined;
+  prNumber: number;
+  projectName: string;
+}): string {
+  if (input.liveOwnerRunId !== undefined) {
+    return `<section><h2>Merge</h2><p class="note">${labelPill(`owned by run ${input.liveOwnerRunId}`, "progress")} Cannot be merged until that Run is cancelled.</p></section>`;
+  }
+  const action = `/prs/${encodeURIComponent(input.projectName)}/${input.prNumber}/merge`;
+  // Pins the SHA to what this page actually shows, not whatever the DB
+  // holds when the merge POST lands -- a poll landing in between would
+  // otherwise let the safety check validate a commit the operator never
+  // saw. See handlePullRequestMerge, which reads this submitted value
+  // rather than re-querying the snapshot.
+  const headShaField =
+    input.headSha === null
+      ? ""
+      : `<input type="hidden" name="expected_head_sha" value="${escapeHtml(input.headSha)}">`;
+  return `<section><h2>Merge</h2><p class="note">No live Run owns this PR — merge is available.</p><form method="post" action="${escapeHtml(action)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">${headShaField}<button class="btn" type="submit">Merge</button></form></section>`;
 }
 
 function renderPullRequestLabelsSection(input: {
@@ -3872,9 +4120,10 @@ function renderPullRequestLabelsSection(input: {
 }
 
 function renderPullRequestDetailPage(input: {
-  banner: PullRequestLabelWriteBanner | undefined;
+  banner: PullRequestActionBanner | undefined;
   csrfToken: string;
   detail: PullRequestDetail;
+  liveOwnerRunId: string | undefined;
   pollNowAvailable: boolean;
 }): string {
   const { detail } = input;
@@ -3899,8 +4148,19 @@ function renderPullRequestDetailPage(input: {
   const bannerHtml =
     input.banner === undefined
       ? ""
-      : `${renderPullRequestLabelWriteBanner(input.banner)}${input.banner.ok && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/prs") : ""}`;
-  return `<h1 class="page-title">PR #${detail.prNumber} ${escapeHtml(snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(`${detail.trackingState}${draftNote}`, family)}</p>${urlHtml}${branchHtml}${bannerHtml}<section><h2>Pull Request State</h2>${signals}</section><section><h2>Follow-up tracking</h2><p class="note">${trackedHtml}</p></section>${renderPullRequestLabelsSection({ csrfToken: input.csrfToken, labels: snapshot.labels, prNumber: detail.prNumber, projectName: detail.projectName })}<p class="note"><a href="/prs">← Back to search</a></p>`;
+      : `${renderPullRequestActionBanner(input.banner)}${input.banner.ok && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/prs") : ""}`;
+  const justMerged =
+    input.banner?.kind === "merge" && input.banner.freshState?.merged === true;
+  const mergeSectionHtml = justMerged
+    ? ""
+    : renderPullRequestMergeSection({
+        csrfToken: input.csrfToken,
+        headSha: snapshot.headSha,
+        liveOwnerRunId: input.liveOwnerRunId,
+        prNumber: detail.prNumber,
+        projectName: detail.projectName
+      });
+  return `<h1 class="page-title">PR #${detail.prNumber} ${escapeHtml(snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(`${detail.trackingState}${draftNote}`, family)}</p>${urlHtml}${branchHtml}${bannerHtml}<section><h2>Pull Request State</h2>${signals}</section><section><h2>Follow-up tracking</h2><p class="note">${trackedHtml}</p></section>${renderPullRequestLabelsSection({ csrfToken: input.csrfToken, labels: snapshot.labels, prNumber: detail.prNumber, projectName: detail.projectName })}${mergeSectionHtml}<p class="note"><a href="/prs">← Back to search</a></p>`;
 }
 
 // A Routine name is globally unique across the *current* declared config

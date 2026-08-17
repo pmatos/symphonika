@@ -330,6 +330,34 @@ export type ReplaceProjectPullRequestSnapshotsInput = {
   rows: Array<Omit<ProjectPullRequestSnapshotRow, "polledAt">>;
 };
 
+// #309 part 3's durable-evidence record for a dashboard-triggered merge
+// action (AC9), independent of any Run — unlike recordWaitingActivity
+// (Run-keyed) and recordPullRequestObservation (tracked_pull_requests.id-
+// keyed), a merge target can be #259's untracked-orphan case with neither.
+// One row per attempt, written once after the attempt completes (both the
+// merge outcome and, separately, the re-derived post-attempt state) rather
+// than a two-phase "attempting" / "done" pair — see ADR 0078 for why a
+// single post-attempt insert was chosen over that alternative.
+export type RecordPullRequestMergeAttemptInput = {
+  error: string | null;
+  freshTrackingState: PullRequestTrackingStateSnapshot | null;
+  method: string;
+  ok: boolean;
+  prNumber: number;
+  projectName: string;
+};
+
+export type PullRequestMergeAttempt = {
+  attemptedAt: string;
+  error: string | null;
+  freshTrackingState: PullRequestTrackingStateSnapshot | null;
+  id: number;
+  method: string;
+  ok: boolean;
+  prNumber: number;
+  projectName: string;
+};
+
 export type ProjectDispatchSelectionInput = {
   issueNumber: number;
   projectName: string;
@@ -643,6 +671,17 @@ type ProjectPullRequestSnapshotDbRow = {
   tracking_state: PullRequestTrackingStateSnapshot | null;
   unresolved_review_threads: number | null;
   url: string | null;
+};
+
+type PullRequestMergeAttemptDbRow = {
+  attempted_at: string;
+  error: string | null;
+  fresh_tracking_state: PullRequestTrackingStateSnapshot | null;
+  id: number;
+  method: string;
+  ok: number;
+  pr_number: number;
+  project_name: string;
 };
 
 type RoutineRow = {
@@ -1656,6 +1695,62 @@ export class RunStore {
       trackingState: row.tracking_state,
       unresolvedReviewThreads: row.unresolved_review_threads,
       url: row.url
+    }));
+  }
+
+  recordPullRequestMergeAttempt(
+    input: RecordPullRequestMergeAttemptInput
+  ): void {
+    this.database
+      .prepare(
+        [
+          "insert into pull_request_merge_attempts (",
+          "project_name, pr_number, method, ok, error, fresh_tracking_state,",
+          "attempted_at",
+          ") values (",
+          "@project_name, @pr_number, @method, @ok, @error, @fresh_tracking_state,",
+          "@attempted_at",
+          ")"
+        ].join(" ")
+      )
+      .run({
+        attempted_at: timestamp(),
+        error: input.error,
+        fresh_tracking_state: input.freshTrackingState,
+        method: input.method,
+        ok: input.ok ? 1 : 0,
+        pr_number: input.prNumber,
+        project_name: input.projectName
+      });
+  }
+
+  // Test-verification reader for recordPullRequestMergeAttempt's evidence
+  // (AC9) — not wired to any UI; #309 part 3 deliberately ships no
+  // merge-attempt-history surface.
+  listPullRequestMergeAttempts(
+    projectName: string,
+    prNumber: number
+  ): PullRequestMergeAttempt[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, pr_number, method, ok, error,",
+          "fresh_tracking_state, attempted_at",
+          "from pull_request_merge_attempts",
+          "where project_name = ? and pr_number = ?",
+          "order by id asc"
+        ].join(" ")
+      )
+      .all(projectName, prNumber) as PullRequestMergeAttemptDbRow[];
+    return rows.map((row) => ({
+      attemptedAt: row.attempted_at,
+      error: row.error,
+      freshTrackingState: row.fresh_tracking_state,
+      id: row.id,
+      method: row.method,
+      ok: row.ok === 1,
+      prNumber: row.pr_number,
+      projectName: row.project_name
     }));
   }
 
@@ -4314,6 +4409,17 @@ export class RunStore {
         created_at text not null,
         updated_at text not null,
         primary key (project_name, pr_number)
+      );
+
+      create table if not exists pull_request_merge_attempts (
+        id integer primary key autoincrement,
+        project_name text not null,
+        pr_number integer not null,
+        method text not null,
+        ok integer not null,
+        error text,
+        fresh_tracking_state text,
+        attempted_at text not null
       );
 
       create table if not exists watchdog_samples (

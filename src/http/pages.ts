@@ -1696,11 +1696,15 @@ function renderRoutinesSection(groups: RoutineGroup[]): string {
 // them and let ?project=<name> pick one, mirroring the disambiguation
 // contract GET /api/routines/:id/firings already exposes via its own
 // ?project= parameter.
-function renderRoutineDisambiguation(name: string, groups: RoutineGroup[]): string {
+function renderRoutineDisambiguation(
+  name: string,
+  groups: RoutineGroup[]
+): string {
   const items = groups
     .map((group) => {
       const [representative] = group.targets;
-      const sourcePath = representative === undefined ? "-" : representative.sourcePath;
+      const sourcePath =
+        representative === undefined ? "-" : representative.sourcePath;
       const targetLinks = group.targets
         .map(
           (target) =>

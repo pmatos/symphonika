@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { open, readFile, rename, stat } from "node:fs/promises";
 import path from "node:path";
 
@@ -112,11 +113,16 @@ async function writeFileAtomic(
   content: string
 ): Promise<void> {
   const mode = await currentMode(filePath);
+  // pid + millisecond timestamp alone can collide: two saves to the same
+  // path from the same process inside one millisecond would open the
+  // identical temp path in truncating "w" mode and clobber each other.
+  // The random suffix plus exclusive-create ("wx") turns that from a
+  // silent corruption into, at worst, an EEXIST retry.
   const tempPath = path.join(
     path.dirname(filePath),
-    `.${path.basename(filePath)}.tmp-${process.pid}-${Date.now()}`
+    `.${path.basename(filePath)}.tmp-${process.pid}-${Date.now()}-${randomBytes(6).toString("hex")}`
   );
-  const handle = await open(tempPath, "w", mode);
+  const handle = await open(tempPath, "wx", mode);
   try {
     await handle.writeFile(content, "utf8");
     await handle.chmod(mode);

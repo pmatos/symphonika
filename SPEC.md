@@ -1875,6 +1875,18 @@ form-encoded submission, or an `X-CSRF-Token` header otherwise. A cross-origin r
 same-origin one with a missing or stale token, gets `403`. The token's lifetime is the daemon
 process's — a restart invalidates every open tab's token until it reloads.
 
+`runSavePipeline` (`src/http/save-pipeline.ts`, ADR-0075) is the save path every future editor
+route calls through: validate with the same parser the reload path uses, refuse a write that would
+clobber a change made since the editor opened (a content-hash comparison, `src/content-hash.ts`),
+write atomically preserving the file's mode, then trigger the real reload path and report its
+actual outcome. It validates routine declarations and workflow contracts today; service-config
+validation-reuse is deferred to whichever editor route first needs it (ADR-0075 records why). A
+save target must resolve — through symlinks — to one of the specific paths the current valid
+config actually references (`resolveConfinedWritePath`/`computeReferencedRealPaths`,
+`src/path-safety.ts`), not merely a path inside the config directory. No editor route calls this
+pipeline yet; it ships ahead of its first caller the same way `#305`'s `GET /events` shipped ahead
+of the dashboard that first consumed it.
+
 The HTTP API exposes `GET /api/routines` with the same Routine status shape as the CLI and
 dashboard, including `latestOutcome`, latest-attempt/skip fields, and per-reason `skipCounts24h`.
 Inactive Routines are hidden by default; `?include_inactive=true` includes them, and the

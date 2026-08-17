@@ -1295,9 +1295,7 @@ function renderProjectCapacityStrip(
   projectState: ProjectState,
   inFlight: number,
   maxInFlight: number | undefined,
-  globalCapacity:
-    | { inFlight: number; maxInFlight: number | null }
-    | undefined,
+  globalCapacity: { inFlight: number; maxInFlight: number | null } | undefined,
   pollingIntervalMs: number,
   startedAtMs: number | undefined,
   nowMs: number
@@ -1423,7 +1421,12 @@ function buildProjectIssueRow(input: {
           ? `recheck ${formatAge(new Date(due.dueAt).toISOString(), input.nowMs)}`
           : (run.stateTransitionReason ??
             (run.state === "input_required" ? "needs operator input" : ""));
-      return { detail, issueNumber: input.issueNumber, pillHtml, title: run.issueTitle };
+      return {
+        detail,
+        issueNumber: input.issueNumber,
+        pillHtml,
+        title: run.issueTitle
+      };
     }
     if (bucket === "terminal" || bucket === "blocked") {
       // A blocked Run's own reason is recorded as its terminalReason (e.g.
@@ -1452,7 +1455,9 @@ function buildProjectIssueRow(input: {
     return {
       detail:
         run.stateTransitionReason ??
-        (run.state === "queued" ? "queued for dispatch" : "preparing workspace"),
+        (run.state === "queued"
+          ? "queued for dispatch"
+          : "preparing workspace"),
       issueNumber: input.issueNumber,
       pillHtml,
       title: run.issueTitle

@@ -47,13 +47,19 @@ discovered from Symphonika's own Issue Branches, deliberately. This is a separat
 that fetches more data for *display* than PR Follow-up needs for *action*; ADR-0044's scoping
 decision governs automatic behavior, not what a dashboard may read.
 
-### Every PR's enrichment fetch runs concurrently within a project, and failing one never drops the row
+### Every PR's enrichment fetch runs with bounded concurrency within a project, and failing one never drops the row
 
 `pollProjectPullRequests` (`src/pull-request-polling.ts`) fetches the bulk REST PR list once, then
-fetches each PR's follow-up state via `Promise.all` — each fetch is independent and already
-isolates its own error inside `buildSnapshot`'s `try`/`catch`, so running them concurrently only
-saves wall-clock time within one project's poll tick, it changes no semantics. When a single PR's
-state fetch throws, or the configured `GitHubIssuesApi` doesn't implement
+fetches each PR's follow-up state through `mapWithConcurrency`, capped at
+`PULL_REQUEST_ENRICHMENT_CONCURRENCY` (4) in flight at a time — each fetch is independent and
+already isolates its own error inside `buildSnapshot`'s `try`/`catch`, so running a bounded batch
+concurrently saves wall-clock time within one project's poll tick without changing semantics. An
+unbounded `Promise.all` was tried first and self-reviewed as a real burst risk: every open PR's
+GraphQL request fires at once, every poll interval, against the same token
+`pull-request-followup.ts`'s primary loop depends on for its own rate limit — that loop processes
+PRs sequentially by design for exactly this reason. A small concurrency cap keeps most of the
+wall-clock win over fully serial fetching while never bursting more than a handful of requests at
+once. When a single PR's state fetch throws, or the configured `GitHubIssuesApi` doesn't implement
 `getPullRequestFollowupState` at all, `buildSnapshot` returns the cheap REST-derived fields
 (`title`, `draft`, `open`, `merged`, `headRef`/`headSha`, `branchOrigin`, `url`) with
 `stateAvailable: false` rather than dropping the row. This matters specifically because of AC4: the

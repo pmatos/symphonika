@@ -148,17 +148,20 @@ async function pollProjectPullRequests(
   }
 
   // Each PR's state enrichment is an independent GraphQL round-trip with its
-  // own internal error isolation (buildSnapshot's try/catch) — fetching them
-  // concurrently keeps one project's poll tick from taking N times a single
-  // round-trip's latency for no benefit.
+  // own internal error isolation (buildSnapshot's try/catch) — fetching a
+  // bounded batch at a time keeps one project's poll tick from taking N
+  // times a single round-trip's latency, without an unbounded Promise.all
+  // bursting every open PR's request at once against the same token the
+  // primary PR-follow-up loop (pull-request-followup.ts, sequential by
+  // design) also depends on for its own rate limit.
   const numberedPullRequests = rawPullRequests.filter(
     (raw): raw is RawGitHubPullRequest & { number: number } =>
       raw.number !== undefined
   );
-  const snapshots = await Promise.all(
-    numberedPullRequests.map((raw) =>
-      buildSnapshot(raw, raw.number, project.name, repoInput, api)
-    )
+  const snapshots = await mapWithConcurrency(
+    numberedPullRequests,
+    PULL_REQUEST_ENRICHMENT_CONCURRENCY,
+    (raw) => buildSnapshot(raw, raw.number, project.name, repoInput, api)
   );
   status.pullRequests.push(...snapshots);
 
@@ -168,6 +171,32 @@ async function pollProjectPullRequests(
     name: project.name,
     ok: true
   });
+}
+
+// Concurrent, not sequential (unlike pull-request-followup.ts's loops) --
+// but bounded, not a single Promise.all: GitHub's secondary rate limits
+// react to request bursts, not just total call volume, so this caps how
+// many of a project's PR-state fetches are in flight at once regardless
+// of how many open PRs it has.
+export const PULL_REQUEST_ENRICHMENT_CONCURRENCY = 4;
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array<R>(items.length);
+  let nextIndex = 0;
+  async function worker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await fn(items[index]!);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, worker)
+  );
+  return results;
 }
 
 async function buildSnapshot(

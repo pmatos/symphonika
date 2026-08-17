@@ -7,7 +7,8 @@ import type {
 } from "../src/issue-polling.js";
 import {
   classifyPullRequestBranchOrigin,
-  pollConfiguredGitHubPullRequestsFromConfig
+  pollConfiguredGitHubPullRequestsFromConfig,
+  PULL_REQUEST_ENRICHMENT_CONCURRENCY
 } from "../src/pull-request-polling.js";
 
 describe("classifyPullRequestBranchOrigin (#309, ADR 0077)", () => {
@@ -102,6 +103,61 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
       stateAvailable: false,
       title: "Fix login"
     });
+  });
+
+  it("caps concurrent per-PR state fetches instead of bursting every open PR at once", async () => {
+    const totalPullRequests = PULL_REQUEST_ENRICHMENT_CONCURRENCY * 3;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const api: GitHubIssuesApi = {
+      getPullRequestFollowupState: async () => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        // Yield so overlapping calls actually overlap rather than each
+        // resolving synchronously before the next one starts.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight--;
+        const fixture: RawGitHubPullRequestFollowupState = {
+          draft: false,
+          headSha: "abc123",
+          mergeable: "MERGEABLE",
+          merged: false,
+          number: 1,
+          reviewDecision: "APPROVED",
+          state: "OPEN",
+          statusCheckRollupState: "SUCCESS",
+          unresolvedReviewThreads: [],
+          url: "https://github.com/pmatos/symphonika/pull/1"
+        };
+        return fixture;
+      },
+      listOpenIssues: () => Promise.resolve([]),
+      listPullRequests: () =>
+        Promise.resolve(
+          Array.from({ length: totalPullRequests }, (_, index) => ({
+            draft: false,
+            head: { ref: `sym/alpha/${index}-fix`, sha: "abc123" },
+            html_url: `https://github.com/pmatos/symphonika/pull/${index}`,
+            merged_at: null,
+            number: index,
+            state: "open" as const,
+            title: `Fix ${index}`
+          }))
+        )
+    };
+    const status = await pollConfiguredGitHubPullRequestsFromConfig({
+      config: { projects: [project()] },
+      env: { GITHUB_TOKEN: "secret" },
+      githubIssuesApi: api
+    });
+
+    expect(status.pullRequests).toHaveLength(totalPullRequests);
+    expect(maxInFlight).toBeLessThanOrEqual(
+      PULL_REQUEST_ENRICHMENT_CONCURRENCY
+    );
+    // Concurrency was actually exercised, not accidentally serialized down
+    // to 1 by the test fixture itself.
+    expect(maxInFlight).toBeGreaterThan(1);
   });
 
   it("enriches with Symphonika's Pull Request State when available", async () => {

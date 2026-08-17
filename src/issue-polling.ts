@@ -112,6 +112,9 @@ export type GitHubIssuesApi = {
   listOpenIssues: (
     input: GitHubIssueRepositoryInput
   ) => Promise<RawGitHubIssue[]>;
+  listPullRequests?: (
+    input: GitHubIssueRepositoryInput
+  ) => Promise<RawGitHubPullRequest[]>;
   listPullRequestsForBranch?: (
     input: GitHubBranchPullRequestsInput
   ) => Promise<RawGitHubPullRequest[]>;
@@ -317,6 +320,18 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
       repo: input.repo,
       ...(input.since === undefined ? {} : { since: input.since }),
       state: input.state
+    });
+  }
+
+  async listPullRequests(
+    input: GitHubIssueRepositoryInput
+  ): Promise<RawGitHubPullRequest[]> {
+    const octokit = this.octokit(input.token);
+    return octokit.paginate(octokit.rest.pulls.list, {
+      owner: input.owner,
+      per_page: 100,
+      repo: input.repo,
+      state: "open"
     });
   }
 
@@ -658,6 +673,16 @@ export async function tryListIssues(
     return undefined;
   }
   return api.listIssues(input);
+}
+
+export async function tryListPullRequests(
+  api: GitHubIssuesApi,
+  input: GitHubIssueRepositoryInput
+): Promise<RawGitHubPullRequest[] | undefined> {
+  if (api.listPullRequests === undefined) {
+    return undefined;
+  }
+  return api.listPullRequests(input);
 }
 
 export async function tryListPullRequestsForBranch(
@@ -1046,7 +1071,7 @@ function compareProjectIssues(
   );
 }
 
-function envReferenceName(input: string): string | undefined {
+export function envReferenceName(input: string): string | undefined {
   const match = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(input);
   return match?.[1];
 }

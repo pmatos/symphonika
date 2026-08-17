@@ -55,6 +55,7 @@ import {
   type WorkflowSnapshot
 } from "./lifecycle/run-controller.js";
 import { detectStaleClaims } from "./lifecycle/stale-claims.js";
+import { pollConfiguredGitHubPullRequestsFromConfig } from "./pull-request-polling.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { createSmtpNotificationSink } from "./notifications/smtp.js";
@@ -527,6 +528,31 @@ export async function startDaemon(
         state.configPath,
         nextStatus
       );
+
+      // #309: a cheap per-repo PR list, persisted alongside the issue
+      // snapshot above (ADR 0077). Kept in its own try/catch — a PR-poll
+      // failure must not blank out issuePollStatus, which dispatch
+      // eligibility depends on.
+      try {
+        const pullRequestStatus =
+          await pollConfiguredGitHubPullRequestsFromConfig({
+            config: snapshot.polling,
+            ...(options.env === undefined ? {} : { env: options.env }),
+            githubIssuesApi
+          });
+        persistProjectPullRequestPollState(runStore, pullRequestStatus);
+        if (pullRequestStatus.errors.length > 0) {
+          logger.warn(
+            { errors: pullRequestStatus.errors },
+            "symphonika PR polling has errors"
+          );
+        }
+      } catch (error) {
+        logger.warn(
+          { error: errorMessage(error) },
+          "symphonika PR polling failed"
+        );
+      }
     } catch (error) {
       issuePollStatus.errors = [errorMessage(error)];
       issuePollStatus.projects = [];
@@ -1332,6 +1358,44 @@ function projectIssueSnapshotRows(
       title: entry.issue.title
     }));
   return [...candidateRows, ...filteredRows];
+}
+
+// #309 (ADR 0077): mirrors persistProjectPollState's per-project
+// wholesale-replace rule (ADR 0073) for PR snapshots — a project whose PR
+// poll failed this tick keeps its last-known snapshot rather than being
+// blanked.
+function persistProjectPullRequestPollState(
+  runStore: ReturnType<typeof openRunStore>,
+  status: import("./pull-request-polling.js").PullRequestPollStatus
+): void {
+  for (const project of status.projects) {
+    if (!project.ok) {
+      continue;
+    }
+    runStore.replaceProjectPullRequestSnapshots({
+      polledAt: project.lastPolledAt ?? timestamp(),
+      projectName: project.name,
+      rows: status.pullRequests
+        .filter((entry) => entry.project === project.name)
+        .map((entry) => ({
+          branchOrigin: entry.branchOrigin,
+          checks: entry.checks,
+          draft: entry.draft,
+          headRef: entry.headRef,
+          headSha: entry.headSha,
+          mergeable: entry.mergeable,
+          merged: entry.merged,
+          open: entry.open,
+          prNumber: entry.prNumber,
+          reviewDecision: entry.reviewDecision,
+          stateAvailable: entry.stateAvailable,
+          title: entry.title,
+          trackingState: entry.trackingState,
+          unresolvedReviewThreads: entry.unresolvedReviewThreads,
+          url: entry.url
+        }))
+    });
+  }
 }
 
 function timestamp(): string {

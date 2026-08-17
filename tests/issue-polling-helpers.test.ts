@@ -5,6 +5,7 @@ import {
   tryAddLabelsToIssue,
   tryGetIssue,
   tryListBranchCommits,
+  tryListPullRequests,
   tryListPullRequestsForBranch,
   type GitHubIssueLabelInput,
   type GitHubIssueRepositoryInput,
@@ -355,5 +356,39 @@ describe("tryListPullRequestsForBranch", () => {
     expect(
       await tryListPullRequestsForBranch(api, branchInput)
     ).toBeUndefined();
+  });
+});
+
+const repoInput: GitHubIssueRepositoryInput = {
+  owner: "pmatos",
+  repo: "symphonika",
+  token: "secret"
+};
+
+describe("tryListPullRequests", () => {
+  it("preserves `this` when invoking a class-based implementation", async () => {
+    class Api {
+      readonly received: GitHubIssueRepositoryInput[] = [];
+      listOpenIssues(): Promise<never[]> {
+        return Promise.resolve([]);
+      }
+      listPullRequests(
+        input: GitHubIssueRepositoryInput
+      ): Promise<RawGitHubPullRequest[]> {
+        this.received.push(input);
+        return Promise.resolve([{ number: 7, merged_at: null }]);
+      }
+    }
+    const api = new Api();
+    const result = await tryListPullRequests(api, repoInput);
+    expect(api.received).toEqual([repoInput]);
+    expect(result).toEqual([{ number: 7, merged_at: null }]);
+  });
+
+  it("returns undefined when the implementation does not provide listPullRequests", async () => {
+    const api: GitHubIssuesApi = {
+      listOpenIssues: () => Promise.resolve([])
+    };
+    expect(await tryListPullRequests(api, repoInput)).toBeUndefined();
   });
 });

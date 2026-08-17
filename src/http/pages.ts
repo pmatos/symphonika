@@ -865,6 +865,23 @@ export function registerPages(options: RegisterPagesOptions): void {
 
       const routinePath = `/routines/${encodeURIComponent(name)}${projectParam === undefined ? "" : `?project=${encodeURIComponent(projectParam)}`}`;
       if (result.kind === "saved") {
+        // The pipeline writes before reload runs, so "saved" alone doesn't
+        // mean the new declaration took effect — redirecting to the detail
+        // page here regardless would read as success even when reload
+        // rejected it and the last-known-good declaration is still live.
+        if (!result.reload.ok) {
+          return context.html(
+            layout(
+              `Saved but not active: ${name}`,
+              renderReloadFailedNotice({
+                editAction: `/routines/${encodeURIComponent(name)}/edit${projectParam === undefined ? "" : `?project=${encodeURIComponent(projectParam)}`}`,
+                errors: result.reload.errors,
+                filePath: declaration.sourcePath
+              })
+            ),
+            200
+          );
+        }
         return context.redirect(
           `${routinePath}${routinePath.includes("?") ? "&" : "?"}saved=1`,
           303
@@ -2364,6 +2381,14 @@ function renderStaleSaveNotice(input: {
       ? "<p>The file was deleted since you opened the editor.</p>"
       : `<pre class="diff">${escapeHtml(input.currentContent)}</pre>`;
   return `<h1 class="page-title">Save refused: changed on disk</h1><div class="alert" role="alert"><strong>${escapeHtml(input.filePath)} was changed since you opened the editor</strong>Your edit was not written. Reopen the editor to start from the current content.</div>${body}<p class="note"><a href="${escapeHtml(input.editAction)}">← Reopen editor</a></p>`;
+}
+
+function renderReloadFailedNotice(input: {
+  editAction: string;
+  errors: string[];
+  filePath: string;
+}): string {
+  return `<h1 class="page-title">Saved, but not active</h1><div class="alert" role="alert"><strong>${escapeHtml(input.filePath)} was written to disk, but reload failed</strong><ul>${input.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div><p class="note">The previous, last-known-good configuration is still what's running. Fix the issue above and save again.</p><p class="note"><a href="${escapeHtml(input.editAction)}">← Back to editor</a></p>`;
 }
 
 // A small line-based LCS diff -- not a general utility, just enough to

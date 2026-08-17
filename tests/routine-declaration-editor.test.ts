@@ -255,6 +255,47 @@ describe("routine declaration editor (#307 part 1, ADR 0075/0076)", () => {
     }
   });
 
+  it("confirm reports a real reload failure on disk instead of redirecting as saved", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        triggerReload: () =>
+          Promise.resolve({ errors: ["schedule_cron: bad cron"], ok: false }),
+        version: "0.1.0"
+      });
+      const editedContent = VALID_DECLARATION.replace(
+        "Audit the codebase.",
+        "Audit the codebase thoroughly."
+      );
+      const response = await app.request("/routines/audit/edit/confirm", {
+        body: formBody({
+          content: editedContent,
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: contentHash(VALID_DECLARATION)
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        redirect: "manual"
+      });
+      // The write already landed (runSavePipeline writes before reload
+      // runs) — the fix under test is that a failed reload no longer
+      // redirects as if nothing were wrong.
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain("Saved, but not active");
+      expect(html).toContain("schedule_cron: bad cron");
+      expect(await readFile(test.routinePath, "utf8")).toBe(editedContent);
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("confirm refuses a stale write and does not touch the file", async () => {
     const test = await setup();
     try {

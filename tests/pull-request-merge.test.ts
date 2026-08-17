@@ -279,6 +279,11 @@ describe("POST /prs/:project/:number/merge (#309 part 3)", () => {
         prNumber: 246,
         projectName: "alpha"
       });
+      // A confirmed merge (freshState.merged === true) suppresses the Merge
+      // section entirely — otherwise the page would show a live Merge
+      // button directly under a banner saying the PR is already merged.
+      expect(html).not.toContain('action="/prs/alpha/246/merge"');
+      expect(html).not.toContain("<h2>Merge</h2>");
     } finally {
       test.cleanup();
     }
@@ -317,6 +322,9 @@ describe("POST /prs/:project/:number/merge (#309 part 3)", () => {
       expect(html).toContain("Pull Request is not mergeable");
       expect(html).toContain("Re-derived current state");
       expect(html).toContain("open");
+      // Not merged — the Merge section stays offered so the operator can
+      // retry once they've fixed whatever GitHub refused for.
+      expect(html).toContain('action="/prs/alpha/246/merge"');
     } finally {
       test.cleanup();
     }

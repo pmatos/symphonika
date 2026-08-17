@@ -4126,12 +4126,16 @@ function renderPullRequestDetailPage(input: {
     input.banner === undefined
       ? ""
       : `${renderPullRequestActionBanner(input.banner)}${input.banner.ok && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/prs") : ""}`;
-  const mergeSectionHtml = renderPullRequestMergeSection({
-    csrfToken: input.csrfToken,
-    liveOwnerRunId: input.liveOwnerRunId,
-    prNumber: detail.prNumber,
-    projectName: detail.projectName
-  });
+  const justMerged =
+    input.banner?.kind === "merge" && input.banner.freshState?.merged === true;
+  const mergeSectionHtml = justMerged
+    ? ""
+    : renderPullRequestMergeSection({
+        csrfToken: input.csrfToken,
+        liveOwnerRunId: input.liveOwnerRunId,
+        prNumber: detail.prNumber,
+        projectName: detail.projectName
+      });
   return `<h1 class="page-title">PR #${detail.prNumber} ${escapeHtml(snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(`${detail.trackingState}${draftNote}`, family)}</p>${urlHtml}${branchHtml}${bannerHtml}<section><h2>Pull Request State</h2>${signals}</section><section><h2>Follow-up tracking</h2><p class="note">${trackedHtml}</p></section>${renderPullRequestLabelsSection({ csrfToken: input.csrfToken, labels: snapshot.labels, prNumber: detail.prNumber, projectName: detail.projectName })}${mergeSectionHtml}<p class="note"><a href="/prs">← Back to search</a></p>`;
 }
 

@@ -1709,74 +1709,86 @@ export class RunController {
       );
       return;
     }
-    await this.bestEffort(
-      () =>
-        (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
-          ...input.repository,
+    // Held for the whole claim-label + continuation-row span, mirroring
+    // claimAndPersistRun: without it, this delete-before-fire branch adds
+    // sym:claimed and creates the continuation run row with no exclusion
+    // against handleClearStaleClaim's concurrent liveness check, which
+    // acquires the same mutex before deciding whether to clear the label.
+    await this.dispatchMutex.acquire();
+    try {
+      await this.bestEffort(
+        () =>
+          (
+            this.githubIssuesApi as LabelWritingGitHubIssuesApi
+          ).addLabelsToIssue({
+            ...input.repository,
+            issueNumber: input.issue.number,
+            labels: ["sym:claimed"]
+          }),
+        {
           issueNumber: input.issue.number,
-          labels: ["sym:claimed"]
-        }),
-      {
-        issueNumber: input.issue.number,
-        label: "sym:claimed",
-        operation: "addLabel",
-        phase: "state-advance-terminal-target",
-        project: input.project.name,
-        runId: input.runId
+          label: "sym:claimed",
+          operation: "addLabel",
+          phase: "state-advance-terminal-target",
+          project: input.project.name,
+          runId: input.runId
+        }
+      );
+      if (this.activeRuns.isShuttingDown()) {
+        await this.rollbackScheduledRunClaimLabel({
+          issueNumber: input.issue.number,
+          phase: "state-advance",
+          projectName: input.project.name,
+          repository: input.repository,
+          runId: input.runId
+        });
+        return;
       }
-    );
-    if (this.activeRuns.isShuttingDown()) {
-      await this.rollbackScheduledRunClaimLabel({
-        issueNumber: input.issue.number,
-        phase: "state-advance",
-        projectName: input.project.name,
-        repository: input.repository,
-        runId: input.runId
-      });
-      return;
-    }
-    this.runStore.createContinuationRun({
-      id: input.runId,
-      issue: input.issue,
-      parentRunId: input.parentRunId,
-      projectName: input.project.name,
-      providerCommand: input.providerCommand,
-      providerName: input.providerName
-    });
-    const transitionReason = `reloaded target ${input.targetState.id} is terminal`;
-    this.runStore.recordWorkflowTerminal(input.runId, {
-      terminalStateId: input.targetState.id,
-      transitionReason
-    });
-    const terminalLabel = narrowTerminalLabel(input.targetState.terminal);
-    const outcome = fuseWorkflowTerminal(
-      { kind: "success", reason: transitionReason },
-      terminalLabel
-    );
-    this.runStore.recordTerminalReason(
-      input.runId,
-      outcome.reason,
-      outcome.classification
-    );
-    this.runStore.updateRunState(input.runId, mapOutcomeToRunState(outcome));
-    this.logger?.info(
-      {
-        issueNumber: input.issue.number,
+      this.runStore.createContinuationRun({
+        id: input.runId,
+        issue: input.issue,
         parentRunId: input.parentRunId,
-        project: input.project.name,
-        runId: input.runId,
-        targetStateId: input.targetState.id,
-        terminal: input.targetState.terminal
-      },
-      "symphonika state advance recorded reloaded terminal target without launching provider"
-    );
-    await this.applyTerminalLabels({
-      fsmContinuing: false,
-      issueNumber: input.issue.number,
-      outcome,
-      repository: input.repository,
-      willRetry: false
-    });
+        projectName: input.project.name,
+        providerCommand: input.providerCommand,
+        providerName: input.providerName
+      });
+      const transitionReason = `reloaded target ${input.targetState.id} is terminal`;
+      this.runStore.recordWorkflowTerminal(input.runId, {
+        terminalStateId: input.targetState.id,
+        transitionReason
+      });
+      const terminalLabel = narrowTerminalLabel(input.targetState.terminal);
+      const outcome = fuseWorkflowTerminal(
+        { kind: "success", reason: transitionReason },
+        terminalLabel
+      );
+      this.runStore.recordTerminalReason(
+        input.runId,
+        outcome.reason,
+        outcome.classification
+      );
+      this.runStore.updateRunState(input.runId, mapOutcomeToRunState(outcome));
+      this.logger?.info(
+        {
+          issueNumber: input.issue.number,
+          parentRunId: input.parentRunId,
+          project: input.project.name,
+          runId: input.runId,
+          targetStateId: input.targetState.id,
+          terminal: input.targetState.terminal
+        },
+        "symphonika state advance recorded reloaded terminal target without launching provider"
+      );
+      await this.applyTerminalLabels({
+        fsmContinuing: false,
+        issueNumber: input.issue.number,
+        outcome,
+        repository: input.repository,
+        willRetry: false
+      });
+    } finally {
+      this.dispatchMutex.release();
+    }
   }
 
   async executeContinuation(payload: ContinuationPayload): Promise<void> {
@@ -2782,109 +2794,124 @@ export class RunController {
           (workflowOutcome.advancedToTerminal ||
             workflowOutcome.blocked ||
             workflowOutcome.advancedToState !== null);
-        this.runStore.updateRunState(input.runId, outcomeState);
+        // Hold dispatchMutex from the terminal-state write through
+        // scheduleNext's registration of the retry/continuation/state-advance
+        // callback (this.schedule, surfaced to readers via getScheduled).
+        // Without this, a run is briefly invisible to every liveness source
+        // collectLiveRunEntries reads (activeRuns already unregistered it in
+        // the finally-block's first step; the DB row just went terminal; no
+        // scheduled callback exists yet) even though it is about to continue
+        // via retry or FSM advance. handleClearStaleClaim / the PR-merge
+        // guard acquire this same mutex before checking liveness, so holding
+        // it here closes that window instead of racing it.
+        await this.dispatchMutex.acquire();
+        try {
+          this.runStore.updateRunState(input.runId, outcomeState);
 
-        const willRetry =
-          effectiveOutcome.kind === "failed" &&
-          effectiveOutcome.classification === "transient" &&
-          this.runStore.runRetryCount(input.runId) <
-            this.lifecyclePolicy.retry.cap;
-        if (!willRetry) {
-          // updateRunState deliberately defers transient failures because the
-          // same Run row is reused by retries. Once the budget is exhausted,
-          // this is the point that makes the genuinely-terminal attempt
-          // visible to the durable notification digest (ADR 0071).
+          const willRetry =
+            effectiveOutcome.kind === "failed" &&
+            effectiveOutcome.classification === "transient" &&
+            this.runStore.runRetryCount(input.runId) <
+              this.lifecyclePolicy.retry.cap;
+          if (!willRetry) {
+            // updateRunState deliberately defers transient failures because the
+            // same Run row is reused by retries. Once the budget is exhausted,
+            // this is the point that makes the genuinely-terminal attempt
+            // visible to the durable notification digest (ADR 0071).
+            try {
+              this.runStore.markRunNotificationPending(input.runId);
+            } catch (error) {
+              this.logger?.warn(
+                { err: error, runId: input.runId },
+                "symphonika issue Run notification evidence write failed"
+              );
+            }
+          }
+
+          this.logger?.info(
+            {
+              attemptNumber: input.attemptNumber,
+              cancelReason,
+              cancelRequested,
+              classification: effectiveOutcome.classification,
+              isContinuation: input.isContinuation,
+              issueNumber: input.issue.number,
+              kind: effectiveOutcome.kind,
+              project: input.project.name,
+              runId: input.runId,
+              state: outcomeState,
+              terminalReason: effectiveOutcome.reason,
+              willRetry,
+              workflowTerminalLabel: workflowOutcome.terminalLabel
+            },
+            "symphonika run terminated"
+          );
+
+          // The raw-FSM walk is "continuing" when applyWorkflowOutcome either
+          // advanced into a non-terminal next state or parked into a wait/merge_pr
+          // action. In both cases the per-state ClassifiedTerminal may legitimately
+          // be `failed` (e.g. a planning step that exited provider_success=true
+          // without committing → no_workspace_changes) while the workflow as a
+          // whole is not failing. applyTerminalLabels uses this to suppress
+          // `sym:failed`, which subsequent successful states would otherwise leave
+          // on the issue forever.
+          const fsmContinuing =
+            isRawFsm &&
+            (workflowOutcome.advancedToState !== null ||
+              workflowOutcome.parkAsWait === true);
+          const labelInput: ApplyLabelsInput = {
+            fsmContinuing,
+            issueNumber: input.issue.number,
+            outcome: effectiveOutcome,
+            repository: input.repository,
+            willRetry
+          };
+          if (cancelReason !== undefined) {
+            labelInput.cancelReason = cancelReason;
+          }
+          await this.applyTerminalLabels(labelInput);
+
+          // scheduleNext also handles transient throws (kind=failed/transient with retry budget).
+          // It is a no-op for cancelled, deterministic, and input_required outcomes.
           try {
-            this.runStore.markRunNotificationPending(input.runId);
-          } catch (error) {
-            this.logger?.warn(
-              { err: error, runId: input.runId },
-              "symphonika issue Run notification evidence write failed"
+            await this.scheduleNext({
+              ...(input.extraInstructions === undefined
+                ? {}
+                : { extraInstructions: input.extraInstructions }),
+              issue: input.issue,
+              outcome: effectiveOutcome,
+              project: input.project,
+              providerCommand: input.providerCommand,
+              providerName: input.providerName,
+              repository: input.repository,
+              respectsIssueLabels,
+              runId: input.runId,
+              runtimeAttemptNumber: input.attemptNumber,
+              willRetry,
+              stateAdvance:
+                isRawFsm &&
+                workflowOutcome.advancedToState !== null &&
+                workflowOutcome.parkAsWait !== true
+                  ? {
+                      toStateId: workflowOutcome.advancedToState
+                    }
+                  : null,
+              waitPark:
+                isRawFsm &&
+                workflowOutcome.parkAsWait === true &&
+                workflowOutcome.waitingRunId !== undefined
+                  ? { waitingRunId: workflowOutcome.waitingRunId }
+                  : null,
+              suppressContinuation
+            });
+          } catch (scheduleError) {
+            this.logger?.error(
+              { err: scheduleError, runId: input.runId },
+              "symphonika scheduleNext failed"
             );
           }
-        }
-
-        this.logger?.info(
-          {
-            attemptNumber: input.attemptNumber,
-            cancelReason,
-            cancelRequested,
-            classification: effectiveOutcome.classification,
-            isContinuation: input.isContinuation,
-            issueNumber: input.issue.number,
-            kind: effectiveOutcome.kind,
-            project: input.project.name,
-            runId: input.runId,
-            state: outcomeState,
-            terminalReason: effectiveOutcome.reason,
-            willRetry,
-            workflowTerminalLabel: workflowOutcome.terminalLabel
-          },
-          "symphonika run terminated"
-        );
-
-        // The raw-FSM walk is "continuing" when applyWorkflowOutcome either
-        // advanced into a non-terminal next state or parked into a wait/merge_pr
-        // action. In both cases the per-state ClassifiedTerminal may legitimately
-        // be `failed` (e.g. a planning step that exited provider_success=true
-        // without committing → no_workspace_changes) while the workflow as a
-        // whole is not failing. applyTerminalLabels uses this to suppress
-        // `sym:failed`, which subsequent successful states would otherwise leave
-        // on the issue forever.
-        const fsmContinuing =
-          isRawFsm &&
-          (workflowOutcome.advancedToState !== null ||
-            workflowOutcome.parkAsWait === true);
-        const labelInput: ApplyLabelsInput = {
-          fsmContinuing,
-          issueNumber: input.issue.number,
-          outcome: effectiveOutcome,
-          repository: input.repository,
-          willRetry
-        };
-        if (cancelReason !== undefined) {
-          labelInput.cancelReason = cancelReason;
-        }
-        await this.applyTerminalLabels(labelInput);
-
-        // scheduleNext also handles transient throws (kind=failed/transient with retry budget).
-        // It is a no-op for cancelled, deterministic, and input_required outcomes.
-        try {
-          await this.scheduleNext({
-            ...(input.extraInstructions === undefined
-              ? {}
-              : { extraInstructions: input.extraInstructions }),
-            issue: input.issue,
-            outcome: effectiveOutcome,
-            project: input.project,
-            providerCommand: input.providerCommand,
-            providerName: input.providerName,
-            repository: input.repository,
-            respectsIssueLabels,
-            runId: input.runId,
-            runtimeAttemptNumber: input.attemptNumber,
-            willRetry,
-            stateAdvance:
-              isRawFsm &&
-              workflowOutcome.advancedToState !== null &&
-              workflowOutcome.parkAsWait !== true
-                ? {
-                    toStateId: workflowOutcome.advancedToState
-                  }
-                : null,
-            waitPark:
-              isRawFsm &&
-              workflowOutcome.parkAsWait === true &&
-              workflowOutcome.waitingRunId !== undefined
-                ? { waitingRunId: workflowOutcome.waitingRunId }
-                : null,
-            suppressContinuation
-          });
-        } catch (scheduleError) {
-          this.logger?.error(
-            { err: scheduleError, runId: input.runId },
-            "symphonika scheduleNext failed"
-          );
+        } finally {
+          this.dispatchMutex.release();
         }
       } // end if (!parkedAsWaiting)
     }

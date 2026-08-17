@@ -3984,6 +3984,84 @@ export class RunStore {
     return rows.map((row) => mapTrackedPullRequestRow(row));
   }
 
+  // Unlike listOpenTrackedPullRequests, includes 'closed' rows: PR Follow-up
+  // sets a tracking row to 'closed' when GitHub reports the PR closed, but a
+  // reopened PR can still have a live parked Run — the PR-merge/clear-stale-
+  // claim ownership guards need that Run's issueNumber regardless of the
+  // tracking row's state.
+  findTrackedPullRequestByProjectAndNumber(input: {
+    projectName: string;
+    prNumber: number;
+  }): TrackedPullRequest | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select id, project_name, issue_number, run_id, pr_number, pr_url,",
+          "branch_name, head_sha_at_dispatch, last_seen_head_sha,",
+          "last_review_dispatch_fingerprint, review_dispatch_count,",
+          "review_followup_cap_reached,",
+          "last_followup_run_id, state, last_observed_at, created_at, updated_at",
+          "from tracked_pull_requests",
+          "where project_name = ? and pr_number = ?",
+          "order by id desc limit 1"
+        ].join(" ")
+      )
+      .get(input.projectName, input.prNumber) as
+      TrackedPullRequestRow | undefined;
+    return row === undefined ? undefined : mapTrackedPullRequestRow(row);
+  }
+
+  // A run whose provider is still preparing/running has no tracked_pull_
+  // requests row yet (listRunsAwaitingPullRequestDiscovery only considers
+  // 'succeeded' runs) — this lets the PR-merge/clear-stale-claim ownership
+  // guards resolve the issue a not-yet-discovered PR's branch belongs to,
+  // so a still-running provider's PR is not read as ownerless.
+  findRunByProjectAndBranch(input: {
+    branchName: string;
+    projectName: string;
+  }): { issueNumber: number; runId: string } | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select id, issue_number from runs",
+          "where project_name = ? and branch_name = ?",
+          "order by updated_at desc, id desc limit 1"
+        ].join(" ")
+      )
+      .get(input.projectName, input.branchName) as
+      { id: string; issue_number: number } | undefined;
+    return row === undefined
+      ? undefined
+      : { issueNumber: row.issue_number, runId: row.id };
+  }
+
+  // Routine Firings are a separate entity from Runs and never get a
+  // tracked_pull_requests row (that table is sourced only from `runs` via
+  // listRunsAwaitingPullRequestDiscovery), so a `routine_firing_branch`
+  // snapshot's PR always resolved to no owner. routine_firings carries its
+  // own liveness via `state`, so this is checked independently of the
+  // Run-keyed ownership path rather than trying to force it through
+  // findLiveRunIdForIssue (Routine Firings have no issue number).
+  findLiveRoutineFiringByBranch(input: {
+    branchName: string;
+    projectName: string;
+  }): { firingId: string; routineName: string } | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select id, routine_name from routine_firings",
+          "where project_name = ? and branch_name = ?",
+          "and state in ('queued', 'preparing_workspace', 'running')",
+          "order by created_at desc limit 1"
+        ].join(" ")
+      )
+      .get(input.projectName, input.branchName) as
+      { id: string; routine_name: string } | undefined;
+    return row === undefined
+      ? undefined
+      : { firingId: row.id, routineName: row.routine_name };
+  }
+
   recordPullRequestObservation(input: {
     headSha: string;
     id: number;

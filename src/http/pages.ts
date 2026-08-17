@@ -7,6 +7,7 @@ import { contentHash } from "../content-hash.js";
 import type { WorkflowFormat } from "../config-schemas.js";
 import {
   checkMutationAuthorized,
+  checkSameOriginRequest,
   CSRF_FIELD_NAME,
   csrfTokenFor,
   ensureSession,
@@ -49,6 +50,7 @@ import type {
   RoutineFiringStatus,
   RunArtifactDescriptor,
   RunArtifactKind,
+  RunDetail,
   RunState,
   RunStatus,
   RunStore,
@@ -131,6 +133,15 @@ export type RegisterPagesOptions = {
   getProjectWorkflowPath?: (
     projectName: string
   ) => { format: WorkflowFormat; path: string } | undefined;
+  // Every configured project name (including projectName itself) whose
+  // tracker resolves to the same GitHub owner/repo as projectName's — the
+  // PR-merge and clear-stale-claim ownership guards need this so two
+  // differently-named Projects pointing at one repo can't cross-clear or
+  // cross-merge each other's live work. Undefined (not wired) degrades to
+  // "just this project name", matching pre-existing behavior. See
+  // HttpAppOptions.getProjectRepoAliases (src/http/app.ts) — the resolver
+  // itself needs runtimeConfig.projectsByName(), which only daemon.ts has.
+  getProjectRepoAliases?: (projectName: string) => string[];
   // #303's "retry ETA" detail for a waiting Run.
   getScheduled?: () => ScheduledCallback[];
   getStatusSnapshot?: () => StatusSnapshot;
@@ -298,6 +309,19 @@ export function registerPages(options: RegisterPagesOptions): void {
       context,
       options.csrfSecret
     );
+    if (!authorization.ok) {
+      return context.json({ error: authorization.reason }, 403);
+    }
+    await next();
+  };
+
+  // GET /config/edit returns the raw service config, including
+  // providers.*.command secrets — a DNS-rebound attacker origin could read
+  // it even though it could never forge a POST past requireAuthorizedMutation,
+  // since a GET has no CSRF token to check. This is the Origin/Host half of
+  // that same defense, without the token requirement a page load can't meet.
+  const requireSameOriginRead: MiddlewareHandler = async (context, next) => {
+    const authorization = checkSameOriginRequest(context);
     if (!authorization.ok) {
       return context.json({ error: authorization.reason }, 403);
     }
@@ -789,6 +813,8 @@ export function registerPages(options: RegisterPagesOptions): void {
       try {
         const liveRunId = findLiveRunIdForIssue({
           getActiveRuns: options.getActiveRuns,
+          getProjectRepoAliases: options.getProjectRepoAliases,
+          getScheduled: options.getScheduled,
           issueNumber,
           projectName,
           runStore: options.runStore
@@ -902,7 +928,8 @@ export function registerPages(options: RegisterPagesOptions): void {
     const detail = loadPullRequestDetail(
       options.runStore,
       projectName,
-      prNumber
+      prNumber,
+      options.getProjectRepoAliases
     );
     if (detail === undefined) {
       return context.html(
@@ -917,10 +944,11 @@ export function registerPages(options: RegisterPagesOptions): void {
         banner: undefined,
         csrfToken,
         detail,
-        liveOwnerRunId: livePullRequestOwnerRunId({
+        liveOwnerRunId: livePullRequestOwnerLabel({
+          detail,
           getActiveRuns: options.getActiveRuns,
-          issueNumber: detail.issueNumber,
-          projectName: detail.projectName,
+          getProjectRepoAliases: options.getProjectRepoAliases,
+          getScheduled: options.getScheduled,
           runStore: options.runStore
         }),
         pollNowAvailable: options.pollNow !== undefined
@@ -939,7 +967,8 @@ export function registerPages(options: RegisterPagesOptions): void {
     const detail = loadPullRequestDetail(
       options.runStore,
       projectName,
-      prNumber
+      prNumber,
+      options.getProjectRepoAliases
     );
     if (detail === undefined) {
       return context.html(
@@ -1003,10 +1032,11 @@ export function registerPages(options: RegisterPagesOptions): void {
         banner,
         csrfToken,
         detail,
-        liveOwnerRunId: livePullRequestOwnerRunId({
+        liveOwnerRunId: livePullRequestOwnerLabel({
+          detail,
           getActiveRuns: options.getActiveRuns,
-          issueNumber: detail.issueNumber,
-          projectName: detail.projectName,
+          getProjectRepoAliases: options.getProjectRepoAliases,
+          getScheduled: options.getScheduled,
           runStore: options.runStore
         }),
         pollNowAvailable: options.pollNow !== undefined
@@ -1047,7 +1077,8 @@ export function registerPages(options: RegisterPagesOptions): void {
     const detail = loadPullRequestDetail(
       options.runStore,
       projectName,
-      prNumber
+      prNumber,
+      options.getProjectRepoAliases
     );
     if (detail === undefined) {
       return context.html(
@@ -1056,19 +1087,16 @@ export function registerPages(options: RegisterPagesOptions): void {
       );
     }
 
-    const liveOwnerRunId = livePullRequestOwnerRunId({
-      getActiveRuns: options.getActiveRuns,
-      issueNumber: detail.issueNumber,
-      projectName: detail.projectName,
-      runStore: options.runStore
-    });
-
     // The SHA the merge is pinned to is whatever the operator's page
     // actually showed (submitted from the GET page's hidden field), not a
     // fresh re-read of the snapshot -- a poll landing between page-load
     // and the click would otherwise let this validate a commit the
-    // operator never saw. Missing/blank means the GET page had no headSha
-    // to pin either (same permissive case as before this field existed).
+    // operator never saw. Missing/blank is only permissive when the GET
+    // page itself had no headSha to pin (renderPullRequestMergeSection
+    // omits the hidden field in that case); when the page did have one,
+    // a missing/blank submission means the pin was stripped, not that
+    // there was nothing to pin, so that case is refused below rather than
+    // silently proceeding unpinned.
     const body = await context.req.parseBody();
     const submittedHeadSha = readOptionalFormField(body, "expected_head_sha");
     const expectedHeadSha =
@@ -1077,34 +1105,61 @@ export function registerPages(options: RegisterPagesOptions): void {
         : submittedHeadSha;
 
     let banner: PullRequestMergeBanner;
-    if (liveOwnerRunId !== undefined) {
-      banner = {
-        error: `Refused: run ${liveOwnerRunId} is live for this PR.`,
-        freshState: undefined,
-        kind: "merge",
-        ok: false
-      };
-    } else if (options.mergePullRequest === undefined) {
-      banner = {
-        error: "merge is unavailable",
-        freshState: undefined,
-        kind: "merge",
-        ok: false
-      };
-    } else {
-      const result = await options.mergePullRequest({
-        ...(expectedHeadSha === undefined ? {} : { expectedHeadSha }),
-        prNumber,
-        projectName
+    let liveOwnerRunId: string | undefined;
+    // Serializes the ownership check with RunController's claim path (ADR
+    // 0052, dispatchMutex) and with handleClearStaleClaim — the same mutex
+    // instance is threaded in as claimMutex. Without it, a new Run claiming
+    // this PR's issue between the check and the merge call races an
+    // in-flight merge instead of being seen by it.
+    await options.claimMutex?.acquire();
+    try {
+      liveOwnerRunId = livePullRequestOwnerLabel({
+        detail,
+        getActiveRuns: options.getActiveRuns,
+        getProjectRepoAliases: options.getProjectRepoAliases,
+        getScheduled: options.getScheduled,
+        runStore: options.runStore
       });
-      banner = result.ok
-        ? { freshState: result.freshState, kind: "merge", ok: true }
-        : {
-            error: result.error,
-            freshState: result.freshState,
-            kind: "merge",
-            ok: false
-          };
+
+      if (detail.snapshot.headSha !== null && expectedHeadSha === undefined) {
+        banner = {
+          error:
+            "Refused: missing the reviewed commit SHA to pin this merge to.",
+          freshState: undefined,
+          kind: "merge",
+          ok: false
+        };
+      } else if (liveOwnerRunId !== undefined) {
+        banner = {
+          error: `Refused: ${liveOwnerRunId} is live for this PR.`,
+          freshState: undefined,
+          kind: "merge",
+          ok: false
+        };
+      } else if (options.mergePullRequest === undefined) {
+        banner = {
+          error: "merge is unavailable",
+          freshState: undefined,
+          kind: "merge",
+          ok: false
+        };
+      } else {
+        const result = await options.mergePullRequest({
+          ...(expectedHeadSha === undefined ? {} : { expectedHeadSha }),
+          prNumber,
+          projectName
+        });
+        banner = result.ok
+          ? { freshState: result.freshState, kind: "merge", ok: true }
+          : {
+              error: result.error,
+              freshState: result.freshState,
+              kind: "merge",
+              ok: false
+            };
+      }
+    } finally {
+      options.claimMutex?.release();
     }
 
     const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
@@ -1451,7 +1506,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
   );
 
-  options.app.get("/config/edit", async (context) => {
+  options.app.get("/config/edit", requireSameOriginRead, async (context) => {
     const configPath = options.getConfigPath?.();
     if (configPath === undefined) {
       return context.html(
@@ -3267,26 +3322,67 @@ function collectLiveRunEntries(input: {
   getActiveRuns:
     | (() => Array<{ issueNumber: number; projectName: string; runId: string }>)
     | undefined;
+  // A retry/continuation/state-advance timer registered via
+  // RunController.schedule (RegisterPagesOptions.getScheduled) has already
+  // unregistered its slot and moved the Run row to a terminal state — the
+  // only remaining ownership signal is this callback. Without it, an issue
+  // mid-backoff reads as unowned even though it will fire again. runStore
+  // resolves each callback's runId back to its (project, issue) pair since
+  // ScheduledCallback carries neither.
+  getScheduled: (() => ScheduledCallback[]) | undefined;
   runStore: RunStore;
 }): Array<{ issueNumber: number; projectName: string; runId: string }> {
+  const scheduledEntries = (input.getScheduled?.() ?? [])
+    .map((callback) => input.runStore.getRun(callback.runId))
+    .filter((run): run is RunDetail => run !== undefined)
+    .map((run) => ({
+      issueNumber: run.issueNumber,
+      projectName: run.project,
+      runId: run.id
+    }));
   return [
     ...(input.getActiveRuns?.() ?? []),
     ...input.runStore.listActiveRunIds(),
-    ...input.runStore.listWaitingRunIds()
+    ...input.runStore.listWaitingRunIds(),
+    ...scheduledEntries
   ];
 }
 
+// KNOWN GAP: a succeeded Run whose PR is under active PR-follow-up
+// (runPullRequestFollowup, src/pull-request-followup.ts) is NOT represented
+// here. Its Run already terminated (so it's absent from every source above)
+// but sym:claimed stays attached while follow-up decides whether to
+// dispatch a review round -- meaning both handleClearStaleClaim and the PR
+// merge guard can act during that window. The natural fix (have
+// runPullRequestFollowup hold dispatchMutex around its decide-then-dispatch
+// step) deadlocks: dispatchReviewFollowup -> runFreshLifecycle ->
+// claimAndPersistRun already acquires that same non-reentrant AsyncMutex.
+// Closing this needs RunController to expose a lock-aware dispatch variant
+// (or a restructured mutex ownership model), not a blind extra acquire()
+// here.
 function findLiveRunIdForIssue(input: {
   getActiveRuns:
     | (() => Array<{ issueNumber: number; projectName: string; runId: string }>)
     | undefined;
+  getScheduled: (() => ScheduledCallback[]) | undefined;
+  // Two configured Projects can point at the same GitHub owner/repo (an
+  // alias); without this, a live Run dispatched under one alias's name is
+  // invisible to a liveness check made under the other, letting the two
+  // cross-clear or cross-merge each other's issues/PRs. Returns every
+  // project name (including projectName itself) sharing the target's repo
+  // identity — undefined (not wired) degrades to "just this project name",
+  // i.e. today's behavior.
+  getProjectRepoAliases: ((projectName: string) => string[]) | undefined;
   issueNumber: number;
   projectName: string;
   runStore: RunStore;
 }): string | undefined {
+  const aliasNames = new Set(
+    input.getProjectRepoAliases?.(input.projectName) ?? [input.projectName]
+  );
   return collectLiveRunEntries(input).find(
     (entry) =>
-      entry.projectName === input.projectName &&
+      aliasNames.has(entry.projectName) &&
       entry.issueNumber === input.issueNumber
   )?.runId;
 }
@@ -3310,6 +3406,8 @@ function livePullRequestOwnerRunId(input: {
   getActiveRuns:
     | (() => Array<{ issueNumber: number; projectName: string; runId: string }>)
     | undefined;
+  getProjectRepoAliases: ((projectName: string) => string[]) | undefined;
+  getScheduled: (() => ScheduledCallback[]) | undefined;
   issueNumber: number | undefined;
   projectName: string;
   runStore: RunStore;
@@ -3319,10 +3417,43 @@ function livePullRequestOwnerRunId(input: {
   }
   return findLiveRunIdForIssue({
     getActiveRuns: input.getActiveRuns,
+    getProjectRepoAliases: input.getProjectRepoAliases,
+    getScheduled: input.getScheduled,
     issueNumber: input.issueNumber,
     projectName: input.projectName,
     runStore: input.runStore
   });
+}
+
+// Combines the two independent ownership signals a PR can have: a live Run
+// (keyed by issueNumber, see livePullRequestOwnerRunId) and a live Routine
+// Firing (keyed by branch directly on PullRequestDetail.liveRoutineFiringId
+// — Routine Firings have no issue number, so they can't flow through the
+// Run-keyed check). Formats a ready-to-display label so callers don't
+// re-derive "run X" vs "routine firing X" wording independently.
+function livePullRequestOwnerLabel(input: {
+  detail: PullRequestDetail;
+  getActiveRuns:
+    | (() => Array<{ issueNumber: number; projectName: string; runId: string }>)
+    | undefined;
+  getProjectRepoAliases: ((projectName: string) => string[]) | undefined;
+  getScheduled: (() => ScheduledCallback[]) | undefined;
+  runStore: RunStore;
+}): string | undefined {
+  const liveRunId = livePullRequestOwnerRunId({
+    getActiveRuns: input.getActiveRuns,
+    getProjectRepoAliases: input.getProjectRepoAliases,
+    getScheduled: input.getScheduled,
+    issueNumber: input.detail.issueNumber,
+    projectName: input.detail.projectName,
+    runStore: input.runStore
+  });
+  if (liveRunId !== undefined) {
+    return `run ${liveRunId}`;
+  }
+  return input.detail.liveRoutineFiringId === undefined
+    ? undefined
+    : `routine firing ${input.detail.liveRoutineFiringId}`;
 }
 
 // #303's own pre-restart check (renderProjectCapacityStrip, above) inlined
@@ -3956,11 +4087,20 @@ function renderPullRequestSearchPage(input: {
 }
 
 type PullRequestDetail = {
-  // The issue this PR was originally discovered from (TrackedPullRequest,
-  // undefined when untracked) -- used to find whether ANY Run is currently
-  // live for that issue, not just the one that originally discovered the
-  // PR. See livePullRequestOwnerRunId.
+  // The issue this PR was originally discovered from -- used to find
+  // whether ANY Run is currently live for that issue, not just the one
+  // that originally discovered the PR. See livePullRequestOwnerRunId.
+  // Resolved from (in order): the tracked_pull_requests row regardless of
+  // its own state (a reopened PR's tracking row can be 'closed' while its
+  // parked Run is still live), then falling back to a direct runs-table
+  // lookup by branch for a still-running provider whose PR hasn't been
+  // tracked yet (listRunsAwaitingPullRequestDiscovery only considers
+  // 'succeeded' runs).
   issueNumber: number | undefined;
+  // A live Routine Firing owning this PR's branch. Routine Firings are a
+  // separate entity from Runs (no issue number), so this is a distinct
+  // ownership signal alongside issueNumber/trackedRunId, not a replacement.
+  liveRoutineFiringId: string | undefined;
   prNumber: number;
   projectName: string;
   snapshot: ProjectPullRequestSnapshotRow;
@@ -3971,7 +4111,13 @@ type PullRequestDetail = {
 function loadPullRequestDetail(
   runStore: RunStore,
   projectName: string,
-  prNumber: number
+  prNumber: number,
+  // Two Projects can point at the same GitHub owner/repo; a PR opened
+  // against that repo may have been tracked under either alias's name, so
+  // the tracked-row lookup below checks every alias, not just projectName.
+  // Undefined (not wired) degrades to just projectName, matching
+  // pre-existing behavior.
+  getProjectRepoAliases?: (projectName: string) => string[]
 ): PullRequestDetail | undefined {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     return undefined;
@@ -3982,17 +4128,33 @@ function loadPullRequestDetail(
   if (snapshot === undefined) {
     return undefined;
   }
-  const tracked = runStore
-    .listOpenTrackedPullRequests()
-    .find(
-      (row) => row.projectName === projectName && row.prNumber === prNumber
-    );
+  const aliasNames = getProjectRepoAliases?.(projectName) ?? [projectName];
+  let tracked: TrackedPullRequest | undefined;
+  for (const aliasName of aliasNames) {
+    tracked = runStore.findTrackedPullRequestByProjectAndNumber({
+      projectName: aliasName,
+      prNumber
+    });
+    if (tracked !== undefined) {
+      break;
+    }
+  }
+  const branchName = snapshot.headRef;
+  const untrackedLiveRun =
+    tracked === undefined && branchName !== null
+      ? runStore.findRunByProjectAndBranch({ branchName, projectName })
+      : undefined;
+  const liveRoutineFiring =
+    snapshot.branchOrigin === "routine_firing_branch" && branchName !== null
+      ? runStore.findLiveRoutineFiringByBranch({ branchName, projectName })
+      : undefined;
   return {
-    issueNumber: tracked?.issueNumber,
+    issueNumber: tracked?.issueNumber ?? untrackedLiveRun?.issueNumber,
+    liveRoutineFiringId: liveRoutineFiring?.firingId,
     prNumber,
     projectName,
     snapshot,
-    trackedRunId: tracked?.runId,
+    trackedRunId: tracked?.runId ?? untrackedLiveRun?.runId,
     trackingState: pullRequestTrackingStateLabel(snapshot)
   };
 }
@@ -4082,7 +4244,7 @@ function renderPullRequestMergeSection(input: {
   projectName: string;
 }): string {
   if (input.liveOwnerRunId !== undefined) {
-    return `<section><h2>Merge</h2><p class="note">${labelPill(`owned by run ${input.liveOwnerRunId}`, "progress")} Cannot be merged until that Run is cancelled.</p></section>`;
+    return `<section><h2>Merge</h2><p class="note">${labelPill(`owned by ${input.liveOwnerRunId}`, "progress")} Cannot be merged until that Run is cancelled.</p></section>`;
   }
   const action = `/prs/${encodeURIComponent(input.projectName)}/${input.prNumber}/merge`;
   // Pins the SHA to what this page actually shows, not whatever the DB

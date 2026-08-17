@@ -1130,6 +1130,105 @@ describe("run-store schema migration", () => {
     }
   });
 
+  it("adds the labels column when upgrading a pre-#420 project_pull_request_snapshots table", async () => {
+    const root = await makeTempRoot();
+    const dbPath = databasePath(root);
+    const writer = new Database(dbPath);
+    try {
+      // #419's original CREATE TABLE shape, before #420 added `labels` --
+      // a database that already ran #419's migration has this table
+      // without the column, and CREATE TABLE IF NOT EXISTS alone would
+      // never add it.
+      writer.exec(`
+        create table project_pull_request_snapshots (
+          project_name text not null,
+          pr_number integer not null,
+          title text not null,
+          url text,
+          draft integer not null default 0,
+          open integer not null default 0,
+          merged integer not null default 0,
+          head_ref text,
+          head_sha text,
+          branch_origin text not null default 'neither',
+          state_available integer not null default 0,
+          mergeable text,
+          checks text,
+          review_decision text,
+          tracking_state text,
+          unresolved_review_threads integer,
+          polled_at text not null,
+          created_at text not null,
+          updated_at text not null,
+          primary key (project_name, pr_number)
+        );
+        insert into project_pull_request_snapshots (
+          project_name, pr_number, title, url, draft, open, merged,
+          head_ref, head_sha, branch_origin, state_available,
+          polled_at, created_at, updated_at
+        ) values (
+          'alpha', 246, 'Fix login', 'https://github.com/pmatos/symphonika/pull/246',
+          0, 1, 0, 'sym/alpha/246-fix-login', 'abc123', 'issue_branch', 0,
+          '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'
+        );
+      `);
+    } finally {
+      writer.close();
+    }
+
+    const store = openRunStore({ stateRoot: root });
+    try {
+      expect(store.listProjectPullRequestSnapshots("alpha")).toEqual([
+        expect.objectContaining({
+          labels: [],
+          prNumber: 246,
+          title: "Fix login"
+        })
+      ]);
+      // The migration must not just add the column but leave it usable —
+      // an upgrade that adds a nullable column but can't be written back
+      // to would still break the very next poll tick.
+      store.replaceProjectPullRequestSnapshots({
+        polledAt: "2026-01-01T00:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            branchOrigin: "issue_branch",
+            checks: null,
+            draft: false,
+            headRef: "sym/alpha/246-fix-login",
+            headSha: "abc123",
+            labels: ["agent-ready"],
+            mergeable: null,
+            merged: false,
+            open: true,
+            prNumber: 246,
+            reviewDecision: null,
+            stateAvailable: false,
+            title: "Fix login",
+            trackingState: null,
+            unresolvedReviewThreads: null,
+            url: "https://github.com/pmatos/symphonika/pull/246"
+          }
+        ]
+      });
+      expect(store.listProjectPullRequestSnapshots("alpha")).toEqual([
+        expect.objectContaining({ labels: ["agent-ready"] })
+      ]);
+    } finally {
+      store.close();
+    }
+
+    const reader = new Database(dbPath, { readonly: true });
+    try {
+      expect(columnNames(reader, "project_pull_request_snapshots")).toContain(
+        "labels"
+      );
+    } finally {
+      reader.close();
+    }
+  });
+
   it("backfills sample history when upgrading a pre-history watchdog_samples table", async () => {
     const root = await makeTempRoot();
     const dbPath = databasePath(root);

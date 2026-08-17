@@ -4539,7 +4539,8 @@ export class RunStore {
       ["routine_firings", "notification_error", "text"],
       ["routine_firings", "workspace_pruned_at", "text"],
       ["routine_firings", "fanout_id", "text"],
-      ["project_issue_snapshots", "labels", "text"]
+      ["project_issue_snapshots", "labels", "text"],
+      ["project_pull_request_snapshots", "labels", "text"]
     ];
 
     const apply = this.database.transaction(() => {

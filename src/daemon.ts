@@ -1161,10 +1161,55 @@ function persistProjectPollState(
           ok: project.ok,
           projectName: project.name
         });
+        // ADR 0073: only a project whose poll succeeded this tick gets its
+        // issue snapshot replaced — a failed poll leaves the last known
+        // snapshot in place rather than blanking the table.
+        if (project.ok) {
+          runStore.replaceProjectIssueSnapshots({
+            polledAt: project.lastPolledAt ?? timestamp(),
+            projectName: project.name,
+            rows: projectIssueSnapshotRows(project.name, status)
+          });
+        }
       }
       return modes;
     }
   );
+}
+
+function projectIssueSnapshotRows(
+  projectName: string,
+  status: import("./issue-polling.js").IssuePollStatus
+): Array<{
+  issueNumber: number;
+  kind: "candidate" | "filtered";
+  priority: number;
+  reasons: string[];
+  title: string;
+}> {
+  const candidateRows = status.candidateIssues
+    .filter((entry) => entry.project === projectName)
+    .map((entry) => ({
+      issueNumber: entry.issue.number,
+      kind: "candidate" as const,
+      priority: entry.issue.priority,
+      reasons: [],
+      title: entry.issue.title
+    }));
+  const filteredRows = status.filteredIssues
+    .filter((entry) => entry.project === projectName)
+    .map((entry) => ({
+      issueNumber: entry.issue.number,
+      kind: "filtered" as const,
+      priority: entry.issue.priority,
+      reasons: entry.reasons,
+      title: entry.issue.title
+    }));
+  return [...candidateRows, ...filteredRows];
+}
+
+function timestamp(): string {
+  return new Date().toISOString();
 }
 
 type ProjectStateInputs = {

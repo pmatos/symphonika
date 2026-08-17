@@ -12,6 +12,7 @@ import {
 import { DEFAULT_WATCHDOG_CONFIG, type WatchdogConfig } from "../reload.js";
 import type {
   ListRunsFilter,
+  ProjectIssueSnapshotRow,
   ProjectState,
   ProviderEventRecord,
   RoutineFiringStatus,
@@ -39,14 +40,35 @@ import {
 import type { ExpandedWorkflow } from "../workflow/types.js";
 import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 
+// Shared by RegisterPagesOptions.getScheduled and buildProjectIssueRow's
+// input — one shape, matching HttpAppOptions.getScheduled's own (src/http/
+// app.ts), rather than three independent inline copies of the same four
+// fields.
+export type ScheduledCallback = {
+  dueAt: number;
+  kind: "retry" | "continuation" | "state_advance" | "wait_park";
+  runId: string;
+};
+
 export type RegisterPagesOptions = {
   app: Hono;
+  // Per-Slice-2 live cap snapshot; #303's capacity strip. See ADR 0053.
+  getConcurrency?: () => {
+    global: { inFlight: number; maxInFlight: number | null };
+    perProject: Array<{
+      inFlight: number;
+      maxInFlight: number;
+      projectName: string;
+    }>;
+  };
   getLastTickAtMonotonic?: () => number | undefined;
   getPollingIntervalMs?: () => number | undefined;
   getTickLoopStartedAtMonotonic?: () => number | undefined;
   getPullRequestFollowupPolicy?: () => {
     maxReviewDispatchesPerPr: number;
   };
+  // #303's "retry ETA" detail for a waiting Run.
+  getScheduled?: () => ScheduledCallback[];
   getStatusSnapshot?: () => StatusSnapshot;
   getWatchdogConfig?: (
     projectName: string
@@ -55,6 +77,10 @@ export type RegisterPagesOptions = {
   monotonicNow: () => number;
   now?: () => number;
   runStore: RunStore;
+  // #303's "pre-restart" staleness marker: a persisted snapshot whose last
+  // successful poll predates process start hasn't been refreshed since the
+  // daemon came up. See ADR 0073.
+  startedAtMs?: number;
   version: string;
 };
 
@@ -402,6 +428,117 @@ export function registerPages(options: RegisterPagesOptions): void {
         renderWorkflowGraphPage(detail.id, graph)
       )
     );
+  });
+
+  options.app.get("/projects/:name", (context) => {
+    const name = context.req.param("name");
+    const projectState = options.runStore.getProjectStatesByName().get(name);
+    if (projectState === undefined) {
+      return context.html(
+        layout(
+          "Project not found",
+          `<h1 class="page-title">Project not found</h1><p class="lede">Project <code>${escapeHtml(name)}</code> was not found.</p>`
+        ),
+        404
+      );
+    }
+    const mode =
+      options.getStatusSnapshot?.()?.projectModes.get(name) ?? "dispatch";
+    const nowMs = now();
+    // The in-flight numerator is computed the same way #302's Projects
+    // section computes it (active Runs + active Routine Firings for this
+    // Project) rather than trusted from getConcurrency()'s perProject
+    // entry, which — like ActiveRunRegistry.countInFlightByProject before
+    // #302's fix — only counts Runs. A Routine Target on a Dispatch Project
+    // (ADR 0069) can hold a capacity slot with no Run at all.
+    const activeRuns = options.runStore.listRuns({
+      project: name,
+      state: ACTIVE_NOW_RUN_STATES_LIST
+    });
+    const activeFirings = options.runStore.listRoutineFirings({
+      project: name,
+      state: ACTIVE_NOW_FIRING_STATES_LIST
+    });
+    const inFlight = activeRuns.length + activeFirings.length;
+    const firings = options.runStore.listRoutineFirings({ project: name });
+
+    if (mode === "routine_host") {
+      const html = layout(
+        name,
+        [
+          `<h1 class="page-title">${escapeHtml(name)}</h1>`,
+          renderRoutineHostCapacityStrip(name, projectState, inFlight),
+          `<section>${sectionHead("Issues", 0)}<div class="empty"><strong>No issues — this is a Routine Host</strong>A Routine Host (ADR 0062) never polls or dispatches issues; it only hosts Routine Firings, listed below.</div></section>`,
+          renderProjectFiringsBlock(firings),
+          `<p class="note"><a href="/runs?project=${encodeURIComponent(name)}">Recent runs →</a></p>`
+        ].join("")
+      );
+      return context.html(html);
+    }
+
+    const concurrency = options.getConcurrency?.();
+    const projectCapacity = concurrency?.perProject.find(
+      (entry) => entry.projectName === name
+    );
+    const pollingIntervalMs =
+      options.getPollingIntervalMs?.() ?? DEFAULT_POLLING_INTERVAL_MS;
+    const scheduled = options.getScheduled?.() ?? [];
+
+    const runs = options.runStore.listRuns({ project: name });
+    const latestRunByIssue = new Map<number, RunStatus>();
+    for (const run of runs) {
+      if (!latestRunByIssue.has(run.issueNumber)) {
+        latestRunByIssue.set(run.issueNumber, run);
+      }
+    }
+    const snapshotByIssue = new Map<number, ProjectIssueSnapshotRow>();
+    for (const row of options.runStore.listProjectIssueSnapshots(name)) {
+      snapshotByIssue.set(row.issueNumber, row);
+    }
+    // #303's join (ADR 0073): union of persisted snapshot rows and Runs for
+    // this Project, keyed by issue number. A closed issue with a Run but no
+    // snapshot row still renders — driven entirely by the Run — because
+    // this is a union, not filtered down to snapshot rows.
+    const issueNumbers = new Set<number>([
+      ...snapshotByIssue.keys(),
+      ...latestRunByIssue.keys()
+    ]);
+    const issueRows = Array.from(issueNumbers)
+      .sort((a, b) => b - a)
+      .map((issueNumber) =>
+        buildProjectIssueRow({
+          inFlight,
+          issueNumber,
+          maxInFlight: projectCapacity?.maxInFlight,
+          nowMs,
+          projectName: name,
+          run: latestRunByIssue.get(issueNumber),
+          runStore: options.runStore,
+          scheduled,
+          snapshot: snapshotByIssue.get(issueNumber)
+        })
+      );
+
+    const html = layout(
+      name,
+      [
+        `<h1 class="page-title">${escapeHtml(name)}</h1>`,
+        renderProjectCapacityStrip(
+          name,
+          projectState,
+          inFlight,
+          projectCapacity?.maxInFlight,
+          concurrency?.global,
+          pollingIntervalMs,
+          options.startedAtMs,
+          nowMs
+        ),
+        renderProjectIssuesTable(issueRows),
+        renderProjectFiringsBlock(firings),
+        `<p class="note"><a href="/runs?project=${encodeURIComponent(name)}">Recent runs →</a></p>`
+      ].join("")
+    );
+    return context.html(html);
   });
 }
 
@@ -1007,7 +1144,7 @@ function renderDispatchProjectsTable(
         row.lastRun === undefined
           ? '<span class="muted">never</span>'
           : `${statePill(row.lastRun.state)} <code>${escapeHtml(formatAge(row.lastRun.updatedAt, nowMs))}</code>`;
-      return `<tr><td>${escapeHtml(row.name)}</td><td>${renderValidityPill(row)}</td><td>${row.eligible}</td><td>${row.inFlight}</td><td class="c-detail">${lastRun}</td></tr>`;
+      return `<tr><td><a href="/projects/${encodeURIComponent(row.name)}">${escapeHtml(row.name)}</a></td><td>${renderValidityPill(row)}</td><td>${row.eligible}</td><td>${row.inFlight}</td><td class="c-detail">${lastRun}</td></tr>`;
     })
     .join("");
   return tableSection(
@@ -1030,7 +1167,7 @@ function renderRoutineHostsTable(rows: ProjectRow[]): string {
   const bodyRows = rows
     .map(
       (row) =>
-        `<tr><td>${escapeHtml(row.name)}</td><td>${renderValidityPill(row)}</td><td>${row.inFlight}</td></tr>`
+        `<tr><td><a href="/projects/${encodeURIComponent(row.name)}">${escapeHtml(row.name)}</a></td><td>${renderValidityPill(row)}</td><td>${row.inFlight}</td></tr>`
     )
     .join("");
   return `<section class="subdued">${sectionHead("Routine hosts", rows.length)}<div class="table-wrap"><table><thead><tr><th>Name</th><th>Validation</th><th>In-flight</th></tr></thead><tbody>${bodyRows}</tbody></table></div></section>`;
@@ -1109,6 +1246,268 @@ function renderStaleIssuesCard(
     staleIssues.length,
     "<tr><th>Project</th><th>Issue</th><th>Reason</th></tr>",
     rows
+  );
+}
+
+function capacityKv(label: string, valueHtml: string): string {
+  return `<span class="kv"><span class="k">${escapeHtml(label)}</span><span class="v">${valueHtml}</span></span>`;
+}
+
+function renderProjectFiringsBlock(firings: RoutineFiringStatus[]): string {
+  if (firings.length === 0) {
+    return `<section>${sectionHead("Routine firings", 0)}<div class="empty"><strong>No Routine firings</strong>No Routine currently targets this Project.</div></section>`;
+  }
+  const rows = firings.map((firing) => firingRowHtml(firing)).join("");
+  return tableSection(
+    "Routine firings",
+    firings.length,
+    ROUTINE_FIRINGS_TABLE_HEAD,
+    rows
+  );
+}
+
+// #303's capacity strip for a Routine Host: validity + in-flight only.
+// Poll age / next poll don't apply — a host is never polled for issues
+// (ADR 0062) — and it has no per-host max_in_flight surfaced through
+// getConcurrency(), which only iterates Dispatch Projects.
+function renderRoutineHostCapacityStrip(
+  name: string,
+  projectState: ProjectState,
+  inFlight: number
+): string {
+  const validity = renderValidityPill({
+    eligible: 0,
+    inFlight: 0,
+    lastRun: undefined,
+    mode: "routine_host",
+    name,
+    validationMessage: projectState.validationMessage,
+    validationState: projectState.validationState
+  });
+  return `<section class="capacity-strip">${capacityKv("validity", validity)}${capacityKv("in-flight", `${inFlight}`)}</section>`;
+}
+
+// #303's capacity strip for a Dispatch Project: this is the page's
+// load-bearing element (PRODUCT.md principle 4) — without it, a table full
+// of eligible issues and nothing running reads as idle rather than capped.
+function renderProjectCapacityStrip(
+  name: string,
+  projectState: ProjectState,
+  inFlight: number,
+  maxInFlight: number | undefined,
+  globalCapacity: { inFlight: number; maxInFlight: number | null } | undefined,
+  pollingIntervalMs: number,
+  startedAtMs: number | undefined,
+  nowMs: number
+): string {
+  const validity = renderValidityPill({
+    eligible: 0,
+    inFlight: 0,
+    lastRun: undefined,
+    mode: "dispatch",
+    name,
+    validationMessage: projectState.validationMessage,
+    validationState: projectState.validationState
+  });
+  const parts = [capacityKv("validity", validity)];
+  const inFlightLabel =
+    maxInFlight === undefined ? `${inFlight}` : `${inFlight}/${maxInFlight}`;
+  parts.push(capacityKv("in-flight", escapeHtml(inFlightLabel)));
+  if (globalCapacity !== undefined && globalCapacity.maxInFlight !== null) {
+    parts.push(
+      capacityKv(
+        "global",
+        escapeHtml(`${globalCapacity.inFlight}/${globalCapacity.maxInFlight}`)
+      )
+    );
+  }
+  const lastPollAt = projectState.lastPollFinishedAt;
+  const pollAge = lastPollAt === null ? "never" : formatAge(lastPollAt, nowMs);
+  const preRestart =
+    lastPollAt !== null &&
+    startedAtMs !== undefined &&
+    Date.parse(lastPollAt) < startedAtMs
+      ? ' <span class="muted">(pre-restart)</span>'
+      : "";
+  parts.push(capacityKv("poll", `${escapeHtml(pollAge)}${preRestart}`));
+  if (lastPollAt !== null) {
+    const nextPollAtMs = Date.parse(lastPollAt) + pollingIntervalMs;
+    parts.push(
+      capacityKv(
+        "next poll",
+        escapeHtml(formatAge(new Date(nextPollAtMs).toISOString(), nowMs))
+      )
+    );
+  }
+  if (projectState.lastPollOk === false) {
+    const reason =
+      projectState.lastPollError === null
+        ? ""
+        : ` <span class="muted">(${escapeHtml(projectState.lastPollError)})</span>`;
+    parts.push(
+      capacityKv(
+        "polling",
+        `<span class="pill pill--fail"><span class="pill-dot" aria-hidden="true"></span>failing</span>${reason}`
+      )
+    );
+  }
+  return `<section class="capacity-strip">${parts.join("")}</section>`;
+}
+
+function labelPill(
+  label: string,
+  family: "ok" | "fail" | "blocked" | "progress" | "neutral"
+): string {
+  return `<span class="pill pill--${family}"><span class="pill-dot" aria-hidden="true"></span>${escapeHtml(label)}</span>`;
+}
+
+// #303's per-row state bucket. A Run's own RunState wins whenever a Run
+// exists — see the ADR 0073 join note above the route handler — so this
+// table maps every RunState into one of the AC's buckets rather than
+// inventing a second state vocabulary. queued/preparing_workspace read as
+// "claimed" (the daemon has picked the issue but no attempt is running
+// yet); input_required folds into "waiting" since it, like `waiting`, has
+// no active provider process (see ACTIVE_NOW_RUN_STATES_LIST above).
+const PROJECT_ISSUE_ROW_BUCKET: Record<
+  RunState,
+  "claimed" | "running" | "waiting" | "blocked" | "terminal"
+> = {
+  blocked: "blocked",
+  cancelled: "terminal",
+  failed: "terminal",
+  input_required: "waiting",
+  preparing_workspace: "claimed",
+  queued: "claimed",
+  running: "running",
+  stale: "terminal",
+  succeeded: "terminal",
+  waiting: "waiting"
+};
+
+type ProjectIssueRow = {
+  detail: string;
+  issueNumber: number;
+  pillHtml: string;
+  title: string;
+};
+
+function buildProjectIssueRow(input: {
+  inFlight: number;
+  issueNumber: number;
+  maxInFlight: number | undefined;
+  nowMs: number;
+  projectName: string;
+  run: RunStatus | undefined;
+  runStore: RunStore;
+  scheduled: ScheduledCallback[];
+  snapshot: ProjectIssueSnapshotRow | undefined;
+}): ProjectIssueRow {
+  if (input.run !== undefined) {
+    const run = input.run;
+    const bucket = PROJECT_ISSUE_ROW_BUCKET[run.state];
+    const pillHtml = statePill(run.state);
+    if (bucket === "running") {
+      return {
+        detail: `attempt ${run.retryCount + 1} · ${formatAge(run.updatedAt, input.nowMs)}`,
+        issueNumber: input.issueNumber,
+        pillHtml,
+        title: run.issueTitle
+      };
+    }
+    if (bucket === "waiting") {
+      const due = input.scheduled.find((entry) => entry.runId === run.id);
+      const detail =
+        due !== undefined
+          ? `recheck ${formatAge(new Date(due.dueAt).toISOString(), input.nowMs)}`
+          : (run.stateTransitionReason ??
+            (run.state === "input_required" ? "needs operator input" : ""));
+      return {
+        detail,
+        issueNumber: input.issueNumber,
+        pillHtml,
+        title: run.issueTitle
+      };
+    }
+    if (bucket === "terminal" || bucket === "blocked") {
+      // A blocked Run's own reason is recorded as its terminalReason (e.g.
+      // "workflow_terminal_blocked" — see recordTerminalReason call sites
+      // in lifecycle/run-controller.ts), the same field a "terminal" Run
+      // uses — not stateTransitionReason, which stays unset on that path.
+      const tracked = input.runStore.findTrackedPullRequestByIssue({
+        issueNumber: input.issueNumber,
+        projectName: input.projectName
+      });
+      const prDetail =
+        tracked === undefined
+          ? ""
+          : ` · PR #${tracked.prNumber} ${tracked.state}`;
+      const reason = run.terminalReason ?? run.stateTransitionReason ?? "";
+      return {
+        detail: `${reason}${prDetail}`,
+        issueNumber: input.issueNumber,
+        pillHtml,
+        title: run.issueTitle
+      };
+    }
+    // "claimed" (queued/preparing_workspace): no terminalReason exists yet
+    // (the Run hasn't terminated), so fall back to a plain description of
+    // what's happening rather than leaving the AC's required detail blank.
+    return {
+      detail:
+        run.stateTransitionReason ??
+        (run.state === "queued"
+          ? "queued for dispatch"
+          : "preparing workspace"),
+      issueNumber: input.issueNumber,
+      pillHtml,
+      title: run.issueTitle
+    };
+  }
+
+  const snapshot = input.snapshot;
+  if (snapshot === undefined) {
+    return {
+      detail: "",
+      issueNumber: input.issueNumber,
+      pillHtml: labelPill("unknown", "neutral"),
+      title: ""
+    };
+  }
+  if (snapshot.kind === "filtered") {
+    return {
+      detail: snapshot.reasons.join(", "),
+      issueNumber: input.issueNumber,
+      pillHtml: labelPill("filtered", "neutral"),
+      title: snapshot.title
+    };
+  }
+  const atCap =
+    input.maxInFlight !== undefined && input.inFlight >= input.maxInFlight;
+  return {
+    detail: atCap
+      ? `queued behind cap (${input.inFlight}/${input.maxInFlight})`
+      : "within cap, next by priority",
+    issueNumber: input.issueNumber,
+    pillHtml: labelPill("eligible", "neutral"),
+    title: snapshot.title
+  };
+}
+
+function renderProjectIssuesTable(rows: ProjectIssueRow[]): string {
+  if (rows.length === 0) {
+    return `<section>${sectionHead("Issues", 0)}<div class="empty"><strong>No issues</strong>No open issue is currently eligible, filtered, or claimed for this Project.</div></section>`;
+  }
+  const body = rows
+    .map(
+      (row) =>
+        `<tr><td>#${row.issueNumber}</td><td class="c-title">${escapeHtml(row.title)}</td><td>${row.pillHtml}</td><td class="c-detail">${escapeHtml(row.detail)}</td></tr>`
+    )
+    .join("");
+  return tableSection(
+    "Issues",
+    rows.length,
+    "<tr><th>#</th><th>Title</th><th>State</th><th>Detail</th></tr>",
+    body
   );
 }
 

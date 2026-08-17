@@ -903,6 +903,110 @@ describe("RunStore detail queries", () => {
       store.close();
     }
   });
+
+  it("replaceProjectIssueSnapshots ages out a row that no longer appears in a successful poll (ADR 0073)", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            issueNumber: 10,
+            kind: "candidate",
+            priority: 1,
+            reasons: [],
+            title: "Still open"
+          },
+          {
+            issueNumber: 11,
+            kind: "filtered",
+            priority: 1,
+            reasons: ["needs-human"],
+            title: "Closes before next poll"
+          }
+        ]
+      });
+
+      // A row for a different project is untouched by a replace scoped to
+      // "alpha" — the delete-then-insert only ever targets one project.
+      store.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "beta",
+        rows: [
+          {
+            issueNumber: 20,
+            kind: "candidate",
+            priority: 1,
+            reasons: [],
+            title: "Beta issue"
+          }
+        ]
+      });
+
+      // The next successful poll for "alpha" no longer returns issue #11
+      // (closed) but does return #10 again — replace-on-success is the
+      // aging-out mechanism, no separate retention sweep.
+      store.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:30.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            issueNumber: 10,
+            kind: "candidate",
+            priority: 1,
+            reasons: [],
+            title: "Still open"
+          }
+        ]
+      });
+
+      const alphaRows = store.listProjectIssueSnapshots("alpha");
+      expect(alphaRows).toEqual([
+        expect.objectContaining({ issueNumber: 10, kind: "candidate" })
+      ]);
+      expect(store.listProjectIssueSnapshots("beta")).toEqual([
+        expect.objectContaining({ issueNumber: 20, kind: "candidate" })
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("replaceProjectIssueSnapshots round-trips filter reasons and priority", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            issueNumber: 30,
+            kind: "filtered",
+            priority: 2,
+            reasons: ["needs-human", "blocked"],
+            title: "Multiple filter reasons"
+          }
+        ]
+      });
+
+      const rows = store.listProjectIssueSnapshots("alpha");
+      expect(rows).toEqual([
+        {
+          issueNumber: 30,
+          kind: "filtered",
+          polledAt: "2026-05-22T10:00:00.000Z",
+          priority: 2,
+          reasons: ["needs-human", "blocked"],
+          title: "Multiple filter reasons"
+        }
+      ]);
+    } finally {
+      store.close();
+    }
+  });
 });
 
 async function streamText(

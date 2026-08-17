@@ -2868,9 +2868,7 @@ describe("HTTP app — firing detail page (#304 part 2/2)", () => {
       expect(body).toContain("tool_call");
       expect(body).toContain("PR #248");
       expect(body).toContain("not a PR Follow-up");
-      expect(body).toContain(
-        "Cancelling a live firing is deferred to #306"
-      );
+      expect(body).toContain("Cancelling a live firing is deferred to #306");
       expect(body).toContain("/logs/firings/fire-1/prompt");
       expect(body).toContain("/logs/firings/fire-1/prompt_metadata");
       expect(body).toContain("/logs/firings/fire-1/provider_raw");
@@ -2957,9 +2955,7 @@ describe("HTTP app — firing detail page (#304 part 2/2)", () => {
       expect(present.headers.get("content-type")).toContain("text/markdown");
       expect(await present.text()).toContain("Do it.");
 
-      const missing = await app.request(
-        "/logs/firings/fire-1/provider_raw"
-      );
+      const missing = await app.request("/logs/firings/fire-1/provider_raw");
       expect(missing.status).toBe(404);
 
       const unknownFiring = await app.request("/logs/firings/nope/prompt");

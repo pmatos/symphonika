@@ -2002,6 +2002,24 @@ that route already id-sniffs a Run vs. a Routine Firing server-side (ADR-0060), 
 mechanism was needed, only the missing UI control. The route's own form-post redirect now sniffs
 the same way (`#307`): cancelling from `/firings/:id` returns to `/firings/:id`, not `/runs/:id`.
 
+`GET /issues` (`#308`, ADR 0077) is a cross-Project issue triage search, linked from every page's
+primary navigation. It reads only `#303`'s persisted per-Project issue poll snapshot
+(`listProjectIssueSnapshots`) — never a live GitHub Search API call, and never `#302`'s in-process
+`issuePollStatus` either, so the page's own snapshot-age display means the same thing for every
+result regardless of how recently the daemon polled. Honest, stated limits: open issues only, at
+most ~30s stale in steady state, scoped to configured Projects' repos, and search is over issue
+titles only (not body — no acceptance criterion needs it, and persisting every open issue's full
+body on every 30s poll is real write amplification the page doesn't require). Each row shows
+Symphonika's own eligibility verdict and reason — `eligible`, `filtered: <label>`, `filtered:
+missing <label>`, `blocked: sym:<label>`, or `claimed by run <id>` — derived purely from the
+snapshot's own `kind`/`reasons` (`describeIssueVerdict`, `src/issues/verdict.ts`), the same verdict
+`evaluateProjectEligibility` computed at poll time, never recomputed against live config. A
+snapshot row polled before the current process started renders `(pre-restart)` next to its age,
+the same rule `/projects/:name`'s capacity strip already uses. Filters — Project, verdict
+(eligible/filtered), exact label, and free-text title search — combine with AND and are all
+optional query parameters; an unrecognized `?verdict=` value is treated as no filter, matching how
+`/runs`'s `?state=` handles an unrecognized value.
+
 Label creation, stale-claim reset, and workspace cleanup remain CLI-only.
 
 ## 15. Bootstrap Acceptance Bar

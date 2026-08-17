@@ -256,6 +256,7 @@ type ProjectIssueSnapshotKind = "candidate" | "filtered";
 export type ProjectIssueSnapshotRow = {
   issueNumber: number;
   kind: ProjectIssueSnapshotKind;
+  labels: string[];
   polledAt: string;
   priority: number;
   reasons: string[];
@@ -267,12 +268,16 @@ export type ProjectIssueSnapshotRow = {
 // project, so an issue that stops being returned (closed, relabeled) ages
 // out on the next successful tick rather than needing a separate retention
 // sweep. A failed poll leaves prior rows untouched — see the ADR for why.
+// #308 (ADR 0077) added `labels`: the triage search page needs an issue's
+// full label set, not just the subset `reasons` names as the cause of a
+// filter decision.
 export type ReplaceProjectIssueSnapshotsInput = {
   polledAt: string;
   projectName: string;
   rows: Array<{
     issueNumber: number;
     kind: ProjectIssueSnapshotKind;
+    labels: string[];
     priority: number;
     reasons: string[];
     title: string;
@@ -567,6 +572,7 @@ type ProjectStateRow = {
 type ProjectIssueSnapshotDbRow = {
   issue_number: number;
   kind: ProjectIssueSnapshotKind;
+  labels: string | null;
   polled_at: string;
   priority: number;
   reasons: string | null;
@@ -1450,10 +1456,10 @@ export class RunStore {
       const insert = this.database.prepare(
         [
           "insert into project_issue_snapshots (",
-          "project_name, issue_number, kind, title, priority, reasons,",
+          "project_name, issue_number, kind, title, priority, reasons, labels,",
           "polled_at, created_at, updated_at",
           ") values (",
-          "@project_name, @issue_number, @kind, @title, @priority, @reasons,",
+          "@project_name, @issue_number, @kind, @title, @priority, @reasons, @labels,",
           "@polled_at, @created_at, @updated_at",
           ")"
         ].join(" ")
@@ -1463,6 +1469,7 @@ export class RunStore {
           created_at: now,
           issue_number: row.issueNumber,
           kind: row.kind,
+          labels: row.labels.length === 0 ? null : JSON.stringify(row.labels),
           polled_at: input.polledAt,
           priority: row.priority,
           project_name: input.projectName,
@@ -1480,7 +1487,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select issue_number, kind, title, priority, reasons, polled_at",
+          "select issue_number, kind, title, priority, reasons, labels, polled_at",
           "from project_issue_snapshots where project_name = ?",
           "order by issue_number asc"
         ].join(" ")
@@ -1489,6 +1496,7 @@ export class RunStore {
     return rows.map((row) => ({
       issueNumber: row.issue_number,
       kind: row.kind,
+      labels: row.labels === null ? [] : (JSON.parse(row.labels) as string[]),
       polledAt: row.polled_at,
       priority: row.priority,
       reasons:
@@ -4123,6 +4131,7 @@ export class RunStore {
         title text not null,
         priority integer not null default 0,
         reasons text,
+        labels text,
         polled_at text not null,
         created_at text not null,
         updated_at text not null,
@@ -4351,7 +4360,8 @@ export class RunStore {
       ["routine_firings", "notification_state", "text"],
       ["routine_firings", "notification_error", "text"],
       ["routine_firings", "workspace_pruned_at", "text"],
-      ["routine_firings", "fanout_id", "text"]
+      ["routine_firings", "fanout_id", "text"],
+      ["project_issue_snapshots", "labels", "text"]
     ];
 
     const apply = this.database.transaction(() => {

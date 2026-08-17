@@ -1243,6 +1243,7 @@ function projectIssueSnapshotRows(
 ): Array<{
   issueNumber: number;
   kind: "candidate" | "filtered";
+  labels: string[];
   priority: number;
   reasons: string[];
   title: string;
@@ -1252,6 +1253,7 @@ function projectIssueSnapshotRows(
     .map((entry) => ({
       issueNumber: entry.issue.number,
       kind: "candidate" as const,
+      labels: entry.issue.labels,
       priority: entry.issue.priority,
       reasons: [],
       title: entry.issue.title
@@ -1261,6 +1263,7 @@ function projectIssueSnapshotRows(
     .map((entry) => ({
       issueNumber: entry.issue.number,
       kind: "filtered" as const,
+      labels: entry.issue.labels,
       priority: entry.issue.priority,
       reasons: entry.reasons,
       title: entry.issue.title

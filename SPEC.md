@@ -1843,11 +1843,23 @@ or Firing transition, and a reload outcome, push the instant they happen; a `pro
 fires at the daemon's existing ~30-second poll cadence (ADR-0036) and only invalidates the poll-age
 display already on the page — receiving one never means issue eligibility itself just became live.
 Each connection subscribes and unsubscribes independently, so concurrent tabs do not share a cursor
-and a disconnect (tab close, navigation, network drop) cannot leak a listener. The client-side
-fragment patching that consumes this stream — reconnect with backoff, a stream-down banner with
-manual refresh, and preserving an open editor's text and scroll position across a live update — is
-delivered in a follow-on slice; this page ships the notification path and its transport only. See
-#305, ADR-0074.
+and a disconnect (tab close, navigation, network drop) cannot leak a listener.
+
+The dashboard (`/`) is the one page wired to this stream. `renderActiveNowBand` and
+`renderProjectsSection` render inside stable `#active-now-band` / `#projects-section` containers,
+each also served standalone (no `layout()`) at `GET /fragments/active-band` and `GET
+/fragments/projects-section` from the same `assembleDashboardData()` inputs the full page uses. An
+embedded script (`DASHBOARD_LIVE_CLIENT_JS`, a plain string constant matching the existing
+`renderWorkflowGraphPage` client-JS precedent — no build step, ADR-0056) opens `GET /events`; on a
+`run-transition`, `firing-transition`, or `project-poll` event it refetches and swaps both
+fragments via `element.replaceChildren(...)` — a full-region replace, not a diffing morph, since
+today neither fragment contains an editor or other state worth preserving across a swap (`#307`
+introduces editors; a preservation mechanism belongs there, against a real element, not built ahead
+of one). `EventSource`'s own reconnect handles drops; `error` shows a `#live-stream-banner` with a
+manual refresh link, `open` hides it and reconciles both fragments once, matching "no replay on
+reconnect." Every other page (`/runs/:id`, `/firings/:id`, `/routines/:name`, `/projects/:name`)
+still requires a manual reload to see a transition — wiring those up is follow-on work. See #305,
+ADR-0074.
 
 The v1 mutating local HTTP API actions are explicit active-run cancellation, a manual poll-now
 trigger that uses the normal daemon scheduler path, and daemon-owned manual Routine firing. The

@@ -111,13 +111,62 @@ daemon's existing 30-second poll cadence (ADR 0036).
 - `#308`'s GitHub search results are snapshot-backed at that same poll cadence and will reuse this
   same event, not a new one.
 
-### Reconnect and the stream-down banner are client concerns
+### Fragments: two named regions, not per-row patches
 
-Backoff-on-reconnect, the "stream is down, here's a manual refresh control" banner, and the
-per-fragment DOM patch that must leave an open editor's text and scroll position untouched are
-`#305`'s second half (a separate, stacked PR — see Consequences). The server contract they build on
-is fixed by this ADR: `GET /events`, the four `ChangeEvent` kinds above, no replay on reconnect, and
-independent per-tab subscriptions.
+The dashboard (`/`) is the only page this slice wires up live — the issue's own acceptance criteria
+name "the active band and the affected Project row," both dashboard elements. `GET
+/fragments/active-band` and `GET /fragments/projects-section` call `renderActiveNowBand` /
+`renderProjectsSection` directly (no `layout()` wrapper), fed by one `assembleDashboardData()`
+helper `GET /` and both fragment routes share — so a live-update fetch renders from the exact same
+inputs a full page load would, not a second hand-maintained assembly.
+
+Fragments are whole named regions, not individual project rows. A `ChangeEvent` deliberately carries
+no `projectName` (see above), and refetching a whole section costs one request either way, so
+resolving "which row" client-side would only add complexity for no savings. On any of
+`run-transition`, `firing-transition`, or `project-poll`, the client refetches and patches both
+fragments — simpler than deciding per event-kind which one region actually changed, and cheap enough
+that the extra request is not worth optimizing away.
+
+### The patch primitive is `replaceChildren`, not a morph
+
+`patchFragment(id, html)` parses the fetched HTML into a detached container and calls
+`element.replaceChildren(...)` with its children — a full swap of the named container's content, no
+diffing, no key-matched node reuse. This is deliberately the simplest thing that satisfies the "only
+the affected fragment is replaced" acceptance criterion: **today**, neither `active-now-band` nor
+`projects-section` contains an editor, a form, or a scrollable subregion — nothing inside either
+fragment has state worth preserving across a swap. Building a general focus/selection/scroll-
+preserving morph now, with no real element to preserve, would be exactly the kind of Speculative
+Generality the Standards review this repo's process runs would flag: machinery for a requirement
+with no instance in the codebase yet.
+
+`#307` introduces editors (routine declarations, workflow contracts, service config). If one ever
+lands inside a live-patched region, that is where a preservation mechanism belongs — built against a
+real element, not a hypothetical one. Until then, "the affected fragment is replaced" is tested as
+region-scoped replacement: patching `active-now-band` leaves `projects-section` and everything
+outside both containers — including an unrelated `<textarea>` — byte-for-byte untouched. That is
+what the test in `tests/dashboard-live-client.test.ts` checks; it does not (and today cannot) check
+in-region preservation, because no in-region state exists to preserve.
+
+### Reconnect and the stream-down banner
+
+`EventSource` already reconnects on its own at a fixed retry interval; this slice does not
+hand-roll a custom backoff on top of it; there is no evidence yet that the browser's default retry
+cadence is a problem for a same-machine, same-process daemon. The client's `error` listener shows a
+`#live-stream-banner` ("Live updates disconnected... Refresh"); the `open` listener (fired on first
+connect and every successful reconnect) hides it and triggers one reconciling fetch of both
+fragments — the client-side counterpart to "no replay on reconnect" above.
+
+### Testability without a build step
+
+The embedded client script (`DASHBOARD_LIVE_CLIENT_JS` / `DASHBOARD_PATCH_FRAGMENT_JS` in
+`src/http/pages.ts`) is a plain string constant, matching the existing `WORKFLOW_GRAPH_CLIENT_JS`
+precedent (ADR-0056: no build step, no bundled client module) rather than a compiled TypeScript
+file — `tsconfig.json` has no `"DOM"` lib entry project-wide, and adding one just for this file
+would be a second compilation concern this repo doesn't otherwise have. Both constants are exported
+so `tests/dashboard-live-client.test.ts` can evaluate the literal source that ships to the browser
+(via `happy-dom`, added as a per-file `// @vitest-environment` pragma — not the global test
+environment, so every other test keeps running under plain Node) instead of testing a
+reimplementation of it.
 
 ## Consequences
 
@@ -129,13 +178,17 @@ independent per-tab subscriptions.
   (no sequence log, no per-client cursor persistence) and is only safe because every event is
   paired with a page that can be re-fetched in full to reconcile — there is no case in this app
   where an event is the only record of something that happened.
-- `#305` ships as two stacked PRs: this one (the notification path, the SSE endpoint, degradation
-  and leak-safety at the transport level, all independently testable without a browser) and a
-  second one (client-side fragment patching, reconnect backoff, the stream-down banner, and the
-  editor/scroll-preservation test, which needs a DOM test environment this repo does not carry
-  yet). Both are required for `#305`'s acceptance criteria in full; this PR covers the "Run/Firing
-  transition pushes", "stream doesn't leak on disconnect", "idle produces no busy-loop traffic",
-  and "multiple tabs supported" criteria on the server side.
+- `#305` shipped as two stacked PRs: the first (the notification path, the SSE endpoint,
+  degradation and leak-safety at the transport level, all independently testable without a
+  browser) and this second one (the dashboard's fragment endpoints, the embedded client script,
+  reconnect-visible banner, and region-scoped-replacement test, using `happy-dom` added as a
+  per-file pragma). Together they satisfy every `#305` acceptance criterion except in-region state
+  preservation during a live patch, which has no real instance in the app until `#307` ships an
+  editor — see "The patch primitive is `replaceChildren`, not a morph" above.
+- Only the dashboard (`/`) got live updates in this slice, matching the acceptance criteria's own
+  wording ("the active band and the affected Project row"). `/runs/:id`, `/firings/:id`,
+  `/routines/:name`, and `/projects/:name` still require a manual reload to see a transition; wiring
+  those up is follow-on work, not part of `#305`'s stated scope.
 - A future mutation site that changes user-visible state but isn't one of the four instrumented
   methods will not notify anyone — same class of risk the "store emits events" option always
   carried, just narrowed to four places rather than every `RunStore` method. If a fifth chokepoint

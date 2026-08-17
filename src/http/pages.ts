@@ -227,7 +227,17 @@ export function registerPages(options: RegisterPagesOptions): void {
     });
   });
 
-  options.app.get("/", (context) => {
+  // Shared by GET / and the /fragments/* routes below (#305 part 2) so a
+  // live-update fetch renders from the exact same inputs a full page load
+  // would, not a second hand-maintained assembly. See ADR 0074.
+  function assembleDashboardData(): {
+    activeFirings: RoutineFiringStatus[];
+    activeRuns: RunStatus[];
+    lastRunByProject: ReadonlyMap<string, RunStatus>;
+    nowMs: number;
+    snapshot: StatusSnapshot | undefined;
+    watchdogByRun: Map<string, WatchdogIdleStatus>;
+  } {
     const snapshot = options.getStatusSnapshot?.();
     const activeRuns = options.runStore.listRuns({
       state: ACTIVE_NOW_RUN_STATES_LIST
@@ -242,6 +252,57 @@ export function registerPages(options: RegisterPagesOptions): void {
       getWatchdogConfig,
       nowMs
     );
+    return {
+      activeFirings,
+      activeRuns,
+      lastRunByProject: options.runStore.listLatestRunsByProject({
+        projectNames: (snapshot?.projectStates ?? []).map(
+          (project) => project.projectName
+        ),
+        states: PROJECT_LAST_RUN_STATES
+      }),
+      nowMs,
+      snapshot,
+      watchdogByRun
+    };
+  }
+
+  options.app.get("/fragments/active-band", (context) => {
+    const data = assembleDashboardData();
+    return context.html(
+      renderActiveNowBand(
+        data.activeRuns,
+        data.activeFirings,
+        data.watchdogByRun,
+        data.nowMs
+      )
+    );
+  });
+
+  options.app.get("/fragments/projects-section", (context) => {
+    const data = assembleDashboardData();
+    return context.html(
+      renderProjectsSection(
+        data.snapshot,
+        options.issuePollStatus,
+        data.activeRuns,
+        data.activeFirings,
+        data.lastRunByProject,
+        data.nowMs
+      )
+    );
+  });
+
+  options.app.get("/", (context) => {
+    const data = assembleDashboardData();
+    const {
+      activeFirings,
+      activeRuns,
+      lastRunByProject,
+      nowMs,
+      snapshot,
+      watchdogByRun
+    } = data;
     const lastTickAtMonotonic = options.getLastTickAtMonotonic?.() ?? null;
     // The banner's own reference point falls back to when the tick loop
     // started scheduling (mirroring isTickRecentEnoughForSystemdWatchdog's
@@ -263,7 +324,8 @@ export function registerPages(options: RegisterPagesOptions): void {
         `<h1 class="page-title">Dashboard</h1>`,
         renderDaemonStaleBanner(tickAgeMs, pollingIntervalMs),
         renderHeader(options.version, snapshot),
-        renderActiveNowBand(activeRuns, activeFirings, watchdogByRun, nowMs),
+        DASHBOARD_STREAM_BANNER,
+        `<div id="active-now-band">${renderActiveNowBand(activeRuns, activeFirings, watchdogByRun, nowMs)}</div>`,
         renderRoutinesSection(
           groupRoutinesByName(
             options.runStore.listRoutines({
@@ -271,20 +333,9 @@ export function registerPages(options: RegisterPagesOptions): void {
             })
           )
         ),
-        renderProjectsSection(
-          snapshot,
-          options.issuePollStatus,
-          activeRuns,
-          activeFirings,
-          options.runStore.listLatestRunsByProject({
-            projectNames: (snapshot?.projectStates ?? []).map(
-              (project) => project.projectName
-            ),
-            states: PROJECT_LAST_RUN_STATES
-          }),
-          nowMs
-        ),
-        renderStaleIssuesCard(options.issuePollStatus?.filteredIssues ?? [])
+        `<div id="projects-section">${renderProjectsSection(snapshot, options.issuePollStatus, activeRuns, activeFirings, lastRunByProject, nowMs)}</div>`,
+        renderStaleIssuesCard(options.issuePollStatus?.filteredIssues ?? []),
+        `<script>${DASHBOARD_LIVE_CLIENT_JS}</script>`
       ].join("")
     );
     return context.html(html);
@@ -671,6 +722,54 @@ export function registerPages(options: RegisterPagesOptions): void {
     return context.html(html);
   });
 }
+
+// The one primitive the "only the affected fragment is replaced" AC (#305)
+// actually needs: swap a named container's children, nothing else on the
+// page. No key-matching / focus-and-selection restore — there is no editor
+// or scrollable subregion inside active-now-band or projects-section today
+// (#307 introduces editors; that's where a preservation mechanism belongs,
+// once there's a real element to preserve). Exported so
+// tests/dashboard-live-client.test.ts can exercise the exact source the
+// browser runs, unmodified — see ADR 0074.
+export const DASHBOARD_PATCH_FRAGMENT_JS = `function patchFragment(id, html) {
+  var el = document.getElementById(id);
+  if (!el) { return; }
+  var temp = document.createElement("div");
+  temp.innerHTML = html;
+  var nodes = [];
+  for (var i = 0; i < temp.childNodes.length; i++) { nodes.push(temp.childNodes[i]); }
+  el.replaceChildren.apply(el, nodes);
+}`;
+
+const DASHBOARD_STREAM_BANNER = `<div id="live-stream-banner" class="alert" style="display:none" role="status">Live updates disconnected — showing the page as of its last load. <a href="/">Refresh</a></div>`;
+
+// EventSource reconnects on its own (fixed retry interval); this only
+// reacts to open/error to show/hide DASHBOARD_STREAM_BANNER and to
+// reconcile once per (re)connect — GET /events carries no replay, so a
+// client that was disconnected must re-fetch to catch up (ADR 0074).
+export const DASHBOARD_LIVE_CLIENT_JS = `(function () {
+  ${DASHBOARD_PATCH_FRAGMENT_JS}
+  var banner = document.getElementById("live-stream-banner");
+  function reconcile() {
+    fetch("/fragments/active-band")
+      .then(function (r) { return r.text(); })
+      .then(function (html) { patchFragment("active-now-band", html); });
+    fetch("/fragments/projects-section")
+      .then(function (r) { return r.text(); })
+      .then(function (html) { patchFragment("projects-section", html); });
+  }
+  var source = new EventSource("/events");
+  ["run-transition", "firing-transition", "project-poll"].forEach(function (kind) {
+    source.addEventListener(kind, reconcile);
+  });
+  source.addEventListener("open", function () {
+    if (banner) { banner.style.display = "none"; }
+    reconcile();
+  });
+  source.addEventListener("error", function () {
+    if (banner) { banner.style.display = ""; }
+  });
+})();`;
 
 const FONT_FACES = BUNDLED_FONTS.map(
   ({ weight, hash }) =>

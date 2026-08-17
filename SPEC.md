@@ -1763,6 +1763,16 @@ The UI is primarily read-only. It shows:
   24-hour skip counts, and discovered PR numbers
 - a per-run interactive workflow graph
 
+The dashboard (`/`) leads with an **active-now band**: every in-flight Run and Routine Firing,
+labelled by kind. Active means `queued`, `preparing_workspace`, or `running` — a `waiting` Run
+(parked for external state, such as PR review) or one in `input_required` has no provider process
+running and is not active right now, though both still appear on `/runs`. Below the band, Routines
+are grouped by their globally unique name into one row per Routine with a target-Project count
+linking to its own page (`/routines/:name`, added in a later slice); Projects split into Dispatch
+Projects (eligible/in-flight counts, last terminal-run outcome) and a visually subordinate Routine
+Hosts group, since a Routine Host is never polled and never dispatches (ADR-0062). The flat
+"recent runs" list this superseded now lives only at `/runs`. See #302.
+
 Operator pages stay server-rendered and primarily read-only, but a page may embed a
 self-contained, client-side interactive visualization to make evidence explorable — for
 example the workflow-graph view at `GET /runs/:id/graph`, which renders a run's expanded FSM

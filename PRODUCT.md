@@ -69,9 +69,10 @@ Concrete patterns this must **not** become:
    Runs. Show the real state — failed, stale, cap-reached, no-progress — plainly and
    specifically, never smoothed into a blanket green "all good." A debugging surface makes the
    failure path as first-class as the happy one.
-5. **Honest to its size.** Three pages, a handful of tables. Don't dress a small, focused tool
-   in the scaffolding of a large one. Ambition goes into precision and legibility, not into
-   inventing structure the surface doesn't have.
+5. **Honest to its size.** A small number of focused pages, each a dense table or two — an
+   active-now band, grouped Routines, grouped Projects — not a sprawling app. Don't dress a
+   small, focused tool in the scaffolding of a large one. Ambition goes into precision and
+   legibility, not into inventing structure the surface doesn't have.
 
 ## Accessibility & Inclusion
 

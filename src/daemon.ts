@@ -141,6 +141,10 @@ export async function startDaemon(
   stateRootOptions.env = env;
   const state = resolveStateRoot(stateRootOptions);
   const issuePollStatus = emptyIssuePollStatus();
+  // Updated alongside issuePollStatus on each poll tick (persistProjectPollState);
+  // left at its last-known value on a reload that fails outright, matching
+  // issuePollStatus's own precedent for that path.
+  let projectModes = new Map<string, "dispatch" | "routine_host">();
   const runStore = openRunStore({
     stateRoot: state.stateRoot
   });
@@ -492,7 +496,11 @@ export async function startDaemon(
         initialErrors: reloadStatus.errors
       });
       replaceIssuePollStatus(issuePollStatus, nextStatus);
-      await persistProjectPollState(runStore, state.configPath, nextStatus);
+      projectModes = await persistProjectPollState(
+        runStore,
+        state.configPath,
+        nextStatus
+      );
     } catch (error) {
       issuePollStatus.errors = [errorMessage(error)];
       issuePollStatus.projects = [];
@@ -961,6 +969,7 @@ export async function startDaemon(
         configDir: state.configDir,
         configPath: state.configPath,
         issuePollStatus,
+        projectModes,
         projectsByName: runtimeConfig.projectsByName(),
         reloadStatus: runtimeConfig.getStatus(),
         runStore,
@@ -1139,26 +1148,40 @@ function persistProjectPollState(
   runStore: ReturnType<typeof openRunStore>,
   configPath: string,
   status: import("./issue-polling.js").IssuePollStatus
-): Promise<void> {
-  return readProjectStateInputs(configPath, status).then((projects) => {
-    runStore.syncProjectStates(projects);
-    for (const project of status.projects) {
-      runStore.recordProjectPollOutcome({
-        candidateIssues: project.candidateIssues ?? 0,
-        error: project.error ?? null,
-        fetchedIssues: project.fetchedIssues,
-        filteredIssues: project.filteredIssues ?? 0,
-        ok: project.ok,
-        projectName: project.name
-      });
+): Promise<Map<string, "dispatch" | "routine_host">> {
+  return readProjectStateInputs(configPath, status).then(
+    ({ inputs, modes }) => {
+      runStore.syncProjectStates(inputs);
+      for (const project of status.projects) {
+        runStore.recordProjectPollOutcome({
+          candidateIssues: project.candidateIssues ?? 0,
+          error: project.error ?? null,
+          fetchedIssues: project.fetchedIssues,
+          filteredIssues: project.filteredIssues ?? 0,
+          ok: project.ok,
+          projectName: project.name
+        });
+      }
+      return modes;
     }
-  });
+  );
 }
+
+type ProjectStateInputs = {
+  inputs: SyncProjectStateInput[];
+  // Parsed straight from the raw config file, not the validated runtime
+  // config: a Project that fails validation (e.g. a Routine Host missing
+  // the tracker its own `kind: git` Routine requires, ADR 0062) never
+  // reaches the validated config, but still gets a project_states row
+  // here — and the dashboard's Dispatch/Routine Host split (#302) needs
+  // its mode to classify that row correctly even while invalid.
+  modes: Map<string, "dispatch" | "routine_host">;
+};
 
 async function readProjectStateInputs(
   configPath: string,
   status: import("./issue-polling.js").IssuePollStatus
-): Promise<SyncProjectStateInput[]> {
+): Promise<ProjectStateInputs> {
   const reports = new Map(
     status.projects.map((project) => [project.name, project])
   );
@@ -1166,16 +1189,24 @@ async function readProjectStateInputs(
   try {
     raw = parse(await readFile(configPath, "utf8")) ?? {};
   } catch {
-    return status.projects.map(projectStateInputFromReport);
+    return {
+      inputs: status.projects.map(projectStateInputFromReport),
+      modes: new Map()
+    };
   }
   if (!isRecord(raw) || !Array.isArray(raw["projects"])) {
-    return status.projects.map(projectStateInputFromReport);
+    return {
+      inputs: status.projects.map(projectStateInputFromReport),
+      modes: new Map()
+    };
   }
   const inputs: SyncProjectStateInput[] = [];
+  const modes = new Map<string, "dispatch" | "routine_host">();
   raw["projects"].forEach((project, index) => {
     if (!isRecord(project) || typeof project["name"] !== "string") {
       return;
     }
+    modes.set(project["name"], rawProjectMode(project["mode"]));
     const report = reports.get(project["name"]);
     if (report !== undefined) {
       inputs.push(projectStateInputFromReport(report));
@@ -1191,7 +1222,13 @@ async function readProjectStateInputs(
       weight: rawProjectWeight(project["weight"])
     });
   });
-  return inputs;
+  return { inputs, modes };
+}
+
+// Mirrors the schema default: an omitted or unrecognized `mode` is a
+// Dispatch Project (ADR 0062).
+function rawProjectMode(mode: unknown): "dispatch" | "routine_host" {
+  return mode === "routine_host" ? "routine_host" : "dispatch";
 }
 
 function projectStateInputFromReport(

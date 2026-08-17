@@ -56,6 +56,20 @@ function looksLikeBrowserRequest(context: Context): boolean {
   );
 }
 
+// Hostnames the daemon's own loopback bind (ADR 0075; only 127.0.0.1 is
+// wired up today) can legitimately be reached at. DNS rebinding lets an
+// attacker's page get its own hostname to resolve to 127.0.0.1 after the
+// browser's initial lookup, so Origin's host and the reflected Host header
+// end up equal to each other while both reflect the attacker's chosen
+// name — comparing Origin only to Host, with no anchor to what this
+// daemon actually is, can't detect that. Restricting to names that can't
+// be handed out by an attacker-controlled DNS answer closes that gap.
+const LOOPBACK_HOSTNAMES: ReadonlySet<string> = new Set([
+  "127.0.0.1",
+  "localhost",
+  "::1"
+]);
+
 function isSameOriginAsHost(context: Context): boolean {
   const origin = context.req.header("origin");
   if (origin === undefined) {
@@ -66,7 +80,10 @@ function isSameOriginAsHost(context: Context): boolean {
     return false;
   }
   try {
-    return new URL(origin).host === host;
+    const originUrl = new URL(origin);
+    return (
+      originUrl.host === host && LOOPBACK_HOSTNAMES.has(originUrl.hostname)
+    );
   } catch {
     return false;
   }

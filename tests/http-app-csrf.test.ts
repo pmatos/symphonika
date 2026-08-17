@@ -184,6 +184,38 @@ describe("HTTP app — mutation authentication (#306 part 1, ADR 0075)", () => {
     }
   });
 
+  it("rejects a DNS-rebound request even when Origin matches the reflected Host", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      // Simulates a successful DNS rebind: the attacker's own hostname
+      // resolves to the daemon's loopback address, so the browser's Origin
+      // and Host headers agree with each other while both name a domain
+      // the attacker controls — the same-origin check must not treat that
+      // agreement as proof the request actually came from this daemon.
+      const reboundHost = "attacker.example:4000";
+      for (const route of routesUnderTest(test)) {
+        const response = await app.request(route.path, {
+          ...route.init,
+          headers: {
+            cookie: `sym_session=${SESSION_ID}`,
+            host: reboundHost,
+            origin: `http://${reboundHost}`,
+            "x-csrf-token": VALID_TOKEN
+          }
+        });
+        expect(response.status).toBe(403);
+      }
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("rejects a same-origin browser request with Sec-Fetch-Site: cross-site", async () => {
     const test = await setup();
     try {

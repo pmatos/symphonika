@@ -919,8 +919,9 @@ export function registerPages(options: RegisterPagesOptions): void {
         detail,
         liveOwnerRunId: livePullRequestOwnerRunId({
           getActiveRuns: options.getActiveRuns,
-          runStore: options.runStore,
-          trackedRunId: detail.trackedRunId
+          issueNumber: detail.issueNumber,
+          projectName: detail.projectName,
+          runStore: options.runStore
         }),
         pollNowAvailable: options.pollNow !== undefined
       })
@@ -1004,8 +1005,9 @@ export function registerPages(options: RegisterPagesOptions): void {
         detail,
         liveOwnerRunId: livePullRequestOwnerRunId({
           getActiveRuns: options.getActiveRuns,
-          runStore: options.runStore,
-          trackedRunId: detail.trackedRunId
+          issueNumber: detail.issueNumber,
+          projectName: detail.projectName,
+          runStore: options.runStore
         }),
         pollNowAvailable: options.pollNow !== undefined
       })
@@ -1056,9 +1058,23 @@ export function registerPages(options: RegisterPagesOptions): void {
 
     const liveOwnerRunId = livePullRequestOwnerRunId({
       getActiveRuns: options.getActiveRuns,
-      runStore: options.runStore,
-      trackedRunId: detail.trackedRunId
+      issueNumber: detail.issueNumber,
+      projectName: detail.projectName,
+      runStore: options.runStore
     });
+
+    // The SHA the merge is pinned to is whatever the operator's page
+    // actually showed (submitted from the GET page's hidden field), not a
+    // fresh re-read of the snapshot -- a poll landing between page-load
+    // and the click would otherwise let this validate a commit the
+    // operator never saw. Missing/blank means the GET page had no headSha
+    // to pin either (same permissive case as before this field existed).
+    const body = await context.req.parseBody();
+    const submittedHeadSha = readOptionalFormField(body, "expected_head_sha");
+    const expectedHeadSha =
+      submittedHeadSha === undefined || submittedHeadSha === ""
+        ? undefined
+        : submittedHeadSha;
 
     let banner: PullRequestMergeBanner;
     if (liveOwnerRunId !== undefined) {
@@ -1077,9 +1093,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       };
     } else {
       const result = await options.mergePullRequest({
-        ...(detail.snapshot.headSha === null
-          ? {}
-          : { expectedHeadSha: detail.snapshot.headSha }),
+        ...(expectedHeadSha === undefined ? {} : { expectedHeadSha }),
         prNumber,
         projectName
       });
@@ -3277,45 +3291,38 @@ function findLiveRunIdForIssue(input: {
   )?.runId;
 }
 
-// #309's merge guard: a tracked PR's owning Run is known directly by id
-// (TrackedPullRequest.runId), so this checks runId membership in the same
-// live union rather than re-deriving it from (project, issueNumber) —
-// findLiveRunIdForIssue's own match shape doesn't fit a PR-keyed caller.
-function isRunIdLive(input: {
-  getActiveRuns:
-    | (() => Array<{ issueNumber: number; projectName: string; runId: string }>)
-    | undefined;
-  runId: string;
-  runStore: RunStore;
-}): boolean {
-  return collectLiveRunEntries(input).some(
-    (entry) => entry.runId === input.runId
-  );
-}
-
 // #309's merge guard/display (AC6/AC7): a tracked-but-not-live PR (its
 // owning Run already terminated) is treated the same as an untracked PR —
 // merge is offered — since AC6's rule is "no *live* Run owns the PR," not
 // "no Run has ever owned the PR." Shared by the GET route (what the merge
 // section renders) and the POST route (the actual refusal), so the button
 // an operator sees always matches what the guard will do.
+//
+// Keyed by the PR's originating issueNumber, not just
+// TrackedPullRequest.runId: a Run that re-engages an already-tracked PR
+// (a review-dispatch retry, or a merge_pr-state waiting Run) can be a
+// *different*, currently-live Run than the one that originally discovered
+// it. Checking only the original runId's liveness would read this PR as
+// unowned the moment that first Run terminates, even while a successor
+// Run for the same issue is actively working it — findLiveRunIdForIssue
+// already finds any live Run for that issue, including that successor.
 function livePullRequestOwnerRunId(input: {
   getActiveRuns:
     | (() => Array<{ issueNumber: number; projectName: string; runId: string }>)
     | undefined;
+  issueNumber: number | undefined;
+  projectName: string;
   runStore: RunStore;
-  trackedRunId: string | undefined;
 }): string | undefined {
-  if (input.trackedRunId === undefined) {
+  if (input.issueNumber === undefined) {
     return undefined;
   }
-  return isRunIdLive({
+  return findLiveRunIdForIssue({
     getActiveRuns: input.getActiveRuns,
-    runId: input.trackedRunId,
+    issueNumber: input.issueNumber,
+    projectName: input.projectName,
     runStore: input.runStore
-  })
-    ? input.trackedRunId
-    : undefined;
+  });
 }
 
 // #303's own pre-restart check (renderProjectCapacityStrip, above) inlined
@@ -3949,6 +3956,11 @@ function renderPullRequestSearchPage(input: {
 }
 
 type PullRequestDetail = {
+  // The issue this PR was originally discovered from (TrackedPullRequest,
+  // undefined when untracked) -- used to find whether ANY Run is currently
+  // live for that issue, not just the one that originally discovered the
+  // PR. See livePullRequestOwnerRunId.
+  issueNumber: number | undefined;
   prNumber: number;
   projectName: string;
   snapshot: ProjectPullRequestSnapshotRow;
@@ -3976,6 +3988,7 @@ function loadPullRequestDetail(
       (row) => row.projectName === projectName && row.prNumber === prNumber
     );
   return {
+    issueNumber: tracked?.issueNumber,
     prNumber,
     projectName,
     snapshot,
@@ -4063,6 +4076,7 @@ function renderPullRequestActionBanner(
 
 function renderPullRequestMergeSection(input: {
   csrfToken: string;
+  headSha: string | null;
   liveOwnerRunId: string | undefined;
   prNumber: number;
   projectName: string;
@@ -4071,7 +4085,16 @@ function renderPullRequestMergeSection(input: {
     return `<section><h2>Merge</h2><p class="note">${labelPill(`owned by run ${input.liveOwnerRunId}`, "progress")} Cannot be merged until that Run is cancelled.</p></section>`;
   }
   const action = `/prs/${encodeURIComponent(input.projectName)}/${input.prNumber}/merge`;
-  return `<section><h2>Merge</h2><p class="note">No live Run owns this PR — merge is available.</p><form method="post" action="${escapeHtml(action)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}"><button class="btn" type="submit">Merge</button></form></section>`;
+  // Pins the SHA to what this page actually shows, not whatever the DB
+  // holds when the merge POST lands -- a poll landing in between would
+  // otherwise let the safety check validate a commit the operator never
+  // saw. See handlePullRequestMerge, which reads this submitted value
+  // rather than re-querying the snapshot.
+  const headShaField =
+    input.headSha === null
+      ? ""
+      : `<input type="hidden" name="expected_head_sha" value="${escapeHtml(input.headSha)}">`;
+  return `<section><h2>Merge</h2><p class="note">No live Run owns this PR — merge is available.</p><form method="post" action="${escapeHtml(action)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">${headShaField}<button class="btn" type="submit">Merge</button></form></section>`;
 }
 
 function renderPullRequestLabelsSection(input: {
@@ -4132,6 +4155,7 @@ function renderPullRequestDetailPage(input: {
     ? ""
     : renderPullRequestMergeSection({
         csrfToken: input.csrfToken,
+        headSha: snapshot.headSha,
         liveOwnerRunId: input.liveOwnerRunId,
         prNumber: detail.prNumber,
         projectName: detail.projectName

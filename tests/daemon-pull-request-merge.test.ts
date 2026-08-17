@@ -95,15 +95,30 @@ async function fetchPrsCsrfToken(
 ): Promise<{
   cookie: string;
   csrfToken: string;
+  expectedHeadSha: string;
 }> {
   const response = await fetch(`${url}${prPath}`);
   const html = await response.text();
   const match = /name="csrf_token" value="([^"]*)"/.exec(html);
+  // The merge form's own hidden field, carrying whatever headSha this page
+  // actually shows -- the merge POST is expected to submit this back
+  // rather than trust a fresh DB read (ADR 0078).
+  const headShaMatch = /name="expected_head_sha" value="([^"]*)"/.exec(html);
   const setCookie = response.headers.get("set-cookie");
-  if (match?.[1] === undefined || setCookie === null) {
-    throw new Error(`could not extract csrf token/cookie from ${html}`);
+  if (
+    match?.[1] === undefined ||
+    headShaMatch?.[1] === undefined ||
+    setCookie === null
+  ) {
+    throw new Error(
+      `could not extract csrf token/head sha/cookie from ${html}`
+    );
   }
-  return { cookie: setCookie.split(";")[0] ?? "", csrfToken: match[1] };
+  return {
+    cookie: setCookie.split(";")[0] ?? "",
+    csrfToken: match[1],
+    expectedHeadSha: headShaMatch[1]
+  };
 }
 
 describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)", () => {
@@ -125,12 +140,15 @@ describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)"
     });
 
     try {
-      const { cookie, csrfToken } = await fetchPrsCsrfToken(
+      const { cookie, csrfToken, expectedHeadSha } = await fetchPrsCsrfToken(
         daemon.url,
         "/prs/symphonika/246"
       );
       const response = await fetch(`${daemon.url}/prs/symphonika/246/merge`, {
-        body: new URLSearchParams({ csrf_token: csrfToken }).toString(),
+        body: new URLSearchParams({
+          csrf_token: csrfToken,
+          expected_head_sha: expectedHeadSha
+        }).toString(),
         headers: {
           cookie,
           "content-type": "application/x-www-form-urlencoded",
@@ -194,12 +212,15 @@ describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)"
     });
 
     try {
-      const { cookie, csrfToken } = await fetchPrsCsrfToken(
+      const { cookie, csrfToken, expectedHeadSha } = await fetchPrsCsrfToken(
         daemon.url,
         "/prs/symphonika/246"
       );
       const response = await fetch(`${daemon.url}/prs/symphonika/246/merge`, {
-        body: new URLSearchParams({ csrf_token: csrfToken }).toString(),
+        body: new URLSearchParams({
+          csrf_token: csrfToken,
+          expected_head_sha: expectedHeadSha
+        }).toString(),
         headers: {
           cookie,
           "content-type": "application/x-www-form-urlencoded",

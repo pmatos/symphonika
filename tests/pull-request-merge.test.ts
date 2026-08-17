@@ -154,6 +154,11 @@ describe("Merge section visibility (#309 part 3, ADR 0078)", () => {
       ).text();
       expect(html).toContain("No live Run owns this PR");
       expect(html).toContain('action="/prs/alpha/246/merge"');
+      // The form carries the SHA this page actually shows, for the merge
+      // POST to pin against rather than re-reading the snapshot fresh.
+      expect(html).toContain(
+        '<input type="hidden" name="expected_head_sha" value="abc123">'
+      );
     } finally {
       test.cleanup();
     }
@@ -191,6 +196,63 @@ describe("Merge section visibility (#309 part 3, ADR 0078)", () => {
       ).text();
       expect(html).toContain("No live Run owns this PR");
       expect(html).toContain('action="/prs/alpha/246/merge"');
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows 'owned by run X' for a live successor Run, even though the originally-tracked Run already terminated", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "run-done-1",
+        issue: sampleIssue({ number: 9 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-done-1", "succeeded");
+      // TrackedPullRequest.runId still points at the terminated original —
+      // a re-dispatch for the same issue created a second, currently-live
+      // Run that TrackedPullRequest was never updated to reflect.
+      test.runStore.trackPullRequest({
+        branchName: "sym/alpha/9-fix",
+        headSha: "abc123",
+        issueNumber: 9,
+        prNumber: 246,
+        prUrl: "https://github.com/pmatos/symphonika/pull/246",
+        projectName: "alpha",
+        runId: "run-done-1"
+      });
+      test.runStore.createRun({
+        id: "run-successor-1",
+        issue: sampleIssue({ number: 9 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        getActiveRuns: () => [
+          {
+            cancelReason: null,
+            cancelRequested: false,
+            issueNumber: 9,
+            projectName: "alpha",
+            runId: "run-successor-1"
+          }
+        ],
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (
+        await app.request("/prs/alpha/246", { headers: browserHeaders() })
+      ).text();
+      expect(html).toContain("owned by run run-successor-1");
+      expect(html).toContain("Cannot be merged until that Run is cancelled");
+      expect(html).not.toContain('action="/prs/alpha/246/merge"');
     } finally {
       test.cleanup();
     }
@@ -262,7 +324,10 @@ describe("POST /prs/:project/:number/merge (#309 part 3)", () => {
         version: "0.1.0"
       });
       const response = await app.request("/prs/alpha/246/merge", {
-        body: formBody({ csrf_token: VALID_TOKEN }),
+        body: formBody({
+          csrf_token: VALID_TOKEN,
+          expected_head_sha: "abc123"
+        }),
         headers: {
           ...browserHeaders(),
           "content-type": "application/x-www-form-urlencoded"
@@ -284,6 +349,48 @@ describe("POST /prs/:project/:number/merge (#309 part 3)", () => {
       // button directly under a banner saying the PR is already merged.
       expect(html).not.toContain('action="/prs/alpha/246/merge"');
       expect(html).not.toContain("<h2>Merge</h2>");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("pins the merge to the SHA submitted with the form, not a fresh re-read of the snapshot", async () => {
+    const test = await setup();
+    try {
+      let received: unknown;
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        mergePullRequest: (input) => {
+          received = input;
+          return Promise.resolve({ freshState: sampleFreshState(), ok: true });
+        },
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      // A poll landing between page-load and the click updated the
+      // snapshot's headSha to "def456" -- the merge must still use what
+      // the operator's page actually showed ("abc123"), submitted via the
+      // hidden form field, not this newer DB value.
+      test.runStore.replaceProjectPullRequestSnapshots({
+        polledAt: "2026-05-22T10:05:00.000Z",
+        projectName: "alpha",
+        rows: [samplePrRow({ headSha: "def456" })]
+      });
+
+      await app.request("/prs/alpha/246/merge", {
+        body: formBody({
+          csrf_token: VALID_TOKEN,
+          expected_head_sha: "abc123"
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+
+      expect(received).toMatchObject({ expectedHeadSha: "abc123" });
     } finally {
       test.cleanup();
     }

@@ -157,18 +157,23 @@ these two known-safe internal paths, falling back to `/issues` for anything else
 value at all, preserving every existing caller's behavior). `renderPollNowForm` gained a second
 `returnTo` parameter threaded from both detail pages' own path.
 
-### The merge guard shares `#308`'s three-source liveness union, keyed by `runId` not `issueNumber`
+### The merge guard shares `#308`'s three-source liveness union, keyed by `issueNumber` not `runId`
 
-`#308`'s `findLiveRunIdForIssue` matched a live entry by `(projectName, issueNumber)`; a PR-keyed
-caller already knows the candidate `runId` directly (`TrackedPullRequest.runId`) and just needs
-membership. Rather than a second three-source read, `findLiveRunIdForIssue` was refactored to call
-a new shared `collectLiveRunEntries` (the same `getActiveRuns()` ∪ `listActiveRunIds()` ∪
-`listWaitingRunIds()` union, concatenated in priority order), and a new `isRunIdLive` filters that
-same union by `runId` membership instead of by `(project, issue)` match. `findLiveRunIdForIssue`'s
-external behavior — same priority order, same first-match — is unchanged; only its internals moved.
-`livePullRequestOwnerRunId` wraps `isRunIdLive` with the "no tracked row → never live" short
-circuit, and is called from both the `GET` route (what the Merge section renders) and the `POST`
-route (the actual refusal) so the button an operator sees always matches what the guard does.
+`#308`'s `findLiveRunIdForIssue` matched a live entry by `(projectName, issueNumber)`. An earlier
+version of this guard instead checked only `TrackedPullRequest.runId`'s own membership in the
+liveness union (via a since-removed `isRunIdLive`), reasoning that a PR-keyed caller already knows
+its candidate `runId` directly and just needs to confirm it. That reasoning missed a real case,
+caught in review: a Run that re-engages an already-tracked PR (a review-dispatch retry, or a
+`merge_pr`-state waiting Run) can be a *different*, currently-live Run than the one that originally
+discovered it — `TrackedPullRequest.runId` is never updated to point at that successor. Checking
+only the original `runId`'s liveness meant the guard read the PR as unowned the instant that first
+Run terminated, even while a live successor Run for the same issue was actively working it.
+`livePullRequestOwnerRunId` now goes through `findLiveRunIdForIssue` directly, keyed by the PR's
+originating `issueNumber` (`TrackedPullRequest.issueNumber`, not the run id) — any live Run for
+that issue is caught, original or successor, and the shared `collectLiveRunEntries` union
+(`getActiveRuns()` ∪ `listActiveRunIds()` ∪ `listWaitingRunIds()`) is unchanged. Still called from
+both the `GET` route (what the Merge section renders) and the `POST` route (the actual refusal) so
+the button an operator sees always matches what the guard does.
 
 ### A tracked-but-terminated PR is treated as mergeable, the same as an untracked one
 
@@ -196,9 +201,12 @@ PR Follow-up's automatic merge (`run-controller.ts`) reads its merge method from
 dashboard click is the operator explicitly overriding that automatic path for one specific PR, not
 a request to apply its policy; threading the policy loader into `pages.ts` would couple the manual
 override path to the exact automatic path it exists to bypass. `expectedHeadSha` is still passed
-(from the persisted snapshot's `headSha`) for the same safety property the FSM's own call has: if
-new commits landed after the operator last saw the PR, GitHub refuses the merge rather than
-merging code the operator never looked at — reported honestly via AC8.
+for the same safety property the FSM's own call has: if new commits landed after the operator last
+saw the PR, GitHub refuses the merge rather than merging code the operator never looked at —
+reported honestly via AC8. That SHA is carried through a hidden form field on the GET page rather
+than re-read from the snapshot when the `POST` lands: a poll landing between page-load and the
+click would otherwise let a fresh DB read validate a commit the operator never actually saw,
+silently defeating the guarantee this field exists for.
 
 ### Evidence is one row per attempt, written once after the attempt completes
 

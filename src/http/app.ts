@@ -74,7 +74,20 @@ export type PollNowResult = {
   state: "dispatching" | "idle";
 };
 
-type PollNowFn = () => PollNowResult | Promise<PollNowResult>;
+export type PollNowFn = () => PollNowResult | Promise<PollNowResult>;
+
+// #308 part 2's label-write action: the only mutation the triage UI performs
+// against GitHub directly (everything else in #307 writes local files). See
+// docs/adr/0077-issue-triage-and-label-writes.md.
+export type WriteIssueLabelsResult =
+  { ok: true } | { error: string; ok: false };
+
+export type WriteIssueLabelsFn = (input: {
+  add: string[];
+  issueNumber: number;
+  projectName: string;
+  remove: string[];
+}) => Promise<WriteIssueLabelsResult>;
 
 type FireRoutineRequest = {
   force: boolean;
@@ -180,6 +193,9 @@ export type HttpAppOptions = {
   sseHeartbeatMs?: number;
   startedAtMs?: number;
   stateRoot: string;
+  // #308 part 2's label-write action: adds/removes non-sym:* labels on a
+  // GitHub issue. See docs/adr/0077-issue-triage-and-label-writes.md.
+  writeIssueLabels?: WriteIssueLabelsFn;
   // #307's editors: the same reload path #305 wired to the daemon's poll
   // tick, driven synchronously by an editor save so an invalid edit (or one
   // that's schema-valid but fails reload) is reported on save, not on the
@@ -619,6 +635,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       issuePollStatus,
       monotonicNow,
       now,
+      ...(options.pollNow === undefined ? {} : { pollNow: options.pollNow }),
       ...(options.resolveWritePath === undefined
         ? {}
         : { resolveWritePath: options.resolveWritePath }),
@@ -628,7 +645,10 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.triggerReload === undefined
         ? {}
         : { triggerReload: options.triggerReload }),
-      version: options.version
+      version: options.version,
+      ...(options.writeIssueLabels === undefined
+        ? {}
+        : { writeIssueLabels: options.writeIssueLabels })
     });
   }
 

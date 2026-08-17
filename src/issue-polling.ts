@@ -619,6 +619,17 @@ export async function tryAddLabelsToIssue(
   return true;
 }
 
+export async function tryRemoveLabelsFromIssue(
+  api: GitHubIssuesApi,
+  input: GitHubIssueLabelInput
+): Promise<boolean> {
+  if (api.removeLabelsFromIssue === undefined) {
+    return false;
+  }
+  await api.removeLabelsFromIssue(input);
+  return true;
+}
+
 export async function tryGetIssue(
   api: GitHubIssuesApi,
   input: GitHubIssueRepositoryInput & { issueNumber: number }

@@ -12,6 +12,7 @@ import {
   ensureSession,
   type CsrfSecret
 } from "./csrf.js";
+import type { PollNowFn, WriteIssueLabelsFn } from "./app.js";
 import { describeIssueVerdict } from "../issues/verdict.js";
 import { setRoutineDisabled } from "../routines/declaration-editor.js";
 import { parseRoutineDeclaration } from "../routines/declaration-loader.js";
@@ -119,6 +120,9 @@ export type RegisterPagesOptions = {
   issuePollStatus?: IssuePollStatus;
   monotonicNow: () => number;
   now?: () => number;
+  // #308 part 2's "poll now" offer after a label write. See
+  // HttpAppOptions.pollNow (src/http/app.ts).
+  pollNow?: PollNowFn;
   // #307's editors: see HttpAppOptions.resolveWritePath (src/http/app.ts)
   // and src/path-safety.ts.
   resolveWritePath?: (candidatePath: string) => Promise<string | undefined>;
@@ -134,6 +138,9 @@ export type RegisterPagesOptions = {
   // #307's editors: see HttpAppOptions.triggerReload (src/http/app.ts).
   triggerReload?: () => Promise<ReloadOutcome>;
   version: string;
+  // #308 part 2's label-write action. See HttpAppOptions.writeIssueLabels
+  // (src/http/app.ts).
+  writeIssueLabels?: WriteIssueLabelsFn;
 };
 
 // Runs whose watchdog idle badge is meaningful on the active-runs list — a
@@ -598,6 +605,126 @@ export function registerPages(options: RegisterPagesOptions): void {
     );
     return context.html(html);
   });
+
+  options.app.get("/issues/:project/:number", (context) => {
+    const projectName = context.req.param("project");
+    const issueNumber = Number.parseInt(context.req.param("number"), 10);
+    const detail = loadIssueDetail(options.runStore, projectName, issueNumber);
+    if (detail === undefined) {
+      return context.html(
+        renderIssueNotFound(projectName, context.req.param("number")),
+        404
+      );
+    }
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const html = layout(
+      `#${issueNumber} ${detail.snapshot.title}`,
+      renderIssueDetailPage({
+        banner: undefined,
+        csrfToken,
+        detail,
+        pollNowAvailable: options.pollNow !== undefined
+      })
+    );
+    return context.html(html);
+  });
+
+  async function handleIssueLabelWrite(
+    context: Context,
+    projectName: string,
+    issueNumberParam: string,
+    action: "add" | "remove"
+  ): Promise<Response> {
+    const issueNumber = Number.parseInt(issueNumberParam, 10);
+    const detail = loadIssueDetail(options.runStore, projectName, issueNumber);
+    if (detail === undefined) {
+      return context.html(
+        renderIssueNotFound(projectName, issueNumberParam),
+        404
+      );
+    }
+
+    const body = (await context.req.parseBody()) as Record<string, unknown>;
+    const label = (readOptionalFormField(body, "label") ?? "").trim();
+
+    let banner: IssueLabelWriteBanner;
+    if (label.length === 0) {
+      banner = { action, label, ok: false, error: "a label is required" };
+    } else if (isOrchestratorLabel(label)) {
+      banner = {
+        action,
+        error:
+          "sym:* labels are managed by Symphonika and can't be edited here (ADR 0002/0024)",
+        label,
+        ok: false
+      };
+    } else if (options.writeIssueLabels === undefined) {
+      banner = {
+        action,
+        error: "label writes are unavailable",
+        label,
+        ok: false
+      };
+    } else {
+      const result = await options.writeIssueLabels({
+        add: action === "add" ? [label] : [],
+        issueNumber,
+        projectName,
+        remove: action === "remove" ? [label] : []
+      });
+      banner = result.ok
+        ? { action, label, ok: true }
+        : { action, error: result.error, label, ok: false };
+    }
+
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const html = layout(
+      `#${issueNumber} ${detail.snapshot.title}`,
+      renderIssueDetailPage({
+        banner,
+        csrfToken,
+        detail,
+        pollNowAvailable: options.pollNow !== undefined
+      })
+    );
+    return context.html(html);
+  }
+
+  options.app.post(
+    "/issues/:project/:number/labels/add",
+    requireAuthorizedMutation,
+    (context) =>
+      handleIssueLabelWrite(
+        context,
+        context.req.param("project"),
+        context.req.param("number"),
+        "add"
+      )
+  );
+  options.app.post(
+    "/issues/:project/:number/labels/remove",
+    requireAuthorizedMutation,
+    (context) =>
+      handleIssueLabelWrite(
+        context,
+        context.req.param("project"),
+        context.req.param("number"),
+        "remove"
+      )
+  );
+
+  options.app.post(
+    "/issues/poll-now",
+    requireAuthorizedMutation,
+    async (context) => {
+      const result = await Promise.resolve(options.pollNow?.());
+      const html = layout(
+        "Issue triage",
+        `<h1 class="page-title">Issue triage</h1><p class="note">${result === undefined ? "Poll-now trigger unavailable." : `Poll ${escapeHtml(result.kind)}.`}</p><p class="note"><a href="/issues">← Back to search</a></p>`
+      );
+      return context.html(html);
+    }
+  );
 
   options.app.get("/projects/:name", (context) => {
     const name = context.req.param("name");
@@ -1975,6 +2102,10 @@ td code { color: var(--ink-2); }
 }
 .alert strong { display: block; margin-bottom: var(--sp-1); }
 .alert ul { margin: 0; padding-left: 1.2em; }
+.alert--ok { border-color: var(--ok-ink); background: var(--ok-bg); color: var(--ok-ink); }
+.label-list { list-style: none; margin: 0 0 var(--sp-4); padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.label-list li { display: flex; align-items: center; gap: var(--sp-2); }
+.label-list form { display: inline; }
 
 .empty {
   padding: var(--sp-5);
@@ -2846,7 +2977,8 @@ function renderIssueSearchPage(input: {
         row.labels.length === 0
           ? "—"
           : row.labels.map((label) => escapeHtml(label)).join(", ");
-      return `<tr><td>${escapeHtml(row.projectName)}</td><td>#${row.issueNumber}</td><td class="c-title">${escapeHtml(row.title)}</td><td>${labelPill(row.verdict, issueVerdictFamily(row.verdict))}</td><td>${labels}</td><td>${escapeHtml(age)}${preRestart}</td></tr>`;
+      const issueLink = `/issues/${encodeURIComponent(row.projectName)}/${row.issueNumber}`;
+      return `<tr><td>${escapeHtml(row.projectName)}</td><td><a href="${escapeHtml(issueLink)}">#${row.issueNumber}</a></td><td class="c-title">${escapeHtml(row.title)}</td><td>${labelPill(row.verdict, issueVerdictFamily(row.verdict))}</td><td>${labels}</td><td>${escapeHtml(age)}${preRestart}</td></tr>`;
     })
     .join("");
   const table = tableSection(
@@ -2856,6 +2988,128 @@ function renderIssueSearchPage(input: {
     body
   );
   return `<h1 class="page-title">Issue triage</h1>${note}${filterForm}${table}`;
+}
+
+// #308 part 2: orchestrator-owned labels (ADR 0002/0024) render as read-only
+// evidence of dispatch state, never as something the triage UI can add or
+// remove — hand-editing one invites the double-dispatch / silent-block ADR
+// 0077 documents. Enforced server-side here, not just hidden client-side.
+const SYM_LABEL_PREFIX = "sym:";
+
+function isOrchestratorLabel(label: string): boolean {
+  return label.startsWith(SYM_LABEL_PREFIX);
+}
+
+type IssueDetail = {
+  claimedRunId: string | undefined;
+  issueNumber: number;
+  projectName: string;
+  snapshot: ProjectIssueSnapshotRow;
+  verdict: string;
+};
+
+function loadIssueDetail(
+  runStore: RunStore,
+  projectName: string,
+  issueNumber: number
+): IssueDetail | undefined {
+  if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+    return undefined;
+  }
+  const snapshot = runStore
+    .listProjectIssueSnapshots(projectName)
+    .find((row) => row.issueNumber === issueNumber);
+  if (snapshot === undefined) {
+    return undefined;
+  }
+  const claimedRunId = resolveClaimedRunId(
+    runStore,
+    projectName,
+    issueNumber,
+    snapshot.reasons
+  );
+  return {
+    claimedRunId,
+    issueNumber,
+    projectName,
+    snapshot,
+    verdict: describeIssueVerdict(snapshot, claimedRunId)
+  };
+}
+
+function renderIssueNotFound(projectName: string, issueNumber: string): string {
+  return layout(
+    "Issue not found",
+    `<h1 class="page-title">Issue not found</h1><p class="lede">No polled snapshot for ${escapeHtml(projectName)}#${escapeHtml(issueNumber)} — it may be closed, outside a configured Project's repo, or not yet polled. Search only reads #303's persisted snapshot, never a live GitHub lookup.</p>`
+  );
+}
+
+// #308 part 2's label-write outcome banner. A write's success or failure
+// never changes what this page shows for `labels` below it — the persisted
+// snapshot only advances on the next successful poll (AC7: "the issue's
+// displayed labels unchanged" on a failed write holds for a *successful* one
+// too, by the same read-only-snapshot design ADR 0077 documents in part 1).
+type IssueLabelWriteBanner = {
+  action: "add" | "remove";
+  error?: string;
+  label: string;
+  ok: boolean;
+};
+
+function renderIssueLabelWriteBanner(banner: IssueLabelWriteBanner): string {
+  const verb = banner.action === "add" ? "Add" : "Remove";
+  if (!banner.ok) {
+    return `<div class="alert" role="alert"><strong>${verb} label "${escapeHtml(banner.label)}" failed</strong>${banner.error === undefined ? "" : `<p>${escapeHtml(banner.error)}</p>`}<p>The labels shown below are unchanged.</p></div>`;
+  }
+  const past = banner.action === "add" ? "Added" : "Removed";
+  return `<div class="alert alert--ok" role="status"><strong>${past} label "${escapeHtml(banner.label)}" on GitHub</strong><p>This page shows the last poll snapshot; the label list below and the verdict won't reflect this until the next poll.</p></div>`;
+}
+
+function renderPollNowForm(csrfToken: string): string {
+  return `<form method="post" action="/issues/poll-now"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}"><button class="btn" type="submit">Poll now</button></form>`;
+}
+
+function renderIssueLabelsSection(input: {
+  csrfToken: string;
+  issueNumber: number;
+  labels: string[];
+  projectName: string;
+}): string {
+  const rows = input.labels.map((label) => {
+    if (isOrchestratorLabel(label)) {
+      return `<li>${labelPill(label, "neutral")} <span class="muted">managed by Symphonika — not editable here</span></li>`;
+    }
+    const removeAction = `/issues/${encodeURIComponent(input.projectName)}/${input.issueNumber}/labels/remove`;
+    return `<li>${labelPill(label, "neutral")} <form method="post" action="${escapeHtml(removeAction)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}"><input type="hidden" name="label" value="${escapeHtml(label)}"><button class="btn" type="submit">Remove</button></form></li>`;
+  });
+  const list =
+    rows.length === 0
+      ? `<p class="muted">No labels.</p>`
+      : `<ul class="label-list">${rows.join("")}</ul>`;
+  const addAction = `/issues/${encodeURIComponent(input.projectName)}/${input.issueNumber}/labels/add`;
+  const addForm = `<form method="post" action="${escapeHtml(addAction)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}"><label>Add a label<input type="text" name="label" placeholder="agent-ready" required></label> <button class="btn" type="submit">Add</button></form>`;
+  return `<section><h2>Labels</h2><p class="note"><code>sym:*</code> labels are how Symphonika tracks dispatch state (ADR 0002/0024) — removing one by hand can trigger a double dispatch or silently block an issue, so they render here but can't be edited.</p>${list}${addForm}</section>`;
+}
+
+function renderIssueDetailPage(input: {
+  banner: IssueLabelWriteBanner | undefined;
+  csrfToken: string;
+  detail: IssueDetail;
+  pollNowAvailable: boolean;
+}): string {
+  const { detail } = input;
+  const bannerHtml =
+    input.banner === undefined
+      ? ""
+      : `${renderIssueLabelWriteBanner(input.banner)}${input.banner.ok && input.pollNowAvailable ? renderPollNowForm(input.csrfToken) : ""}`;
+  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${renderIssueLabelsSection(
+    {
+      csrfToken: input.csrfToken,
+      issueNumber: detail.issueNumber,
+      labels: detail.snapshot.labels,
+      projectName: detail.projectName
+    }
+  )}<p class="note"><a href="/issues">← Back to search</a></p>`;
 }
 
 // A Routine name is globally unique across the *current* declared config

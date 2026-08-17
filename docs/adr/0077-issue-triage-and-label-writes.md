@@ -66,6 +66,52 @@ label add/remove attached. Folding them into one view would force the cross-proj
 either drag in per-Run cap/retry detail it doesn't need, or force the single-Project ops view to lose
 detail it depends on. They stay two views over overlapping data, not one.
 
+### Label writes go through a new daemon-owned `GitHubIssuesApi` seam, not a second client
+
+`writeIssueLabels` (`src/daemon.ts`, typed as `WriteIssueLabelsFn` in `src/http/app.ts`) is the only
+mutation `pages.ts` performs against GitHub directly — every other `#307`/`#308` write goes through a
+local file (`runSavePipeline`) or the Run Store. It reuses the exact `githubIssuesApi` instance the
+poll tick already holds (so a test's injected mock API governs both polling and writes, one seam, not
+two), resolves the Project's `tracker.token` via `resolveToken` (`src/lifecycle/token.ts` — a third,
+already-existing implementation of the same `$VAR → env value` lookup issue-polling.ts's own
+`resolveEnvBackedValue` and run-controller.ts's private `resolveTokenFromEnv` also carry; picked
+because it's the one already public with the simplest signature, not because the duplication itself
+is being cleaned up here — that's out of scope), and calls `tryAddLabelsToIssue` /
+`tryRemoveLabelsFromIssue` (the latter added this slice, mirroring the former's existing shape in
+`src/issue-polling.ts`) so a `GitHubIssuesApi` stub without label-write methods degrades to a named
+error instead of a `TypeError`.
+
+### `sym:*` is refused before `writeIssueLabels` is ever called, not inside it
+
+The route handler (`handleIssueLabelWrite`, `src/http/pages.ts`) checks `isOrchestratorLabel` first
+and short-circuits with a banner if the submitted label starts with `sym:` — `writeIssueLabels` is
+never invoked for a refused label, verified directly in `tests/issue-triage-labels.test.ts` via a
+call-count assertion. This is deliberately the single choke point: the daemon-side callback has no
+equivalent check of its own, on the reasoning that `pages.ts` is its only caller and duplicating the
+guard there would be exactly the kind of defensive layering with nothing to defend against that
+`#307`'s own self-review already cut once (`getProjectWorkflowPath`'s unused `format`).
+
+### A write's success or failure never changes what the page shows
+
+`#308`'s AC: "a failed GitHub write surfaces as a failure, with the issue's displayed labels
+unchanged." The label list on `/issues/:project/:number` is *always* read from the persisted
+snapshot (`runStore.listProjectIssueSnapshots`), never from an in-memory optimistic update — so this
+holds for a successful write too, not only a failed one, as a consequence of part 1's read-only-
+snapshot design rather than a special case added for this AC. The success banner says so explicitly
+("this page shows the last poll snapshot... won't reflect this until the next poll") so the operator
+isn't left wondering why the label they just added isn't visible yet.
+
+### Poll-now is a page-facing wrapper, offered not fired
+
+`/api/poll-now` (`src/http/app.ts`) already existed as a JSON API for the CLI's `poll-now` command,
+gated by `requireAuthorizedMutation` but returning `context.json(...)` — the wrong shape for a
+browser form post. `POST /issues/poll-now` (`src/http/pages.ts`) is a thin page-facing wrapper that
+calls the identical `options.pollNow` callback and renders the outcome as HTML instead. It is a
+separate form the operator submits after seeing the write-success banner, never auto-submitted by
+the label-write response itself — the AC says poll-now is *offered*, and firing it automatically
+from a write handler would blur the two actions together and make a label write silently trigger
+network activity the operator didn't ask for.
+
 ## Consequences
 
 - `project_issue_snapshots` gained a `labels` column (migrated via `ensureColumn`, like every other
@@ -75,5 +121,9 @@ detail it depends on. They stay two views over overlapping data, not one.
   every 30s poll is real write amplification for zero AC coverage. Search is title-only; this is a
   stated limit, not a silent one, alongside the page's other honest limits (open issues only, at most
   ~30s stale, scoped to configured Projects' repos).
-- This first slice is read-only: search, verdicts, snapshot-age display. Label writes and
-  clear-stale-claim land in later slices of this same ADR.
+- Part 1 (this ADR's first slice) is read-only: search, verdicts, snapshot-age display.
+- Part 2 adds label add/remove (excluding `sym:*`, enforced server-side) and a poll-now offer after a
+  write, on a new per-issue page `GET /issues/:project/:number`. Clear-stale-claim (the one `sym:*`
+  mutation the UI offers, per ADR 0038) lands in part 3, along with amending ADR-0075/ADR-0027's
+  "stale-claim reset remains CLI-only" line and SPEC.md's matching closing sentence in §14 — neither
+  is amended yet, since it stays true until part 3 actually moves stale-claim clearing into the UI.

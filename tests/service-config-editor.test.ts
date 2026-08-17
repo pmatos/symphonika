@@ -317,6 +317,43 @@ describe("service config editor (#307 part 3, ADR 0076)", () => {
     }
   });
 
+  it("confirm reports a real reload failure on disk instead of redirecting as saved", async () => {
+    const test = await setup();
+    try {
+      const app = appFor(test, {
+        triggerReload: () =>
+          Promise.resolve({ errors: ["projects: required"], ok: false })
+      });
+      const editedContent = validConfig().replace(
+        "interval_ms: 1000",
+        "interval_ms: 2000"
+      );
+      const response = await app.request("/config/edit/confirm", {
+        body: formBody({
+          content: editedContent,
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: contentHash(validConfig())
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        redirect: "manual"
+      });
+      // The write already landed (runSavePipeline writes before reload
+      // runs) — the fix under test is that a failed reload no longer
+      // redirects as if nothing were wrong.
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain("Saved, but not active");
+      expect(html).toContain("projects: required");
+      expect(await readFile(test.configPath, "utf8")).toBe(editedContent);
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("confirm refuses a stale write and does not touch the file", async () => {
     const test = await setup();
     try {

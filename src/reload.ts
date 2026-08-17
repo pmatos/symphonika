@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -498,11 +499,16 @@ export async function validateServiceConfigContent(
   configPath: string
 ): Promise<{ errors: string[] }> {
   const configDir = path.dirname(configPath);
+  // pid + millisecond timestamp alone can collide: two concurrent preview
+  // requests would write the identical temp path and could each see a mix
+  // of the other's content, or have their `finally` cleanup race and
+  // delete the file out from under the other's read. The random suffix
+  // plus exclusive-create makes that an EEXIST retry instead.
   const tempPath = path.join(
     configDir,
-    `.${path.basename(configPath)}.editor-validate-${process.pid}-${Date.now()}`
+    `.${path.basename(configPath)}.editor-validate-${process.pid}-${Date.now()}-${randomBytes(6).toString("hex")}`
   );
-  await writeFile(tempPath, content, "utf8");
+  await writeFile(tempPath, content, { encoding: "utf8", flag: "wx" });
   try {
     const result = await loadRuntimeConfigSnapshot({
       attemptedAt: new Date().toISOString(),

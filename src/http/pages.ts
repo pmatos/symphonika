@@ -1041,6 +1041,23 @@ export function registerPages(options: RegisterPagesOptions): void {
       });
 
       if (result.kind === "saved") {
+        // The pipeline writes before reload runs, so "saved" alone doesn't
+        // mean the new config took effect — redirecting to the dashboard
+        // here regardless would read as success even when reload rejected
+        // it and the last-known-good config is still live.
+        if (!result.reload.ok) {
+          return context.html(
+            layout(
+              "Saved but not active: service config",
+              renderReloadFailedNotice({
+                editAction: "/config/edit",
+                errors: result.reload.errors,
+                filePath: configPath
+              })
+            ),
+            200
+          );
+        }
         return context.redirect("/?saved=1", 303);
       }
       if (result.kind === "invalid") {

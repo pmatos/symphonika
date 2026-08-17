@@ -9,7 +9,7 @@ const execFileAsync = promisify(execFile);
 // staged/unstaged status independent of the rest of the working tree
 // (dirty alone can't distinguish "this file is clean but something else
 // isn't" from "this file itself has uncommitted changes").
-export type GitFileStatus =
+type GitFileStatus =
   | "clean"
   | "modified_staged"
   | "modified_staged_and_unstaged"

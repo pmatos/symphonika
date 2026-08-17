@@ -49,18 +49,18 @@
     "@stryker-mutator/core": "^9.6.1",
     "@stryker-mutator/typescript-checker": "^9.6.1",
     "@stryker-mutator/vitest-runner": "^9.6.1",
-    "@types/node": "^26.1.2",
+    "@types/node": "^26.2.0",
     "@types/nodemailer": "^8.0.1",
     "@typescript/native": "npm:typescript@^7.0.2",
     "@vitest/coverage-v8": "^4.1.10",
-    "eslint": "^10.8.0",
+    "eslint": "^10.8.1",
     "eslint-config-prettier": "^10.1.8",
     "fast-check": "^4.9.0",
-    "knip": "^6.32.0",
+    "knip": "^6.32.2",
     "prettier": "^3.9.6",
-    "tsx": "^4.23.10",
+    "tsx": "^4.23.12",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-eslint": "^8.66.0",
+    "typescript-eslint": "^8.67.0",
     "vitest": "^4.1.5"
   }
 }

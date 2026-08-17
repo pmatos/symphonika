@@ -540,6 +540,78 @@ export function registerPages(options: RegisterPagesOptions): void {
     );
     return context.html(html);
   });
+
+  options.app.get("/routines/:name", (context) => {
+    const name = context.req.param("name");
+    const projectParam = context.req.query("project");
+    const groups = groupRoutinesByName(
+      options.runStore.listRoutines({ includeInactive: true })
+    ).filter((group) => group.name === name);
+
+    if (groups.length === 0) {
+      return context.html(
+        layout(
+          "Routine not found",
+          `<h1 class="page-title">Routine not found</h1><p class="lede">Routine <code>${escapeHtml(name)}</code> was not found.</p>`
+        ),
+        404
+      );
+    }
+
+    let group: RoutineGroup | undefined;
+    if (projectParam !== undefined) {
+      group = groups.find((candidate) =>
+        candidate.targets.some((target) => target.projectName === projectParam)
+      );
+      if (group === undefined) {
+        return context.html(
+          layout(
+            "Routine target not found",
+            `<h1 class="page-title">Routine target not found</h1><p class="lede">Routine <code>${escapeHtml(name)}</code> has no target in Project <code>${escapeHtml(projectParam)}</code>.</p>`
+          ),
+          404
+        );
+      }
+    } else if (groups.length === 1) {
+      group = groups[0];
+    }
+    if (group === undefined) {
+      return context.html(
+        layout(name, renderRoutineDisambiguation(name, groups))
+      );
+    }
+
+    const declaration = resolveRoutineDeclaration(options.runStore, group);
+    const groupProjectNames = new Set(
+      group.targets.map((target) => target.projectName)
+    );
+    // Scoped to this group's own targets: a stale, soft-disabled
+    // declaration that reused this name for a different Project (the same
+    // "stale name reuse" case groupRoutinesByName documents) has its own,
+    // unrelated firing history that must not bleed into this one.
+    const firings = options.runStore
+      .listRoutineFirings({ routineName: name })
+      .filter((firing) => groupProjectNames.has(firing.projectName));
+    // invalidRoutines carries no error text of its own (see reload.ts) —
+    // the reload error lives only in the flat, process-lifetime
+    // reload.errors list, so this is a best-effort match on the routine's
+    // own name rather than a guaranteed per-routine correlation.
+    const reloadErrors = (
+      options.getStatusSnapshot?.()?.reload.errors ?? []
+    ).filter((error) => error.includes(name));
+
+    const html = layout(
+      name,
+      [
+        `<h1 class="page-title">${escapeHtml(name)}</h1>`,
+        renderRoutineDeclarationCard(declaration, reloadErrors),
+        renderRoutineTargetsTable(group),
+        renderRoutineFiringHistory(firings),
+        `<p class="note">Enable/disable and manual-fire controls land with #306's write-surface plumbing — this page is read-only until then.</p>`
+      ].join("")
+    );
+    return context.html(html);
+  });
 }
 
 const FONT_FACES = BUNDLED_FONTS.map(
@@ -1558,11 +1630,18 @@ function groupRoutinesByName(routines: RoutineStatus[]): RoutineGroup[] {
   return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function formatRoutineSchedule(group: RoutineGroup): string {
-  if (group.scheduleCron !== null) {
-    return `${group.scheduleCron} (${group.scheduleTz ?? "UTC"})`;
+// Widened past RoutineGroup so #304's declaration card can format a
+// specific resolved target's schedule (see resolveRoutineDeclaration)
+// without a duplicate copy of this two-line rule.
+function formatRoutineSchedule(schedule: {
+  scheduleAt: string | null;
+  scheduleCron: string | null;
+  scheduleTz: string | null;
+}): string {
+  if (schedule.scheduleCron !== null) {
+    return `${schedule.scheduleCron} (${schedule.scheduleTz ?? "UTC"})`;
   }
-  return group.scheduleAt ?? "-";
+  return schedule.scheduleAt ?? "-";
 }
 
 // A group with no active target shows its shared lifecycle state (plus
@@ -1607,6 +1686,194 @@ function renderRoutinesSection(groups: RoutineGroup[]): string {
     "Routines",
     groups.length,
     "<tr><th>Routine</th><th>Kind</th><th>Schedule</th><th>Targets</th><th>Next fire</th></tr>",
+    rows
+  );
+}
+
+// More than one distinct (name, sourcePath) declaration currently shares
+// this name — the same stale-name-reuse case groupRoutinesByName's own
+// comment documents. Rather than guess which one the caller meant, list
+// them and let ?project=<name> pick one, mirroring the disambiguation
+// contract GET /api/routines/:id/firings already exposes via its own
+// ?project= parameter.
+function renderRoutineDisambiguation(
+  name: string,
+  groups: RoutineGroup[]
+): string {
+  const items = groups
+    .map((group) => {
+      const [representative] = group.targets;
+      const sourcePath =
+        representative === undefined ? "-" : representative.sourcePath;
+      const targetLinks = group.targets
+        .map(
+          (target) =>
+            `<a href="/routines/${encodeURIComponent(name)}?project=${encodeURIComponent(target.projectName)}">${escapeHtml(target.projectName)}</a>`
+        )
+        .join(", ");
+      return `<li><code>${escapeHtml(sourcePath)}</code> — targets: ${targetLinks}</li>`;
+    })
+    .join("");
+  return `<h1 class="page-title">${escapeHtml(name)}</h1><section><div class="empty"><strong>Multiple declarations share this name</strong>An earlier declaration was likely removed from config and a later one reused the name for a different target. Pick a target Project to disambiguate:<ul>${items}</ul></div></section>`;
+}
+
+type RoutineDeclarationView = {
+  allowOverlap: boolean;
+  catchUp: string;
+  invalid: boolean;
+  kind: RoutineKind;
+  prompt: string | null;
+  provider: string | null;
+  scheduleAt: string | null;
+  scheduleCron: string | null;
+  scheduleTz: string | null;
+  sourcePath: string;
+};
+
+// The declaration (prompt, kind, provider, schedule, allowOverlap,
+// catchUp, sourcePath) is materialized identically on every target row for
+// the same (name, sourcePath) group (ADR 0069), so any one *valid* target
+// carries the full declaration. 'invalid' targets are placeholder stubs
+// (upsertInvalidRoutineStub writes prompt_body/schedule_at as '') and are
+// tried last, so one target's reload failure doesn't blank out a sibling
+// target's real schedule/prompt — the #304 AC: "an invalid declaration
+// shows the reload error without losing sibling schedule state." Only when
+// every target is invalid or inactive does this fall back to the group's
+// own bare fields, with prompt unavailable.
+function resolveRoutineDeclaration(
+  runStore: RunStore,
+  group: RoutineGroup
+): RoutineDeclarationView {
+  const ordered = [
+    ...group.targets.filter((target) => target.state !== "invalid"),
+    ...group.targets.filter((target) => target.state === "invalid")
+  ];
+  for (const target of ordered) {
+    const detail = runStore.getRoutine({
+      name: target.name,
+      projectName: target.projectName
+    });
+    if (detail !== undefined) {
+      return {
+        allowOverlap: detail.allowOverlap,
+        catchUp: detail.catchUp,
+        invalid: target.state === "invalid",
+        kind: detail.kind,
+        prompt: detail.prompt === "" ? null : detail.prompt,
+        provider: detail.provider,
+        scheduleAt: detail.scheduleAt,
+        scheduleCron: detail.scheduleCron,
+        scheduleTz: detail.scheduleTz,
+        sourcePath: detail.sourcePath
+      };
+    }
+  }
+  const [representative] = group.targets;
+  return {
+    allowOverlap: representative?.allowOverlap ?? false,
+    catchUp: representative?.catchUp ?? "skip",
+    invalid: representative?.state === "invalid",
+    kind: group.kind,
+    prompt: null,
+    provider: representative?.provider ?? null,
+    scheduleAt: representative?.scheduleAt ?? null,
+    scheduleCron: representative?.scheduleCron ?? null,
+    scheduleTz: representative?.scheduleTz ?? null,
+    sourcePath: representative?.sourcePath ?? "-"
+  };
+}
+
+function renderRoutineDeclarationCard(
+  declaration: RoutineDeclarationView,
+  reloadErrors: string[]
+): string {
+  const errorBanner =
+    !declaration.invalid || reloadErrors.length === 0
+      ? ""
+      : `<div class="alert" role="alert"><strong>Reload error</strong><ul>${reloadErrors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div>`;
+  const promptSection =
+    declaration.prompt === null
+      ? `<div class="empty"><strong>Prompt unavailable</strong>${declaration.invalid ? "This declaration failed to reload." : "Every target for this declaration is inactive — the prompt body is not retained once a declaration has no live target."}</div>`
+      : `<div class="msg">${escapeHtml(declaration.prompt)}</div>`;
+  return `${errorBanner}<section><dl class="fields">
+  <dt>Kind</dt><dd>${escapeHtml(declaration.kind)}</dd>
+  <dt>Provider</dt><dd>${declaration.provider === null ? '<span class="muted">inherited</span>' : escapeHtml(declaration.provider)}</dd>
+  <dt>Schedule</dt><dd><code>${escapeHtml(formatRoutineSchedule(declaration))}</code></dd>
+  <dt>Allow overlap</dt><dd>${declaration.allowOverlap ? "yes" : "no"}</dd>
+  <dt>Catch up</dt><dd>${escapeHtml(declaration.catchUp)}</dd>
+  <dt>Source</dt><dd><code>${escapeHtml(declaration.sourcePath)}</code></dd>
+</dl></section><section>${sectionHead("Prompt")}${promptSection}</section>`;
+}
+
+function renderRoutineTargetsTable(group: RoutineGroup): string {
+  const rows = group.targets
+    .map((target) => {
+      const reason =
+        target.disabledReason === null
+          ? ""
+          : ` <span class="muted">(${escapeHtml(target.disabledReason)})</span>`;
+      const skip =
+        target.lastSkipReason === null
+          ? '<span class="muted">none</span>'
+          : `${escapeHtml(target.lastSkipReason)} <code>${escapeHtml(target.lastSkipAt ?? "-")}</code>`;
+      const counts = `overlap ${target.skipCounts24h.overlap} · cap ${target.skipCounts24h.concurrency_cap} · catch-up ${target.skipCounts24h.catch_up_window}`;
+      return `<tr><td>${escapeHtml(target.projectName)}</td><td>${routineStatePill(target.state)}${reason}</td><td><code>${escapeHtml(target.nextFireAt ?? "-")}</code></td><td><code>${escapeHtml(target.lastFiredAt ?? "-")}</code></td><td class="c-detail">${skip}</td><td class="c-detail">${counts}</td></tr>`;
+    })
+    .join("");
+  return tableSection(
+    "Targets",
+    group.targets.length,
+    "<tr><th>Project</th><th>State</th><th>Next fire</th><th>Last fired</th><th>Last skip</th><th>Skips (24h)</th></tr>",
+    rows
+  );
+}
+
+// Sibling firings admitted by one clock event share a fanoutId (ADR 0069);
+// a manually triggered or pre-fan-out firing has none and stands alone.
+// Grouping (rather than a flat newest-first list) is what makes an N-target
+// event read as one event instead of N unrelated rows — the #304 AC.
+function renderRoutineFiringHistory(firings: RoutineFiringStatus[]): string {
+  if (firings.length === 0) {
+    return `<section>${sectionHead("Firing history", 0)}<div class="empty"><strong>No firings yet</strong>This Routine has not fired for any of its current targets.</div></section>`;
+  }
+  const groups = new Map<string, RoutineFiringStatus[]>();
+  for (const firing of firings) {
+    const key = firing.fanoutId ?? firing.id;
+    const members = groups.get(key);
+    if (members === undefined) {
+      groups.set(key, [firing]);
+    } else {
+      members.push(firing);
+    }
+  }
+  // firings arrives ordered `created_at desc, id desc` (listRoutineFirings),
+  // so each group's first-seen member is already its newest — this sort is
+  // a defensive restatement of that invariant, not a correctness dependency
+  // on Map insertion order.
+  const ordered = [...groups.values()].sort((a, b) => {
+    const left = a[0];
+    const right = b[0];
+    if (left === undefined || right === undefined) {
+      return 0;
+    }
+    return right.createdAt.localeCompare(left.createdAt);
+  });
+  const rows = ordered
+    .flatMap((members) => {
+      const eventLabel =
+        members.length > 1 ? `fan-out · ${members.length} targets` : "single";
+      return [...members]
+        .sort((a, b) => a.projectName.localeCompare(b.projectName))
+        .map(
+          (firing) =>
+            `<tr><td class="c-detail">${escapeHtml(eventLabel)}</td><td><a href="/firings/${encodeURIComponent(firing.id)}"><code>${escapeHtml(firing.id)}</code></a></td><td>${escapeHtml(firing.projectName)}</td><td>${statePill(firing.state)}</td><td class="c-detail">${escapeHtml(firing.terminalReason ?? "")}</td><td><code>${escapeHtml(firing.createdAt)}</code></td></tr>`
+        );
+    })
+    .join("");
+  return tableSection(
+    "Firing history",
+    firings.length,
+    "<tr><th>Event</th><th>Firing</th><th>Project</th><th>State</th><th>Terminal reason</th><th>Created</th></tr>",
     rows
   );
 }

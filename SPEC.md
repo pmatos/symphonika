@@ -1768,7 +1768,7 @@ labelled by kind. Active means `queued`, `preparing_workspace`, or `running` —
 (parked for external state, such as PR review) or one in `input_required` has no provider process
 running and is not active right now, though both still appear on `/runs`. Below the band, Routines
 are grouped by their globally unique name into one row per Routine with a target-Project count
-linking to its own page (`/routines/:name`, added in a later slice); Projects split into Dispatch
+linking to its own page (`/routines/:name`, detailed below); Projects split into Dispatch
 Projects (eligible/in-flight counts, last terminal-run outcome) and a visually subordinate Routine
 Hosts group, since a Routine Host is never polled and never dispatches (ADR-0062). The flat
 "recent runs" list this superseded now lives only at `/runs`. See #302.
@@ -1788,6 +1788,22 @@ issue with neither a Run nor a snapshot row does not appear. Below the table, a 
 block lists every Firing that has targeted this Project. A Routine Host's page skips the capacity
 strip's poll/cap fields (a Host is never polled) and the issue table entirely, showing only the
 Routine Firings block and an explanation. See #303, ADR-0073.
+
+Each Routine's target-count link resolves to `GET /routines/:name`: its declaration (kind,
+provider, schedule, `allowOverlap`, `catchUp`, source path, prompt body), one row per target
+Project with that target's own state, `next_fire_at`, `disabled_reason`, last-fired/last-skip
+evidence, and rolling 24-hour skip counts per ADR-0058, and the firing history across every current
+target, newest first. Sibling firings admitted by one clock event share a `fanoutId` (ADR-0069) and
+render grouped as one event rather than N unrelated rows; a firing with no `fanoutId` (manual or
+pre-fan-out) stands alone. Because a Routine name is unique only among currently-declared
+targets — a removed declaration's row is soft-disabled, never deleted, and a later, unrelated
+declaration may reuse its name for a different target — a bare `/routines/:name` that matches more
+than one distinct declaration renders a disambiguation list instead of guessing; `?project=<name>`
+resolves it, mirroring the same query parameter `GET /api/routines/:id/firings` already exposes for
+this purpose. An `invalid` target's declaration never displaces a valid sibling's real prompt or
+schedule — `resolveRoutineDeclaration` tries every non-invalid target first — and any reload error
+mentioning the Routine's name is shown alongside it. Enable/disable and manual-fire controls are
+deferred to #306's write-surface plumbing; this page is read-only until then. See #304.
 
 Operator pages stay server-rendered and primarily read-only, but a page may embed a
 self-contained, client-side interactive visualization to make evidence explorable — for

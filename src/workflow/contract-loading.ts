@@ -3,6 +3,7 @@ import { parse } from "yaml";
 
 import { contentHash } from "../content-hash.js";
 import type { WorkflowFormat } from "../config-schemas.js";
+import { locatedYamlErrorMessage } from "../yaml-errors.js";
 import { validatePromptTemplateExpressions } from "./autonomous-prompt.js";
 
 export type WorkflowContract = {
@@ -279,8 +280,11 @@ function parseFrontMatter(
   try {
     parsed = parse(source) ?? {};
   } catch (error) {
+    // source is lines.slice(1, closingLine).join("\n") -- its own line 1 is
+    // the workflow file's line 2 (line 1 is the opening ---), hence the +1
+    // offset so a located error points at the real file line.
     errors.push(
-      `workflow front matter at ${workflowPath} could not be parsed: ${errorMessage(error)}`
+      `workflow front matter at ${workflowPath} could not be parsed: ${locatedYamlErrorMessage(error, 1)}`
     );
     return undefined;
   }
@@ -289,10 +293,6 @@ function parseFrontMatter(
     return undefined;
   }
   return parsed;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function stringProperty(

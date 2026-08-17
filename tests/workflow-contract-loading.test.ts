@@ -151,6 +151,18 @@ describe("workflow contract loading", () => {
       `workflow front matter at ${workflowPath} evidence.ignore must be a list`
     );
   });
+
+  it("locates a YAML syntax error in the front matter with the real file line (#307, ADR 0076)", () => {
+    const workflowPath = "/repo/WORKFLOW.md";
+    const workflow = parseWorkflowContract(
+      ["---", "evidence: [unterminated", "---", "Body.", ""].join("\n"),
+      workflowPath
+    );
+
+    // The broken flow sequence is on the front matter's own line 1, which
+    // is line 2 of the workflow file (line 1 is the opening ---).
+    expect(workflow.errors[0]).toMatch(/\(line 2, column \d+\)/);
+  });
 });
 
 describe("workflow format routing", () => {

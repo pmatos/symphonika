@@ -10,6 +10,7 @@ import {
   createCsrfSecret,
   type CsrfSecret
 } from "./csrf.js";
+import type { WorkflowFormat } from "../config-schemas.js";
 import type {
   IssuePollStatus,
   ProjectIssuePollReport
@@ -141,6 +142,15 @@ export type HttpAppOptions = {
   getPullRequestFollowupPolicy?: () => {
     maxReviewDispatchesPerPr: number;
   };
+  // #307's workflow-contract editor: a Dispatch Project's current resolved
+  // workflow path and configured format, or undefined for a Routine Host
+  // (no workflow) or an unknown Project name. format is the project's own
+  // resolved WorkflowFormat (config-schemas.ts) -- required so the editor
+  // validates a save against the same format reload would actually use,
+  // not always the file-extension guess (fsm-expansion.ts's "auto").
+  getProjectWorkflowPath?: (
+    projectName: string
+  ) => { format: WorkflowFormat; path: string } | undefined;
   getRuns?: () => RunStatus[];
   getReloadStatus?: () => RuntimeReloadStatus;
   getScheduled?: () => ScheduledCallback[];
@@ -579,6 +589,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         : {
             getPullRequestFollowupPolicy: options.getPullRequestFollowupPolicy
           }),
+      ...(options.getProjectWorkflowPath === undefined
+        ? {}
+        : { getProjectWorkflowPath: options.getProjectWorkflowPath }),
       ...(options.getStatusSnapshot === undefined
         ? {}
         : { getStatusSnapshot: options.getStatusSnapshot }),

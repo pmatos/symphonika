@@ -1899,7 +1899,19 @@ own line/column (`locatedYamlErrorMessage`, `src/yaml-errors.ts`); a semantic va
 missing or malformed field) has no parser position to report and is shown as plain text. The
 schedule and next-fire-time effect of a saved edit lands on the next dispatch tick, same as any
 other config reload — the page shows whatever the store's current row holds on next visit, not a
-synthetic post-save preview.
+synthetic post-save preview. The editor states which Routine Targets a save affects and their
+current next-fire time before the operator commits.
+
+`GET /projects/:name/workflow/edit` follows the identical two-step shape for a Dispatch Project's
+workflow contract (a Routine Host has no workflow and gets no edit link). Validation
+(`validateWorkflowContractContent`, `src/workflow/fsm-expansion.ts`) dispatches on the file's own
+format the same way reload's `readWorkflowSnapshot` does — a raw-FSM YAML contract (which can
+legitimately open with `---`, a bare YAML document marker) is validated as raw FSM, not
+misinterpreted as unterminated Markdown front matter, closing a gap in `#306`'s save-pipeline
+wiring that had no real caller to exercise it until now. The editor states explicitly that a save
+affects the Project's *next* dispatch only — an in-flight Run keeps the workflow graph it started
+with (ADR-0045's per-Run persisted expanded graph), which the issue text calls out as the direction
+an operator would otherwise reasonably assume wrong.
 
 `detectGitFileState` (`src/http/git-status.ts`, ADR-0075) gives a future editor the git context the
 issue requires before a save: whether the target path sits inside a git repo, its repo root and

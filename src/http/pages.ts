@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { Hono, type MiddlewareHandler } from "hono";
 
 import { contentHash } from "../content-hash.js";
+import type { WorkflowFormat } from "../config-schemas.js";
 import {
   checkMutationAuthorized,
   CSRF_FIELD_NAME,
@@ -11,6 +12,7 @@ import {
   type CsrfSecret
 } from "./csrf.js";
 import { parseRoutineDeclaration } from "../routines/declaration-loader.js";
+import { validateWorkflowContractContent } from "../workflow/fsm-expansion.js";
 import { runSavePipeline, type ReloadOutcome } from "./save-pipeline.js";
 import {
   DEFAULT_POLLING_INTERVAL_MS,
@@ -91,6 +93,13 @@ export type RegisterPagesOptions = {
   getPullRequestFollowupPolicy?: () => {
     maxReviewDispatchesPerPr: number;
   };
+  // #307's workflow-contract editor: a Dispatch Project's current resolved
+  // workflow path and configured format, or undefined for a Routine Host
+  // (no workflow) or an unknown Project name. See
+  // HttpAppOptions.getProjectWorkflowPath (src/http/app.ts).
+  getProjectWorkflowPath?: (
+    projectName: string
+  ) => { format: WorkflowFormat; path: string } | undefined;
   // #303's "retry ETA" detail for a waiting Run.
   getScheduled?: () => ScheduledCallback[];
   getStatusSnapshot?: () => StatusSnapshot;
@@ -638,11 +647,219 @@ export function registerPages(options: RegisterPagesOptions): void {
         ),
         renderProjectIssuesTable(issueRows),
         renderProjectFiringsBlock(firings),
+        options.getProjectWorkflowPath?.(name) === undefined
+          ? ""
+          : `<p class="note"><a href="/projects/${encodeURIComponent(name)}/workflow/edit">Edit workflow →</a></p>`,
         `<p class="note"><a href="/runs?project=${encodeURIComponent(name)}">Recent runs →</a></p>`
       ].join("")
     );
     return context.html(html);
   });
+
+  options.app.get("/projects/:name/workflow/edit", async (context) => {
+    const name = context.req.param("name");
+    const workflow = options.getProjectWorkflowPath?.(name);
+    if (workflow === undefined) {
+      return context.html(
+        layout(
+          "Project has no workflow to edit",
+          `<h1 class="page-title">Project has no workflow to edit</h1><p class="lede">Project <code>${escapeHtml(name)}</code> was not found, or is a Routine Host with no workflow contract.</p>`
+        ),
+        404
+      );
+    }
+
+    let content: string;
+    try {
+      content = await readFile(workflow.path, "utf8");
+    } catch (error) {
+      return context.html(
+        layout(
+          "Workflow contract unreadable",
+          `<h1 class="page-title">Workflow contract unreadable</h1><p class="lede">${escapeHtml(workflow.path)}: ${escapeHtml(errorMessage(error))}</p>`
+        ),
+        404
+      );
+    }
+
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const html = layout(
+      `Edit ${name} workflow`,
+      renderEditorForm({
+        action: `/projects/${encodeURIComponent(name)}/workflow/edit/preview`,
+        blastRadiusHtml: renderWorkflowEditBlastRadius(name),
+        content,
+        contentHash: contentHash(content),
+        csrfToken,
+        name: `${name} workflow`,
+        projectParam: undefined
+      })
+    );
+    return context.html(html);
+  });
+
+  options.app.post(
+    "/projects/:name/workflow/edit/preview",
+    requireAuthorizedMutation,
+    async (context) => {
+      const name = context.req.param("name");
+      const workflow = options.getProjectWorkflowPath?.(name);
+      if (workflow === undefined) {
+        return context.html(
+          layout(
+            "Project has no workflow to edit",
+            `<h1 class="page-title">Project has no workflow to edit</h1>`
+          ),
+          404
+        );
+      }
+      const body = await context.req.parseBody();
+      const content = readRequiredFormField(body, "content");
+      const expectedContentHash = readRequiredFormField(
+        body,
+        "expected_content_hash"
+      );
+      const validation = await validateWorkflowContractContent(
+        content,
+        workflow.path,
+        workflow.format
+      );
+      const onDisk = await readFile(workflow.path, "utf8").catch(() => null);
+
+      const csrfToken = csrfTokenFor(
+        options.csrfSecret,
+        ensureSession(context)
+      );
+      const html = layout(
+        `Confirm changes to ${name} workflow`,
+        renderEditorPreview({
+          confirmAction: `/projects/${encodeURIComponent(name)}/workflow/edit/confirm`,
+          content,
+          csrfToken,
+          errors: validation.errors,
+          expectedContentHash,
+          name: `${name} workflow`,
+          onDisk,
+          projectParam: undefined,
+          reviewAction: `/projects/${encodeURIComponent(name)}/workflow/edit`
+        })
+      );
+      return context.html(html);
+    }
+  );
+
+  options.app.post(
+    "/projects/:name/workflow/edit/confirm",
+    requireAuthorizedMutation,
+    async (context) => {
+      const name = context.req.param("name");
+      const workflow = options.getProjectWorkflowPath?.(name);
+      if (workflow === undefined) {
+        return context.html(
+          layout(
+            "Project has no workflow to edit",
+            `<h1 class="page-title">Project has no workflow to edit</h1>`
+          ),
+          404
+        );
+      }
+      const body = await context.req.parseBody();
+      const content = readRequiredFormField(body, "content");
+      const expectedContentHash = readRequiredFormField(
+        body,
+        "expected_content_hash"
+      );
+      const resolvedPath =
+        options.resolveWritePath === undefined
+          ? workflow.path
+          : await options.resolveWritePath(workflow.path);
+      if (resolvedPath === undefined) {
+        return context.html(
+          layout(
+            "Save refused",
+            `<h1 class="page-title">Save refused</h1><p class="lede">${escapeHtml(workflow.path)} is not a path the current configuration references.</p>`
+          ),
+          403
+        );
+      }
+
+      const result = await runSavePipeline({
+        content,
+        expectedContentHash,
+        filePath: resolvedPath,
+        kind: "workflow_contract",
+        reload:
+          options.triggerReload ??
+          (() => Promise.resolve({ errors: [], ok: true })),
+        workflowFormat: workflow.format
+      });
+
+      const projectPath = `/projects/${encodeURIComponent(name)}`;
+      if (result.kind === "saved") {
+        // The pipeline writes before reload runs, so "saved" alone doesn't
+        // mean the new contract took effect — redirecting to the project
+        // page here regardless would read as success even when reload
+        // rejected it and the last-known-good workflow is still live.
+        if (!result.reload.ok) {
+          return context.html(
+            layout(
+              `Saved but not active: ${name} workflow`,
+              renderReloadFailedNotice({
+                editAction: `/projects/${encodeURIComponent(name)}/workflow/edit`,
+                errors: result.reload.errors,
+                filePath: workflow.path
+              })
+            ),
+            200
+          );
+        }
+        return context.redirect(`${projectPath}?saved=1`, 303);
+      }
+      if (result.kind === "invalid") {
+        const csrfToken = csrfTokenFor(
+          options.csrfSecret,
+          ensureSession(context)
+        );
+        return context.html(
+          layout(
+            `Confirm changes to ${name} workflow`,
+            renderEditorPreview({
+              confirmAction: `/projects/${encodeURIComponent(name)}/workflow/edit/confirm`,
+              content,
+              csrfToken,
+              errors: result.errors,
+              expectedContentHash,
+              name: `${name} workflow`,
+              onDisk: await readFile(workflow.path, "utf8").catch(() => null),
+              projectParam: undefined,
+              reviewAction: `/projects/${encodeURIComponent(name)}/workflow/edit`
+            })
+          ),
+          422
+        );
+      }
+      if (result.kind === "stale") {
+        return context.html(
+          layout(
+            "Save refused: changed on disk",
+            renderStaleSaveNotice({
+              currentContent: result.currentContent,
+              editAction: `/projects/${encodeURIComponent(name)}/workflow/edit`,
+              filePath: workflow.path
+            })
+          ),
+          409
+        );
+      }
+      return context.html(
+        layout(
+          "Save failed",
+          `<h1 class="page-title">Save failed</h1><p class="lede">${escapeHtml(result.error)}</p>`
+        ),
+        500
+      );
+    }
+  );
 
   options.app.get("/routines/:name", (context) => {
     const name = context.req.param("name");
@@ -2342,6 +2559,16 @@ function renderRoutineEditBlastRadius(targets: RoutineStatus[]): string {
     )
     .join("");
   return `<div class="empty"><strong>This save affects</strong>Every target below picks up the edited schedule and prompt on the next dispatch tick.<ul>${items}</ul></div>`;
+}
+
+// #307 AC: "Workflow contract -> which Project's next dispatch. In-flight
+// Runs are immune (ADR 0045 persists the expanded graph per Run) -- say so
+// in the UI, because operators will reasonably assume otherwise." Stated
+// explicitly rather than left implicit precisely because it's the
+// surprising direction (an operator watching a Run in progress would
+// reasonably expect an urgent contract fix to apply to it).
+function renderWorkflowEditBlastRadius(projectName: string): string {
+  return `<div class="empty"><strong>This save affects</strong>Project <code>${escapeHtml(projectName)}</code>'s <em>next</em> dispatch. Any Run currently in progress keeps the workflow graph it started with (ADR 0045) and is unaffected by this edit.</div>`;
 }
 
 function renderEditorPreview(input: {

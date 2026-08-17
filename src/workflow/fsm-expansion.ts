@@ -5,6 +5,7 @@ import { parse } from "yaml";
 import { BUILTIN_WORKFLOW_TEMPLATES } from "../builtin-templates.js";
 import type { WorkflowFormat } from "../config-schemas.js";
 import { isPathInside } from "../path-safety.js";
+import { locatedYamlErrorMessage } from "../yaml-errors.js";
 import {
   parseWorkflowContract,
   projectWorkflowReferences,
@@ -110,6 +111,48 @@ export async function loadExpandedWorkflow(
 ): Promise<ExpandedWorkflowLoadResult> {
   const contents = await readFile(workflowPath, "utf8");
   return expandWorkflowDefinition(contents, workflowPath, format);
+}
+
+// Validates in-memory workflow contract content the same way reload's own
+// readWorkflowSnapshot (src/reload.ts) validates a file on disk, minus the
+// file read -- #307's editor calls this against a submitted edit before
+// it's written. format must be the project's own resolved WorkflowFormat
+// (its caller gets this from HttpAppOptions.getProjectWorkflowPath), not
+// hardcoded "auto" -- a project that deliberately declares format: to
+// override its file extension's guess would otherwise have edits
+// validated against the wrong grammar here while reload uses the real one.
+// Deliberately not shared with readWorkflowSnapshot's near-identical
+// branch: that function also assembles a full WorkflowSnapshot (body,
+// evidence, contentHash) for the live runtime map, not just errors, and
+// extracting a shared seam out of it is exactly the kind of surgery on a
+// large critical-path function this project avoids doing speculatively
+// (see ADR 0075's identical reasoning for reload.ts's service-config
+// validation).
+export async function validateWorkflowContractContent(
+  contents: string,
+  workflowPath: string,
+  format: WorkflowFormat
+): Promise<{ errors: string[] }> {
+  const expanded = await expandWorkflowDefinition(
+    contents,
+    workflowPath,
+    format
+  );
+  if (expanded.workflow.source.kind !== "raw_fsm") {
+    // expandWorkflowDefinition's markdown branch already folds
+    // parseWorkflowContract's own front-matter errors into expanded.errors
+    // (see its markdown branch below) -- re-parsing here would only
+    // duplicate the same messages.
+    return { errors: expanded.errors };
+  }
+  if (expanded.errors.length > 0) {
+    return { errors: expanded.errors };
+  }
+  const referenceErrors = await validateExpandedWorkflowReferences(
+    expanded.workflow,
+    workflowPath
+  );
+  return { errors: referenceErrors };
 }
 
 export async function validateExpandedWorkflowReferences(
@@ -337,7 +380,7 @@ function parseExplicitWorkflowDefinition(
     parsed = parse(contents) ?? {};
   } catch (error) {
     errors.push(
-      `workflow definition at ${workflowPath} could not be parsed: ${errorMessage(error)}`
+      `workflow definition at ${workflowPath} could not be parsed: ${locatedYamlErrorMessage(error)}`
     );
     return undefined;
   }

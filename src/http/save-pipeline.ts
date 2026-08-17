@@ -3,6 +3,7 @@ import { open, readFile, rename, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { contentHash } from "../content-hash.js";
+import type { WorkflowFormat } from "../config-schemas.js";
 import { parseRoutineDeclaration } from "../routines/declaration-loader.js";
 import { validateWorkflowContractContent } from "../workflow/fsm-expansion.js";
 
@@ -34,6 +35,11 @@ export type SavePipelineInput = {
   // directly so this module stays independent of daemon/reload wiring
   // until a caller (#307) actually has one to provide.
   reload: () => Promise<ReloadOutcome>;
+  // kind: "workflow_contract" only -- the project's own resolved format
+  // (HttpAppOptions.getProjectWorkflowPath), so validation uses the same
+  // grammar reload would rather than always inferring from the file
+  // extension. Ignored for routine_declaration.
+  workflowFormat?: WorkflowFormat;
 };
 
 export type SavePipelineResult =
@@ -50,11 +56,17 @@ const VALIDATORS: Record<
   SaveContentKind,
   (
     contents: string,
-    filePath: string
+    filePath: string,
+    workflowFormat?: WorkflowFormat
   ) => { errors: string[] } | Promise<{ errors: string[] }>
 > = {
   routine_declaration: parseRoutineDeclaration,
-  workflow_contract: validateWorkflowContractContent
+  workflow_contract: (contents, filePath, workflowFormat) =>
+    validateWorkflowContractContent(
+      contents,
+      filePath,
+      workflowFormat ?? "auto"
+    )
 };
 
 // The one path every editor's save button calls through (#306): validate
@@ -69,7 +81,8 @@ export async function runSavePipeline(
 ): Promise<SavePipelineResult> {
   const validation = await VALIDATORS[input.kind](
     input.content,
-    input.filePath
+    input.filePath,
+    input.workflowFormat
   );
   if (validation.errors.length > 0) {
     return { errors: validation.errors, kind: "invalid" };

@@ -990,7 +990,7 @@ export async function startDaemon(
       if (workflow === undefined || !("expandedWorkflow" in workflow)) {
         return undefined;
       }
-      return { path: workflow.path };
+      return { format: workflow.format, path: workflow.path };
     },
     getRuns: () => runStore.listRuns(),
     getWatchdogConfig: (projectName) =>

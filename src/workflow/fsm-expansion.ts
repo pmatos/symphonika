@@ -116,13 +116,11 @@ export async function loadExpandedWorkflow(
 // Validates in-memory workflow contract content the same way reload's own
 // readWorkflowSnapshot (src/reload.ts) validates a file on disk, minus the
 // file read -- #307's editor calls this against a submitted edit before
-// it's written. format is always "auto": the generic content+path shape
-// this is called with (src/http/save-pipeline.ts's VALIDATORS) carries no
-// per-project format override, so this infers from the file's own
-// extension (resolveWorkflowFormat's fallback) -- correct for every project
-// that doesn't deliberately declare a format contradicting its file's own
-// extension, which reload.ts itself treats as the unusual case (an
-// explicit format: is only needed to override the extension guess).
+// it's written. format must be the project's own resolved WorkflowFormat
+// (its caller gets this from HttpAppOptions.getProjectWorkflowPath), not
+// hardcoded "auto" -- a project that deliberately declares format: to
+// override its file extension's guess would otherwise have edits
+// validated against the wrong grammar here while reload uses the real one.
 // Deliberately not shared with readWorkflowSnapshot's near-identical
 // branch: that function also assembles a full WorkflowSnapshot (body,
 // evidence, contentHash) for the live runtime map, not just errors, and
@@ -132,12 +130,13 @@ export async function loadExpandedWorkflow(
 // validation).
 export async function validateWorkflowContractContent(
   contents: string,
-  workflowPath: string
+  workflowPath: string,
+  format: WorkflowFormat
 ): Promise<{ errors: string[] }> {
   const expanded = await expandWorkflowDefinition(
     contents,
     workflowPath,
-    "auto"
+    format
   );
   if (expanded.workflow.source.kind !== "raw_fsm") {
     // expandWorkflowDefinition's markdown branch already folds

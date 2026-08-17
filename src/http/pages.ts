@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { Hono, type MiddlewareHandler } from "hono";
 
 import { contentHash } from "../content-hash.js";
+import type { WorkflowFormat } from "../config-schemas.js";
 import {
   checkMutationAuthorized,
   CSRF_FIELD_NAME,
@@ -93,12 +94,12 @@ export type RegisterPagesOptions = {
     maxReviewDispatchesPerPr: number;
   };
   // #307's workflow-contract editor: a Dispatch Project's current resolved
-  // workflow path, or undefined for a Routine Host (no workflow) or an
-  // unknown Project name. See HttpAppOptions.getProjectWorkflowPath
-  // (src/http/app.ts).
+  // workflow path and configured format, or undefined for a Routine Host
+  // (no workflow) or an unknown Project name. See
+  // HttpAppOptions.getProjectWorkflowPath (src/http/app.ts).
   getProjectWorkflowPath?: (
     projectName: string
-  ) => { path: string } | undefined;
+  ) => { format: WorkflowFormat; path: string } | undefined;
   // #303's "retry ETA" detail for a waiting Run.
   getScheduled?: () => ScheduledCallback[];
   getStatusSnapshot?: () => StatusSnapshot;
@@ -720,7 +721,8 @@ export function registerPages(options: RegisterPagesOptions): void {
       );
       const validation = await validateWorkflowContractContent(
         content,
-        workflow.path
+        workflow.path,
+        workflow.format
       );
       const onDisk = await readFile(workflow.path, "utf8").catch(() => null);
 
@@ -788,11 +790,29 @@ export function registerPages(options: RegisterPagesOptions): void {
         kind: "workflow_contract",
         reload:
           options.triggerReload ??
-          (() => Promise.resolve({ errors: [], ok: true }))
+          (() => Promise.resolve({ errors: [], ok: true })),
+        workflowFormat: workflow.format
       });
 
       const projectPath = `/projects/${encodeURIComponent(name)}`;
       if (result.kind === "saved") {
+        // The pipeline writes before reload runs, so "saved" alone doesn't
+        // mean the new contract took effect — redirecting to the project
+        // page here regardless would read as success even when reload
+        // rejected it and the last-known-good workflow is still live.
+        if (!result.reload.ok) {
+          return context.html(
+            layout(
+              `Saved but not active: ${name} workflow`,
+              renderReloadFailedNotice({
+                editAction: `/projects/${encodeURIComponent(name)}/workflow/edit`,
+                errors: result.reload.errors,
+                filePath: workflow.path
+              })
+            ),
+            200
+          );
+        }
         return context.redirect(`${projectPath}?saved=1`, 303);
       }
       if (result.kind === "invalid") {

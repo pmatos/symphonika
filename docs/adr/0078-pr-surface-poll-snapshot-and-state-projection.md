@@ -157,6 +157,79 @@ these two known-safe internal paths, falling back to `/issues` for anything else
 value at all, preserving every existing caller's behavior). `renderPollNowForm` gained a second
 `returnTo` parameter threaded from both detail pages' own path.
 
+### The merge guard shares `#308`'s three-source liveness union, keyed by `runId` not `issueNumber`
+
+`#308`'s `findLiveRunIdForIssue` matched a live entry by `(projectName, issueNumber)`; a PR-keyed
+caller already knows the candidate `runId` directly (`TrackedPullRequest.runId`) and just needs
+membership. Rather than a second three-source read, `findLiveRunIdForIssue` was refactored to call
+a new shared `collectLiveRunEntries` (the same `getActiveRuns()` ∪ `listActiveRunIds()` ∪
+`listWaitingRunIds()` union, concatenated in priority order), and a new `isRunIdLive` filters that
+same union by `runId` membership instead of by `(project, issue)` match. `findLiveRunIdForIssue`'s
+external behavior — same priority order, same first-match — is unchanged; only its internals moved.
+`livePullRequestOwnerRunId` wraps `isRunIdLive` with the "no tracked row → never live" short
+circuit, and is called from both the `GET` route (what the Merge section renders) and the `POST`
+route (the actual refusal) so the button an operator sees always matches what the guard does.
+
+### A tracked-but-terminated PR is treated as mergeable, the same as an untracked one
+
+AC6's rule is "no *live* Run owns the PR," not "no Run has ever owned the PR." A PR whose tracked
+row still exists but whose `runId` now points at a terminated Run (succeeded, failed, cancelled,
+stale) is exactly as mergeable as `#259`'s never-tracked orphans — `livePullRequestOwnerRunId`
+returns `undefined` for both cases, and the Merge section renders identically for both.
+
+**On `listOpenTrackedPullRequests()`'s `state = 'open'` filter, used for this same lookup**: the
+guard (and part 1's display join) both use this filtered list rather than an unfiltered lookup by
+`(project, prNumber)`. This is deliberate, not an oversight: `tracked_pull_requests.state` tracks
+the PR's own open/closed/merged status, not the owning Run's liveness — the two are independent
+columns updated by different code paths. The only way this filter could hide a genuinely live
+owner is if a row's `state` flips to `merged`/`closed` *before* its owning Run's own state
+transitions out of `waiting` — and in `run-controller.ts`'s `reEvaluateWaitingRun`, those two writes
+happen synchronously in the same function call with no `await` between them, so no concurrent HTTP
+request can observe that intermediate state. Even in a theoretical future refactor that introduced
+such a gap, the failure mode is bounded: GitHub itself refuses to merge an already-merged/closed
+PR, and AC8's re-derivation reports that refusal honestly — never a silent double-dispatch.
+
+### `method` is hardcoded to `"merge"`, not read from `pullRequestPolicyLoader()`
+
+PR Follow-up's automatic merge (`run-controller.ts`) reads its merge method from
+`pullRequestPolicyLoader()` — a policy governing the FSM's own `merge_pr` state under ADR-0044. A
+dashboard click is the operator explicitly overriding that automatic path for one specific PR, not
+a request to apply its policy; threading the policy loader into `pages.ts` would couple the manual
+override path to the exact automatic path it exists to bypass. `expectedHeadSha` is still passed
+(from the persisted snapshot's `headSha`) for the same safety property the FSM's own call has: if
+new commits landed after the operator last saw the PR, GitHub refuses the merge rather than
+merging code the operator never looked at — reported honestly via AC8.
+
+### Evidence is one row per attempt, written once after the attempt completes
+
+`recordPullRequestMergeAttempt` (AC9) is called exactly once, after both the merge call and the
+post-attempt re-fetch have settled — not a two-phase "attempting" row followed by an update. A
+two-phase write can leave a dangling "attempting" row if the process dies mid-merge; a single
+post-attempt insert can lose the record entirely if the process dies after GitHub applies the merge
+but before the write lands. The second failure mode is judged worse in principle (silent loss of
+evidence for a mutation that actually happened) but is accepted here: the next poll tick's own
+snapshot replacement will independently show the PR as merged regardless of whether this evidence
+row exists, so the operator-facing consequence of the gap is "one attempt's evidence row is
+missing," never "the PR's true state goes unnoticed." A durable two-phase design was considered and
+rejected as disproportionate machinery for a gap whose only cost is a missing audit row, not a
+missing fact about PR state.
+
+A guard refusal (a live Run owns the PR) is not recorded as an attempt — `options.mergePullRequest`
+is never invoked in that path, mirroring `#308`'s clear-stale-claim: `writeIssueLabels` is likewise
+never called on that guard's own refusal. "The merge action is recorded" (AC9) is read as covering
+an attempt that actually reached GitHub (successful or GitHub-refused), not a request the local
+guard stopped before it left the process.
+
+### Re-derivation renders the fresh fetch, never persists it
+
+`MergePullRequestFn`'s `freshState` is rendered directly in the response banner
+(`renderPullRequestFreshStateNote`) and nowhere written into `project_pull_request_snapshots` —
+that table's invariant is "what the last successful poll saw," and a request-time write would
+break the wholesale-replace contract every other write to that table upholds. The banner says so
+implicitly by being the *only* place this fresher data appears; the Pull Request State section
+below it still reads the persisted (possibly now-stale-by-one-poll) snapshot, consistent with every
+other write on this page never mutating what's displayed outside its own banner.
+
 ## Consequences
 
 - New table `project_pull_request_snapshots` (`src/run-store.ts`): one row per open PR per
@@ -164,6 +237,10 @@ value at all, preserving every existing caller's behavior). `renderPollNowForm` 
   `draft`, `open`, `merged`, `head_ref`, `head_sha`, `labels`, `branch_origin`), plus the enrichment
   fields (`state_available`, `mergeable`, `checks`, `review_decision`, `tracking_state`,
   `unresolved_review_threads`) which are all `null` together when `state_available` is false.
+- New table `pull_request_merge_attempts` (`src/run-store.ts`): one row per dashboard-triggered
+  merge attempt that actually reached GitHub, independent of any Run (AC9).
+  `listPullRequestMergeAttempts` is a test-verification reader only — this slice ships no
+  merge-attempt-history UI.
 - New `GitHubIssuesApi` method `listPullRequests` (bulk, paginated, `state: "open"`) plus
   `tryListPullRequests`, alongside the existing per-branch `listPullRequestsForBranch`.
 - `envReferenceName` and `normalizeLabels` (`src/issue-polling.ts`) are now exported —
@@ -177,7 +254,8 @@ value at all, preserving every existing caller's behavior). `renderPollNowForm` 
   `writeIssueLabels`/`tryAddLabelsToIssue`/`tryRemoveLabelsFromIssue` under the same `sym:*` policy
   `#308` established, and gives `POST /issues/poll-now` a `return_to` so it serves both search
   pages honestly. This closes AC5.
-- Part 3 will add the ownership-guarded merge action, evidence recording, and honest re-derivation
-  of state after a merge attempt (AC6–AC9), reusing `#308`'s three-source liveness pattern
-  (`getActiveRuns()` ∪ `listActiveRunIds()` ∪ `listWaitingRunIds()`) keyed by the tracked PR's
-  `runId` rather than by issue number. This closes epic `#301`.
+- Part 3 adds the ownership-guarded merge action (`POST /prs/:project/:number/merge`), reusing
+  `#308`'s three-source liveness pattern refactored into `collectLiveRunEntries`/`isRunIdLive`,
+  keyed by the tracked PR's `runId` rather than by issue number, plus durable evidence
+  (`pull_request_merge_attempts`) and honest post-attempt state re-derivation
+  (`renderPullRequestFreshStateNote`, never persisted). This closes AC6–AC9 and epic `#301`.

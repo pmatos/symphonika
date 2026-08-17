@@ -28,6 +28,7 @@ import {
   type RoutineEvidencePaths
 } from "../routines/evidence.js";
 import type { RoutineFiringState, RoutineState } from "../routines/types.js";
+import type { PullRequestState } from "../pull-request-state.js";
 import type { ReloadOutcome } from "./save-pipeline.js";
 import type { StatusSnapshot } from "../status.js";
 import type {
@@ -96,6 +97,28 @@ export type WriteIssueLabelsFn = (input: {
   remove: string[];
   subjectNumber: number;
 }) => Promise<WriteIssueLabelsResult>;
+
+// #309 part 3's guarded-merge action: the only other GitHub mutation the
+// triage UI performs directly. `freshState` is the PR's Pull Request State
+// re-fetched immediately after the merge attempt (success or failure) —
+// AC8 asks that the displayed state be re-derived, not assumed merged, so
+// the caller renders this instead of the (still-stale-until-next-poll)
+// persisted snapshot. `undefined` means the re-fetch itself failed or is
+// unsupported by the configured GitHub API — distinct from a fetch that
+// succeeded and genuinely reported an unresolved/unknown field, the same
+// stateAvailable honesty the poll snapshot itself carries (ADR 0078).
+// `method` is always "merge" here — a dashboard click is the operator
+// explicitly overriding the FSM's own configured merge policy (ADR 0044),
+// not subject to it.
+export type MergePullRequestResult =
+  | { freshState: PullRequestState | undefined; ok: true }
+  | { error: string; freshState: PullRequestState | undefined; ok: false };
+
+export type MergePullRequestFn = (input: {
+  expectedHeadSha?: string;
+  prNumber: number;
+  projectName: string;
+}) => Promise<MergePullRequestResult>;
 
 type FireRoutineRequest = {
   force: boolean;
@@ -199,6 +222,9 @@ export type HttpAppOptions = {
   // without it would let a claim landing between the liveness check and
   // the label-removal write get silently wiped as "stale".
   claimMutex?: AsyncMutex;
+  // #309 part 3's guarded-merge action: see
+  // docs/adr/0078-pr-surface-poll-snapshot-and-state-projection.md.
+  mergePullRequest?: MergePullRequestFn;
   // Aborted by stopServer before it calls server.close(), so open /events
   // streams exit their loop instead of holding the shutdown open forever.
   shutdownSignal?: AbortSignal;
@@ -653,6 +679,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         ? {}
         : { getWatchdogConfig: options.getWatchdogConfig }),
       issuePollStatus,
+      ...(options.mergePullRequest === undefined
+        ? {}
+        : { mergePullRequest: options.mergePullRequest }),
       monotonicNow,
       now,
       ...(options.pollNow === undefined ? {} : { pollNow: options.pollNow }),

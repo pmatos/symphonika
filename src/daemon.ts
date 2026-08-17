@@ -9,6 +9,7 @@ import { parse } from "yaml";
 import {
   createHttpApp,
   type FireRoutineResult,
+  type MergePullRequestResult,
   type PollNowResult,
   type WriteIssueLabelsResult
 } from "./http/app.js";
@@ -25,8 +26,11 @@ import {
   readConfiguredPollingIntervalMs,
   replaceIssuePollStatus,
   tryAddLabelsToIssue,
+  tryGetPullRequestFollowupState,
+  tryMergePullRequest,
   tryRemoveLabelsFromIssue
 } from "./issue-polling.js";
+import { interpretPullRequest } from "./pull-request-state.js";
 import { ActiveRunRegistry, CANCEL_REASONS } from "./lifecycle/active-runs.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
 import { resolveToken } from "./lifecycle/token.js";
@@ -1027,6 +1031,81 @@ export async function startDaemon(
         return undefined;
       }
       return { format: workflow.format, path: workflow.path };
+    },
+    mergePullRequest: async (input): Promise<MergePullRequestResult> => {
+      const project = runtimeConfig.projectsByName().get(input.projectName);
+      if (project?.tracker === undefined) {
+        return {
+          error: `projects.${input.projectName}.tracker is not configured`,
+          freshState: undefined,
+          ok: false
+        };
+      }
+      const token = resolveToken(project.tracker.token, env);
+      if (token === undefined) {
+        return {
+          error: `projects.${input.projectName}.tracker.token is not available`,
+          freshState: undefined,
+          ok: false
+        };
+      }
+      const repository = {
+        owner: project.tracker.owner,
+        repo: project.tracker.repo,
+        token
+      };
+
+      let mergeError: string | undefined;
+      try {
+        const merged = await tryMergePullRequest(githubIssuesApi, {
+          ...repository,
+          ...(input.expectedHeadSha === undefined
+            ? {}
+            : { expectedHeadSha: input.expectedHeadSha }),
+          method: "merge",
+          pullNumber: input.prNumber
+        });
+        if (!merged) {
+          mergeError = "merging is not supported by the configured GitHub API";
+        }
+      } catch (error) {
+        mergeError = errorMessage(error);
+      }
+
+      // Re-derive the PR's actual state regardless of the merge outcome
+      // above (AC8: "the PR's displayed state is re-derived rather than
+      // assumed merged") — a thrown merge error doesn't necessarily mean
+      // nothing changed (e.g. GitHub could reject the response but have
+      // already applied the merge), and a reported success is not proof
+      // either. `undefined` here means the re-fetch itself failed or is
+      // unsupported, distinct from a fetch that succeeded with an
+      // unresolved/unknown field.
+      let freshState;
+      try {
+        const followup = await tryGetPullRequestFollowupState(githubIssuesApi, {
+          ...repository,
+          pullNumber: input.prNumber
+        });
+        freshState =
+          followup === null || followup === undefined
+            ? undefined
+            : interpretPullRequest(followup);
+      } catch {
+        freshState = undefined;
+      }
+
+      runStore.recordPullRequestMergeAttempt({
+        error: mergeError ?? null,
+        freshTrackingState: freshState?.trackingState ?? null,
+        method: "merge",
+        ok: mergeError === undefined,
+        prNumber: input.prNumber,
+        projectName: input.projectName
+      });
+
+      return mergeError === undefined
+        ? { freshState, ok: true }
+        : { error: mergeError, freshState, ok: false };
     },
     writeIssueLabels: async (input): Promise<WriteIssueLabelsResult> => {
       const project = runtimeConfig.projectsByName().get(input.projectName);

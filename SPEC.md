@@ -2082,7 +2082,22 @@ accepts an optional `return_to` field (validated against a fixed `/issues`/`/prs
 triggering it from either search page's detail view returns to the page it came from, rather than
 always landing back on `/issues`.
 
-The ownership-guarded merge action is a later part of the same slice.
+The PR detail page's Merge section (`#309` part 3, closing epic `#301`) offers a "Merge" button only
+when no live Run owns the PR — a PR whose tracked row points at a terminated Run is treated as
+mergeable, same as an untracked one, since the rule is "no *live* Run," not "never tracked." When a
+live Run does own it (checked against the same three-source liveness union `#308`'s clear-stale-
+claim uses — the in-process registry, active `runs` rows, and parked `waiting` rows, which still own
+a PR under a `merge_pr` FSM state), the section instead shows "owned by run `<id>`, cannot be merged
+until that Run is cancelled" and renders no button at all — refused both in the UI and, independently,
+server-side on the `POST` route, so a replayed or hand-crafted request gets the identical refusal a
+test covers directly. Merging goes through `mergePullRequest` (`src/daemon.ts`), which resolves the
+Project's tracker token, calls `GitHubIssuesApi.mergePullRequest` with the persisted snapshot's
+`headSha` as `expectedHeadSha` (so GitHub refuses a merge of commits the operator never saw), and —
+regardless of whether that call succeeds or GitHub refuses it — immediately re-fetches the PR's Pull
+Request State and renders that fresh result in the outcome banner, never assuming success or failure
+implies a particular state. Every attempt that reaches GitHub (successful or refused) is recorded as
+a durable evidence row, independent of any Run — the `#259` orphan case that motivates this feature
+has no Run to key evidence off of.
 
 ## 15. Bootstrap Acceptance Bar
 

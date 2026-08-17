@@ -3086,9 +3086,7 @@ export class RunStore {
     const projectPlaceholders = input.projectNames.map(
       (_, index) => `@project${index}`
     );
-    const statePlaceholders = input.states.map(
-      (_, index) => `@state${index}`
-    );
+    const statePlaceholders = input.states.map((_, index) => `@state${index}`);
     const params: Record<string, unknown> = {};
     input.projectNames.forEach((name, index) => {
       params[`project${index}`] = name;

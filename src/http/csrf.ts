@@ -13,7 +13,7 @@ import { getCookie, setCookie } from "hono/cookie";
 const SESSION_COOKIE_NAME = "sym_session";
 const SESSION_ID_PATTERN = /^[0-9a-f]{32}$/;
 export const CSRF_FIELD_NAME = "csrf_token";
-export const CSRF_HEADER_NAME = "x-csrf-token";
+const CSRF_HEADER_NAME = "x-csrf-token";
 
 export type CsrfSecret = Buffer;
 

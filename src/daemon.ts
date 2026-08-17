@@ -1052,7 +1052,7 @@ export async function startDaemon(
         if (input.add.length > 0) {
           const added = await tryAddLabelsToIssue(githubIssuesApi, {
             ...repository,
-            issueNumber: input.issueNumber,
+            issueNumber: input.subjectNumber,
             labels: input.add
           });
           if (!added) {
@@ -1066,7 +1066,7 @@ export async function startDaemon(
         if (input.remove.length > 0) {
           const removed = await tryRemoveLabelsFromIssue(githubIssuesApi, {
             ...repository,
-            issueNumber: input.issueNumber,
+            issueNumber: input.subjectNumber,
             labels: input.remove
           });
           if (!removed) {
@@ -1383,6 +1383,7 @@ function persistProjectPullRequestPollState(
           draft: entry.draft,
           headRef: entry.headRef,
           headSha: entry.headSha,
+          labels: entry.labels,
           mergeable: entry.mergeable,
           merged: entry.merged,
           open: entry.open,

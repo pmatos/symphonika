@@ -121,23 +121,62 @@ deliberately read-only informational listing, or lose the repo-wide scope `/prs`
 separate surfaces over related but distinct data, the same reasoning ADR-0077 gave for keeping
 `/issues` and `/projects/:name`'s own issue table apart.
 
+### Label writes reuse `writeIssueLabels`, with `subjectNumber` instead of `issueNumber`
+
+`WriteIssueLabelsFn` (`src/http/app.ts`) was `#308`'s issue-only mutation seam. GitHub's labels
+endpoint treats an issue number and a PR number identically — the same `addLabelsToIssue`/
+`removeLabelsFromIssue` calls work for both — so `#309` part 2 reuses the callback directly rather
+than adding a parallel `writePullRequestLabels`. The input's `issueNumber` field is renamed to
+`subjectNumber`, and a `kind: "issue" | "pull_request"` field is added: a PR-label call site
+passing a PR number through a field literally named `issueNumber` would misname what it actually
+holds, the kind of Mysterious Name a reviewer (or a later reader) would rightly flag even though it
+causes no functional bug. `kind` is carried into the daemon-side implementation even though nothing
+there branches on it today — clarity at the boundary, not a currently-load-bearing discriminant.
+Every existing `#308` call site (`handleIssueLabelWrite`, `handleClearStaleClaim`) updates to pass
+`kind: "issue"` alongside the renamed field; behavior is unchanged.
+
+### `renderPullRequestLabelsSection`/`PullRequestLabelWriteBanner` are parallel to `#308`'s, not shared
+
+The PR detail page's labels UI (`renderPullRequestLabelsSection`, `renderPullRequestLabelWriteBanner`,
+`PullRequestLabelWriteBanner`) is structurally identical to `#308`'s issue-page equivalents but
+kept as its own set of functions/types rather than genericized over "issue or PR" — the two pages'
+banner unions will diverge in part 3 (a guarded-merge banner joins the PR page's union; nothing
+else joins the issue page's), the same reason `#308` part 3 widened `IssueLabelWriteBanner` into a
+union only once clear-stale-claim actually needed it, not ahead of time.
+
+### Poll-now gained a `return_to`, since it now serves two search pages
+
+`POST /issues/poll-now` predates `#309` and always rendered "Issue triage" / linked back to
+`/issues`, regardless of which page's write banner triggered it. Once the PR detail page's own
+successful label write also offers a poll-now trigger (`#309`'s poll tick refreshes issues and PRs
+together, so one trigger genuinely serves both), that hard-coded copy and back-link became wrong
+for half its callers. The route now reads an optional `return_to` form field, validated against a
+fixed two-value allowlist (`POLL_NOW_RETURN_TARGETS`: `/issues`, `/prs`) — never trusted as a raw
+redirect target, so a request replaying an arbitrary `return_to` value can only ever land on one of
+these two known-safe internal paths, falling back to `/issues` for anything else (including no
+value at all, preserving every existing caller's behavior). `renderPollNowForm` gained a second
+`returnTo` parameter threaded from both detail pages' own path.
+
 ## Consequences
 
 - New table `project_pull_request_snapshots` (`src/run-store.ts`): one row per open PR per
   Project, replaced wholesale per successful poll. Columns: the cheap REST fields (`title`, `url`,
-  `draft`, `open`, `merged`, `head_ref`, `head_sha`, `branch_origin`), plus the enrichment fields
-  (`state_available`, `mergeable`, `checks`, `review_decision`, `tracking_state`,
+  `draft`, `open`, `merged`, `head_ref`, `head_sha`, `labels`, `branch_origin`), plus the enrichment
+  fields (`state_available`, `mergeable`, `checks`, `review_decision`, `tracking_state`,
   `unresolved_review_threads`) which are all `null` together when `state_available` is false.
 - New `GitHubIssuesApi` method `listPullRequests` (bulk, paginated, `state: "open"`) plus
   `tryListPullRequests`, alongside the existing per-branch `listPullRequestsForBranch`.
-- `envReferenceName` (`src/issue-polling.ts`) is now exported — `pull-request-polling.ts` reuses it
-  for the identical token-resolution error message issue polling already produces, rather than a
-  fourth near-duplicate of that string.
+- `envReferenceName` and `normalizeLabels` (`src/issue-polling.ts`) are now exported —
+  `pull-request-polling.ts` reuses both for the identical token-resolution error message and
+  label-array normalization issue polling already implements, rather than near-duplicates of
+  either.
 - Part 1 is read-only: `GET /prs` (search: project, origin, tracking, free-text title) and
   `GET /prs/:project/:number` (full Pull Request State, branch/origin, follow-up tracking status
   and owning Run). AC1–AC4 land this part.
-- Part 2 will add label add/remove on a PR, reusing `writeIssueLabels`/`tryAddLabelsToIssue`/
-  `tryRemoveLabelsFromIssue` under the same `sym:*` policy `#308` established (AC5).
+- Part 2 adds label add/remove on a PR (`POST /prs/:project/:number/labels/add|remove`), reusing
+  `writeIssueLabels`/`tryAddLabelsToIssue`/`tryRemoveLabelsFromIssue` under the same `sym:*` policy
+  `#308` established, and gives `POST /issues/poll-now` a `return_to` so it serves both search
+  pages honestly. This closes AC5.
 - Part 3 will add the ownership-guarded merge action, evidence recording, and honest re-derivation
   of state after a merge attempt (AC6–AC9), reusing `#308`'s three-source liveness pattern
   (`getActiveRuns()` ∪ `listActiveRunIds()` ∪ `listWaitingRunIds()`) keyed by the tracked PR's

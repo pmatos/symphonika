@@ -173,9 +173,10 @@ describe("POST /issues/:project/:number/clear-stale-claim (#308 part 3)", () => 
       expect(html).toContain('action="/issues/poll-now"');
       expect(received).toEqual({
         add: [],
-        issueNumber: 9,
+        kind: "issue",
         projectName: "alpha",
-        remove: ["sym:stale", "sym:claimed"]
+        remove: ["sym:stale", "sym:claimed"],
+        subjectNumber: 9
       });
     } finally {
       test.cleanup();

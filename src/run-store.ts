@@ -310,6 +310,7 @@ export type ProjectPullRequestSnapshotRow = {
   draft: boolean;
   headRef: string | null;
   headSha: string | null;
+  labels: string[];
   mergeable: PullRequestMergeableState | null;
   merged: boolean;
   open: boolean;
@@ -630,6 +631,7 @@ type ProjectPullRequestSnapshotDbRow = {
   draft: number;
   head_ref: string | null;
   head_sha: string | null;
+  labels: string | null;
   mergeable: PullRequestMergeableState | null;
   merged: number;
   open: number;
@@ -1583,12 +1585,12 @@ export class RunStore {
         [
           "insert into project_pull_request_snapshots (",
           "project_name, pr_number, title, url, draft, open, merged,",
-          "head_ref, head_sha, branch_origin, state_available, mergeable,",
+          "head_ref, head_sha, labels, branch_origin, state_available, mergeable,",
           "checks, review_decision, tracking_state, unresolved_review_threads,",
           "polled_at, created_at, updated_at",
           ") values (",
           "@project_name, @pr_number, @title, @url, @draft, @open, @merged,",
-          "@head_ref, @head_sha, @branch_origin, @state_available, @mergeable,",
+          "@head_ref, @head_sha, @labels, @branch_origin, @state_available, @mergeable,",
           "@checks, @review_decision, @tracking_state, @unresolved_review_threads,",
           "@polled_at, @created_at, @updated_at",
           ")"
@@ -1602,6 +1604,7 @@ export class RunStore {
           draft: row.draft ? 1 : 0,
           head_ref: row.headRef,
           head_sha: row.headSha,
+          labels: row.labels.length === 0 ? null : JSON.stringify(row.labels),
           mergeable: row.mergeable,
           merged: row.merged ? 1 : 0,
           open: row.open ? 1 : 0,
@@ -1628,7 +1631,7 @@ export class RunStore {
       .prepare(
         [
           "select pr_number, title, url, draft, open, merged, head_ref,",
-          "head_sha, branch_origin, state_available, mergeable, checks,",
+          "head_sha, labels, branch_origin, state_available, mergeable, checks,",
           "review_decision, tracking_state, unresolved_review_threads, polled_at",
           "from project_pull_request_snapshots where project_name = ?",
           "order by pr_number asc"
@@ -1641,6 +1644,7 @@ export class RunStore {
       draft: row.draft === 1,
       headRef: row.head_ref,
       headSha: row.head_sha,
+      labels: row.labels === null ? [] : (JSON.parse(row.labels) as string[]),
       mergeable: row.mergeable,
       merged: row.merged === 1,
       open: row.open === 1,
@@ -4298,6 +4302,7 @@ export class RunStore {
         merged integer not null default 0,
         head_ref text,
         head_sha text,
+        labels text,
         branch_origin text not null default 'neither',
         state_available integer not null default 0,
         mergeable text,
@@ -4534,7 +4539,8 @@ export class RunStore {
       ["routine_firings", "notification_error", "text"],
       ["routine_firings", "workspace_pruned_at", "text"],
       ["routine_firings", "fanout_id", "text"],
-      ["project_issue_snapshots", "labels", "text"]
+      ["project_issue_snapshots", "labels", "text"],
+      ["project_pull_request_snapshots", "labels", "text"]
     ];
 
     const apply = this.database.transaction(() => {

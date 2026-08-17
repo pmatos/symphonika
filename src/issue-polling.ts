@@ -44,6 +44,7 @@ export type RawGitHubPullRequest = {
   draft?: boolean;
   head?: { ref?: string; sha?: string };
   html_url?: string | null;
+  labels?: unknown[];
   merged_at?: string | null;
   number?: number;
   state?: string;
@@ -961,7 +962,7 @@ function normalizeIssueSnapshot(
   };
 }
 
-function normalizeLabels(labels: unknown[]): string[] {
+export function normalizeLabels(labels: unknown[]): string[] {
   const normalized: string[] = [];
 
   for (const label of labels) {

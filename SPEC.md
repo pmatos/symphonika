@@ -1982,6 +1982,26 @@ the field is `null`. The matching server-rendered Run page shows an amber manual
 linked to the PR. Both surfaces use only persisted tracking state and the current loaded policy; they
 do not call GitHub while serving a request.
 
+The Routine-detail page (`/routines/:name`) surfaces ADR-0060's disable/enable as a first-class
+action (`#307`): a "Disable routine" / "Enable routine" button (whichever the routine's current
+`disabledReason` calls for; neither renders for a `removed_from_config` routine, since that state
+is controlled by config file inclusion, not this action) posts to `/routines/:name/disable` or
+`/enable`, which computes the toggled `disabled:` value via a targeted structured edit
+(`setRoutineDisabled`, `src/routines/declaration-editor.ts` — the `yaml` document API, preserving
+every other comment and key in the front matter) and renders the same diff-before-write
+confirmation the raw-text editor uses; the confirm button posts to the same
+`/routines/:name/edit/confirm` route, so the write itself goes through the identical save pipeline
+regardless of which editor produced the content. Disabling affects every target sharing that
+declaration (ADR-0069's fan-out); a live firing already in progress is unaffected until it
+terminates, and the schedule/state change itself lands on the next dispatch tick, same as any other
+routine-declaration edit.
+
+The Firing-detail page (`/firings/:id`) surfaces a "Cancel firing" button for a non-terminal firing,
+posting to the same `/api/runs/:id/cancel` route the Run-detail page's cancel form already uses —
+that route already id-sniffs a Run vs. a Routine Firing server-side (ADR-0060), so no new cancel
+mechanism was needed, only the missing UI control. The route's own form-post redirect now sniffs
+the same way (`#307`): cancelling from `/firings/:id` returns to `/firings/:id`, not `/runs/:id`.
+
 Label creation, stale-claim reset, and workspace cleanup remain CLI-only.
 
 ## 15. Bootstrap Acceptance Bar

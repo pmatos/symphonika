@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createHttpApp } from "../src/http/app.js";
 import type { IssueSnapshot } from "../src/issue-polling.js";
+import { routineEvidencePaths } from "../src/routines/evidence.js";
 import type { RunState } from "../src/run-store.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
 
@@ -2776,6 +2777,194 @@ describe("HTTP app — routine detail page (#304)", () => {
         await app.request("/routines/audit?project=alpha")
       ).text();
       expect(alphaBody).toContain("removed_from_config");
+    } finally {
+      test.cleanup();
+    }
+  });
+});
+
+describe("HTTP app — firing detail page (#304 part 2/2)", () => {
+  it("404s for an unknown firing id", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/firings/nope");
+      expect(response.status).toBe(404);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows summary, transitions, coalesced events, PR association, and file links, sourced from evidence on disk", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit.",
+          provider: "codex",
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        }
+      ]);
+      test.runStore.createRoutineFiring({
+        branchName: "sym/audit-fire-1",
+        branchRef: "refs/heads/sym/audit-fire-1",
+        id: "fire-1",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "audit",
+        workspacePath: "/tmp/ws"
+      });
+      test.runStore.updateRoutineFiringState("fire-1", "running");
+      test.runStore.updateRoutineFiringState("fire-1", "succeeded");
+      test.runStore.recordRoutinePullRequest({
+        firingId: "fire-1",
+        headSha: "abc123",
+        prNumber: 248,
+        projectName: "alpha",
+        routineName: "audit"
+      });
+
+      const evidence = routineEvidencePaths(test.stateRoot, "fire-1");
+      await mkdir(evidence.directory, { recursive: true });
+      await writeFile(evidence.promptPath, "# Prompt\nDo the audit.", "utf8");
+      await writeFile(
+        evidence.promptMetadataPath,
+        JSON.stringify({ model: "codex" }),
+        "utf8"
+      );
+      await writeFile(
+        evidence.normalizedLogPath,
+        [
+          JSON.stringify({ type: "message", message: "Hello " }),
+          JSON.stringify({ type: "message", message: "world." }),
+          JSON.stringify({ command: "ls", tool: "bash", type: "tool_call" })
+        ].join("\n") + "\n",
+        "utf8"
+      );
+      await writeFile(evidence.rawLogPath, "{}\n", "utf8");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/firings/fire-1")).text();
+
+      expect(body).toContain('<a href="/routines/audit">audit</a>');
+      expect(body).toContain("alpha");
+      expect(body).toContain("sym/audit-fire-1");
+      expect(body).toContain("no per-run workflow graph");
+      expect(body).toContain("State transitions");
+      expect(body).toContain("Hello world.");
+      expect(body).toContain("tool_call");
+      expect(body).toContain("PR #248");
+      expect(body).toContain("not a PR Follow-up");
+      expect(body).toContain("Cancelling a live firing is deferred to #306");
+      expect(body).toContain("/logs/firings/fire-1/prompt");
+      expect(body).toContain("/logs/firings/fire-1/prompt_metadata");
+      expect(body).toContain("/logs/firings/fire-1/provider_raw");
+      expect(body).toContain("/logs/firings/fire-1/provider_normalized");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows a failed firing's terminal reason as legibly as a failed Run's", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit.",
+          provider: "codex",
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        }
+      ]);
+      test.runStore.createRoutineFiring({
+        id: "fire-failed",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "audit"
+      });
+      test.runStore.completeRoutineFiring({
+        id: "fire-failed",
+        state: "failed",
+        terminalReason: "provider_exit_nonzero"
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/firings/fire-failed")).text();
+
+      expect(body).toContain("Terminal reason");
+      expect(body).toContain("provider_exit_nonzero");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("streams a present evidence file and 404s a missing one", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit.",
+          provider: "codex",
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        }
+      ]);
+      test.runStore.createRoutineFiring({
+        id: "fire-1",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "audit"
+      });
+      const evidence = routineEvidencePaths(test.stateRoot, "fire-1");
+      await mkdir(evidence.directory, { recursive: true });
+      await writeFile(evidence.promptPath, "# Prompt\nDo it.", "utf8");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const present = await app.request("/logs/firings/fire-1/prompt");
+      expect(present.status).toBe(200);
+      expect(present.headers.get("content-type")).toContain("text/markdown");
+      expect(await present.text()).toContain("Do it.");
+
+      const missing = await app.request("/logs/firings/fire-1/provider_raw");
+      expect(missing.status).toBe(404);
+
+      const unknownFiring = await app.request("/logs/firings/nope/prompt");
+      expect(unknownFiring.status).toBe(404);
+
+      const unknownKind = await app.request(
+        "/logs/firings/fire-1/workflow_graph"
+      );
+      expect(unknownKind.status).toBe(404);
     } finally {
       test.cleanup();
     }

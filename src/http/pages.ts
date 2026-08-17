@@ -15,15 +15,24 @@ import type {
   ProjectIssueSnapshotRow,
   ProjectState,
   ProviderEventRecord,
+  RoutineFiringStateTransition,
   RoutineFiringStatus,
   RunArtifactDescriptor,
+  RunArtifactKind,
   RunState,
   RunStatus,
   RunStore
 } from "../run-store.js";
+import {
+  readRecentRoutineEvents,
+  routineEvidencePaths,
+  statRoutineEvidenceFile,
+  type RoutineEvidencePaths
+} from "../routines/evidence.js";
 import type {
   RoutineFiringState,
   RoutineKind,
+  RoutinePullRequestStatus,
   RoutineState,
   RoutineStatus
 } from "../routines/types.js";
@@ -77,6 +86,10 @@ export type RegisterPagesOptions = {
   monotonicNow: () => number;
   now?: () => number;
   runStore: RunStore;
+  // #304's /firings/:id evidence — routineEvidencePaths derives a Firing's
+  // log/prompt paths from stateRoot + firing id, the same convention
+  // src/http/app.ts's /logs/firings/:id/:kind route already streams from.
+  stateRoot: string;
   // #303's "pre-restart" staleness marker: a persisted snapshot whose last
   // successful poll predates process start hasn't been refreshed since the
   // daemon came up. See ADR 0073.
@@ -608,6 +621,51 @@ export function registerPages(options: RegisterPagesOptions): void {
         renderRoutineTargetsTable(group),
         renderRoutineFiringHistory(firings),
         `<p class="note">Enable/disable and manual-fire controls land with #306's write-surface plumbing — this page is read-only until then.</p>`
+      ].join("")
+    );
+    return context.html(html);
+  });
+
+  options.app.get("/firings/:id", async (context) => {
+    const id = context.req.param("id");
+    const detail = options.runStore.getRoutineFiring(id);
+    if (detail === undefined) {
+      return context.html(
+        layout(
+          "Routine firing not found",
+          `<h1 class="page-title">Routine firing not found</h1><p class="lede">Routine firing <code>${escapeHtml(id)}</code> was not found.</p>`
+        ),
+        404
+      );
+    }
+    const transitions = options.runStore.listRoutineFiringTransitions(id);
+    const evidence = routineEvidencePaths(options.stateRoot, id);
+    const rawEvents = await readRecentRoutineEvents(
+      evidence.normalizedLogPath,
+      EVENT_TAIL_LIMIT
+    );
+    // readRecentRoutineEvents keeps a ring buffer of `limit` lines and
+    // tracks total lines seen via each entry's own `sequence` — if the
+    // window is full and the last entry's sequence exceeds the window
+    // size, the buffer wrapped at least once, i.e. more lines existed than
+    // fit. Mirrors /runs/:id's own "fetch one extra to detect truncation"
+    // trick without changing readRecentRoutineEvents's return shape.
+    const lastEvent = rawEvents[rawEvents.length - 1];
+    const eventsTruncated =
+      lastEvent !== undefined && lastEvent.sequence > rawEvents.length;
+    const artifacts = await buildFiringArtifactDescriptors(evidence);
+
+    const html = layout(
+      `Firing ${detail.id}`,
+      [
+        `<h1 class="page-title">Firing <code>${escapeHtml(detail.id)}</code></h1>`,
+        `<p class="note">A Routine Firing has no GitHub Issue, no retried attempts, and no per-run workflow graph — a Firing is one execution of a scheduled prompt, not the issue-dispatch lifecycle a Run models.</p>`,
+        renderFiringSummary(detail, transitions),
+        renderFiringPullRequests(detail.pullRequests),
+        `<p class="note">Cancelling a live firing is deferred to #306's write-surface plumbing — this page is read-only until then.</p>`,
+        renderTransitionsTable(transitions),
+        renderEventsTable(rawEvents, eventsTruncated),
+        renderRunFileLinks(detail.id, artifacts, "firings")
       ].join("")
     );
     return context.html(html);
@@ -1878,6 +1936,83 @@ function renderRoutineFiringHistory(firings: RoutineFiringStatus[]): string {
   );
 }
 
+// Mirrors /runs/:id's renderRunSummary — same <dl class="fields"> layout —
+// but for a Firing: no issue, no retries/continuation, and started/ended
+// derived from its own transitions rather than carried on the row itself.
+function renderFiringSummary(
+  detail: RoutineFiringStatus,
+  transitions: RoutineFiringStateTransition[]
+): string {
+  const startedAt = transitions.find(
+    (transition) => transition.state === "queued"
+  )?.createdAt;
+  const endedAt = [...transitions]
+    .reverse()
+    .find((transition) =>
+      (["succeeded", "failed", "cancelled"] as RoutineFiringState[]).includes(
+        transition.state
+      )
+    )?.createdAt;
+  const terminalRow =
+    detail.terminalReason === null
+      ? ""
+      : `<dt>Terminal reason</dt><dd><code>${escapeHtml(detail.terminalReason)}</code></dd>`;
+  const cancelLine = detail.cancelRequested
+    ? `<div class="field-note"><strong>Cancel requested</strong> (reason: ${escapeHtml(detail.cancelReason ?? "unknown")})</div>`
+    : "";
+  return `<section><dl class="fields">
+  <dt>Routine</dt><dd><a href="/routines/${encodeURIComponent(detail.routineName)}">${escapeHtml(detail.routineName)}</a></dd>
+  <dt>Project</dt><dd>${escapeHtml(detail.projectName)}</dd>
+  <dt>State</dt><dd>${statePill(detail.state)}</dd>
+  <dt>Provider</dt><dd>${escapeHtml(detail.provider)}</dd>
+  <dt>Trigger</dt><dd>${escapeHtml(detail.triggerSource)}</dd>
+  <dt>Scheduled</dt><dd><code>${escapeHtml(detail.scheduledAt ?? "-")}</code></dd>
+  <dt>Started</dt><dd><code>${escapeHtml(startedAt ?? "-")}</code></dd>
+  <dt>Ended</dt><dd><code>${escapeHtml(endedAt ?? "-")}</code></dd>
+  <dt>Workspace</dt><dd><code>${escapeHtml(detail.workspacePath)}</code></dd>
+  <dt>Branch</dt><dd><code>${escapeHtml(detail.branchName)}</code></dd>
+  ${terminalRow}
+  ${cancelLine}
+</dl></section>`;
+}
+
+// Read-only association per CONTEXT.md: a Routine Pull Request is never a
+// PR Follow-up (that machinery is Run-only, driven by tracked_pull_requests
+// / review dispatch caps). Plain informational text, not a link — like the
+// show-firing CLI command's own rendering of the same data,
+// RoutinePullRequestStatus carries no prUrl to link to.
+function renderFiringPullRequests(
+  pullRequests: RoutinePullRequestStatus[]
+): string {
+  if (pullRequests.length === 0) {
+    return "";
+  }
+  const items = pullRequests
+    .map(
+      (pullRequest) =>
+        `<li>PR #${pullRequest.prNumber} <code>${escapeHtml(pullRequest.headSha)}</code> <small>(informational — not a PR Follow-up)</small></li>`
+    )
+    .join("");
+  return `<section>${sectionHead("Pull requests", pullRequests.length)}<ul class="files">${items}</ul></section>`;
+}
+
+async function buildFiringArtifactDescriptors(
+  evidence: RoutineEvidencePaths
+): Promise<RunArtifactDescriptor[]> {
+  const entries: Array<[RunArtifactKind, string]> = [
+    ["prompt", evidence.promptPath],
+    ["prompt_metadata", evidence.promptMetadataPath],
+    ["provider_raw", evidence.rawLogPath],
+    ["provider_normalized", evidence.normalizedLogPath]
+  ];
+  return Promise.all(
+    entries.map(async ([kind, filePath]) => {
+      const sizeBytes = await statRoutineEvidenceFile(filePath);
+      return { kind, present: sizeBytes !== undefined, sizeBytes };
+    })
+  );
+}
+
 function collectActiveWatchdogIdleStatuses(
   runStore: RunStore,
   runs: RunStatus[],
@@ -2139,7 +2274,11 @@ function renderAttemptsTable(
 }
 
 function renderTransitionsTable(
-  transitions: { sequence: number; state: RunState; createdAt: string }[]
+  transitions: {
+    sequence: number;
+    state: RunState | RoutineFiringState;
+    createdAt: string;
+  }[]
 ): string {
   if (transitions.length === 0) {
     return "";
@@ -2158,8 +2297,23 @@ function renderTransitionsTable(
   );
 }
 
+// The DB-backed ProviderEventRecord (Run events) satisfies this structurally
+// with no adapter — Firing events, read from a normalized-log file (see
+// routines/evidence.ts) rather than the provider_events table, have no
+// per-event createdAt of their own (the log line is the raw normalized
+// event exactly as the provider emitted it, with no timestamp injected at
+// write time — see routines/dispatcher.ts's appendRoutineEvent) and no
+// attemptId/runId/raw to fabricate, so this only requires what
+// coalesceEvents/renderEventsTable actually read.
+type CoalesceableProviderEvent = {
+  createdAt?: string;
+  normalized: Record<string, unknown>;
+  sequence: number;
+  type: string;
+};
+
 function renderEventsTable(
-  events: ProviderEventRecord[],
+  events: CoalesceableProviderEvent[],
   truncated: boolean
 ): string {
   if (events.length === 0) {
@@ -2172,9 +2326,9 @@ function renderEventsTable(
           row.firstSequence === row.lastSequence
             ? `${row.firstSequence}`
             : `${row.firstSequence}–${row.lastSequence}`;
-        return `<tr><td>${seq}</td><td>message</td><td class="c-detail"><div class="msg">${escapeHtml(row.text)}</div></td><td><code>${escapeHtml(row.createdAt)}</code></td></tr>`;
+        return `<tr><td>${seq}</td><td>message</td><td class="c-detail"><div class="msg">${escapeHtml(row.text)}</div></td><td><code>${escapeHtml(row.createdAt || "-")}</code></td></tr>`;
       }
-      return `<tr><td>${row.sequence}</td><td>${escapeHtml(row.type)}</td><td class="c-detail"><code>${escapeHtml(row.detail)}</code></td><td><code>${escapeHtml(row.createdAt)}</code></td></tr>`;
+      return `<tr><td>${row.sequence}</td><td>${escapeHtml(row.type)}</td><td class="c-detail"><code>${escapeHtml(row.detail)}</code></td><td><code>${escapeHtml(row.createdAt || "-")}</code></td></tr>`;
     })
     .join("");
   const scope = truncated
@@ -2184,8 +2338,9 @@ function renderEventsTable(
 }
 
 function renderRunFileLinks(
-  runId: string,
-  artifacts: RunArtifactDescriptor[]
+  id: string,
+  artifacts: RunArtifactDescriptor[],
+  basePath: "runs" | "firings" = "runs"
 ): string {
   const items = artifacts
     .filter((artifact) => artifact.present)
@@ -2194,7 +2349,7 @@ function renderRunFileLinks(
         artifact.sizeBytes === undefined
           ? ""
           : ` <small>(${artifact.sizeBytes} bytes)</small>`;
-      return `<li><a href="/logs/runs/${encodeURIComponent(runId)}/${encodeURIComponent(artifact.kind)}">${escapeHtml(formatArtifactKind(artifact.kind))}</a>${size}</li>`;
+      return `<li><a href="/logs/${basePath}/${encodeURIComponent(id)}/${encodeURIComponent(artifact.kind)}">${escapeHtml(formatArtifactKind(artifact.kind))}</a>${size}</li>`;
     });
   if (items.length === 0) {
     return "";
@@ -2331,7 +2486,9 @@ type EventDisplayRow =
 
 // Codex streams assistant text one token per event; merge runs of adjacent
 // message events into a single readable block, breaking on any other event.
-function coalesceEvents(events: ProviderEventRecord[]): EventDisplayRow[] {
+function coalesceEvents(
+  events: CoalesceableProviderEvent[]
+): EventDisplayRow[] {
   const rows: EventDisplayRow[] = [];
   let buffer: Extract<EventDisplayRow, { kind: "message" }> | undefined;
   const flush = (): void => {
@@ -2343,10 +2500,11 @@ function coalesceEvents(events: ProviderEventRecord[]): EventDisplayRow[] {
 
   for (const event of events) {
     const message = event.normalized.message;
+    const createdAt = event.createdAt ?? "";
     if (event.type === "message" && typeof message === "string") {
       if (buffer === undefined) {
         buffer = {
-          createdAt: event.createdAt,
+          createdAt,
           firstSequence: event.sequence,
           kind: "message",
           lastSequence: event.sequence,
@@ -2355,14 +2513,14 @@ function coalesceEvents(events: ProviderEventRecord[]): EventDisplayRow[] {
       } else {
         buffer.text += message;
         buffer.lastSequence = event.sequence;
-        buffer.createdAt = event.createdAt;
+        buffer.createdAt = createdAt;
       }
       continue;
     }
 
     flush();
     rows.push({
-      createdAt: event.createdAt,
+      createdAt,
       detail:
         typeof message === "string"
           ? message

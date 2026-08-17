@@ -157,6 +157,28 @@ describe("service config editor (#307 part 3, ADR 0076)", () => {
     }
   });
 
+  it("GET /config/edit refuses a cross-origin request instead of serving the raw config", async () => {
+    const test = await setup();
+    try {
+      const app = appFor(test);
+      // Simulates a DNS-rebound attacker page: Origin's host equals the
+      // reflected Host header, but neither is a loopback name -- without
+      // this route's own same-origin guard, that page could read
+      // provider-command secrets out of the response body.
+      const response = await app.request("/config/edit", {
+        headers: browserHeaders({
+          host: "evil.example",
+          origin: "http://evil.example"
+        })
+      });
+      expect(response.status).toBe(403);
+      const html = await response.text();
+      expect(html).not.toContain("codex -p symphonika");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("preview refuses an invalid edit with a located error, and never writes", async () => {
     const test = await setup();
     try {

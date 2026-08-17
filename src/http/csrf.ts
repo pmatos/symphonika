@@ -116,10 +116,15 @@ async function readSubmittedToken(
 export type MutationAuthorization =
   { ok: true } | { ok: false; reason: string };
 
-export async function checkMutationAuthorized(
-  context: Context,
-  secret: CsrfSecret
-): Promise<MutationAuthorization> {
+// The Origin/Host half of checkMutationAuthorized, exported standalone for
+// routes that return sensitive data on GET (e.g. /config/edit's raw config,
+// which includes provider-command secrets) and so have no submitted CSRF
+// token to check but still need the DNS-rebinding defense: without this, an
+// attacker page whose hostname resolves to this loopback bind can read the
+// response even though it could never forge a POST past checkMutationAuthorized.
+export function checkSameOriginRequest(
+  context: Context
+): MutationAuthorization {
   if (!looksLikeBrowserRequest(context)) {
     return { ok: true };
   }
@@ -131,6 +136,26 @@ export async function checkMutationAuthorized(
     secFetchSite === "none";
   if (!secFetchSiteOk || !isSameOriginAsHost(context)) {
     return { ok: false, reason: "cross-origin request rejected" };
+  }
+
+  return { ok: true };
+}
+
+export async function checkMutationAuthorized(
+  context: Context,
+  secret: CsrfSecret
+): Promise<MutationAuthorization> {
+  // Mirrors checkSameOriginRequest's own CLI exemption (see
+  // looksLikeBrowserRequest above): a non-browser caller is out of the CSRF
+  // threat model entirely, so it skips the session/token check below too,
+  // not just the origin check.
+  if (!looksLikeBrowserRequest(context)) {
+    return { ok: true };
+  }
+
+  const originCheck = checkSameOriginRequest(context);
+  if (!originCheck.ok) {
+    return originCheck;
   }
 
   const sessionId = getCookie(context, SESSION_COOKIE_NAME);

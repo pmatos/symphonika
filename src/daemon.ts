@@ -378,6 +378,11 @@ export async function startDaemon(
   let lastTickAtMonotonicMs: number | undefined;
   let tickLoopStartedAtMonotonicMs: number | undefined;
   let polling = false;
+  // Guards the PR-enrichment fire-and-forget below (refreshIssuePollStatus)
+  // against overlapping itself; deliberately separate from `polling` --
+  // its own GraphQL round-trips must not gate issue dispatch, so it isn't
+  // awaited by refreshIssuePollStatus and needs its own reentrancy check.
+  let prPolling = false;
   let scheduledWork = Promise.resolve();
   let lastPollErrorsKey = "";
   let lastPullRequestFollowupAt = Date.now();
@@ -470,6 +475,15 @@ export async function startDaemon(
   const reloadConfigAndRecordOutcome = async () => {
     const snapshot = await runtimeConfig.reload();
     const reloadStatus = runtimeConfig.getStatus();
+    // Deliberately NOT `|| reloadStatus.errors.length > 0`: per-routine
+    // declaration errors (ADR 0060) land in this same `errors` array but are
+    // isolated by design -- they get their own "Routine declarations became
+    // invalid" alert via observeInvalidRoutines below, and must not also
+    // trip the whole-snapshot "Service Config reload failed" alert or make
+    // an unrelated editor save report a spurious reload failure. Every
+    // genuine whole-config error already forces usingLastKnownGood=true or
+    // snapshot===undefined, so those two conditions alone correctly capture
+    // "the reload itself is broken."
     const reloadBroken =
       snapshot === undefined || reloadStatus.usingLastKnownGood === true;
     daemonHealthNotifications.observeReload({
@@ -534,28 +548,40 @@ export async function startDaemon(
       );
 
       // #309: a cheap per-repo PR list, persisted alongside the issue
-      // snapshot above (ADR 0077). Kept in its own try/catch — a PR-poll
+      // snapshot above (ADR 0077). Fire-and-forget, not awaited: its
+      // GraphQL round-trips must not delay the issue-dispatch tick this
+      // function's own callers (reconcile/launchWork, and startup before
+      // the HTTP server is created) are waiting on. `prPolling` keeps two
+      // ticks' worth from overlapping if a poll runs long; a PR-poll
       // failure must not blank out issuePollStatus, which dispatch
-      // eligibility depends on.
-      try {
-        const pullRequestStatus =
-          await pollConfiguredGitHubPullRequestsFromConfig({
-            config: snapshot.polling,
-            ...(options.env === undefined ? {} : { env: options.env }),
-            githubIssuesApi
-          });
-        persistProjectPullRequestPollState(runStore, pullRequestStatus);
-        if (pullRequestStatus.errors.length > 0) {
-          logger.warn(
-            { errors: pullRequestStatus.errors },
-            "symphonika PR polling has errors"
-          );
-        }
-      } catch (error) {
-        logger.warn(
-          { error: errorMessage(error) },
-          "symphonika PR polling failed"
-        );
+      // eligibility depends on, so it's isolated in its own try/catch same
+      // as before.
+      if (!prPolling) {
+        prPolling = true;
+        void (async () => {
+          try {
+            const pullRequestStatus =
+              await pollConfiguredGitHubPullRequestsFromConfig({
+                config: snapshot.polling,
+                ...(options.env === undefined ? {} : { env: options.env }),
+                githubIssuesApi
+              });
+            persistProjectPullRequestPollState(runStore, pullRequestStatus);
+            if (pullRequestStatus.errors.length > 0) {
+              logger.warn(
+                { errors: pullRequestStatus.errors },
+                "symphonika PR polling has errors"
+              );
+            }
+          } catch (error) {
+            logger.warn(
+              { error: errorMessage(error) },
+              "symphonika PR polling failed"
+            );
+          } finally {
+            prPolling = false;
+          }
+        })();
       }
     } catch (error) {
       issuePollStatus.errors = [errorMessage(error)];
@@ -1032,6 +1058,22 @@ export async function startDaemon(
       }
       return { format: workflow.format, path: workflow.path };
     },
+    getProjectRepoAliases: (projectName) => {
+      const tracker = runtimeConfig.projectsByName().get(projectName)?.tracker;
+      if (tracker === undefined) {
+        return [projectName];
+      }
+      const aliases: string[] = [];
+      for (const project of runtimeConfig.projectsByName().values()) {
+        if (
+          project.tracker?.owner === tracker.owner &&
+          project.tracker.repo === tracker.repo
+        ) {
+          aliases.push(project.name);
+        }
+      }
+      return aliases;
+    },
     mergePullRequest: async (input): Promise<MergePullRequestResult> => {
       const project = runtimeConfig.projectsByName().get(input.projectName);
       if (project?.tracker === undefined) {
@@ -1055,6 +1097,13 @@ export async function startDaemon(
         token
       };
 
+      // The project's own configured merge method (default squash, see
+      // DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY), not a hardcoded "merge" --
+      // repos configured to disallow merge commits (Allow merge commits
+      // unchecked, the common case for a squash-only default) rejected
+      // every dashboard merge with a 405 regardless of what the automatic
+      // PR-follow-up merge (which already used this policy) was doing.
+      const mergeMethod = runtimeConfig.pullRequestPolicy().merge.method;
       let mergeError: string | undefined;
       try {
         const merged = await tryMergePullRequest(githubIssuesApi, {
@@ -1062,7 +1111,7 @@ export async function startDaemon(
           ...(input.expectedHeadSha === undefined
             ? {}
             : { expectedHeadSha: input.expectedHeadSha }),
-          method: "merge",
+          method: mergeMethod,
           pullNumber: input.prNumber
         });
         if (!merged) {
@@ -1097,7 +1146,7 @@ export async function startDaemon(
       runStore.recordPullRequestMergeAttempt({
         error: mergeError ?? null,
         freshTrackingState: freshState?.trackingState ?? null,
-        method: "merge",
+        method: mergeMethod,
         ok: mergeError === undefined,
         prNumber: input.prNumber,
         projectName: input.projectName
@@ -1589,9 +1638,26 @@ function resolveListeningPort(
   return fallbackPort;
 }
 
+const SERVER_CLOSE_GRACE_MS = 5_000;
+
 function stopServer(server: ServerType, logger: Logger): Promise<void> {
   return new Promise((resolve, reject) => {
+    // close() waits for every open connection to end on its own. A peer that
+    // stops reading mid-response never lets its socket go idle, so without a
+    // bound the daemon would wait on it forever; destroy the stragglers once
+    // the grace window elapses.
+    const forceClose = setTimeout(() => {
+      if ("closeAllConnections" in server) {
+        logger.warn(
+          "symphonika daemon forcing lingering HTTP connections closed"
+        );
+        server.closeAllConnections();
+      }
+    }, SERVER_CLOSE_GRACE_MS);
+
     server.close((error) => {
+      clearTimeout(forceClose);
+
       if (error) {
         reject(error);
         return;

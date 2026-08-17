@@ -214,9 +214,10 @@ rather than surfacing git's own error text.
 ## Consequences
 
 - Every future mutating route must route through `requireAuthorizedMutation` (or an equivalent
-  explicit exemption with its own justification) — there is no default-safe way to add a new `POST`
-  in `src/http/app.ts` that skips it by omission the way today's three routes could have before this
-  ADR.
+  explicit exemption with its own justification). This is a convention, not a structural guarantee:
+  `requireAuthorizedMutation` is passed per-route (`app.post(path, requireAuthorizedMutation, ...)`),
+  not mounted with `app.use()`, so a new `POST` can still omit it by omission exactly as easily as
+  today's three routes could have before this ADR — review is what catches that, not the router.
 - A daemon restart invalidates every open tab's CSRF token. Acceptable for a single-operator local
   tool; revisit if `#301`'s out-of-scope remote-access story ever needs tokens to outlive a restart.
 - The CLI's bare-`fetch` compatibility path is a deliberate, permanent asymmetry, not a gap to close

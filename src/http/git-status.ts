@@ -59,13 +59,17 @@ export async function detectGitFileState(
       "status",
       "--porcelain=v1",
       "--",
-      path.relative(repoRoot, filePath)
+      literalPathspec(path.relative(repoRoot, filePath))
     ]),
+    // check-ignore takes plain pathnames, not pathspecs -- it errors on any
+    // magic signature ("pathspec magic not supported by this command"), so
+    // this one call is left as a literal filesystem path.
     gitSucceeds([
       "-C",
       repoRoot,
       "check-ignore",
       "--quiet",
+      "--",
       path.relative(repoRoot, filePath)
     ])
   ]);
@@ -128,8 +132,49 @@ export async function commitFile(input: {
     };
   }
 
+  // detectGitFileState derives repoRoot independently from filePath itself
+  // (git rev-parse --show-toplevel); refuse rather than trust a
+  // caller-supplied repoRoot that disagrees with it -- silently proceeding
+  // would scope the add/commit below to the wrong repository.
+  if (path.resolve(state.repoRoot) !== path.resolve(input.repoRoot)) {
+    return {
+      kind: "refused",
+      reason: `filePath resolves to repository ${state.repoRoot}, not the requested ${input.repoRoot}`
+    };
+  }
+
   const relativePath = path.relative(input.repoRoot, input.filePath);
-  await git(["-C", input.repoRoot, "add", "--", relativePath]);
+  // :(literal) turns off pathspec glob matching -- without it, a filename
+  // containing *, ?, or a valid [...] range is glob-expanded by git itself,
+  // so `git commit -- 'template?.yaml'` can match and sweep in an entirely
+  // different, separately staged file (e.g. templateA.yaml) rather than
+  // committing only the intended one.
+  const pathspec = literalPathspec(relativePath);
+  // Worktree back at HEAD's content while the index still holds a different
+  // edit: `git add` would overwrite that staged blob with HEAD's own and the
+  // commit would then be empty -- destroying the only copy of the staged edit
+  // and reporting it as "nothing to commit". Staged-and-unstaged is otherwise
+  // fine to commit: the saved content lands in a commit that supersedes it.
+  if (
+    state.fileStatus === "modified_staged_and_unstaged" &&
+    (await gitSucceeds([
+      "-C",
+      input.repoRoot,
+      "diff",
+      "--quiet",
+      "HEAD",
+      "--",
+      pathspec
+    ]))
+  ) {
+    return {
+      kind: "refused",
+      reason:
+        "this file has a staged edit and the saved content matches HEAD; committing would discard that staged edit without recording anything -- commit or unstage it first"
+    };
+  }
+
+  await git(["-C", input.repoRoot, "add", "--", pathspec]);
   try {
     await git([
       "-C",
@@ -138,7 +183,7 @@ export async function commitFile(input: {
       "-m",
       input.message,
       "--",
-      relativePath
+      pathspec
     ]);
   } catch (error) {
     if (isNothingToCommit(error)) {
@@ -174,6 +219,13 @@ function parseFileStatus(statusLine: string): GitFileStatus {
   return "clean";
 }
 
+// git's pathspec magic signature that disables glob matching -- see the
+// callers in commitFile. Not usable with check-ignore, which takes plain
+// pathnames and errors on any magic signature.
+function literalPathspec(relativePath: string): string {
+  return `:(literal)${relativePath}`;
+}
+
 async function pathExists(candidate: string): Promise<boolean> {
   try {
     await access(candidate);
@@ -200,8 +252,16 @@ function errorOutput(error: unknown): string {
   return `${stdout}\n${stderr}`;
 }
 
+// commit runs pre-commit/commit-msg hooks with no stdin wired up; a hook
+// that blocks waiting for input (or just hangs) would otherwise stall this
+// request forever. Applies to every call here, not only commit, so one
+// constant covers all of them.
+const GIT_COMMAND_TIMEOUT_MS = 30_000;
+
 async function git(args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args);
+  const { stdout } = await execFileAsync("git", args, {
+    timeout: GIT_COMMAND_TIMEOUT_MS
+  });
   return stdout.trim();
 }
 
@@ -219,7 +279,9 @@ async function tryGit(args: string[]): Promise<string | undefined> {
 // String.trim() would silently turn it into "staged change" by eating it.
 async function tryGitRawOutput(args: string[]): Promise<string | undefined> {
   try {
-    const { stdout } = await execFileAsync("git", args);
+    const { stdout } = await execFileAsync("git", args, {
+      timeout: GIT_COMMAND_TIMEOUT_MS
+    });
     return stdout.replace(/\r?\n$/, "");
   } catch {
     return undefined;

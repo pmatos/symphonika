@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { Logger } from "pino";
@@ -29,6 +29,7 @@ import type {
 import {
   DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY,
   pullRequestFollowupPolicyFromRaw,
+  pullRequestPolicySchema,
   type PullRequestFollowupPolicy
 } from "./pull-request-followup.js";
 import { parseWorkflowContract } from "./workflow/contract-loading.js";
@@ -47,6 +48,7 @@ import {
   MAX_ROUTINE_WORKSPACE_RETENTION_DAYS,
   type RoutineWorkspaceRetentionPolicy
 } from "./routines/workspace-retention.js";
+import { createAsyncMutex } from "./lifecycle/async-mutex.js";
 
 export type RuntimeConfigSnapshot = {
   configPath: string;
@@ -339,6 +341,14 @@ const serviceRoutineSchema = z
 const serviceConfigSchema = z
   .object({
     email: emailNotificationConfigSchema.optional(),
+    // Mirrors src/state.ts's own resolveStateRoot schema so a malformed
+    // `state:` block is rejected here, at save/reload time, instead of only
+    // surfacing at startup via resolveStateRoot's throw.
+    state: z
+      .object({
+        root: z.string().min(1).optional()
+      })
+      .optional(),
     polling: z
       .object({
         interval_ms: z.number().int().positive().optional()
@@ -378,6 +388,12 @@ export class RuntimeConfigReloader {
   private readonly configDir: string;
   private readonly configPath: string;
   private readonly logger?: Logger;
+  // Serializes concurrent reload() calls (a poll-tick reload racing an
+  // editor-triggered reload): without this, whichever call's I/O happens to
+  // finish last wins `this.snapshot`, regardless of which reload actually
+  // started later, so a just-installed editor save could be overwritten by
+  // an in-flight scheduled reload that started before it.
+  private readonly reloadMutex = createAsyncMutex();
   private snapshot: RuntimeConfigSnapshot | undefined;
   private status: RuntimeReloadStatus = {
     errors: [],
@@ -440,45 +456,50 @@ export class RuntimeConfigReloader {
   }
 
   async reload(): Promise<RuntimeConfigSnapshot | undefined> {
-    const attemptedAt = new Date().toISOString();
-    const reloadInput = {
-      attemptedAt,
-      configDir: this.configDir,
-      configPath: this.configPath
-    };
-    const result = await loadRuntimeConfigSnapshot({
-      ...reloadInput,
-      ...(this.snapshot === undefined ? {} : { previous: this.snapshot })
-    });
+    await this.reloadMutex.acquire();
+    try {
+      const attemptedAt = new Date().toISOString();
+      const reloadInput = {
+        attemptedAt,
+        configDir: this.configDir,
+        configPath: this.configPath
+      };
+      const result = await loadRuntimeConfigSnapshot({
+        ...reloadInput,
+        ...(this.snapshot === undefined ? {} : { previous: this.snapshot })
+      });
 
-    this.status.lastAttemptedAt = attemptedAt;
-    if (result.snapshot !== undefined) {
-      this.snapshot = result.snapshot;
-      this.status.lastLoadedAt = result.snapshot.loadedAt;
+      this.status.lastAttemptedAt = attemptedAt;
+      if (result.snapshot !== undefined) {
+        this.snapshot = result.snapshot;
+        this.status.lastLoadedAt = result.snapshot.loadedAt;
+      }
+      this.status.errors = result.errors;
+      this.status.ok = result.errors.length === 0;
+      this.status.usingLastKnownGood = result.usingLastKnownGood;
+
+      if (result.errors.length > 0) {
+        this.logger?.warn(
+          {
+            errors: result.errors,
+            usingLastKnownGood: result.usingLastKnownGood
+          },
+          "symphonika config reload failed"
+        );
+      } else {
+        this.logger?.debug(
+          {
+            pollingIntervalMs: this.snapshot?.pollingIntervalMs,
+            projects: this.snapshot?.polling.projects.length ?? 0
+          },
+          "symphonika config reload succeeded"
+        );
+      }
+
+      return this.snapshot;
+    } finally {
+      this.reloadMutex.release();
     }
-    this.status.errors = result.errors;
-    this.status.ok = result.errors.length === 0;
-    this.status.usingLastKnownGood = result.usingLastKnownGood;
-
-    if (result.errors.length > 0) {
-      this.logger?.warn(
-        {
-          errors: result.errors,
-          usingLastKnownGood: result.usingLastKnownGood
-        },
-        "symphonika config reload failed"
-      );
-    } else {
-      this.logger?.debug(
-        {
-          pollingIntervalMs: this.snapshot?.pollingIntervalMs,
-          projects: this.snapshot?.polling.projects.length ?? 0
-        },
-        "symphonika config reload succeeded"
-      );
-    }
-
-    return this.snapshot;
   }
 }
 
@@ -508,7 +529,14 @@ export async function validateServiceConfigContent(
     configDir,
     `.${path.basename(configPath)}.editor-validate-${process.pid}-${Date.now()}-${randomBytes(6).toString("hex")}`
   );
-  await writeFile(tempPath, content, { encoding: "utf8", flag: "wx" });
+  // Match the live config file's own permissions rather than Node's default
+  // (0o666 minus umask) -- this scratch copy carries the same
+  // provider-command/token content the live file does, so it should never
+  // be more readable than the file it's validating. Falls back to 0o600
+  // (not the live file's mode) when the live file can't be stat'd, since an
+  // unreadable-permissions failure should fail closed, not open.
+  const mode = await currentConfigMode(configPath);
+  await writeFile(tempPath, content, { encoding: "utf8", flag: "wx", mode });
   try {
     const result = await loadRuntimeConfigSnapshot({
       attemptedAt: new Date().toISOString(),
@@ -575,6 +603,16 @@ async function loadRuntimeConfigSnapshot(input: {
     // candidate snapshot through the normal last-known-good path (like the
     // `!parsed.success` branch above) instead of continuing to build and
     // return a "live" snapshot with an already-invalid provider command.
+    return lastKnownGoodOrNothing(input.previous, errors);
+  }
+
+  // pullRequestPolicy (below) falls back to DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY
+  // whenever pullRequestFollowupPolicyFromRaw's own parse fails, silently
+  // masking a malformed `pull_requests:` block. Validate it here, against
+  // the same schema, so that failure surfaces as a reload error instead.
+  const pullRequestPolicyParse = pullRequestPolicySchema.safeParse(raw);
+  if (!pullRequestPolicyParse.success) {
+    errors.push(...pullRequestPolicyParse.error.issues.map(formatZodIssue));
     return lastKnownGoodOrNothing(input.previous, errors);
   }
 
@@ -1394,4 +1432,12 @@ function formatZodIssueWithPrefix(issue: z.ZodIssue, prefix: string[]): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function currentConfigMode(configPath: string): Promise<number> {
+  try {
+    return (await stat(configPath)).mode & 0o777;
+  } catch {
+    return 0o600;
+  }
 }

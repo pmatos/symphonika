@@ -242,6 +242,58 @@ describe("commitFile (#306 part 3/3, ADR 0075)", () => {
     expect(status).toContain("other.txt");
   });
 
+  it("commits exactly a filename containing a pathspec glob metacharacter, leaving an unrelated staged file untouched", async () => {
+    const root = await makeTempRoot();
+    await initRepo(root);
+    const filePath = path.join(root, "template?.yaml");
+    const otherPath = path.join(root, "templateA.yaml");
+    await writeFile(filePath, "content\n", "utf8");
+    await writeFile(otherPath, "other\n", "utf8");
+    await git(root, ["add", "--", "template?.yaml", "templateA.yaml"]);
+    await git(root, ["commit", "-m", "base"]);
+    await writeFile(filePath, "edited\n", "utf8");
+    await writeFile(otherPath, "also edited\n", "utf8");
+    await git(root, ["add", "--", "templateA.yaml"]);
+
+    const result = await commitFile({
+      filePath,
+      message: "Edit template?.yaml via the dashboard",
+      repoRoot: root
+    });
+
+    expect(result.kind).toBe("committed");
+    const status = await git(root, ["status", "--porcelain=v1"]);
+    // Unescaped, "template?.yaml" is a pathspec glob that also matches
+    // templateA.yaml -- a raw (non-literal) pathspec would sweep
+    // templateA.yaml's separately staged edit into this commit too.
+    expect(status).not.toContain("template?.yaml");
+    expect(status).toContain("templateA.yaml");
+  });
+
+  it("refuses when the caller-supplied repoRoot disagrees with the file's actual repository", async () => {
+    const root = await makeTempRoot();
+    await initRepo(root);
+    const otherRoot = await makeTempRoot();
+    await initRepo(otherRoot);
+    const filePath = path.join(root, "workflow.md");
+    await writeFile(filePath, "content\n", "utf8");
+    await git(root, ["add", "workflow.md"]);
+    await git(root, ["commit", "-m", "base"]);
+    await writeFile(filePath, "edited\n", "utf8");
+
+    const result = await commitFile({
+      filePath,
+      message: "Edit workflow.md via the dashboard",
+      repoRoot: otherRoot
+    });
+
+    expect(result).toMatchObject({ kind: "refused" });
+    // Nothing was committed in either repository.
+    expect(await git(root, ["rev-list", "--count", "HEAD"])).toBe("1");
+    const status = await git(root, ["status", "--porcelain=v1"]);
+    expect(status).toContain("workflow.md");
+  });
+
   it("returns nothing_to_commit when the content is unchanged", async () => {
     const root = await makeTempRoot();
     await initRepo(root);
@@ -257,6 +309,56 @@ describe("commitFile (#306 part 3/3, ADR 0075)", () => {
     });
 
     expect(result).toEqual({ kind: "nothing_to_commit" });
+  });
+
+  it("refuses, preserving the staged edit, when the saved content matches HEAD", async () => {
+    const root = await makeTempRoot();
+    await initRepo(root);
+    const filePath = path.join(root, "workflow.md");
+    await writeFile(filePath, "content\n", "utf8");
+    await git(root, ["add", "workflow.md"]);
+    await git(root, ["commit", "-m", "base"]);
+    await writeFile(filePath, "staged edit\n", "utf8");
+    await git(root, ["add", "workflow.md"]);
+    // Reverted to HEAD's content, so the index is the only place the
+    // staged edit still exists.
+    await writeFile(filePath, "content\n", "utf8");
+
+    const result = await commitFile({
+      filePath,
+      message: "Save whose content matches HEAD",
+      repoRoot: root
+    });
+
+    expect(result.kind).toBe("refused");
+    if (result.kind === "refused") {
+      expect(result.reason).toContain("staged edit");
+    }
+    expect(await git(root, ["show", ":workflow.md"])).toBe("staged edit");
+    expect(await git(root, ["rev-list", "--count", "HEAD"])).toBe("1");
+  });
+
+  it("commits a file that was staged and then edited further", async () => {
+    const root = await makeTempRoot();
+    await initRepo(root);
+    const filePath = path.join(root, "workflow.md");
+    await writeFile(filePath, "content\n", "utf8");
+    await git(root, ["add", "workflow.md"]);
+    await git(root, ["commit", "-m", "base"]);
+    await writeFile(filePath, "staged edit\n", "utf8");
+    await git(root, ["add", "workflow.md"]);
+    await writeFile(filePath, "staged edit, then more on top\n", "utf8");
+
+    const result = await commitFile({
+      filePath,
+      message: "Save on top of a staged edit",
+      repoRoot: root
+    });
+
+    expect(result.kind).toBe("committed");
+    expect(await git(root, ["show", "HEAD:workflow.md"])).toBe(
+      "staged edit, then more on top"
+    );
   });
 
   it("refuses to commit while mid-rebase", async () => {

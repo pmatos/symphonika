@@ -197,6 +197,13 @@ export type HttpAppOptions = {
   getProjectWorkflowPath?: (
     projectName: string
   ) => { format: WorkflowFormat; path: string } | undefined;
+  // Ownership/liveness guards (clear-stale-claim, PR merge) key on Project
+  // name, but two Projects can point at the same GitHub owner/repo (a
+  // supported config). Returns every Project name sharing that repo,
+  // including projectName itself, so those guards union liveness across the
+  // whole alias group instead of missing a claim/run parked under a sibling
+  // Project name. See src/http/pages.ts's getProjectRepoAliases usage.
+  getProjectRepoAliases?: (projectName: string) => string[];
   getRuns?: () => RunStatus[];
   getReloadStatus?: () => RuntimeReloadStatus;
   getScheduled?: () => ScheduledCallback[];
@@ -669,6 +676,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.getProjectWorkflowPath === undefined
         ? {}
         : { getProjectWorkflowPath: options.getProjectWorkflowPath }),
+      ...(options.getProjectRepoAliases === undefined
+        ? {}
+        : { getProjectRepoAliases: options.getProjectRepoAliases }),
       ...(options.getStatusSnapshot === undefined
         ? {}
         : { getStatusSnapshot: options.getStatusSnapshot }),
@@ -845,6 +855,11 @@ function streamChangeEvents(
     const onShutdown = () => {
       done = true;
       wake?.();
+      // A writeSSE already blocked on a stalled client's backpressure never
+      // resolves on its own, so waking the idle-wait is not enough. Aborting
+      // errors the underlying writer, which makes that pending write return
+      // and lets the loop reach its finally.
+      stream.abort();
     };
     shutdownSignal?.addEventListener("abort", onShutdown);
     const unsubscribe = runStore.subscribeToChanges((event) => {

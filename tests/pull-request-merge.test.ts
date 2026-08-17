@@ -416,7 +416,10 @@ describe("POST /prs/:project/:number/merge (#309 part 3)", () => {
         version: "0.1.0"
       });
       const response = await app.request("/prs/alpha/246/merge", {
-        body: formBody({ csrf_token: VALID_TOKEN }),
+        body: formBody({
+          csrf_token: VALID_TOKEN,
+          expected_head_sha: "abc123"
+        }),
         headers: {
           ...browserHeaders(),
           "content-type": "application/x-www-form-urlencoded"
@@ -504,7 +507,10 @@ describe("POST /prs/:project/:number/merge (#309 part 3)", () => {
         version: "0.1.0"
       });
       const response = await app.request("/prs/alpha/246/merge", {
-        body: formBody({ csrf_token: VALID_TOKEN }),
+        body: formBody({
+          csrf_token: VALID_TOKEN,
+          expected_head_sha: "abc123"
+        }),
         headers: {
           ...browserHeaders(),
           "content-type": "application/x-www-form-urlencoded"
@@ -513,6 +519,74 @@ describe("POST /prs/:project/:number/merge (#309 part 3)", () => {
       });
       const html = await response.text();
       expect(html).toContain("Refused: run run-live-1 is live for this PR.");
+      expect(called).toBe(false);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("refuses when a live Run is owned by a sibling Project aliasing the same repository", async () => {
+    const test = await setup();
+    try {
+      // The PR itself is tracked under "alpha", but the Run actually working
+      // its issue was dispatched under "beta" -- a second configured Project
+      // pointing at the same GitHub owner/repo as "alpha". Without
+      // getProjectRepoAliases, findLiveRunIdForIssue's projectName-only
+      // match would miss it and offer the merge unrefused.
+      test.runStore.createRun({
+        id: "run-live-beta",
+        issue: sampleIssue({ number: 9 }),
+        projectName: "beta",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.trackPullRequest({
+        branchName: "sym/alpha/9-fix",
+        headSha: "abc123",
+        issueNumber: 9,
+        prNumber: 246,
+        prUrl: "https://github.com/pmatos/symphonika/pull/246",
+        projectName: "alpha",
+        runId: "run-live-beta"
+      });
+
+      let called = false;
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        getActiveRuns: () => [
+          {
+            cancelReason: null,
+            cancelRequested: false,
+            issueNumber: 9,
+            projectName: "beta",
+            runId: "run-live-beta"
+          }
+        ],
+        getProjectRepoAliases: (projectName) =>
+          projectName === "alpha" || projectName === "beta"
+            ? ["alpha", "beta"]
+            : [projectName],
+        mergePullRequest: () => {
+          called = true;
+          return Promise.resolve({ freshState: undefined, ok: true });
+        },
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/prs/alpha/246/merge", {
+        body: formBody({
+          csrf_token: VALID_TOKEN,
+          expected_head_sha: "abc123"
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+      const html = await response.text();
+      expect(html).toContain("Refused: run run-live-beta is live for this PR.");
       expect(called).toBe(false);
     } finally {
       test.cleanup();
@@ -551,7 +625,10 @@ describe("POST /prs/:project/:number/merge (#309 part 3)", () => {
         version: "0.1.0"
       });
       const response = await app.request("/prs/alpha/246/merge", {
-        body: formBody({ csrf_token: VALID_TOKEN }),
+        body: formBody({
+          csrf_token: VALID_TOKEN,
+          expected_head_sha: "abc123"
+        }),
         headers: {
           ...browserHeaders(),
           "content-type": "application/x-www-form-urlencoded"
@@ -599,7 +676,10 @@ describe("POST /prs/:project/:number/merge (#309 part 3)", () => {
         version: "0.1.0"
       });
       const response = await app.request("/prs/alpha/246/merge", {
-        body: formBody({ csrf_token: VALID_TOKEN }),
+        body: formBody({
+          csrf_token: VALID_TOKEN,
+          expected_head_sha: "abc123"
+        }),
         headers: {
           ...browserHeaders(),
           "content-type": "application/x-www-form-urlencoded"
@@ -624,7 +704,10 @@ describe("POST /prs/:project/:number/merge (#309 part 3)", () => {
         version: "0.1.0"
       });
       const response = await app.request("/prs/alpha/246/merge", {
-        body: formBody({ csrf_token: VALID_TOKEN }),
+        body: formBody({
+          csrf_token: VALID_TOKEN,
+          expected_head_sha: "abc123"
+        }),
         headers: {
           ...browserHeaders(),
           "content-type": "application/x-www-form-urlencoded"

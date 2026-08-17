@@ -81,11 +81,18 @@ function emptyPullRequestPollStatus(): PullRequestPollStatus {
 
 export async function pollConfiguredGitHubPullRequestsFromConfig(options: {
   config: PollingServiceConfig;
+  // Defaults to a process-lifetime module singleton (below) so daemon.ts's
+  // repeated polling ticks share one enrichment budget without having to
+  // thread a cache through. Tests inject a fresh Map so cases using the
+  // same project/PR number don't see another case's cached enrichment.
+  enrichmentCache?: Map<string, CachedPullRequestEnrichment>;
   env?: NodeJS.ProcessEnv;
   githubIssuesApi: GitHubIssuesApi;
 }): Promise<PullRequestPollStatus> {
   const env = options.env ?? process.env;
+  const cache = options.enrichmentCache ?? defaultEnrichmentCache;
   const status = emptyPullRequestPollStatus();
+  const seenEnrichmentCacheKeys = new Set<string>();
 
   for (const project of options.config.projects) {
     if (project.disabled === true) {
@@ -95,8 +102,20 @@ export async function pollConfiguredGitHubPullRequestsFromConfig(options: {
       project,
       env,
       options.githubIssuesApi,
-      status
+      status,
+      cache,
+      seenEnrichmentCacheKeys
     );
+  }
+
+  // A PR no longer returned by any project's poll (closed, merged and aged
+  // out, or the repo/project reconfigured) has no reason to keep its
+  // enrichment cached forever -- an unbounded-lifetime daemon would
+  // otherwise leak one entry per PR ever seen.
+  for (const key of cache.keys()) {
+    if (!seenEnrichmentCacheKeys.has(key)) {
+      cache.delete(key);
+    }
   }
 
   return status;
@@ -106,7 +125,9 @@ async function pollProjectPullRequests(
   project: PollingProjectConfig,
   env: NodeJS.ProcessEnv,
   api: GitHubIssuesApi,
-  status: PullRequestPollStatus
+  status: PullRequestPollStatus,
+  cache: Map<string, CachedPullRequestEnrichment>,
+  seenEnrichmentCacheKeys: Set<string>
 ): Promise<void> {
   const lastPolledAt = new Date().toISOString();
   const token = resolveEnvBackedValue(project.tracker.token, env);
@@ -160,10 +181,15 @@ async function pollProjectPullRequests(
     (raw): raw is RawGitHubPullRequest & { number: number } =>
       raw.number !== undefined
   );
+  const nowMs = Date.now();
+  for (const raw of numberedPullRequests) {
+    seenEnrichmentCacheKeys.add(enrichmentCacheKey(project.name, raw.number));
+  }
   const snapshots = await mapWithConcurrency(
     numberedPullRequests,
     PULL_REQUEST_ENRICHMENT_CONCURRENCY,
-    (raw) => buildSnapshot(raw, raw.number, project.name, repoInput, api)
+    (raw) =>
+      buildSnapshot(raw, raw.number, project.name, repoInput, api, nowMs, cache)
   );
   status.pullRequests.push(...snapshots);
 
@@ -201,12 +227,48 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+export type CachedPullRequestEnrichment = {
+  checks: PullRequestState["checks"] | null;
+  enrichedAtMs: number;
+  headSha: string | null;
+  mergeable: PullRequestState["mergeable"] | null;
+  merged: boolean;
+  open: boolean;
+  reviewDecision: PullRequestState["reviewDecision"] | null;
+  trackingState: PullRequestState["trackingState"] | null;
+  unresolvedReviewThreads: number | null;
+  url: string | null;
+};
+
+// The default when a caller doesn't inject its own (see
+// pollConfiguredGitHubPullRequestsFromConfig): every daemon.ts polling tick
+// should share one enrichment budget, the same way a single process shares
+// one GitHub rate limit. Keyed by project name, not owner/repo, so a Project
+// rename/re-point starts a fresh cache entry rather than serving another
+// Project's stale enrichment under the old key.
+const defaultEnrichmentCache = new Map<string, CachedPullRequestEnrichment>();
+
+function enrichmentCacheKey(projectName: string, prNumber: number): string {
+  return `${projectName}#${prNumber}`;
+}
+
+// Enrichment is a GraphQL round-trip against the same token
+// pull-request-followup.ts's own (sequential) polling depends on. Without a
+// floor, hourly volume scales as ticks-per-hour x open-PR-count — at the
+// default 30s poll interval, 120 x every open PR, every hour, forever. A
+// five-minute floor still keeps displayed PR state well within an operator's
+// tolerance for "how stale is this checks/reviewDecision column" while
+// cutting that volume by roughly 10x.
+const PULL_REQUEST_ENRICHMENT_MIN_INTERVAL_MS = 5 * 60_000;
+
 async function buildSnapshot(
   raw: RawGitHubPullRequest,
   prNumber: number,
   projectName: string,
   repoInput: GitHubIssueRepositoryInput,
-  api: GitHubIssuesApi
+  api: GitHubIssuesApi,
+  nowMs: number,
+  cache: Map<string, CachedPullRequestEnrichment>
 ): Promise<ProjectPullRequestSnapshot> {
   const base: ProjectPullRequestSnapshot = {
     branchOrigin: classifyPullRequestBranchOrigin(raw.head?.ref),
@@ -228,6 +290,27 @@ async function buildSnapshot(
     url: raw.html_url ?? null
   };
 
+  const cacheKey = enrichmentCacheKey(projectName, prNumber);
+  const cached = cache.get(cacheKey);
+  if (
+    cached !== undefined &&
+    nowMs - cached.enrichedAtMs < PULL_REQUEST_ENRICHMENT_MIN_INTERVAL_MS
+  ) {
+    return {
+      ...base,
+      checks: cached.checks,
+      headSha: cached.headSha,
+      mergeable: cached.mergeable,
+      merged: cached.merged,
+      open: cached.open,
+      reviewDecision: cached.reviewDecision,
+      stateAvailable: true,
+      trackingState: cached.trackingState,
+      unresolvedReviewThreads: cached.unresolvedReviewThreads,
+      url: cached.url
+    };
+  }
+
   let followup;
   try {
     followup = await tryGetPullRequestFollowupState(api, {
@@ -245,6 +328,18 @@ async function buildSnapshot(
   }
 
   const state = interpretPullRequest(followup);
+  cache.set(cacheKey, {
+    checks: state.checks,
+    enrichedAtMs: nowMs,
+    headSha: state.headSha,
+    mergeable: state.mergeable,
+    merged: state.merged,
+    open: state.open,
+    reviewDecision: state.reviewDecision,
+    trackingState: state.trackingState,
+    unresolvedReviewThreads: state.unresolvedReviewThreads,
+    url: state.url
+  });
   return {
     ...base,
     checks: state.checks,

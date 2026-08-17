@@ -1875,17 +1875,31 @@ form-encoded submission, or an `X-CSRF-Token` header otherwise. A cross-origin r
 same-origin one with a missing or stale token, gets `403`. The token's lifetime is the daemon
 process's — a restart invalidates every open tab's token until it reloads.
 
-`runSavePipeline` (`src/http/save-pipeline.ts`, ADR-0075) is the save path every future editor
-route calls through: validate with the same parser the reload path uses, refuse a write that would
-clobber a change made since the editor opened (a content-hash comparison, `src/content-hash.ts`),
-write atomically preserving the file's mode, then trigger the real reload path and report its
-actual outcome. It validates routine declarations and workflow contracts today; service-config
+`runSavePipeline` (`src/http/save-pipeline.ts`, ADR-0075) is the save path every editor route calls
+through: validate with the same parser the reload path uses, refuse a write that would clobber a
+change made since the editor opened (a content-hash comparison, `src/content-hash.ts`), write
+atomically preserving the file's mode, then trigger the real reload path and report its actual
+outcome. It validates routine declarations and workflow contracts today; service-config
 validation-reuse is deferred to whichever editor route first needs it (ADR-0075 records why). A
 save target must resolve — through symlinks — to one of the specific paths the current valid
 config actually references (`resolveConfinedWritePath`/`computeReferencedRealPaths`,
-`src/path-safety.ts`), not merely a path inside the config directory. No editor route calls this
-pipeline yet; it ships ahead of its first caller the same way `#305`'s `GET /events` shipped ahead
-of the dashboard that first consumed it.
+`src/path-safety.ts`), not merely a path inside the config directory.
+
+`GET /routines/:name/edit` is the first caller (`#307`, ADR-0076): raw text editing of the
+Routine's declaration file, no generated form — the file is Markdown-with-YAML-front-matter, and a
+form round-trip would reformat it. Saving is two steps, never one: `POST .../edit/preview`
+re-validates the submitted content with `parseRoutineDeclaration` and, when valid, renders a diff
+against the current on-disk content (a small in-process LCS line diff — the two texts are always
+in memory already, never large enough to warrant a dependency); nothing is written until the
+operator submits the resulting confirm form to `POST .../edit/confirm`, which resolves the write
+target through `resolveWritePath` and calls `runSavePipeline` with the daemon's real reload as the
+`reload` callback. A stale write (content changed on disk since the editor opened) is refused with
+the current content shown, never silently overwritten. A YAML syntax error surfaces the parser's
+own line/column (`locatedYamlErrorMessage`, `src/yaml-errors.ts`); a semantic validation error (a
+missing or malformed field) has no parser position to report and is shown as plain text. The
+schedule and next-fire-time effect of a saved edit lands on the next dispatch tick, same as any
+other config reload — the page shows whatever the store's current row holds on next visit, not a
+synthetic post-save preview.
 
 `detectGitFileState` (`src/http/git-status.ts`, ADR-0075) gives a future editor the git context the
 issue requires before a save: whether the target path sits inside a git repo, its repo root and

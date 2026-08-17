@@ -1,11 +1,17 @@
-import { Hono } from "hono";
+import { readFile } from "node:fs/promises";
 
+import { Hono, type MiddlewareHandler } from "hono";
+
+import { contentHash } from "../content-hash.js";
 import {
+  checkMutationAuthorized,
   CSRF_FIELD_NAME,
   csrfTokenFor,
   ensureSession,
   type CsrfSecret
 } from "./csrf.js";
+import { parseRoutineDeclaration } from "../routines/declaration-loader.js";
+import { runSavePipeline, type ReloadOutcome } from "./save-pipeline.js";
 import {
   DEFAULT_POLLING_INTERVAL_MS,
   type FilteredProjectIssueSnapshot,
@@ -94,6 +100,9 @@ export type RegisterPagesOptions = {
   issuePollStatus?: IssuePollStatus;
   monotonicNow: () => number;
   now?: () => number;
+  // #307's editors: see HttpAppOptions.resolveWritePath (src/http/app.ts)
+  // and src/path-safety.ts.
+  resolveWritePath?: (candidatePath: string) => Promise<string | undefined>;
   runStore: RunStore;
   // #304's /firings/:id evidence — routineEvidencePaths derives a Firing's
   // log/prompt paths from stateRoot + firing id, the same convention
@@ -103,6 +112,8 @@ export type RegisterPagesOptions = {
   // successful poll predates process start hasn't been refreshed since the
   // daemon came up. See ADR 0073.
   startedAtMs?: number;
+  // #307's editors: see HttpAppOptions.triggerReload (src/http/app.ts).
+  triggerReload?: () => Promise<ReloadOutcome>;
   version: string;
 };
 
@@ -207,6 +218,24 @@ export function registerPages(options: RegisterPagesOptions): void {
   const now = options.now ?? Date.now;
   const getWatchdogConfig =
     options.getWatchdogConfig ?? (() => DEFAULT_WATCHDOG_CONFIG);
+  // Same gate as src/http/app.ts's own mutating routes -- an editor's
+  // preview step does no write, but it does meaningful server-side work
+  // (validation) against caller-supplied content, so it gets the same
+  // same-origin/CSRF check as the confirm step that actually writes. See
+  // docs/adr/0075-mutation-authentication-and-superseding-0027.md.
+  const requireAuthorizedMutation: MiddlewareHandler = async (
+    context,
+    next
+  ) => {
+    const authorization = await checkMutationAuthorized(
+      context,
+      options.csrfSecret
+    );
+    if (!authorization.ok) {
+      return context.json({ error: authorization.reason }, 403);
+    }
+    await next();
+  };
 
   options.app.get("/assets/fonts/:file", (context) => {
     // The URL carries a per-weight content hash so the immutable one-year cache
@@ -618,42 +647,30 @@ export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/routines/:name", (context) => {
     const name = context.req.param("name");
     const projectParam = context.req.query("project");
-    const groups = groupRoutinesByName(
-      options.runStore.listRoutines({ includeInactive: true })
-    ).filter((group) => group.name === name);
-
-    if (groups.length === 0) {
+    const resolved = resolveNamedRoutineGroup(
+      options.runStore,
+      name,
+      projectParam
+    );
+    if (resolved.kind === "not_found") {
       return context.html(
         layout(
-          "Routine not found",
-          `<h1 class="page-title">Routine not found</h1><p class="lede">Routine <code>${escapeHtml(name)}</code> was not found.</p>`
+          projectParam === undefined
+            ? "Routine not found"
+            : "Routine target not found",
+          projectParam === undefined
+            ? `<h1 class="page-title">Routine not found</h1><p class="lede">Routine <code>${escapeHtml(name)}</code> was not found.</p>`
+            : `<h1 class="page-title">Routine target not found</h1><p class="lede">Routine <code>${escapeHtml(name)}</code> has no target in Project <code>${escapeHtml(projectParam)}</code>.</p>`
         ),
         404
       );
     }
-
-    let group: RoutineGroup | undefined;
-    if (projectParam !== undefined) {
-      group = groups.find((candidate) =>
-        candidate.targets.some((target) => target.projectName === projectParam)
-      );
-      if (group === undefined) {
-        return context.html(
-          layout(
-            "Routine target not found",
-            `<h1 class="page-title">Routine target not found</h1><p class="lede">Routine <code>${escapeHtml(name)}</code> has no target in Project <code>${escapeHtml(projectParam)}</code>.</p>`
-          ),
-          404
-        );
-      }
-    } else if (groups.length === 1) {
-      group = groups[0];
-    }
-    if (group === undefined) {
+    if (resolved.kind === "ambiguous") {
       return context.html(
-        layout(name, renderRoutineDisambiguation(name, groups))
+        layout(name, renderRoutineDisambiguation(name, resolved.groups))
       );
     }
+    const { group } = resolved;
 
     const declaration = resolveRoutineDeclaration(options.runStore, group);
     const groupProjectNames = new Set(
@@ -681,11 +698,242 @@ export function registerPages(options: RegisterPagesOptions): void {
         renderRoutineDeclarationCard(declaration, reloadErrors),
         renderRoutineTargetsTable(group),
         renderRoutineFiringHistory(firings),
-        `<p class="note">Enable/disable and manual-fire controls land with #306's write-surface plumbing — this page is read-only until then.</p>`
+        `<p class="note"><a href="/routines/${encodeURIComponent(name)}/edit${projectParam === undefined ? "" : `?project=${encodeURIComponent(projectParam)}`}">Edit declaration →</a></p>`,
+        `<p class="note">Manual-fire controls land with a later slice — this page is read-only for firing besides Edit.</p>`
       ].join("")
     );
     return context.html(html);
   });
+
+  options.app.get("/routines/:name/edit", async (context) => {
+    const name = context.req.param("name");
+    const projectParam = context.req.query("project");
+    const resolved = resolveNamedRoutineGroup(
+      options.runStore,
+      name,
+      projectParam
+    );
+    if (resolved.kind !== "ok") {
+      return context.html(
+        renderUneditableRoutine(name, resolved),
+        resolved.kind === "ambiguous" ? 200 : 404
+      );
+    }
+    const declaration = resolveRoutineDeclaration(
+      options.runStore,
+      resolved.group
+    );
+
+    let content: string;
+    try {
+      content = await readFile(declaration.sourcePath, "utf8");
+    } catch (error) {
+      return context.html(
+        layout(
+          "Routine declaration unreadable",
+          `<h1 class="page-title">Routine declaration unreadable</h1><p class="lede">${escapeHtml(declaration.sourcePath)}: ${escapeHtml(errorMessage(error))}</p>`
+        ),
+        404
+      );
+    }
+
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const html = layout(
+      `Edit ${name}`,
+      renderEditorForm({
+        action: `/routines/${encodeURIComponent(name)}/edit/preview`,
+        blastRadiusHtml: renderRoutineEditBlastRadius(resolved.group.targets),
+        content,
+        contentHash: contentHash(content),
+        csrfToken,
+        name,
+        projectParam
+      })
+    );
+    return context.html(html);
+  });
+
+  options.app.post(
+    "/routines/:name/edit/preview",
+    requireAuthorizedMutation,
+    async (context) => {
+      const name = context.req.param("name");
+      const body = await context.req.parseBody();
+      const projectParam = readOptionalFormField(body, "project_param");
+      const resolved = resolveNamedRoutineGroup(
+        options.runStore,
+        name,
+        projectParam
+      );
+      if (resolved.kind !== "ok") {
+        return context.html(
+          renderUneditableRoutine(name, resolved),
+          resolved.kind === "ambiguous" ? 200 : 404
+        );
+      }
+      const declaration = resolveRoutineDeclaration(
+        options.runStore,
+        resolved.group
+      );
+
+      const content = readRequiredFormField(body, "content");
+      const expectedContentHash = readRequiredFormField(
+        body,
+        "expected_content_hash"
+      );
+      const validation = parseRoutineDeclaration(
+        content,
+        declaration.sourcePath
+      );
+      const onDisk = await readFile(declaration.sourcePath, "utf8").catch(
+        () => null
+      );
+
+      const csrfToken = csrfTokenFor(
+        options.csrfSecret,
+        ensureSession(context)
+      );
+      const html = layout(
+        `Confirm changes to ${name}`,
+        renderEditorPreview({
+          confirmAction: `/routines/${encodeURIComponent(name)}/edit/confirm`,
+          content,
+          csrfToken,
+          errors: validation.errors,
+          expectedContentHash,
+          name,
+          onDisk,
+          projectParam,
+          reviewAction: `/routines/${encodeURIComponent(name)}/edit`
+        })
+      );
+      return context.html(html);
+    }
+  );
+
+  options.app.post(
+    "/routines/:name/edit/confirm",
+    requireAuthorizedMutation,
+    async (context) => {
+      const name = context.req.param("name");
+      const body = await context.req.parseBody();
+      const projectParam = readOptionalFormField(body, "project_param");
+      const resolved = resolveNamedRoutineGroup(
+        options.runStore,
+        name,
+        projectParam
+      );
+      if (resolved.kind !== "ok") {
+        return context.html(
+          renderUneditableRoutine(name, resolved),
+          resolved.kind === "ambiguous" ? 200 : 404
+        );
+      }
+      const declaration = resolveRoutineDeclaration(
+        options.runStore,
+        resolved.group
+      );
+
+      const content = readRequiredFormField(body, "content");
+      const expectedContentHash = readRequiredFormField(
+        body,
+        "expected_content_hash"
+      );
+      const resolvedPath =
+        options.resolveWritePath === undefined
+          ? declaration.sourcePath
+          : await options.resolveWritePath(declaration.sourcePath);
+      if (resolvedPath === undefined) {
+        return context.html(
+          layout(
+            "Save refused",
+            `<h1 class="page-title">Save refused</h1><p class="lede">${escapeHtml(declaration.sourcePath)} is not a path the current configuration references.</p>`
+          ),
+          403
+        );
+      }
+
+      const result = await runSavePipeline({
+        content,
+        expectedContentHash,
+        filePath: resolvedPath,
+        kind: "routine_declaration",
+        reload:
+          options.triggerReload ??
+          (() => Promise.resolve({ errors: [], ok: true }))
+      });
+
+      const routinePath = `/routines/${encodeURIComponent(name)}${projectParam === undefined ? "" : `?project=${encodeURIComponent(projectParam)}`}`;
+      if (result.kind === "saved") {
+        // The pipeline writes before reload runs, so "saved" alone doesn't
+        // mean the new declaration took effect — redirecting to the detail
+        // page here regardless would read as success even when reload
+        // rejected it and the last-known-good declaration is still live.
+        if (!result.reload.ok) {
+          return context.html(
+            layout(
+              `Saved but not active: ${name}`,
+              renderReloadFailedNotice({
+                editAction: `/routines/${encodeURIComponent(name)}/edit${projectParam === undefined ? "" : `?project=${encodeURIComponent(projectParam)}`}`,
+                errors: result.reload.errors,
+                filePath: declaration.sourcePath
+              })
+            ),
+            200
+          );
+        }
+        return context.redirect(
+          `${routinePath}${routinePath.includes("?") ? "&" : "?"}saved=1`,
+          303
+        );
+      }
+      if (result.kind === "invalid") {
+        const csrfToken = csrfTokenFor(
+          options.csrfSecret,
+          ensureSession(context)
+        );
+        return context.html(
+          layout(
+            `Confirm changes to ${name}`,
+            renderEditorPreview({
+              confirmAction: `/routines/${encodeURIComponent(name)}/edit/confirm`,
+              content,
+              csrfToken,
+              errors: result.errors,
+              expectedContentHash,
+              name,
+              onDisk: await readFile(declaration.sourcePath, "utf8").catch(
+                () => null
+              ),
+              projectParam,
+              reviewAction: `/routines/${encodeURIComponent(name)}/edit`
+            })
+          ),
+          422
+        );
+      }
+      if (result.kind === "stale") {
+        return context.html(
+          layout(
+            "Save refused: changed on disk",
+            renderStaleSaveNotice({
+              currentContent: result.currentContent,
+              editAction: `/routines/${encodeURIComponent(name)}/edit${projectParam === undefined ? "" : `?project=${encodeURIComponent(projectParam)}`}`,
+              filePath: declaration.sourcePath
+            })
+          ),
+          409
+        );
+      }
+      return context.html(
+        layout(
+          "Save failed",
+          `<h1 class="page-title">Save failed</h1><p class="lede">${escapeHtml(result.error)}</p>`
+        ),
+        500
+      );
+    }
+  );
 
   options.app.get("/firings/:id", async (context) => {
     const id = context.req.param("id");
@@ -1158,6 +1406,33 @@ td code { color: var(--ink-2); }
   color: var(--ink);
 }
 .hint { color: var(--ink-muted); font-size: var(--fs-meta); margin: 0 0 var(--sp-3); }
+
+.editor {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-3);
+  resize: vertical;
+}
+.diff {
+  margin: 0 0 var(--sp-5);
+  max-height: 32rem;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: var(--sp-3);
+}
+.diff-line { display: block; white-space: pre-wrap; }
+.diff-add { color: var(--ok-ink); background: var(--ok-bg); }
+.diff-del { color: var(--fail-ink); background: var(--fail-bg); }
 
 @media (prefers-reduced-motion: no-preference) {
   .pill--progress.is-running .pill-dot { animation: pulse 1.8s ease-in-out infinite; }
@@ -1884,6 +2159,58 @@ function renderRoutineDisambiguation(
   return `<h1 class="page-title">${escapeHtml(name)}</h1><section><div class="empty"><strong>Multiple declarations share this name</strong>An earlier declaration was likely removed from config and a later one reused the name for a different target. Pick a target Project to disambiguate:<ul>${items}</ul></div></section>`;
 }
 
+// Shared by /routines/:name and #307's editor routes (GET .../edit,
+// POST .../edit/preview, POST .../edit/confirm) so the same name+project
+// disambiguation rules apply everywhere a routine is looked up by name —
+// previously duplicated inline in /routines/:name alone.
+function resolveNamedRoutineGroup(
+  runStore: RunStore,
+  name: string,
+  projectParam: string | undefined
+):
+  | { kind: "not_found" }
+  | { groups: RoutineGroup[]; kind: "ambiguous" }
+  | { group: RoutineGroup; kind: "ok" } {
+  const groups = groupRoutinesByName(
+    runStore.listRoutines({ includeInactive: true })
+  ).filter((group) => group.name === name);
+
+  if (groups.length === 0) {
+    return { kind: "not_found" };
+  }
+  if (projectParam !== undefined) {
+    const group = groups.find((candidate) =>
+      candidate.targets.some(
+        (target: RoutineStatus) => target.projectName === projectParam
+      )
+    );
+    return group === undefined ? { kind: "not_found" } : { group, kind: "ok" };
+  }
+  if (groups.length === 1) {
+    return { group: groups[0]!, kind: "ok" };
+  }
+  return { groups, kind: "ambiguous" };
+}
+
+// Shared by #307's editor routes for the two ways resolveNamedRoutineGroup
+// can fail to produce a single group to edit -- ambiguous renders the same
+// disambiguation page /routines/:name itself uses (pick a target Project),
+// rather than the misleading "not found" a bare 404 would show for a
+// routine that does exist, just not uniquely by name alone.
+function renderUneditableRoutine(
+  name: string,
+  resolved:
+    { kind: "not_found" } | { groups: RoutineGroup[]; kind: "ambiguous" }
+): string {
+  if (resolved.kind === "ambiguous") {
+    return layout(name, renderRoutineDisambiguation(name, resolved.groups));
+  }
+  return layout(
+    "Routine not found",
+    `<h1 class="page-title">Routine not found</h1><p class="lede">Routine <code>${escapeHtml(name)}</code> was not found.</p>`
+  );
+}
+
 type RoutineDeclarationView = {
   allowOverlap: boolean;
   catchUp: string;
@@ -1948,6 +2275,182 @@ function resolveRoutineDeclaration(
     scheduleTz: representative?.scheduleTz ?? null,
     sourcePath: representative?.sourcePath ?? "-"
   };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+// Hono's parseBody() types a form-encoded field as string | File |
+// (string | File)[] | BodyDataValueDotAll -- these two narrow that down to
+// the plain string a hidden/textarea field always is here, refusing a
+// missing or wrong-shaped field rather than silently coercing it.
+function readOptionalFormField(
+  body: Record<string, unknown>,
+  key: string
+): string | undefined {
+  const value = body[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function readRequiredFormField(
+  body: Record<string, unknown>,
+  key: string
+): string {
+  const value = readOptionalFormField(body, key);
+  if (value === undefined) {
+    throw new Error(`missing required form field "${key}"`);
+  }
+  return value;
+}
+
+// Shared by every #307 editor (routine declaration, workflow contract,
+// service config): the raw-text-with-hidden-hash form each GET .../edit
+// route renders. blastRadiusHtml is caller-rendered rather than a fixed
+// shape here, since what a save affects differs per artifact (#307's issue
+// text: Routine Targets + next fire times; a Project's next dispatch;
+// the whole daemon) -- forcing one shared shape onto three different
+// disclosures would be the wrong abstraction.
+function renderEditorForm(input: {
+  action: string;
+  blastRadiusHtml: string;
+  content: string;
+  contentHash: string;
+  csrfToken: string;
+  name: string;
+  projectParam: string | undefined;
+}): string {
+  return `<h1 class="page-title">Edit ${escapeHtml(input.name)}</h1><p class="note">Raw text editing — this is the exact content written to disk; comments and key ordering elsewhere in the file are untouched by a save. Saving takes you to a diff review before anything is written.</p>${input.blastRadiusHtml}<form method="post" action="${escapeHtml(input.action)}">
+  <input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">
+  <input type="hidden" name="expected_content_hash" value="${escapeHtml(input.contentHash)}">
+  ${input.projectParam === undefined ? "" : `<input type="hidden" name="project_param" value="${escapeHtml(input.projectParam)}">`}
+  <p><textarea name="content" rows="24" cols="100" class="editor">${escapeHtml(input.content)}</textarea></p>
+  <button class="btn" type="submit">Review changes</button>
+</form>`;
+}
+
+// #307 AC: "Routine declaration → which Routine Targets, and their next
+// fire times." Targets share the same declaration (ADR 0069's fan-out), so
+// every one of them is affected by a save to this file -- listed
+// individually because "every target" without the list is exactly the
+// vague disclosure the AC asks editors not to give.
+function renderRoutineEditBlastRadius(targets: RoutineStatus[]): string {
+  const items = targets
+    .map(
+      (target) =>
+        `<li>${escapeHtml(target.projectName)} — next fire: <code>${target.nextFireAt === null ? "—" : escapeHtml(target.nextFireAt)}</code></li>`
+    )
+    .join("");
+  return `<div class="empty"><strong>This save affects</strong>Every target below picks up the edited schedule and prompt on the next dispatch tick.<ul>${items}</ul></div>`;
+}
+
+function renderEditorPreview(input: {
+  confirmAction: string;
+  content: string;
+  csrfToken: string;
+  errors: string[];
+  expectedContentHash: string;
+  name: string;
+  onDisk: string | null;
+  projectParam: string | undefined;
+  reviewAction: string;
+}): string {
+  if (input.errors.length > 0) {
+    return `<h1 class="page-title">Changes to ${escapeHtml(input.name)} are invalid</h1><div class="alert" role="alert"><strong>Fix these before saving</strong><ul>${input.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div><p class="note"><a href="${escapeHtml(input.reviewAction)}${input.projectParam === undefined ? "" : `?project=${encodeURIComponent(input.projectParam)}`}">← Back to editor</a></p>`;
+  }
+  const diffHtml =
+    input.onDisk === null
+      ? '<div class="empty"><strong>No on-disk content to diff against</strong>The file did not exist or could not be read.</div>'
+      : renderLineDiff(input.onDisk, input.content);
+  return `<h1 class="page-title">Confirm changes to ${escapeHtml(input.name)}</h1><p class="note">This is what will be written. Nothing is saved until you confirm.</p>${diffHtml}<form method="post" action="${escapeHtml(input.confirmAction)}">
+  <input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">
+  <input type="hidden" name="expected_content_hash" value="${escapeHtml(input.expectedContentHash)}">
+  <input type="hidden" name="content" value="${escapeHtml(input.content)}">
+  ${input.projectParam === undefined ? "" : `<input type="hidden" name="project_param" value="${escapeHtml(input.projectParam)}">`}
+  <button class="btn" type="submit">Confirm save</button>
+</form><p class="note"><a href="${escapeHtml(input.reviewAction)}${input.projectParam === undefined ? "" : `?project=${encodeURIComponent(input.projectParam)}`}">← Back to editor</a></p>`;
+}
+
+function renderStaleSaveNotice(input: {
+  currentContent: string | null;
+  editAction: string;
+  filePath: string;
+}): string {
+  const body =
+    input.currentContent === null
+      ? "<p>The file was deleted since you opened the editor.</p>"
+      : `<pre class="diff">${escapeHtml(input.currentContent)}</pre>`;
+  return `<h1 class="page-title">Save refused: changed on disk</h1><div class="alert" role="alert"><strong>${escapeHtml(input.filePath)} was changed since you opened the editor</strong>Your edit was not written. Reopen the editor to start from the current content.</div>${body}<p class="note"><a href="${escapeHtml(input.editAction)}">← Reopen editor</a></p>`;
+}
+
+function renderReloadFailedNotice(input: {
+  editAction: string;
+  errors: string[];
+  filePath: string;
+}): string {
+  return `<h1 class="page-title">Saved, but not active</h1><div class="alert" role="alert"><strong>${escapeHtml(input.filePath)} was written to disk, but reload failed</strong><ul>${input.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div><p class="note">The previous, last-known-good configuration is still what's running. Fix the issue above and save again.</p><p class="note"><a href="${escapeHtml(input.editAction)}">← Back to editor</a></p>`;
+}
+
+// A small line-based LCS diff -- not a general utility, just enough to
+// render the "diff before every write" requirement (#307) for the three
+// editors' confirmation screens. Deliberately hand-rolled rather than a
+// dependency: these are two known-in-memory strings, never large enough for
+// an O(n*m) LCS table to matter.
+function renderLineDiff(before: string, after: string): string {
+  const beforeLines = before.split("\n");
+  const afterLines = after.split("\n");
+  const rows: string[] = [];
+  for (const op of diffLines(beforeLines, afterLines)) {
+    const cssClass =
+      op.kind === "added" ? "add" : op.kind === "removed" ? "del" : "ctx";
+    const marker =
+      op.kind === "added" ? "+" : op.kind === "removed" ? "-" : " ";
+    rows.push(
+      `<span class="diff-line diff-${cssClass}">${marker} ${escapeHtml(op.line)}</span>`
+    );
+  }
+  return `<pre class="diff">${rows.join("\n")}</pre>`;
+}
+
+type DiffOp = { kind: "added" | "removed" | "unchanged"; line: string };
+
+function diffLines(before: string[], after: string[]): DiffOp[] {
+  const lcs: number[][] = Array.from({ length: before.length + 1 }, () =>
+    new Array<number>(after.length + 1).fill(0)
+  );
+  for (let i = before.length - 1; i >= 0; i--) {
+    for (let j = after.length - 1; j >= 0; j--) {
+      lcs[i]![j] =
+        before[i] === after[j]
+          ? lcs[i + 1]![j + 1]! + 1
+          : Math.max(lcs[i + 1]![j]!, lcs[i]![j + 1]!);
+    }
+  }
+  const ops: DiffOp[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < before.length && j < after.length) {
+    if (before[i] === after[j]) {
+      ops.push({ kind: "unchanged", line: before[i]! });
+      i++;
+      j++;
+    } else if (lcs[i + 1]![j]! >= lcs[i]![j + 1]!) {
+      ops.push({ kind: "removed", line: before[i]! });
+      i++;
+    } else {
+      ops.push({ kind: "added", line: after[j]! });
+      j++;
+    }
+  }
+  while (i < before.length) {
+    ops.push({ kind: "removed", line: before[i]! });
+    i++;
+  }
+  while (j < after.length) {
+    ops.push({ kind: "added", line: after[j]! });
+    j++;
+  }
+  return ops;
 }
 
 function renderRoutineDeclarationCard(

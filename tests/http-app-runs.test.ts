@@ -2584,9 +2584,8 @@ describe("HTTP app — routine detail page (#304)", () => {
       expect(body).toContain("overlap 0 · cap 0 · catch-up 0");
       expect(body).toContain("fire-1");
       expect(body).toContain("single");
-      expect(body).toContain(
-        "Enable/disable and manual-fire controls land with #306"
-      );
+      expect(body).toContain('href="/routines/audit/edit"');
+      expect(body).toContain("Manual-fire controls land with a later slice");
     } finally {
       test.cleanup();
     }

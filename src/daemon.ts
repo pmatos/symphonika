@@ -47,7 +47,8 @@ import { reconcileWatchdog } from "./lifecycle/watchdog.js";
 import {
   RunController,
   type RunControllerProjectConfig,
-  type RunControllerProvidersConfig
+  type RunControllerProvidersConfig,
+  type WorkflowSnapshot
 } from "./lifecycle/run-controller.js";
 import { detectStaleClaims } from "./lifecycle/stale-claims.js";
 import type { AgentProviderRegistry } from "./provider.js";
@@ -60,6 +61,10 @@ import {
   runPullRequestFollowup,
   type PullRequestFollowupPolicy
 } from "./pull-request-followup.js";
+import {
+  computeReferencedRealPaths,
+  resolveConfinedWritePath
+} from "./path-safety.js";
 import { resolveWatchdogConfig, RuntimeConfigReloader } from "./reload.js";
 import {
   INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS,
@@ -446,6 +451,47 @@ export async function startDaemon(
       ? {}
       : { prepareIssueWorkspace: options.prepareIssueWorkspace })
   });
+  // Shared by the poll tick (refreshIssuePollStatus) and #307's editor save
+  // routes (triggerReload, below): reload symphonika.yml, record the
+  // outcome (health notifier + #305's change-event publish), and upsert
+  // invalid-routine stubs. Deliberately does not touch `polling` -- an
+  // editor save's reload is a distinct, cheap, file-scoped operation with no
+  // shared mutable state to race against a concurrent poll tick, so it runs
+  // even while one is in flight rather than silently no-oping.
+  const reloadConfigAndRecordOutcome = async () => {
+    const snapshot = await runtimeConfig.reload();
+    const reloadStatus = runtimeConfig.getStatus();
+    const reloadBroken =
+      snapshot === undefined || reloadStatus.usingLastKnownGood === true;
+    daemonHealthNotifications.observeReload({
+      broken: reloadBroken,
+      errors: reloadStatus.errors
+    });
+    runStore.publishReloadOutcome({
+      errors: reloadStatus.errors,
+      ok: !reloadBroken
+    });
+    daemonHealthNotifications.observeInvalidRoutines(
+      snapshot?.invalidRoutines ?? []
+    );
+    if (snapshot !== undefined) {
+      // A brand-new routine declaration with no prior valid snapshot gets
+      // a state = 'invalid' identity here (see docs/adr/0060). Reload
+      // itself never touches the run store; this is the one call site
+      // that has both the fresh snapshot and the store in scope.
+      for (const invalid of snapshot.invalidRoutines) {
+        if (invalid.name !== undefined) {
+          runStore.upsertInvalidRoutineStub({
+            name: invalid.name,
+            projectName: invalid.projectName,
+            sourcePath: invalid.path
+          });
+        }
+      }
+    }
+    return { errors: reloadStatus.errors, ok: !reloadBroken, snapshot };
+  };
+
   const refreshIssuePollStatus = async (): Promise<void> => {
     if (!state.configExists || polling) {
       return;
@@ -453,40 +499,11 @@ export async function startDaemon(
 
     polling = true;
     try {
-      const snapshot = await runtimeConfig.reload();
-      const reloadStatus = runtimeConfig.getStatus();
-      const reloadBroken =
-        snapshot === undefined || reloadStatus.usingLastKnownGood === true;
-      daemonHealthNotifications.observeReload({
-        broken: reloadBroken,
-        errors: reloadStatus.errors
-      });
-      runStore.publishReloadOutcome({
-        errors: reloadStatus.errors,
-        ok: !reloadBroken
-      });
-      daemonHealthNotifications.observeInvalidRoutines(
-        snapshot?.invalidRoutines ?? []
-      );
-      if (snapshot !== undefined) {
-        // A brand-new routine declaration with no prior valid snapshot gets
-        // a state = 'invalid' identity here (see docs/adr/0060). Reload
-        // itself never touches the run store; this is the one call site
-        // that has both the fresh snapshot and the store in scope.
-        for (const invalid of snapshot.invalidRoutines) {
-          if (invalid.name !== undefined) {
-            runStore.upsertInvalidRoutineStub({
-              name: invalid.name,
-              projectName: invalid.projectName,
-              sourcePath: invalid.path
-            });
-          }
-        }
-      }
+      const { errors, snapshot } = await reloadConfigAndRecordOutcome();
       if (snapshot === undefined) {
         replaceIssuePollStatus(issuePollStatus, {
           candidateIssues: [],
-          errors: reloadStatus.errors,
+          errors,
           filteredIssues: [],
           projects: []
         });
@@ -498,7 +515,7 @@ export async function startDaemon(
         ...(options.githubIssuesApi === undefined
           ? {}
           : { githubIssuesApi: options.githubIssuesApi }),
-        initialErrors: reloadStatus.errors
+        initialErrors: errors
       });
       replaceIssuePollStatus(issuePollStatus, nextStatus);
       projectModes = await persistProjectPollState(
@@ -984,6 +1001,31 @@ export async function startDaemon(
     issuePollStatus,
     getReloadStatus: () => runtimeConfig.getStatus(),
     pollNow: triggerPollNow,
+    // #307's editors: validate-and-write goes through the save pipeline,
+    // reload picks the edit up (routine declarations/workflow contracts
+    // take effect on the next dispatch tick; an invalid symphonika.yml
+    // edit is refused and the daemon keeps its last-good snapshot).
+    resolveWritePath: async (candidatePath: string) => {
+      const referenced = await computeReferencedRealPaths({
+        configPath: state.configPath,
+        routineSourcePaths: runStore
+          .listRoutines({ includeInactive: true })
+          .filter((routine) => routine.disabledReason !== "removed_from_config")
+          .map((routine) => routine.sourcePath),
+        workflowPaths: [...runtimeConfig.projectsByName().values()]
+          .map((project) => project.workflow)
+          .filter(
+            (workflow): workflow is WorkflowSnapshot =>
+              workflow !== undefined && "expandedWorkflow" in workflow
+          )
+          .map((workflow) => workflow.path)
+      });
+      return resolveConfinedWritePath(candidatePath, referenced);
+    },
+    triggerReload: async () => {
+      const { errors, ok } = await reloadConfigAndRecordOutcome();
+      return { errors, ok };
+    },
     runStore,
     shutdownSignal: shutdownController.signal,
     stateRoot: state.stateRoot,

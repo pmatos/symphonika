@@ -4,6 +4,7 @@ import path from "node:path";
 import { parse } from "yaml";
 
 import type { AgentProviderName } from "../provider.js";
+import { locatedYamlErrorMessage } from "../yaml-errors.js";
 import { isIanaTimezone, normalizeRoutineCron } from "./schedule.js";
 import type {
   RoutineDeclaration,
@@ -297,8 +298,11 @@ function parseFrontMatter(
   try {
     parsed = parse(source) ?? {};
   } catch (error) {
+    // source is lines.slice(1, closingLine).join("\n") -- its own line 1 is
+    // the routine file's line 2 (line 1 is the opening ---), hence the +1
+    // offset so a located error points at the real file line.
     errors.push(
-      `routine front matter at ${routinePath} could not be parsed: ${errorMessage(error)}`
+      `routine front matter at ${routinePath} could not be parsed: ${locatedYamlErrorMessage(error, 1)}`
     );
     return null;
   }

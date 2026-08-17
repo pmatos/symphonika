@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import { Hono, type MiddlewareHandler } from "hono";
+import { parse } from "yaml";
 
 import { contentHash } from "../content-hash.js";
 import type { WorkflowFormat } from "../config-schemas.js";
@@ -23,7 +24,11 @@ import {
   formatCapReachedReason,
   parseCapReachedReason
 } from "../lifecycle/terminal-reason.js";
-import { DEFAULT_WATCHDOG_CONFIG, type WatchdogConfig } from "../reload.js";
+import {
+  DEFAULT_WATCHDOG_CONFIG,
+  validateServiceConfigContent,
+  type WatchdogConfig
+} from "../reload.js";
 import type {
   ListRunsFilter,
   ProjectIssueSnapshotRow,
@@ -93,6 +98,9 @@ export type RegisterPagesOptions = {
   getPullRequestFollowupPolicy?: () => {
     maxReviewDispatchesPerPr: number;
   };
+  // #307's service-config editor: the absolute path to symphonika.yml. See
+  // HttpAppOptions.getConfigPath (src/http/app.ts).
+  getConfigPath?: () => string;
   // #307's workflow-contract editor: a Dispatch Project's current resolved
   // workflow path and configured format, or undefined for a Routine Host
   // (no workflow) or an unknown Project name. See
@@ -846,6 +854,243 @@ export function registerPages(options: RegisterPagesOptions): void {
               currentContent: result.currentContent,
               editAction: `/projects/${encodeURIComponent(name)}/workflow/edit`,
               filePath: workflow.path
+            })
+          ),
+          409
+        );
+      }
+      return context.html(
+        layout(
+          "Save failed",
+          `<h1 class="page-title">Save failed</h1><p class="lede">${escapeHtml(result.error)}</p>`
+        ),
+        500
+      );
+    }
+  );
+
+  options.app.get("/config/edit", async (context) => {
+    const configPath = options.getConfigPath?.();
+    if (configPath === undefined) {
+      return context.html(
+        layout(
+          "Service config unavailable",
+          `<h1 class="page-title">Service config unavailable</h1>`
+        ),
+        404
+      );
+    }
+
+    let content: string;
+    try {
+      content = await readFile(configPath, "utf8");
+    } catch (error) {
+      return context.html(
+        layout(
+          "Service config unreadable",
+          `<h1 class="page-title">Service config unreadable</h1><p class="lede">${escapeHtml(configPath)}: ${escapeHtml(errorMessage(error))}</p>`
+        ),
+        404
+      );
+    }
+
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const html = layout(
+      "Edit service config",
+      renderEditorForm({
+        action: "/config/edit/preview",
+        blastRadiusHtml: renderServiceConfigBlastRadius(),
+        content,
+        contentHash: contentHash(content),
+        csrfToken,
+        name: "service config",
+        projectParam: undefined
+      })
+    );
+    return context.html(html);
+  });
+
+  options.app.post(
+    "/config/edit/preview",
+    requireAuthorizedMutation,
+    async (context) => {
+      const configPath = options.getConfigPath?.();
+      if (configPath === undefined) {
+        return context.html(
+          layout(
+            "Service config unavailable",
+            `<h1 class="page-title">Service config unavailable</h1>`
+          ),
+          404
+        );
+      }
+      const body = await context.req.parseBody();
+      const content = readRequiredFormField(body, "content");
+      const expectedContentHash = readRequiredFormField(
+        body,
+        "expected_content_hash"
+      );
+      const validation = await validateServiceConfigContent(
+        content,
+        configPath
+      );
+      const onDisk = await readFile(configPath, "utf8").catch(() => null);
+
+      const csrfToken = csrfTokenFor(
+        options.csrfSecret,
+        ensureSession(context)
+      );
+      const html = layout(
+        "Confirm changes to service config",
+        renderEditorPreview({
+          confirmAction: "/config/edit/confirm",
+          content,
+          csrfToken,
+          errors: validation.errors,
+          expectedContentHash,
+          ...(validation.errors.length === 0 &&
+          onDisk !== null &&
+          providerCommandsDiffer(onDisk, content)
+            ? { extraConfirmationHtml: renderProviderCommandConfirmation() }
+            : {}),
+          name: "service config",
+          onDisk,
+          projectParam: undefined,
+          reviewAction: "/config/edit"
+        })
+      );
+      return context.html(html);
+    }
+  );
+
+  options.app.post(
+    "/config/edit/confirm",
+    requireAuthorizedMutation,
+    async (context) => {
+      const configPath = options.getConfigPath?.();
+      if (configPath === undefined) {
+        return context.html(
+          layout(
+            "Service config unavailable",
+            `<h1 class="page-title">Service config unavailable</h1>`
+          ),
+          404
+        );
+      }
+      const body = await context.req.parseBody();
+      const content = readRequiredFormField(body, "content");
+      const expectedContentHash = readRequiredFormField(
+        body,
+        "expected_content_hash"
+      );
+      const confirmedProviderCommandChange =
+        readOptionalFormField(body, "confirm_provider_command_change") === "on";
+
+      const onDisk = await readFile(configPath, "utf8").catch(() => null);
+      if (
+        onDisk !== null &&
+        providerCommandsDiffer(onDisk, content) &&
+        !confirmedProviderCommandChange
+      ) {
+        const csrfToken = csrfTokenFor(
+          options.csrfSecret,
+          ensureSession(context)
+        );
+        return context.html(
+          layout(
+            "Confirm changes to service config",
+            renderEditorPreview({
+              confirmAction: "/config/edit/confirm",
+              content,
+              csrfToken,
+              errors: [],
+              expectedContentHash,
+              extraConfirmationHtml: renderProviderCommandConfirmation(),
+              name: "service config",
+              onDisk,
+              projectParam: undefined,
+              reviewAction: "/config/edit"
+            })
+          ),
+          422
+        );
+      }
+
+      const resolvedPath =
+        options.resolveWritePath === undefined
+          ? configPath
+          : await options.resolveWritePath(configPath);
+      if (resolvedPath === undefined) {
+        return context.html(
+          layout(
+            "Save refused",
+            `<h1 class="page-title">Save refused</h1><p class="lede">${escapeHtml(configPath)} is not a path the current configuration references.</p>`
+          ),
+          403
+        );
+      }
+
+      const result = await runSavePipeline({
+        content,
+        expectedContentHash,
+        filePath: resolvedPath,
+        kind: "service_config",
+        reload:
+          options.triggerReload ??
+          (() => Promise.resolve({ errors: [], ok: true }))
+      });
+
+      if (result.kind === "saved") {
+        // The pipeline writes before reload runs, so "saved" alone doesn't
+        // mean the new config took effect — redirecting to the dashboard
+        // here regardless would read as success even when reload rejected
+        // it and the last-known-good config is still live.
+        if (!result.reload.ok) {
+          return context.html(
+            layout(
+              "Saved but not active: service config",
+              renderReloadFailedNotice({
+                editAction: "/config/edit",
+                errors: result.reload.errors,
+                filePath: configPath
+              })
+            ),
+            200
+          );
+        }
+        return context.redirect("/?saved=1", 303);
+      }
+      if (result.kind === "invalid") {
+        const csrfToken = csrfTokenFor(
+          options.csrfSecret,
+          ensureSession(context)
+        );
+        return context.html(
+          layout(
+            "Confirm changes to service config",
+            renderEditorPreview({
+              confirmAction: "/config/edit/confirm",
+              content,
+              csrfToken,
+              errors: result.errors,
+              expectedContentHash,
+              name: "service config",
+              onDisk,
+              projectParam: undefined,
+              reviewAction: "/config/edit"
+            })
+          ),
+          422
+        );
+      }
+      if (result.kind === "stale") {
+        return context.html(
+          layout(
+            "Save refused: changed on disk",
+            renderStaleSaveNotice({
+              currentContent: result.currentContent,
+              editAction: "/config/edit",
+              filePath: configPath
             })
           ),
           409
@@ -1677,7 +1922,7 @@ function layout(title: string, body: string): string {
 <body>
 <header class="topbar">
   <div class="brand"><a href="/">Symphonika</a></div>
-  <nav class="nav" aria-label="Primary"><a href="/">Dashboard</a><a href="/runs">Runs</a></nav>
+  <nav class="nav" aria-label="Primary"><a href="/">Dashboard</a><a href="/runs">Runs</a><a href="/config/edit">Config</a></nav>
 </header>
 <main>
 ${body}
@@ -2571,12 +2816,71 @@ function renderWorkflowEditBlastRadius(projectName: string): string {
   return `<div class="empty"><strong>This save affects</strong>Project <code>${escapeHtml(projectName)}</code>'s <em>next</em> dispatch. Any Run currently in progress keeps the workflow graph it started with (ADR 0045) and is unaffected by this edit.</div>`;
 }
 
+// #307 AC: "Service config -> the whole daemon: projects, caps, provider
+// argv." Stated once, unconditionally -- unlike the routine/workflow
+// disclosures, a symphonika.yml save can touch anything, so there's no
+// narrower "affected set" to enumerate.
+function renderServiceConfigBlastRadius(): string {
+  return `<div class="empty"><strong>This save affects</strong>The whole daemon on its next reload: every Project's caps and eligibility, every Routine's declared targets, and (see below) which process each provider spawns.</div>`;
+}
+
+// #307 AC: "Editing providers.*.command requires an explicit confirmation
+// step distinct from an ordinary save." providers.codex/claude/omp are the
+// only three provider names the schema allows (src/reload.ts's
+// serviceConfigSchema) -- compared directly rather than diffing an
+// arbitrary map. A parse failure on either side returns undefined for that
+// side's command, which reads as "unchanged" here; that's fine because a
+// YAML syntax error is already caught and blocks the save entirely before
+// this ever gets called with the invalid content standing for real.
+function providerCommandsDiffer(before: string, after: string): boolean {
+  const providerNames = ["claude", "codex", "omp"] as const;
+  return providerNames.some(
+    (name) =>
+      extractProviderCommand(before, name) !==
+      extractProviderCommand(after, name)
+  );
+}
+
+function extractProviderCommand(
+  content: string,
+  providerName: string
+): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = parse(content);
+  } catch {
+    return undefined;
+  }
+  if (!isPlainRecord(parsed) || !isPlainRecord(parsed.providers)) {
+    return undefined;
+  }
+  const provider = parsed.providers[providerName];
+  if (!isPlainRecord(provider) || typeof provider.command !== "string") {
+    return undefined;
+  }
+  return provider.command;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function renderProviderCommandConfirmation(): string {
+  return `<div class="alert" role="alert"><strong>This save changes a provider command</strong>Editing <code>providers.*.command</code> changes what process the daemon spawns for that provider — check the box to confirm you intend this.<label><input type="checkbox" name="confirm_provider_command_change" required> I understand this changes what process the daemon spawns</label></div>`;
+}
+
 function renderEditorPreview(input: {
   confirmAction: string;
   content: string;
   csrfToken: string;
   errors: string[];
   expectedContentHash: string;
+  // #307 AC: "Editing providers.*.command requires an explicit confirmation
+  // distinct from an ordinary save." Rendered between the diff and the
+  // Confirm save button (not folded into it) so it reads as a distinct
+  // step, not decoration on the normal one. Only the service-config editor
+  // ever sets this.
+  extraConfirmationHtml?: string;
   name: string;
   onDisk: string | null;
   projectParam: string | undefined;
@@ -2594,6 +2898,7 @@ function renderEditorPreview(input: {
   <input type="hidden" name="expected_content_hash" value="${escapeHtml(input.expectedContentHash)}">
   <input type="hidden" name="content" value="${escapeHtml(input.content)}">
   ${input.projectParam === undefined ? "" : `<input type="hidden" name="project_param" value="${escapeHtml(input.projectParam)}">`}
+  ${input.extraConfirmationHtml ?? ""}
   <button class="btn" type="submit">Confirm save</button>
 </form><p class="note"><a href="${escapeHtml(input.reviewAction)}${input.projectParam === undefined ? "" : `?project=${encodeURIComponent(input.projectParam)}`}">← Back to editor</a></p>`;
 }

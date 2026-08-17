@@ -142,6 +142,8 @@ export type HttpAppOptions = {
   getPullRequestFollowupPolicy?: () => {
     maxReviewDispatchesPerPr: number;
   };
+  // #307's service-config editor: the absolute path to symphonika.yml.
+  getConfigPath?: () => string;
   // #307's workflow-contract editor: a Dispatch Project's current resolved
   // workflow path and configured format, or undefined for a Routine Host
   // (no workflow) or an unknown Project name. format is the project's own
@@ -589,6 +591,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         : {
             getPullRequestFollowupPolicy: options.getPullRequestFollowupPolicy
           }),
+      ...(options.getConfigPath === undefined
+        ? {}
+        : { getConfigPath: options.getConfigPath }),
       ...(options.getProjectWorkflowPath === undefined
         ? {}
         : { getProjectWorkflowPath: options.getProjectWorkflowPath }),

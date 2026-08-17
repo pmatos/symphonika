@@ -94,6 +94,45 @@ just errors, and extracting a shared seam out of it is the same kind of speculat
 large critical-path function ADR-0075 already declined to do for `reload.ts`'s service-config
 schema. The ~10-line branch shape is duplicated once, not built as an abstraction with one caller.
 
+### Service-config validation: a throwaway file, not surgery on `loadRuntimeConfigSnapshot`
+
+ADR-0075 deferred `service_config` validation-reuse specifically because `loadRuntimeConfigSnapshot`
+(`src/reload.ts`) is a large function (schema parse → provider-command-template rendering → routine
+attach → previous-snapshot merge) with no clean parse-only seam, and extracting one speculatively
+against no caller would be exactly the kind of surgery this project avoids. `#307`'s service-config
+editor is the real caller ADR-0075 said should drive that decision — and the actual seam turns out
+not to require touching `loadRuntimeConfigSnapshot`'s internals at all: it already reads from a
+caller-supplied `configPath`/`configDir` pair, entirely independent of *which* file backs
+`configPath`. `validateServiceConfigContent` writes the submitted content to a throwaway file in the
+**same directory** as the real config — never system tmpdir, because every relative path a
+`routines:` or `projects[].workflow` entry names must resolve against the real directory tree, the
+same way a genuine reload's relative-path resolution works — calls `loadRuntimeConfigSnapshot`
+against that throwaway path (no `previous`, since a from-scratch evaluation is what "does this
+content produce a valid snapshot" actually means), and deletes it before returning. No routine
+declaration or workflow contract is ever globbed from the directory (grep-verified: no `readdir`
+call anywhere in `src/`), so the throwaway file's brief existence is inert to everything else.
+
+The one honest limitation: validating without `previous` means this can occasionally be *stricter*
+than the real reload that follows a successful save — a few carry-forward fallbacks
+(e.g. a disabled Project's last-loaded workflow, ADR-0054) only apply when `previous` is available.
+This is a false-negative risk, never a false-positive one: nothing is written until validation
+passes, and the save's own `reload` callback is the real `RuntimeConfigReloader.reload()` with real
+`previous` state, so the authoritative check always still runs after write. Worse case is an
+operator occasionally re-attempting a save that would have actually succeeded once merged with live
+state — annoying, never unsafe.
+
+### The provider-command confirmation gate is a second, independent check — not just a UI hint
+
+`providers.codex`, `providers.claude`, and `providers.omp` are the only three provider names
+`serviceConfigSchema` allows (`src/reload.ts`) — `providerCommandsDiffer` compares each by name
+directly rather than diffing an arbitrary map. The confirmation itself is enforced twice: a
+`required` HTML checkbox blocks client-side submission, and the confirm route independently
+re-parses both the on-disk and submitted content and refuses the write outright
+(`422`, re-rendering the same preview with the checkbox) if a provider-command change is present
+without the checkbox having been submitted. The second check exists because the client is not
+trusted — a hand-crafted request to `POST /config/edit/confirm` skipping the preview step entirely
+must still be caught, not just steered away from by UI affordance.
+
 ### Preview reads and diffs; only confirm resolves and writes
 
 `resolveWritePath` (path confinement, `src/path-safety.ts` via ADR-0075) gates the confirm step
@@ -141,3 +180,11 @@ operator the routine doesn't exist, when it does, just not uniquely by name.
   (`expandWorkflowDefinition` and `validateExpandedWorkflowReferences` both are). `runSavePipeline`
   awaits the result unconditionally; a still-synchronous validator like `parseRoutineDeclaration`
   is unaffected.
+- `SaveContentKind` now has all three real kinds from `#306`'s own issue text (`routine_declaration`,
+  `workflow_contract`, `service_config`) — the pipeline built ahead of a caller in `#306` is now
+  exercised end to end by all three editors `#307` asks for.
+- The Config link in the shared page navigation is unconditional (every page, regardless of whether
+  `getConfigPath` is wired) — matching how "Runs" is already unconditional regardless of `runStore`.
+  A harness that doesn't wire `getConfigPath` gets a 404 behind that link rather than a hidden one;
+  no route handler has the caller context needed to conditionally suppress a nav item shared across
+  every page.

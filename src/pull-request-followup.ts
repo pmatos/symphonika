@@ -68,7 +68,10 @@ export const DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY: PullRequestFollowupPolicy = {
 };
 
 const mergeMethodSchema = z.enum(["merge", "rebase", "squash"]);
-const pullRequestPolicySchema = z
+// Exported so reload.ts's loadRuntimeConfigSnapshot can surface a malformed
+// `pull_requests:` block as a reload error instead of the silent
+// undefined-on-parse-failure fallback pullRequestFollowupPolicyFromRaw uses.
+export const pullRequestPolicySchema = z
   .object({
     pull_requests: z
       .object({

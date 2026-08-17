@@ -224,4 +224,31 @@ describe("runSavePipeline (#306 part 2/3, ADR 0075)", () => {
     // validated and saved; a later fix-and-resave is the recovery path).
     expect(await readFile(filePath, "utf8")).toBe(VALID_WORKFLOW);
   });
+
+  it("still reports saved when reload() throws instead of returning a failed outcome", async () => {
+    const root = await makeTempRoot();
+    const filePath = path.join(root, "workflow.md");
+    const original = "Original content.\n";
+    await writeFile(filePath, original, "utf8");
+    const reload = vi.fn(() => Promise.reject(new Error("reloader crashed")));
+
+    const result = await runSavePipeline({
+      content: VALID_WORKFLOW,
+      expectedContentHash: contentHash(original),
+      filePath,
+      kind: "workflow_contract",
+      reload
+    });
+
+    // The write already succeeded before reload() ran -- a throwing
+    // reload() must not surface as an unhandled rejection that hides that.
+    expect(result.kind).toBe("saved");
+    if (result.kind === "saved") {
+      expect(result.reload).toEqual({
+        errors: ["reloader crashed"],
+        ok: false
+      });
+    }
+    expect(await readFile(filePath, "utf8")).toBe(VALID_WORKFLOW);
+  });
 });

@@ -98,7 +98,17 @@ export async function runSavePipeline(
     return { error: errorMessage(error), kind: "write_failed" };
   }
 
-  return { kind: "saved", reload: await input.reload() };
+  // The write above already landed on disk -- a throwing reload() (as
+  // opposed to one that catches its own errors into ReloadOutcome) must
+  // still report "saved", or the caller sees an unhandled rejection and has
+  // no way to learn the write succeeded while reload status is unknown.
+  let reload: ReloadOutcome;
+  try {
+    reload = await input.reload();
+  } catch (error) {
+    reload = { errors: [errorMessage(error)], ok: false };
+  }
+  return { kind: "saved", reload };
 }
 
 async function readCurrentFile(filePath: string): Promise<string | null> {

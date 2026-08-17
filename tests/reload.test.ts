@@ -1,10 +1,21 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { resolveWatchdogConfig, RuntimeConfigReloader } from "../src/reload.js";
+import {
+  resolveWatchdogConfig,
+  RuntimeConfigReloader,
+  validateServiceConfigContent
+} from "../src/reload.js";
 
 const tempRoots: string[] = [];
 
@@ -2220,5 +2231,103 @@ describe("RuntimeConfigReloader routine model/effort/permission_mode template cr
     await reloader.reload();
 
     expect(reloader.getStatus()).toMatchObject({ ok: true, errors: [] });
+  });
+});
+
+describe("RuntimeConfigReloader state root validation", () => {
+  it("rejects a malformed state.root instead of silently accepting it", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: []
+    });
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    // src/state.ts's own resolveStateRoot schema requires state.root to be a
+    // non-empty string when present -- an empty string here should be
+    // rejected at reload/save time, matching resolveStateRoot's own throw.
+    await writeFile(
+      configPath,
+      original.replace("state:\n  root: ./.symphonika", 'state:\n  root: ""')
+    );
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    expect(reloader.getStatus().ok).toBe(false);
+    expect(reloader.getStatus().errors.join("\n")).toContain("state.root");
+  });
+});
+
+describe("RuntimeConfigReloader pull_requests policy validation", () => {
+  it("rejects an invalid pull_requests.merge.method instead of silently defaulting", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "pull_requests:",
+        "  merge:",
+        "    method: not-a-real-method"
+      ]
+    });
+    const configPath = path.join(root, "symphonika.yml");
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    expect(reloader.getStatus().ok).toBe(false);
+    expect(reloader.getStatus().errors.join("\n")).toContain("pull_requests");
+  });
+
+  it("accepts a well-formed pull_requests block", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "pull_requests:",
+        "  enabled: true",
+        "  merge:",
+        "    method: squash"
+      ]
+    });
+    const configPath = path.join(root, "symphonika.yml");
+
+    const reloader = new RuntimeConfigReloader({ configPath });
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({ errors: [], ok: true });
+  });
+});
+
+describe("validateServiceConfigContent (#307 editor save-preview validation)", () => {
+  it("reports the same state.root error the live reload would report", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {});
+    const configPath = path.join(root, "symphonika.yml");
+    const original = await readFile(configPath, "utf8");
+    const malformed = original.replace(
+      "state:\n  root: ./.symphonika",
+      'state:\n  root: ""'
+    );
+
+    const result = await validateServiceConfigContent(malformed, configPath);
+
+    expect(result.errors.join("\n")).toContain("state.root");
+  });
+
+  it("leaves no scratch file behind in the config directory", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {});
+    const configPath = path.join(root, "symphonika.yml");
+    const content = await readFile(configPath, "utf8");
+
+    await validateServiceConfigContent(content, configPath);
+
+    const entries = await readdir(root);
+    expect(entries.filter((name) => name.includes("editor-validate"))).toEqual(
+      []
+    );
   });
 });

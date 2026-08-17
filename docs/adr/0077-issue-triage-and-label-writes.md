@@ -11,7 +11,12 @@ and the daemon-stale-banner threshold already cites a real `docs/adr/0065` elsew
 codebase. This ADR is numbered 0077, the next free slot, and the issue text's own number is stale.
 It also floats merging into "0064" if that ADR "ends up covering the whole mutation boundary" —
 0064 is `split-daemon-provider-cgroups`, unrelated. The actual mutation-boundary ADR is
-ADR-0075 (`mutation-authentication-and-superseding-0027`), which this ADR amends instead.
+ADR-0075 (`mutation-authentication-and-superseding-0027`). This ADR's part 3 (below) narrows the
+CLI-only boundary ADR-0075's own Context section describes (itself quoting ADR-0027, which it
+supersedes) — SPEC.md's matching sentence is updated to say so; ADR-0075's own text is left as
+written, since it is describing what ADR-0027 established at the time, not asserting an ongoing
+constraint, and this repo's convention is for a later ADR to narrow a boundary by reference rather
+than rewriting an earlier one's prose.
 
 Like ADR-0076, this ADR is filled in part by part as `#308`'s slices land, rather than written once
 ahead of the work.
@@ -112,6 +117,58 @@ the label-write response itself — the AC says poll-now is *offered*, and firin
 from a write handler would blur the two actions together and make a label write silently trigger
 network activity the operator didn't ask for.
 
+### "Updates the Run Store" resolves to the liveness gate, not a new claim record
+
+`#308`'s AC: "Clear-stale-claim updates both the label and the Run Store, and is refused when a live
+Run exists for that issue." Read as one sentence, not two independent obligations: the Run Store's
+participation *is* the liveness check, not a separate mutation. There is no Run Store column or table
+recording "this issue is claimed" as its own fact — ADR-0038 is explicit that the claim *is* label
+state ("stale detection treats `sym:claimed` or `sym:running` as evidence of a claim"), and
+`listActiveRunIds`/`listWaitingRunIds` derive live/parked status from `runs.state` at query time, not
+from a persisted claim flag. A `claim_cleared_at`-style column was considered and rejected: nothing
+would ever read it — no page, no query, no AC — which is exactly the Speculative Generality this
+project's own review baseline flags (the same smell `#307` part 2 caught and cut from
+`getProjectWorkflowPath`'s unused `format`). If a future slice needs an audit trail of manual clears,
+that is its own slice with its own reader, not a column added speculatively now.
+
+### The liveness check unions all three sources `detectStaleClaims` does, not the same instance
+
+`findLiveRunIdForIssue` (`src/http/pages.ts`) checks `getActiveRuns()` (the in-process registry,
+newly threaded onto `RegisterPagesOptions` this slice — it already existed on `HttpAppOptions` for
+`/api/status`), `runStore.listActiveRunIds()`, and `runStore.listWaitingRunIds()`, in that order,
+mirroring `collectLiveKeys` (`src/lifecycle/stale-claims.ts`) exactly. All three matter: a Run that is
+`running` right now lives only in the in-process registry between DB writes; a `queued` or
+`preparing_workspace` Run is a DB row with no registry entry yet; a parked `waiting` Run keeps
+`sym:claimed` across the wait (ADR 0047) with neither. Checking only one source would let an operator
+clear a claim out from under a Run in whichever state that source doesn't cover — the exact double
+dispatch this action exists to prevent. This is a fresh implementation, not a shared call into
+`collectLiveKeys` itself: that function is `async`, takes a `DetectStaleClaimsInput` bundling
+`activeRuns`/`githubIssuesApi`/`pollStatus`/`projects`/`logger` the HTTP route has no reason to
+assemble, and is walking every filtered issue in a poll tick rather than answering "is this one
+(project, issue) pair live" — same three-source shape, different caller context, not the same
+function with different plumbing.
+
+### `runClearStale` (the CLI) is left as-is, not refactored to share this liveness check
+
+`doctor.ts`'s `clear-stale` command predates this slice, reads config from disk itself, and calls
+`GitHubApi.removeIssueLabel` — a different interface than `GitHubIssuesApi.removeLabelsFromIssue`
+the polling/write path uses — and has no liveness check of its own today (a real, pre-existing gap
+this UI action closes, not one it inherits). Unifying the two into one shared implementation would be
+cross-cutting surgery on a working, unrelated CLI path for a slice that only asked for the web UI
+action — the same call `#307` part 2 made for `validateWorkflowContractContent` vs.
+`readWorkflowSnapshot`'s near-identical branch: a narrow, parallel implementation for the new caller,
+with the duplication named here rather than justifying a refactor with no requesting caller.
+
+### The action removes whichever of the three labels are present, not always all three
+
+`STALE_CLEAR_LABELS` (`sym:stale`, `sym:claimed`, `sym:running`) mirrors `doctor.ts`'s own constant of
+the same name and ADR-0038's rule that all three must go together (leaving `sym:claimed` or
+`sym:running` behind would re-trigger `sym:stale` on the next poll). The button only renders when at
+least one is present, and the write removes exactly the subset actually on the issue — calling
+`removeLabelsFromIssue` for a label that was never there risks a needless 404 from GitHub's API for
+no benefit, and `writeIssueLabels` already surfaces that kind of failure honestly if it happened
+anyway.
+
 ## Consequences
 
 - `project_issue_snapshots` gained a `labels` column (migrated via `ensureColumn`, like every other
@@ -121,9 +178,13 @@ network activity the operator didn't ask for.
   every 30s poll is real write amplification for zero AC coverage. Search is title-only; this is a
   stated limit, not a silent one, alongside the page's other honest limits (open issues only, at most
   ~30s stale, scoped to configured Projects' repos).
-- Part 1 (this ADR's first slice) is read-only: search, verdicts, snapshot-age display.
-- Part 2 adds label add/remove (excluding `sym:*`, enforced server-side) and a poll-now offer after a
-  write, on a new per-issue page `GET /issues/:project/:number`. Clear-stale-claim (the one `sym:*`
-  mutation the UI offers, per ADR 0038) lands in part 3, along with amending ADR-0075/ADR-0027's
-  "stale-claim reset remains CLI-only" line and SPEC.md's matching closing sentence in §14 — neither
-  is amended yet, since it stays true until part 3 actually moves stale-claim clearing into the UI.
+- Part 1 is read-only: search, verdicts, snapshot-age display.
+- Part 2 adds label add/remove (excluding `sym:*`, enforced server-side before `writeIssueLabels` is
+  ever called) and a poll-now offer after a write, on a new per-issue page
+  `GET /issues/:project/:number`.
+- Part 3 adds clear-stale-claim, the one `sym:*` mutation the UI offers, gated by a three-source
+  liveness check and reusing `writeIssueLabels` for the actual write (deliberately bypassing the
+  generic route's `sym:*` refusal, since this handler is the one place that mutation is sanctioned).
+  This closes `#308`: all 8 acceptance criteria. SPEC.md §14's closing sentence is updated — "label
+  creation and workspace cleanup remain CLI-only; stale-claim reset no longer is" — while ADR-0075's
+  own text is left unedited, per this ADR's Context section.

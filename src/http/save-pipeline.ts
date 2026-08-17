@@ -15,7 +15,7 @@ import { parseWorkflowContract } from "../workflow/contract-loading.js";
 // today) that should be driven by #307's actual service-config editor
 // route, not done speculatively against no caller. See
 // docs/adr/0075-mutation-authentication-and-superseding-0027.md.
-export type SaveContentKind = "routine_declaration" | "workflow_contract";
+type SaveContentKind = "routine_declaration" | "workflow_contract";
 
 export type ReloadOutcome = { errors: string[]; ok: boolean };
 

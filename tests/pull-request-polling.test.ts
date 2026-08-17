@@ -8,7 +8,8 @@ import type {
 import {
   classifyPullRequestBranchOrigin,
   pollConfiguredGitHubPullRequestsFromConfig,
-  PULL_REQUEST_ENRICHMENT_CONCURRENCY
+  PULL_REQUEST_ENRICHMENT_CONCURRENCY,
+  type CachedPullRequestEnrichment
 } from "../src/pull-request-polling.js";
 
 describe("classifyPullRequestBranchOrigin (#309, ADR 0077)", () => {
@@ -241,6 +242,118 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
       }
     ]);
     expect(status.pullRequests).toEqual([]);
+  });
+
+  it("does not re-enrich a PR whose cache entry is still fresh (bounds cross-tick GraphQL volume)", async () => {
+    let enrichmentCalls = 0;
+    const followup: RawGitHubPullRequestFollowupState = {
+      draft: false,
+      headSha: "def456",
+      mergeable: "MERGEABLE",
+      merged: false,
+      number: 501,
+      reviewDecision: "APPROVED",
+      state: "OPEN",
+      statusCheckRollupState: "SUCCESS",
+      unresolvedReviewThreads: [],
+      url: "https://github.com/pmatos/symphonika/pull/501"
+    };
+    const api: GitHubIssuesApi = {
+      getPullRequestFollowupState: () => {
+        enrichmentCalls++;
+        return Promise.resolve(followup);
+      },
+      listOpenIssues: () => Promise.resolve([]),
+      listPullRequests: () =>
+        Promise.resolve([
+          {
+            draft: false,
+            head: { ref: "sym/alpha/3-fix", sha: "def456" },
+            html_url: "https://github.com/pmatos/symphonika/pull/501",
+            merged_at: null,
+            number: 501,
+            state: "open",
+            title: "Fix timeout"
+          }
+        ])
+    };
+    const cache = new Map<string, CachedPullRequestEnrichment>();
+    const config = { projects: [project()] };
+    const env = { GITHUB_TOKEN: "secret" };
+
+    const first = await pollConfiguredGitHubPullRequestsFromConfig({
+      config,
+      enrichmentCache: cache,
+      env,
+      githubIssuesApi: api
+    });
+    const second = await pollConfiguredGitHubPullRequestsFromConfig({
+      config,
+      enrichmentCache: cache,
+      env,
+      githubIssuesApi: api
+    });
+
+    expect(enrichmentCalls).toBe(1);
+    expect(first.pullRequests[0]).toMatchObject({ stateAvailable: true });
+    expect(second.pullRequests[0]).toMatchObject({
+      checks: "success",
+      mergeable: "mergeable",
+      reviewDecision: "approved",
+      stateAvailable: true
+    });
+  });
+
+  it("prunes a cache entry once its PR stops appearing in the poll", async () => {
+    const followup: RawGitHubPullRequestFollowupState = {
+      draft: false,
+      headSha: "aaa111",
+      mergeable: "MERGEABLE",
+      merged: false,
+      number: 502,
+      reviewDecision: "APPROVED",
+      state: "OPEN",
+      statusCheckRollupState: "SUCCESS",
+      unresolvedReviewThreads: [],
+      url: "https://github.com/pmatos/symphonika/pull/502"
+    };
+    let listedPullRequests: Array<{ number: number }> = [{ number: 502 }];
+    const api: GitHubIssuesApi = {
+      getPullRequestFollowupState: () => Promise.resolve(followup),
+      listOpenIssues: () => Promise.resolve([]),
+      listPullRequests: () =>
+        Promise.resolve(
+          listedPullRequests.map((pr) => ({
+            draft: false,
+            head: { ref: `sym/alpha/${pr.number}-fix`, sha: "aaa111" },
+            html_url: `https://github.com/pmatos/symphonika/pull/${pr.number}`,
+            merged_at: null,
+            number: pr.number,
+            state: "open" as const,
+            title: "Fix"
+          }))
+        )
+    };
+    const cache = new Map<string, CachedPullRequestEnrichment>();
+    const config = { projects: [project()] };
+    const env = { GITHUB_TOKEN: "secret" };
+
+    await pollConfiguredGitHubPullRequestsFromConfig({
+      config,
+      enrichmentCache: cache,
+      env,
+      githubIssuesApi: api
+    });
+    expect(cache.has("alpha#502")).toBe(true);
+
+    listedPullRequests = [];
+    await pollConfiguredGitHubPullRequestsFromConfig({
+      config,
+      enrichmentCache: cache,
+      env,
+      githubIssuesApi: api
+    });
+    expect(cache.has("alpha#502")).toBe(false);
   });
 
   it("skips a disabled project", async () => {

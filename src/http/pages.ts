@@ -694,9 +694,10 @@ export function registerPages(options: RegisterPagesOptions): void {
     } else {
       const result = await options.writeIssueLabels({
         add: action === "add" ? [label] : [],
-        issueNumber,
+        kind: "issue",
         projectName,
-        remove: action === "remove" ? [label] : []
+        remove: action === "remove" ? [label] : [],
+        subjectNumber: issueNumber
       });
       banner = result.ok
         ? { action, kind: "label_write", label, ok: true }
@@ -799,9 +800,10 @@ export function registerPages(options: RegisterPagesOptions): void {
         } else {
           const result = await options.writeIssueLabels({
             add: [],
-            issueNumber,
+            kind: "issue",
             projectName,
-            remove: presentClaimLabels
+            remove: presentClaimLabels,
+            subjectNumber: issueNumber
           });
           banner = result.ok
             ? {
@@ -844,10 +846,14 @@ export function registerPages(options: RegisterPagesOptions): void {
     "/issues/poll-now",
     requireAuthorizedMutation,
     async (context) => {
+      const body = (await context.req.parseBody()) as Record<string, unknown>;
+      const returnTo = normalizePollNowReturnTo(
+        readOptionalFormField(body, "return_to")
+      );
       const result = await Promise.resolve(options.pollNow?.());
       const html = layout(
-        "Issue triage",
-        `<h1 class="page-title">Issue triage</h1><p class="note">${result === undefined ? "Poll-now trigger unavailable." : `Poll ${escapeHtml(result.kind)}.`}</p><p class="note"><a href="/issues">← Back to search</a></p>`
+        "Poll now",
+        `<h1 class="page-title">Poll now</h1><p class="note">${result === undefined ? "Poll-now trigger unavailable." : `Poll ${escapeHtml(result.kind)}.`}</p><p class="note"><a href="${escapeHtml(returnTo)}">← Back to search</a></p>`
       );
       return context.html(html);
     }
@@ -896,12 +902,107 @@ export function registerPages(options: RegisterPagesOptions): void {
         404
       );
     }
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
     const html = layout(
       `PR #${prNumber} ${detail.snapshot.title}`,
-      renderPullRequestDetailPage(detail)
+      renderPullRequestDetailPage({
+        banner: undefined,
+        csrfToken,
+        detail,
+        pollNowAvailable: options.pollNow !== undefined
+      })
     );
     return context.html(html);
   });
+
+  async function handlePullRequestLabelWrite(
+    context: Context,
+    projectName: string,
+    prNumberParam: string,
+    action: "add" | "remove"
+  ): Promise<Response> {
+    const prNumber = Number.parseInt(prNumberParam, 10);
+    const detail = loadPullRequestDetail(
+      options.runStore,
+      projectName,
+      prNumber
+    );
+    if (detail === undefined) {
+      return context.html(
+        renderPullRequestNotFound(projectName, prNumberParam),
+        404
+      );
+    }
+
+    const body = (await context.req.parseBody()) as Record<string, unknown>;
+    const label = (readOptionalFormField(body, "label") ?? "").trim();
+
+    let banner: PullRequestLabelWriteBanner;
+    if (label.length === 0) {
+      banner = { action, error: "a label is required", label, ok: false };
+    } else if (isOrchestratorLabel(label)) {
+      banner = {
+        action,
+        error:
+          "sym:* labels are managed by Symphonika and can't be edited here (ADR 0002/0024)",
+        label,
+        ok: false
+      };
+    } else if (options.writeIssueLabels === undefined) {
+      banner = {
+        action,
+        error: "label writes are unavailable",
+        label,
+        ok: false
+      };
+    } else {
+      const result = await options.writeIssueLabels({
+        add: action === "add" ? [label] : [],
+        kind: "pull_request",
+        projectName,
+        remove: action === "remove" ? [label] : [],
+        subjectNumber: prNumber
+      });
+      banner = result.ok
+        ? { action, label, ok: true }
+        : { action, error: result.error, label, ok: false };
+    }
+
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const html = layout(
+      `PR #${prNumber} ${detail.snapshot.title}`,
+      renderPullRequestDetailPage({
+        banner,
+        csrfToken,
+        detail,
+        pollNowAvailable: options.pollNow !== undefined
+      })
+    );
+    return context.html(html);
+  }
+
+  options.app.post(
+    "/prs/:project/:number/labels/add",
+    requireAuthorizedMutation,
+    (context) =>
+      handlePullRequestLabelWrite(
+        context,
+        context.req.param("project"),
+        context.req.param("number"),
+        "add"
+      )
+  );
+  options.app.post(
+    "/prs/:project/:number/labels/remove",
+    requireAuthorizedMutation,
+    (context) =>
+      handlePullRequestLabelWrite(
+        context,
+        context.req.param("project"),
+        context.req.param("number"),
+        "remove"
+      )
+  );
 
   options.app.get("/projects/:name", (context) => {
     const name = context.req.param("name");
@@ -3301,8 +3402,25 @@ function renderIssueActionBanner(banner: IssueActionBanner): string {
     : renderIssueClearStaleClaimBanner(banner);
 }
 
-function renderPollNowForm(csrfToken: string): string {
-  return `<form method="post" action="/issues/poll-now"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}"><button class="btn" type="submit">Poll now</button></form>`;
+// #309: the daemon's poll tick now refreshes both issues and PRs together
+// (ADR 0078), so the PR detail page's write banner offers the same trigger
+// the issue page does. `returnTo` carries the caller back to the search
+// page it came from, rather than always landing on /issues regardless of
+// origin — validated against a fixed allowlist server-side
+// (normalizePollNowReturnTo), never trusted as a raw redirect target.
+function renderPollNowForm(csrfToken: string, returnTo: string): string {
+  return `<form method="post" action="/issues/poll-now"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}"><input type="hidden" name="return_to" value="${escapeHtml(returnTo)}"><button class="btn" type="submit">Poll now</button></form>`;
+}
+
+const POLL_NOW_RETURN_TARGETS: ReadonlySet<string> = new Set([
+  "/issues",
+  "/prs"
+]);
+
+function normalizePollNowReturnTo(value: string | undefined): string {
+  return value !== undefined && POLL_NOW_RETURN_TARGETS.has(value)
+    ? value
+    : "/issues";
 }
 
 // #308 part 3: the same three labels ADR 0038 / doctor.ts's `clear-stale`
@@ -3370,7 +3488,7 @@ function renderIssueDetailPage(input: {
   const bannerHtml =
     input.banner === undefined
       ? ""
-      : `${renderIssueActionBanner(input.banner)}${input.banner.ok && input.pollNowAvailable ? renderPollNowForm(input.csrfToken) : ""}`;
+      : `${renderIssueActionBanner(input.banner)}${input.banner.ok && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/issues") : ""}`;
   return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${renderIssueLabelsSection(
     {
       csrfToken: input.csrfToken,
@@ -3708,7 +3826,58 @@ function renderPullRequestNotFound(
   );
 }
 
-function renderPullRequestDetailPage(detail: PullRequestDetail): string {
+// #309 part 2's label-write outcome banner for a PR — structurally identical
+// to #308's IssueLabelWriteBanner, but a distinct type since the PR detail
+// page's banner union will grow independently (a guarded-merge banner in
+// part 3, matching how #308 part 3 widened its own banner union only when
+// clear-stale-claim actually needed it).
+type PullRequestLabelWriteBanner = {
+  action: "add" | "remove";
+  error?: string;
+  label: string;
+  ok: boolean;
+};
+
+function renderPullRequestLabelWriteBanner(
+  banner: PullRequestLabelWriteBanner
+): string {
+  const verb = banner.action === "add" ? "Add" : "Remove";
+  if (!banner.ok) {
+    return `<div class="alert" role="alert"><strong>${verb} label "${escapeHtml(banner.label)}" failed</strong>${banner.error === undefined ? "" : `<p>${escapeHtml(banner.error)}</p>`}<p>The labels shown below are unchanged.</p></div>`;
+  }
+  const past = banner.action === "add" ? "Added" : "Removed";
+  return `<div class="alert alert--ok" role="status"><strong>${past} label "${escapeHtml(banner.label)}" on GitHub</strong><p>This page shows the last poll snapshot; the label list below won't reflect this until the next poll.</p></div>`;
+}
+
+function renderPullRequestLabelsSection(input: {
+  csrfToken: string;
+  labels: string[];
+  prNumber: number;
+  projectName: string;
+}): string {
+  const rows = input.labels.map((label) => {
+    if (isOrchestratorLabel(label)) {
+      return `<li>${labelPill(label, "neutral")} <span class="muted">managed by Symphonika — not editable here</span></li>`;
+    }
+    const removeAction = `/prs/${encodeURIComponent(input.projectName)}/${input.prNumber}/labels/remove`;
+    return `<li>${labelPill(label, "neutral")} <form method="post" action="${escapeHtml(removeAction)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}"><input type="hidden" name="label" value="${escapeHtml(label)}"><button class="btn" type="submit">Remove</button></form></li>`;
+  });
+  const list =
+    rows.length === 0
+      ? `<p class="muted">No labels.</p>`
+      : `<ul class="label-list">${rows.join("")}</ul>`;
+  const addAction = `/prs/${encodeURIComponent(input.projectName)}/${input.prNumber}/labels/add`;
+  const addForm = `<form method="post" action="${escapeHtml(addAction)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}"><label>Add a label<input type="text" name="label" placeholder="agent-ready" required></label> <button class="btn" type="submit">Add</button></form>`;
+  return `<section><h2>Labels</h2><p class="note">Labels are written under the same policy as issues (#308) — <code>sym:*</code> labels are how Symphonika tracks state (ADR 0002/0024) and render here as read-only.</p>${list}${addForm}</section>`;
+}
+
+function renderPullRequestDetailPage(input: {
+  banner: PullRequestLabelWriteBanner | undefined;
+  csrfToken: string;
+  detail: PullRequestDetail;
+  pollNowAvailable: boolean;
+}): string {
+  const { detail } = input;
   const { snapshot } = detail;
   const draftNote = snapshot.draft ? " (draft)" : "";
   const family = pullRequestStateFamily(detail.trackingState, snapshot);
@@ -3727,7 +3896,11 @@ function renderPullRequestDetailPage(detail: PullRequestDetail): string {
   const signals = snapshot.stateAvailable
     ? `<dl class="fields"><dt>Mergeable</dt><dd>${escapeHtml(snapshot.mergeable ?? "unknown")}</dd><dt>Checks</dt><dd>${escapeHtml(snapshot.checks ?? "unknown")}</dd><dt>Review</dt><dd>${escapeHtml(snapshot.reviewDecision ?? "unknown")}</dd><dt>Unresolved threads</dt><dd>${snapshot.unresolvedReviewThreads ?? 0}</dd></dl>`
     : `<p class="note">Symphonika's Pull Request State could not be fetched for this PR at the last poll — mergeable/checks/review are unknown for this reason, not because GitHub reported no issues.</p>`;
-  return `<h1 class="page-title">PR #${detail.prNumber} ${escapeHtml(snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(`${detail.trackingState}${draftNote}`, family)}</p>${urlHtml}${branchHtml}<section><h2>Pull Request State</h2>${signals}</section><section><h2>Follow-up tracking</h2><p class="note">${trackedHtml}</p></section><p class="note"><a href="/prs">← Back to search</a></p>`;
+  const bannerHtml =
+    input.banner === undefined
+      ? ""
+      : `${renderPullRequestLabelWriteBanner(input.banner)}${input.banner.ok && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/prs") : ""}`;
+  return `<h1 class="page-title">PR #${detail.prNumber} ${escapeHtml(snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(`${detail.trackingState}${draftNote}`, family)}</p>${urlHtml}${branchHtml}${bannerHtml}<section><h2>Pull Request State</h2>${signals}</section><section><h2>Follow-up tracking</h2><p class="note">${trackedHtml}</p></section>${renderPullRequestLabelsSection({ csrfToken: input.csrfToken, labels: snapshot.labels, prNumber: detail.prNumber, projectName: detail.projectName })}<p class="note"><a href="/prs">← Back to search</a></p>`;
 }
 
 // A Routine name is globally unique across the *current* declared config

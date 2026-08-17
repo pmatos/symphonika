@@ -1,5 +1,6 @@
 import {
   envReferenceName,
+  normalizeLabels,
   resolveEnvBackedValue,
   tryGetPullRequestFollowupState,
   tryListPullRequests,
@@ -46,6 +47,7 @@ type ProjectPullRequestSnapshot = {
   draft: boolean;
   headRef: string | null;
   headSha: string | null;
+  labels: string[];
   mergeable: PullRequestState["mergeable"] | null;
   merged: boolean;
   open: boolean;
@@ -212,6 +214,7 @@ async function buildSnapshot(
     draft: raw.draft ?? false,
     headRef: raw.head?.ref ?? null,
     headSha: raw.head?.sha ?? null,
+    labels: normalizeLabels(raw.labels ?? []),
     mergeable: null,
     merged: raw.merged_at !== null && raw.merged_at !== undefined,
     open: raw.state === "open",

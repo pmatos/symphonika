@@ -2072,9 +2072,17 @@ branch (an Issue Branch or Routine Firing branch with no matching `tracked_pull_
 `#259`'s twelve orphaned PRs are exactly this case) renders with an explicit "untracked" pill rather
 than silently looking the same as a PR from an unrelated repo branch.
 
-Part 1 is read-only: poll, snapshot, search, detail. Label writes (reusing `#308`'s
-`writeIssueLabels` under the same `sym:*` policy) and the ownership-guarded merge action are later
-parts of the same slice.
+The PR detail page's Labels section (`#309` part 2) reuses `#308`'s exact policy: orchestrator-owned
+`sym:*` labels render as read-only pills, and every other label gets a Remove control plus an "Add a
+label" form. Both write through `writeIssueLabels` (`src/daemon.ts`) — the same callback `#308`'s
+issue labelling uses, since GitHub's labels endpoint treats an issue number and a PR number
+identically — passing `kind: "pull_request"` and the PR number as `subjectNumber`. A successful
+write's banner offers `POST /issues/poll-now` exactly as the issue page does; that route now
+accepts an optional `return_to` field (validated against a fixed `/issues`/`/prs` allowlist) so
+triggering it from either search page's detail view returns to the page it came from, rather than
+always landing back on `/issues`.
+
+The ownership-guarded merge action is a later part of the same slice.
 
 ## 15. Bootstrap Acceptance Bar
 

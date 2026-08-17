@@ -52,6 +52,7 @@ function samplePrRow(
     draft: false,
     headRef: "sym/alpha/246-fix-login",
     headSha: "abc123",
+    labels: [],
     mergeable: "mergeable",
     merged: false,
     open: true,

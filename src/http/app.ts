@@ -79,15 +79,22 @@ export type PollNowFn = () => PollNowResult | Promise<PollNowResult>;
 
 // #308 part 2's label-write action: the only mutation the triage UI performs
 // against GitHub directly (everything else in #307 writes local files). See
-// docs/adr/0077-issue-triage-and-label-writes.md.
+// docs/adr/0077-issue-triage-and-label-writes.md. #309 part 2 reuses this same
+// callback for PR label writes — GitHub's labels endpoint treats an issue and
+// a PR number identically — so the field is `subjectNumber`, not
+// `issueNumber`: a PR-label call site passing a PR number through a field
+// named `issueNumber` would misname what it actually holds. `kind` is
+// carried for the same clarity reason, even though the daemon-side
+// implementation doesn't currently need to branch on it.
 export type WriteIssueLabelsResult =
   { ok: true } | { error: string; ok: false };
 
 export type WriteIssueLabelsFn = (input: {
   add: string[];
-  issueNumber: number;
+  kind: "issue" | "pull_request";
   projectName: string;
   remove: string[];
+  subjectNumber: number;
 }) => Promise<WriteIssueLabelsResult>;
 
 type FireRoutineRequest = {

@@ -216,6 +216,34 @@ describe("HTTP app — GET /events (#305, ADR 0074)", () => {
     }
   });
 
+  it("ends the stream and unsubscribes when the shutdown signal aborts", async () => {
+    const test = await setup();
+    try {
+      const shutdownController = new AbortController();
+      const app = createHttpApp({
+        runStore: test.runStore,
+        shutdownSignal: shutdownController.signal,
+        sseHeartbeatMs: 60_000,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      expect(test.runStore.changeListenerCount).toBe(0);
+      const response = await app.request("/events");
+      const reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(test.runStore.changeListenerCount).toBe(1);
+
+      shutdownController.abort();
+      const { done } = await reader!.read();
+      expect(done).toBe(true);
+      expect(test.runStore.changeListenerCount).toBe(0);
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("gives each concurrent connection its own independent subscription", async () => {
     const test = await setup();
     try {

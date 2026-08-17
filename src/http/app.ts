@@ -145,6 +145,9 @@ export type HttpAppOptions = {
   now?: () => number;
   pollNow?: PollNowFn;
   runStore?: RunStore;
+  // Aborted by stopServer before it calls server.close(), so open /events
+  // streams exit their loop instead of holding the shutdown open forever.
+  shutdownSignal?: AbortSignal;
   // Test-only override; production always uses SSE_HEARTBEAT_MS. See
   // docs/adr/0074-live-notification-path.md.
   sseHeartbeatMs?: number;
@@ -472,7 +475,8 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       streamChangeEvents(
         context,
         runStore,
-        options.sseHeartbeatMs ?? SSE_HEARTBEAT_MS
+        options.sseHeartbeatMs ?? SSE_HEARTBEAT_MS,
+        options.shutdownSignal
       )
     );
 
@@ -674,16 +678,26 @@ async function streamRoutineFiringArtifact(
 function streamChangeEvents(
   context: Context,
   runStore: RunStore,
-  heartbeatMs: number
+  heartbeatMs: number,
+  shutdownSignal: AbortSignal | undefined
 ): Response {
   return streamSSE(context, async (stream) => {
     const queue: ChangeEvent[] = [];
     let wake: (() => void) | undefined;
-    let done = false;
+    let done = shutdownSignal?.aborted ?? false;
     stream.onAbort(() => {
       done = true;
       wake?.();
     });
+    // Node's server.close() waits for every open connection to end on its
+    // own; an SSE stream never does that by itself, so without this a
+    // daemon shutdown would hang as long as any /events tab stayed open.
+    // stopServer aborts this signal before calling close() (daemon.ts).
+    const onShutdown = () => {
+      done = true;
+      wake?.();
+    };
+    shutdownSignal?.addEventListener("abort", onShutdown);
     const unsubscribe = runStore.subscribeToChanges((event) => {
       queue.push(event);
       wake?.();
@@ -723,6 +737,7 @@ function streamChangeEvents(
       }
     } finally {
       unsubscribe();
+      shutdownSignal?.removeEventListener("abort", onShutdown);
     }
   });
 }

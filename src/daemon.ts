@@ -887,6 +887,7 @@ export async function startDaemon(
     }
     return { kind: "not-found" };
   };
+  const shutdownController = new AbortController();
   const app = createHttpApp({
     cancelRun: cancelViaUi,
     dispatchRuntime,
@@ -984,6 +985,7 @@ export async function startDaemon(
     getReloadStatus: () => runtimeConfig.getStatus(),
     pollNow: triggerPollNow,
     runStore,
+    shutdownSignal: shutdownController.signal,
     stateRoot: state.stateRoot,
     version: VERSION
   });
@@ -1140,6 +1142,7 @@ export async function startDaemon(
       await Promise.allSettled(Array.from(inflightDispatches));
       await daemonHealthNotifications.settled();
       try {
+        shutdownController.abort();
         await stopServer(server, logger);
         await removeDaemonEndpoint(state.stateRoot);
       } finally {

@@ -2230,9 +2230,7 @@ describe("HTTP app — project detail page (#303)", () => {
       const app = createHttpApp({
         getConcurrency: () => ({
           global: { inFlight: 1, maxInFlight: null },
-          perProject: [
-            { inFlight: 1, maxInFlight: 2, projectName: "alpha" }
-          ]
+          perProject: [{ inFlight: 1, maxInFlight: 2, projectName: "alpha" }]
         }),
         getScheduled: () => [
           {
@@ -2333,9 +2331,7 @@ describe("HTTP app — project detail page (#303)", () => {
       const app = createHttpApp({
         getConcurrency: () => ({
           global: { inFlight: 2, maxInFlight: null },
-          perProject: [
-            { inFlight: 2, maxInFlight: 2, projectName: "alpha" }
-          ]
+          perProject: [{ inFlight: 2, maxInFlight: 2, projectName: "alpha" }]
         }),
         getStatusSnapshot: () => ({
           configPath: "/tmp/symphonika.yml",
@@ -2519,7 +2515,9 @@ describe("HTTP app — project detail page (#303)", () => {
 
       expect(body).toContain("No issues — this is a Routine Host");
       expect(body).toContain("audit");
-      expect(body).not.toContain('class="capacity-strip"><span class="kv"><span class="k">in-flight</span><span class="v">1/');
+      expect(body).not.toContain(
+        'class="capacity-strip"><span class="kv"><span class="k">in-flight</span><span class="v">1/'
+      );
     } finally {
       test.cleanup();
     }

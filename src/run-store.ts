@@ -251,7 +251,7 @@ export type ProjectPollOutcomeInput = {
   projectName: string;
 };
 
-export type ProjectIssueSnapshotKind = "candidate" | "filtered";
+type ProjectIssueSnapshotKind = "candidate" | "filtered";
 
 export type ProjectIssueSnapshotRow = {
   issueNumber: number;
@@ -1406,7 +1406,8 @@ export class RunStore {
           polled_at: input.polledAt,
           priority: row.priority,
           project_name: input.projectName,
-          reasons: row.reasons.length === 0 ? null : JSON.stringify(row.reasons),
+          reasons:
+            row.reasons.length === 0 ? null : JSON.stringify(row.reasons),
           title: row.title,
           updated_at: now
         });
@@ -1430,7 +1431,8 @@ export class RunStore {
       kind: row.kind,
       polledAt: row.polled_at,
       priority: row.priority,
-      reasons: row.reasons === null ? [] : (JSON.parse(row.reasons) as string[]),
+      reasons:
+        row.reasons === null ? [] : (JSON.parse(row.reasons) as string[]),
       title: row.title
     }));
   }

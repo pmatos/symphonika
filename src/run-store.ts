@@ -284,6 +284,51 @@ export type ReplaceProjectIssueSnapshotsInput = {
   }>;
 };
 
+export type PullRequestBranchOrigin =
+  "issue_branch" | "routine_firing_branch" | "neither";
+type PullRequestMergeableState = "mergeable" | "conflicting" | "unknown";
+type PullRequestChecksState = "failure" | "pending" | "success" | "unknown";
+type PullRequestReviewDecisionState =
+  | "approved"
+  | "changes_requested"
+  | "review_required"
+  | "commented"
+  | "unknown";
+type PullRequestTrackingStateSnapshot = "closed" | "merged" | "open";
+
+// Persists #309's per-repo PR poll snapshot (ADR 0077), mirroring #303's
+// `project_issue_snapshots`: the daemon replaces a project's rows wholesale
+// on every successful poll, so a PR that stops being returned (closed,
+// merged) ages out on the next successful tick. `stateAvailable` is false
+// when Symphonika's own Pull Request State (src/pull-request-state.ts)
+// couldn't be fetched for this PR at poll time — the mergeable/checks/
+// reviewDecision/trackingState/unresolvedReviewThreads fields are then all
+// null, distinct from GitHub genuinely reporting "unknown".
+export type ProjectPullRequestSnapshotRow = {
+  branchOrigin: PullRequestBranchOrigin;
+  checks: PullRequestChecksState | null;
+  draft: boolean;
+  headRef: string | null;
+  headSha: string | null;
+  mergeable: PullRequestMergeableState | null;
+  merged: boolean;
+  open: boolean;
+  polledAt: string;
+  prNumber: number;
+  reviewDecision: PullRequestReviewDecisionState | null;
+  stateAvailable: boolean;
+  title: string;
+  trackingState: PullRequestTrackingStateSnapshot | null;
+  unresolvedReviewThreads: number | null;
+  url: string | null;
+};
+
+export type ReplaceProjectPullRequestSnapshotsInput = {
+  polledAt: string;
+  projectName: string;
+  rows: Array<Omit<ProjectPullRequestSnapshotRow, "polledAt">>;
+};
+
 export type ProjectDispatchSelectionInput = {
   issueNumber: number;
   projectName: string;
@@ -577,6 +622,25 @@ type ProjectIssueSnapshotDbRow = {
   priority: number;
   reasons: string | null;
   title: string;
+};
+
+type ProjectPullRequestSnapshotDbRow = {
+  branch_origin: PullRequestBranchOrigin;
+  checks: PullRequestChecksState | null;
+  draft: number;
+  head_ref: string | null;
+  head_sha: string | null;
+  mergeable: PullRequestMergeableState | null;
+  merged: number;
+  open: number;
+  polled_at: string;
+  pr_number: number;
+  review_decision: PullRequestReviewDecisionState | null;
+  state_available: number;
+  title: string;
+  tracking_state: PullRequestTrackingStateSnapshot | null;
+  unresolved_review_threads: number | null;
+  url: string | null;
 };
 
 type RoutineRow = {
@@ -1502,6 +1566,92 @@ export class RunStore {
       reasons:
         row.reasons === null ? [] : (JSON.parse(row.reasons) as string[]),
       title: row.title
+    }));
+  }
+
+  replaceProjectPullRequestSnapshots(
+    input: ReplaceProjectPullRequestSnapshotsInput
+  ): void {
+    const now = timestamp();
+    const apply = this.database.transaction(() => {
+      this.database
+        .prepare(
+          "delete from project_pull_request_snapshots where project_name = ?"
+        )
+        .run(input.projectName);
+      const insert = this.database.prepare(
+        [
+          "insert into project_pull_request_snapshots (",
+          "project_name, pr_number, title, url, draft, open, merged,",
+          "head_ref, head_sha, branch_origin, state_available, mergeable,",
+          "checks, review_decision, tracking_state, unresolved_review_threads,",
+          "polled_at, created_at, updated_at",
+          ") values (",
+          "@project_name, @pr_number, @title, @url, @draft, @open, @merged,",
+          "@head_ref, @head_sha, @branch_origin, @state_available, @mergeable,",
+          "@checks, @review_decision, @tracking_state, @unresolved_review_threads,",
+          "@polled_at, @created_at, @updated_at",
+          ")"
+        ].join(" ")
+      );
+      for (const row of input.rows) {
+        insert.run({
+          branch_origin: row.branchOrigin,
+          checks: row.checks,
+          created_at: now,
+          draft: row.draft ? 1 : 0,
+          head_ref: row.headRef,
+          head_sha: row.headSha,
+          mergeable: row.mergeable,
+          merged: row.merged ? 1 : 0,
+          open: row.open ? 1 : 0,
+          polled_at: input.polledAt,
+          pr_number: row.prNumber,
+          project_name: input.projectName,
+          review_decision: row.reviewDecision,
+          state_available: row.stateAvailable ? 1 : 0,
+          title: row.title,
+          tracking_state: row.trackingState,
+          unresolved_review_threads: row.unresolvedReviewThreads,
+          updated_at: now,
+          url: row.url
+        });
+      }
+    });
+    apply();
+  }
+
+  listProjectPullRequestSnapshots(
+    projectName: string
+  ): ProjectPullRequestSnapshotRow[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select pr_number, title, url, draft, open, merged, head_ref,",
+          "head_sha, branch_origin, state_available, mergeable, checks,",
+          "review_decision, tracking_state, unresolved_review_threads, polled_at",
+          "from project_pull_request_snapshots where project_name = ?",
+          "order by pr_number asc"
+        ].join(" ")
+      )
+      .all(projectName) as ProjectPullRequestSnapshotDbRow[];
+    return rows.map((row) => ({
+      branchOrigin: row.branch_origin,
+      checks: row.checks,
+      draft: row.draft === 1,
+      headRef: row.head_ref,
+      headSha: row.head_sha,
+      mergeable: row.mergeable,
+      merged: row.merged === 1,
+      open: row.open === 1,
+      polledAt: row.polled_at,
+      prNumber: row.pr_number,
+      reviewDecision: row.review_decision,
+      stateAvailable: row.state_available === 1,
+      title: row.title,
+      trackingState: row.tracking_state,
+      unresolvedReviewThreads: row.unresolved_review_threads,
+      url: row.url
     }));
   }
 
@@ -4136,6 +4286,29 @@ export class RunStore {
         created_at text not null,
         updated_at text not null,
         primary key (project_name, issue_number)
+      );
+
+      create table if not exists project_pull_request_snapshots (
+        project_name text not null,
+        pr_number integer not null,
+        title text not null,
+        url text,
+        draft integer not null default 0,
+        open integer not null default 0,
+        merged integer not null default 0,
+        head_ref text,
+        head_sha text,
+        branch_origin text not null default 'neither',
+        state_available integer not null default 0,
+        mergeable text,
+        checks text,
+        review_decision text,
+        tracking_state text,
+        unresolved_review_threads integer,
+        polled_at text not null,
+        created_at text not null,
+        updated_at text not null,
+        primary key (project_name, pr_number)
       );
 
       create table if not exists watchdog_samples (

@@ -36,15 +36,18 @@ import {
 import type {
   ListRunsFilter,
   ProjectIssueSnapshotRow,
+  ProjectPullRequestSnapshotRow,
   ProjectState,
   ProviderEventRecord,
+  PullRequestBranchOrigin,
   RoutineFiringStateTransition,
   RoutineFiringStatus,
   RunArtifactDescriptor,
   RunArtifactKind,
   RunState,
   RunStatus,
-  RunStore
+  RunStore,
+  TrackedPullRequest
 } from "../run-store.js";
 import {
   readRecentRoutineEvents,
@@ -849,6 +852,56 @@ export function registerPages(options: RegisterPagesOptions): void {
       return context.html(html);
     }
   );
+
+  options.app.get("/prs", (context) => {
+    const filters: PullRequestSearchFilters = {
+      origin: normalizePullRequestOriginFilter(context.req.query("origin")),
+      project: normalizeQueryParam(context.req.query("project")),
+      q: normalizeQueryParam(context.req.query("q")),
+      tracking: normalizePullRequestTrackingFilter(
+        context.req.query("tracking")
+      )
+    };
+    const nowMs = now();
+    const projectNames = Array.from(
+      new Set(
+        options.runStore.listProjectStates().map((state) => state.projectName)
+      )
+    ).sort();
+    const rows = searchPullRequestSnapshots({
+      filters,
+      nowMs,
+      projectNames,
+      runStore: options.runStore,
+      startedAtMs: options.startedAtMs
+    });
+    const html = layout(
+      "Pull requests",
+      renderPullRequestSearchPage({ filters, nowMs, projectNames, rows })
+    );
+    return context.html(html);
+  });
+
+  options.app.get("/prs/:project/:number", (context) => {
+    const projectName = context.req.param("project");
+    const prNumber = Number.parseInt(context.req.param("number"), 10);
+    const detail = loadPullRequestDetail(
+      options.runStore,
+      projectName,
+      prNumber
+    );
+    if (detail === undefined) {
+      return context.html(
+        renderPullRequestNotFound(projectName, context.req.param("number")),
+        404
+      );
+    }
+    const html = layout(
+      `PR #${prNumber} ${detail.snapshot.title}`,
+      renderPullRequestDetailPage(detail)
+    );
+    return context.html(html);
+  });
 
   options.app.get("/projects/:name", (context) => {
     const name = context.req.param("name");
@@ -2355,7 +2408,7 @@ function layout(title: string, body: string): string {
 <body>
 <header class="topbar">
   <div class="brand"><a href="/">Symphonika</a></div>
-  <nav class="nav" aria-label="Primary"><a href="/">Dashboard</a><a href="/runs">Runs</a><a href="/issues">Issues</a><a href="/config/edit">Config</a></nav>
+  <nav class="nav" aria-label="Primary"><a href="/">Dashboard</a><a href="/runs">Runs</a><a href="/issues">Issues</a><a href="/prs">Pull requests</a><a href="/config/edit">Config</a></nav>
 </header>
 <main>
 ${body}
@@ -3331,6 +3384,350 @@ function renderIssueDetailPage(input: {
     labels: detail.snapshot.labels,
     projectName: detail.projectName
   })}<p class="note"><a href="/issues">← Back to search</a></p>`;
+}
+
+// #309's PR search: filter query params, all optional and combined with AND
+// — same shape as #308's IssueSearchFilters above.
+type PullRequestSearchFilters = {
+  origin: PullRequestBranchOrigin | undefined;
+  project: string | undefined;
+  q: string | undefined;
+  tracking: "tracked" | "untracked" | undefined;
+};
+
+type PullRequestSearchRow = {
+  branchOrigin: PullRequestBranchOrigin;
+  checks: string | null;
+  draft: boolean;
+  mergeable: string | null;
+  polledAt: string;
+  preRestart: boolean;
+  prNumber: number;
+  projectName: string;
+  reviewDecision: string | null;
+  stateAvailable: boolean;
+  title: string;
+  trackedRunId: string | undefined;
+  trackingState: "closed" | "merged" | "open";
+  unresolvedReviewThreads: number | null;
+};
+
+const KNOWN_PR_ORIGIN_FILTERS: ReadonlySet<string> = new Set([
+  "issue_branch",
+  "routine_firing_branch",
+  "neither"
+]);
+const KNOWN_PR_TRACKING_FILTERS: ReadonlySet<string> = new Set([
+  "tracked",
+  "untracked"
+]);
+
+function normalizePullRequestOriginFilter(
+  value: string | undefined
+): PullRequestBranchOrigin | undefined {
+  const trimmed = normalizeQueryParam(value);
+  return trimmed !== undefined && KNOWN_PR_ORIGIN_FILTERS.has(trimmed)
+    ? (trimmed as PullRequestBranchOrigin)
+    : undefined;
+}
+
+function normalizePullRequestTrackingFilter(
+  value: string | undefined
+): "tracked" | "untracked" | undefined {
+  const trimmed = normalizeQueryParam(value);
+  return trimmed !== undefined && KNOWN_PR_TRACKING_FILTERS.has(trimmed)
+    ? (trimmed as "tracked" | "untracked")
+    : undefined;
+}
+
+function trackedPullRequestKey(projectName: string, prNumber: number): string {
+  return `${projectName}#${prNumber}`;
+}
+
+// #309: joins the poll snapshot against tracked_pull_requests at read time
+// rather than persisting `runId` on the snapshot row — tracking status can
+// change (cap reached, cancelled) independently of the next poll tick, and
+// this table is already the single source for that join, matching how
+// resolveClaimedRunId (above) reads the Run Store fresh for issues rather
+// than caching a claimed-run id on the snapshot.
+function buildTrackedPullRequestIndex(
+  runStore: RunStore
+): Map<string, TrackedPullRequest> {
+  const index = new Map<string, TrackedPullRequest>();
+  for (const tracked of runStore.listOpenTrackedPullRequests()) {
+    index.set(
+      trackedPullRequestKey(tracked.projectName, tracked.prNumber),
+      tracked
+    );
+  }
+  return index;
+}
+
+// A snapshot row's `trackingState` is null when Symphonika's Pull Request
+// State (src/pull-request-state.ts) couldn't be fetched at poll time (see
+// ProjectPullRequestSnapshotRow, src/run-store.ts) — the cheap REST-derived
+// `open`/`merged` fields are always populated regardless, so this falls back
+// to them rather than showing "unknown" for a PR that plainly is or isn't
+// merged.
+function pullRequestTrackingStateLabel(
+  snapshot: ProjectPullRequestSnapshotRow
+): "closed" | "merged" | "open" {
+  if (snapshot.trackingState !== null) {
+    return snapshot.trackingState;
+  }
+  if (snapshot.merged) {
+    return "merged";
+  }
+  return snapshot.open ? "open" : "closed";
+}
+
+function pullRequestStateFamily(
+  trackingState: "closed" | "merged" | "open",
+  signals: {
+    checks: string | null;
+    mergeable: string | null;
+    stateAvailable: boolean;
+  }
+): "ok" | "fail" | "blocked" | "progress" | "neutral" {
+  if (trackingState === "merged") {
+    return "ok";
+  }
+  if (trackingState === "closed") {
+    return "neutral";
+  }
+  if (!signals.stateAvailable) {
+    return "neutral";
+  }
+  if (signals.checks === "failure" || signals.mergeable === "conflicting") {
+    return "fail";
+  }
+  if (signals.checks === "pending") {
+    return "progress";
+  }
+  return "ok";
+}
+
+function pullRequestOriginLabel(origin: PullRequestBranchOrigin): string {
+  switch (origin) {
+    case "issue_branch":
+      return "Issue Branch";
+    case "routine_firing_branch":
+      return "Routine Firing branch";
+    default:
+      return "neither";
+  }
+}
+
+function pullRequestSignalsText(row: {
+  checks: string | null;
+  mergeable: string | null;
+  reviewDecision: string | null;
+  stateAvailable: boolean;
+  unresolvedReviewThreads: number | null;
+}): string {
+  if (!row.stateAvailable) {
+    return "state not fetched";
+  }
+  return [
+    row.mergeable ?? "unknown",
+    `checks: ${row.checks ?? "unknown"}`,
+    `review: ${row.reviewDecision ?? "unknown"}`,
+    `${row.unresolvedReviewThreads ?? 0} unresolved`
+  ].join(" · ");
+}
+
+function searchPullRequestSnapshots(input: {
+  filters: PullRequestSearchFilters;
+  nowMs: number;
+  projectNames: string[];
+  runStore: RunStore;
+  startedAtMs: number | undefined;
+}): PullRequestSearchRow[] {
+  const targetProjects =
+    input.filters.project === undefined
+      ? input.projectNames
+      : input.projectNames.filter((name) => name === input.filters.project);
+  const q = input.filters.q?.toLowerCase();
+  const trackedIndex = buildTrackedPullRequestIndex(input.runStore);
+  const rows: PullRequestSearchRow[] = [];
+  for (const projectName of targetProjects) {
+    for (const snapshot of input.runStore.listProjectPullRequestSnapshots(
+      projectName
+    )) {
+      if (
+        input.filters.origin !== undefined &&
+        snapshot.branchOrigin !== input.filters.origin
+      ) {
+        continue;
+      }
+      if (q !== undefined && !snapshot.title.toLowerCase().includes(q)) {
+        continue;
+      }
+      const tracked = trackedIndex.get(
+        trackedPullRequestKey(projectName, snapshot.prNumber)
+      );
+      if (input.filters.tracking === "tracked" && tracked === undefined) {
+        continue;
+      }
+      if (input.filters.tracking === "untracked" && tracked !== undefined) {
+        continue;
+      }
+      rows.push({
+        branchOrigin: snapshot.branchOrigin,
+        checks: snapshot.checks,
+        draft: snapshot.draft,
+        mergeable: snapshot.mergeable,
+        polledAt: snapshot.polledAt,
+        preRestart: isPreRestartSnapshot(snapshot.polledAt, input.startedAtMs),
+        prNumber: snapshot.prNumber,
+        projectName,
+        reviewDecision: snapshot.reviewDecision,
+        stateAvailable: snapshot.stateAvailable,
+        title: snapshot.title,
+        trackedRunId: tracked?.runId,
+        trackingState: pullRequestTrackingStateLabel(snapshot),
+        unresolvedReviewThreads: snapshot.unresolvedReviewThreads
+      });
+    }
+  }
+  rows.sort(
+    (a, b) =>
+      a.projectName.localeCompare(b.projectName) || b.prNumber - a.prNumber
+  );
+  return rows;
+}
+
+function renderPullRequestSearchFilters(
+  filters: PullRequestSearchFilters,
+  projectNames: string[]
+): string {
+  const projectOptions = projectNames
+    .map(
+      (name) =>
+        `<option value="${escapeHtml(name)}"${filters.project === name ? " selected" : ""}>${escapeHtml(name)}</option>`
+    )
+    .join("");
+  const originOption = (value: string, label: string) =>
+    `<option value="${escapeHtml(value)}"${filters.origin === value ? " selected" : ""}>${escapeHtml(label)}</option>`;
+  const trackingOption = (value: string, label: string) =>
+    `<option value="${escapeHtml(value)}"${filters.tracking === value ? " selected" : ""}>${escapeHtml(label)}</option>`;
+  return `<form class="filters" method="get" action="/prs">
+<label>Search<input type="text" name="q" value="${escapeHtml(filters.q ?? "")}" placeholder="PR title"></label>
+<label>Project<select name="project"><option value="">All projects</option>${projectOptions}</select></label>
+<label>Origin<select name="origin">${originOption("", "Any")}${originOption("issue_branch", "Issue Branch")}${originOption("routine_firing_branch", "Routine Firing branch")}${originOption("neither", "Neither")}</select></label>
+<label>Tracking<select name="tracking">${trackingOption("", "Any")}${trackingOption("tracked", "Tracked")}${trackingOption("untracked", "Untracked")}</select></label>
+<button class="btn" type="submit">Search</button>
+</form>`;
+}
+
+function renderPullRequestSearchPage(input: {
+  filters: PullRequestSearchFilters;
+  nowMs: number;
+  projectNames: string[];
+  rows: PullRequestSearchRow[];
+}): string {
+  const filterForm = renderPullRequestSearchFilters(
+    input.filters,
+    input.projectNames
+  );
+  const note = `<p class="note">Reads Symphonika's own PR poll snapshot (ADR 0077): open pull requests, at most ~30s stale in steady state, scoped to configured Projects' repos. No live GitHub calls; search is over PR titles only.</p>`;
+  if (input.rows.length === 0) {
+    return `<h1 class="page-title">Pull requests</h1>${note}${filterForm}<div class="empty"><strong>No matching pull requests</strong>No polled PR matches these filters.</div>`;
+  }
+  const body = input.rows
+    .map((row) => {
+      const age = formatAge(row.polledAt, input.nowMs);
+      const preRestart = row.preRestart
+        ? ' <span class="muted">(pre-restart)</span>'
+        : "";
+      const prLink = `/prs/${encodeURIComponent(row.projectName)}/${row.prNumber}`;
+      const tracked =
+        row.trackedRunId === undefined
+          ? labelPill("untracked", "blocked")
+          : `<a href="/runs/${encodeURIComponent(row.trackedRunId)}">run ${escapeHtml(row.trackedRunId)}</a>`;
+      const draftNote = row.draft ? " (draft)" : "";
+      const statePill = labelPill(
+        `${row.trackingState}${draftNote}`,
+        pullRequestStateFamily(row.trackingState, row)
+      );
+      return `<tr><td>${escapeHtml(row.projectName)}</td><td><a href="${escapeHtml(prLink)}">#${row.prNumber}</a></td><td class="c-title">${escapeHtml(row.title)}</td><td>${statePill}</td><td>${escapeHtml(pullRequestSignalsText(row))}</td><td>${escapeHtml(pullRequestOriginLabel(row.branchOrigin))}</td><td>${tracked}</td><td>${escapeHtml(age)}${preRestart}</td></tr>`;
+    })
+    .join("");
+  const table = tableSection(
+    "Pull requests",
+    input.rows.length,
+    "<tr><th>Project</th><th>#</th><th>Title</th><th>State</th><th>Signals</th><th>Origin</th><th>Tracked</th><th>Polled</th></tr>",
+    body
+  );
+  return `<h1 class="page-title">Pull requests</h1>${note}${filterForm}${table}`;
+}
+
+type PullRequestDetail = {
+  prNumber: number;
+  projectName: string;
+  snapshot: ProjectPullRequestSnapshotRow;
+  trackedRunId: string | undefined;
+  trackingState: "closed" | "merged" | "open";
+};
+
+function loadPullRequestDetail(
+  runStore: RunStore,
+  projectName: string,
+  prNumber: number
+): PullRequestDetail | undefined {
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return undefined;
+  }
+  const snapshot = runStore
+    .listProjectPullRequestSnapshots(projectName)
+    .find((row) => row.prNumber === prNumber);
+  if (snapshot === undefined) {
+    return undefined;
+  }
+  const tracked = runStore
+    .listOpenTrackedPullRequests()
+    .find(
+      (row) => row.projectName === projectName && row.prNumber === prNumber
+    );
+  return {
+    prNumber,
+    projectName,
+    snapshot,
+    trackedRunId: tracked?.runId,
+    trackingState: pullRequestTrackingStateLabel(snapshot)
+  };
+}
+
+function renderPullRequestNotFound(
+  projectName: string,
+  prNumber: string
+): string {
+  return layout(
+    "Pull request not found",
+    `<h1 class="page-title">Pull request not found</h1><p class="lede">No polled snapshot for ${escapeHtml(projectName)}#${escapeHtml(prNumber)} — it may be closed, outside a configured Project's repo, or not yet polled. Search only reads #309's persisted snapshot, never a live GitHub lookup.</p>`
+  );
+}
+
+function renderPullRequestDetailPage(detail: PullRequestDetail): string {
+  const { snapshot } = detail;
+  const draftNote = snapshot.draft ? " (draft)" : "";
+  const family = pullRequestStateFamily(detail.trackingState, snapshot);
+  const trackedHtml =
+    detail.trackedRunId === undefined
+      ? `${labelPill("untracked", "blocked")} <span class="muted">Not tracked by PR Follow-up — review re-dispatch and auto-merge never act on this PR.</span>`
+      : `Tracked by PR Follow-up, owned by <a href="/runs/${encodeURIComponent(detail.trackedRunId)}">run ${escapeHtml(detail.trackedRunId)}</a>`;
+  const urlHtml =
+    snapshot.url === null
+      ? ""
+      : `<p class="note"><a href="${escapeHtml(snapshot.url)}">${escapeHtml(snapshot.url)}</a></p>`;
+  const branchHtml =
+    snapshot.headRef === null
+      ? ""
+      : `<p class="note">Branch <code>${escapeHtml(snapshot.headRef)}</code> — ${escapeHtml(pullRequestOriginLabel(snapshot.branchOrigin))}</p>`;
+  const signals = snapshot.stateAvailable
+    ? `<dl class="fields"><dt>Mergeable</dt><dd>${escapeHtml(snapshot.mergeable ?? "unknown")}</dd><dt>Checks</dt><dd>${escapeHtml(snapshot.checks ?? "unknown")}</dd><dt>Review</dt><dd>${escapeHtml(snapshot.reviewDecision ?? "unknown")}</dd><dt>Unresolved threads</dt><dd>${snapshot.unresolvedReviewThreads ?? 0}</dd></dl>`
+    : `<p class="note">Symphonika's Pull Request State could not be fetched for this PR at the last poll — mergeable/checks/review are unknown for this reason, not because GitHub reported no issues.</p>`;
+  return `<h1 class="page-title">PR #${detail.prNumber} ${escapeHtml(snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(`${detail.trackingState}${draftNote}`, family)}</p>${urlHtml}${branchHtml}<section><h2>Pull Request State</h2>${signals}</section><section><h2>Follow-up tracking</h2><p class="note">${trackedHtml}</p></section><p class="note"><a href="/prs">← Back to search</a></p>`;
 }
 
 // A Routine name is globally unique across the *current* declared config

@@ -2045,6 +2045,37 @@ as-is (a narrow, deliberately un-generalized addition — see ADR 0077).
 
 Label creation and workspace cleanup remain CLI-only; stale-claim reset no longer is.
 
+`GET /prs` (`#309`, ADR 0078) is the PR counterpart to `/issues`: a cross-Project pull request
+search, linked from every page's primary navigation. Unlike issues, there is no pre-existing
+repo-wide PR poll — this slice adds one, a cheap paginated REST list (`GitHubIssuesApi.
+listPullRequests`) per configured Project's repo, run on the same tick as the issue poll and
+persisted to a new `project_pull_request_snapshots` table (mirroring `#303`'s
+`project_issue_snapshots` replace-wholesale rule: a PR that stops being returned ages out on the
+next successful poll, a failed poll leaves the prior snapshot in place). Each listed PR's
+Symphonika Pull Request State (`src/pull-request-state.ts` — merged, mergeable, checks,
+unresolved-thread count, and review decision) is also fetched at poll time, one GraphQL follow-up
+call per PR, and persisted alongside the cheap fields; a PR whose state fetch fails or whose
+`GitHubIssuesApi` doesn't support it still gets a row, with `stateAvailable: false` rather than
+being dropped — the un-enrichable PRs are exactly the ones this feature exists to make visible.
+Search combines Project, branch origin (`issue_branch` / `routine_firing_branch` / `neither`, from
+the PR's head ref shape — see ADR 0078), tracking status (`tracked` / `untracked`), and free-text
+title, all optional and AND-combined; an unrecognized filter value is treated as no filter, the
+same rule `/issues` and `/runs` use.
+
+Each result links to `GET /prs/:project/:number`, showing the PR's full normalized Pull Request
+State (mergeable, checks, review decision, unresolved-thread count) when available, or an explicit
+note that the state couldn't be fetched at the last poll — never a silent "unknown" that looks the
+same as GitHub genuinely reporting nothing outstanding. Follow-up tracking status and the owning
+Run id are joined at read time against `tracked_pull_requests`, not persisted on the snapshot row —
+tracking status can change independently of the next poll tick. An untracked PR from a Symphonika
+branch (an Issue Branch or Routine Firing branch with no matching `tracked_pull_requests` row —
+`#259`'s twelve orphaned PRs are exactly this case) renders with an explicit "untracked" pill rather
+than silently looking the same as a PR from an unrelated repo branch.
+
+Part 1 is read-only: poll, snapshot, search, detail. Label writes (reusing `#308`'s
+`writeIssueLabels` under the same `sym:*` policy) and the ownership-guarded merge action are later
+parts of the same slice.
+
 ## 15. Bootstrap Acceptance Bar
 
 The bootstrap slice is accepted when:

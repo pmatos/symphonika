@@ -75,6 +75,18 @@ async function readUntil(
   return buffer;
 }
 
+async function waitForListenerCount(
+  runStore: RunStore,
+  expected: number,
+  timeoutMs = 1_000
+): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  while (runStore.changeListenerCount !== expected && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  return runStore.changeListenerCount;
+}
+
 describe("HTTP app — GET /events (#305, ADR 0074)", () => {
   it("streams a run-transition event immediately after a mutation", async () => {
     const test = await setup();
@@ -239,6 +251,35 @@ describe("HTTP app — GET /events (#305, ADR 0074)", () => {
       const { done } = await reader!.read();
       expect(done).toBe(true);
       expect(test.runStore.changeListenerCount).toBe(0);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("ends a stream stalled mid-write when the shutdown signal aborts", async () => {
+    const test = await setup();
+    try {
+      const shutdownController = new AbortController();
+      const app = createHttpApp({
+        runStore: test.runStore,
+        shutdownSignal: shutdownController.signal,
+        sseHeartbeatMs: 5,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/events");
+      // Never read from the body: the resulting backpressure parks the
+      // handler inside writeSSE, which is the state a client whose socket
+      // has stalled leaves it in.
+      expect(response.body).not.toBeNull();
+      response.body?.getReader();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(test.runStore.changeListenerCount).toBe(1);
+
+      shutdownController.abort();
+
+      expect(await waitForListenerCount(test.runStore, 0)).toBe(0);
     } finally {
       test.cleanup();
     }

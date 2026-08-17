@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -159,9 +159,13 @@ describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)"
       const html = await response.text();
 
       expect(html).toContain("Merge attempted on GitHub");
+      // No `pull_requests:` block is configured, so this is the policy
+      // default (DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY.merge.method) -- not
+      // a hardcoded "merge", which 405s on the common squash-only repo
+      // configuration.
       expect(githubIssuesApi.mergePullRequest).toHaveBeenCalledWith({
         expectedHeadSha: "abc123",
-        method: "merge",
+        method: "squash",
         owner: "pmatos",
         pullNumber: 246,
         repo: "symphonika",
@@ -179,7 +183,7 @@ describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)"
         expect(attempts).toHaveLength(1);
         expect(attempts[0]).toMatchObject({
           error: null,
-          method: "merge",
+          method: "squash",
           ok: true,
           prNumber: 246,
           projectName: "symphonika"
@@ -187,6 +191,53 @@ describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)"
       } finally {
         runStore.close();
       }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("uses the project's configured merge method instead of the policy default", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    await appendFile(
+      path.join(root, "symphonika.yml"),
+      "pull_requests:\n  merge:\n    method: merge\n"
+    );
+    const githubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      listPullRequests: vi.fn().mockResolvedValue([orphanPullRequestFixture()]),
+      mergePullRequest: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const { cookie, csrfToken, expectedHeadSha } = await fetchPrsCsrfToken(
+        daemon.url,
+        "/prs/symphonika/246"
+      );
+      await fetch(`${daemon.url}/prs/symphonika/246/merge`, {
+        body: new URLSearchParams({
+          csrf_token: csrfToken,
+          expected_head_sha: expectedHeadSha
+        }).toString(),
+        headers: {
+          cookie,
+          "content-type": "application/x-www-form-urlencoded",
+          origin: daemon.url
+        },
+        method: "POST"
+      });
+
+      expect(githubIssuesApi.mergePullRequest).toHaveBeenCalledWith(
+        expect.objectContaining({ method: "merge" })
+      );
     } finally {
       await daemon.stop();
     }
@@ -245,7 +296,7 @@ describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)"
         expect(attempts).toHaveLength(1);
         expect(attempts[0]).toMatchObject({
           error: "Pull Request is not mergeable",
-          method: "merge",
+          method: "squash",
           ok: false,
           prNumber: 246,
           projectName: "symphonika"

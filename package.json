@@ -7,8 +7,10 @@
     "symphonika": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
-    "dev": "tsx src/cli.ts",
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "node scripts/build-client.mjs",
+    "build:server": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
+    "dev": "npm run build:client && tsx src/cli.ts",
     "format": "prettier . --write",
     "format:check": "prettier . --check",
     "gen:fonts": "node scripts/gen-fonts.mjs",
@@ -24,7 +26,10 @@
     "smoke:local": "scripts/smoke.sh",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "npm run typecheck:server && npm run typecheck:client && npm run typecheck:client-tests",
+    "typecheck:client": "tsc --noEmit -p src/client/tsconfig.json",
+    "typecheck:client-tests": "tsc --noEmit -p tests/client/tsconfig.json",
+    "typecheck:server": "tsc --noEmit -p tsconfig.json"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -49,19 +54,30 @@
     "@stryker-mutator/core": "^9.6.1",
     "@stryker-mutator/typescript-checker": "^9.6.1",
     "@stryker-mutator/vitest-runner": "^9.6.1",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^26.2.0",
     "@types/nodemailer": "^8.0.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
     "@typescript/native": "npm:typescript@^7.0.2",
     "@vitest/coverage-v8": "^4.1.10",
+    "esbuild": "^0.28.2",
     "eslint": "^10.8.1",
     "eslint-config-prettier": "^10.1.8",
     "fast-check": "^4.9.0",
     "happy-dom": "^20.11.2",
     "knip": "^6.32.2",
     "prettier": "^3.9.6",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "tsx": "^4.23.12",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "typescript-eslint": "^8.67.0",
     "vitest": "^4.1.5"
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.3": true,
+    "esbuild@0.28.2": true
   }
 }

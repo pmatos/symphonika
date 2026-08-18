@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { parse } from "yaml";
@@ -356,6 +357,36 @@ export function registerPages(options: RegisterPagesOptions): void {
     });
   });
 
+  // #467's bulk multi-select label editing: the /issues page's React
+  // island (src/client/issues-bulk.tsx), bundled by esbuild
+  // (scripts/build-client.mjs) into dist/client/issues-bulk.js. Resolved
+  // relative to this compiled module's own location, two directories up to
+  // the repo root then into dist/client -- that's the same relative path
+  // whether this file is running as src/http/pages.ts (tsx, dev) or
+  // dist/http/pages.js (tsc, prod), since dist/ is always a sibling of
+  // src/ at the repo root. Not embedded as a source constant (unlike
+  // src/http/fonts.ts): unlike the pinned, rarely-regenerated font bytes,
+  // this bundle changes with every edit to actively-developed app code.
+  const clientBundlePath = fileURLToPath(
+    new URL("../../dist/client/issues-bulk.js", import.meta.url)
+  );
+  options.app.get("/assets/issues-bulk.js", async (context) => {
+    let bytes: ArrayBuffer;
+    try {
+      const buffer = await readFile(clientBundlePath);
+      bytes = buffer.buffer.slice(
+        buffer.byteOffset,
+        buffer.byteOffset + buffer.byteLength
+      );
+    } catch {
+      return context.notFound();
+    }
+    return new Response(bytes, {
+      headers: { "content-type": "application/javascript; charset=utf-8" },
+      status: 200
+    });
+  });
+
   // Shared by GET / and the /fragments/* routes below (#305 part 2) so a
   // live-update fetch renders from the exact same inputs a full page load
   // would, not a second hand-maintained assembly. See ADR 0074.
@@ -649,9 +680,10 @@ export function registerPages(options: RegisterPagesOptions): void {
       runStore: options.runStore,
       startedAtMs: options.startedAtMs
     });
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
     const html = layout(
       "Issue triage",
-      renderIssueSearchPage({ filters, nowMs, projectNames, rows })
+      renderIssueSearchPage({ csrfToken, filters, nowMs, projectNames, rows })
     );
     return context.html(html);
   });
@@ -776,6 +808,72 @@ export function registerPages(options: RegisterPagesOptions): void {
         context.req.param("number"),
         "remove"
       )
+  );
+
+  options.app.post(
+    "/api/issues/bulk-labels",
+    requireAuthorizedMutation,
+    async (context) => {
+      const body = (await context.req.json().catch(() => undefined)) as
+        | {
+            addLabels?: unknown;
+            operations?: unknown;
+            removeLabels?: unknown;
+          }
+        | undefined;
+      const addLabelsResult = asStringArray("addLabels", body?.addLabels);
+      const removeLabelsResult = asStringArray(
+        "removeLabels",
+        body?.removeLabels
+      );
+      const operationsResult = asBulkIssueOperations(body?.operations);
+      if (!addLabelsResult.ok) {
+        return context.json({ error: addLabelsResult.error }, 400);
+      }
+      if (!removeLabelsResult.ok) {
+        return context.json({ error: removeLabelsResult.error }, 400);
+      }
+      if (!operationsResult.ok) {
+        return context.json({ error: operationsResult.error }, 400);
+      }
+      const addLabels = addLabelsResult.values;
+      const removeLabels = removeLabelsResult.values;
+      const operations = operationsResult.values;
+      const orchestratorLabel = [...addLabels, ...removeLabels].find((label) =>
+        isOrchestratorLabel(label)
+      );
+      if (orchestratorLabel !== undefined) {
+        return context.json(
+          {
+            error:
+              "sym:* labels are managed by Symphonika and can't be edited here (ADR 0002/0024)"
+          },
+          400
+        );
+      }
+      if (operations.length === 0) {
+        return context.json(
+          { error: "at least one issue in operations is required" },
+          400
+        );
+      }
+      if (addLabels.length === 0 && removeLabels.length === 0) {
+        return context.json(
+          { error: "at least one label to add or remove is required" },
+          400
+        );
+      }
+      if (options.writeIssueLabels === undefined) {
+        return context.json({ error: "label writes are unavailable" }, 503);
+      }
+      const results = await runBulkIssueLabelWrites({
+        addLabels,
+        operations,
+        removeLabels,
+        writeIssueLabels: options.writeIssueLabels
+      });
+      return context.json({ results }, 200);
+    }
   );
 
   async function handleClearStaleClaim(
@@ -3572,7 +3670,21 @@ function renderIssueSearchFilters(
 </form>`;
 }
 
+// #467's bulk multi-select label editing: the data window.__ISSUES__ hands
+// the React island (src/client/issues-bulk.tsx) -- just enough to build
+// selection state and a label autocomplete without a second network
+// request. Mirrors the currently-rendered rows exactly, not the full
+// IssueSearchRow (verdict/age/preRestart are display-only, not something
+// the bulk-action UI needs).
+type BulkSelectIssueData = {
+  issueNumber: number;
+  labels: string[];
+  projectName: string;
+  title: string;
+};
+
 function renderIssueSearchPage(input: {
+  csrfToken: string;
   filters: IssueSearchFilters;
   nowMs: number;
   projectNames: string[];
@@ -3597,16 +3709,27 @@ function renderIssueSearchPage(input: {
           ? "—"
           : row.labels.map((label) => escapeHtml(label)).join(", ");
       const issueLink = `/issues/${encodeURIComponent(row.projectName)}/${row.issueNumber}`;
-      return `<tr><td>${escapeHtml(row.projectName)}</td><td><a href="${escapeHtml(issueLink)}">#${row.issueNumber}</a></td><td class="c-title">${escapeHtml(row.title)}</td><td>${labelPill(row.verdict, issueVerdictFamily(row.verdict))}</td><td>${labels}</td><td>${escapeHtml(age)}${preRestart}</td></tr>`;
+      const checkbox = `<input type="checkbox" class="bulk-issue-checkbox" data-project="${escapeHtml(row.projectName)}" data-issue="${row.issueNumber}">`;
+      return `<tr><td>${checkbox}</td><td>${escapeHtml(row.projectName)}</td><td><a href="${escapeHtml(issueLink)}">#${row.issueNumber}</a></td><td class="c-title">${escapeHtml(row.title)}</td><td>${labelPill(row.verdict, issueVerdictFamily(row.verdict))}</td><td>${labels}</td><td>${escapeHtml(age)}${preRestart}</td></tr>`;
     })
     .join("");
   const table = tableSection(
     "Issues",
     input.rows.length,
-    "<tr><th>Project</th><th>#</th><th>Title</th><th>Verdict</th><th>Labels</th><th>Polled</th></tr>",
+    `<tr><th><input type="checkbox" id="bulk-select-all-checkbox"></th><th>Project</th><th>#</th><th>Title</th><th>Verdict</th><th>Labels</th><th>Polled</th></tr>`,
     body
   );
-  return `<h1 class="page-title">Issue triage</h1>${note}${filterForm}${table}`;
+  const issuesData: BulkSelectIssueData[] = input.rows.map((row) => ({
+    issueNumber: row.issueNumber,
+    labels: row.labels,
+    projectName: row.projectName,
+    title: row.title
+  }));
+  const bulkSelectMount = `<div id="issues-bulk-root"></div>
+<script>window.__ISSUES__ = ${escapeJsonForInlineScript(issuesData)};
+window.__CSRF_TOKEN__ = ${escapeJsonForInlineScript(input.csrfToken)};</script>
+<script src="/assets/issues-bulk.js"></script>`;
+  return `<h1 class="page-title">Issue triage</h1>${note}${filterForm}${bulkSelectMount}${table}`;
 }
 
 // #308 part 2: orchestrator-owned labels (ADR 0002/0024) render as read-only
@@ -3615,8 +3738,144 @@ function renderIssueSearchPage(input: {
 // 0077 documents. Enforced server-side here, not just hidden client-side.
 const SYM_LABEL_PREFIX = "sym:";
 
+// GitHub label names are matched case-insensitively (two labels differing
+// only by case can't coexist in one repo), so a case-sensitive prefix check
+// alone lets a caller-submitted "SYM:claimed" bypass this guard while still
+// resolving to the real orchestrator-owned sym:claimed label on GitHub's
+// side.
 function isOrchestratorLabel(label: string): boolean {
-  return label.startsWith(SYM_LABEL_PREFIX);
+  return label.toLowerCase().startsWith(SYM_LABEL_PREFIX);
+}
+
+type BulkIssueLabelResult =
+  | { issueNumber: number; ok: true; projectName: string }
+  | { error: string; issueNumber: number; ok: false; projectName: string };
+
+// Array.isArray's lib.es5.d.ts signature narrows to `any[]`, not
+// `unknown[]` -- these normalize a parsed JSON body's fields to properly
+// typed arrays. A malformed element (wrong type, missing field) makes the
+// whole field invalid rather than being silently dropped: the documented
+// contract for a malformed request body is 400 with no writes attempted,
+// and filtering out just the bad element let the route mutate the
+// surviving, seemingly-valid entries -- a partial write the caller never
+// asked for and has no way to detect from the response. An omitted field
+// (`undefined`) is not malformed -- it just means "none provided" -- and
+// stays valid-and-empty so the existing "at least one required" checks
+// handle it.
+type ArrayValidationResult<T> =
+  { ok: true; values: T[] } | { error: string; ok: false };
+
+function asStringArray(
+  fieldName: string,
+  value: unknown
+): ArrayValidationResult<string> {
+  if (value === undefined) {
+    return { ok: true, values: [] };
+  }
+  if (!Array.isArray(value)) {
+    return { error: `${fieldName} must be an array of strings`, ok: false };
+  }
+  const values: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") {
+      return { error: `${fieldName} must be an array of strings`, ok: false };
+    }
+    values.push(entry);
+  }
+  return { ok: true, values };
+}
+
+function asBulkIssueOperations(
+  value: unknown
+): ArrayValidationResult<{ issueNumber: number; projectName: string }> {
+  if (value === undefined) {
+    return { ok: true, values: [] };
+  }
+  if (!Array.isArray(value)) {
+    return {
+      error: "operations must be an array of {issueNumber, projectName}",
+      ok: false
+    };
+  }
+  const values: Array<{ issueNumber: number; projectName: string }> = [];
+  for (const entry of value) {
+    const issueNumber = (entry as Record<string, unknown> | null)?.issueNumber;
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      typeof issueNumber !== "number" ||
+      !Number.isInteger(issueNumber) ||
+      issueNumber <= 0 ||
+      typeof (entry as Record<string, unknown>).projectName !== "string"
+    ) {
+      return {
+        error: "operations must be an array of {issueNumber, projectName}",
+        ok: false
+      };
+    }
+    values.push(entry as { issueNumber: number; projectName: string });
+  }
+  return { ok: true, values };
+}
+
+// Fast without bursting the GitHub API: a worker pool rather than fully
+// sequential or fully parallel writes across a potentially large selection.
+const BULK_LABEL_WRITE_CONCURRENCY = 4;
+
+async function runBulkIssueLabelWrites(input: {
+  addLabels: string[];
+  operations: Array<{ issueNumber: number; projectName: string }>;
+  removeLabels: string[];
+  writeIssueLabels: WriteIssueLabelsFn;
+}): Promise<BulkIssueLabelResult[]> {
+  const { addLabels, operations, removeLabels, writeIssueLabels } = input;
+  const results = new Array<BulkIssueLabelResult>(operations.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    for (;;) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const operation = operations[index];
+      if (operation === undefined) {
+        return;
+      }
+      // The full requested removeLabels goes to every issue, not narrowed
+      // against the persisted poll snapshot -- the snapshot can lag live
+      // GitHub state indefinitely (ADR 0073), so filtering against it can
+      // silently drop a legitimate removal (e.g. add-then-immediate-remove
+      // of the same label) and report false success. Removing a label an
+      // issue doesn't have is instead made idempotent at the source
+      // (tryRemoveLabelsFromIssue, src/issue-polling.ts, swallows the
+      // resulting 404), which is safe against live state regardless of
+      // snapshot staleness. Every operation runs regardless of earlier
+      // outcomes -- best-effort, so one issue's GitHub-side failure
+      // doesn't block the rest of the batch.
+      const outcome = await writeIssueLabels({
+        add: addLabels,
+        kind: "issue",
+        projectName: operation.projectName,
+        remove: removeLabels,
+        subjectNumber: operation.issueNumber
+      });
+      results[index] = outcome.ok
+        ? {
+            issueNumber: operation.issueNumber,
+            ok: true,
+            projectName: operation.projectName
+          }
+        : {
+            error: outcome.error,
+            issueNumber: operation.issueNumber,
+            ok: false,
+            projectName: operation.projectName
+          };
+    }
+  }
+
+  const workerCount = Math.min(BULK_LABEL_WRITE_CONCURRENCY, operations.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
 }
 
 type IssueDetail = {
@@ -5663,10 +5922,7 @@ function findLast<T>(
 }
 
 function serializeGraphForScript(graph: ExpandedWorkflow): string {
-  return JSON.stringify(graph).replace(
-    /[<>&\u2028\u2029]/g,
-    (ch) => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0")
-  );
+  return escapeJsonForInlineScript(graph);
 }
 
 function renderWorkflowGraphPage(
@@ -5965,4 +6221,17 @@ function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+// JSON.stringify does not escape "<", ">", "&", or the JS line-terminator
+// characters U+2028/U+2029 -- embedding its output verbatim inside an
+// inline <script> lets attacker-controlled data (e.g. an issue title) close
+// the tag early with a literal "</script>" and inject a sibling script.
+// \u-escaping those characters keeps the JSON value identical after
+// JSON.parse/eval while making that impossible.
+function escapeJsonForInlineScript(value: unknown): string {
+  return JSON.stringify(value).replace(
+    /[<>&\u2028\u2029]/g,
+    (ch) => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0")
+  );
 }

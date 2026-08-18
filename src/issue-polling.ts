@@ -376,12 +376,17 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
   async removeLabelsFromIssue(input: GitHubIssueLabelInput): Promise<void> {
     const octokit = this.octokit(input.token);
     for (const label of input.labels) {
-      await octokit.rest.issues.removeLabel({
-        issue_number: input.issueNumber,
-        name: label,
-        owner: input.owner,
-        repo: input.repo
-      });
+      // Idempotent per label, inside the loop -- catching a 404 around
+      // the whole multi-label call instead would abort on the first
+      // absent label and never attempt the rest.
+      await swallowLabelNotFound(() =>
+        octokit.rest.issues.removeLabel({
+          issue_number: input.issueNumber,
+          name: label,
+          owner: input.owner,
+          repo: input.repo
+        })
+      );
     }
   }
 
@@ -1170,4 +1175,29 @@ function isOctokitNotFound(error: unknown): boolean {
     "status" in error &&
     (error as { status?: unknown }).status === 404
   );
+}
+
+// Swallows a 404 from a single label-removal attempt as success --
+// idempotent by design: if the label is already absent, that isn't a
+// failure worth surfacing. GitHub's remove-label endpoint also 404s when
+// the issue or repo itself is missing/inaccessible, which is a real
+// failure and must propagate -- so this only swallows the 404 whose
+// message identifies an absent label ("Label does not exist"), not a
+// generic "Not Found". Exported so a caller can wrap each iteration of a
+// multi-step operation individually (see
+// OctokitGitHubIssuesApi.removeLabelsFromIssue): catching around a whole
+// loop instead would abort on the first 404 and never attempt the rest.
+export async function swallowLabelNotFound(
+  attempt: () => Promise<unknown>
+): Promise<void> {
+  try {
+    await attempt();
+  } catch (error) {
+    if (
+      !isOctokitNotFound(error) ||
+      !errorMessage(error).toLowerCase().includes("label does not exist")
+    ) {
+      throw error;
+    }
+  }
 }

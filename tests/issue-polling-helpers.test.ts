@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   fetchPullRequestFollowupState,
+  swallowLabelNotFound,
   tryAddLabelsToIssue,
   tryGetIssue,
   tryListBranchCommits,
   tryListPullRequests,
   tryListPullRequestsForBranch,
+  tryRemoveLabelsFromIssue,
   type GitHubIssueLabelInput,
   type GitHubIssueRepositoryInput,
   type GitHubIssuesApi,
@@ -63,6 +65,99 @@ describe("tryAddLabelsToIssue", () => {
       listOpenIssues: () => Promise.resolve([])
     };
     await expect(tryAddLabelsToIssue(api, labelInput)).rejects.toThrow("boom");
+  });
+});
+
+describe("tryRemoveLabelsFromIssue", () => {
+  it("returns false when the implementation does not provide removeLabelsFromIssue", async () => {
+    const api: GitHubIssuesApi = {
+      listOpenIssues: () => Promise.resolve([])
+    };
+    expect(await tryRemoveLabelsFromIssue(api, labelInput)).toBe(false);
+  });
+
+  it("propagates a non-404 error thrown by the implementation", async () => {
+    const api: GitHubIssuesApi = {
+      listOpenIssues: () => Promise.resolve([]),
+      removeLabelsFromIssue: () => Promise.reject(new Error("boom"))
+    };
+    await expect(tryRemoveLabelsFromIssue(api, labelInput)).rejects.toThrow(
+      "boom"
+    );
+  });
+
+  it("propagates a 404 thrown by the implementation -- idempotent-removal handling lives in removeLabelsFromIssue's own per-label loop, not here", async () => {
+    // A wrapper-level catch here can only see "did the whole (possibly
+    // multi-label) call throw", not which individual label 404d -- so it
+    // can't distinguish "the only requested label was absent" from "an
+    // earlier label was absent and a later one was never attempted". See
+    // swallowLabelNotFound / OctokitGitHubIssuesApi.removeLabelsFromIssue.
+    const notFound = Object.assign(new Error("Label does not exist"), {
+      status: 404
+    });
+    const api: GitHubIssuesApi = {
+      listOpenIssues: () => Promise.resolve([]),
+      removeLabelsFromIssue: () => Promise.reject(notFound)
+    };
+    await expect(tryRemoveLabelsFromIssue(api, labelInput)).rejects.toThrow(
+      "Label does not exist"
+    );
+  });
+});
+
+describe("swallowLabelNotFound", () => {
+  it("resolves without throwing when the attempt 404s with GitHub's absent-label message", async () => {
+    const labelNotFound = Object.assign(new Error("Label does not exist"), {
+      status: 404
+    });
+    await expect(
+      swallowLabelNotFound(() => Promise.reject(labelNotFound))
+    ).resolves.toBeUndefined();
+  });
+
+  it("propagates a 404 whose message does not identify an absent label -- e.g. the issue or repo itself is missing/inaccessible", async () => {
+    // GitHub's remove-label endpoint 404s for more than one reason (label
+    // absent, issue absent, repo absent/inaccessible); only the first is
+    // safe to treat as an idempotent no-op. A generic "Not Found" must
+    // still surface as a real failure, not a false success.
+    const genericNotFound = Object.assign(new Error("Not Found"), {
+      status: 404
+    });
+    await expect(
+      swallowLabelNotFound(() => Promise.reject(genericNotFound))
+    ).rejects.toThrow("Not Found");
+  });
+
+  it("propagates a non-404 error from the attempt", async () => {
+    await expect(
+      swallowLabelNotFound(() => Promise.reject(new Error("boom")))
+    ).rejects.toThrow("boom");
+  });
+
+  it("resolves normally when the attempt succeeds", async () => {
+    let called = false;
+    await swallowLabelNotFound(() => {
+      called = true;
+      return Promise.resolve();
+    });
+    expect(called).toBe(true);
+  });
+
+  it("lets a loop continue past an absent-label 404 to reach a later attempt -- the bug this exists to fix", async () => {
+    const labelNotFound = Object.assign(new Error("Label does not exist"), {
+      status: 404
+    });
+    const attempted: string[] = [];
+    const labels = ["sym:stale", "agent-ready"];
+    for (const label of labels) {
+      await swallowLabelNotFound(() => {
+        attempted.push(label);
+        return label === "sym:stale"
+          ? Promise.reject(labelNotFound)
+          : Promise.resolve();
+      });
+    }
+    expect(attempted).toEqual(["sym:stale", "agent-ready"]);
   });
 });
 

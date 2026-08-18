@@ -65,7 +65,7 @@ export type DoctorOptions = {
   liveCheckTimeoutMs?: number;
 };
 
-export type DoctorLiveCheckReport = {
+type DoctorLiveCheckReport = {
   detail: string;
   ok: boolean;
   provider: AgentProviderName;

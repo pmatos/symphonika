@@ -1120,6 +1120,9 @@ export async function startDaemon(
       }
       return aliases;
     },
+    getProjectRequiredLabels: (projectName) =>
+      runtimeConfig.projectsByName().get(projectName)?.issue_filters
+        ?.labels_all ?? [],
     mergePullRequest: async (input): Promise<MergePullRequestResult> => {
       const project = runtimeConfig.projectsByName().get(input.projectName);
       if (project?.tracker === undefined) {

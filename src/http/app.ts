@@ -209,6 +209,12 @@ export type HttpAppOptions = {
   // whole alias group instead of missing a claim/run parked under a sibling
   // Project name. See src/http/pages.ts's getProjectRepoAliases usage.
   getProjectRepoAliases?: (projectName: string) => string[];
+  // The project's configured issue_filters.labels_all -- the label-write
+  // dependency gate (src/http/pages.ts's handleIssueLabelWrite) only blocks
+  // adding a label in this set, never a hardcoded "agent-ready" string,
+  // since which label actually gates dispatch is per-project config. Absent
+  // (or an unknown project name) degrades to an empty set, i.e. no gate.
+  getProjectRequiredLabels?: (projectName: string) => string[];
   getRuns?: () => RunStatus[];
   getReloadStatus?: () => RuntimeReloadStatus;
   getScheduled?: () => ScheduledCallback[];
@@ -713,6 +719,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.getProjectRepoAliases === undefined
         ? {}
         : { getProjectRepoAliases: options.getProjectRepoAliases }),
+      ...(options.getProjectRequiredLabels === undefined
+        ? {}
+        : { getProjectRequiredLabels: options.getProjectRequiredLabels }),
       ...(options.getStatusSnapshot === undefined
         ? {}
         : { getStatusSnapshot: options.getStatusSnapshot }),

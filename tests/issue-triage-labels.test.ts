@@ -318,6 +318,148 @@ describe("POST /issues/:project/:number/labels/(add|remove) (#308 part 2)", () =
   });
 });
 
+describe("POST /issues/:project/:number/labels/add dependency gate", () => {
+  async function setupBlocked(): Promise<TestSetup> {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    runStore.syncProjectStates([
+      { name: "alpha", validationState: "valid", weight: 1 }
+    ]);
+    runStore.replaceProjectIssueSnapshots({
+      polledAt: "2026-08-18T10:00:00.000Z",
+      projectName: "alpha",
+      rows: [
+        {
+          blockedBy: [
+            {
+              number: 301,
+              owner: "pmatos",
+              repo: "symphonika",
+              state: "OPEN",
+              title: "sibling slice"
+            }
+          ],
+          issueNumber: 8,
+          kind: "filtered",
+          labels: ["needs-triage"],
+          priority: 1,
+          reasons: ["blocked by open dependency #301"],
+          title: "Blocked issue"
+        }
+      ]
+    });
+    return {
+      cleanup: () => runStore.close(),
+      runStore,
+      stateRoot
+    };
+  }
+
+  it("refuses to add the project's required label while a dependency is unresolved, without calling writeIssueLabels", async () => {
+    const test = await setupBlocked();
+    try {
+      let called = false;
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        getProjectRequiredLabels: () => ["agent-ready"],
+        pollNow: () => ({
+          candidateIssues: 0,
+          dispatching: false,
+          errors: 0,
+          filteredIssues: 0,
+          issuePolling: { errors: [], projects: [] },
+          kind: "queued",
+          state: "idle"
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0",
+        writeIssueLabels: () => {
+          called = true;
+          return Promise.resolve({ ok: true });
+        }
+      });
+      const response = await app.request("/issues/alpha/8/labels/add", {
+        body: formBody({ csrf_token: VALID_TOKEN, label: "agent-ready" }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+      const html = await response.text();
+      expect(html).toContain('Add label "agent-ready" failed');
+      expect(html).toContain("#301");
+      expect(html).toContain('action="/issues/poll-now"');
+      expect(called).toBe(false);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("allows adding a label that isn't the project's required label even while blocked", async () => {
+    const test = await setupBlocked();
+    try {
+      let called = false;
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        getProjectRequiredLabels: () => ["agent-ready"],
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0",
+        writeIssueLabels: () => {
+          called = true;
+          return Promise.resolve({ ok: true });
+        }
+      });
+      const response = await app.request("/issues/alpha/8/labels/add", {
+        body: formBody({ csrf_token: VALID_TOKEN, label: "needs-triage" }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+      const html = await response.text();
+      expect(html).toContain('Added label "needs-triage" on GitHub');
+      expect(called).toBe(true);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("allows removing the required label from a blocked issue (removal is unaffected)", async () => {
+    const test = await setupBlocked();
+    try {
+      let called = false;
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        getProjectRequiredLabels: () => ["agent-ready"],
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0",
+        writeIssueLabels: () => {
+          called = true;
+          return Promise.resolve({ ok: true });
+        }
+      });
+      const response = await app.request("/issues/alpha/8/labels/remove", {
+        body: formBody({ csrf_token: VALID_TOKEN, label: "agent-ready" }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+      const html = await response.text();
+      expect(html).toContain('Removed label "agent-ready" on GitHub');
+      expect(called).toBe(true);
+    } finally {
+      test.cleanup();
+    }
+  });
+});
+
 describe("POST /issues/poll-now (#308 part 2)", () => {
   it("triggers a poll and reports its outcome", async () => {
     const test = await setup();

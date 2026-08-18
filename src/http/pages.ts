@@ -29,7 +29,8 @@ import { runSavePipeline, type ReloadOutcome } from "./save-pipeline.js";
 import {
   DEFAULT_POLLING_INTERVAL_MS,
   type FilteredProjectIssueSnapshot,
-  type IssuePollStatus
+  type IssuePollStatus,
+  type RawGitHubIssueDependencyRef
 } from "../issue-polling.js";
 import {
   formatCapReachedReason,
@@ -143,6 +144,10 @@ export type RegisterPagesOptions = {
   // HttpAppOptions.getProjectRepoAliases (src/http/app.ts) — the resolver
   // itself needs runtimeConfig.projectsByName(), which only daemon.ts has.
   getProjectRepoAliases?: (projectName: string) => string[];
+  // The project's configured issue_filters.labels_all -- handleIssueLabelWrite's
+  // dependency gate only blocks adding a label in this set. See
+  // HttpAppOptions.getProjectRequiredLabels (src/http/app.ts).
+  getProjectRequiredLabels?: (projectName: string) => string[];
   // #303's "retry ETA" detail for a waiting Run.
   getScheduled?: () => ScheduledCallback[];
   getStatusSnapshot?: () => StatusSnapshot;
@@ -745,6 +750,28 @@ export function registerPages(options: RegisterPagesOptions): void {
           "sym:* labels are managed by Symphonika and can't be edited here (ADR 0002/0024)",
         kind: "label_write",
         label,
+        ok: false
+      };
+    } else if (
+      action === "add" &&
+      (options.getProjectRequiredLabels?.(projectName) ?? []).includes(label) &&
+      unresolvedIssueDependencies(detail.snapshot).length > 0
+    ) {
+      // Hard block, no override (see docs/adr, issue dependency gating):
+      // the only way past this is to actually resolve the dependency on
+      // GitHub. This is best-effort UX against a snapshot that can be up
+      // to ~30s stale (ADR 0073) -- the authoritative gate is
+      // evaluateProjectEligibility, re-evaluated every poll regardless of
+      // what this route allowed. offerPollNow lets an operator who just
+      // closed the blocker refresh immediately rather than wait it out.
+      banner = {
+        action,
+        error: `blocked by open ${dependencyList(
+          unresolvedIssueDependencies(detail.snapshot)
+        )} -- resolve on GitHub, then poll now`,
+        kind: "label_write",
+        label,
+        offerPollNow: true,
         ok: false
       };
     } else if (options.writeIssueLabels === undefined) {
@@ -3747,6 +3774,24 @@ function isOrchestratorLabel(label: string): boolean {
   return label.toLowerCase().startsWith(SYM_LABEL_PREFIX);
 }
 
+// The label-write dependency gate's own read of "resolved" (state ===
+// CLOSED, regardless of stateReason) -- kept in lockstep with
+// evaluateProjectEligibility's identical rule (src/issue-polling.ts) since
+// this route is a best-effort UX gate against the same snapshot data, not
+// a second source of truth. See docs/adr (issue dependency gating).
+function unresolvedIssueDependencies(
+  snapshot: ProjectIssueSnapshotRow
+): RawGitHubIssueDependencyRef[] {
+  return snapshot.blockedBy.filter((blocker) => blocker.state !== "CLOSED");
+}
+
+function dependencyList(blockers: RawGitHubIssueDependencyRef[]): string {
+  const refs = blockers
+    .map((blocker) => `${blocker.owner}/${blocker.repo}#${blocker.number}`)
+    .join(", ");
+  return blockers.length === 1 ? `dependency ${refs}` : `dependencies ${refs}`;
+}
+
 type BulkIssueLabelResult =
   | { issueNumber: number; ok: true; projectName: string }
   | { error: string; issueNumber: number; ok: false; projectName: string };
@@ -3933,6 +3978,12 @@ type IssueLabelWriteBanner = {
   kind: "label_write";
   label: string;
   ok: boolean;
+  // Set on the dependency gate's own rejection: unlike every other failed
+  // write, this one is worth offering a poll-now retry for, since the
+  // fix (closing the blocker on GitHub) happens entirely outside
+  // Symphonika and a fresh poll is exactly what lets the operator retry
+  // without waiting out the poll interval.
+  offerPollNow?: boolean;
 };
 
 // #308 part 3's clear-stale-claim action: its own named banner, distinct
@@ -4056,10 +4107,15 @@ function renderIssueDetailPage(input: {
   pollNowAvailable: boolean;
 }): string {
   const { detail } = input;
+  const offerPollNow =
+    input.banner !== undefined &&
+    (input.banner.ok ||
+      (input.banner.kind === "label_write" &&
+        input.banner.offerPollNow === true));
   const bannerHtml =
     input.banner === undefined
       ? ""
-      : `${renderIssueActionBanner(input.banner)}${input.banner.ok && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/issues") : ""}`;
+      : `${renderIssueActionBanner(input.banner)}${offerPollNow && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/issues") : ""}`;
   return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${renderIssueLabelsSection(
     {
       csrfToken: input.csrfToken,

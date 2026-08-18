@@ -3982,9 +3982,17 @@ async function runBulkIssueLabelWrites(input: {
           operation.projectName,
           operation.issueNumber
         );
-        if (snapshot !== undefined && issueDependencyGateBlocks(snapshot)) {
+        // A missing snapshot (not yet polled, or a stale/incorrect issue
+        // number posted straight to the API) is unknown dependency state,
+        // not clear dependency state -- fail closed the same way a
+        // truncated fetch does (ADR 0081), rather than letting the add
+        // through unchecked because there's nothing to gate against.
+        if (snapshot === undefined || issueDependencyGateBlocks(snapshot)) {
           results[index] = {
-            error: `${issueDependencyGateMessage(snapshot)} -- resolve on GitHub, then poll now`,
+            error:
+              snapshot === undefined
+                ? `issue #${operation.issueNumber} is not in the current poll snapshot -- poll now, then retry`
+                : `${issueDependencyGateMessage(snapshot)} -- resolve on GitHub, then poll now`,
             issueNumber: operation.issueNumber,
             ok: false,
             projectName: operation.projectName

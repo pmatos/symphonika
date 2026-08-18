@@ -796,6 +796,48 @@ describe("POST /api/issues/bulk-labels dependency gate", () => {
     }
   });
 
+  it("refuses to add the required label to an issue absent from the current poll snapshot", async () => {
+    const test = await setupOneBlockedOneClear();
+    try {
+      const received: unknown[] = [];
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        getProjectRequiredLabels: () => ["agent-ready"],
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0",
+        writeIssueLabels: (input) => {
+          received.push(input);
+          return Promise.resolve({ ok: true });
+        }
+      });
+      const response = await app.request("/api/issues/bulk-labels", {
+        body: JSON.stringify({
+          addLabels: ["agent-ready"],
+          operations: [{ issueNumber: 999, projectName: "alpha" }]
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/json"
+        },
+        method: "POST"
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        results: Array<{ error?: string; issueNumber: number; ok: boolean }>;
+      };
+      expect(body.results).toEqual([
+        expect.objectContaining({ issueNumber: 999, ok: false })
+      ]);
+      expect(body.results[0]?.error).toContain(
+        "not in the current poll snapshot"
+      );
+      expect(received).toEqual([]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("does not gate removeLabels-only operations on a dependency-blocked issue", async () => {
     const test = await setupOneBlockedOneClear();
     try {

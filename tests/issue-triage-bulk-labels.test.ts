@@ -591,6 +591,8 @@ describe("POST /api/issues/bulk-labels", () => {
       projectName: "alpha",
       rows: [
         {
+          blockedByTruncated: false,
+          blockedBy: [],
           issueNumber: 7,
           kind: "candidate",
           labels: ["bug"],

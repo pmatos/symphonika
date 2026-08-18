@@ -1139,6 +1139,50 @@ describe("RunStore detail queries", () => {
       store.close();
     }
   });
+
+  it("replaceProjectIssueSnapshots round-trips parentIssueNumber, absent when not parsed", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.replaceProjectIssueSnapshots({
+        polledAt: "2026-08-18T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueNumber: 299,
+            kind: "candidate",
+            labels: [],
+            parentIssueNumber: 289,
+            priority: 1,
+            reasons: [],
+            title: "Has a parent"
+          },
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueNumber: 300,
+            kind: "candidate",
+            labels: [],
+            priority: 1,
+            reasons: [],
+            title: "No parent"
+          }
+        ]
+      });
+
+      const rows = store.listProjectIssueSnapshots("alpha");
+      expect(
+        rows.find((row) => row.issueNumber === 299)?.parentIssueNumber
+      ).toBe(289);
+      expect(
+        rows.find((row) => row.issueNumber === 300)?.parentIssueNumber
+      ).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
 });
 
 async function streamText(

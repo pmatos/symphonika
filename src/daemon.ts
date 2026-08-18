@@ -1512,6 +1512,7 @@ function projectIssueSnapshotRows(
   issueNumber: number;
   kind: "candidate" | "filtered";
   labels: string[];
+  parentIssueNumber?: number;
   priority: number;
   reasons: string[];
   title: string;
@@ -1524,6 +1525,9 @@ function projectIssueSnapshotRows(
       issueNumber: entry.issue.number,
       kind: "candidate" as const,
       labels: entry.issue.labels,
+      ...(entry.issue.parentIssueNumber === undefined
+        ? {}
+        : { parentIssueNumber: entry.issue.parentIssueNumber }),
       priority: entry.issue.priority,
       reasons: [],
       title: entry.issue.title
@@ -1536,6 +1540,9 @@ function projectIssueSnapshotRows(
       issueNumber: entry.issue.number,
       kind: "filtered" as const,
       labels: entry.issue.labels,
+      ...(entry.issue.parentIssueNumber === undefined
+        ? {}
+        : { parentIssueNumber: entry.issue.parentIssueNumber }),
       priority: entry.issue.priority,
       reasons: entry.reasons,
       title: entry.issue.title

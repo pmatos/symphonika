@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   fetchIssueDependencies,
   fetchPullRequestFollowupState,
+  parseParentIssueNumber,
   pollConfiguredGitHubIssuesFromConfig,
   swallowLabelNotFound,
   tryAddLabelsToIssue,
@@ -441,6 +442,48 @@ describe("fetchPullRequestFollowupState", () => {
     expect(state?.unresolvedReviewThreads.map((thread) => thread.id)).toEqual([
       "open"
     ]);
+  });
+});
+
+describe("parseParentIssueNumber", () => {
+  it("reads a bare issue number under a ## Parent heading", () => {
+    expect(
+      parseParentIssueNumber("## Parent\n\n#299\n\n## What to build")
+    ).toBe(299);
+  });
+
+  it("reads the number even when trailing parenthetical text follows it", () => {
+    expect(
+      parseParentIssueNumber(
+        "## Parent\n\n#199 (planning parent, kept open)\n\n## What's missing"
+      )
+    ).toBe(199);
+  });
+
+  it("reads the number when trailing text describes a slice/PR", () => {
+    expect(
+      parseParentIssueNumber(
+        "## Parent\n\n#289 (slice 6, PR #351 merged)\n\n## Context"
+      )
+    ).toBe(289);
+  });
+
+  it("returns undefined when there is no ## Parent heading", () => {
+    expect(
+      parseParentIssueNumber("## What to build\n\nBlocked by #301.")
+    ).toBeUndefined();
+  });
+
+  it("returns undefined for an empty body", () => {
+    expect(parseParentIssueNumber("")).toBeUndefined();
+  });
+
+  it("is not confused by an unrelated #N reference elsewhere in the body", () => {
+    expect(
+      parseParentIssueNumber(
+        "## What to build\n\nSee #123 for context.\n\n## Parent\n\n#456"
+      )
+    ).toBe(456);
   });
 });
 

@@ -348,4 +348,66 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
       test.cleanup();
     }
   });
+
+  it("shows an open-dependency count and link for a blocked issue, and a dash for one with no dependencies", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-08-18T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [
+              {
+                number: 301,
+                owner: "pmatos",
+                repo: "symphonika",
+                state: "OPEN",
+                title: "sibling slice"
+              },
+              {
+                number: 295,
+                owner: "pmatos",
+                repo: "symphonika",
+                state: "CLOSED",
+                title: "slice 6"
+              }
+            ],
+            issueNumber: 299,
+            kind: "filtered",
+            labels: ["agent-ready"],
+            priority: 1,
+            reasons: ["blocked by open dependency #301"],
+            title: "Migrate live routines"
+          },
+          {
+            blockedBy: [],
+            issueNumber: 300,
+            kind: "candidate",
+            labels: [],
+            priority: 1,
+            reasons: [],
+            title: "No dependencies"
+          }
+        ]
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues")).text();
+
+      expect(html).toContain("1 open");
+      expect(html).toContain(
+        'href="/issues/graph?project=alpha&amp;issue=299"'
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
 });

@@ -3401,6 +3401,7 @@ type IssueSearchFilters = {
 };
 
 type IssueSearchRow = {
+  blockedBy: RawGitHubIssueDependencyRef[];
   issueNumber: number;
   labels: string[];
   polledAt: string;
@@ -3643,6 +3644,7 @@ function searchIssueSnapshots(input: {
         snapshot.reasons
       );
       rows.push({
+        blockedBy: snapshot.blockedBy,
         issueNumber: snapshot.issueNumber,
         labels: snapshot.labels,
         polledAt: snapshot.polledAt,
@@ -3710,6 +3712,23 @@ type BulkSelectIssueData = {
   title: string;
 };
 
+// The /issues list row's "Deps" column: a bare count + link into the
+// dependency graph view (Phase 2, GET /issues/graph), independent of the
+// Verdict pill -- which already surfaces the same unresolved-dependency
+// fact in eligibility-reason form (see evaluateProjectEligibility). This
+// column exists for the itemized detail the terse verdict string doesn't
+// carry, not to duplicate the eligibility signal.
+function renderIssueSearchRowDeps(row: IssueSearchRow): string {
+  if (row.blockedBy.length === 0) {
+    return "—";
+  }
+  const openCount = row.blockedBy.filter(
+    (blocker) => blocker.state !== "CLOSED"
+  ).length;
+  const graphLink = `/issues/graph?project=${encodeURIComponent(row.projectName)}&issue=${row.issueNumber}`;
+  return `<a href="${escapeHtml(graphLink)}">${openCount} open ↗</a>`;
+}
+
 function renderIssueSearchPage(input: {
   csrfToken: string;
   filters: IssueSearchFilters;
@@ -3737,13 +3756,14 @@ function renderIssueSearchPage(input: {
           : row.labels.map((label) => escapeHtml(label)).join(", ");
       const issueLink = `/issues/${encodeURIComponent(row.projectName)}/${row.issueNumber}`;
       const checkbox = `<input type="checkbox" class="bulk-issue-checkbox" data-project="${escapeHtml(row.projectName)}" data-issue="${row.issueNumber}">`;
-      return `<tr><td>${checkbox}</td><td>${escapeHtml(row.projectName)}</td><td><a href="${escapeHtml(issueLink)}">#${row.issueNumber}</a></td><td class="c-title">${escapeHtml(row.title)}</td><td>${labelPill(row.verdict, issueVerdictFamily(row.verdict))}</td><td>${labels}</td><td>${escapeHtml(age)}${preRestart}</td></tr>`;
+      const deps = renderIssueSearchRowDeps(row);
+      return `<tr><td>${checkbox}</td><td>${escapeHtml(row.projectName)}</td><td><a href="${escapeHtml(issueLink)}">#${row.issueNumber}</a></td><td class="c-title">${escapeHtml(row.title)}</td><td>${labelPill(row.verdict, issueVerdictFamily(row.verdict))}</td><td>${labels}</td><td>${deps}</td><td>${escapeHtml(age)}${preRestart}</td></tr>`;
     })
     .join("");
   const table = tableSection(
     "Issues",
     input.rows.length,
-    `<tr><th><input type="checkbox" id="bulk-select-all-checkbox"></th><th>Project</th><th>#</th><th>Title</th><th>Verdict</th><th>Labels</th><th>Polled</th></tr>`,
+    `<tr><th><input type="checkbox" id="bulk-select-all-checkbox"></th><th>Project</th><th>#</th><th>Title</th><th>Verdict</th><th>Labels</th><th>Deps</th><th>Polled</th></tr>`,
     body
   );
   const issuesData: BulkSelectIssueData[] = input.rows.map((row) => ({
@@ -4116,7 +4136,7 @@ function renderIssueDetailPage(input: {
     input.banner === undefined
       ? ""
       : `${renderIssueActionBanner(input.banner)}${offerPollNow && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/issues") : ""}`;
-  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${renderIssueLabelsSection(
+  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${renderIssueDependenciesSection(detail.snapshot.blockedBy)}${renderIssueLabelsSection(
     {
       csrfToken: input.csrfToken,
       issueNumber: detail.issueNumber,
@@ -4129,6 +4149,26 @@ function renderIssueDetailPage(input: {
     labels: detail.snapshot.labels,
     projectName: detail.projectName
   })}<p class="note"><a href="/issues">← Back to search</a></p>`;
+}
+
+// Full itemized breakdown of a Deps-column count -- kind of every
+// blockedBy entry (open and closed), unlike evaluateProjectEligibility's
+// reasons, which only names the open (unresolved) ones. Absent entirely
+// for an issue with no blockedBy links, rather than an empty section.
+function renderIssueDependenciesSection(
+  blockedBy: RawGitHubIssueDependencyRef[]
+): string {
+  if (blockedBy.length === 0) {
+    return "";
+  }
+  const rows = blockedBy
+    .map((blocker) => {
+      const ref = `${blocker.owner}/${blocker.repo}#${blocker.number}`;
+      const family = blocker.state === "CLOSED" ? "ok" : "blocked";
+      return `<li>${labelPill(blocker.state, family)} ${escapeHtml(ref)} — ${escapeHtml(blocker.title)}</li>`;
+    })
+    .join("");
+  return `<section><h2>Dependencies</h2><p class="note">GitHub's native issue-dependency links (not parsed from body text). An open blocker here is also why this issue may show a "blocked:" verdict.</p><ul class="label-list">${rows}</ul></section>`;
 }
 
 // #309's PR search: filter query params, all optional and combined with AND

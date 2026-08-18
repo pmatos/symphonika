@@ -143,6 +143,88 @@ describe("GET /issues/:project/:number (#308 part 2, ADR 0077)", () => {
       test.cleanup();
     }
   });
+
+  it("lists blockers with number, title, state, and owner/repo for a cross-repo one", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    runStore.syncProjectStates([
+      { name: "alpha", validationState: "valid", weight: 1 }
+    ]);
+    runStore.replaceProjectIssueSnapshots({
+      polledAt: "2026-08-18T10:00:00.000Z",
+      projectName: "alpha",
+      rows: [
+        {
+          blockedBy: [
+            {
+              number: 301,
+              owner: "pmatos",
+              repo: "symphonika",
+              state: "OPEN",
+              title: "sibling slice"
+            },
+            {
+              number: 295,
+              owner: "pmatos",
+              repo: "symphonika",
+              state: "CLOSED",
+              title: "slice 6"
+            },
+            {
+              number: 4,
+              owner: "someone-else",
+              repo: "other-repo",
+              state: "OPEN",
+              title: "external blocker"
+            }
+          ],
+          issueNumber: 299,
+          kind: "filtered",
+          labels: ["agent-ready"],
+          priority: 1,
+          reasons: ["blocked by open dependency #301"],
+          title: "Migrate live routines"
+        }
+      ]
+    });
+    try {
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore,
+        stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (
+        await app.request("/issues/alpha/299", { headers: browserHeaders() })
+      ).text();
+      expect(html).toContain("sibling slice");
+      expect(html).toContain("#301");
+      expect(html).toContain("OPEN");
+      expect(html).toContain("slice 6");
+      expect(html).toContain("CLOSED");
+      expect(html).toContain("someone-else/other-repo#4");
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("shows no dependencies section for an issue with no blockers", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (
+        await app.request("/issues/alpha/7", { headers: browserHeaders() })
+      ).text();
+      expect(html).not.toContain("Dependencies");
+    } finally {
+      test.cleanup();
+    }
+  });
 });
 
 describe("POST /issues/:project/:number/labels/(add|remove) (#308 part 2)", () => {

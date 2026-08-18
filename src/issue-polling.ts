@@ -376,12 +376,17 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
   async removeLabelsFromIssue(input: GitHubIssueLabelInput): Promise<void> {
     const octokit = this.octokit(input.token);
     for (const label of input.labels) {
-      await octokit.rest.issues.removeLabel({
-        issue_number: input.issueNumber,
-        name: label,
-        owner: input.owner,
-        repo: input.repo
-      });
+      // Idempotent per label, inside the loop -- catching a 404 around
+      // the whole multi-label call instead would abort on the first
+      // absent label and never attempt the rest.
+      await swallowNotFound(() =>
+        octokit.rest.issues.removeLabel({
+          issue_number: input.issueNumber,
+          name: label,
+          owner: input.owner,
+          repo: input.repo
+        })
+      );
     }
   }
 
@@ -642,21 +647,7 @@ export async function tryRemoveLabelsFromIssue(
   if (api.removeLabelsFromIssue === undefined) {
     return false;
   }
-  try {
-    await api.removeLabelsFromIssue(input);
-  } catch (error) {
-    // Removing a label the issue doesn't have 404s -- idempotent by
-    // design: the desired end state (label absent) is already true, so
-    // this isn't a failure worth surfacing. Narrowed to this wrapper
-    // (not GitHubIssuesApi.removeLabelsFromIssue itself, which
-    // run-controller.ts calls directly in several state-machine-driven
-    // contexts) so this only changes behavior for this function's own
-    // callers -- writeIssueLabels, used by the triage page's single-issue
-    // and bulk label writes.
-    if (!isOctokitNotFound(error)) {
-      throw error;
-    }
-  }
+  await api.removeLabelsFromIssue(input);
   return true;
 }
 
@@ -1184,4 +1175,22 @@ function isOctokitNotFound(error: unknown): boolean {
     "status" in error &&
     (error as { status?: unknown }).status === 404
   );
+}
+
+// Swallows a 404 from a single attempt as success -- idempotent by design:
+// if the desired end state (e.g. a label being absent) is already true,
+// that isn't a failure worth surfacing. Exported so a caller can wrap each
+// iteration of a multi-step operation individually (see
+// OctokitGitHubIssuesApi.removeLabelsFromIssue): catching around a whole
+// loop instead would abort on the first 404 and never attempt the rest.
+export async function swallowNotFound(
+  attempt: () => Promise<unknown>
+): Promise<void> {
+  try {
+    await attempt();
+  } catch (error) {
+    if (!isOctokitNotFound(error)) {
+      throw error;
+    }
+  }
 }

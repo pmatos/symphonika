@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   fetchPullRequestFollowupState,
+  swallowNotFound,
   tryAddLabelsToIssue,
   tryGetIssue,
   tryListBranchCommits,
@@ -85,13 +86,59 @@ describe("tryRemoveLabelsFromIssue", () => {
     );
   });
 
-  it("returns true without throwing when the implementation 404s -- removing an absent label is idempotent", async () => {
+  it("propagates a 404 thrown by the implementation -- idempotent-removal handling lives in removeLabelsFromIssue's own per-label loop, not here", async () => {
+    // A wrapper-level catch here can only see "did the whole (possibly
+    // multi-label) call throw", not which individual label 404d -- so it
+    // can't distinguish "the only requested label was absent" from "an
+    // earlier label was absent and a later one was never attempted". See
+    // swallowNotFound / OctokitGitHubIssuesApi.removeLabelsFromIssue.
     const notFound = Object.assign(new Error("Not Found"), { status: 404 });
     const api: GitHubIssuesApi = {
       listOpenIssues: () => Promise.resolve([]),
       removeLabelsFromIssue: () => Promise.reject(notFound)
     };
-    expect(await tryRemoveLabelsFromIssue(api, labelInput)).toBe(true);
+    await expect(tryRemoveLabelsFromIssue(api, labelInput)).rejects.toThrow(
+      "Not Found"
+    );
+  });
+});
+
+describe("swallowNotFound", () => {
+  it("resolves without throwing when the attempt 404s -- idempotent removal of an absent label", async () => {
+    const notFound = Object.assign(new Error("Not Found"), { status: 404 });
+    await expect(
+      swallowNotFound(() => Promise.reject(notFound))
+    ).resolves.toBeUndefined();
+  });
+
+  it("propagates a non-404 error from the attempt", async () => {
+    await expect(
+      swallowNotFound(() => Promise.reject(new Error("boom")))
+    ).rejects.toThrow("boom");
+  });
+
+  it("resolves normally when the attempt succeeds", async () => {
+    let called = false;
+    await swallowNotFound(() => {
+      called = true;
+      return Promise.resolve();
+    });
+    expect(called).toBe(true);
+  });
+
+  it("lets a loop continue past a 404'd attempt to reach a later one -- the bug this exists to fix", async () => {
+    const notFound = Object.assign(new Error("Not Found"), { status: 404 });
+    const attempted: string[] = [];
+    const labels = ["sym:stale", "agent-ready"];
+    for (const label of labels) {
+      await swallowNotFound(() => {
+        attempted.push(label);
+        return label === "sym:stale"
+          ? Promise.reject(notFound)
+          : Promise.resolve();
+      });
+    }
+    expect(attempted).toEqual(["sym:stale", "agent-ready"]);
   });
 });
 

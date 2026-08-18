@@ -148,6 +148,14 @@ export type RegisterPagesOptions = {
   // dependency gate only blocks adding a label in this set. See
   // HttpAppOptions.getProjectRequiredLabels (src/http/app.ts).
   getProjectRequiredLabels?: (projectName: string) => string[];
+  // The dependency graph view (/issues/graph) needs a Project's GitHub
+  // owner/repo to build node ids and resolve "## Parent" clustering.
+  // Undefined for a Routine Host or an unknown Project name -- that
+  // project's issues are skipped from the graph rather than erroring. See
+  // HttpAppOptions.getProjectRepo (src/http/app.ts).
+  getProjectRepo?: (
+    projectName: string
+  ) => { owner: string; repo: string } | undefined;
   // #303's "retry ETA" detail for a waiting Run.
   getScheduled?: () => ScheduledCallback[];
   getStatusSnapshot?: () => StatusSnapshot;
@@ -379,6 +387,29 @@ export function registerPages(options: RegisterPagesOptions): void {
     let bytes: ArrayBuffer;
     try {
       const buffer = await readFile(clientBundlePath);
+      bytes = buffer.buffer.slice(
+        buffer.byteOffset,
+        buffer.byteOffset + buffer.byteLength
+      );
+    } catch {
+      return context.notFound();
+    }
+    return new Response(bytes, {
+      headers: { "content-type": "application/javascript; charset=utf-8" },
+      status: 200
+    });
+  });
+
+  // The dependency graph view's React island (src/client/issues-deps-graph.tsx),
+  // bundled the same way as issues-bulk.js above -- see that route's comment
+  // for why the path is resolved relative to this compiled module.
+  const depsGraphBundlePath = fileURLToPath(
+    new URL("../../dist/client/issues-deps-graph.js", import.meta.url)
+  );
+  options.app.get("/assets/issues-deps-graph.js", async (context) => {
+    let bytes: ArrayBuffer;
+    try {
+      const buffer = await readFile(depsGraphBundlePath);
       bytes = buffer.buffer.slice(
         buffer.byteOffset,
         buffer.byteOffset + buffer.byteLength
@@ -689,6 +720,29 @@ export function registerPages(options: RegisterPagesOptions): void {
     const html = layout(
       "Issue triage",
       renderIssueSearchPage({ csrfToken, filters, nowMs, projectNames, rows })
+    );
+    return context.html(html);
+  });
+
+  options.app.get("/issues/graph", (context) => {
+    const projectFilter = normalizeQueryParam(context.req.query("project"));
+    const projectNames = Array.from(
+      new Set(
+        options.runStore.listProjectStates().map((state) => state.projectName)
+      )
+    ).sort();
+    const targetProjects =
+      projectFilter === undefined
+        ? projectNames
+        : projectNames.filter((name) => name === projectFilter);
+    const issues = buildDependencyGraphIssues({
+      getProjectRepo: options.getProjectRepo,
+      runStore: options.runStore,
+      targetProjects
+    });
+    const html = layout(
+      "Issue dependency graph",
+      renderIssueDependencyGraphPage({ issues, projectFilter, projectNames })
     );
     return context.html(html);
   });
@@ -3799,6 +3853,108 @@ function renderIssueSearchPage(input: {
 window.__CSRF_TOKEN__ = ${escapeJsonForInlineScript(input.csrfToken)};</script>
 <script src="/assets/issues-bulk.js"></script>`;
   return `<h1 class="page-title">Issue triage</h1>${note}${filterForm}${bulkSelectMount}${table}`;
+}
+
+// The shape embedded as window.__ISSUE_DEPS_GRAPH__ for the client-side
+// buildDependencyGraphElements (src/client/dependency-graph-elements.ts) --
+// duplicated locally rather than imported, matching this codebase's
+// existing src/client/ convention (e.g. issues-bulk-select.tsx's own
+// BulkSelectIssueData) of not sharing types across the server/client
+// tsconfig boundary.
+type DependencyGraphEmbedIssue = {
+  blockedBy: RawGitHubIssueDependencyRef[];
+  issueNumber: number;
+  owner: string;
+  parentIssueNumber?: number;
+  projectName: string;
+  repo: string;
+  title: string;
+};
+
+// Only projects whose owner/repo actually resolves contribute nodes -- a
+// Routine Host or an unknown Project name is skipped rather than erroring,
+// consistent with this route's other optional-injected accessors.
+function buildDependencyGraphIssues(input: {
+  getProjectRepo:
+    | ((projectName: string) => { owner: string; repo: string } | undefined)
+    | undefined;
+  runStore: RunStore;
+  targetProjects: string[];
+}): DependencyGraphEmbedIssue[] {
+  const issues: DependencyGraphEmbedIssue[] = [];
+  for (const projectName of input.targetProjects) {
+    const repo = input.getProjectRepo?.(projectName);
+    if (repo === undefined) {
+      continue;
+    }
+    for (const snapshot of input.runStore.listProjectIssueSnapshots(
+      projectName
+    )) {
+      issues.push({
+        blockedBy: snapshot.blockedBy,
+        issueNumber: snapshot.issueNumber,
+        owner: repo.owner,
+        ...(snapshot.parentIssueNumber === undefined
+          ? {}
+          : { parentIssueNumber: snapshot.parentIssueNumber }),
+        projectName,
+        repo: repo.repo,
+        title: snapshot.title
+      });
+    }
+  }
+  return issues;
+}
+
+// ADR-0056's graceful-degradation guardrail: always rendered, and only
+// hidden by the client script (IssuesDepsGraphView) once cytoscape has
+// mounted without throwing -- see that component's own comment. Only lists
+// issues with at least one blocker, mirroring renderIssueDependenciesSection
+// on the issue detail page rather than repeating every dependency-free
+// issue here too.
+function renderIssueDependencyGraphFallback(
+  issues: DependencyGraphEmbedIssue[]
+): string {
+  const withBlockers = issues.filter((issue) => issue.blockedBy.length > 0);
+  if (withBlockers.length === 0) {
+    return `<p class="note">No open dependency links in this view.</p>`;
+  }
+  const rows = withBlockers
+    .map((issue) => {
+      const blockers = issue.blockedBy
+        .map((blocker) => {
+          const ref = `${blocker.owner}/${blocker.repo}#${blocker.number}`;
+          const family = blocker.state === "CLOSED" ? "ok" : "blocked";
+          return `<li>${labelPill(blocker.state, family)} ${escapeHtml(ref)} — ${escapeHtml(blocker.title)}</li>`;
+        })
+        .join("");
+      return `<li><strong>${escapeHtml(issue.projectName)}#${issue.issueNumber}</strong> ${escapeHtml(issue.title)}<ul class="label-list">${blockers}</ul></li>`;
+    })
+    .join("");
+  return `<ul class="label-list">${rows}</ul>`;
+}
+
+function renderIssueDependencyGraphPage(input: {
+  issues: DependencyGraphEmbedIssue[];
+  projectFilter: string | undefined;
+  projectNames: string[];
+}): string {
+  const projectOptions = input.projectNames
+    .map(
+      (name) =>
+        `<option value="${escapeHtml(name)}"${input.projectFilter === name ? " selected" : ""}>${escapeHtml(name)}</option>`
+    )
+    .join("");
+  const filterForm = `<form class="filters" method="get" action="/issues/graph">
+<label>Project<select name="project"><option value="">All projects</option>${projectOptions}</select></label>
+<button class="btn" type="submit">Filter</button>
+</form>`;
+  const fallback = renderIssueDependencyGraphFallback(input.issues);
+  const mount = `<div id="issues-deps-graph-fallback">${fallback}</div>
+<div id="issues-deps-graph-root"></div>
+<script>window.__ISSUE_DEPS_GRAPH__ = ${escapeJsonForInlineScript({ issues: input.issues })};</script>
+<script src="/assets/issues-deps-graph.js"></script>`;
+  return `<h1 class="page-title">Issue dependency graph</h1><p class="note"><a href="/issues">&larr; back to triage</a></p>${filterForm}${mount}`;
 }
 
 // #308 part 2: orchestrator-owned labels (ADR 0002/0024) render as read-only

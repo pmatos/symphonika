@@ -1123,6 +1123,12 @@ export async function startDaemon(
     getProjectRequiredLabels: (projectName) =>
       runtimeConfig.projectsByName().get(projectName)?.issue_filters
         ?.labels_all ?? [],
+    getProjectRepo: (projectName) => {
+      const tracker = runtimeConfig.projectsByName().get(projectName)?.tracker;
+      return tracker === undefined
+        ? undefined
+        : { owner: tracker.owner, repo: tracker.repo };
+    },
     mergePullRequest: async (input): Promise<MergePullRequestResult> => {
       const project = runtimeConfig.projectsByName().get(input.projectName);
       if (project?.tracker === undefined) {

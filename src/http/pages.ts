@@ -3833,18 +3833,26 @@ async function runBulkIssueLabelWrites(input: {
   // spurious remove-side 404 would discard an already-successful add.
   // Narrows removeLabels per issue against the persisted poll snapshot
   // (the same data loadIssueDetail reads for the single-issue page),
-  // fetched once per project rather than once per operation.
-  const currentLabelsByProject = new Map<string, Map<number, string[]>>();
+  // fetched once per project rather than once per operation. Compared
+  // case-insensitively -- GitHub matches label names case-insensitively
+  // (confirmed, and already relied on by isOrchestratorLabel), so a
+  // selection spanning issues whose equivalent label differs only by case
+  // must still match; the requested spelling, not the issue's actual
+  // casing, is what's passed to the writer.
+  const currentLabelsByProject = new Map<string, Map<number, Set<string>>>();
   function currentLabelsFor(
     projectName: string,
     issueNumber: number
-  ): string[] | undefined {
+  ): Set<string> | undefined {
     let byIssue = currentLabelsByProject.get(projectName);
     if (byIssue === undefined) {
       byIssue = new Map(
         runStore
           .listProjectIssueSnapshots(projectName)
-          .map((row) => [row.issueNumber, row.labels])
+          .map((row) => [
+            row.issueNumber,
+            new Set(row.labels.map((label) => label.toLowerCase()))
+          ])
       );
       currentLabelsByProject.set(projectName, byIssue);
     }
@@ -3859,7 +3867,7 @@ async function runBulkIssueLabelWrites(input: {
       if (operation === undefined) {
         return;
       }
-      const currentLabels = currentLabelsFor(
+      const currentLabelsLower = currentLabelsFor(
         operation.projectName,
         operation.issueNumber
       );
@@ -3868,9 +3876,11 @@ async function runBulkIssueLabelWrites(input: {
       // removal; the write's own honest failure is then no worse than
       // today's behavior for that edge case.
       const removeForThisIssue =
-        currentLabels === undefined
+        currentLabelsLower === undefined
           ? removeLabels
-          : removeLabels.filter((label) => currentLabels.includes(label));
+          : removeLabels.filter((label) =>
+              currentLabelsLower.has(label.toLowerCase())
+            );
       // Every operation runs regardless of earlier outcomes -- best-effort,
       // so one issue's GitHub-side failure doesn't block the rest of the
       // batch.

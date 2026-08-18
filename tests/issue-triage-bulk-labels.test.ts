@@ -607,4 +607,63 @@ describe("POST /api/issues/bulk-labels", () => {
       runStore.close();
     }
   });
+
+  it("matches a requested removeLabels entry against an issue's current label case-insensitively, preserving the requested spelling", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    runStore.syncProjectStates([
+      { name: "alpha", validationState: "valid", weight: 1 }
+    ]);
+    runStore.replaceProjectIssueSnapshots({
+      polledAt: "2026-05-22T10:00:00.000Z",
+      projectName: "alpha",
+      rows: [
+        {
+          issueNumber: 7,
+          kind: "candidate",
+          labels: ["Needs-Triage"],
+          priority: 1,
+          reasons: [],
+          title: "Label differs only by case"
+        }
+      ]
+    });
+    try {
+      const received: unknown[] = [];
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore,
+        stateRoot,
+        version: "0.1.0",
+        writeIssueLabels: (input) => {
+          received.push(input);
+          return Promise.resolve({ ok: true });
+        }
+      });
+      const response = await app.request("/api/issues/bulk-labels", {
+        body: JSON.stringify({
+          addLabels: [],
+          operations: [{ issueNumber: 7, projectName: "alpha" }],
+          removeLabels: ["needs-triage"]
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/json"
+        },
+        method: "POST"
+      });
+      expect(response.status).toBe(200);
+      expect(received).toEqual([
+        {
+          add: [],
+          kind: "issue",
+          projectName: "alpha",
+          remove: ["needs-triage"],
+          subjectNumber: 7
+        }
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
 });

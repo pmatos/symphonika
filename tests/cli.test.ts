@@ -89,6 +89,130 @@ describe("CLI", () => {
     expect(output.stdout).toBe("test email sent to operator@example.com\n");
   });
 
+  it("daemon --self-check runs the self-check instead of starting the daemon", async () => {
+    const output = { stderr: "", stdout: "" };
+    const runSelfCheck = vi.fn().mockResolvedValue({ ok: true, errors: [] });
+    const startDaemon = vi.fn();
+    const program = buildCli({
+      registerSignalHandlers: false,
+      runSelfCheck,
+      startDaemon
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "daemon",
+      "--self-check",
+      "/tmp/throwaway-state-root"
+    ]);
+
+    expect(runSelfCheck).toHaveBeenCalledWith({
+      stateRoot: "/tmp/throwaway-state-root"
+    });
+    expect(startDaemon).not.toHaveBeenCalled();
+    expect(output.stderr).toBe("");
+    expect(output.stdout).toBe("self-check ok\n");
+  });
+
+  it("daemon --self-check reports failure without starting the daemon", async () => {
+    const output = { stderr: "", stdout: "" };
+    const runSelfCheck = vi
+      .fn()
+      .mockResolvedValue({ ok: false, errors: ["native binding failed"] });
+    const startDaemon = vi.fn();
+    const program = buildCli({
+      registerSignalHandlers: false,
+      runSelfCheck,
+      startDaemon
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "daemon",
+      "--self-check",
+      "/tmp/throwaway-state-root"
+    ]);
+
+    expect(startDaemon).not.toHaveBeenCalled();
+    expect(output.stderr).toBe("self-check failed: native binding failed\n");
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it("service rollback restores the previous install generation", async () => {
+    const output = { stderr: "", stdout: "" };
+    const runRollback = vi.fn().mockResolvedValue({
+      installPath: "/opt/symphonika",
+      kind: "rolled-back"
+    });
+    const program = buildCli({
+      registerSignalHandlers: false,
+      runRollback
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync(["node", "symphonika", "service", "rollback"]);
+
+    expect(runRollback).toHaveBeenCalledTimes(1);
+    expect(output.stderr).toBe("");
+    expect(output.stdout).toContain(
+      "service rollback ok: restored /opt/symphonika\n"
+    );
+    expect(output.stdout).toContain(
+      "systemctl --user restart symphonika.service"
+    );
+  });
+
+  it("service rollback fails clearly when there is no previous generation", async () => {
+    const output = { stderr: "", stdout: "" };
+    const runRollback = vi
+      .fn()
+      .mockResolvedValue({ kind: "no-previous-generation" });
+    const program = buildCli({
+      registerSignalHandlers: false,
+      runRollback
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync(["node", "symphonika", "service", "rollback"]);
+
+    expect(output.stderr).toContain("no previous install generation found");
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
   it("builds a missing dist bin during npm link so the linked executable shows help", async () => {
     const root = await makeTempRoot();
     const prefix = path.join(root, "prefix");

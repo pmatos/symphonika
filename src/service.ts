@@ -361,7 +361,7 @@ function systemdEnvAssignment(name: string, value: string): string {
   return `"${escaped}"`;
 }
 
-function defaultScriptPath(): string {
+export function defaultScriptPath(): string {
   return path.join(path.dirname(fileURLToPath(import.meta.url)), "cli.js");
 }
 

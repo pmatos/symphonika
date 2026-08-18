@@ -74,6 +74,9 @@ export type RuntimeConfigSnapshot = {
   pullRequestPolicy: PullRequestFollowupPolicy;
   routineDefaults?: RoutineExecutionOverrides;
   routineWorkspaceRetention: RoutineWorkspaceRetentionPolicy;
+  // Opt-in daemon self-update (ADR 0079). Boolean-only in this slice --
+  // no configurable check interval or channel.
+  selfUpdate: boolean;
   watchdog: WatchdogConfig;
 };
 
@@ -380,6 +383,10 @@ const serviceConfigSchema = z
     // Service-level routine declarations targeting declared Projects. See
     // ADR 0069. Optional; omitted means no routines.
     routines: z.array(serviceRoutineSchema).optional(),
+    // Opt-in daemon self-update (ADR 0079). Defaults to false; boolean-only
+    // in this slice, matching the issue's own proposed `self-update: true`
+    // shape with no configurable check interval or channel.
+    self_update: z.boolean().default(false),
     projects: z.array(z.unknown()).min(1)
   })
   .passthrough();
@@ -453,6 +460,10 @@ export class RuntimeConfigReloader {
       projects: this.snapshot?.projects ?? [],
       watchdog: this.snapshot?.watchdog ?? DEFAULT_WATCHDOG_CONFIG
     };
+  }
+
+  selfUpdateEnabled(): boolean {
+    return this.snapshot?.selfUpdate ?? false;
   }
 
   async reload(): Promise<RuntimeConfigSnapshot | undefined> {
@@ -885,6 +896,7 @@ async function loadRuntimeConfigSnapshot(input: {
       routineWorkspaceRetention: normalizeRoutineWorkspaceRetention(
         parsed.data.retention?.routine_workspaces
       ),
+      selfUpdate: parsed.data.self_update,
       watchdog: normalizeWatchdogConfig(parsed.data.watchdog)
     },
     usingLastKnownGood: false

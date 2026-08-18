@@ -102,6 +102,8 @@ What the generated units give you:
 
 If you need the daemon to keep running after logout, `loginctl enable-linger $USER`.
 
+CI publishes a checksummed release artifact (`dist/`, `package.json`, `package-lock.json`, plus a `SHA256SUMS.txt`) to [GitHub Releases](https://github.com/pmatos/symphonika/releases) on every version tag. Set `self_update: true` in `symphonika.yml` to have the daemon check for, stage, verify, and cut over a newer release on its own, draining in-flight work before restarting — see `docs/adr/0079` for the full design and its explicitly deferred edges (no prebuilt native-module binaries, no automatic rollback after a post-cutover crash-loop). `symphonika service rollback` restores the previous install generation manually.
+
 ### Built-in workflow templates
 
 Raw-FSM workflows can reference built-in templates by prefix without authoring local YAML, for example:

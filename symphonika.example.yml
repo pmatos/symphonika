@@ -24,6 +24,12 @@ retention:
 # global:
 #   max_in_flight: 8
 
+# When true, the daemon periodically checks GitHub Releases for a newer
+# Symphonika version, stages and smoke-checks it in isolation, drains
+# in-flight work, and cuts over with a systemctl-driven restart. Disabled by
+# default. See ADR 0079.
+self_update: false
+
 # Optional best-effort Routine Firing, terminal issue Run, and daemon-health
 # notifications (ADR 0067 / ADR 0071). The password value comes only from the
 # named environment variable.

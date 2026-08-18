@@ -9,8 +9,7 @@ import type { NotificationMessage, NotificationSink } from "./types.js";
 
 export class DaemonHealthNotifier {
   private readonly inFlight = new Set<Promise<void>>();
-  private invalidRoutines: boolean | undefined;
-  private reloadBroken: boolean | undefined;
+  private readonly edgeState = new Map<string, boolean>();
 
   constructor(
     private readonly input: {
@@ -20,13 +19,18 @@ export class DaemonHealthNotifier {
     }
   ) {}
 
+  // Reports once on transition into a broken state, once on transition back
+  // to healthy, and never on a repeated same-state result -- a persistently
+  // broken dimension notifies once, not every check. Shared by every
+  // observe* below, each keyed by its own dimension name.
+  private edgeTriggered(key: string, broken: boolean): boolean {
+    const previous = this.edgeState.get(key);
+    this.edgeState.set(key, broken);
+    return !(previous === broken || (previous === undefined && !broken));
+  }
+
   observeReload(input: { broken: boolean; errors: readonly string[] }): void {
-    const previous = this.reloadBroken;
-    this.reloadBroken = input.broken;
-    if (
-      previous === input.broken ||
-      (previous === undefined && !input.broken)
-    ) {
+    if (!this.edgeTriggered("reload", input.broken)) {
       return;
     }
     this.enqueue({
@@ -48,9 +52,7 @@ export class DaemonHealthNotifier {
     }>
   ): void {
     const broken = routines.length > 0;
-    const previous = this.invalidRoutines;
-    this.invalidRoutines = broken;
-    if (previous === broken || (previous === undefined && !broken)) {
+    if (!this.edgeTriggered("invalidRoutines", broken)) {
       return;
     }
     this.enqueue({
@@ -63,6 +65,19 @@ export class DaemonHealthNotifier {
       subject: broken
         ? "Routine declarations became invalid"
         : "Routine declarations recovered"
+    });
+  }
+
+  observeUpdateFailure(input: { broken: boolean; detail?: string }): void {
+    if (!this.edgeTriggered("selfUpdate", input.broken)) {
+      return;
+    }
+    this.enqueue({
+      details:
+        input.broken && input.detail !== undefined
+          ? [input.detail]
+          : ["Self-update completed successfully."],
+      subject: input.broken ? "Self-update failed" : "Self-update recovered"
     });
   }
 

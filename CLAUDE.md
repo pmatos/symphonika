@@ -39,6 +39,12 @@ Before opening a PR, run each of these as a separate command (never `&&`-chained
 and typecheck while still failing it. If it flags a file the current change didn't touch, leave that
 file alone; only fix formatting in files the diff already modifies.
 
+PR titles must follow Conventional Commits (`type: subject`, e.g. `feat: ...`, `fix: ...`) with a
+lowercase subject — the "Lint PR title" workflow enforces this on open/edit/reopen/synchronize
+(mirrors `commitlint.config.cjs`'s subject-case rule), so a plain-English or capitalized title fails
+CI immediately. Set it correctly in `gh pr create --title "..."` up front rather than fixing it after
+the check fails.
+
 ## Agent skills
 
 ### Issue tracker

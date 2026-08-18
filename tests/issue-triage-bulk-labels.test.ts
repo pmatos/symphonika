@@ -215,6 +215,44 @@ describe("POST /api/issues/bulk-labels", () => {
     }
   });
 
+  it.each([1.5, -1, 0, -0.5])(
+    "rejects an operation with a non-positive-integer issueNumber (%s) with 400 and never calls writeIssueLabels",
+    async (issueNumber) => {
+      const test = await setup();
+      try {
+        let called = false;
+        const app = createHttpApp({
+          csrfSecret: TEST_SECRET,
+          runStore: test.runStore,
+          stateRoot: test.stateRoot,
+          version: "0.1.0",
+          writeIssueLabels: () => {
+            called = true;
+            return Promise.resolve({ ok: true });
+          }
+        });
+        const response = await app.request("/api/issues/bulk-labels", {
+          body: JSON.stringify({
+            addLabels: ["agent-ready"],
+            operations: [{ issueNumber, projectName: "alpha" }],
+            removeLabels: []
+          }),
+          headers: {
+            ...browserHeaders(),
+            "content-type": "application/json"
+          },
+          method: "POST"
+        });
+        expect(response.status).toBe(400);
+        const body = (await response.json()) as { error: string };
+        expect(body.error).toContain("operations");
+        expect(called).toBe(false);
+      } finally {
+        test.cleanup();
+      }
+    }
+  );
+
   it("writes the requested labels to every selected issue and reports per-issue success", async () => {
     const test = await setup();
     try {

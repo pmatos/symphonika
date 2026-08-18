@@ -3793,10 +3793,13 @@ function asBulkIssueOperations(
   }
   const values: Array<{ issueNumber: number; projectName: string }> = [];
   for (const entry of value) {
+    const issueNumber = (entry as Record<string, unknown> | null)?.issueNumber;
     if (
       typeof entry !== "object" ||
       entry === null ||
-      typeof (entry as Record<string, unknown>).issueNumber !== "number" ||
+      typeof issueNumber !== "number" ||
+      !Number.isInteger(issueNumber) ||
+      issueNumber <= 0 ||
       typeof (entry as Record<string, unknown>).projectName !== "string"
     ) {
       return {

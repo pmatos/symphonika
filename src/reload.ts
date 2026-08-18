@@ -386,7 +386,7 @@ const serviceConfigSchema = z
     // Opt-in daemon self-update (ADR 0079). Defaults to false; boolean-only
     // in this slice, matching the issue's own proposed `self-update: true`
     // shape with no configurable check interval or channel.
-    self_update: z.boolean().default(false).optional(),
+    self_update: z.boolean().default(false),
     projects: z.array(z.unknown()).min(1)
   })
   .passthrough();
@@ -896,7 +896,7 @@ async function loadRuntimeConfigSnapshot(input: {
       routineWorkspaceRetention: normalizeRoutineWorkspaceRetention(
         parsed.data.retention?.routine_workspaces
       ),
-      selfUpdate: parsed.data.self_update ?? false,
+      selfUpdate: parsed.data.self_update,
       watchdog: normalizeWatchdogConfig(parsed.data.watchdog)
     },
     usingLastKnownGood: false

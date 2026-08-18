@@ -32,10 +32,6 @@ export type GetLatestReleaseResult =
   | { kind: "error"; error: string }
   | { kind: "release"; release: LatestRelease };
 
-interface ReleaseClient {
-  getLatestRelease(): Promise<GetLatestReleaseResult>;
-}
-
 // Minimal shape this module actually calls -- lets tests inject a plain
 // object instead of a real Octokit instance or a `vi.mock` of "@octokit/rest".
 export type OctokitLike = {
@@ -59,7 +55,7 @@ function defaultCreateOctokit(token: string): OctokitLike {
 // token first lets self-update stay silently no-op (not an error) when
 // GITHUB_TOKEN is absent, matching decision #3's opt-in framing, and
 // authenticates the getLatestRelease call itself against rate limits.
-export class OctokitReleaseClient implements ReleaseClient {
+export class OctokitReleaseClient {
   private readonly env: NodeJS.ProcessEnv;
   private readonly createOctokit: (token: string) => OctokitLike;
 

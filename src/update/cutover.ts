@@ -164,13 +164,7 @@ export async function rollbackToPreviousRelease(
     return { kind: "error", error: gitGuardReason };
   }
 
-  let previousExists = true;
-  try {
-    await access(previousPath);
-  } catch {
-    previousExists = false;
-  }
-  if (!previousExists) {
+  if (!(await pathExists(previousPath))) {
     return { kind: "no-previous-generation" };
   }
 
@@ -240,14 +234,10 @@ export async function checkUnitRegenerationNeeded(input: {
     return { needed: false };
   }
 
-  const stagedMarkers = STRUCTURAL_MARKERS.map(
-    (pattern) => pattern.exec(stagedUnitContent)?.[0]
-  );
-  const installedMarkers = STRUCTURAL_MARKERS.map(
-    (pattern) => pattern.exec(installedUnitContent)?.[0]
-  );
-  const differs = stagedMarkers.some(
-    (value, index) => value !== installedMarkers[index]
+  const differs = STRUCTURAL_MARKERS.some(
+    (pattern) =>
+      pattern.exec(stagedUnitContent)?.[0] !==
+      pattern.exec(installedUnitContent)?.[0]
   );
 
   return differs
@@ -262,17 +252,24 @@ export async function checkUnitRegenerationNeeded(input: {
 }
 
 // `service install --print` (src/cli.ts) writes each file as
-// "# <path>\n<content>\n". The .service unit is written first
-// (runServiceInstall's file order); take the first section only.
+// "# <path>\n<content>\n". Select the section by matching its header path
+// against "symphonika.service" rather than assuming file order -- that
+// decouples this parser from runServiceInstall's internal file-list
+// ordering entirely.
 //
 // The header line is always an absolute path (`# ${file.path}`), so the
 // split pattern requires a "/" right after "# " -- otherwise the rendered
 // unit's own embedded "# ..." comment lines (renderServiceUnit in
-// src/service.ts is full of them) match too, truncating the section at the
-// first comment instead of at the next file header.
+// src/service.ts is full of them) match too, splitting mid-section instead
+// of only at file headers.
 function extractServiceUnitSection(printOutput: string): string | undefined {
-  const sections = printOutput.split(/^# \/.*$/m).slice(1);
-  return sections[0]?.trim();
+  const parts = printOutput.split(/^(# \/.*)$/m);
+  for (let index = 1; index < parts.length; index += 2) {
+    if (parts[index]!.endsWith("symphonika.service")) {
+      return parts[index + 1]?.trim();
+    }
+  }
+  return undefined;
 }
 
 async function defaultRunStagedServiceInstallPrint(

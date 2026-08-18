@@ -84,8 +84,11 @@ export function createDefaultUpdateOps(input: {
         stagingPath
       }),
     pruneStale: async (keepVersion) => {
-      await pruneStaleDownloads({ keepVersion, stateRoot: input.stateRoot });
-      await pruneStaleStagingDirs({ installParentDir, keepVersion });
+      // Disjoint directory trees -- independently safe to prune concurrently.
+      await Promise.all([
+        pruneStaleDownloads({ keepVersion, stateRoot: input.stateRoot }),
+        pruneStaleStagingDirs({ installParentDir, keepVersion })
+      ]);
     },
     isSystemdAvailable: () => probeSystemdRunAvailable({ env: input.env }),
     restartService: async () => {

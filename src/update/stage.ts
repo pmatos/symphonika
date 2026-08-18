@@ -40,9 +40,20 @@ export async function downloadAndVerify(input: {
   await mkdir(downloadDir, { recursive: true });
   const archivePath = path.join(downloadDir, input.release.tarballAsset.name);
 
+  // Independent requests, fired concurrently: allSettled (not all) keeps
+  // each asset's own HTTP-status/network-error message distinct even when
+  // one settles before the other.
+  const [tarballOutcome, checksumsOutcome] = await Promise.allSettled([
+    fetchImpl(input.release.tarballAsset.url),
+    fetchImpl(input.release.checksumsAsset.url)
+  ]);
+
   let tarballBytes: Buffer;
   try {
-    const response = await fetchImpl(input.release.tarballAsset.url);
+    if (tarballOutcome.status === "rejected") {
+      throw tarballOutcome.reason;
+    }
+    const response = tarballOutcome.value;
     if (!response.ok) {
       return {
         kind: "error",
@@ -59,7 +70,10 @@ export async function downloadAndVerify(input: {
 
   let checksumsText: string;
   try {
-    const response = await fetchImpl(input.release.checksumsAsset.url);
+    if (checksumsOutcome.status === "rejected") {
+      throw checksumsOutcome.reason;
+    }
+    const response = checksumsOutcome.value;
     if (!response.ok) {
       return {
         kind: "error",

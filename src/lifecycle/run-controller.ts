@@ -3798,9 +3798,14 @@ export class RunController {
     // executeContinuation re-assert their claim -- without this,
     // blockedBy/blockedByTruncated stay undefined here, so `?? []` reads
     // as "no blockers" and a dependency added mid-run never stops the
-    // retry/continuation. Fail closed (return undefined, which every
-    // caller already treats as "drop the scheduled work") on a fetch
-    // error, matching the poll loop's own fail-the-whole-poll stance.
+    // retry/continuation. A dependency-fetch error is narrower than an
+    // issue-fetch error: the REST snapshot above is still good, so keep it
+    // and mark blockedByTruncated true (evaluateProjectEligibility's
+    // existing "truncated => treat as blocked" fail-closed path) rather
+    // than discarding the whole refresh via `return undefined` -- every
+    // caller treats undefined as "drop the scheduled work entirely",
+    // which would let one transient GraphQL error permanently cancel a
+    // retry/continuation instead of just failing the dependency check.
     let dependencies;
     try {
       dependencies = await tryGetIssueDependencies(this.githubIssuesApi, {
@@ -3814,7 +3819,8 @@ export class RunController {
         { err: error },
         "symphonika continuation dependency refresh failed"
       );
-      return undefined;
+      snapshot.blockedByTruncated = true;
+      return snapshot;
     }
     const issueDependencies = dependencies?.get(input.issueNumber);
     if (issueDependencies !== undefined) {

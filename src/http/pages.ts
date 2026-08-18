@@ -754,7 +754,9 @@ export function registerPages(options: RegisterPagesOptions): void {
       };
     } else if (
       action === "add" &&
-      (options.getProjectRequiredLabels?.(projectName) ?? []).includes(label) &&
+      (options.getProjectRequiredLabels?.(projectName) ?? [])
+        .map((requiredLabel) => requiredLabel.toLowerCase())
+        .includes(label.toLowerCase()) &&
       issueDependencyGateBlocks(detail.snapshot)
     ) {
       // Hard block, no override (see docs/adr, issue dependency gating):
@@ -3969,9 +3971,11 @@ async function runBulkIssueLabelWrites(input: {
       // and remove are skipped for this operation when blocked, since a
       // single writeIssueLabels call can't apply just one half of a
       // combined add+remove request.
-      const requiredLabels = getProjectRequiredLabels(operation.projectName);
+      const requiredLabels = getProjectRequiredLabels(
+        operation.projectName
+      ).map((requiredLabel) => requiredLabel.toLowerCase());
       const addsRequiredLabel = addLabels.some((label) =>
-        requiredLabels.includes(label)
+        requiredLabels.includes(label.toLowerCase())
       );
       if (addsRequiredLabel) {
         const snapshot = snapshotFor(

@@ -576,6 +576,46 @@ describe("POST /issues/:project/:number/labels/add dependency gate", () => {
     }
   });
 
+  it("refuses a case-variant spelling of the required label the same as the canonical spelling", async () => {
+    const test = await setupBlocked();
+    try {
+      let called = false;
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        getProjectRequiredLabels: () => ["agent-ready"],
+        pollNow: () => ({
+          candidateIssues: 0,
+          dispatching: false,
+          errors: 0,
+          filteredIssues: 0,
+          issuePolling: { errors: [], projects: [] },
+          kind: "queued",
+          state: "idle"
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0",
+        writeIssueLabels: () => {
+          called = true;
+          return Promise.resolve({ ok: true });
+        }
+      });
+      const response = await app.request("/issues/alpha/8/labels/add", {
+        body: formBody({ csrf_token: VALID_TOKEN, label: "Agent-Ready" }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+      const html = await response.text();
+      expect(html).toContain('Add label "Agent-Ready" failed');
+      expect(called).toBe(false);
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("refuses to add the required label when the dependency fetch was truncated, even if every fetched blocker is closed", async () => {
     const stateRoot = await makeTempRoot();
     const runStore = openRunStore({ stateRoot });

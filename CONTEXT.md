@@ -74,8 +74,9 @@ _Avoid_: dependency graph (the `/issues/graph` display) when referring to this g
 
 **Continuation Eligibility**:
 The question "may this already-owned Run lifecycle keep going?", including open state for every Run,
-and label re-checks only for label-controlled work. State Advance, waiting rows, and PR Follow-up
-Runs keep going on label drift but still stop when the Issue closes.
+and label and Dependency Gate (see docs/adr/0081-issue-dependency-gating-and-graph-view.md)
+re-checks only for label-controlled work. State Advance, waiting rows, and PR Follow-up Runs keep
+going on label drift and dependency drift alike, but still stop when the Issue closes.
 _Avoid_: dispatch eligibility when referring to active-run or scheduled-work re-checks
 
 **Required Eligibility Label**:

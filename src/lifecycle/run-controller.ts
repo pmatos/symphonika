@@ -3257,6 +3257,41 @@ export class RunController {
     });
   }
 
+  // Independent, best-effort add: called alongside the sym:* label in both
+  // markIssueFailed and markIssueBlocked so a human-attention signal exists
+  // regardless of which terminal-failure path was taken (exhausted retries,
+  // provider asking for input, or an explicit blocked terminal). Kept as its
+  // own try/catch so a sym:* label failure never suppresses this one, and
+  // vice versa. sym:human-needed uses the sym: prefix like every other
+  // orchestrator-owned label (sym:claimed/running/blocked/failed/stale) —
+  // distinct from the pre-existing manual "needs-human" convention operators
+  // may add by hand. Add sym:human-needed to a project's
+  // issue_filters.labels_none for this to also stop the issue from being
+  // redispatched while agent-ready is still present.
+  private async markIssueNeedsHuman(input: {
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+  }): Promise<void> {
+    const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
+    try {
+      await api.addLabelsToIssue({
+        ...input.repository,
+        issueNumber: input.issueNumber,
+        labels: ["sym:human-needed"]
+      });
+    } catch (err) {
+      this.logger?.warn(
+        { err, issueNumber: input.issueNumber },
+        "symphonika failed to add sym:human-needed label"
+      );
+      return;
+    }
+    this.logger?.info(
+      { issueNumber: input.issueNumber },
+      "symphonika marked issue sym:human-needed"
+    );
+  }
+
   private async markIssueFailed(input: {
     issueNumber: number;
     repository: GitHubIssueRepositoryInput;
@@ -3273,12 +3308,14 @@ export class RunController {
         { err, issueNumber: input.issueNumber },
         "symphonika failed to add sym:failed label; sym:claimed left in place"
       );
+      await this.markIssueNeedsHuman(input);
       return;
     }
     this.logger?.info(
       { issueNumber: input.issueNumber },
       "symphonika marked issue sym:failed"
     );
+    await this.markIssueNeedsHuman(input);
   }
 
   private async markIssueBlocked(input: {
@@ -3297,12 +3334,14 @@ export class RunController {
         { err, issueNumber: input.issueNumber },
         "symphonika failed to add sym:blocked label; sym:claimed left in place"
       );
+      await this.markIssueNeedsHuman(input);
       return;
     }
     this.logger?.info(
       { issueNumber: input.issueNumber },
       "symphonika marked issue sym:blocked"
     );
+    await this.markIssueNeedsHuman(input);
   }
 
   private async applyTerminalLabels(input: ApplyLabelsInput): Promise<void> {

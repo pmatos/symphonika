@@ -969,6 +969,9 @@ describe("wait state lifecycle", () => {
       expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith(
         expect.objectContaining({ labels: ["sym:blocked"] })
       );
+      expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:human-needed"] })
+      );
     } finally {
       store.close();
     }

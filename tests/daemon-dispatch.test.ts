@@ -737,6 +737,15 @@ describe("daemon dispatch", () => {
             repo: "symphonika",
             token: "secret-token"
           }
+        ],
+        [
+          {
+            issueNumber: 8,
+            labels: ["sym:human-needed"],
+            owner: "pmatos",
+            repo: "symphonika",
+            token: "secret-token"
+          }
         ]
       ]);
       expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith({
@@ -1217,6 +1226,15 @@ describe("daemon dispatch", () => {
           {
             issueNumber: 8,
             labels: ["sym:failed"],
+            owner: "pmatos",
+            repo: "symphonika",
+            token: "secret-token"
+          }
+        ],
+        [
+          {
+            issueNumber: 8,
+            labels: ["sym:human-needed"],
             owner: "pmatos",
             repo: "symphonika",
             token: "secret-token"

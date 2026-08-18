@@ -849,7 +849,7 @@ export async function tryGetIssue(
   return api.getIssue(input);
 }
 
-async function tryGetIssueDependencies(
+export async function tryGetIssueDependencies(
   api: GitHubIssuesApi,
   input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
 ): Promise<Map<number, RawGitHubIssueDependencies> | undefined> {

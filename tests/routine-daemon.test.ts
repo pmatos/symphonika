@@ -44,7 +44,12 @@ afterEach(async () => {
 describe("daemon routine firing", () => {
   it("fires a not-due Routine through the daemon without consuming its scheduled event", async () => {
     const root = await makeTempRoot();
-    const fireAt = new Date(Date.now() + 500).toISOString();
+    // Needs enough headroom past daemon startup (DB open, orphan sweeps, HTTP
+    // listen) for the test to observe the routine still "active" before the
+    // scheduled tick fires it — too short a buffer flakes under CI load
+    // because a late observation races the auto-fire and consumes
+    // "manual-fire" via the scheduled path instead.
+    const fireAt = new Date(Date.now() + 3_000).toISOString();
     await writeRoutineProject(root, fireAt);
     const provider = quietProvider();
     const firingIds = ["manual-fire", "scheduled-fire"];

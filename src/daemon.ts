@@ -1504,6 +1504,7 @@ function projectIssueSnapshotRows(
   projectName: string,
   status: import("./issue-polling.js").IssuePollStatus
 ): Array<{
+  blockedBy: import("./issue-polling.js").RawGitHubIssueDependencyRef[];
   issueNumber: number;
   kind: "candidate" | "filtered";
   labels: string[];
@@ -1514,6 +1515,7 @@ function projectIssueSnapshotRows(
   const candidateRows = status.candidateIssues
     .filter((entry) => entry.project === projectName)
     .map((entry) => ({
+      blockedBy: entry.issue.blockedBy ?? [],
       issueNumber: entry.issue.number,
       kind: "candidate" as const,
       labels: entry.issue.labels,
@@ -1524,6 +1526,7 @@ function projectIssueSnapshotRows(
   const filteredRows = status.filteredIssues
     .filter((entry) => entry.project === projectName)
     .map((entry) => ({
+      blockedBy: entry.issue.blockedBy ?? [],
       issueNumber: entry.issue.number,
       kind: "filtered" as const,
       labels: entry.issue.labels,

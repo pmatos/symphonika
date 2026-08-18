@@ -81,6 +81,7 @@ async function setup(labels: string[]): Promise<TestSetup> {
     projectName: "alpha",
     rows: [
       {
+        blockedBy: [],
         issueNumber: 9,
         kind: "filtered",
         labels,

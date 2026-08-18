@@ -70,6 +70,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
             labels: ["bug"],
@@ -84,6 +85,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "beta",
         rows: [
           {
+            blockedBy: [],
             issueNumber: 2,
             kind: "filtered",
             labels: ["needs-human"],
@@ -121,6 +123,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
             labels: ["bug"],
@@ -129,6 +132,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
             title: "Fix the login flow"
           },
           {
+            blockedBy: [],
             issueNumber: 2,
             kind: "filtered",
             labels: ["needs-human"],
@@ -179,6 +183,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
             labels: [],
@@ -212,6 +217,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
             labels: [],
@@ -247,6 +253,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
             labels: [],
@@ -282,6 +289,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedBy: [],
             issueNumber: 5,
             kind: "filtered",
             labels: ["sym:claimed"],

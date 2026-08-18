@@ -296,6 +296,67 @@ describe("IssuesBulkSelect", () => {
     }
   });
 
+  it("un-checks and un-indeterminates the header after select-all once every row is unchecked again", () => {
+    renderWithServerRows();
+    const selectAll = document.getElementById(
+      "bulk-select-all-checkbox"
+    ) as HTMLInputElement;
+    fireEvent.click(selectAll);
+    expect(selectAll.checked).toBe(true);
+
+    for (const issueNumber of [7, 8]) {
+      const checkbox = document.querySelector<HTMLInputElement>(
+        `.bulk-issue-checkbox[data-issue="${issueNumber}"]`
+      );
+      if (checkbox === null) {
+        throw new Error("checkbox not found");
+      }
+      fireEvent.click(checkbox);
+    }
+    expect(selectAll.checked).toBe(false);
+    expect(selectAll.indeterminate).toBe(false);
+  });
+
+  it("marks the header checkbox indeterminate after select-all then unchecking one row, instead of leaving it checked", () => {
+    renderWithServerRows();
+    const selectAll = document.getElementById(
+      "bulk-select-all-checkbox"
+    ) as HTMLInputElement;
+    fireEvent.click(selectAll);
+    expect(selectAll.checked).toBe(true);
+
+    const rowSeven = document.querySelector<HTMLInputElement>(
+      '.bulk-issue-checkbox[data-issue="7"]'
+    );
+    if (rowSeven === null) {
+      throw new Error("checkbox not found");
+    }
+    fireEvent.click(rowSeven);
+
+    expect(selectAll.checked).toBe(false);
+    expect(selectAll.indeterminate).toBe(true);
+  });
+
+  it("marks the header checked (not indeterminate) once every row is checked individually", () => {
+    renderWithServerRows();
+    const selectAll = document.getElementById(
+      "bulk-select-all-checkbox"
+    ) as HTMLInputElement;
+
+    for (const issueNumber of [7, 8]) {
+      const checkbox = document.querySelector<HTMLInputElement>(
+        `.bulk-issue-checkbox[data-issue="${issueNumber}"]`
+      );
+      if (checkbox === null) {
+        throw new Error("checkbox not found");
+      }
+      fireEvent.click(checkbox);
+    }
+
+    expect(selectAll.checked).toBe(true);
+    expect(selectAll.indeterminate).toBe(false);
+  });
+
   it("preserves a label containing a comma as one label instead of splitting it", async () => {
     renderWithServerRows();
     const fetchMock = vi

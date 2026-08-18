@@ -30,6 +30,33 @@ function issueKey(projectName: string, issueNumber: number): string {
   return JSON.stringify([projectName, issueNumber]);
 }
 
+// The header checkbox's `checked`/`indeterminate` are native, uncontrolled
+// DOM state -- an individual row toggle only updates `selected`, so without
+// this the header stays stuck at whatever it last was, even once
+// selection is empty, partial, or complete again. Read directly off the
+// server-rendered row checkboxes (not React state), since the browser has
+// already applied the native checked change by the time this runs.
+function syncSelectAllCheckbox(): void {
+  const selectAll = document.getElementById(
+    "bulk-select-all-checkbox"
+  ) as HTMLInputElement | null;
+  if (selectAll === null) {
+    return;
+  }
+  const rowCheckboxes = document.querySelectorAll<HTMLInputElement>(
+    ".bulk-issue-checkbox"
+  );
+  const total = rowCheckboxes.length;
+  let checkedCount = 0;
+  for (const checkbox of rowCheckboxes) {
+    if (checkbox.checked) {
+      checkedCount += 1;
+    }
+  }
+  selectAll.checked = total > 0 && checkedCount === total;
+  selectAll.indeterminate = checkedCount > 0 && checkedCount < total;
+}
+
 // Committed chips plus whatever's still sitting in the input, deduplicated.
 // GitHub label names are unconstrained -- a delimiter-joined text field
 // can't unambiguously represent a label containing that delimiter (e.g.
@@ -119,6 +146,7 @@ export function IssuesBulkSelect() {
         }
         return next;
       });
+      syncSelectAllCheckbox();
     }
     document.addEventListener("change", handleChange);
     return () => document.removeEventListener("change", handleChange);

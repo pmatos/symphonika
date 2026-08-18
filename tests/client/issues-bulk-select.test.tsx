@@ -422,6 +422,93 @@ describe("IssuesBulkSelect", () => {
     expect(body.addLabels).toEqual(["agent-ready", "needs-triage"]);
   });
 
+  it("discards a bulk-apply response that resolves after the selection has moved on", async () => {
+    renderWithServerRows();
+    let resolveFetch!: (response: Response) => void;
+    const fetchMock = vi.fn().mockReturnValue(
+      new Promise<Response>((resolve) => {
+        resolveFetch = resolve;
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const checkbox7 = document.querySelector<HTMLInputElement>(
+      '.bulk-issue-checkbox[data-issue="7"]'
+    );
+    if (checkbox7 === null) {
+      throw new Error("checkbox not found");
+    }
+    fireEvent.click(checkbox7);
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    // Selection moves on to a different issue while the request is still
+    // in flight, before the stale response ever resolves.
+    fireEvent.click(checkbox7);
+    const checkbox8 = document.querySelector<HTMLInputElement>(
+      '.bulk-issue-checkbox[data-issue="8"]'
+    );
+    if (checkbox8 === null) {
+      throw new Error("checkbox not found");
+    }
+    fireEvent.click(checkbox8);
+
+    resolveFetch(
+      new Response(
+        JSON.stringify({
+          results: [{ issueNumber: 7, ok: true, projectName: "alpha" }]
+        })
+      )
+    );
+
+    await vi.waitFor(() => {
+      expect(
+        screen.getByRole<HTMLButtonElement>("button", { name: "Apply" })
+          .disabled
+      ).toBe(false);
+    });
+    expect(document.querySelector(".bulk-select-results")).toBeNull();
+  });
+
+  it("clears results once the selection drops to zero, so they don't reappear when a different issue is selected", async () => {
+    renderWithServerRows();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            results: [{ issueNumber: 7, ok: true, projectName: "alpha" }]
+          })
+        )
+      )
+    );
+
+    const checkbox7 = document.querySelector<HTMLInputElement>(
+      '.bulk-issue-checkbox[data-issue="7"]'
+    );
+    if (checkbox7 === null) {
+      throw new Error("checkbox not found");
+    }
+    fireEvent.click(checkbox7);
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(await screen.findByText(/alpha#7: ok/)).toBeDefined();
+
+    fireEvent.click(checkbox7);
+
+    const checkbox8 = document.querySelector<HTMLInputElement>(
+      '.bulk-issue-checkbox[data-issue="8"]'
+    );
+    if (checkbox8 === null) {
+      throw new Error("checkbox not found");
+    }
+    fireEvent.click(checkbox8);
+
+    expect(document.querySelector(".bulk-select-results")).toBeNull();
+  });
+
   it("removes a committed chip when its remove button is clicked", () => {
     renderWithServerRows();
     const checkbox = document.querySelector<HTMLInputElement>(

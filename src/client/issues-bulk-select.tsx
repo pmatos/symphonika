@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type BulkSelectIssueData = {
   issueNumber: number;
@@ -93,6 +93,18 @@ export function IssuesBulkSelect() {
   const [results, setResults] = useState<BulkLabelResult[] | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // Bumped whenever the selection changes -- including a drop to zero,
+  // where the component just renders null rather than unmounting, so its
+  // state (and any in-flight request) survives. Read back by handleApply
+  // before committing a response, so a request whose selection has since
+  // moved on can never overwrite results/errors for the current selection.
+  const requestIdRef = useRef(0);
+
+  useEffect(() => {
+    requestIdRef.current += 1;
+    setResults(null);
+    setApplyError(null);
+  }, [selected]);
 
   useEffect(() => {
     function handleChange(event: Event): void {
@@ -171,6 +183,8 @@ export function IssuesBulkSelect() {
   const operations = Array.from(selected.values());
 
   async function handleApply(): Promise<void> {
+    requestIdRef.current += 1;
+    const requestId = requestIdRef.current;
     const addLabels = labelsWithPendingInput(addLabelChips, addLabelInput);
     const removeLabels = labelsWithPendingInput(
       removeLabelChips,
@@ -190,6 +204,12 @@ export function IssuesBulkSelect() {
       });
       const body = (await response.json()) as
         { error: string } | { results: BulkLabelResult[] };
+      if (requestIdRef.current !== requestId) {
+        // The selection has changed (or a newer Apply superseded this one)
+        // since this request was sent -- discard a response that no
+        // longer describes the current selection.
+        return;
+      }
       if (!response.ok || !("results" in body)) {
         setApplyError(
           "error" in body ? body.error : "the bulk-label request failed"
@@ -200,7 +220,9 @@ export function IssuesBulkSelect() {
     } catch {
       // A network failure or a non-JSON body -- request failed outright,
       // as distinct from the server responding with a JSON {error}.
-      setApplyError("request failed -- check the network and try again");
+      if (requestIdRef.current === requestId) {
+        setApplyError("request failed -- check the network and try again");
+      }
     } finally {
       setSubmitting(false);
     }

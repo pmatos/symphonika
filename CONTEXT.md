@@ -79,7 +79,7 @@ its workflow meaning.
 _Avoid_: operational label
 
 **Operational Label**:
-A GitHub issue label owned by the orchestrator for dispatch safety and runtime bookkeeping; v1 labels are `sym:claimed`, `sym:running`, `sym:failed`, `sym:blocked`, and `sym:stale`.
+A GitHub issue label owned by the orchestrator for dispatch safety and runtime bookkeeping; v1 labels are `sym:claimed`, `sym:running`, `sym:failed`, `sym:blocked`, `sym:stale`, and `sym:human-needed`.
 _Avoid_: workflow label
 
 **Workflow Label**:

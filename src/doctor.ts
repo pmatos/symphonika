@@ -224,6 +224,11 @@ const OPERATIONAL_LABEL_DESCRIPTIONS: Record<
     color: "d73a4a",
     description: "A Symphonika run reached a deterministic failed state."
   },
+  "sym:human-needed": {
+    color: "b60205",
+    description:
+      "A Symphonika run hit a terminal state that needs human attention."
+  },
   "sym:running": {
     color: "0e8a16",
     description: "A Symphonika coding-agent run is currently active."

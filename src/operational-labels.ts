@@ -3,5 +3,6 @@ export const REQUIRED_OPERATIONAL_LABELS = [
   "sym:running",
   "sym:failed",
   "sym:blocked",
-  "sym:stale"
+  "sym:stale",
+  "sym:human-needed"
 ] as const;

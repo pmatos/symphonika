@@ -423,6 +423,57 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
     }
   });
 
+  it("renders the blocked pill for an issue that is both missing its required label and blocked by an open dependency", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-08-18T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedByTruncated: false,
+            blockedBy: [
+              {
+                number: 301,
+                owner: "pmatos",
+                repo: "symphonika",
+                state: "OPEN",
+                title: "sibling slice"
+              }
+            ],
+            issueNumber: 299,
+            kind: "filtered",
+            labels: [],
+            priority: 1,
+            reasons: [
+              "missing required label agent-ready",
+              "blocked by open dependency #301"
+            ],
+            title: "Not yet labeled and blocked"
+          }
+        ]
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues")).text();
+
+      expect(html).toContain(
+        "filtered: missing agent-ready; blocked: dependency #301 open"
+      );
+      expect(html).toContain("pill pill--blocked");
+      expect(html).not.toContain("pill pill--neutral");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("marks a truncated dependency fetch as having more blockers than shown, even when every fetched blocker is closed", async () => {
     const test = await setup();
     try {

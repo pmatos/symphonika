@@ -16,6 +16,7 @@ import type {
 import {
   evaluateProjectEligibility,
   tryGetIssue,
+  tryGetIssueDependencies,
   tryGetPullRequestFollowupState,
   tryMergePullRequest
 } from "../issue-polling.js";
@@ -3791,7 +3792,36 @@ export class RunController {
     if (raw === null) {
       return null;
     }
-    return normalizeRawIssue(raw, input.project);
+    const snapshot = normalizeRawIssue(raw, input.project);
+    // Refreshed snapshots feed evaluateProjectEligibility (the same
+    // dependency gate the poll loop enforces) before executeRetry /
+    // executeContinuation re-assert their claim -- without this,
+    // blockedBy/blockedByTruncated stay undefined here, so `?? []` reads
+    // as "no blockers" and a dependency added mid-run never stops the
+    // retry/continuation. Fail closed (return undefined, which every
+    // caller already treats as "drop the scheduled work") on a fetch
+    // error, matching the poll loop's own fail-the-whole-poll stance.
+    let dependencies;
+    try {
+      dependencies = await tryGetIssueDependencies(this.githubIssuesApi, {
+        issueNumbers: [input.issueNumber],
+        owner: input.repository.owner,
+        repo: input.repository.repo,
+        token: input.repository.token
+      });
+    } catch (error) {
+      this.logger?.warn(
+        { err: error },
+        "symphonika continuation dependency refresh failed"
+      );
+      return undefined;
+    }
+    const issueDependencies = dependencies?.get(input.issueNumber);
+    if (issueDependencies !== undefined) {
+      snapshot.blockedBy = issueDependencies.blockedBy;
+      snapshot.blockedByTruncated = issueDependencies.truncated;
+    }
+    return snapshot;
   }
 
   private async bestEffort(

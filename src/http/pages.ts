@@ -1746,6 +1746,7 @@ export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/routines/:name", (context) => {
     const name = context.req.param("name");
     const projectParam = context.req.query("project");
+    const fireNotice = renderFireResultNotice(context);
     const resolved = resolveNamedRoutineGroup(
       options.runStore,
       name,
@@ -1757,16 +1758,20 @@ export function registerPages(options: RegisterPagesOptions): void {
           projectParam === undefined
             ? "Routine not found"
             : "Routine target not found",
-          projectParam === undefined
-            ? `<h1 class="page-title">Routine not found</h1><p class="lede">Routine <code>${escapeHtml(name)}</code> was not found.</p>`
-            : `<h1 class="page-title">Routine target not found</h1><p class="lede">Routine <code>${escapeHtml(name)}</code> has no target in Project <code>${escapeHtml(projectParam)}</code>.</p>`
+          fireNotice +
+            (projectParam === undefined
+              ? `<h1 class="page-title">Routine not found</h1><p class="lede">Routine <code>${escapeHtml(name)}</code> was not found.</p>`
+              : `<h1 class="page-title">Routine target not found</h1><p class="lede">Routine <code>${escapeHtml(name)}</code> has no target in Project <code>${escapeHtml(projectParam)}</code>.</p>`)
         ),
         404
       );
     }
     if (resolved.kind === "ambiguous") {
       return context.html(
-        layout(name, renderRoutineDisambiguation(name, resolved.groups))
+        layout(
+          name,
+          fireNotice + renderRoutineDisambiguation(name, resolved.groups)
+        )
       );
     }
     const { group } = resolved;
@@ -1797,6 +1802,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     const html = layout(
       name,
       [
+        fireNotice,
         `<h1 class="page-title">${escapeHtml(name)}</h1>`,
         renderRoutineDeclarationCard(declaration, reloadErrors),
         renderRoutineTargetsTable(group),
@@ -1808,7 +1814,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           projectParam,
           lifecycleCsrfToken
         ),
-        `<p class="note">Manual-fire controls land with a later slice.</p>`
+        renderRoutineFireControls(name, group, projectParam, lifecycleCsrfToken)
       ].join("")
     );
     return context.html(html);
@@ -4870,6 +4876,89 @@ function renderRoutineLifecycleControls(
     return "";
   }
   return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/disable">${csrfField}${projectField}<button class="btn" type="submit">Disable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
+}
+
+// #469: fire-now posts straight at /api/routines/:id/fire (ADR 0075),
+// mirroring /api/runs/:id/cancel's form/JSON duality rather than
+// disable/enable's diff-preview route -- firing isn't a declaration edit,
+// so there's no diff to confirm. One button per target, since
+// fireRoutineNow requires an unambiguous (routineName, projectName) pair
+// once a Routine fans out to more than one Project (ADR 0069).
+function renderRoutineFireControls(
+  name: string,
+  group: RoutineGroup,
+  projectParam: string | undefined,
+  csrfToken: string
+): string {
+  const targets = group.targets.filter(
+    (target) => target.disabledReason !== "removed_from_config"
+  );
+  if (targets.length === 0) {
+    return "";
+  }
+  const projectField =
+    projectParam === undefined
+      ? ""
+      : `<input type="hidden" name="project_param" value="${escapeHtml(projectParam)}">`;
+  const csrfField = `<input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}">`;
+  const buttons = targets
+    .map((target) => {
+      const label =
+        targets.length > 1
+          ? `Fire now — ${escapeHtml(target.projectName)}`
+          : "Fire now";
+      return `<form method="post" action="/api/routines/${encodeURIComponent(name)}/fire?project=${encodeURIComponent(target.projectName)}">${csrfField}${projectField}<button class="btn" type="submit">${label}</button></form>`;
+    })
+    .join("");
+  return `<section>${buttons}<p class="note">Fires target the routine's last reloaded declaration, not any pending edit (#364).</p></section>`;
+}
+
+const FIRE_REFUSAL_REASON_TEXT: Readonly<Record<string, string>> = {
+  concurrency_cap: "the concurrency cap for this Project is currently reached",
+  daemon_shutdown: "the daemon is shutting down",
+  disabled: "the routine is disabled",
+  expired: "the routine's schedule has expired",
+  inactive: "the target Project is inactive",
+  invalid: "the routine declaration is invalid",
+  overlap: "a firing for this Routine/Project is already in progress",
+  self_update_draining:
+    "a self-update is draining in-flight work before cutover"
+};
+
+// #469 AC: refused (with reason), ambiguous, and not_found/unavailable
+// must render as legible page state, not a raw JSON error -- the fire
+// route redirects here with the outcome flattened into query params
+// (POST has no response body of its own to render). Whitelisted against
+// known literals rather than reflected verbatim, since these are
+// attacker-reachable query params on an otherwise-unauthenticated GET.
+function renderFireResultNotice(context: Context): string {
+  const kind = context.req.query("fire");
+  if (kind === undefined) {
+    return "";
+  }
+  const projectName = context.req.query("fire_project");
+  const projectSuffix =
+    projectName === undefined ? "" : ` for Project ${escapeHtml(projectName)}`;
+  switch (kind) {
+    case "accepted":
+      return `<div class="alert alert--ok" role="status"><strong>Fire accepted</strong><p>Firing queued${projectSuffix}.</p></div>`;
+    case "refused": {
+      const reason = context.req.query("fire_reason");
+      const reasonText =
+        reason !== undefined && Object.hasOwn(FIRE_REFUSAL_REASON_TEXT, reason)
+          ? FIRE_REFUSAL_REASON_TEXT[reason]
+          : "the routine is not currently eligible to fire";
+      return `<div class="alert" role="alert"><strong>Fire refused</strong><p>Refused${projectSuffix}: ${escapeHtml(reasonText ?? "")}.</p></div>`;
+    }
+    case "not_found":
+      return `<div class="alert" role="alert"><strong>Fire target not found</strong><p>No matching Routine target${projectSuffix}.</p></div>`;
+    case "ambiguous":
+      return `<div class="alert" role="alert"><strong>Fire request was ambiguous</strong><p>Specify a Project to disambiguate.</p></div>`;
+    case "unavailable":
+      return `<div class="alert" role="alert"><strong>Manual firing unavailable</strong><p>The daemon does not support manual firing right now.</p></div>`;
+    default:
+      return "";
+  }
 }
 
 function renderRoutineTargetsTable(group: RoutineGroup): string {

@@ -120,6 +120,24 @@ describe("GET /issues/graph", () => {
     }
   });
 
+  it("styles the cytoscape mount with a nonzero height so it isn't invisible once the fallback is hidden", async () => {
+    const test = await setup();
+    try {
+      const app = makeApp(test);
+      const response = await app.request("/issues/graph");
+      const html = await response.text();
+
+      const styles = Array.from(html.matchAll(/<style>([\s\S]*?)<\/style>/g))
+        .map((match) => match[1])
+        .join("\n");
+      expect(styles).toMatch(
+        /\.deps-graph-canvas\s*\{[^}]*(?:height|min-height)\s*:/
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("filters to the requested project and ignores an unknown project name", async () => {
     const test = await setup();
     try {

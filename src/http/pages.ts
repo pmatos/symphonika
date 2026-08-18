@@ -3951,11 +3951,24 @@ function renderIssueDependencyGraphPage(input: {
 </form>`;
   const fallback = renderIssueDependencyGraphFallback(input.issues);
   const mount = `<div id="issues-deps-graph-fallback">${fallback}</div>
+<style>${DEPS_GRAPH_STYLES}</style>
 <div id="issues-deps-graph-root"></div>
 <script>window.__ISSUE_DEPS_GRAPH__ = ${escapeJsonForInlineScript({ issues: input.issues })};</script>
 <script src="/assets/issues-deps-graph.js"></script>`;
   return `<h1 class="page-title">Issue dependency graph</h1><p class="note"><a href="/issues">&larr; back to triage</a></p>${filterForm}${mount}`;
 }
+
+// Without an explicit height, .deps-graph-canvas is an empty block with no
+// content until cytoscape populates it -- it computes to zero height, so
+// IssuesDepsGraphView's cytoscape instance would mount into an invisible
+// container right before hideFallback() removes the only visible content.
+// Mirrors WORKFLOW_GRAPH_STYLES's #wf-cy sizing for the pre-existing
+// /runs/:id/graph cytoscape view.
+const DEPS_GRAPH_STYLES = `
+.deps-graph-wrap { display:flex; gap:1rem; align-items:stretch; }
+.deps-graph-canvas { flex:1 1 auto; height:80vh; min-height:520px; border:1px solid #e2e8f0; border-radius:10px; }
+.deps-graph-detail { flex:0 0 320px; border:1px solid #e2e8f0; border-radius:10px; padding:.8rem .9rem; }
+`;
 
 // #308 part 2: orchestrator-owned labels (ADR 0002/0024) render as read-only
 // evidence of dispatch state, never as something the triage UI can add or

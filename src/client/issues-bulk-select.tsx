@@ -20,8 +20,14 @@ declare global {
 
 const SYM_LABEL_PREFIX = "sym:";
 
+// Project names are unconstrained (`z.string().trim().min(1)` in
+// src/doctor.ts), so any delimiter-joined string risks two different
+// (projectName, issueNumber) pairs colliding on the same key. JSON-encoding
+// the pair is unambiguous by construction -- selection state stores the
+// structured pair as the map's value, so this key is only ever used as an
+// opaque lookup/dedup token, never split back apart.
 function issueKey(projectName: string, issueNumber: number): string {
-  return `${projectName}:${issueNumber}`;
+  return JSON.stringify([projectName, issueNumber]);
 }
 
 function parseLabelList(value: string): string[] {
@@ -38,7 +44,9 @@ function parseLabelList(value: string): string[] {
 export function IssuesBulkSelect() {
   const issues = window.__ISSUES__ ?? [];
   const csrfToken = window.__CSRF_TOKEN__ ?? "";
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<
+    Map<string, { issueNumber: number; projectName: string }>
+  >(new Map());
   const [addLabelsText, setAddLabelsText] = useState("");
   const [removeLabelsText, setRemoveLabelsText] = useState("");
   const [results, setResults] = useState<BulkLabelResult[] | null>(null);
@@ -55,7 +63,10 @@ export function IssuesBulkSelect() {
         const rowCheckboxes = document.querySelectorAll<HTMLInputElement>(
           ".bulk-issue-checkbox"
         );
-        const next = new Set<string>();
+        const next = new Map<
+          string,
+          { issueNumber: number; projectName: string }
+        >();
         for (const checkbox of rowCheckboxes) {
           checkbox.checked = target.checked;
           const projectName = checkbox.dataset.project;
@@ -65,7 +76,11 @@ export function IssuesBulkSelect() {
             projectName !== undefined &&
             issueNumberRaw !== undefined
           ) {
-            next.add(issueKey(projectName, Number(issueNumberRaw)));
+            const issueNumber = Number(issueNumberRaw);
+            next.set(issueKey(projectName, issueNumber), {
+              issueNumber,
+              projectName
+            });
           }
         }
         setSelected(next);
@@ -79,11 +94,12 @@ export function IssuesBulkSelect() {
       if (projectName === undefined || issueNumberRaw === undefined) {
         return;
       }
-      const key = issueKey(projectName, Number(issueNumberRaw));
+      const issueNumber = Number(issueNumberRaw);
+      const key = issueKey(projectName, issueNumber);
       setSelected((previous) => {
-        const next = new Set(previous);
+        const next = new Map(previous);
         if (target.checked) {
-          next.add(key);
+          next.set(key, { issueNumber, projectName });
         } else {
           next.delete(key);
         }
@@ -110,10 +126,7 @@ export function IssuesBulkSelect() {
     return null;
   }
 
-  const operations = Array.from(selected).map((key) => {
-    const [projectName, issueNumberText] = key.split(":");
-    return { issueNumber: Number(issueNumberText), projectName };
-  });
+  const operations = Array.from(selected.values());
 
   async function handleApply(): Promise<void> {
     const addLabels = parseLabelList(addLabelsText);

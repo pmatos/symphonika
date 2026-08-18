@@ -229,6 +229,57 @@ describe("IssuesBulkSelect", () => {
     expect(await screen.findByText(/request failed/i)).toBeDefined();
   });
 
+  it("preserves a project name containing a colon when building the request", async () => {
+    document.body.innerHTML = `
+      <div id="issues-bulk-root"></div>
+      <table>
+        <tbody>
+          <tr><td><input type="checkbox" class="bulk-issue-checkbox" data-project="team:alpha" data-issue="7"></td></tr>
+        </tbody>
+      </table>
+    `;
+    window.__ISSUES__ = [
+      {
+        issueNumber: 7,
+        labels: [],
+        projectName: "team:alpha",
+        title: "Colon in project name"
+      }
+    ];
+    window.__CSRF_TOKEN__ = "test-token";
+    render(<IssuesBulkSelect />, {
+      container: document.getElementById("issues-bulk-root") ?? undefined
+    });
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ results: [] })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const checkbox = document.querySelector<HTMLInputElement>(
+      '.bulk-issue-checkbox[data-issue="7"]'
+    );
+    if (checkbox === null) {
+      throw new Error("checkbox not found");
+    }
+    fireEvent.click(checkbox);
+    fireEvent.change(screen.getByLabelText("Add labels"), {
+      target: { value: "agent-ready" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+    const [, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(requestInit.body as string) as {
+      operations: Array<{ issueNumber: number; projectName: string }>;
+    };
+    expect(body.operations).toEqual([
+      { issueNumber: 7, projectName: "team:alpha" }
+    ]);
+  });
+
   it("selects every row when the header select-all checkbox is checked", () => {
     renderWithServerRows();
     const selectAll = document.getElementById(

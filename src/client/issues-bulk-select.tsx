@@ -114,7 +114,7 @@ export function IssuesBulkSelect() {
     const labels = new Set<string>();
     for (const issue of issues) {
       for (const label of issue.labels) {
-        if (!label.startsWith(SYM_LABEL_PREFIX)) {
+        if (!label.toLowerCase().startsWith(SYM_LABEL_PREFIX)) {
           labels.add(label);
         }
       }

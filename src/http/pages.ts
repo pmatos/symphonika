@@ -3717,8 +3717,13 @@ window.__CSRF_TOKEN__ = ${escapeJsonForInlineScript(input.csrfToken)};</script>
 // 0077 documents. Enforced server-side here, not just hidden client-side.
 const SYM_LABEL_PREFIX = "sym:";
 
+// GitHub label names are matched case-insensitively (two labels differing
+// only by case can't coexist in one repo), so a case-sensitive prefix check
+// alone lets a caller-submitted "SYM:claimed" bypass this guard while still
+// resolving to the real orchestrator-owned sym:claimed label on GitHub's
+// side.
 function isOrchestratorLabel(label: string): boolean {
-  return label.startsWith(SYM_LABEL_PREFIX);
+  return label.toLowerCase().startsWith(SYM_LABEL_PREFIX);
 }
 
 type BulkIssueLabelResult =

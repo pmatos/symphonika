@@ -120,6 +120,41 @@ describe("POST /api/issues/bulk-labels", () => {
     }
   });
 
+  it("rejects a case-variant sym:* label (e.g. SYM:claimed) with 400, since GitHub matches label names case-insensitively", async () => {
+    const test = await setup();
+    try {
+      let called = false;
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0",
+        writeIssueLabels: () => {
+          called = true;
+          return Promise.resolve({ ok: true });
+        }
+      });
+      const response = await app.request("/api/issues/bulk-labels", {
+        body: JSON.stringify({
+          addLabels: [],
+          operations: [{ issueNumber: 7, projectName: "alpha" }],
+          removeLabels: ["SYM:claimed"]
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/json"
+        },
+        method: "POST"
+      });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("managed by Symphonika");
+      expect(called).toBe(false);
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("rejects an empty operations list with 400", async () => {
     const test = await setup();
     try {

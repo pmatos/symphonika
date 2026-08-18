@@ -30,11 +30,23 @@ function issueKey(projectName: string, issueNumber: number): string {
   return JSON.stringify([projectName, issueNumber]);
 }
 
-function parseLabelList(value: string): string[] {
-  return value
-    .split(",")
-    .map((label) => label.trim())
-    .filter((label) => label.length > 0);
+// Committed chips plus whatever's still sitting in the input, deduplicated.
+// GitHub label names are unconstrained -- a delimiter-joined text field
+// can't unambiguously represent a label containing that delimiter (e.g.
+// "needs,review" with a comma-separated field), so each label is committed
+// as one atomic chip (via Enter) instead of being parsed apart from a
+// single string. Any text still in the field when Apply is clicked is
+// treated as one more chip, so a single label doesn't require pressing
+// Enter first.
+function labelsWithPendingInput(
+  chips: string[],
+  pendingInput: string
+): string[] {
+  const trimmed = pendingInput.trim();
+  if (trimmed.length === 0 || chips.includes(trimmed)) {
+    return chips;
+  }
+  return [...chips, trimmed];
 }
 
 // Owns selection/toolbar/bulk-form state, but never re-renders the
@@ -47,8 +59,10 @@ export function IssuesBulkSelect() {
   const [selected, setSelected] = useState<
     Map<string, { issueNumber: number; projectName: string }>
   >(new Map());
-  const [addLabelsText, setAddLabelsText] = useState("");
-  const [removeLabelsText, setRemoveLabelsText] = useState("");
+  const [addLabelChips, setAddLabelChips] = useState<string[]>([]);
+  const [addLabelInput, setAddLabelInput] = useState("");
+  const [removeLabelChips, setRemoveLabelChips] = useState<string[]>([]);
+  const [removeLabelInput, setRemoveLabelInput] = useState("");
   const [results, setResults] = useState<BulkLabelResult[] | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -129,8 +143,11 @@ export function IssuesBulkSelect() {
   const operations = Array.from(selected.values());
 
   async function handleApply(): Promise<void> {
-    const addLabels = parseLabelList(addLabelsText);
-    const removeLabels = parseLabelList(removeLabelsText);
+    const addLabels = labelsWithPendingInput(addLabelChips, addLabelInput);
+    const removeLabels = labelsWithPendingInput(
+      removeLabelChips,
+      removeLabelInput
+    );
     setSubmitting(true);
     setResults(null);
     setApplyError(null);
@@ -166,18 +183,74 @@ export function IssuesBulkSelect() {
       <span>{selected.size} selected</span>
       <label>
         Add labels
+        <ul className="bulk-select-chips">
+          {addLabelChips.map((label) => (
+            <li key={label}>
+              {label}
+              <button
+                aria-label={`Remove ${label}`}
+                onClick={() =>
+                  setAddLabelChips(
+                    addLabelChips.filter((chip) => chip !== label)
+                  )
+                }
+                type="button"
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
         <input
           list="bulk-known-labels"
-          onChange={(event) => setAddLabelsText(event.target.value)}
-          value={addLabelsText}
+          onChange={(event) => setAddLabelInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") {
+              return;
+            }
+            event.preventDefault();
+            setAddLabelChips(
+              labelsWithPendingInput(addLabelChips, addLabelInput)
+            );
+            setAddLabelInput("");
+          }}
+          value={addLabelInput}
         />
       </label>
       <label>
         Remove labels
+        <ul className="bulk-select-chips">
+          {removeLabelChips.map((label) => (
+            <li key={label}>
+              {label}
+              <button
+                aria-label={`Remove ${label}`}
+                onClick={() =>
+                  setRemoveLabelChips(
+                    removeLabelChips.filter((chip) => chip !== label)
+                  )
+                }
+                type="button"
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
         <input
           list="bulk-known-labels"
-          onChange={(event) => setRemoveLabelsText(event.target.value)}
-          value={removeLabelsText}
+          onChange={(event) => setRemoveLabelInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") {
+              return;
+            }
+            event.preventDefault();
+            setRemoveLabelChips(
+              labelsWithPendingInput(removeLabelChips, removeLabelInput)
+            );
+            setRemoveLabelInput("");
+          }}
+          value={removeLabelInput}
         />
       </label>
       <datalist id="bulk-known-labels">

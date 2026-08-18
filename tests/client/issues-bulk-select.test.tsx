@@ -295,4 +295,88 @@ describe("IssuesBulkSelect", () => {
       expect(checkbox.checked).toBe(true);
     }
   });
+
+  it("preserves a label containing a comma as one label instead of splitting it", async () => {
+    renderWithServerRows();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ results: [] })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const checkbox = document.querySelector<HTMLInputElement>(
+      '.bulk-issue-checkbox[data-issue="7"]'
+    );
+    if (checkbox === null) {
+      throw new Error("checkbox not found");
+    }
+    fireEvent.click(checkbox);
+    fireEvent.change(screen.getByLabelText("Add labels"), {
+      target: { value: "needs,review" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+    const [, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(requestInit.body as string) as {
+      addLabels: string[];
+    };
+    expect(body.addLabels).toEqual(["needs,review"]);
+  });
+
+  it("commits a label as a chip on Enter, allowing several labels to be added in one request", async () => {
+    renderWithServerRows();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ results: [] })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const checkbox = document.querySelector<HTMLInputElement>(
+      '.bulk-issue-checkbox[data-issue="7"]'
+    );
+    if (checkbox === null) {
+      throw new Error("checkbox not found");
+    }
+    fireEvent.click(checkbox);
+
+    const addInput = screen.getByLabelText("Add labels");
+    fireEvent.change(addInput, { target: { value: "agent-ready" } });
+    fireEvent.keyDown(addInput, { key: "Enter" });
+    fireEvent.change(addInput, { target: { value: "needs-triage" } });
+    fireEvent.keyDown(addInput, { key: "Enter" });
+
+    expect(screen.getByText("agent-ready")).toBeDefined();
+    expect(screen.getByText("needs-triage")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+    const [, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(requestInit.body as string) as {
+      addLabels: string[];
+    };
+    expect(body.addLabels).toEqual(["agent-ready", "needs-triage"]);
+  });
+
+  it("removes a committed chip when its remove button is clicked", () => {
+    renderWithServerRows();
+    const checkbox = document.querySelector<HTMLInputElement>(
+      '.bulk-issue-checkbox[data-issue="7"]'
+    );
+    if (checkbox === null) {
+      throw new Error("checkbox not found");
+    }
+    fireEvent.click(checkbox);
+
+    const addInput = screen.getByLabelText("Add labels");
+    fireEvent.change(addInput, { target: { value: "agent-ready" } });
+    fireEvent.keyDown(addInput, { key: "Enter" });
+    expect(screen.getByText("agent-ready")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove agent-ready" }));
+    expect(screen.queryByText("agent-ready")).toBeNull();
+  });
 });

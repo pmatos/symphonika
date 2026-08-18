@@ -159,6 +159,21 @@ describe("downloadAndVerify", () => {
 });
 
 describe("stageExtractedRelease", () => {
+  // release.yml's real package.json ships a `prepare: npm run build`
+  // script that npm ci always runs; a fake extractTarball that writes one
+  // out lets these tests exercise the same stripPackageScripts step a real
+  // extraction would hit, instead of masking it.
+  function writeStagedPackageJson(destDir: string): Promise<void> {
+    return writeFile(
+      path.join(destDir, "package.json"),
+      JSON.stringify({
+        name: "symphonika",
+        version: "1.2.3",
+        scripts: { prepare: "npm run build" }
+      })
+    );
+  }
+
   it("wipes any pre-existing staging directory, extracts, then runs npm ci", async () => {
     const installParentDir = await makeTempRoot();
     const stagingPath = path.join(installParentDir, stagingDirName("1.2.3"));
@@ -170,9 +185,9 @@ describe("stageExtractedRelease", () => {
       archivePath: "/tmp/archive.tar.gz",
       version: "1.2.3",
       installParentDir,
-      extractTarball: (input) => {
+      extractTarball: async (input) => {
         calls.push(`extract:${input.archivePath}:${input.destDir}`);
-        return Promise.resolve();
+        await writeStagedPackageJson(input.destDir);
       },
       runNpmCi: (cwd) => {
         calls.push(`npmci:${cwd}`);
@@ -188,6 +203,31 @@ describe("stageExtractedRelease", () => {
     await expect(
       readFile(path.join(stagingPath, "stale-leftover.txt"))
     ).rejects.toThrow();
+  });
+
+  it("strips the scripts block from the staged package.json before running npm ci", async () => {
+    const installParentDir = await makeTempRoot();
+    const stagingPath = path.join(installParentDir, stagingDirName("1.2.3"));
+    let packageJsonAtNpmCiTime = "";
+
+    const result = await stageExtractedRelease({
+      archivePath: "/tmp/archive.tar.gz",
+      version: "1.2.3",
+      installParentDir,
+      extractTarball: (input) => writeStagedPackageJson(input.destDir),
+      runNpmCi: async (cwd) => {
+        packageJsonAtNpmCiTime = await readFile(
+          path.join(cwd, "package.json"),
+          "utf8"
+        );
+      }
+    });
+
+    expect(result.kind).toBe("staged");
+    expect(JSON.parse(packageJsonAtNpmCiTime)).not.toHaveProperty("scripts");
+    expect(
+      JSON.parse(await readFile(path.join(stagingPath, "package.json"), "utf8"))
+    ).toEqual({ name: "symphonika", version: "1.2.3" });
   });
 
   it("returns an error and never runs npm ci when extraction fails", async () => {
@@ -206,6 +246,25 @@ describe("stageExtractedRelease", () => {
     expect(runNpmCi).not.toHaveBeenCalled();
   });
 
+  it("returns an error when the staged tree has no package.json to strip", async () => {
+    const installParentDir = await makeTempRoot();
+    const runNpmCi = vi.fn();
+
+    const result = await stageExtractedRelease({
+      archivePath: "/tmp/archive.tar.gz",
+      version: "1.2.3",
+      installParentDir,
+      extractTarball: () => Promise.resolve(),
+      runNpmCi
+    });
+
+    expect(result.kind).toBe("error");
+    expect((result as { error: string }).error).toContain(
+      "stripping package.json scripts failed"
+    );
+    expect(runNpmCi).not.toHaveBeenCalled();
+  });
+
   it("returns an error when npm ci fails", async () => {
     const installParentDir = await makeTempRoot();
 
@@ -213,7 +272,7 @@ describe("stageExtractedRelease", () => {
       archivePath: "/tmp/archive.tar.gz",
       version: "1.2.3",
       installParentDir,
-      extractTarball: () => Promise.resolve(),
+      extractTarball: (input) => writeStagedPackageJson(input.destDir),
       runNpmCi: () => Promise.reject(new Error("npm ci exploded"))
     });
 

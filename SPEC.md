@@ -1833,9 +1833,9 @@ resolves it, mirroring the same query parameter `GET /api/routines/:id/firings` 
 this purpose. An `invalid` target's declaration never displaces a valid sibling's real prompt or
 schedule — `resolveRoutineDeclaration` tries every non-invalid target first — and any reload error
 mentioning the Routine's name is shown alongside it. Enable/disable (#411, ADR-0076) and manual-fire
-(#469) render as plain HTML forms posting straight to their existing JSON-API routes, no client-side
-JS. Enable/disable funnels through the same validate/diff-confirm/write pipeline the raw-text editor
-uses, since toggling `disabled` is a declaration edit. Fire-now instead posts directly to
+(#469) both render as plain HTML forms, no client-side JS. Enable/disable funnels through the same
+validate/diff-confirm/write pipeline the raw-text editor uses, since toggling `disabled` is a
+declaration edit. Fire-now instead posts directly to
 `POST /api/routines/:id/fire` (ADR-0075), which content-type-sniffs a form submission and redirects
 back to `/routines/:name` with the outcome flattened into query parameters — mirroring
 `/api/runs/:id/cancel`'s existing form/JSON duality — rather than returning raw JSON, so `refused`

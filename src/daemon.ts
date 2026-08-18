@@ -661,7 +661,14 @@ export async function startDaemon(
     // the next tick will re-pick anything else. Acquiring the mutex here
     // also prevents two concurrent waiting-run readers from both deciding
     // to advance the same row.
-    if (dispatchMutex.tryAcquire()) {
+    //
+    // Also gated on the self-update drain flag: reEvaluateWaitingRun can
+    // reserve a slot and spawn a fresh provider run, the same admission
+    // launchWork and fireRoutine already refuse while draining. Skipping
+    // this tick's wait reconciliation while draining closes that gap —
+    // any still-waiting rows are simply picked up again once draining
+    // clears.
+    if (!updateCoordinator.isDrainRequested() && dispatchMutex.tryAcquire()) {
       try {
         await reconcileWaitingRuns({
           logger,

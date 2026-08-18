@@ -28,6 +28,8 @@ const execFile = promisify(execFileCallback);
 // stays a plain boolean (ADR 0079 decision #2).
 const DEFAULT_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_DRAIN_POLL_INTERVAL_MS = 5_000;
+const RESTART_TIMEOUT_MS = 10_000;
+const SELF_CHECK_TIMEOUT_MS = 60_000;
 
 export type UpdateOps = {
   getLatestRelease(): Promise<GetLatestReleaseResult>;
@@ -87,7 +89,30 @@ export function createDefaultUpdateOps(input: {
     },
     isSystemdAvailable: () => probeSystemdRunAvailable({ env: input.env }),
     restartService: async () => {
-      await execFile("systemctl", ["--user", "restart", "symphonika.service"]);
+      // --no-block: this call runs from inside the very unit being
+      // restarted, under the default KillMode=control-group, so systemd
+      // SIGTERMs the whole cgroup -- daemon and this systemctl child alike
+      // -- as part of the restart job. A blocking call would race its own
+      // death: the child (and often this very process) can be killed
+      // before observing job success, surfacing a spurious update-failed
+      // notification for a restart that actually succeeded, or simply
+      // never resuming because the calling process is gone. --no-block
+      // sidesteps the race by only waiting for systemd to *enqueue* the
+      // job, not for it to finish -- which is the most this call could
+      // ever meaningfully observe anyway, since the process asking the
+      // question is the one about to be replaced. Real post-restart health
+      // has to be judged after the fact (daemon-health / systemd's own
+      // Restart=on-failure + watchdog), not from this call's result.
+      // `timeout` only guards the enqueue step itself hanging (e.g. a
+      // wedged --user D-Bus manager), matching every other unattended
+      // systemctl call in this codebase (see
+      // src/lifecycle/process-scope.ts) -- it does not, and cannot, guard
+      // whether the restart job itself later succeeds.
+      await execFile(
+        "systemctl",
+        ["--user", "restart", "--no-block", "symphonika.service"],
+        { timeout: RESTART_TIMEOUT_MS }
+      );
     }
   };
 }
@@ -106,12 +131,11 @@ async function runStagedSelfCheck(input: {
   );
   const cliPath = path.join(input.stagingPath, "dist", "cli.js");
   try {
-    await execFile(process.execPath, [
-      cliPath,
-      "daemon",
-      "--self-check",
-      throwawayStateRoot
-    ]);
+    await execFile(
+      process.execPath,
+      [cliPath, "daemon", "--self-check", throwawayStateRoot],
+      { timeout: SELF_CHECK_TIMEOUT_MS }
+    );
     return { errors: [], ok: true };
   } catch (error) {
     return { errors: [errorMessage(error)], ok: false };
@@ -276,6 +300,20 @@ export class UpdateCoordinator {
         detail: errorMessage(error)
       });
       this.input.logger?.error({ err: error }, "symphonika self-update failed");
+      // Unlike the up-to-date and post-cutover success paths, a failed
+      // cycle never otherwise reaches pruneStale -- without this, a host
+      // that keeps failing (e.g. no working native-module toolchain) would
+      // accumulate one orphaned download and staging tree per new release
+      // indefinitely. Best-effort: a prune failure must never mask the
+      // update failure already being reported above.
+      try {
+        await this.input.ops.pruneStale(undefined);
+      } catch (pruneError) {
+        this.input.logger?.error(
+          { err: pruneError },
+          "symphonika self-update: pruning stale artifacts after a failed cycle also failed"
+        );
+      }
     }
   }
 

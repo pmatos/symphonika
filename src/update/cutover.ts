@@ -61,15 +61,53 @@ export async function cutOverStagedRelease(input: {
     return { kind: "refused", reason: gitGuardReason };
   }
 
+  const orphanedPreviousPath = `${previousPath}.orphaned`;
+
+  // Self-heal a leftover from a hard crash (SIGKILL, power loss -- not
+  // anything this module's own try/catch could trap) partway through an
+  // earlier attempt's rename-aside-then-restore-or-remove dance below. Its
+  // mere presence is the only signal available: if previousPath was
+  // already recreated since (a later attempt completed), the orphan is
+  // stale and gets discarded; otherwise it IS the real previous
+  // generation and gets restored before this attempt proceeds.
+  if (await pathExists(orphanedPreviousPath)) {
+    if (await pathExists(previousPath)) {
+      await rm(orphanedPreviousPath, { force: true, recursive: true });
+    } else {
+      await rename(orphanedPreviousPath, previousPath);
+    }
+  }
+
+  // Exactly one prior generation is kept: a second successful cutover
+  // replaces the older .previous rather than attempting rename() onto an
+  // existing non-empty directory, which fails with ENOTEMPTY/EEXIST. The
+  // older generation is moved aside (not deleted) before either swap
+  // rename runs, and only removed once both renames have succeeded -- so a
+  // failure partway through (e.g. rename(installPath, previousPath)
+  // throwing EPERM/EBUSY) never destroys the one rollback generation the
+  // operator still has, even though no cutover actually happened.
+  let hadPreviousGeneration = true;
   try {
-    // Exactly one prior generation is kept: a second successful cutover
-    // replaces the older .previous rather than attempting rename() onto an
-    // existing non-empty directory, which fails with ENOTEMPTY/EEXIST.
-    await rm(previousPath, { force: true, recursive: true });
+    await rename(previousPath, orphanedPreviousPath);
+  } catch {
+    hadPreviousGeneration = false;
+  }
+
+  try {
     await rename(installPath, previousPath);
     await rename(stagingPath, installPath);
   } catch (error) {
+    // Best-effort: restore the prior generation to its expected path so a
+    // failed cutover doesn't also strand it under a name
+    // `symphonika service rollback` doesn't know to look for.
+    if (hadPreviousGeneration) {
+      await rename(orphanedPreviousPath, previousPath).catch(() => undefined);
+    }
     return { kind: "error", error: errorMessage(error) };
+  }
+
+  if (hadPreviousGeneration) {
+    await rm(orphanedPreviousPath, { force: true, recursive: true });
   }
 
   return { kind: "cut-over", installPath };
@@ -80,8 +118,20 @@ async function refuseIfGitCheckout(
 ): Promise<string | undefined> {
   try {
     await access(path.join(installPath, ".git"));
-  } catch {
-    return undefined;
+  } catch (error) {
+    // ENOENT (no .git present) is the only outcome that means "safe to
+    // proceed". Any other error (e.g. EACCES) is indistinguishable from
+    // "yes, .git is there" as far as this safety check can tell, so it
+    // must fail closed and refuse rather than silently permit a cutover
+    // that could rename aside a live development checkout.
+    if (isEnoent(error)) {
+      return undefined;
+    }
+    return (
+      `refusing to cut over: could not determine whether ${installPath} is ` +
+      `a development checkout (${errorMessage(error)}); resolve the error ` +
+      "and retry"
+    );
   }
   return (
     `refusing to cut over: ${installPath} contains .git -- this looks like ` +
@@ -104,6 +154,15 @@ export async function rollbackToPreviousRelease(
 ): Promise<RollbackResult> {
   const { installPath, previousPath } = deriveInstallPaths(scriptPath);
   const failedPath = `${installPath}.failed`;
+
+  // Same guard cutOverStagedRelease applies: a `.previous` directory next
+  // to a development checkout (leftover from an earlier real install/
+  // rollback test, or a misresolved scriptPath) must not be silently
+  // rotated in over a live working tree.
+  const gitGuardReason = await refuseIfGitCheckout(installPath);
+  if (gitGuardReason !== undefined) {
+    return { kind: "error", error: gitGuardReason };
+  }
 
   let previousExists = true;
   try {
@@ -205,8 +264,14 @@ export async function checkUnitRegenerationNeeded(input: {
 // `service install --print` (src/cli.ts) writes each file as
 // "# <path>\n<content>\n". The .service unit is written first
 // (runServiceInstall's file order); take the first section only.
+//
+// The header line is always an absolute path (`# ${file.path}`), so the
+// split pattern requires a "/" right after "# " -- otherwise the rendered
+// unit's own embedded "# ..." comment lines (renderServiceUnit in
+// src/service.ts is full of them) match too, truncating the section at the
+// first comment instead of at the next file header.
 function extractServiceUnitSection(printOutput: string): string | undefined {
-  const sections = printOutput.split(/^# .*$/m).slice(1);
+  const sections = printOutput.split(/^# \/.*$/m).slice(1);
   return sections[0]?.trim();
 }
 
@@ -225,4 +290,22 @@ async function defaultRunStagedServiceInstallPrint(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isEnoent(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "ENOENT"
+  );
+}
+
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await access(target);
+    return true;
+  } catch {
+    return false;
+  }
 }

@@ -1,4 +1,4 @@
-export type DependencyGraphBlocker = {
+type DependencyGraphBlocker = {
   number: number;
   owner: string;
   repo: string;
@@ -30,7 +30,7 @@ type DependencyGraphNodeData = {
 
 export type DependencyGraphNode = { data: DependencyGraphNodeData };
 
-export type DependencyGraphEdge = {
+type DependencyGraphEdge = {
   data: { id: string; source: string; target: string };
 };
 

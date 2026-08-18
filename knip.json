@@ -3,7 +3,9 @@
   "entry": [
     "fuzz/*.fuzz.mjs",
     "src/lifecycle/eligibility-interface.ts",
-    "src/lifecycle/run-lifecycle-interface.ts"
+    "src/lifecycle/run-lifecycle-interface.ts",
+    "src/client/issues-bulk.tsx",
+    "src/client/issues-deps-graph.tsx"
   ],
-  "project": ["src/**/*.ts", "fuzz/**/*.mjs"]
+  "project": ["src/**/*.{ts,tsx}", "fuzz/**/*.mjs"]
 }

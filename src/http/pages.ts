@@ -870,7 +870,6 @@ export function registerPages(options: RegisterPagesOptions): void {
         addLabels,
         operations,
         removeLabels,
-        runStore: options.runStore,
         writeIssueLabels: options.writeIssueLabels
       });
       return context.json({ results }, 200);
@@ -3818,46 +3817,11 @@ async function runBulkIssueLabelWrites(input: {
   addLabels: string[];
   operations: Array<{ issueNumber: number; projectName: string }>;
   removeLabels: string[];
-  runStore: RunStore;
   writeIssueLabels: WriteIssueLabelsFn;
 }): Promise<BulkIssueLabelResult[]> {
-  const { addLabels, operations, removeLabels, runStore, writeIssueLabels } =
-    input;
+  const { addLabels, operations, removeLabels, writeIssueLabels } = input;
   const results = new Array<BulkIssueLabelResult>(operations.length);
   let nextIndex = 0;
-
-  // Removing a label an issue doesn't currently have risks a needless 404
-  // from GitHub (ADR 0077's rule, already followed by the single-issue
-  // clear-stale-claim action) -- and since writeIssueLabels adds before
-  // removing and reports the whole operation failed on any thrown error, a
-  // spurious remove-side 404 would discard an already-successful add.
-  // Narrows removeLabels per issue against the persisted poll snapshot
-  // (the same data loadIssueDetail reads for the single-issue page),
-  // fetched once per project rather than once per operation. Compared
-  // case-insensitively -- GitHub matches label names case-insensitively
-  // (confirmed, and already relied on by isOrchestratorLabel), so a
-  // selection spanning issues whose equivalent label differs only by case
-  // must still match; the requested spelling, not the issue's actual
-  // casing, is what's passed to the writer.
-  const currentLabelsByProject = new Map<string, Map<number, Set<string>>>();
-  function currentLabelsFor(
-    projectName: string,
-    issueNumber: number
-  ): Set<string> | undefined {
-    let byIssue = currentLabelsByProject.get(projectName);
-    if (byIssue === undefined) {
-      byIssue = new Map(
-        runStore
-          .listProjectIssueSnapshots(projectName)
-          .map((row) => [
-            row.issueNumber,
-            new Set(row.labels.map((label) => label.toLowerCase()))
-          ])
-      );
-      currentLabelsByProject.set(projectName, byIssue);
-    }
-    return byIssue.get(issueNumber);
-  }
 
   async function worker(): Promise<void> {
     for (;;) {
@@ -3867,28 +3831,22 @@ async function runBulkIssueLabelWrites(input: {
       if (operation === undefined) {
         return;
       }
-      const currentLabelsLower = currentLabelsFor(
-        operation.projectName,
-        operation.issueNumber
-      );
-      // No snapshot found (e.g. it aged out between page load and Apply) --
-      // fall back to the requested list rather than silently dropping the
-      // removal; the write's own honest failure is then no worse than
-      // today's behavior for that edge case.
-      const removeForThisIssue =
-        currentLabelsLower === undefined
-          ? removeLabels
-          : removeLabels.filter((label) =>
-              currentLabelsLower.has(label.toLowerCase())
-            );
-      // Every operation runs regardless of earlier outcomes -- best-effort,
-      // so one issue's GitHub-side failure doesn't block the rest of the
-      // batch.
+      // The full requested removeLabels goes to every issue, not narrowed
+      // against the persisted poll snapshot -- the snapshot can lag live
+      // GitHub state indefinitely (ADR 0073), so filtering against it can
+      // silently drop a legitimate removal (e.g. add-then-immediate-remove
+      // of the same label) and report false success. Removing a label an
+      // issue doesn't have is instead made idempotent at the source
+      // (tryRemoveLabelsFromIssue, src/issue-polling.ts, swallows the
+      // resulting 404), which is safe against live state regardless of
+      // snapshot staleness. Every operation runs regardless of earlier
+      // outcomes -- best-effort, so one issue's GitHub-side failure
+      // doesn't block the rest of the batch.
       const outcome = await writeIssueLabels({
         add: addLabels,
         kind: "issue",
         projectName: operation.projectName,
-        remove: removeForThisIssue,
+        remove: removeLabels,
         subjectNumber: operation.issueNumber
       });
       results[index] = outcome.ok

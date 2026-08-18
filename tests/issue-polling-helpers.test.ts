@@ -7,6 +7,7 @@ import {
   tryListBranchCommits,
   tryListPullRequests,
   tryListPullRequestsForBranch,
+  tryRemoveLabelsFromIssue,
   type GitHubIssueLabelInput,
   type GitHubIssueRepositoryInput,
   type GitHubIssuesApi,
@@ -63,6 +64,34 @@ describe("tryAddLabelsToIssue", () => {
       listOpenIssues: () => Promise.resolve([])
     };
     await expect(tryAddLabelsToIssue(api, labelInput)).rejects.toThrow("boom");
+  });
+});
+
+describe("tryRemoveLabelsFromIssue", () => {
+  it("returns false when the implementation does not provide removeLabelsFromIssue", async () => {
+    const api: GitHubIssuesApi = {
+      listOpenIssues: () => Promise.resolve([])
+    };
+    expect(await tryRemoveLabelsFromIssue(api, labelInput)).toBe(false);
+  });
+
+  it("propagates a non-404 error thrown by the implementation", async () => {
+    const api: GitHubIssuesApi = {
+      listOpenIssues: () => Promise.resolve([]),
+      removeLabelsFromIssue: () => Promise.reject(new Error("boom"))
+    };
+    await expect(tryRemoveLabelsFromIssue(api, labelInput)).rejects.toThrow(
+      "boom"
+    );
+  });
+
+  it("returns true without throwing when the implementation 404s -- removing an absent label is idempotent", async () => {
+    const notFound = Object.assign(new Error("Not Found"), { status: 404 });
+    const api: GitHubIssuesApi = {
+      listOpenIssues: () => Promise.resolve([]),
+      removeLabelsFromIssue: () => Promise.reject(notFound)
+    };
+    expect(await tryRemoveLabelsFromIssue(api, labelInput)).toBe(true);
   });
 });
 

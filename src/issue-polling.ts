@@ -642,7 +642,21 @@ export async function tryRemoveLabelsFromIssue(
   if (api.removeLabelsFromIssue === undefined) {
     return false;
   }
-  await api.removeLabelsFromIssue(input);
+  try {
+    await api.removeLabelsFromIssue(input);
+  } catch (error) {
+    // Removing a label the issue doesn't have 404s -- idempotent by
+    // design: the desired end state (label absent) is already true, so
+    // this isn't a failure worth surfacing. Narrowed to this wrapper
+    // (not GitHubIssuesApi.removeLabelsFromIssue itself, which
+    // run-controller.ts calls directly in several state-machine-driven
+    // contexts) so this only changes behavior for this function's own
+    // callers -- writeIssueLabels, used by the triage page's single-issue
+    // and bulk label writes.
+    if (!isOctokitNotFound(error)) {
+      throw error;
+    }
+  }
   return true;
 }
 

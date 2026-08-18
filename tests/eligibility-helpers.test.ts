@@ -45,6 +45,8 @@ const baseProject: PollingProjectConfig = {
 
 function snapshot(overrides: Partial<IssueSnapshot> = {}): IssueSnapshot {
   return {
+    blockedBy: [],
+    blockedByTruncated: false,
     body: "",
     created_at: "2025-01-01T00:00:00Z",
     id: 1,
@@ -104,6 +106,84 @@ describe("evaluateProjectEligibility", () => {
     expect(result.eligible).toBe(false);
     expect(
       result.reasons.some((reason) => reason.includes("needs-human"))
+    ).toBe(true);
+  });
+
+  it("flags an issue with an open blocking dependency as ineligible", () => {
+    const result = evaluateProjectEligibility(
+      snapshot({
+        blockedBy: [
+          {
+            number: 301,
+            owner: "pmatos",
+            repo: "symphonika",
+            state: "OPEN",
+            title: "sibling slice"
+          }
+        ]
+      }),
+      baseProject,
+      { ignoreOperationalLabels: true }
+    );
+
+    expect(result.eligible).toBe(false);
+    expect(result.reasons).toContain("blocked by open dependency #301");
+  });
+
+  it("does not flag an issue whose blockers are all closed", () => {
+    const result = evaluateProjectEligibility(
+      snapshot({
+        blockedBy: [
+          {
+            number: 295,
+            owner: "pmatos",
+            repo: "symphonika",
+            state: "CLOSED",
+            title: "done"
+          }
+        ]
+      }),
+      baseProject,
+      { ignoreOperationalLabels: true }
+    );
+
+    expect(result.eligible).toBe(true);
+    expect(result.reasons).toEqual([]);
+  });
+
+  it("names a cross-repo blocker with owner/repo#N", () => {
+    const result = evaluateProjectEligibility(
+      snapshot({
+        blockedBy: [
+          {
+            number: 4,
+            owner: "someone-else",
+            repo: "other-repo",
+            state: "OPEN",
+            title: "external"
+          }
+        ]
+      }),
+      baseProject,
+      { ignoreOperationalLabels: true }
+    );
+
+    expect(result.eligible).toBe(false);
+    expect(result.reasons).toContain(
+      "blocked by open dependency someone-else/other-repo#4"
+    );
+  });
+
+  it("flags a truncated dependency fetch as unresolved rather than silently allowing it", () => {
+    const result = evaluateProjectEligibility(
+      snapshot({ blockedByTruncated: true }),
+      baseProject,
+      { ignoreOperationalLabels: true }
+    );
+
+    expect(result.eligible).toBe(false);
+    expect(
+      result.reasons.some((reason) => reason.includes("dependency"))
     ).toBe(true);
   });
 });

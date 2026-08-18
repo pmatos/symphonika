@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  fetchIssueDependencies,
   fetchPullRequestFollowupState,
   swallowLabelNotFound,
   tryAddLabelsToIssue,
@@ -421,6 +422,213 @@ describe("fetchPullRequestFollowupState", () => {
     expect(state?.unresolvedReviewThreads.map((thread) => thread.id)).toEqual([
       "open"
     ]);
+  });
+});
+
+describe("fetchIssueDependencies", () => {
+  it("returns an empty blockedBy list for an issue with no dependencies", async () => {
+    const executor: GraphqlExecutor = () =>
+      Promise.resolve({
+        repository: {
+          i299: { blockedBy: { nodes: [], totalCount: 0 }, number: 299 }
+        }
+      });
+
+    const result = await fetchIssueDependencies(executor, {
+      issueNumbers: [299],
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "secret"
+    });
+
+    expect(result.get(299)).toEqual({ blockedBy: [], truncated: false });
+  });
+
+  it("classifies blockers by state and marks unresolved ones distinctly from closed ones", async () => {
+    const executor: GraphqlExecutor = () =>
+      Promise.resolve({
+        repository: {
+          i299: {
+            blockedBy: {
+              nodes: [
+                {
+                  number: 295,
+                  repository: { name: "symphonika", owner: { login: "pmatos" } },
+                  state: "CLOSED",
+                  title: "slice 6"
+                },
+                {
+                  number: 301,
+                  repository: { name: "symphonika", owner: { login: "pmatos" } },
+                  state: "OPEN",
+                  title: "sibling slice"
+                }
+              ],
+              totalCount: 2
+            },
+            number: 299
+          }
+        }
+      });
+
+    const result = await fetchIssueDependencies(executor, {
+      issueNumbers: [299],
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "secret"
+    });
+
+    expect(result.get(299)).toEqual({
+      blockedBy: [
+        {
+          number: 295,
+          owner: "pmatos",
+          repo: "symphonika",
+          state: "CLOSED",
+          title: "slice 6"
+        },
+        {
+          number: 301,
+          owner: "pmatos",
+          repo: "symphonika",
+          state: "OPEN",
+          title: "sibling slice"
+        }
+      ],
+      truncated: false
+    });
+  });
+
+  it("resolves a cross-repo blocker using its own repository, not the polled repo", async () => {
+    const executor: GraphqlExecutor = () =>
+      Promise.resolve({
+        repository: {
+          i10: {
+            blockedBy: {
+              nodes: [
+                {
+                  number: 4,
+                  repository: { name: "other-repo", owner: { login: "someone-else" } },
+                  state: "OPEN",
+                  title: "external blocker"
+                }
+              ],
+              totalCount: 1
+            },
+            number: 10
+          }
+        }
+      });
+
+    const result = await fetchIssueDependencies(executor, {
+      issueNumbers: [10],
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "secret"
+    });
+
+    expect(result.get(10)?.blockedBy).toEqual([
+      {
+        number: 4,
+        owner: "someone-else",
+        repo: "other-repo",
+        state: "OPEN",
+        title: "external blocker"
+      }
+    ]);
+  });
+
+  it("marks an issue truncated when totalCount exceeds the fetched blockers", async () => {
+    const executor: GraphqlExecutor = () =>
+      Promise.resolve({
+        repository: {
+          i50: {
+            blockedBy: {
+              nodes: [
+                {
+                  number: 1,
+                  repository: { name: "symphonika", owner: { login: "pmatos" } },
+                  state: "OPEN",
+                  title: "one of many"
+                }
+              ],
+              totalCount: 30
+            },
+            number: 50
+          }
+        }
+      });
+
+    const result = await fetchIssueDependencies(executor, {
+      issueNumbers: [50],
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "secret"
+    });
+
+    expect(result.get(50)?.truncated).toBe(true);
+  });
+
+  it("batches every requested issue into a single GraphQL call", async () => {
+    const calls: Array<{ query: string; variables: Record<string, unknown> }> =
+      [];
+    const executor: GraphqlExecutor = (query, variables) => {
+      calls.push({ query, variables });
+      return Promise.resolve({
+        repository: {
+          i1: { blockedBy: { nodes: [], totalCount: 0 }, number: 1 },
+          i2: { blockedBy: { nodes: [], totalCount: 0 }, number: 2 }
+        }
+      });
+    };
+
+    const result = await fetchIssueDependencies(executor, {
+      issueNumbers: [1, 2],
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "secret"
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(result.get(1)).toEqual({ blockedBy: [], truncated: false });
+    expect(result.get(2)).toEqual({ blockedBy: [], truncated: false });
+  });
+
+  it("splits a large issue list into chunked GraphQL calls instead of one unbounded query", async () => {
+    const issueNumbers = Array.from({ length: 45 }, (_, index) => index + 1);
+    const calls: number[][] = [];
+    const executor: GraphqlExecutor = (query, variables) => {
+      const owner = variables.owner as string;
+      const repo = variables.repo as string;
+      expect(owner).toBe("pmatos");
+      expect(repo).toBe("symphonika");
+      const aliasMatches = [...query.matchAll(/i(\d+): issue\(/g)].map((match) =>
+        Number(match[1])
+      );
+      calls.push(aliasMatches);
+      const repository: Record<
+        string,
+        { blockedBy: { nodes: never[]; totalCount: number }; number: number }
+      > = {};
+      for (const issueNumber of aliasMatches) {
+        repository[`i${issueNumber}`] = {
+          blockedBy: { nodes: [], totalCount: 0 },
+          number: issueNumber
+        };
+      }
+      return Promise.resolve({ repository });
+    };
+
+    const result = await fetchIssueDependencies(executor, {
+      issueNumbers,
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "secret"
+    });
+
+    expect(calls.length).toBeGreaterThan(1);
+    expect(calls.flat().sort((a, b) => a - b)).toEqual(issueNumbers);
+    expect(result.size).toBe(45);
   });
 });
 

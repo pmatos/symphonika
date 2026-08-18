@@ -45,6 +45,7 @@ async function setup(): Promise<TestSetup> {
     projectName: "alpha",
     rows: [
       {
+        blockedByTruncated: false,
         blockedBy: [],
         issueNumber: 7,
         kind: "candidate",
@@ -151,6 +152,7 @@ describe("GET /issues bulk-select UI (React island wiring)", () => {
       projectName: "alpha",
       rows: [
         {
+          blockedByTruncated: false,
           blockedBy: [],
           issueNumber: 7,
           kind: "candidate",

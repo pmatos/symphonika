@@ -755,7 +755,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     } else if (
       action === "add" &&
       (options.getProjectRequiredLabels?.(projectName) ?? []).includes(label) &&
-      unresolvedIssueDependencies(detail.snapshot).length > 0
+      issueDependencyGateBlocks(detail.snapshot)
     ) {
       // Hard block, no override (see docs/adr, issue dependency gating):
       // the only way past this is to actually resolve the dependency on
@@ -766,9 +766,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       // closed the blocker refresh immediately rather than wait it out.
       banner = {
         action,
-        error: `blocked by open ${dependencyList(
-          unresolvedIssueDependencies(detail.snapshot)
-        )} -- resolve on GitHub, then poll now`,
+        error: `${issueDependencyGateMessage(detail.snapshot)} -- resolve on GitHub, then poll now`,
         kind: "label_write",
         label,
         offerPollNow: true,
@@ -3803,6 +3801,27 @@ function unresolvedIssueDependencies(
   snapshot: ProjectIssueSnapshotRow
 ): RawGitHubIssueDependencyRef[] {
   return snapshot.blockedBy.filter((blocker) => blocker.state !== "CLOSED");
+}
+
+// A truncated fetch (more blockedBy links than
+// ISSUE_DEPENDENCIES_MAX_BLOCKERS_PER_ISSUE, src/issue-polling.ts) gates
+// exactly like an open blocker -- fail closed on the unfetched overflow
+// rather than gating only on the state of the blockers that happened to
+// fit, which would silently allow dispatch when the true state is
+// unknown.
+function issueDependencyGateBlocks(snapshot: ProjectIssueSnapshotRow): boolean {
+  return (
+    snapshot.blockedByTruncated ||
+    unresolvedIssueDependencies(snapshot).length > 0
+  );
+}
+
+function issueDependencyGateMessage(snapshot: ProjectIssueSnapshotRow): string {
+  const unresolved = unresolvedIssueDependencies(snapshot);
+  if (unresolved.length === 0 && snapshot.blockedByTruncated) {
+    return "blocked: this issue has more dependency links than could be checked";
+  }
+  return `blocked by open ${dependencyList(unresolved)}`;
 }
 
 function dependencyList(blockers: RawGitHubIssueDependencyRef[]): string {

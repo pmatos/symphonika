@@ -63,6 +63,7 @@ async function setup(): Promise<TestSetup> {
     projectName: "alpha",
     rows: [
       {
+        blockedByTruncated: false,
         blockedBy: [],
         issueNumber: 7,
         kind: "filtered",
@@ -155,6 +156,7 @@ describe("GET /issues/:project/:number (#308 part 2, ADR 0077)", () => {
       projectName: "alpha",
       rows: [
         {
+          blockedByTruncated: false,
           blockedBy: [
             {
               number: 301,
@@ -412,6 +414,7 @@ describe("POST /issues/:project/:number/labels/add dependency gate", () => {
       projectName: "alpha",
       rows: [
         {
+          blockedByTruncated: false,
           blockedBy: [
             {
               number: 301,
@@ -476,6 +479,67 @@ describe("POST /issues/:project/:number/labels/add dependency gate", () => {
       expect(called).toBe(false);
     } finally {
       test.cleanup();
+    }
+  });
+
+  it("refuses to add the required label when the dependency fetch was truncated, even if every fetched blocker is closed", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    runStore.syncProjectStates([
+      { name: "alpha", validationState: "valid", weight: 1 }
+    ]);
+    runStore.replaceProjectIssueSnapshots({
+      polledAt: "2026-08-18T10:00:00.000Z",
+      projectName: "alpha",
+      rows: [
+        {
+          blockedBy: [
+            {
+              number: 295,
+              owner: "pmatos",
+              repo: "symphonika",
+              state: "CLOSED",
+              title: "one of many"
+            }
+          ],
+          blockedByTruncated: true,
+          issueNumber: 50,
+          kind: "filtered",
+          labels: ["needs-triage"],
+          priority: 1,
+          reasons: [
+            "has more dependency links than could be checked - treat as unresolved until reviewed"
+          ],
+          title: "Truncated fetch"
+        }
+      ]
+    });
+    try {
+      let called = false;
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        getProjectRequiredLabels: () => ["agent-ready"],
+        runStore,
+        stateRoot,
+        version: "0.1.0",
+        writeIssueLabels: () => {
+          called = true;
+          return Promise.resolve({ ok: true });
+        }
+      });
+      const response = await app.request("/issues/alpha/50/labels/add", {
+        body: formBody({ csrf_token: VALID_TOKEN, label: "agent-ready" }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+      const html = await response.text();
+      expect(html).toContain('Add label "agent-ready" failed');
+      expect(called).toBe(false);
+    } finally {
+      runStore.close();
     }
   });
 

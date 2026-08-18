@@ -57,6 +57,51 @@ describe("describeIssueVerdict (#308, ADR 0077)", () => {
     ).toBe("blocked: sym:failed");
   });
 
+  it("renders an unresolved-dependency reason as blocked: dependency <ref> open", () => {
+    expect(
+      describeIssueVerdict(
+        {
+          kind: "filtered",
+          reasons: ["blocked by open dependency #301"]
+        },
+        undefined
+      )
+    ).toBe("blocked: dependency #301 open");
+  });
+
+  it("joins multiple unresolved-dependency reasons, each still prefixed blocked:", () => {
+    expect(
+      describeIssueVerdict(
+        {
+          kind: "filtered",
+          reasons: [
+            "blocked by open dependency #301",
+            "blocked by open dependency someone-else/other-repo#4"
+          ]
+        },
+        undefined
+      )
+    ).toBe(
+      "blocked: dependency #301 open; blocked: dependency someone-else/other-repo#4 open"
+    );
+  });
+
+  it("renders a truncated-dependency-fetch reason as blocked:", () => {
+    expect(
+      describeIssueVerdict(
+        {
+          kind: "filtered",
+          reasons: [
+            "has more dependency links than could be checked - treat as unresolved until reviewed"
+          ]
+        },
+        undefined
+      )
+    ).toBe(
+      "blocked: has more dependency links than could be checked - treat as unresolved until reviewed"
+    );
+  });
+
   it("renders sym:claimed without a resolvable run as blocked: sym:claimed", () => {
     expect(
       describeIssueVerdict(

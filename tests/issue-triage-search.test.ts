@@ -70,6 +70,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
@@ -85,6 +86,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "beta",
         rows: [
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 2,
             kind: "filtered",
@@ -123,6 +125,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
@@ -132,6 +135,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
             title: "Fix the login flow"
           },
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 2,
             kind: "filtered",
@@ -183,6 +187,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
@@ -217,6 +222,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
@@ -253,6 +259,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
@@ -289,6 +296,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 5,
             kind: "filtered",
@@ -360,6 +368,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
             blockedBy: [
               {
                 number: 301,
@@ -384,6 +393,7 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
             title: "Migrate live routines"
           },
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 300,
             kind: "candidate",
@@ -406,6 +416,8 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
       expect(html).toContain(
         'href="/issues/graph?project=alpha&amp;issue=299"'
       );
+      expect(html).toContain("blocked: dependency #301 open");
+      expect(html).toContain("pill pill--blocked");
     } finally {
       test.cleanup();
     }

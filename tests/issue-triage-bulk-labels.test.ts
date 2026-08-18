@@ -60,6 +60,7 @@ async function setup(): Promise<TestSetup> {
     projectName: "alpha",
     rows: [
       {
+        blockedByTruncated: false,
         blockedBy: [],
         issueNumber: 7,
         kind: "candidate",
@@ -69,6 +70,7 @@ async function setup(): Promise<TestSetup> {
         title: "First issue"
       },
       {
+        blockedByTruncated: false,
         blockedBy: [],
         issueNumber: 8,
         kind: "candidate",
@@ -386,6 +388,7 @@ describe("POST /api/issues/bulk-labels", () => {
       projectName: "alpha",
       rows: Array.from({ length: 10 }, (_v, i) => ({
         blockedBy: [],
+        blockedByTruncated: false,
         issueNumber: i + 1,
         kind: "candidate" as const,
         labels: ["needs-triage"],

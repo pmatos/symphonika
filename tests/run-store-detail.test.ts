@@ -913,6 +913,7 @@ describe("RunStore detail queries", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 10,
             kind: "candidate",
@@ -922,6 +923,7 @@ describe("RunStore detail queries", () => {
             title: "Still open"
           },
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 11,
             kind: "filtered",
@@ -940,6 +942,7 @@ describe("RunStore detail queries", () => {
         projectName: "beta",
         rows: [
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 20,
             kind: "candidate",
@@ -959,6 +962,7 @@ describe("RunStore detail queries", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 10,
             kind: "candidate",
@@ -991,6 +995,7 @@ describe("RunStore detail queries", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 30,
             kind: "filtered",
@@ -1006,6 +1011,7 @@ describe("RunStore detail queries", () => {
       expect(rows).toEqual([
         {
           blockedBy: [],
+          blockedByTruncated: false,
           issueNumber: 30,
           kind: "filtered",
           labels: ["needs-human", "bug"],
@@ -1029,6 +1035,7 @@ describe("RunStore detail queries", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
             blockedBy: [
               {
                 number: 295,
@@ -1053,6 +1060,7 @@ describe("RunStore detail queries", () => {
             title: "Migrate live routines"
           },
           {
+            blockedByTruncated: false,
             blockedBy: [],
             issueNumber: 300,
             kind: "candidate",
@@ -1084,6 +1092,49 @@ describe("RunStore detail queries", () => {
       expect(rows.find((row) => row.issueNumber === 300)?.blockedBy).toEqual(
         []
       );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("replaceProjectIssueSnapshots round-trips blockedByTruncated", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.replaceProjectIssueSnapshots({
+        polledAt: "2026-08-18T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [],
+            blockedByTruncated: true,
+            issueNumber: 50,
+            kind: "filtered",
+            labels: [],
+            priority: 1,
+            reasons: ["has more dependency links than could be checked"],
+            title: "Truncated"
+          },
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueNumber: 51,
+            kind: "candidate",
+            labels: [],
+            priority: 1,
+            reasons: [],
+            title: "Not truncated"
+          }
+        ]
+      });
+
+      const rows = store.listProjectIssueSnapshots("alpha");
+      expect(
+        rows.find((row) => row.issueNumber === 50)?.blockedByTruncated
+      ).toBe(true);
+      expect(
+        rows.find((row) => row.issueNumber === 51)?.blockedByTruncated
+      ).toBe(false);
     } finally {
       store.close();
     }

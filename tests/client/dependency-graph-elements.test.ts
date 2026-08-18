@@ -24,6 +24,7 @@ describe("buildDependencyGraphElements", () => {
             id: "issue:pmatos/symphonika#101",
             issueNumber: 101,
             kind: "issue",
+            label: "Add graph view",
             owner: "pmatos",
             projectName: "alpha",
             repo: "symphonika",
@@ -61,6 +62,7 @@ describe("buildDependencyGraphElements", () => {
         id: "issue:pmatos/symphonika#42",
         issueNumber: 42,
         kind: "external",
+        label: "pmatos/symphonika#42\nDesign the dependency model",
         owner: "pmatos",
         repo: "symphonika",
         state: "CLOSED",
@@ -147,6 +149,7 @@ describe("buildDependencyGraphElements", () => {
         id: "issue:other-org/shared-lib#7",
         issueNumber: 7,
         kind: "external",
+        label: "other-org/shared-lib#7\nShip the upstream fix",
         owner: "other-org",
         repo: "shared-lib",
         state: "OPEN",
@@ -179,12 +182,13 @@ describe("buildDependencyGraphElements", () => {
       }
     ]);
 
-    const clusterId = "cluster:pmatos/symphonika#289";
+    const clusterId = "issue:pmatos/symphonika#289";
     expect(result.nodes).toContainEqual({
       data: {
         id: clusterId,
         issueNumber: 289,
         kind: "cluster",
+        label: "pmatos/symphonika#289",
         owner: "pmatos",
         repo: "symphonika",
         title: "pmatos/symphonika#289"
@@ -314,5 +318,99 @@ describe("buildDependencyGraphElements", () => {
     ]);
 
     expect(result.nodes[0]?.data.truncated).toBeUndefined();
+  });
+
+  it("reuses the same synthetic node when an out-of-snapshot parent is also a blocker elsewhere", () => {
+    const result = buildDependencyGraphElements([
+      {
+        blockedBy: [],
+        blockedByTruncated: false,
+        issueNumber: 101,
+        owner: "pmatos",
+        parentIssueNumber: 289,
+        projectName: "alpha",
+        repo: "symphonika",
+        title: "Add graph view"
+      },
+      {
+        blockedBy: [
+          {
+            number: 289,
+            owner: "pmatos",
+            repo: "symphonika",
+            state: "CLOSED",
+            title: "Dependency epic"
+          }
+        ],
+        blockedByTruncated: false,
+        issueNumber: 102,
+        owner: "pmatos",
+        projectName: "alpha",
+        repo: "symphonika",
+        title: "Add gating"
+      }
+    ]);
+
+    const nodesFor289 = result.nodes.filter(
+      (node) => node.data.owner === "pmatos" && node.data.issueNumber === 289
+    );
+    expect(nodesFor289).toHaveLength(1);
+    const child101 = result.nodes.find(
+      (node) => node.data.id === "issue:pmatos/symphonika#101"
+    );
+    expect(child101?.data.parent).toBe(nodesFor289[0]?.data.id);
+    expect(result.edges).toContainEqual({
+      data: {
+        id: `${nodesFor289[0]?.data.id}->issue:pmatos/symphonika#102`,
+        source: nodesFor289[0]?.data.id,
+        target: "issue:pmatos/symphonika#102"
+      }
+    });
+  });
+
+  it("labels an external node with its owner/repo#N so it can't be mistaken for a local issue", () => {
+    const result = buildDependencyGraphElements([
+      {
+        blockedBy: [
+          {
+            number: 7,
+            owner: "other-org",
+            repo: "shared-lib",
+            state: "OPEN",
+            title: "Ship the upstream fix"
+          }
+        ],
+        blockedByTruncated: false,
+        issueNumber: 101,
+        owner: "pmatos",
+        projectName: "alpha",
+        repo: "symphonika",
+        title: "Add graph view"
+      }
+    ]);
+
+    const external = result.nodes.find(
+      (node) => node.data.id === "issue:other-org/shared-lib#7"
+    );
+    expect(external?.data.label).toBe(
+      "other-org/shared-lib#7\nShip the upstream fix"
+    );
+    expect(external?.data.title).toBe("Ship the upstream fix");
+  });
+
+  it("labels a real issue node with just its title", () => {
+    const result = buildDependencyGraphElements([
+      {
+        blockedBy: [],
+        blockedByTruncated: false,
+        issueNumber: 101,
+        owner: "pmatos",
+        projectName: "alpha",
+        repo: "symphonika",
+        title: "Add graph view"
+      }
+    ]);
+
+    expect(result.nodes[0]?.data.label).toBe("Add graph view");
   });
 });

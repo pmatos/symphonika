@@ -21,7 +21,7 @@ const NODE_STYLE: cytoscape.StylesheetJsonBlock[] = [
       "border-color": "#94a3b8",
       "border-width": 1.5,
       color: "#0f172a",
-      label: "data(title)",
+      label: "data(label)",
       "text-valign": "center",
       "text-wrap": "wrap"
     }

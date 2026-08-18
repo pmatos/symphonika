@@ -20,6 +20,11 @@ export type DependencyGraphIssue = {
 type DependencyGraphNodeData = {
   id: string;
   issueNumber: number;
+  // The rendered cytoscape node label -- distinct from `title` so an
+  // external node's owner/repo#N qualifier (needed so its numbering can't
+  // be mistaken for a local issue) doesn't also leak into the detail
+  // panel's separate "Title" row, which shows `title` alone.
+  label: string;
   kind: "cluster" | "external" | "issue";
   owner: string;
   parent?: string;
@@ -63,6 +68,7 @@ export function buildDependencyGraphElements(
       data: {
         id,
         issueNumber: issue.issueNumber,
+        label: issue.title,
         kind: "issue",
         owner: issue.owner,
         projectName: issue.projectName,
@@ -79,19 +85,22 @@ export function buildDependencyGraphElements(
       continue;
     }
     const childId = issueNodeId(issue.owner, issue.repo, issue.issueNumber);
-    const realParentId = issueNodeId(
+    // Always the same id an issue node or a blockedBy entry for this same
+    // physical issue would already use (or will later use) -- so whichever
+    // of the three loops reaches this issue first "wins" its node, and the
+    // others just add an edge/parent reference to it, rather than each
+    // synthesizing a disconnected duplicate under a different id scheme.
+    const parentId = issueNodeId(
       issue.owner,
       issue.repo,
       issue.parentIssueNumber
     );
-    const parentId = nodesById.has(realParentId)
-      ? realParentId
-      : `cluster:${issue.owner}/${issue.repo}#${issue.parentIssueNumber}`;
     if (!nodesById.has(parentId)) {
       nodesById.set(parentId, {
         data: {
           id: parentId,
           issueNumber: issue.parentIssueNumber,
+          label: `${issue.owner}/${issue.repo}#${issue.parentIssueNumber}`,
           kind: "cluster",
           owner: issue.owner,
           repo: issue.repo,
@@ -114,6 +123,7 @@ export function buildDependencyGraphElements(
           data: {
             id: sourceId,
             issueNumber: blocker.number,
+            label: `${blocker.owner}/${blocker.repo}#${blocker.number}\n${blocker.title}`,
             kind: "external",
             owner: blocker.owner,
             repo: blocker.repo,

@@ -65,9 +65,12 @@ The command uses normal `PATH` resolution. Generated configuration must not pers
 machine-specific path such as `~/.bun/bin/omp`. Operators who install OMP through Bun must run
 `symphonika service install` from a login shell whose `PATH` contains Bun's bin directory.
 
-Provider validation requires RPC mode and either `--auto-approve` or
-`--approval-mode yolo`, rejects print mode, and performs a bounded ready-frame probe without
-sending a model prompt.
+Provider validation requires RPC mode (`--mode rpc`, selected exactly once), rejects print mode, and
+performs a bounded ready-frame probe without sending a model prompt. It does not require
+`--auto-approve`/`--approval-mode yolo` specifically: which approval policy the command runs under is
+the operator's own choice, not a value Symphonika's static validation enforces (see ADR-0015's
+amendment note and SPEC.md §11.3). The default command above still carries `--auto-approve` as
+Symphonika's recommended posture.
 
 ### Configuration
 

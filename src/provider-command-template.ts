@@ -1,7 +1,7 @@
 export type ProviderCommandTemplateValues = {
   effort?: string;
   model?: string;
-  permissionMode?: "bypass";
+  permissionMode?: string;
 };
 
 export class ProviderCommandTemplateError extends Error {

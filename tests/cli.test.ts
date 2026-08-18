@@ -578,6 +578,72 @@ describe("CLI", () => {
     expect(output.stdout).toContain("#42  Orphan claimed issue");
   });
 
+  it("doctor forwards --live-check to runDoctor and prints its result", async () => {
+    const output = { stderr: "", stdout: "" };
+    let receivedLiveCheckProvider: string | undefined;
+    const program = buildCli({
+      registerSignalHandlers: false,
+      runDoctor: (options) => {
+        receivedLiveCheckProvider = (options as { liveCheckProvider?: string })
+          .liveCheckProvider;
+        return Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          errors: [],
+          liveCheck: { detail: "Hi there!", ok: true, provider: "claude" },
+          ok: true,
+          projects: [],
+          warnings: []
+        });
+      }
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "doctor",
+      "--live-check",
+      "claude"
+    ]);
+
+    expect(receivedLiveCheckProvider).toBe("claude");
+    expect(output.stdout).toContain("live check (claude): ok — Hi there!");
+    expect(output.stdout).toContain("doctor ok");
+  });
+
+  it("doctor rejects an unknown --live-check provider", async () => {
+    const program = buildCli({ registerSignalHandlers: false });
+    program.exitOverride();
+    for (const command of program.commands) {
+      command.exitOverride();
+    }
+    program.configureOutput({
+      writeErr: () => {
+        /* swallow Commander's stderr noise */
+      },
+      writeOut: () => {
+        /* swallow Commander's stdout noise */
+      }
+    });
+
+    await expect(
+      program.parseAsync([
+        "node",
+        "symphonika",
+        "doctor",
+        "--live-check",
+        "not-a-provider"
+      ])
+    ).rejects.toThrow(/provider must be one of/i);
+  });
+
   it("doctor points first-time users to init when the default user config is missing", async () => {
     const previousExitCode = process.exitCode;
     const previousCwd = process.cwd();

@@ -750,15 +750,6 @@ function validateClaudeProtocolFlags(args: string[]): void {
       "Claude provider command must include --verbose (required by claude CLI when --print is combined with --output-format stream-json)"
     );
   }
-
-  if (
-    !args.includes("--dangerously-skip-permissions") &&
-    !hasOptionValue(args, "--permission-mode", "bypassPermissions")
-  ) {
-    throw new Error(
-      "Claude provider command must run with full permissions using --dangerously-skip-permissions or --permission-mode bypassPermissions"
-    );
-  }
 }
 
 function hasOptionValue(

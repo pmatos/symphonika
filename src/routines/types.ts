@@ -34,7 +34,7 @@ export type RoutineSchedule = { at: string } | { cron: string; tz: string };
 export type RoutineExecutionOverrides = {
   effort?: string;
   model?: string;
-  permissionMode?: "bypass";
+  permissionMode?: string;
   timeoutMinutes?: number;
 };
 

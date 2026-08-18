@@ -34,6 +34,7 @@ import { emailNotificationConfigSchema } from "./notifications/config.js";
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 import type { AgentProviderName, AgentProviderRegistry } from "./provider.js";
 import { renderProviderCommandTemplate } from "./provider-command-template.js";
+import { probeProviderCommand } from "./provider-probe.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import type { RoutineExecutionOverrides } from "./routines/types.js";
@@ -56,6 +57,18 @@ export type DoctorOptions = {
   githubApi?: GitHubApi;
   githubIssuesApi?: GitHubIssuesApi;
   homeDir?: string;
+  // Opt-in: spawns providers.<name>.command for real with a trivial prompt
+  // and waits for a reply, instead of only the static protocol checks every
+  // doctor run already does. Not run by default — it is a real billed call
+  // that can take tens of seconds. See probeProviderCommand.
+  liveCheckProvider?: AgentProviderName;
+  liveCheckTimeoutMs?: number;
+};
+
+export type DoctorLiveCheckReport = {
+  detail: string;
+  ok: boolean;
+  provider: AgentProviderName;
 };
 
 type StaleIssueSummary = {
@@ -83,6 +96,7 @@ export type DoctorProjectReport = {
 export type DoctorReport = {
   configPath: string;
   errors: string[];
+  liveCheck?: DoctorLiveCheckReport;
   ok: boolean;
   projects: DoctorProjectReport[];
   warnings: string[];
@@ -386,7 +400,7 @@ const routineExecutionDefaultsSchema = z
   .object({
     effort: z.string().trim().min(1).optional(),
     model: z.string().trim().min(1).optional(),
-    permission_mode: z.literal("bypass").optional(),
+    permission_mode: z.string().trim().min(1).optional(),
     timeout_minutes: z.number().positive().optional()
   })
   .strict();
@@ -525,7 +539,54 @@ export async function runDoctor(
     ))
   );
 
-  return report(configPath, errors, projects, warnings);
+  const liveCheck = await runLiveCheck(
+    options.liveCheckProvider,
+    options.liveCheckTimeoutMs,
+    parsedConfig.providers,
+    agentProviders,
+    errors
+  );
+
+  return report(configPath, errors, projects, warnings, liveCheck);
+}
+
+async function runLiveCheck(
+  providerName: AgentProviderName | undefined,
+  timeoutMs: number | undefined,
+  providers: { [name in AgentProviderName]?: { command: string } | undefined },
+  agentProviders: AgentProviderRegistry,
+  errors: string[]
+): Promise<DoctorLiveCheckReport | undefined> {
+  if (providerName === undefined) {
+    return undefined;
+  }
+
+  const providerConfig = providers[providerName];
+  if (providerConfig === undefined) {
+    errors.push(
+      `--live-check ${providerName} requested, but providers.${providerName}.command is not configured`
+    );
+    return undefined;
+  }
+
+  const adapter = agentProviders[providerName];
+  if (adapter === undefined) {
+    errors.push(
+      `--live-check ${providerName} requested, but no adapter is registered`
+    );
+    return undefined;
+  }
+
+  const probe = await probeProviderCommand({
+    command: providerConfig.command,
+    provider: adapter,
+    providerName,
+    ...(timeoutMs === undefined ? {} : { timeoutMs })
+  });
+  if (!probe.ok) {
+    errors.push(`--live-check ${providerName} failed: ${probe.detail}`);
+  }
+  return { detail: probe.detail, ok: probe.ok, provider: providerName };
 }
 
 // Detects an installed unit that predates a systemd-unit-shape change (the
@@ -2166,11 +2227,13 @@ function report(
   configPath: string,
   errors: string[],
   projects: DoctorProjectReport[],
-  warnings: string[] = []
+  warnings: string[] = [],
+  liveCheck?: DoctorLiveCheckReport
 ): DoctorReport {
   return {
     configPath,
     errors,
+    ...(liveCheck === undefined ? {} : { liveCheck }),
     ok: errors.length === 0,
     projects,
     warnings

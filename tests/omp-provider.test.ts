@@ -1850,9 +1850,6 @@ describe("Oh My Pi RPC provider", () => {
     await expect(provider.validate("omp --auto-approve")).rejects.toThrow(
       "must include --mode rpc"
     );
-    await expect(provider.validate("omp --mode rpc")).rejects.toThrow(
-      "must run with full permissions"
-    );
     await expect(
       provider.validate("omp --mode rpc --auto-approve --print")
     ).rejects.toThrow("must not use print mode");

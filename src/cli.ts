@@ -190,8 +190,25 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       "validate service config and workflow contracts without dispatching work"
     )
     .option("--config <path>", "service config path")
-    .action(async (options: { config?: string }) => {
-      const report = await doctor(withConfigPath(options.config));
+    .option(
+      "--live-check <provider>",
+      "also spawn providers.<provider>.command for real with a trivial prompt and wait for a reply (billed, can take tens of seconds; not run by default)",
+      parseProvider
+    )
+    .action(async (options: { config?: string; liveCheck?: InitProvider }) => {
+      const report = await doctor({
+        ...withConfigPath(options.config),
+        ...(options.liveCheck === undefined
+          ? {}
+          : { liveCheckProvider: options.liveCheck })
+      });
+
+      if (report.liveCheck !== undefined) {
+        writeOut(
+          program,
+          `live check (${report.liveCheck.provider}): ${report.liveCheck.ok ? "ok" : "failed"} — ${report.liveCheck.detail}\n`
+        );
+      }
 
       if (report.ok) {
         writeOut(

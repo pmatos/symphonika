@@ -149,13 +149,12 @@ export function parseRoutineDeclaration(
     routinePath,
     errors
   );
-  const permissionModeValue = stringField(frontMatter, "permission_mode");
-  if (
-    Object.hasOwn(frontMatter, "permission_mode") &&
-    permissionModeValue !== "bypass"
-  ) {
-    errors.push(`routine at ${routinePath} permission_mode must be bypass`);
-  }
+  const permissionMode = executionStringField(
+    frontMatter,
+    "permission_mode",
+    routinePath,
+    errors
+  );
   const timeoutMinutesValue = frontMatter.timeout_minutes;
   let timeoutMinutes: number | undefined;
   if (Object.hasOwn(frontMatter, "timeout_minutes")) {
@@ -197,9 +196,7 @@ export function parseRoutineDeclaration(
       ...(model === undefined ? {} : { model }),
       name: name!,
       ...(typeof notifyValue === "boolean" ? { notify: notifyValue } : {}),
-      ...(permissionModeValue === "bypass"
-        ? { permissionMode: permissionModeValue }
-        : {}),
+      ...(permissionMode === undefined ? {} : { permissionMode }),
       prompt,
       provider,
       schedule: parsedSchedule!,
@@ -211,7 +208,7 @@ export function parseRoutineDeclaration(
 
 function executionStringField(
   frontMatter: Record<string, unknown>,
-  key: "effort" | "model",
+  key: "effort" | "model" | "permission_mode",
   routinePath: string,
   errors: string[]
 ): string | undefined {

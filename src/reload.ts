@@ -131,7 +131,7 @@ const routineExecutionDefaultsSchema = z
   .object({
     model: z.string().trim().min(1).optional(),
     effort: z.string().trim().min(1).optional(),
-    permission_mode: z.literal("bypass").optional(),
+    permission_mode: z.string().trim().min(1).optional(),
     timeout_minutes: z.number().positive().optional()
   })
   .strict();
@@ -910,7 +910,7 @@ function normalizeRoutineExecutionDefaults(
     | {
         effort?: string | undefined;
         model?: string | undefined;
-        permission_mode?: "bypass" | undefined;
+        permission_mode?: string | undefined;
         timeout_minutes?: number | undefined;
       }
     | undefined

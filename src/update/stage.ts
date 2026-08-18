@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -186,12 +186,38 @@ export async function stageExtractedRelease(input: {
   }
 
   try {
+    await stripPackageScripts(stagingPath);
+  } catch (error) {
+    return {
+      kind: "error",
+      error: `stripping package.json scripts failed: ${errorMessage(error)}`
+    };
+  }
+
+  try {
     await runNpmCi(stagingPath);
   } catch (error) {
     return { kind: "error", error: `npm ci failed: ${errorMessage(error)}` };
   }
 
   return { kind: "staged", stagingPath };
+}
+
+// release.yml packages package.json as-is, `scripts` block included --
+// notably `prepare: npm run build`, which npm ci always runs regardless of
+// --omit=dev. The release tarball ships no src/ or tsconfig.build.json for
+// that to build against, so an unmodified package.json makes npm ci fail
+// every time. Mirrors the manual redeploy flow's own package.json edit
+// (strip scripts before npm ci --omit=dev under the install's node).
+async function stripPackageScripts(stagingPath: string): Promise<void> {
+  const packageJsonPath = path.join(stagingPath, "package.json");
+  const raw = await readFile(packageJsonPath, "utf8");
+  const parsed: unknown = JSON.parse(raw);
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error(`${packageJsonPath} did not parse to an object`);
+  }
+  delete (parsed as Record<string, unknown>).scripts;
+  await writeFile(packageJsonPath, `${JSON.stringify(parsed, null, 2)}\n`);
 }
 
 // `tar` is a universal system utility present on any host this daemon can

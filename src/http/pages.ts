@@ -3901,7 +3901,10 @@ function buildDependencyGraphIssues(input: {
     for (const snapshot of input.runStore.listProjectIssueSnapshots(
       projectName
     )) {
-      const issueKey = `${repo.owner}/${repo.repo}#${snapshot.issueNumber}`;
+      // Lowercased for the same reason the client's issueNodeId is: GitHub
+      // repo lookups are case-insensitive, so two aliased Projects can
+      // configure the identical repo with different casing.
+      const issueKey = `${repo.owner.toLowerCase()}/${repo.repo.toLowerCase()}#${snapshot.issueNumber}`;
       if (seenIssueKeys.has(issueKey)) {
         continue;
       }

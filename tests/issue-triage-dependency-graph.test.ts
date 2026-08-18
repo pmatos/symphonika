@@ -322,6 +322,57 @@ describe("GET /issues/graph", () => {
     }
   });
 
+  it("dedupes aliased Projects whose configured repo casing differs", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha-mirror", validationState: "valid", weight: 1 },
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      for (const projectName of ["alpha", "alpha-mirror"]) {
+        test.runStore.replaceProjectIssueSnapshots({
+          polledAt: "2026-08-18T10:00:00.000Z",
+          projectName,
+          rows: [
+            {
+              blockedBy: [],
+              blockedByTruncated: false,
+              issueNumber: 101,
+              kind: "candidate",
+              labels: [],
+              priority: 1,
+              reasons: [],
+              title: "Shared repo issue"
+            }
+          ]
+        });
+      }
+
+      const repoByProject: Record<string, { owner: string; repo: string }> = {
+        alpha: { owner: "pmatos", repo: "symphonika" },
+        "alpha-mirror": { owner: "PMatos", repo: "Symphonika" }
+      };
+      const app = makeApp(test, {
+        getProjectRepo: (projectName) => repoByProject[projectName]
+      });
+      const response = await app.request("/issues/graph");
+      const html = await response.text();
+      const embedded = /window\.__ISSUE_DEPS_GRAPH__ = (.*?);<\/script>/s.exec(
+        html
+      );
+      const graph = JSON.parse(embedded?.[1] ?? "null") as {
+        issues: Array<{ issueNumber: number; projectName: string }>;
+      };
+      const forIssue101 = graph.issues.filter(
+        (issue) => issue.issueNumber === 101
+      );
+      expect(forIssue101).toHaveLength(1);
+      expect(forIssue101[0]?.projectName).toBe("alpha");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("forwards blockedByTruncated into the embedded payload and the fallback list", async () => {
     const test = await setup();
     try {

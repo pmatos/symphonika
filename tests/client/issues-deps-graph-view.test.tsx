@@ -141,4 +141,55 @@ describe("IssuesDepsGraphView", () => {
     const link = screen.getByRole("link", { name: /#101/ });
     expect(link.getAttribute("href")).toBe("/issues/alpha/101");
   });
+
+  it("URL-encodes a project name containing reserved characters in the issue link", () => {
+    window.__ISSUE_DEPS_GRAPH__ = {
+      issues: [
+        {
+          blockedBy: [],
+          issueNumber: 101,
+          owner: "pmatos",
+          projectName: "team a/b",
+          repo: "symphonika",
+          title: "Add graph view"
+        }
+      ]
+    };
+    let tapHandler: ((event: unknown) => void) | undefined;
+    mockedCytoscape.mockReturnValue({
+      destroy: vi.fn(),
+      on: vi.fn(
+        (
+          eventName: string,
+          _selector: string,
+          handler: (event: unknown) => void
+        ) => {
+          if (eventName === "tap") {
+            tapHandler = handler;
+          }
+        }
+      )
+    } as unknown as cytoscape.Core);
+
+    renderWithFallback();
+
+    act(() => {
+      tapHandler?.({
+        target: {
+          data: () => ({
+            id: "issue:pmatos/symphonika#101",
+            issueNumber: 101,
+            kind: "issue",
+            owner: "pmatos",
+            projectName: "team a/b",
+            repo: "symphonika",
+            title: "Add graph view"
+          })
+        }
+      });
+    });
+
+    const link = screen.getByRole("link", { name: /#101/ });
+    expect(link.getAttribute("href")).toBe("/issues/team%20a%2Fb/101");
+  });
 });

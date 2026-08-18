@@ -108,7 +108,7 @@ export function IssuesDepsGraphView() {
               {selected.kind === "issue" &&
               selected.projectName !== undefined ? (
                 <a
-                  href={`/issues/${selected.projectName}/${selected.issueNumber}`}
+                  href={`/issues/${encodeURIComponent(selected.projectName)}/${selected.issueNumber}`}
                 >
                   #{selected.issueNumber}
                 </a>

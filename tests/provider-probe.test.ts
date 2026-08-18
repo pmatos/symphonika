@@ -39,6 +39,35 @@ describe("probeProviderCommand", () => {
     expect(result).toEqual({ detail: "Hi there!", ok: true });
   });
 
+  it("closes the provider iterator so its own shutdown cleanup runs, even on a non-process_exit terminal event", async () => {
+    let cleanupRan = false;
+    const provider: AgentProvider = {
+      cancel: () => Promise.resolve(),
+      name: "claude",
+      runAttempt: async function* () {
+        try {
+          // Mirrors a real adapter: yields the terminal event and then
+          // loops back to await the next queue item, staying suspended
+          // here unless the consumer calls .next() again or closes it.
+          yield { normalized: { result: "Hi!", type: "turn_completed" }, raw: {} };
+          yield { normalized: { type: "process_exit" }, raw: {} };
+        } finally {
+          cleanupRan = true;
+        }
+      },
+      validate: () => Promise.resolve()
+    };
+
+    const result = await probeProviderCommand({
+      command: "claude -p",
+      provider,
+      providerName: "claude"
+    });
+
+    expect(result).toEqual({ detail: "Hi!", ok: true });
+    expect(cleanupRan).toBe(true);
+  });
+
   it("falls back to a placeholder when turn_completed carries no result text", async () => {
     const provider = fakeProvider([
       { normalized: { type: "turn_completed" }, raw: {} }
@@ -149,6 +178,43 @@ describe("probeProviderCommand", () => {
     expect(result.detail).toContain("no reply within 20ms");
     expect(cancelled).toBe(true);
   });
+
+  it(
+    "returns promptly even when closing the iterator hangs",
+    async () => {
+      const provider: AgentProvider = {
+        cancel: () => Promise.resolve(),
+        name: "claude",
+        runAttempt: async function* () {
+          try {
+            yield {
+              normalized: { result: "Hi!", type: "turn_completed" },
+              raw: {}
+            };
+          } finally {
+            // A provider whose own shutdown cleanup never resolves (e.g. a
+            // child ignoring SIGTERM) must not make the probe itself hang.
+            await new Promise(() => {
+              // Never resolves.
+            });
+          }
+        },
+        validate: () => Promise.resolve()
+      };
+
+      const start = Date.now();
+      const result = await probeProviderCommand({
+        command: "claude -p",
+        provider,
+        providerName: "claude"
+      });
+      const elapsedMs = Date.now() - start;
+
+      expect(result).toEqual({ detail: "Hi!", ok: true });
+      expect(elapsedMs).toBeLessThan(9_000);
+    },
+    10_000
+  );
 
   it("surfaces a thrown error from runAttempt as a failed probe", async () => {
     const provider: AgentProvider = {

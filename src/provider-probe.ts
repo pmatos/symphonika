@@ -15,6 +15,7 @@ export type ProviderProbeResult = {
 
 const DEFAULT_PROBE_PROMPT = "Say Hi";
 const DEFAULT_PROBE_TIMEOUT_MS = 60_000;
+const ITERATOR_CLOSE_TIMEOUT_MS = 5_000;
 
 // Live functional check for an operator-authored provider command: spawns
 // the real command (raw, as authored — runAttempt renders any {{tag}}
@@ -59,30 +60,52 @@ export async function probeProviderCommand(input: {
     });
     const iterator = events[Symbol.asyncIterator]();
 
-    while (true) {
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) {
-        void input.provider.cancel(runId);
-        return { detail: `no reply within ${timeoutMs}ms`, ok: false };
-      }
+    try {
+      while (true) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+          void input.provider.cancel(runId);
+          return { detail: `no reply within ${timeoutMs}ms`, ok: false };
+        }
 
-      const step = await raceWithTimeout(iterator.next(), remainingMs);
-      if (step === "timed-out") {
-        // Best-effort: ask the provider to stop the run, but don't wait for
-        // it — a hung/unresponsive provider must not hang the probe caller.
-        void input.provider.cancel(runId);
-        return { detail: `no reply within ${timeoutMs}ms`, ok: false };
-      }
-      if (step.done === true) {
-        return {
-          detail: "provider closed the event stream without completing a turn",
-          ok: false
-        };
-      }
+        const step = await raceWithTimeout(iterator.next(), remainingMs);
+        if (step === "timed-out") {
+          // Best-effort: ask the provider to stop the run, but don't wait
+          // for it — a hung/unresponsive provider must not hang the probe
+          // caller.
+          void input.provider.cancel(runId);
+          return { detail: `no reply within ${timeoutMs}ms`, ok: false };
+        }
+        if (step.done === true) {
+          return {
+            detail:
+              "provider closed the event stream without completing a turn",
+            ok: false
+          };
+        }
 
-      const outcome = outcomeFromEvent(step.value);
-      if (outcome !== undefined) {
-        return outcome;
+        const outcome = outcomeFromEvent(step.value);
+        if (outcome !== undefined) {
+          return outcome;
+        }
+      }
+    } finally {
+      // Every return path above leaves the provider's own runAttempt
+      // generator suspended at its last yield (only a self-issued `return`
+      // inside that generator, still pending on its next resume, ends it) —
+      // its shutdown/process-scope cleanup lives in a `finally` that only
+      // runs once the generator resumes past that yield, which closing the
+      // iterator triggers. Bounded and swallowed: iterator.return() itself
+      // awaits that cleanup, which can hang (e.g. a child ignoring SIGTERM),
+      // and closing must never hang this function after it already has a
+      // result (or a timeout) to return.
+      try {
+        await raceWithTimeout(
+          closeIterator(iterator),
+          ITERATOR_CLOSE_TIMEOUT_MS
+        );
+      } catch {
+        // best-effort; must not mask the result already being returned
       }
     }
   } catch (error) {
@@ -93,6 +116,12 @@ export async function probeProviderCommand(input: {
   } finally {
     await rm(workspacePath, { force: true, recursive: true });
   }
+}
+
+async function closeIterator(
+  iterator: AsyncIterator<ProviderEvent>
+): Promise<void> {
+  await iterator.return?.();
 }
 
 async function raceWithTimeout<T>(

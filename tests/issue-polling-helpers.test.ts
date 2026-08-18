@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   fetchPullRequestFollowupState,
-  swallowNotFound,
+  swallowLabelNotFound,
   tryAddLabelsToIssue,
   tryGetIssue,
   tryListBranchCommits,
@@ -91,50 +91,69 @@ describe("tryRemoveLabelsFromIssue", () => {
     // multi-label) call throw", not which individual label 404d -- so it
     // can't distinguish "the only requested label was absent" from "an
     // earlier label was absent and a later one was never attempted". See
-    // swallowNotFound / OctokitGitHubIssuesApi.removeLabelsFromIssue.
-    const notFound = Object.assign(new Error("Not Found"), { status: 404 });
+    // swallowLabelNotFound / OctokitGitHubIssuesApi.removeLabelsFromIssue.
+    const notFound = Object.assign(new Error("Label does not exist"), {
+      status: 404
+    });
     const api: GitHubIssuesApi = {
       listOpenIssues: () => Promise.resolve([]),
       removeLabelsFromIssue: () => Promise.reject(notFound)
     };
     await expect(tryRemoveLabelsFromIssue(api, labelInput)).rejects.toThrow(
-      "Not Found"
+      "Label does not exist"
     );
   });
 });
 
-describe("swallowNotFound", () => {
-  it("resolves without throwing when the attempt 404s -- idempotent removal of an absent label", async () => {
-    const notFound = Object.assign(new Error("Not Found"), { status: 404 });
+describe("swallowLabelNotFound", () => {
+  it("resolves without throwing when the attempt 404s with GitHub's absent-label message", async () => {
+    const labelNotFound = Object.assign(new Error("Label does not exist"), {
+      status: 404
+    });
     await expect(
-      swallowNotFound(() => Promise.reject(notFound))
+      swallowLabelNotFound(() => Promise.reject(labelNotFound))
     ).resolves.toBeUndefined();
+  });
+
+  it("propagates a 404 whose message does not identify an absent label -- e.g. the issue or repo itself is missing/inaccessible", async () => {
+    // GitHub's remove-label endpoint 404s for more than one reason (label
+    // absent, issue absent, repo absent/inaccessible); only the first is
+    // safe to treat as an idempotent no-op. A generic "Not Found" must
+    // still surface as a real failure, not a false success.
+    const genericNotFound = Object.assign(new Error("Not Found"), {
+      status: 404
+    });
+    await expect(
+      swallowLabelNotFound(() => Promise.reject(genericNotFound))
+    ).rejects.toThrow("Not Found");
   });
 
   it("propagates a non-404 error from the attempt", async () => {
     await expect(
-      swallowNotFound(() => Promise.reject(new Error("boom")))
+      swallowLabelNotFound(() => Promise.reject(new Error("boom")))
     ).rejects.toThrow("boom");
   });
 
   it("resolves normally when the attempt succeeds", async () => {
     let called = false;
-    await swallowNotFound(() => {
+    await swallowLabelNotFound(() => {
       called = true;
       return Promise.resolve();
     });
     expect(called).toBe(true);
   });
 
-  it("lets a loop continue past a 404'd attempt to reach a later one -- the bug this exists to fix", async () => {
-    const notFound = Object.assign(new Error("Not Found"), { status: 404 });
+  it("lets a loop continue past an absent-label 404 to reach a later attempt -- the bug this exists to fix", async () => {
+    const labelNotFound = Object.assign(new Error("Label does not exist"), {
+      status: 404
+    });
     const attempted: string[] = [];
     const labels = ["sym:stale", "agent-ready"];
     for (const label of labels) {
-      await swallowNotFound(() => {
+      await swallowLabelNotFound(() => {
         attempted.push(label);
         return label === "sym:stale"
-          ? Promise.reject(notFound)
+          ? Promise.reject(labelNotFound)
           : Promise.resolve();
       });
     }

@@ -12,6 +12,21 @@ to know any provider's flag vocabulary, matching how `-c sandbox_mode=...`/`-c a
 already work today. Everything else in this ADR (the config surface, the deadline mechanism, the
 anti-backgrounding guards, the one-shot notice) is unchanged.
 
+**Second amendment note:** `permission_mode` was broadened from accepting only the literal `bypass`
+to any non-empty string, and the Claude/OMP adapters' static command validation no longer inspects
+which permission-mode value the operator chose — only the wire-protocol flags each adapter's parser
+requires (see ADR 0015/SPEC.md §11.3, "protocol conformance, not policy"). The prior design
+hardcoded `bypass` because it was the only value any provider CLI supported at the time and every
+adapter statically rejected an authored command that used anything else; both premises turned out
+false (Claude's own `--permission-mode auto` is a supported, headless-compatible mode the static
+gate rejected outright) and, on principle, a value gate that must be updated by hand every time a
+provider ships a new mode is exactly the kind of policy Symphonika should not be encoding in
+TypeScript. `permission_mode` now works exactly like `model`/`effort`: free-form, operator-authored,
+templated, and unenforced beyond "non-empty string." The complementary check for "does this command
+actually work" moved to an opt-in functional probe, `doctor --live-check <provider>`, which spawns
+the real command with a trivial prompt and waits for a reply — see SPEC.md §11.3. Everything else in
+this ADR is unchanged.
+
 ## Context
 
 The live ptt routines require different model, effort, permission, and 60-minute execution
@@ -19,10 +34,10 @@ settings. Symphonika previously selected only a provider name per Routine and ha
 bound for a Routine Firing. The Watchdog in ADR 0054 answers a different question—whether observable
 progress stopped—and cannot substitute for a declared maximum duration.
 
-Provider commands are operator-authored. `permission_mode: bypass` is asymmetric across providers:
-Claude uses a dedicated flag while Codex and OMP express full permission through different startup
-settings — but every provider already independently hard-enforces full-permission execution
-regardless of this field (ADR 0015), so `permission_mode` need not be reflected in every command.
+Provider commands are operator-authored. `permission_mode` is asymmetric across providers: Claude and
+OMP express it through a dedicated flag while Codex expresses full permission through different
+startup settings — so `permission_mode` need not be reflected in every command, and Symphonika does
+not constrain which value it takes (see second amendment note above).
 
 ## Decision
 
@@ -62,12 +77,15 @@ tracked in a dedicated `project.templateRejectedRoutines` list (mirroring
 `project.trackerlessGitRoutines`), which `syncRoutines` soft-disables with `disabled_reason =
 "rejected_provider_template_mismatch"` instead of the generic `removed_from_config` a bare `continue`
 would otherwise produce — a still-configured-but-rejected routine must never be mistaken for one
-removed from `routines:`. `permission_mode` is exempt from this check for the reason given in
-Context: it is redundant, not inert, when untemplated.
+removed from `routines:`. `permission_mode` is exempt from this check: a routine may declare it
+purely as documentation of intent without its resolved provider command referencing the tag, since
+no provider currently requires it to appear in the command for full permission to take effect by
+default (see second amendment note above).
 
-`permission_mode` currently accepts only `bypass`. This is the portable semantic shared by all
-providers and preserves ADR 0015's Full-Permission Agent Execution invariant. Codex and OMP base
-commands already validate their equivalent bypass posture.
+`permission_mode` accepts any non-empty string — the operator's own choice of provider policy,
+exactly like `model`/`effort`. Symphonika's default provider commands still carry a fixed
+full-permission flag literally (see SPEC.md §11.3), preserving ADR 0015's posture as a default, not
+as an enforced invariant on operator-overridden commands.
 
 Every Claude Routine Firing also appends
 `--disallowedTools ScheduleWakeup Monitor CronCreate` and sets
@@ -99,7 +117,10 @@ in the background (tracked in #353).
   flag once parsed into argv, rather than erroring.
 - A progressing firing can still exceed its declared deadline; a non-progressing firing can still
   trip the Watchdog first. Neither policy replaces the other.
-- Restricted or interactive Routine permission modes remain unsupported by design.
+- Symphonika no longer prevents an operator from configuring a restrictive or interactive permission
+  mode; it is unenforced, not unsupported. A Routine still runs headless (`-p`, no
+  `--permission-prompt-tool`), so a mode that relies on a human answering a prompt cannot make
+  progress on gated actions in practice — the operator's own responsibility, not a Symphonika check.
 - A firing that times out during workspace preparation leaves its `git` clone/fetch running
   unattended; because `ensureRepositoryCache` serializes callers per project repository cache, that
   abandoned work can delay the next firing's or Run's workspace preparation for the same project

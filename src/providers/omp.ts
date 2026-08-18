@@ -1420,14 +1420,6 @@ function validateOmpProtocolFlags(args: string[]): void {
       "Oh My Pi provider command must select exactly one --mode rpc"
     );
   }
-  if (
-    !args.includes("--auto-approve") &&
-    !hasOptionValue(args, "--approval-mode", "yolo")
-  ) {
-    throw new Error(
-      "Oh My Pi provider command must run with full permissions using --auto-approve or --approval-mode yolo"
-    );
-  }
   if (args.includes("-p") || args.includes("--print")) {
     throw new Error("Oh My Pi provider command must not use print mode");
   }
@@ -1445,19 +1437,6 @@ function optionValues(args: string[], option: string): string[] {
     }
   }
   return values;
-}
-
-function hasOptionValue(
-  args: string[],
-  option: string,
-  expectedValue: string
-): boolean {
-  return args.some((arg, index) => {
-    if (arg === option) {
-      return args[index + 1] === expectedValue;
-    }
-    return arg === `${option}=${expectedValue}`;
-  });
 }
 
 async function validateOmpRpcCommand(command: {

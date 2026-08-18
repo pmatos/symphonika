@@ -180,7 +180,7 @@ describe("doctor", () => {
     await writeValidConfig(configPath, {
       routineDefaultLines: [
         "routine_defaults:",
-        "  permission_mode: ask",
+        "  permission_mode: ''",
         "  timeout_minutes: 0"
       ]
     });
@@ -195,6 +195,132 @@ describe("doctor", () => {
     expect(process.exitCode).toBe(1);
     expect(output.stderr).toContain("routine_defaults.permission_mode");
     expect(output.stderr).toContain("routine_defaults.timeout_minutes");
+  });
+
+  it("skips the live provider check by default", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath);
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      githubApi: successfulGitHubApi(),
+      homeDir: root
+    });
+
+    expect(report.liveCheck).toBeUndefined();
+  });
+
+  it("runs the live provider check when requested and reports success", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath);
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const report = await runDoctor({
+      agentProviders: {
+        ...fakeAgentProviders(),
+        codex: {
+          cancel: () => Promise.resolve(),
+          name: "codex",
+          runAttempt: async function* () {
+            await Promise.resolve();
+            yield {
+              normalized: { result: "Hi there!", type: "turn_completed" },
+              raw: {}
+            };
+          },
+          validate: () => Promise.resolve()
+        }
+      },
+      configPath,
+      githubApi: successfulGitHubApi(),
+      homeDir: root,
+      liveCheckProvider: "codex"
+    });
+
+    expect(report.liveCheck).toEqual({
+      detail: "Hi there!",
+      ok: true,
+      provider: "codex"
+    });
+    expect(report.errors).toEqual([]);
+    expect(report.ok).toBe(true);
+  });
+
+  it("fails doctor when the requested live provider check fails", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath);
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const report = await runDoctor({
+      agentProviders: {
+        ...fakeAgentProviders(),
+        codex: {
+          cancel: () => Promise.resolve(),
+          name: "codex",
+          runAttempt: async function* () {
+            await Promise.resolve();
+            yield {
+              normalized: { message: "auth expired", type: "turn_failed" },
+              raw: {}
+            };
+          },
+          validate: () => Promise.resolve()
+        }
+      },
+      configPath,
+      githubApi: successfulGitHubApi(),
+      homeDir: root,
+      liveCheckProvider: "codex"
+    });
+
+    expect(report.liveCheck).toEqual({
+      detail: "auth expired",
+      ok: false,
+      provider: "codex"
+    });
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain("--live-check codex failed: auth expired");
+  });
+
+  it("reports a missing adapter for the requested live provider check", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, { ompCommand: "omp --mode rpc" });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      githubApi: successfulGitHubApi(),
+      homeDir: root,
+      liveCheckProvider: "omp"
+    });
+
+    expect(report.liveCheck).toBeUndefined();
+    expect(report.errors).toContain(
+      "--live-check omp requested, but no adapter is registered"
+    );
   });
 
   it("reports duplicate Routine names within one Project", async () => {

@@ -44,7 +44,7 @@ export type ProviderRunInput = {
   routine?: {
     effort?: string;
     model?: string;
-    permissionMode?: "bypass";
+    permissionMode?: string;
   };
   workspacePath: string;
 };

@@ -700,7 +700,7 @@ type RoutineRow = {
   next_fire_at: string | null;
   notify_enabled: number;
   project_name: string;
-  permission_mode: "bypass" | null;
+  permission_mode: string | null;
   provider_name: AgentProviderName | null;
   schedule_at: string;
   schedule_cron: string | null;

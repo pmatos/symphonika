@@ -207,8 +207,7 @@ Symphonika supports hand-authored Markdown routine files with YAML front matter:
 - exactly one schedule shape: `schedule.at` or `schedule.cron` with optional `schedule.tz`
 - `kind: report` or `kind: git`
 - optional `provider`
-- optional `model` and `effort` provider settings
-- optional `permission_mode: bypass`
+- optional `model`, `effort`, and `permission_mode` provider settings
 - optional positive `timeout_minutes`
 - optional `catch_up: fire_once_if_missed` (omitted means missed clock events are skipped)
 - optional `allow_overlap: true` (omitted means overlapping firings are skipped)
@@ -563,10 +562,11 @@ boolean. Their omitted defaults are missed-event skip and `false`, respectively.
 present, must be a boolean; omitted defaults to `false`. `disabled: true` stops future scheduling
 for that routine on the next reload without affecting an in-flight firing; see §8.4.
 
-`model` and `effort`, when present, must be non-empty strings. `permission_mode`, when present, must
-be `bypass`, preserving the Full-Permission Agent Execution invariant. `timeout_minutes`, when
-present, must be a finite positive number. Invalid values are deterministic declaration-load
-errors and use the same per-Routine last-known-good reload path as an invalid cron expression.
+`model`, `effort`, and `permission_mode`, when present, must be non-empty strings — Symphonika does
+not constrain `permission_mode` to a specific value; it is operator-authored, exactly like `model`
+and `effort` (see §11.3). `timeout_minutes`, when present, must be a finite positive number. Invalid
+values are deterministic declaration-load errors and use the same per-Routine last-known-good reload
+path as an invalid cron expression.
 
 The Service Config may declare the same optional fields in a top-level `routine_defaults:` mapping.
 Resolution is front matter, then `routine_defaults`, then no override: when neither level supplies a
@@ -1300,27 +1300,44 @@ Default Oh My Pi command:
 omp --mode rpc --auto-approve
 ```
 
-The OMP adapter requires RPC mode and full-permission operation through `--auto-approve` or
-`--approval-mode yolo`. It validates the versioned ready frame with a bounded startup probe and
-negotiates protocol v2 chunking when the installed OMP advertises it. See ADR-0066.
+The OMP adapter requires RPC mode (`--mode rpc`, selected exactly once) and rejects print mode
+(`-p`/`--print`). It validates the versioned ready frame with a bounded startup probe and negotiates
+protocol v2 chunking when the installed OMP advertises it. See ADR-0066.
 
 Provider commands may be overridden, but the replacement command must speak the provider adapter's
 expected protocol.
 
-Routine `model` and `effort` overrides are delivered by command templating, not append-at-spawn:
-`providers.<name>.command` may reference plain tags `{{model}}` / `{{effort}}`, substituted with the
-resolved value, and `{{#tag}}...{{/tag}}` conditional sections, whose enclosed text (delimiters
-included) is kept only when the field resolves to a value — the section form is what lets an
-operator omit a whole `--model X` segment when `X` is absent without leaving a dangling incomplete
-flag. Each provider adapter renders `input.provider.command` through this template — using the
-firing's resolved values for `runAttempt`, and empty values (so every section collapses) for
-`validate()` and for issue-driven Runs — before parsing the rendered string into argv. Symphonika's
-TypeScript never hardcodes a provider's flag vocabulary; the operator's own authored command carries
-that knowledge, exactly as it already does today for Codex's `-c sandbox_mode=...`. An unrecognized
-or malformed template tag throws rather than being passed through as literal text. `permission_mode`
-is not templated: `bypass` is the only value any provider currently supports, and every provider
-already independently hard-enforces it (Claude's protocol validation, Codex and OMP's already-
-validated full-permission startup posture), so declaring it has no templating story to speak of.
+Provider adapters validate wire protocol conformance only — the flags each adapter's own
+stream-json/RPC parser requires to function (Claude: `-p`, `--input-format stream-json`,
+`--output-format stream-json`, `--verbose`; OMP: `--mode rpc`, no print mode; Codex: the `app-server`
+subcommand) — never which permission or approval *policy* the operator chose. Which permission mode
+a command runs under (`--dangerously-skip-permissions`, `--permission-mode bypassPermissions`,
+`--permission-mode auto`, or any later mode a provider CLI adds) is the operator's own authored
+choice, exactly like `-c sandbox_mode=...` for Codex; Symphonika's TypeScript never hardcodes or
+allowlists a specific policy value. An operator who wants to verify a chosen command and permission
+mode actually completes a real turn, rather than only passing this static shape check, can request
+`doctor --live-check <provider>`: an opt-in functional probe (not part of the default `doctor` run,
+since it is a real billed call that can take tens of seconds) that spawns the configured command with
+a trivial prompt and waits for a reply.
+
+Routine `model`, `effort`, and `permission_mode` overrides are delivered by command templating, not
+append-at-spawn: `providers.<name>.command` may reference plain tags `{{model}}` / `{{effort}}` /
+`{{permission_mode}}`, substituted with the resolved value, and `{{#tag}}...{{/tag}}` conditional
+sections, whose enclosed text (delimiters included) is kept only when the field resolves to a value —
+the section form is what lets an operator omit a whole `--model X` segment when `X` is absent without
+leaving a dangling incomplete flag, and likewise lets an operator template
+`{{#permission_mode}}--permission-mode {{permission_mode}}{{/permission_mode}}` so a routine that
+doesn't declare `permission_mode` doesn't emit a dangling flag either. Each provider adapter renders
+`input.provider.command` through this template — using the firing's resolved values for
+`runAttempt`, and empty values (so every section collapses) for `validate()` and for issue-driven
+Runs — before parsing the rendered string into argv. Symphonika's TypeScript never hardcodes a
+provider's flag vocabulary; the operator's own authored command carries that knowledge, exactly as it
+already does today for Codex's `-c sandbox_mode=...`. An unrecognized or malformed template tag
+throws rather than being passed through as literal text. `permission_mode` is exempt from the
+unreferenced-field declaration-load check (§5.4): unlike `model`/`effort`, a routine may declare
+`permission_mode` purely as documentation of intent without its resolved provider command
+referencing the tag, since no provider currently requires it to appear in the command for full
+permission to take effect (the default commands above already carry a fixed policy flag literally).
 Claude Routine Firings additionally append `--disallowedTools ScheduleWakeup Monitor CronCreate`
 (outside the template, appended by the adapter directly) and set
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child environment.

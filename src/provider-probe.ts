@@ -1,0 +1,183 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import type {
+  AgentProvider,
+  AgentProviderName,
+  ProviderEvent
+} from "./provider.js";
+
+export type ProviderProbeResult = {
+  detail: string;
+  ok: boolean;
+};
+
+const DEFAULT_PROBE_PROMPT = "Say Hi";
+const DEFAULT_PROBE_TIMEOUT_MS = 60_000;
+const CLEANUP_TIMEOUT_MS = 5_000;
+
+// Live functional check for an operator-authored provider command: spawns
+// the real command (raw, as authored — runAttempt renders any {{tag}}
+// placeholders itself with an empty routine context, matching an
+// issue-driven Run) with a trivial prompt and waits for a reply. This is the
+// opt-in complement to AgentProvider.validate(), which only checks static
+// protocol shape (flags, --help output) and never spends a real turn. Not
+// part of the default `doctor` run — it is a real billed call that can take
+// tens of seconds, so callers gate it behind an explicit flag.
+export async function probeProviderCommand(input: {
+  command: string;
+  prompt?: string;
+  provider: AgentProvider;
+  providerName: AgentProviderName;
+  timeoutMs?: number;
+}): Promise<ProviderProbeResult> {
+  const workspacePath = await mkdtemp(path.join(tmpdir(), "symphonika-probe-"));
+  const runId = "symphonika-doctor-probe";
+  const timeoutMs = input.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+
+  try {
+    const events = input.provider.runAttempt({
+      branchName: "symphonika-doctor-probe",
+      issue: {
+        body: "",
+        created_at: EPOCH,
+        id: 0,
+        labels: [],
+        number: 0,
+        priority: 0,
+        state: "open",
+        title: "symphonika doctor live check",
+        updated_at: EPOCH,
+        url: ""
+      },
+      prompt: input.prompt ?? DEFAULT_PROBE_PROMPT,
+      promptPath: path.join(workspacePath, "prompt.txt"),
+      provider: { command: input.command, name: input.providerName },
+      run: { attempt: 1, id: runId },
+      workspacePath
+    });
+    const iterator = events[Symbol.asyncIterator]();
+
+    try {
+      while (true) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+          return { detail: `no reply within ${timeoutMs}ms`, ok: false };
+        }
+
+        const step = await raceWithTimeout(iterator.next(), remainingMs);
+        if (step === "timed-out") {
+          return { detail: `no reply within ${timeoutMs}ms`, ok: false };
+        }
+        if (step.done === true) {
+          return {
+            detail:
+              "provider closed the event stream without completing a turn",
+            ok: false
+          };
+        }
+
+        const outcome = outcomeFromEvent(step.value);
+        if (outcome !== undefined) {
+          return outcome;
+        }
+      }
+    } finally {
+      // Every return path above leaves the provider's own runAttempt
+      // generator suspended at its last yield (only a self-issued `return`
+      // inside that generator, still pending on its next resume, ends it).
+      // Closing the iterator alone is not enough to kill the child: that
+      // only resumes the generator as if `return` were injected at the
+      // yield point, which skips straight to the generator's own enclosing
+      // `finally` (bookkeeping plus a best-effort systemd-scope stop that's
+      // a no-op when user systemd scopes are unavailable) — it never
+      // reaches each adapter's own direct `shutdownProviderProcess(child)`
+      // call, which sits as a plain statement *after* the yield in the
+      // event loop body and is only reached by resuming normally. cancel()
+      // is every adapter's dedicated, unconditional child-kill path (it
+      // calls shutdownProviderProcess directly), so call it first, then
+      // close the iterator so the generator's own bookkeeping still runs.
+      // Both bounded and swallowed: neither must hang this function after
+      // it already has a result (or a timeout) to return.
+      await withBoundedCleanup(() => input.provider.cancel(runId));
+      await withBoundedCleanup(() => closeIterator(iterator));
+    }
+  } catch (error) {
+    return {
+      detail: error instanceof Error ? error.message : String(error),
+      ok: false
+    };
+  } finally {
+    await rm(workspacePath, { force: true, recursive: true });
+  }
+}
+
+async function closeIterator(
+  iterator: AsyncIterator<ProviderEvent>
+): Promise<void> {
+  await iterator.return?.();
+}
+
+async function withBoundedCleanup(
+  action: () => Promise<unknown>
+): Promise<void> {
+  try {
+    await raceWithTimeout(
+      Promise.resolve(action()).then(() => undefined),
+      CLEANUP_TIMEOUT_MS
+    );
+  } catch {
+    // best-effort; must not mask the result already being returned
+  }
+}
+
+async function raceWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number
+): Promise<T | "timed-out"> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<"timed-out">((resolve) => {
+    timer = setTimeout(() => resolve("timed-out"), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const EPOCH = new Date(0).toISOString();
+
+function outcomeFromEvent(
+  event: ProviderEvent
+): ProviderProbeResult | undefined {
+  switch (event.normalized?.type) {
+    case "turn_completed":
+      return {
+        detail: stringOrFallback(event.normalized.result, "(no reply text)"),
+        ok: true
+      };
+    case "turn_failed":
+      return {
+        detail: stringOrFallback(event.normalized.message, "turn failed"),
+        ok: false
+      };
+    case "input_required":
+      return { detail: "provider requested input", ok: false };
+    case "process_exit":
+      return {
+        detail: "provider process exited before completing a turn",
+        ok: false
+      };
+    default:
+      return undefined;
+  }
+}
+
+function stringOrFallback(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim().length > 0
+    ? value
+    : fallback;
+}

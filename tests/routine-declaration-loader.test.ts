@@ -79,13 +79,37 @@ describe("RoutineDeclarationLoader", () => {
     });
   });
 
+  it("accepts a permission_mode value other than bypass", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "auto-mode.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: auto-mode",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "permission_mode: auto",
+        "---",
+        "Report using an operator-chosen permission mode.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.routine).toMatchObject({ permissionMode: "auto" });
+  });
+
   it.each([
     ["model", "model: ''", "model must be a non-empty string"],
     ["effort", "effort: 42", "effort must be a non-empty string"],
     [
       "permission_mode",
-      "permission_mode: acceptEdits",
-      "permission_mode must be bypass"
+      "permission_mode: 42",
+      "permission_mode must be a non-empty string"
     ],
     [
       "timeout_minutes",

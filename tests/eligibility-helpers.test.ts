@@ -182,9 +182,9 @@ describe("evaluateProjectEligibility", () => {
     );
 
     expect(result.eligible).toBe(false);
-    expect(
-      result.reasons.some((reason) => reason.includes("dependency"))
-    ).toBe(true);
+    expect(result.reasons.some((reason) => reason.includes("dependency"))).toBe(
+      true
+    );
   });
 });
 

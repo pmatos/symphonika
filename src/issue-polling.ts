@@ -106,6 +106,9 @@ export type GitHubIssuesApi = {
   getIssue?: (
     input: GitHubIssueRepositoryInput & { issueNumber: number }
   ) => Promise<RawGitHubIssue | null>;
+  getIssueDependencies?: (
+    input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
+  ) => Promise<Map<number, RawGitHubIssueDependencies>>;
   listBranchCommits?: (
     input: GitHubBranchCommitsInput
   ) => Promise<RawGitHubCommit[] | null>;
@@ -318,6 +321,16 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
     });
 
     return issues;
+  }
+
+  async getIssueDependencies(
+    input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
+  ): Promise<Map<number, RawGitHubIssueDependencies>> {
+    const octokit = this.octokit(input.token);
+    return fetchIssueDependencies(
+      (query, variables) => octokit.graphql(query, variables),
+      input
+    );
   }
 
   async listIssues(input: GitHubIssuesListInput): Promise<RawGitHubIssue[]> {
@@ -826,6 +839,16 @@ export async function tryGetIssue(
   return api.getIssue(input);
 }
 
+export async function tryGetIssueDependencies(
+  api: GitHubIssuesApi,
+  input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
+): Promise<Map<number, RawGitHubIssueDependencies> | undefined> {
+  if (api.getIssueDependencies === undefined) {
+    return undefined;
+  }
+  return api.getIssueDependencies(input);
+}
+
 export async function tryListBranchCommits(
   api: GitHubIssuesApi,
   input: GitHubBranchCommitsInput
@@ -1010,16 +1033,49 @@ async function pollProject(
     return;
   }
 
+  const issues = rawIssues
+    .filter((rawIssue) => rawIssue.pull_request === undefined)
+    .map((rawIssue) => normalizeIssueSnapshot(rawIssue, project));
+
+  let dependencies: Map<number, RawGitHubIssueDependencies> | undefined;
+  try {
+    dependencies = await tryGetIssueDependencies(githubIssuesApi, {
+      issueNumbers: issues.map((issue) => issue.number),
+      owner: project.tracker.owner,
+      repo: project.tracker.repo,
+      token
+    });
+  } catch (error) {
+    // Fails the whole project poll rather than proceeding with a partial
+    // eligibility picture -- same "leave prior snapshot untouched" handling
+    // as a failed listOpenIssues call above, and consistent with treating
+    // a truncated dependency fetch as unresolved rather than silently
+    // ignoring the gap.
+    const message = `projects.${project.name}.tracker.repository ${project.tracker.owner}/${project.tracker.repo} issue dependencies could not be checked: ${errorMessage(error)}`;
+    status.errors.push(message);
+    status.projects.push({
+      candidateIssues: 0,
+      error: message,
+      fetchedIssues: 0,
+      filteredIssues: 0,
+      lastPolledAt,
+      name: project.name,
+      ok: false,
+      weight
+    });
+    return;
+  }
+
   let fetchedIssues = 0;
   let candidateIssues = 0;
   let filteredIssues = 0;
-  for (const rawIssue of rawIssues) {
-    if (rawIssue.pull_request !== undefined) {
-      continue;
-    }
-
+  for (const issue of issues) {
     fetchedIssues += 1;
-    const issue = normalizeIssueSnapshot(rawIssue, project);
+    const issueDependencies = dependencies?.get(issue.number);
+    if (issueDependencies !== undefined) {
+      issue.blockedBy = issueDependencies.blockedBy;
+      issue.blockedByTruncated = issueDependencies.truncated;
+    }
     const reasons = issueFilterReasons(issue, project);
 
     if (reasons.length === 0) {
@@ -1246,7 +1302,9 @@ function issueDependencyRef(
     project.tracker.kind === "github" &&
     blocker.owner === project.tracker.owner &&
     blocker.repo === project.tracker.repo;
-  return sameRepo ? `#${blocker.number}` : `${blocker.owner}/${blocker.repo}#${blocker.number}`;
+  return sameRepo
+    ? `#${blocker.number}`
+    : `${blocker.owner}/${blocker.repo}#${blocker.number}`;
 }
 
 export async function loadPollingProjectsByName(

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   fetchIssueDependencies,
   fetchPullRequestFollowupState,
+  pollConfiguredGitHubIssuesFromConfig,
   swallowLabelNotFound,
   tryAddLabelsToIssue,
   tryGetIssue,
@@ -15,10 +16,28 @@ import {
   type GitHubIssuesApi,
   type GitHubPullRequestInput,
   type GraphqlExecutor,
+  type PollingProjectConfig,
   type RawGitHubCommit,
   type RawGitHubIssue,
   type RawGitHubPullRequest
 } from "../src/issue-polling.js";
+
+const dependencyGateProject: PollingProjectConfig = {
+  agent: { provider: "codex" },
+  issue_filters: {
+    labels_all: ["agent-ready"],
+    labels_none: [],
+    states: ["open"]
+  },
+  name: "symphonika",
+  priority: { default: 99, labels: {} },
+  tracker: {
+    kind: "github",
+    owner: "pmatos",
+    repo: "symphonika",
+    token: "$GITHUB_TOKEN"
+  }
+};
 
 const labelInput: GitHubIssueLabelInput = {
   issueNumber: 1,
@@ -453,13 +472,19 @@ describe("fetchIssueDependencies", () => {
               nodes: [
                 {
                   number: 295,
-                  repository: { name: "symphonika", owner: { login: "pmatos" } },
+                  repository: {
+                    name: "symphonika",
+                    owner: { login: "pmatos" }
+                  },
                   state: "CLOSED",
                   title: "slice 6"
                 },
                 {
                   number: 301,
-                  repository: { name: "symphonika", owner: { login: "pmatos" } },
+                  repository: {
+                    name: "symphonika",
+                    owner: { login: "pmatos" }
+                  },
                   state: "OPEN",
                   title: "sibling slice"
                 }
@@ -508,7 +533,10 @@ describe("fetchIssueDependencies", () => {
               nodes: [
                 {
                   number: 4,
-                  repository: { name: "other-repo", owner: { login: "someone-else" } },
+                  repository: {
+                    name: "other-repo",
+                    owner: { login: "someone-else" }
+                  },
                   state: "OPEN",
                   title: "external blocker"
                 }
@@ -547,7 +575,10 @@ describe("fetchIssueDependencies", () => {
               nodes: [
                 {
                   number: 1,
-                  repository: { name: "symphonika", owner: { login: "pmatos" } },
+                  repository: {
+                    name: "symphonika",
+                    owner: { login: "pmatos" }
+                  },
                   state: "OPEN",
                   title: "one of many"
                 }
@@ -602,8 +633,8 @@ describe("fetchIssueDependencies", () => {
       const repo = variables.repo as string;
       expect(owner).toBe("pmatos");
       expect(repo).toBe("symphonika");
-      const aliasMatches = [...query.matchAll(/i(\d+): issue\(/g)].map((match) =>
-        Number(match[1])
+      const aliasMatches = [...query.matchAll(/i(\d+): issue\(/g)].map(
+        (match) => Number(match[1])
       );
       calls.push(aliasMatches);
       const repository: Record<
@@ -629,6 +660,153 @@ describe("fetchIssueDependencies", () => {
     expect(calls.length).toBeGreaterThan(1);
     expect(calls.flat().sort((a, b) => a - b)).toEqual(issueNumbers);
     expect(result.size).toBe(45);
+  });
+});
+
+describe("pollConfiguredGitHubIssuesFromConfig dependency gating", () => {
+  it("filters out a candidate issue with an unresolved GraphQL blocker", async () => {
+    const githubIssuesApi: GitHubIssuesApi = {
+      getIssueDependencies: () =>
+        Promise.resolve(
+          new Map([
+            [
+              299,
+              {
+                blockedBy: [
+                  {
+                    number: 301,
+                    owner: "pmatos",
+                    repo: "symphonika",
+                    state: "OPEN",
+                    title: "sibling slice"
+                  }
+                ],
+                truncated: false
+              }
+            ]
+          ])
+        ),
+      listOpenIssues: () =>
+        Promise.resolve([
+          {
+            body: "",
+            created_at: "2026-08-01T00:00:00Z",
+            id: 1,
+            labels: [{ name: "agent-ready" }],
+            number: 299,
+            state: "open",
+            title: "Migrate live routines",
+            updated_at: "2026-08-01T00:00:00Z",
+            url: "https://example/299"
+          }
+        ])
+    };
+
+    const status = await pollConfiguredGitHubIssuesFromConfig({
+      config: { projects: [dependencyGateProject] },
+      env: { GITHUB_TOKEN: "secret" },
+      githubIssuesApi
+    });
+
+    expect(status.candidateIssues).toEqual([]);
+    expect(status.filteredIssues).toHaveLength(1);
+    expect(status.filteredIssues[0]?.reasons).toContain(
+      "blocked by open dependency #301"
+    );
+    expect(status.filteredIssues[0]?.issue.blockedBy).toEqual([
+      {
+        number: 301,
+        owner: "pmatos",
+        repo: "symphonika",
+        state: "OPEN",
+        title: "sibling slice"
+      }
+    ]);
+  });
+
+  it("keeps an issue eligible when its GraphQL blockers are all closed", async () => {
+    const githubIssuesApi: GitHubIssuesApi = {
+      getIssueDependencies: () =>
+        Promise.resolve(
+          new Map([
+            [
+              299,
+              {
+                blockedBy: [
+                  {
+                    number: 295,
+                    owner: "pmatos",
+                    repo: "symphonika",
+                    state: "CLOSED",
+                    title: "slice 6"
+                  }
+                ],
+                truncated: false
+              }
+            ]
+          ])
+        ),
+      listOpenIssues: () =>
+        Promise.resolve([
+          {
+            body: "",
+            created_at: "2026-08-01T00:00:00Z",
+            id: 1,
+            labels: [{ name: "agent-ready" }],
+            number: 299,
+            state: "open",
+            title: "Migrate live routines",
+            updated_at: "2026-08-01T00:00:00Z",
+            url: "https://example/299"
+          }
+        ])
+    };
+
+    const status = await pollConfiguredGitHubIssuesFromConfig({
+      config: { projects: [dependencyGateProject] },
+      env: { GITHUB_TOKEN: "secret" },
+      githubIssuesApi
+    });
+
+    expect(status.filteredIssues).toEqual([]);
+    expect(status.candidateIssues).toHaveLength(1);
+    expect(status.candidateIssues[0]?.issue.blockedBy).toEqual([
+      {
+        number: 295,
+        owner: "pmatos",
+        repo: "symphonika",
+        state: "CLOSED",
+        title: "slice 6"
+      }
+    ]);
+  });
+
+  it("degrades to no known blockers when getIssueDependencies isn't configured", async () => {
+    const githubIssuesApi: GitHubIssuesApi = {
+      listOpenIssues: () =>
+        Promise.resolve([
+          {
+            body: "",
+            created_at: "2026-08-01T00:00:00Z",
+            id: 1,
+            labels: [{ name: "agent-ready" }],
+            number: 299,
+            state: "open",
+            title: "Migrate live routines",
+            updated_at: "2026-08-01T00:00:00Z",
+            url: "https://example/299"
+          }
+        ])
+    };
+
+    const status = await pollConfiguredGitHubIssuesFromConfig({
+      config: { projects: [dependencyGateProject] },
+      env: { GITHUB_TOKEN: "secret" },
+      githubIssuesApi
+    });
+
+    expect(status.filteredIssues).toEqual([]);
+    expect(status.candidateIssues[0]?.issue.blockedBy).toEqual([]);
   });
 });
 

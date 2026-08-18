@@ -125,7 +125,8 @@ export function buildDependencyGraphElements(
     const targetId = issueNodeId(issue.owner, issue.repo, issue.issueNumber);
     for (const blocker of issue.blockedBy) {
       const sourceId = issueNodeId(blocker.owner, blocker.repo, blocker.number);
-      if (!nodesById.has(sourceId)) {
+      const existingSource = nodesById.get(sourceId);
+      if (existingSource === undefined) {
         nodesById.set(sourceId, {
           data: {
             id: sourceId,
@@ -138,6 +139,19 @@ export function buildDependencyGraphElements(
             title: blocker.title
           }
         });
+      } else if (existingSource.data.kind === "cluster") {
+        // The parent pass reached this same physical issue first and left
+        // only a bare placeholder (no state, generic label) -- now that
+        // the blocker pass knows its real state and title, upgrade in
+        // place rather than leaving stale placeholder data behind. A real
+        // "issue" node is never touched here: it's already the most
+        // authoritative source for this physical issue.
+        existingSource.data.kind = "external";
+        existingSource.data.label = `${blocker.owner}/${blocker.repo}#${blocker.number}\n${blocker.title}`;
+        existingSource.data.owner = blocker.owner;
+        existingSource.data.repo = blocker.repo;
+        existingSource.data.state = blocker.state;
+        existingSource.data.title = blocker.title;
       }
       edges.push({
         data: {

@@ -368,6 +368,84 @@ describe("buildDependencyGraphElements", () => {
     });
   });
 
+  it("upgrades a parent placeholder to a full external node once the blocker pass reaches it", () => {
+    const result = buildDependencyGraphElements([
+      {
+        blockedBy: [],
+        blockedByTruncated: false,
+        issueNumber: 101,
+        owner: "pmatos",
+        parentIssueNumber: 289,
+        projectName: "alpha",
+        repo: "symphonika",
+        title: "Add graph view"
+      },
+      {
+        blockedBy: [
+          {
+            number: 289,
+            owner: "pmatos",
+            repo: "symphonika",
+            state: "CLOSED",
+            title: "Dependency epic"
+          }
+        ],
+        blockedByTruncated: false,
+        issueNumber: 102,
+        owner: "pmatos",
+        projectName: "alpha",
+        repo: "symphonika",
+        title: "Add gating"
+      }
+    ]);
+
+    const node289 = result.nodes.find(
+      (node) => node.data.id === "issue:pmatos/symphonika#289"
+    );
+    expect(node289?.data.kind).toBe("external");
+    expect(node289?.data.state).toBe("CLOSED");
+    expect(node289?.data.title).toBe("Dependency epic");
+    expect(node289?.data.label).toBe("pmatos/symphonika#289\nDependency epic");
+  });
+
+  it("never downgrades a real issue node when it's also referenced as a parent or blocker", () => {
+    const result = buildDependencyGraphElements([
+      {
+        blockedBy: [
+          {
+            number: 289,
+            owner: "pmatos",
+            repo: "symphonika",
+            state: "OPEN",
+            title: "Stale blocker title"
+          }
+        ],
+        blockedByTruncated: false,
+        issueNumber: 101,
+        owner: "pmatos",
+        parentIssueNumber: 289,
+        projectName: "alpha",
+        repo: "symphonika",
+        title: "Add graph view"
+      },
+      {
+        blockedBy: [],
+        blockedByTruncated: false,
+        issueNumber: 289,
+        owner: "pmatos",
+        projectName: "alpha",
+        repo: "symphonika",
+        title: "Dependency epic"
+      }
+    ]);
+
+    const node289 = result.nodes.find(
+      (node) => node.data.id === "issue:pmatos/symphonika#289"
+    );
+    expect(node289?.data.kind).toBe("issue");
+    expect(node289?.data.title).toBe("Dependency epic");
+  });
+
   it("labels an external node with its owner/repo#N so it can't be mistaken for a local issue", () => {
     const result = buildDependencyGraphElements([
       {

@@ -209,6 +209,14 @@ export type HttpAppOptions = {
   // whole alias group instead of missing a claim/run parked under a sibling
   // Project name. See src/http/pages.ts's getProjectRepoAliases usage.
   getProjectRepoAliases?: (projectName: string) => string[];
+  // The issue dependency graph (src/http/pages.ts's /issues/graph) needs a
+  // Project's GitHub owner/repo to build each issue's node id and to
+  // resolve its "## Parent" heading (same-repo only) into a compound-node
+  // cluster. Undefined for a Routine Host or an unknown Project name --
+  // that project's issues are simply skipped from the graph.
+  getProjectRepo?: (
+    projectName: string
+  ) => { owner: string; repo: string } | undefined;
   // The project's configured issue_filters.labels_all -- the label-write
   // dependency gate (src/http/pages.ts's handleIssueLabelWrite) only blocks
   // adding a label in this set, never a hardcoded "agent-ready" string,
@@ -719,6 +727,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.getProjectRepoAliases === undefined
         ? {}
         : { getProjectRepoAliases: options.getProjectRepoAliases }),
+      ...(options.getProjectRepo === undefined
+        ? {}
+        : { getProjectRepo: options.getProjectRepo }),
       ...(options.getProjectRequiredLabels === undefined
         ? {}
         : { getProjectRequiredLabels: options.getProjectRequiredLabels }),

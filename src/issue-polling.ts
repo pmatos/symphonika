@@ -142,6 +142,10 @@ export type IssueSnapshot = {
   id: number;
   labels: string[];
   number: number;
+  // Best-effort "## Parent" heading parse (see parseParentIssueNumber) --
+  // display-only graph clustering, never a gating signal. Undefined when
+  // absent or unparseable, same as no epic membership.
+  parentIssueNumber?: number;
   priority: number;
   state: string;
   title: string;
@@ -1174,11 +1178,30 @@ async function readPollingConfig(
   return config;
 }
 
+// Best-effort, display-only signal for the dependency graph's epic
+// clustering (see docs/adr, issue dependency gating) -- never used for
+// gating, unlike blockedBy. An issue with no parseable heading (or none
+// at all) just renders ungrouped in the graph; that's expected, not an
+// error. Matches the real "## Parent\n\n#N" convention already in use
+// across this repo's issues, including trailing parenthetical text after
+// the number (e.g. "#199 (planning parent, kept open)").
+const PARENT_HEADING_REASON = /^##\s*Parent\s*\n+\s*#(\d+)/im;
+
+export function parseParentIssueNumber(body: string): number | undefined {
+  const match = PARENT_HEADING_REASON.exec(body);
+  if (match?.[1] === undefined) {
+    return undefined;
+  }
+  return Number.parseInt(match[1], 10);
+}
+
 function normalizeIssueSnapshot(
   rawIssue: RawGitHubIssue,
   project: PollingProjectConfig
 ): IssueSnapshot {
   const labels = normalizeLabels(rawIssue.labels ?? []);
+  const body = rawIssue.body ?? "";
+  const parentIssueNumber = parseParentIssueNumber(body);
 
   return {
     // Populated by a separate fetchIssueDependencies GraphQL call and
@@ -1186,11 +1209,12 @@ function normalizeIssueSnapshot(
     // only ever sees the REST issue payload, which has no blockedBy field.
     blockedBy: [],
     blockedByTruncated: false,
-    body: rawIssue.body ?? "",
+    body,
     created_at: rawIssue.created_at ?? "",
     id: rawIssue.id ?? 0,
     labels,
     number: rawIssue.number ?? 0,
+    ...(parentIssueNumber === undefined ? {} : { parentIssueNumber }),
     priority: priorityForLabels(labels, project),
     state: rawIssue.state ?? "open",
     title: rawIssue.title ?? "",

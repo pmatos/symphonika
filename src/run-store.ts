@@ -268,6 +268,10 @@ export type ProjectIssueSnapshotRow = {
   issueNumber: number;
   kind: ProjectIssueSnapshotKind;
   labels: string[];
+  // Best-effort "## Parent" heading parse (parseParentIssueNumber,
+  // src/issue-polling.ts) -- display-only graph clustering, never a
+  // gating signal. Absent when the body had no parseable heading.
+  parentIssueNumber?: number;
   polledAt: string;
   priority: number;
   reasons: string[];
@@ -291,6 +295,7 @@ export type ReplaceProjectIssueSnapshotsInput = {
     issueNumber: number;
     kind: ProjectIssueSnapshotKind;
     labels: string[];
+    parentIssueNumber?: number;
     priority: number;
     reasons: string[];
     title: string;
@@ -662,6 +667,7 @@ type ProjectIssueSnapshotDbRow = {
   issue_number: number;
   kind: ProjectIssueSnapshotKind;
   labels: string | null;
+  parent_issue_number: number | null;
   polled_at: string;
   priority: number;
   reasons: string | null;
@@ -1577,10 +1583,12 @@ export class RunStore {
         [
           "insert into project_issue_snapshots (",
           "project_name, issue_number, kind, title, priority, reasons, labels,",
-          "blocked_by, blocked_by_truncated, polled_at, created_at, updated_at",
+          "blocked_by, blocked_by_truncated, parent_issue_number, polled_at,",
+          "created_at, updated_at",
           ") values (",
           "@project_name, @issue_number, @kind, @title, @priority, @reasons, @labels,",
-          "@blocked_by, @blocked_by_truncated, @polled_at, @created_at, @updated_at",
+          "@blocked_by, @blocked_by_truncated, @parent_issue_number, @polled_at,",
+          "@created_at, @updated_at",
           ")"
         ].join(" ")
       );
@@ -1593,6 +1601,7 @@ export class RunStore {
           issue_number: row.issueNumber,
           kind: row.kind,
           labels: row.labels.length === 0 ? null : JSON.stringify(row.labels),
+          parent_issue_number: row.parentIssueNumber ?? null,
           polled_at: input.polledAt,
           priority: row.priority,
           project_name: input.projectName,
@@ -1611,7 +1620,7 @@ export class RunStore {
       .prepare(
         [
           "select issue_number, kind, title, priority, reasons, labels,",
-          "blocked_by, blocked_by_truncated, polled_at",
+          "blocked_by, blocked_by_truncated, parent_issue_number, polled_at",
           "from project_issue_snapshots where project_name = ?",
           "order by issue_number asc"
         ].join(" ")
@@ -1626,6 +1635,9 @@ export class RunStore {
       issueNumber: row.issue_number,
       kind: row.kind,
       labels: row.labels === null ? [] : (JSON.parse(row.labels) as string[]),
+      ...(row.parent_issue_number === null
+        ? {}
+        : { parentIssueNumber: row.parent_issue_number }),
       polledAt: row.polled_at,
       priority: row.priority,
       reasons:
@@ -4754,6 +4766,7 @@ export class RunStore {
         "blocked_by_truncated",
         "integer not null default 0"
       ],
+      ["project_issue_snapshots", "parent_issue_number", "integer"],
       ["project_pull_request_snapshots", "labels", "text"]
     ];
 

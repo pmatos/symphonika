@@ -148,6 +148,14 @@ export type RegisterPagesOptions = {
   // dependency gate only blocks adding a label in this set. See
   // HttpAppOptions.getProjectRequiredLabels (src/http/app.ts).
   getProjectRequiredLabels?: (projectName: string) => string[];
+  // The dependency graph view (/issues/graph) needs a Project's GitHub
+  // owner/repo to build node ids and resolve "## Parent" clustering.
+  // Undefined for a Routine Host or an unknown Project name -- that
+  // project's issues are skipped from the graph rather than erroring. See
+  // HttpAppOptions.getProjectRepo (src/http/app.ts).
+  getProjectRepo?: (
+    projectName: string
+  ) => { owner: string; repo: string } | undefined;
   // #303's "retry ETA" detail for a waiting Run.
   getScheduled?: () => ScheduledCallback[];
   getStatusSnapshot?: () => StatusSnapshot;
@@ -379,6 +387,29 @@ export function registerPages(options: RegisterPagesOptions): void {
     let bytes: ArrayBuffer;
     try {
       const buffer = await readFile(clientBundlePath);
+      bytes = buffer.buffer.slice(
+        buffer.byteOffset,
+        buffer.byteOffset + buffer.byteLength
+      );
+    } catch {
+      return context.notFound();
+    }
+    return new Response(bytes, {
+      headers: { "content-type": "application/javascript; charset=utf-8" },
+      status: 200
+    });
+  });
+
+  // The dependency graph view's React island (src/client/issues-deps-graph.tsx),
+  // bundled the same way as issues-bulk.js above -- see that route's comment
+  // for why the path is resolved relative to this compiled module.
+  const depsGraphBundlePath = fileURLToPath(
+    new URL("../../dist/client/issues-deps-graph.js", import.meta.url)
+  );
+  options.app.get("/assets/issues-deps-graph.js", async (context) => {
+    let bytes: ArrayBuffer;
+    try {
+      const buffer = await readFile(depsGraphBundlePath);
       bytes = buffer.buffer.slice(
         buffer.byteOffset,
         buffer.byteOffset + buffer.byteLength
@@ -689,6 +720,50 @@ export function registerPages(options: RegisterPagesOptions): void {
     const html = layout(
       "Issue triage",
       renderIssueSearchPage({ csrfToken, filters, nowMs, projectNames, rows })
+    );
+    return context.html(html);
+  });
+
+  options.app.get("/issues/graph", (context) => {
+    const projectFilter = normalizeQueryParam(context.req.query("project"));
+    const projectNames = Array.from(
+      new Set(
+        options.runStore.listProjectStates().map((state) => state.projectName)
+      )
+    ).sort();
+    const targetProjects =
+      projectFilter === undefined
+        ? projectNames
+        : projectNames.filter((name) => name === projectFilter);
+    const issues = buildDependencyGraphIssues({
+      getProjectRepo: options.getProjectRepo,
+      runStore: options.runStore,
+      targetProjects
+    });
+    // Only resolvable when exactly one Project is selected -- with the
+    // "all projects" view (projectFilter undefined) there's no way to know
+    // which Project's repo a bare issue number belongs to.
+    const issueParam = parsePositiveIntQueryParam(context.req.query("issue"));
+    const focusRepo =
+      projectFilter === undefined
+        ? undefined
+        : options.getProjectRepo?.(projectFilter);
+    const focusIssue =
+      issueParam === undefined || focusRepo === undefined
+        ? undefined
+        : {
+            issueNumber: issueParam,
+            owner: focusRepo.owner,
+            repo: focusRepo.repo
+          };
+    const html = layout(
+      "Issue dependency graph",
+      renderIssueDependencyGraphPage({
+        focusIssue,
+        issues,
+        projectFilter,
+        projectNames
+      })
     );
     return context.html(html);
   });
@@ -3420,6 +3495,16 @@ function normalizeQueryParam(value: string | undefined): string | undefined {
   return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
 }
 
+function parsePositiveIntQueryParam(
+  value: string | undefined
+): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 // A claim-shaped operational-label reason (sym:claimed/sym:running) gets its
 // Run id resolved through the Run Store — a local read, not a GitHub call —
 // so describeIssueVerdict (src/issues/verdict.ts) can stay pure and DB-free.
@@ -3800,6 +3885,150 @@ window.__CSRF_TOKEN__ = ${escapeJsonForInlineScript(input.csrfToken)};</script>
 <script src="/assets/issues-bulk.js"></script>`;
   return `<h1 class="page-title">Issue triage</h1>${note}${filterForm}${bulkSelectMount}${table}`;
 }
+
+// The shape embedded as window.__ISSUE_DEPS_GRAPH__ for the client-side
+// buildDependencyGraphElements (src/client/dependency-graph-elements.ts) --
+// duplicated locally rather than imported, matching this codebase's
+// existing src/client/ convention (e.g. issues-bulk-select.tsx's own
+// BulkSelectIssueData) of not sharing types across the server/client
+// tsconfig boundary.
+type DependencyGraphEmbedIssue = {
+  blockedBy: RawGitHubIssueDependencyRef[];
+  blockedByTruncated: boolean;
+  issueNumber: number;
+  owner: string;
+  parentIssueNumber?: number;
+  projectName: string;
+  repo: string;
+  title: string;
+};
+
+// Only projects whose owner/repo actually resolves contribute nodes -- a
+// Routine Host or an unknown Project name is skipped rather than erroring,
+// consistent with this route's other optional-injected accessors.
+//
+// Two Project names can alias the same GitHub owner/repo (a supported
+// config -- see getProjectRepoAliases's own doc comment above), and each
+// alias polls and persists its own snapshot row for the same physical
+// GitHub issue. Since a graph node represents one physical issue, not one
+// Project's view of it, `seenIssueKeys` keeps only the first row seen per
+// owner/repo#issueNumber -- callers pass targetProjects pre-sorted, so
+// "first seen" is deterministically the alphabetically-first Project name,
+// not an accident of Map/object iteration order.
+function buildDependencyGraphIssues(input: {
+  getProjectRepo:
+    | ((projectName: string) => { owner: string; repo: string } | undefined)
+    | undefined;
+  runStore: RunStore;
+  targetProjects: string[];
+}): DependencyGraphEmbedIssue[] {
+  const issues: DependencyGraphEmbedIssue[] = [];
+  const seenIssueKeys = new Set<string>();
+  for (const projectName of input.targetProjects) {
+    const repo = input.getProjectRepo?.(projectName);
+    if (repo === undefined) {
+      continue;
+    }
+    for (const snapshot of input.runStore.listProjectIssueSnapshots(
+      projectName
+    )) {
+      // Lowercased for the same reason the client's issueNodeId is: GitHub
+      // repo lookups are case-insensitive, so two aliased Projects can
+      // configure the identical repo with different casing.
+      const issueKey = `${repo.owner.toLowerCase()}/${repo.repo.toLowerCase()}#${snapshot.issueNumber}`;
+      if (seenIssueKeys.has(issueKey)) {
+        continue;
+      }
+      seenIssueKeys.add(issueKey);
+      issues.push({
+        blockedBy: snapshot.blockedBy,
+        blockedByTruncated: snapshot.blockedByTruncated,
+        issueNumber: snapshot.issueNumber,
+        owner: repo.owner,
+        ...(snapshot.parentIssueNumber === undefined
+          ? {}
+          : { parentIssueNumber: snapshot.parentIssueNumber }),
+        projectName,
+        repo: repo.repo,
+        title: snapshot.title
+      });
+    }
+  }
+  return issues;
+}
+
+// ADR-0056's graceful-degradation guardrail: always rendered, and only
+// hidden by the client script (IssuesDepsGraphView) once cytoscape has
+// mounted without throwing -- see that component's own comment. Only lists
+// issues with at least one blocker, mirroring renderIssueDependenciesSection
+// on the issue detail page rather than repeating every dependency-free
+// issue here too.
+function renderIssueDependencyGraphFallback(
+  issues: DependencyGraphEmbedIssue[]
+): string {
+  const withBlockers = issues.filter(
+    (issue) => issue.blockedBy.length > 0 || issue.blockedByTruncated
+  );
+  if (withBlockers.length === 0) {
+    return `<p class="note">No open dependency links in this view.</p>`;
+  }
+  const rows = withBlockers
+    .map((issue) => {
+      const blockers = issue.blockedBy
+        .map((blocker) => {
+          const ref = `${blocker.owner}/${blocker.repo}#${blocker.number}`;
+          const family = blocker.state === "CLOSED" ? "ok" : "blocked";
+          return `<li>${labelPill(blocker.state, family)} ${escapeHtml(ref)} — ${escapeHtml(blocker.title)}</li>`;
+        })
+        .join("");
+      // A truncated fetch means the fetched blockers above -- even if every
+      // one shown is closed -- aren't the whole story; called out
+      // separately so it can't be mistaken for one more (closed) blocker.
+      const truncatedNote = issue.blockedByTruncated
+        ? `<li class="pill pill--blocked">⚠ more dependency links than could be checked</li>`
+        : "";
+      return `<li><strong>${escapeHtml(issue.projectName)}#${issue.issueNumber}</strong> ${escapeHtml(issue.title)}<ul class="label-list">${blockers}${truncatedNote}</ul></li>`;
+    })
+    .join("");
+  return `<ul class="label-list">${rows}</ul>`;
+}
+
+function renderIssueDependencyGraphPage(input: {
+  focusIssue: { issueNumber: number; owner: string; repo: string } | undefined;
+  issues: DependencyGraphEmbedIssue[];
+  projectFilter: string | undefined;
+  projectNames: string[];
+}): string {
+  const projectOptions = input.projectNames
+    .map(
+      (name) =>
+        `<option value="${escapeHtml(name)}"${input.projectFilter === name ? " selected" : ""}>${escapeHtml(name)}</option>`
+    )
+    .join("");
+  const filterForm = `<form class="filters" method="get" action="/issues/graph">
+<label>Project<select name="project"><option value="">All projects</option>${projectOptions}</select></label>
+<button class="btn" type="submit">Filter</button>
+</form>`;
+  const fallback = renderIssueDependencyGraphFallback(input.issues);
+  const mount = `<div id="issues-deps-graph-fallback">${fallback}</div>
+<style>${DEPS_GRAPH_STYLES}</style>
+<div id="issues-deps-graph-root"></div>
+<script>window.__ISSUE_DEPS_GRAPH__ = ${escapeJsonForInlineScript({ focusIssue: input.focusIssue, issues: input.issues })};</script>
+<script src="/assets/issues-deps-graph.js"></script>`;
+  return `<h1 class="page-title">Issue dependency graph</h1><p class="note"><a href="/issues">&larr; back to triage</a></p>${filterForm}${mount}`;
+}
+
+// Without an explicit height, .deps-graph-canvas is an empty block with no
+// content until cytoscape populates it -- it computes to zero height, so
+// IssuesDepsGraphView's cytoscape instance would mount into an invisible
+// container right before hideFallback() removes the only visible content.
+// Mirrors WORKFLOW_GRAPH_STYLES's #wf-cy sizing for the pre-existing
+// /runs/:id/graph cytoscape view.
+const DEPS_GRAPH_STYLES = `
+.deps-graph-wrap { display:flex; gap:1rem; align-items:stretch; }
+.deps-graph-canvas { flex:1 1 auto; height:80vh; min-height:520px; border:1px solid #e2e8f0; border-radius:10px; }
+.deps-graph-detail { flex:0 0 320px; border:1px solid #e2e8f0; border-radius:10px; padding:.8rem .9rem; }
+`;
 
 // #308 part 2: orchestrator-owned labels (ADR 0002/0024) render as read-only
 // evidence of dispatch state, never as something the triage UI can add or

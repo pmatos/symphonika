@@ -1123,6 +1123,12 @@ export async function startDaemon(
     getProjectRequiredLabels: (projectName) =>
       runtimeConfig.projectsByName().get(projectName)?.issue_filters
         ?.labels_all ?? [],
+    getProjectRepo: (projectName) => {
+      const tracker = runtimeConfig.projectsByName().get(projectName)?.tracker;
+      return tracker === undefined
+        ? undefined
+        : { owner: tracker.owner, repo: tracker.repo };
+    },
     mergePullRequest: async (input): Promise<MergePullRequestResult> => {
       const project = runtimeConfig.projectsByName().get(input.projectName);
       if (project?.tracker === undefined) {
@@ -1512,6 +1518,7 @@ function projectIssueSnapshotRows(
   issueNumber: number;
   kind: "candidate" | "filtered";
   labels: string[];
+  parentIssueNumber?: number;
   priority: number;
   reasons: string[];
   title: string;
@@ -1524,6 +1531,9 @@ function projectIssueSnapshotRows(
       issueNumber: entry.issue.number,
       kind: "candidate" as const,
       labels: entry.issue.labels,
+      ...(entry.issue.parentIssueNumber === undefined
+        ? {}
+        : { parentIssueNumber: entry.issue.parentIssueNumber }),
       priority: entry.issue.priority,
       reasons: [],
       title: entry.issue.title
@@ -1536,6 +1546,9 @@ function projectIssueSnapshotRows(
       issueNumber: entry.issue.number,
       kind: "filtered" as const,
       labels: entry.issue.labels,
+      ...(entry.issue.parentIssueNumber === undefined
+        ? {}
+        : { parentIssueNumber: entry.issue.parentIssueNumber }),
       priority: entry.issue.priority,
       reasons: entry.reasons,
       title: entry.issue.title

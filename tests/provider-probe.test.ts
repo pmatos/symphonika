@@ -39,10 +39,20 @@ describe("probeProviderCommand", () => {
     expect(result).toEqual({ detail: "Hi there!", ok: true });
   });
 
-  it("closes the provider iterator so its own shutdown cleanup runs, even on a non-process_exit terminal event", async () => {
+  it("cancels the run and closes the provider iterator on a turn_completed event, so the child is actually killed and its own shutdown cleanup runs", async () => {
     let cleanupRan = false;
+    let cancelled = false;
     const provider: AgentProvider = {
-      cancel: () => Promise.resolve(),
+      // cancel() is every adapter's own direct child-shutdown path — closing
+      // the iterator alone only reaches the generator's generic enclosing
+      // finally (bookkeeping + a best-effort systemd-scope stop that no-ops
+      // without systemd), never each adapter's shutdownProviderProcess(child)
+      // call that sits as a plain statement after the yield. A successful
+      // probe must still call cancel() to guarantee the child is killed.
+      cancel: () => {
+        cancelled = true;
+        return Promise.resolve();
+      },
       name: "claude",
       runAttempt: async function* () {
         await Promise.resolve();
@@ -69,6 +79,7 @@ describe("probeProviderCommand", () => {
     });
 
     expect(result).toEqual({ detail: "Hi!", ok: true });
+    expect(cancelled).toBe(true);
     expect(cleanupRan).toBe(true);
   });
 
@@ -200,6 +211,37 @@ describe("probeProviderCommand", () => {
             // Never resolves.
           });
         }
+      },
+      validate: () => Promise.resolve()
+    };
+
+    const start = Date.now();
+    const result = await probeProviderCommand({
+      command: "claude -p",
+      provider,
+      providerName: "claude"
+    });
+    const elapsedMs = Date.now() - start;
+
+    expect(result).toEqual({ detail: "Hi!", ok: true });
+    expect(elapsedMs).toBeLessThan(9_000);
+  }, 10_000);
+
+  it("returns promptly even when cancel() itself hangs", async () => {
+    const provider: AgentProvider = {
+      // A provider whose cancel() never resolves must not make the probe
+      // itself hang either — bounded independently of closeIterator.
+      cancel: () =>
+        new Promise(() => {
+          // Never resolves.
+        }),
+      name: "claude",
+      runAttempt: async function* () {
+        await Promise.resolve();
+        yield {
+          normalized: { result: "Hi!", type: "turn_completed" },
+          raw: {}
+        };
       },
       validate: () => Promise.resolve()
     };

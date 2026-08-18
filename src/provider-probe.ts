@@ -15,7 +15,7 @@ export type ProviderProbeResult = {
 
 const DEFAULT_PROBE_PROMPT = "Say Hi";
 const DEFAULT_PROBE_TIMEOUT_MS = 60_000;
-const ITERATOR_CLOSE_TIMEOUT_MS = 5_000;
+const CLEANUP_TIMEOUT_MS = 5_000;
 
 // Live functional check for an operator-authored provider command: spawns
 // the real command (raw, as authored — runAttempt renders any {{tag}}
@@ -64,16 +64,11 @@ export async function probeProviderCommand(input: {
       while (true) {
         const remainingMs = deadline - Date.now();
         if (remainingMs <= 0) {
-          void input.provider.cancel(runId);
           return { detail: `no reply within ${timeoutMs}ms`, ok: false };
         }
 
         const step = await raceWithTimeout(iterator.next(), remainingMs);
         if (step === "timed-out") {
-          // Best-effort: ask the provider to stop the run, but don't wait
-          // for it — a hung/unresponsive provider must not hang the probe
-          // caller.
-          void input.provider.cancel(runId);
           return { detail: `no reply within ${timeoutMs}ms`, ok: false };
         }
         if (step.done === true) {
@@ -92,21 +87,22 @@ export async function probeProviderCommand(input: {
     } finally {
       // Every return path above leaves the provider's own runAttempt
       // generator suspended at its last yield (only a self-issued `return`
-      // inside that generator, still pending on its next resume, ends it) —
-      // its shutdown/process-scope cleanup lives in a `finally` that only
-      // runs once the generator resumes past that yield, which closing the
-      // iterator triggers. Bounded and swallowed: iterator.return() itself
-      // awaits that cleanup, which can hang (e.g. a child ignoring SIGTERM),
-      // and closing must never hang this function after it already has a
-      // result (or a timeout) to return.
-      try {
-        await raceWithTimeout(
-          closeIterator(iterator),
-          ITERATOR_CLOSE_TIMEOUT_MS
-        );
-      } catch {
-        // best-effort; must not mask the result already being returned
-      }
+      // inside that generator, still pending on its next resume, ends it).
+      // Closing the iterator alone is not enough to kill the child: that
+      // only resumes the generator as if `return` were injected at the
+      // yield point, which skips straight to the generator's own enclosing
+      // `finally` (bookkeeping plus a best-effort systemd-scope stop that's
+      // a no-op when user systemd scopes are unavailable) — it never
+      // reaches each adapter's own direct `shutdownProviderProcess(child)`
+      // call, which sits as a plain statement *after* the yield in the
+      // event loop body and is only reached by resuming normally. cancel()
+      // is every adapter's dedicated, unconditional child-kill path (it
+      // calls shutdownProviderProcess directly), so call it first, then
+      // close the iterator so the generator's own bookkeeping still runs.
+      // Both bounded and swallowed: neither must hang this function after
+      // it already has a result (or a timeout) to return.
+      await withBoundedCleanup(() => input.provider.cancel(runId));
+      await withBoundedCleanup(() => closeIterator(iterator));
     }
   } catch (error) {
     return {
@@ -122,6 +118,19 @@ async function closeIterator(
   iterator: AsyncIterator<ProviderEvent>
 ): Promise<void> {
   await iterator.return?.();
+}
+
+async function withBoundedCleanup(
+  action: () => Promise<unknown>
+): Promise<void> {
+  try {
+    await raceWithTimeout(
+      Promise.resolve(action()).then(() => undefined),
+      CLEANUP_TIMEOUT_MS
+    );
+  } catch {
+    // best-effort; must not mask the result already being returned
+  }
 }
 
 async function raceWithTimeout<T>(

@@ -31,9 +31,9 @@ repository as one real Project well enough to help implement later Symphonika is
 - Automatic issue Workspace deletion.
 - GitHub Projects board integration.
 - Parsing issue-body dependency syntax as a *gating* mechanism: dispatch eligibility depends on
-  GitHub's native `blockedBy` issue-dependency links, not on any body-text DSL. Symphonika does parse
-  a best-effort `## Parent` heading for the `/issues/graph` view's display-only clustering — see
-  ADR-0081 — but that parse never influences eligibility.
+  GitHub's native `blockedBy` issue-dependency links, not on any body-text DSL. A stacked follow-up PR
+  adds a best-effort `## Parent` heading parse for the `/issues/graph` view's display-only clustering
+  — see ADR-0081 — but that parse never influences eligibility.
 
 ## 3. Implementation Stack
 
@@ -51,10 +51,8 @@ Symphonika uses a small TypeScript stack optimized for agentic coding and debugg
 - Vitest for tests
 - Pino for structured logging
 - React, bundled by esbuild, for scoped client-side islands (the `/issues` page's bulk label-select
-  toolbar; the `/issues/graph` dependency graph view) — not a general frontend framework adopted
-  across the dashboard; see ADR-0080 and ADR-0081
-- Cytoscape.js, bundled by esbuild alongside React, for the `/issues/graph` view's interactive graph
-  rendering — scoped to that one bundle, not a general visualization dependency; see ADR-0081
+  toolbar; the `/issues/graph` dependency graph view, landing in a stacked follow-up PR) — not a
+  general frontend framework adopted across the dashboard; see ADR-0080 and ADR-0081
 
 ## 4. Domain Model
 

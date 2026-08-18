@@ -20,6 +20,14 @@ Parent` heading. The graph view is the only piece touching the React/esbuild pip
 0080 introduced, and lands stacked on that PR's branch as a separate PR from the gating/visibility
 work, once the latter's own size made it worth splitting rather than landing both as one PR.
 
+This ADR records the decision for both PRs together, since the decision was made as one piece of
+design before either landed -- but the two PRs deliver it in stages. Everything below through "Two
+gates, one snapshot-staleness caveat" and "The dependency reason reuses the existing `reasons` →
+verdict pipeline" is implemented in this PR (#472). The four sections from "`## Parent` clustering"
+onward, and the `parent_issue_number` column / cytoscape stack-list Consequences below, are `## Parent`
+parsing and the `/issues/graph` view itself -- implemented in the stacked PR #473, not this one; they're
+recorded here rather than in a second ADR because they're the same decision, not a separate one.
+
 ## Decision
 
 ### Native `blockedBy` is the gate's only source of truth -- no body-text DSL
@@ -77,7 +85,7 @@ ineligibility reason. This is intentional: the Deps column and the Verdict pill 
 same underlying fact (per the design spec's "Show in both" decision), not two independently
 maintained signals that could disagree.
 
-### `## Parent` clustering is display-only and degrades silently
+### `## Parent` clustering is display-only and degrades silently (PR #473)
 
 `parseParentIssueNumber` (`src/issue-polling.ts`) looks for a `## Parent` heading followed by a bare
 `#N` reference and returns `undefined` for anything else -- no heading, an unparseable reference, or
@@ -87,7 +95,7 @@ than erroring or omitting it. The parsed number is assumed same-repo as the issu
 heading carries no `owner/repo` of its own) -- cross-repo epics are out of scope for this best-effort
 convenience.
 
-### The graph synthesizes nodes cytoscape needs but the poll snapshot doesn't carry
+### The graph synthesizes nodes cytoscape needs but the poll snapshot doesn't carry (PR #473)
 
 `buildDependencyGraphElements` (`src/client/dependency-graph-elements.ts`, bundled client-side, not
 run on the server) builds real "issue" nodes only for the open issues actually in scope --
@@ -99,7 +107,7 @@ placeholder node for a `## Parent` target that isn't already a real node -- reus
 id instead when the parent *is* itself in scope, so cytoscape's compound-node feature nests children
 under the actual issue rather than a redundant synthetic container.
 
-### The graph view is a second, independent client bundle, not a growth of `issues-bulk.js`
+### The graph view is a second, independent client bundle, not a growth of `issues-bulk.js` (PR #473)
 
 `scripts/build-client.mjs` moved from a single hardcoded entry point/outfile to an `entryPoints[]` +
 `outdir` esbuild call so `src/client/issues-deps-graph.tsx` bundles to its own
@@ -109,7 +117,7 @@ way React already is (ADR 0080), rather than CDN+SRI the way the pre-existing `/
 loads it (ADR 0056) -- consistent with ADR 0080's "self-contained, no external runtime dependency"
 rationale, and avoiding two different script-loading strategies on one page.
 
-### Graceful degradation is progressive enhancement, not a load-failure handler
+### Graceful degradation is progressive enhancement, not a load-failure handler (PR #473)
 
 ADR 0056's guardrail ("degrades gracefully when its visualization dependencies are unavailable") was
 written for CDN scripts, where a failed `<script>` load is observable and a fallback can be triggered
@@ -122,16 +130,17 @@ only thing rendered, by construction rather than by detecting the failure.
 
 ## Consequences
 
-- `project_issue_snapshots` gained `blocked_by`, `blocked_by_truncated`, and `parent_issue_number`
-  columns (migrated via `ensureColumn`, like every column added after the table's original shape).
-  `IssueSnapshot`'s matching fields are optional (a widely-shared type with ~65 call sites) while
-  `ProjectIssueSnapshotRow`'s `blockedBy`/`blockedByTruncated` are required (a narrower type with far
-  fewer call sites) -- `parentIssueNumber` stays optional on both, since most issues have no epic.
+- `project_issue_snapshots` gained `blocked_by` and `blocked_by_truncated` columns in this PR
+  (migrated via `ensureColumn`, like every column added after the table's original shape); the
+  `parent_issue_number` column lands with `## Parent` parsing in PR #473. `IssueSnapshot`'s matching
+  fields are optional (a widely-shared type with ~65 call sites) while `ProjectIssueSnapshotRow`'s
+  `blockedBy`/`blockedByTruncated` are required (a narrower type with far fewer call sites) --
+  `parentIssueNumber` stays optional on both, since most issues have no epic.
 - `CONTEXT.md` is updated to note dispatch eligibility also depends on resolved GitHub-native
   `blockedBy` links, not label/state filters alone.
-- `SPEC.md` §2's issue-body-dependency-syntax non-goal is narrowed as described above; §3's stack list
-  gains cytoscape, scoped to the `/issues/graph` bundle the same way React/esbuild is scoped to
-  `issues-bulk.js`.
+- `SPEC.md` §2's issue-body-dependency-syntax non-goal is narrowed as described above. §3's stack list
+  gains cytoscape in PR #473, scoped to the `/issues/graph` bundle the same way React/esbuild is
+  scoped to `issues-bulk.js`.
 
 ## Numbering
 

@@ -210,6 +210,100 @@ describe("GET /issues/:project/:number (#308 part 2, ADR 0077)", () => {
     }
   });
 
+  it("shows a truncated-overflow row even when every fetched blocker is closed", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    runStore.syncProjectStates([
+      { name: "alpha", validationState: "valid", weight: 1 }
+    ]);
+    runStore.replaceProjectIssueSnapshots({
+      polledAt: "2026-08-18T10:00:00.000Z",
+      projectName: "alpha",
+      rows: [
+        {
+          blockedByTruncated: true,
+          blockedBy: [
+            {
+              number: 295,
+              owner: "pmatos",
+              repo: "symphonika",
+              state: "CLOSED",
+              title: "slice 6"
+            }
+          ],
+          issueNumber: 299,
+          kind: "filtered",
+          labels: ["agent-ready"],
+          priority: 1,
+          reasons: [
+            "has more dependency links than could be checked - treat as unresolved until reviewed"
+          ],
+          title: "Migrate live routines"
+        }
+      ]
+    });
+    try {
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore,
+        stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (
+        await app.request("/issues/alpha/299", { headers: browserHeaders() })
+      ).text();
+      expect(html).toContain("Dependencies");
+      expect(html).toContain("slice 6");
+      expect(html).toContain("more dependency links than could be checked");
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("shows a truncated-overflow row even for an issue with no fetched blockers at all", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    runStore.syncProjectStates([
+      { name: "alpha", validationState: "valid", weight: 1 }
+    ]);
+    runStore.replaceProjectIssueSnapshots({
+      polledAt: "2026-08-18T10:00:00.000Z",
+      projectName: "alpha",
+      rows: [
+        {
+          blockedByTruncated: true,
+          blockedBy: [],
+          issueNumber: 299,
+          kind: "filtered",
+          labels: ["agent-ready"],
+          priority: 1,
+          reasons: [
+            "has more dependency links than could be checked - treat as unresolved until reviewed"
+          ],
+          title: "Migrate live routines"
+        }
+      ]
+    });
+    try {
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore,
+        stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (
+        await app.request("/issues/alpha/299", { headers: browserHeaders() })
+      ).text();
+      // Must not silently omit the section (the pre-fix behavior for an
+      // empty blockedBy array) even though the gate treats this issue as
+      // blocked.
+      expect(html).toContain("Dependencies");
+      expect(html).toContain("more dependency links than could be checked");
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("shows no dependencies section for an issue with no blockers", async () => {
     const test = await setup();
     try {

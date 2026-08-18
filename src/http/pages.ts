@@ -3403,6 +3403,7 @@ type IssueSearchFilters = {
 
 type IssueSearchRow = {
   blockedBy: RawGitHubIssueDependencyRef[];
+  blockedByTruncated: boolean;
   issueNumber: number;
   labels: string[];
   polledAt: string;
@@ -3646,6 +3647,7 @@ function searchIssueSnapshots(input: {
       );
       rows.push({
         blockedBy: snapshot.blockedBy,
+        blockedByTruncated: snapshot.blockedByTruncated,
         issueNumber: snapshot.issueNumber,
         labels: snapshot.labels,
         polledAt: snapshot.polledAt,
@@ -3720,14 +3722,21 @@ type BulkSelectIssueData = {
 // column exists for the itemized detail the terse verdict string doesn't
 // carry, not to duplicate the eligibility signal.
 function renderIssueSearchRowDeps(row: IssueSearchRow): string {
-  if (row.blockedBy.length === 0) {
+  if (row.blockedBy.length === 0 && !row.blockedByTruncated) {
     return "—";
   }
   const openCount = row.blockedBy.filter(
     (blocker) => blocker.state !== "CLOSED"
   ).length;
   const graphLink = `/issues/graph?project=${encodeURIComponent(row.projectName)}&issue=${row.issueNumber}`;
-  return `<a href="${escapeHtml(graphLink)}">${openCount} open ↗</a>`;
+  // A truncated fetch means openCount is a lower bound, not the true
+  // count -- the "+" signals more blockers exist than could be checked,
+  // so this never reads as "0 open" (eligible) for an issue the gate
+  // (issueDependencyGateBlocks) is actually treating as blocked.
+  const label = row.blockedByTruncated
+    ? `${openCount}+ open`
+    : `${openCount} open`;
+  return `<a href="${escapeHtml(graphLink)}">${label} ↗</a>`;
 }
 
 function renderIssueSearchPage(input: {
@@ -4210,7 +4219,7 @@ function renderIssueDetailPage(input: {
     input.banner === undefined
       ? ""
       : `${renderIssueActionBanner(input.banner)}${offerPollNow && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/issues") : ""}`;
-  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${renderIssueDependenciesSection(detail.snapshot.blockedBy)}${renderIssueLabelsSection(
+  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${renderIssueDependenciesSection(detail.snapshot.blockedBy, detail.snapshot.blockedByTruncated)}${renderIssueLabelsSection(
     {
       csrfToken: input.csrfToken,
       issueNumber: detail.issueNumber,
@@ -4230,9 +4239,10 @@ function renderIssueDetailPage(input: {
 // reasons, which only names the open (unresolved) ones. Absent entirely
 // for an issue with no blockedBy links, rather than an empty section.
 function renderIssueDependenciesSection(
-  blockedBy: RawGitHubIssueDependencyRef[]
+  blockedBy: RawGitHubIssueDependencyRef[],
+  blockedByTruncated: boolean
 ): string {
-  if (blockedBy.length === 0) {
+  if (blockedBy.length === 0 && !blockedByTruncated) {
     return "";
   }
   const rows = blockedBy
@@ -4242,7 +4252,14 @@ function renderIssueDependenciesSection(
       return `<li>${labelPill(blocker.state, family)} ${escapeHtml(ref)} — ${escapeHtml(blocker.title)}</li>`;
     })
     .join("");
-  return `<section><h2>Dependencies</h2><p class="note">GitHub's native issue-dependency links (not parsed from body text). An open blocker here is also why this issue may show a "blocked:" verdict.</p><ul class="label-list">${rows}</ul></section>`;
+  // Rendered even when blockedBy is empty (rather than short-circuiting
+  // above) so a truncated fetch never omits the section entirely --
+  // that would look identical to "no dependencies" for an issue the
+  // gate is actually treating as blocked.
+  const truncatedRow = blockedByTruncated
+    ? `<li>${labelPill("unknown", "blocked")} this issue has more dependency links than could be checked</li>`
+    : "";
+  return `<section><h2>Dependencies</h2><p class="note">GitHub's native issue-dependency links (not parsed from body text). An open blocker here is also why this issue may show a "blocked:" verdict.</p><ul class="label-list">${rows}${truncatedRow}</ul></section>`;
 }
 
 // #309's PR search: filter query params, all optional and combined with AND

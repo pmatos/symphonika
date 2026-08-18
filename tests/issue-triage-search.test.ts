@@ -422,4 +422,54 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
       test.cleanup();
     }
   });
+
+  it("marks a truncated dependency fetch as having more blockers than shown, even when every fetched blocker is closed", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-08-18T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedByTruncated: true,
+            blockedBy: [
+              {
+                number: 295,
+                owner: "pmatos",
+                repo: "symphonika",
+                state: "CLOSED",
+                title: "slice 6"
+              }
+            ],
+            issueNumber: 299,
+            kind: "filtered",
+            labels: ["agent-ready"],
+            priority: 1,
+            reasons: [
+              "has more dependency links than could be checked - treat as unresolved until reviewed"
+            ],
+            title: "Migrate live routines"
+          }
+        ]
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues")).text();
+
+      // Every fetched blocker is closed (openCount = 0), but the fetch was
+      // truncated -- must not read as "0 open" (the same shape a fully
+      // resolved issue would show) since the gate treats this as blocked.
+      expect(html).toContain("0+ open");
+      expect(html).not.toContain(">0 open<");
+    } finally {
+      test.cleanup();
+    }
+  });
 });

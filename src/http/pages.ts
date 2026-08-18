@@ -3874,6 +3874,15 @@ type DependencyGraphEmbedIssue = {
 // Only projects whose owner/repo actually resolves contribute nodes -- a
 // Routine Host or an unknown Project name is skipped rather than erroring,
 // consistent with this route's other optional-injected accessors.
+//
+// Two Project names can alias the same GitHub owner/repo (a supported
+// config -- see getProjectRepoAliases's own doc comment above), and each
+// alias polls and persists its own snapshot row for the same physical
+// GitHub issue. Since a graph node represents one physical issue, not one
+// Project's view of it, `seenIssueKeys` keeps only the first row seen per
+// owner/repo#issueNumber -- callers pass targetProjects pre-sorted, so
+// "first seen" is deterministically the alphabetically-first Project name,
+// not an accident of Map/object iteration order.
 function buildDependencyGraphIssues(input: {
   getProjectRepo:
     | ((projectName: string) => { owner: string; repo: string } | undefined)
@@ -3882,6 +3891,7 @@ function buildDependencyGraphIssues(input: {
   targetProjects: string[];
 }): DependencyGraphEmbedIssue[] {
   const issues: DependencyGraphEmbedIssue[] = [];
+  const seenIssueKeys = new Set<string>();
   for (const projectName of input.targetProjects) {
     const repo = input.getProjectRepo?.(projectName);
     if (repo === undefined) {
@@ -3890,6 +3900,11 @@ function buildDependencyGraphIssues(input: {
     for (const snapshot of input.runStore.listProjectIssueSnapshots(
       projectName
     )) {
+      const issueKey = `${repo.owner}/${repo.repo}#${snapshot.issueNumber}`;
+      if (seenIssueKeys.has(issueKey)) {
+        continue;
+      }
+      seenIssueKeys.add(issueKey);
       issues.push({
         blockedBy: snapshot.blockedBy,
         issueNumber: snapshot.issueNumber,

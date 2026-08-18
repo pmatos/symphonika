@@ -455,4 +455,77 @@ describe("POST /api/issues/bulk-labels", () => {
       test.cleanup();
     }
   });
+
+  it("rejects the whole request with 400 when operations mixes a valid entry with a malformed one, instead of silently writing only the valid one", async () => {
+    const test = await setup();
+    try {
+      let called = false;
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0",
+        writeIssueLabels: () => {
+          called = true;
+          return Promise.resolve({ ok: true });
+        }
+      });
+      const response = await app.request("/api/issues/bulk-labels", {
+        body: JSON.stringify({
+          addLabels: ["agent-ready"],
+          operations: [
+            { issueNumber: 7, projectName: "alpha" },
+            { issueNumber: "not-a-number", projectName: "beta" }
+          ],
+          removeLabels: []
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/json"
+        },
+        method: "POST"
+      });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("operations");
+      expect(called).toBe(false);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("rejects the whole request with 400 when addLabels mixes a valid string with a non-string entry", async () => {
+    const test = await setup();
+    try {
+      let called = false;
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0",
+        writeIssueLabels: () => {
+          called = true;
+          return Promise.resolve({ ok: true });
+        }
+      });
+      const response = await app.request("/api/issues/bulk-labels", {
+        body: JSON.stringify({
+          addLabels: ["agent-ready", 42],
+          operations: [{ issueNumber: 7, projectName: "alpha" }],
+          removeLabels: []
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/json"
+        },
+        method: "POST"
+      });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("addLabels");
+      expect(called).toBe(false);
+    } finally {
+      test.cleanup();
+    }
+  });
 });

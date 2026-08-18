@@ -821,9 +821,24 @@ export function registerPages(options: RegisterPagesOptions): void {
             removeLabels?: unknown;
           }
         | undefined;
-      const addLabels = asStringArray(body?.addLabels);
-      const removeLabels = asStringArray(body?.removeLabels);
-      const operations = asBulkIssueOperations(body?.operations);
+      const addLabelsResult = asStringArray("addLabels", body?.addLabels);
+      const removeLabelsResult = asStringArray(
+        "removeLabels",
+        body?.removeLabels
+      );
+      const operationsResult = asBulkIssueOperations(body?.operations);
+      if (!addLabelsResult.ok) {
+        return context.json({ error: addLabelsResult.error }, 400);
+      }
+      if (!removeLabelsResult.ok) {
+        return context.json({ error: removeLabelsResult.error }, 400);
+      }
+      if (!operationsResult.ok) {
+        return context.json({ error: operationsResult.error }, 400);
+      }
+      const addLabels = addLabelsResult.values;
+      const removeLabels = removeLabelsResult.values;
+      const operations = operationsResult.values;
       const orchestratorLabel = [...addLabels, ...removeLabels].find((label) =>
         isOrchestratorLabel(label)
       );
@@ -3732,27 +3747,66 @@ type BulkIssueLabelResult =
 
 // Array.isArray's lib.es5.d.ts signature narrows to `any[]`, not
 // `unknown[]` -- these normalize a parsed JSON body's fields to properly
-// typed arrays, silently dropping malformed entries rather than passing an
-// `any` through.
-function asStringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === "string")
-    : [];
+// typed arrays. A malformed element (wrong type, missing field) makes the
+// whole field invalid rather than being silently dropped: the documented
+// contract for a malformed request body is 400 with no writes attempted,
+// and filtering out just the bad element let the route mutate the
+// surviving, seemingly-valid entries -- a partial write the caller never
+// asked for and has no way to detect from the response. An omitted field
+// (`undefined`) is not malformed -- it just means "none provided" -- and
+// stays valid-and-empty so the existing "at least one required" checks
+// handle it.
+type ArrayValidationResult<T> =
+  { ok: true; values: T[] } | { error: string; ok: false };
+
+function asStringArray(
+  fieldName: string,
+  value: unknown
+): ArrayValidationResult<string> {
+  if (value === undefined) {
+    return { ok: true, values: [] };
+  }
+  if (!Array.isArray(value)) {
+    return { error: `${fieldName} must be an array of strings`, ok: false };
+  }
+  const values: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") {
+      return { error: `${fieldName} must be an array of strings`, ok: false };
+    }
+    values.push(entry);
+  }
+  return { ok: true, values };
 }
 
 function asBulkIssueOperations(
   value: unknown
-): Array<{ issueNumber: number; projectName: string }> {
-  if (!Array.isArray(value)) {
-    return [];
+): ArrayValidationResult<{ issueNumber: number; projectName: string }> {
+  if (value === undefined) {
+    return { ok: true, values: [] };
   }
-  return value.filter(
-    (entry): entry is { issueNumber: number; projectName: string } =>
-      typeof entry === "object" &&
-      entry !== null &&
-      typeof (entry as Record<string, unknown>).issueNumber === "number" &&
-      typeof (entry as Record<string, unknown>).projectName === "string"
-  );
+  if (!Array.isArray(value)) {
+    return {
+      error: "operations must be an array of {issueNumber, projectName}",
+      ok: false
+    };
+  }
+  const values: Array<{ issueNumber: number; projectName: string }> = [];
+  for (const entry of value) {
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      typeof (entry as Record<string, unknown>).issueNumber !== "number" ||
+      typeof (entry as Record<string, unknown>).projectName !== "string"
+    ) {
+      return {
+        error: "operations must be an array of {issueNumber, projectName}",
+        ok: false
+      };
+    }
+    values.push(entry as { issueNumber: number; projectName: string });
+  }
+  return { ok: true, values };
 }
 
 // Fast without bursting the GitHub API: a worker pool rather than fully

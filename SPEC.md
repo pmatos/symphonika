@@ -21,9 +21,12 @@ repository as one real Project well enough to help implement later Symphonika is
 - A multi-tenant control plane.
 - Provider-level sandboxing or approval workflows.
 - Cross-repository pull request handling.
-- A separate/standalone rich frontend application (SPA). Self-contained, read-only
-  interactive visualizations embedded in a server-rendered operator page (e.g. the
-  workflow-graph view) are permitted — see §14 and ADR-0056.
+- A separate/standalone rich frontend application (SPA): a client-routed app that fetches its own
+  data over JSON instead of the server rendering it. Self-contained, read-only interactive
+  visualizations embedded in a server-rendered operator page (e.g. the workflow-graph view) are
+  permitted — see §14 and ADR-0056 — as is a scoped client-side island, bundled with a build step,
+  that owns interactive behavior on top of server-rendered data for one page (e.g. the `/issues`
+  page's bulk label-select toolbar) — see ADR-0080.
 - Automatic issue Workspace deletion.
 - GitHub Projects board integration.
 - Parsing issue-body dependency syntax.
@@ -43,6 +46,9 @@ Symphonika uses a small TypeScript stack optimized for agentic coding and debugg
 - Octokit for GitHub API access
 - Vitest for tests
 - Pino for structured logging
+- React, bundled by esbuild, for one scoped client-side island (the `/issues` page's bulk
+  label-select toolbar) — not a general frontend framework adopted across the dashboard; see
+  ADR-0080
 
 ## 4. Domain Model
 
@@ -2074,6 +2080,17 @@ that is still live is exactly the double-dispatch ADR 0038 exists to prevent. Th
 as-is (a narrow, deliberately un-generalized addition — see ADR 0077).
 
 Label creation and workspace cleanup remain CLI-only; stale-claim reset no longer is.
+
+`GET /issues` also lets an operator select several rows and add or remove labels across all of them
+in one action (ADR 0080) — a checkbox per row plus a header "select all," a label-picker toolbar with
+autocomplete drawn from the labels already present in the currently-rendered rows (no new
+label-listing call), and a React island (`src/client/issues-bulk-select.tsx`, bundled by esbuild into
+`dist/client/issues-bulk.js`, served at `GET /assets/issues-bulk.js`) that owns that selection/toolbar
+behavior on top of the still-server-rendered table. `POST /api/issues/bulk-labels` is the write path:
+it rejects the whole request before any write if any requested label is `sym:*` (the same guard the
+single-issue form uses), then writes best-effort per selected issue — one issue's GitHub-side failure
+doesn't block the rest — through a small concurrency cap, and reports success or failure per issue in
+the response.
 
 `GET /prs` (`#309`, ADR 0078) is the PR counterpart to `/issues`: a cross-Project pull request
 search, linked from every page's primary navigation. Unlike issues, there is no pre-existing

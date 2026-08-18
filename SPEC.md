@@ -124,6 +124,7 @@ Symphonika owns this narrow GitHub label namespace:
 - `sym:failed`
 - `sym:blocked`
 - `sym:stale`
+- `sym:human-needed`
 
 The orchestrator may write these labels for dispatch safety and runtime bookkeeping. Workflow
 labels, comments, PR links, handoff labels, and issue closure are owned by the coding agent and the

@@ -3265,9 +3265,10 @@ export class RunController {
   // vice versa. sym:human-needed uses the sym: prefix like every other
   // orchestrator-owned label (sym:claimed/running/blocked/failed/stale) —
   // distinct from the pre-existing manual "needs-human" convention operators
-  // may add by hand. Add sym:human-needed to a project's
-  // issue_filters.labels_none for this to also stop the issue from being
-  // redispatched while agent-ready is still present.
+  // may add by hand. It is listed in REQUIRED_OPERATIONAL_LABELS, so
+  // evaluateProjectEligibility (issue-polling.ts) already excludes it from
+  // redispatch while agent-ready is still present, the same way sym:blocked
+  // and sym:failed do.
   private async markIssueNeedsHuman(input: {
     issueNumber: number;
     repository: GitHubIssueRepositoryInput;
@@ -3401,6 +3402,20 @@ export class RunController {
           {
             issueNumber: input.issueNumber,
             label: "sym:blocked",
+            operation: "removeLabel",
+            phase: "closed-issue-cleanup"
+          }
+        );
+        await this.bestEffort(
+          () =>
+            api.removeLabelsFromIssue({
+              ...input.repository,
+              issueNumber: input.issueNumber,
+              labels: ["sym:human-needed"]
+            }),
+          {
+            issueNumber: input.issueNumber,
+            label: "sym:human-needed",
             operation: "removeLabel",
             phase: "closed-issue-cleanup"
           }

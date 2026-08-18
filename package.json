@@ -7,7 +7,7 @@
     "symphonika": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
     "dev": "tsx src/cli.ts",
     "format": "prettier . --write",
     "format:check": "prettier . --check",

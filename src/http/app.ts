@@ -395,23 +395,52 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     "/api/routines/:id/fire",
     requireAuthorizedMutation,
     async (context) => {
-      if (options.fireRoutine === undefined) {
-        return context.json(
-          {
-            error: "manual Routine trigger unavailable",
-            kind: "unavailable"
-          },
-          503
-        );
-      }
+      const routineName = context.req.param("id");
       const projectName = context.req.query("project");
+      // #469: a plain <form> POST from /routines/:name gets a 303 redirect
+      // back to the page with the outcome encoded as query params instead
+      // of the JSON body a fetch()/CLI caller expects -- same content-type
+      // sniff /api/runs/:id/cancel already uses (ADR 0075).
+      const wantsRedirect = (
+        context.req.header("content-type") ?? ""
+      ).startsWith("application/x-www-form-urlencoded");
+      const redirectTo = async (result: FireRoutineResult) => {
+        const body = await context.req.parseBody();
+        const pageProject = body.project_param;
+        const params = new URLSearchParams();
+        if (typeof pageProject === "string") {
+          params.set("project", pageProject);
+        }
+        params.set("fire", result.kind);
+        if (projectName !== undefined) {
+          params.set("fire_project", projectName);
+        }
+        if (result.kind === "refused") {
+          params.set("fire_reason", result.reason);
+        }
+        return context.redirect(
+          `/routines/${encodeURIComponent(routineName)}?${params.toString()}`,
+          303
+        );
+      };
+
+      if (options.fireRoutine === undefined) {
+        const result: FireRoutineResult = {
+          error: "manual Routine trigger unavailable",
+          kind: "unavailable"
+        };
+        return wantsRedirect ? redirectTo(result) : context.json(result, 503);
+      }
       const result = await Promise.resolve(
         options.fireRoutine({
           force: context.req.query("force") === "true",
           ...(projectName === undefined ? {} : { projectName }),
-          routineName: context.req.param("id")
+          routineName
         })
       );
+      if (wantsRedirect) {
+        return redirectTo(result);
+      }
       switch (result.kind) {
         case "accepted":
           return context.json(result, 202);

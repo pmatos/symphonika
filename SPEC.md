@@ -1832,8 +1832,17 @@ than one distinct declaration renders a disambiguation list instead of guessing;
 resolves it, mirroring the same query parameter `GET /api/routines/:id/firings` already exposes for
 this purpose. An `invalid` target's declaration never displaces a valid sibling's real prompt or
 schedule — `resolveRoutineDeclaration` tries every non-invalid target first — and any reload error
-mentioning the Routine's name is shown alongside it. Enable/disable and manual-fire controls are
-deferred to #306's write-surface plumbing; this page is read-only until then. See #304.
+mentioning the Routine's name is shown alongside it. Enable/disable (#411, ADR-0076) and manual-fire
+(#469) render as plain HTML forms posting straight to their existing JSON-API routes, no client-side
+JS. Enable/disable funnels through the same validate/diff-confirm/write pipeline the raw-text editor
+uses, since toggling `disabled` is a declaration edit. Fire-now instead posts directly to
+`POST /api/routines/:id/fire` (ADR-0075), which content-type-sniffs a form submission and redirects
+back to `/routines/:name` with the outcome flattened into query parameters — mirroring
+`/api/runs/:id/cancel`'s existing form/JSON duality — rather than returning raw JSON, so `refused`
+(with reason), `ambiguous`, and `not_found`/`unavailable` render as a legible notice instead of a
+blank failure. A Routine that fans out to more than one Project (ADR-0069) gets one Fire-now button
+per target, since `fireRoutineNow` requires an unambiguous `(routineName, projectName)` pair. See
+#304.
 
 Each firing row on `/routines/:name` links to `GET /firings/:id`, `/runs/:id`'s counterpart for a
 Routine Firing: state, terminal reason, timings (started/ended derived from its own state

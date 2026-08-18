@@ -2588,7 +2588,7 @@ describe("HTTP app — routine detail page (#304)", () => {
       expect(body).toContain("fire-1");
       expect(body).toContain("single");
       expect(body).toContain('href="/routines/audit/edit"');
-      expect(body).toContain("Manual-fire controls land with a later slice");
+      expect(body).toContain('action="/api/routines/audit/fire?project=alpha"');
     } finally {
       test.cleanup();
     }

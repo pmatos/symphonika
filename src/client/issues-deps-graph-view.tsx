@@ -3,13 +3,17 @@ import { useEffect, useRef, useState } from "react";
 
 import {
   buildDependencyGraphElements,
+  issueNodeId,
   type DependencyGraphIssue,
   type DependencyGraphNode
 } from "./dependency-graph-elements.js";
 
 declare global {
   interface Window {
-    __ISSUE_DEPS_GRAPH__?: { issues: DependencyGraphIssue[] };
+    __ISSUE_DEPS_GRAPH__?: {
+      focusIssue?: { issueNumber: number; owner: string; repo: string };
+      issues: DependencyGraphIssue[];
+    };
   }
 }
 
@@ -72,6 +76,7 @@ export function IssuesDepsGraphView() {
     null
   );
   const issues = window.__ISSUE_DEPS_GRAPH__?.issues ?? [];
+  const focusIssue = window.__ISSUE_DEPS_GRAPH__?.focusIssue;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -90,6 +95,24 @@ export function IssuesDepsGraphView() {
         const node = event.target as cytoscape.NodeSingular;
         setSelected(node.data() as DependencyGraphNode["data"]);
       });
+      if (focusIssue !== undefined) {
+        // Node positions aren't final until the layout settles -- selecting
+        // before then is fine, but centering on it would jump again once
+        // cose repositions everything, so both wait for the same event.
+        const focusId = issueNodeId(
+          focusIssue.owner,
+          focusIssue.repo,
+          focusIssue.issueNumber
+        );
+        cy.one("layoutstop", () => {
+          const node = cy.$id(focusId);
+          if (node.length > 0) {
+            node.select();
+            setSelected(node.data() as DependencyGraphNode["data"]);
+            cy.center(node);
+          }
+        });
+      }
       hideFallback();
       return () => {
         cy.destroy();
@@ -97,7 +120,7 @@ export function IssuesDepsGraphView() {
     } catch {
       return undefined;
     }
-  }, [issues]);
+  }, [issues, focusIssue]);
 
   if (issues.length === 0) {
     return null;

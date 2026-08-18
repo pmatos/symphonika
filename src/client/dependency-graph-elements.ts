@@ -52,7 +52,14 @@ export type DependencyGraphElements = {
 // sides of the same physical issue always resolve to one node id. The
 // separate `owner`/`repo` fields on each node's `data` keep their original
 // casing for display.
-function issueNodeId(owner: string, repo: string, issueNumber: number): string {
+// Exported so the view can compute a `?issue=`-focused node's id the exact
+// same way the elements it's looking for were built, rather than
+// duplicating the id scheme at the call site.
+export function issueNodeId(
+  owner: string,
+  repo: string,
+  issueNumber: number
+): string {
   return `issue:${owner.toLowerCase()}/${repo.toLowerCase()}#${issueNumber}`;
 }
 

@@ -422,4 +422,110 @@ describe("GET /issues/graph", () => {
       test.cleanup();
     }
   });
+
+  it("embeds a focusIssue target when ?project= and ?issue= both single out one issue", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-08-18T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueNumber: 101,
+            kind: "candidate",
+            labels: [],
+            priority: 1,
+            reasons: [],
+            title: "Add graph view"
+          }
+        ]
+      });
+
+      const app = makeApp(test);
+      const response = await app.request(
+        "/issues/graph?project=alpha&issue=101"
+      );
+      const html = await response.text();
+      const embedded = /window\.__ISSUE_DEPS_GRAPH__ = (.*?);<\/script>/s.exec(
+        html
+      );
+      const graph = JSON.parse(embedded?.[1] ?? "null") as {
+        focusIssue?: { issueNumber: number; owner: string; repo: string };
+      };
+      expect(graph.focusIssue).toEqual({
+        issueNumber: 101,
+        owner: "pmatos",
+        repo: "symphonika"
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("omits focusIssue when no single project is selected, even with ?issue= present", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-08-18T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueNumber: 101,
+            kind: "candidate",
+            labels: [],
+            priority: 1,
+            reasons: [],
+            title: "Add graph view"
+          }
+        ]
+      });
+
+      const app = makeApp(test);
+      const response = await app.request("/issues/graph?issue=101");
+      const html = await response.text();
+      const embedded = /window\.__ISSUE_DEPS_GRAPH__ = (.*?);<\/script>/s.exec(
+        html
+      );
+      const graph = JSON.parse(embedded?.[1] ?? "null") as {
+        focusIssue?: unknown;
+      };
+      expect(graph.focusIssue).toBeUndefined();
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("ignores a malformed ?issue= value rather than erroring", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      const app = makeApp(test);
+      const response = await app.request(
+        "/issues/graph?project=alpha&issue=not-a-number"
+      );
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      const embedded = /window\.__ISSUE_DEPS_GRAPH__ = (.*?);<\/script>/s.exec(
+        html
+      );
+      const graph = JSON.parse(embedded?.[1] ?? "null") as {
+        focusIssue?: unknown;
+      };
+      expect(graph.focusIssue).toBeUndefined();
+    } finally {
+      test.cleanup();
+    }
+  });
 });

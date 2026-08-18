@@ -740,9 +740,30 @@ export function registerPages(options: RegisterPagesOptions): void {
       runStore: options.runStore,
       targetProjects
     });
+    // Only resolvable when exactly one Project is selected -- with the
+    // "all projects" view (projectFilter undefined) there's no way to know
+    // which Project's repo a bare issue number belongs to.
+    const issueParam = parsePositiveIntQueryParam(context.req.query("issue"));
+    const focusRepo =
+      projectFilter === undefined
+        ? undefined
+        : options.getProjectRepo?.(projectFilter);
+    const focusIssue =
+      issueParam === undefined || focusRepo === undefined
+        ? undefined
+        : {
+            issueNumber: issueParam,
+            owner: focusRepo.owner,
+            repo: focusRepo.repo
+          };
     const html = layout(
       "Issue dependency graph",
-      renderIssueDependencyGraphPage({ issues, projectFilter, projectNames })
+      renderIssueDependencyGraphPage({
+        focusIssue,
+        issues,
+        projectFilter,
+        projectNames
+      })
     );
     return context.html(html);
   });
@@ -3474,6 +3495,16 @@ function normalizeQueryParam(value: string | undefined): string | undefined {
   return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
 }
 
+function parsePositiveIntQueryParam(
+  value: string | undefined
+): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 // A claim-shaped operational-label reason (sym:claimed/sym:running) gets its
 // Run id resolved through the Run Store — a local read, not a GitHub call —
 // so describeIssueVerdict (src/issues/verdict.ts) can stay pure and DB-free.
@@ -3963,6 +3994,7 @@ function renderIssueDependencyGraphFallback(
 }
 
 function renderIssueDependencyGraphPage(input: {
+  focusIssue: { issueNumber: number; owner: string; repo: string } | undefined;
   issues: DependencyGraphEmbedIssue[];
   projectFilter: string | undefined;
   projectNames: string[];
@@ -3981,7 +4013,7 @@ function renderIssueDependencyGraphPage(input: {
   const mount = `<div id="issues-deps-graph-fallback">${fallback}</div>
 <style>${DEPS_GRAPH_STYLES}</style>
 <div id="issues-deps-graph-root"></div>
-<script>window.__ISSUE_DEPS_GRAPH__ = ${escapeJsonForInlineScript({ issues: input.issues })};</script>
+<script>window.__ISSUE_DEPS_GRAPH__ = ${escapeJsonForInlineScript({ focusIssue: input.focusIssue, issues: input.issues })};</script>
 <script src="/assets/issues-deps-graph.js"></script>`;
   return `<h1 class="page-title">Issue dependency graph</h1><p class="note"><a href="/issues">&larr; back to triage</a></p>${filterForm}${mount}`;
 }

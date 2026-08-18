@@ -248,4 +248,108 @@ describe("IssuesDepsGraphView", () => {
 
     expect(screen.getByText(/may be incomplete/i)).toBeDefined();
   });
+
+  it("selects and centers the focusIssue node once the layout settles", () => {
+    window.__ISSUE_DEPS_GRAPH__ = {
+      focusIssue: { issueNumber: 101, owner: "pmatos", repo: "symphonika" },
+      issues: [
+        {
+          blockedBy: [],
+          blockedByTruncated: false,
+          issueNumber: 101,
+          owner: "pmatos",
+          projectName: "alpha",
+          repo: "symphonika",
+          title: "Add graph view"
+        },
+        {
+          blockedBy: [],
+          blockedByTruncated: false,
+          issueNumber: 102,
+          owner: "pmatos",
+          projectName: "alpha",
+          repo: "symphonika",
+          title: "Add gating"
+        }
+      ]
+    };
+    let layoutstopHandler: (() => void) | undefined;
+    const centerMock = vi.fn();
+    const selectMock = vi.fn();
+    const focusNodeData = {
+      id: "issue:pmatos/symphonika#101",
+      issueNumber: 101,
+      kind: "issue",
+      label: "Add graph view",
+      owner: "pmatos",
+      projectName: "alpha",
+      repo: "symphonika",
+      title: "Add graph view"
+    };
+    mockedCytoscape.mockReturnValue({
+      $id: vi.fn(() => ({
+        data: () => focusNodeData,
+        length: 1,
+        select: selectMock
+      })),
+      center: centerMock,
+      destroy: vi.fn(),
+      on: vi.fn(),
+      one: vi.fn((eventName: string, handler: () => void) => {
+        if (eventName === "layoutstop") {
+          layoutstopHandler = handler;
+        }
+      })
+    } as unknown as cytoscape.Core);
+
+    renderWithFallback();
+
+    expect(layoutstopHandler).toBeDefined();
+    act(() => {
+      layoutstopHandler?.();
+    });
+
+    expect(selectMock).toHaveBeenCalledTimes(1);
+    expect(centerMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Add graph view")).toBeDefined();
+  });
+
+  it("does nothing when the focusIssue node isn't in the graph", () => {
+    window.__ISSUE_DEPS_GRAPH__ = {
+      focusIssue: { issueNumber: 999, owner: "pmatos", repo: "symphonika" },
+      issues: [
+        {
+          blockedBy: [],
+          blockedByTruncated: false,
+          issueNumber: 101,
+          owner: "pmatos",
+          projectName: "alpha",
+          repo: "symphonika",
+          title: "Add graph view"
+        }
+      ]
+    };
+    let layoutstopHandler: (() => void) | undefined;
+    const centerMock = vi.fn();
+    mockedCytoscape.mockReturnValue({
+      $id: vi.fn(() => ({ data: () => undefined, length: 0, select: vi.fn() })),
+      center: centerMock,
+      destroy: vi.fn(),
+      on: vi.fn(),
+      one: vi.fn((eventName: string, handler: () => void) => {
+        if (eventName === "layoutstop") {
+          layoutstopHandler = handler;
+        }
+      })
+    } as unknown as cytoscape.Core);
+
+    renderWithFallback();
+
+    act(() => {
+      layoutstopHandler?.();
+    });
+
+    expect(centerMock).not.toHaveBeenCalled();
+    expect(screen.getByText("Click a node for details.")).toBeDefined();
+  });
 });

@@ -144,11 +144,13 @@ function collectReferencedFields(
   }
 }
 
-// permission_mode is excluded here: its schema only ever accepts "bypass", and
-// every provider already independently hard-enforces bypass permissions
-// (validateClaudeProtocolFlags for Claude, hardcoded approval_policy/sandbox_mode
-// for Codex, --auto-approve for OMP), so an untemplated permission_mode is
-// redundant, not silently inert the way an untemplated model/effort would be.
+// permission_mode is excluded here: no provider currently requires it to
+// appear in the command for full permission to take effect by default — the
+// shipped default commands each carry a fixed policy flag literally (see
+// ADR-0067's second amendment and SPEC.md §11.3). Unlike an unreferenced
+// model/effort, an unreferenced permission_mode is therefore silently inert
+// here rather than flagged — extending this check to cover it too is a
+// separate decision, left out of this PR's scope.
 function unreferencedFields(
   referenced: Set<string>,
   values: ProviderCommandTemplateValues

@@ -870,6 +870,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         addLabels,
         operations,
         removeLabels,
+        runStore: options.runStore,
         writeIssueLabels: options.writeIssueLabels
       });
       return context.json({ results }, 200);
@@ -3817,11 +3818,38 @@ async function runBulkIssueLabelWrites(input: {
   addLabels: string[];
   operations: Array<{ issueNumber: number; projectName: string }>;
   removeLabels: string[];
+  runStore: RunStore;
   writeIssueLabels: WriteIssueLabelsFn;
 }): Promise<BulkIssueLabelResult[]> {
-  const { addLabels, operations, removeLabels, writeIssueLabels } = input;
+  const { addLabels, operations, removeLabels, runStore, writeIssueLabels } =
+    input;
   const results = new Array<BulkIssueLabelResult>(operations.length);
   let nextIndex = 0;
+
+  // Removing a label an issue doesn't currently have risks a needless 404
+  // from GitHub (ADR 0077's rule, already followed by the single-issue
+  // clear-stale-claim action) -- and since writeIssueLabels adds before
+  // removing and reports the whole operation failed on any thrown error, a
+  // spurious remove-side 404 would discard an already-successful add.
+  // Narrows removeLabels per issue against the persisted poll snapshot
+  // (the same data loadIssueDetail reads for the single-issue page),
+  // fetched once per project rather than once per operation.
+  const currentLabelsByProject = new Map<string, Map<number, string[]>>();
+  function currentLabelsFor(
+    projectName: string,
+    issueNumber: number
+  ): string[] | undefined {
+    let byIssue = currentLabelsByProject.get(projectName);
+    if (byIssue === undefined) {
+      byIssue = new Map(
+        runStore
+          .listProjectIssueSnapshots(projectName)
+          .map((row) => [row.issueNumber, row.labels])
+      );
+      currentLabelsByProject.set(projectName, byIssue);
+    }
+    return byIssue.get(issueNumber);
+  }
 
   async function worker(): Promise<void> {
     for (;;) {
@@ -3831,6 +3859,18 @@ async function runBulkIssueLabelWrites(input: {
       if (operation === undefined) {
         return;
       }
+      const currentLabels = currentLabelsFor(
+        operation.projectName,
+        operation.issueNumber
+      );
+      // No snapshot found (e.g. it aged out between page load and Apply) --
+      // fall back to the requested list rather than silently dropping the
+      // removal; the write's own honest failure is then no worse than
+      // today's behavior for that edge case.
+      const removeForThisIssue =
+        currentLabels === undefined
+          ? removeLabels
+          : removeLabels.filter((label) => currentLabels.includes(label));
       // Every operation runs regardless of earlier outcomes -- best-effort,
       // so one issue's GitHub-side failure doesn't block the rest of the
       // batch.
@@ -3838,7 +3878,7 @@ async function runBulkIssueLabelWrites(input: {
         add: addLabels,
         kind: "issue",
         projectName: operation.projectName,
-        remove: removeLabels,
+        remove: removeForThisIssue,
         subjectNumber: operation.issueNumber
       });
       results[index] = outcome.ok

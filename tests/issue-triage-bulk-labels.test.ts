@@ -528,4 +528,83 @@ describe("POST /api/issues/bulk-labels", () => {
       test.cleanup();
     }
   });
+
+  it("narrows each issue's removeLabels to the labels it actually has, per ADR 0077's no-needless-404 rule", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    runStore.syncProjectStates([
+      { name: "alpha", validationState: "valid", weight: 1 }
+    ]);
+    runStore.replaceProjectIssueSnapshots({
+      polledAt: "2026-05-22T10:00:00.000Z",
+      projectName: "alpha",
+      rows: [
+        {
+          issueNumber: 7,
+          kind: "candidate",
+          labels: ["needs-triage", "bug"],
+          priority: 1,
+          reasons: [],
+          title: "Has needs-triage"
+        },
+        {
+          issueNumber: 8,
+          kind: "candidate",
+          labels: ["agent-ready"],
+          priority: 1,
+          reasons: [],
+          title: "Does not have needs-triage"
+        }
+      ]
+    });
+    try {
+      const received: unknown[] = [];
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore,
+        stateRoot,
+        version: "0.1.0",
+        writeIssueLabels: (input) => {
+          received.push(input);
+          return Promise.resolve({ ok: true });
+        }
+      });
+      const response = await app.request("/api/issues/bulk-labels", {
+        body: JSON.stringify({
+          addLabels: [],
+          operations: [
+            { issueNumber: 7, projectName: "alpha" },
+            { issueNumber: 8, projectName: "alpha" }
+          ],
+          removeLabels: ["needs-triage"]
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/json"
+        },
+        method: "POST"
+      });
+      expect(response.status).toBe(200);
+      expect(received).toEqual(
+        expect.arrayContaining([
+          {
+            add: [],
+            kind: "issue",
+            projectName: "alpha",
+            remove: ["needs-triage"],
+            subjectNumber: 7
+          },
+          {
+            add: [],
+            kind: "issue",
+            projectName: "alpha",
+            remove: [],
+            subjectNumber: 8
+          }
+        ])
+      );
+    } finally {
+      runStore.close();
+    }
+  });
 });

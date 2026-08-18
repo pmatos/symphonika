@@ -181,6 +181,54 @@ describe("IssuesBulkSelect", () => {
     expect(options).not.toContain("sym:claimed");
   });
 
+  it("shows the server's error message instead of crashing when the response is not ok", async () => {
+    renderWithServerRows();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: "at least one label to add or remove is required"
+          }),
+          { status: 400 }
+        )
+      )
+    );
+
+    const checkbox = document.querySelector<HTMLInputElement>(
+      '.bulk-issue-checkbox[data-issue="7"]'
+    );
+    if (checkbox === null) {
+      throw new Error("checkbox not found");
+    }
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(
+      await screen.findByText("at least one label to add or remove is required")
+    ).toBeDefined();
+    expect(document.querySelector(".bulk-select-results")).toBeNull();
+  });
+
+  it("shows a generic error message when the fetch itself fails (network error)", async () => {
+    renderWithServerRows();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new TypeError("Failed to fetch"))
+    );
+
+    const checkbox = document.querySelector<HTMLInputElement>(
+      '.bulk-issue-checkbox[data-issue="7"]'
+    );
+    if (checkbox === null) {
+      throw new Error("checkbox not found");
+    }
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(await screen.findByText(/request failed/i)).toBeDefined();
+  });
+
   it("selects every row when the header select-all checkbox is checked", () => {
     renderWithServerRows();
     const selectAll = document.getElementById(

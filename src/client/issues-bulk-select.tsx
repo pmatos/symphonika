@@ -42,6 +42,7 @@ export function IssuesBulkSelect() {
   const [addLabelsText, setAddLabelsText] = useState("");
   const [removeLabelsText, setRemoveLabelsText] = useState("");
   const [results, setResults] = useState<BulkLabelResult[] | null>(null);
+  const [applyError, setApplyError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -119,6 +120,7 @@ export function IssuesBulkSelect() {
     const removeLabels = parseLabelList(removeLabelsText);
     setSubmitting(true);
     setResults(null);
+    setApplyError(null);
     try {
       const response = await fetch("/api/issues/bulk-labels", {
         body: JSON.stringify({ addLabels, operations, removeLabels }),
@@ -128,8 +130,19 @@ export function IssuesBulkSelect() {
         },
         method: "POST"
       });
-      const body = (await response.json()) as { results: BulkLabelResult[] };
+      const body = (await response.json()) as
+        { error: string } | { results: BulkLabelResult[] };
+      if (!response.ok || !("results" in body)) {
+        setApplyError(
+          "error" in body ? body.error : "the bulk-label request failed"
+        );
+        return;
+      }
       setResults(body.results);
+    } catch {
+      // A network failure or a non-JSON body -- request failed outright,
+      // as distinct from the server responding with a JSON {error}.
+      setApplyError("request failed -- check the network and try again");
     } finally {
       setSubmitting(false);
     }
@@ -168,6 +181,9 @@ export function IssuesBulkSelect() {
       >
         Apply
       </button>
+      {applyError !== null ? (
+        <p className="bulk-select-error">{applyError}</p>
+      ) : null}
       {results !== null ? (
         <ul className="bulk-select-results">
           {results.map((result) => (

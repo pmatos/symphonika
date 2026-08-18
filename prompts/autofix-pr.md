@@ -36,7 +36,7 @@ if you need the PR number — do not assume one. Stay on branch
   catch-all and terminates the run as `blocked`. Exiting 0 here would
   set `provider_success: true`, return the FSM to `wait_for_pr`, which
   would observe the same failing PR signals and route straight back
-  into this state — an infinite loop. Do not self-apply `needs-human`.
+  into this state — an infinite loop. Do not self-apply `sym:human-needed`.
 
 ## Exit
 

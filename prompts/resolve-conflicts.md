@@ -43,7 +43,7 @@ second PR.
   the run as `blocked`. Exiting 0 here would set `provider_success: true`,
   return the FSM to `wait_for_pr`, which would observe the same
   `mergeable: false` signal and route straight back into this state —
-  an infinite loop. Do not self-apply `needs-human`.
+  an infinite loop. Do not self-apply `sym:human-needed`.
 
 ## Exit
 

@@ -321,4 +321,54 @@ describe("GET /issues/graph", () => {
       test.cleanup();
     }
   });
+
+  it("forwards blockedByTruncated into the embedded payload and the fallback list", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-08-18T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [
+              {
+                number: 42,
+                owner: "pmatos",
+                repo: "symphonika",
+                state: "CLOSED",
+                title: "Only the fetched blockers, capped at 25"
+              }
+            ],
+            blockedByTruncated: true,
+            issueNumber: 101,
+            kind: "candidate",
+            labels: [],
+            priority: 1,
+            reasons: [],
+            title: "Add graph view"
+          }
+        ]
+      });
+
+      const app = makeApp(test);
+      const response = await app.request("/issues/graph");
+      const html = await response.text();
+
+      const embedded = /window\.__ISSUE_DEPS_GRAPH__ = (.*?);<\/script>/s.exec(
+        html
+      );
+      expect(embedded).not.toBeNull();
+      const graph = JSON.parse(embedded?.[1] ?? "null") as {
+        issues: Array<{ blockedByTruncated: boolean; issueNumber: number }>;
+      };
+      const issue = graph.issues.find((entry) => entry.issueNumber === 101);
+      expect(issue?.blockedByTruncated).toBe(true);
+      expect(html).toMatch(/more dependency links than could be checked/i);
+    } finally {
+      test.cleanup();
+    }
+  });
 });

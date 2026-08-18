@@ -7,6 +7,7 @@ describe("buildDependencyGraphElements", () => {
     const result = buildDependencyGraphElements([
       {
         blockedBy: [],
+        blockedByTruncated: false,
         issueNumber: 101,
         owner: "pmatos",
         projectName: "alpha",
@@ -46,6 +47,7 @@ describe("buildDependencyGraphElements", () => {
             title: "Design the dependency model"
           }
         ],
+        blockedByTruncated: false,
         issueNumber: 101,
         owner: "pmatos",
         projectName: "alpha",
@@ -88,6 +90,7 @@ describe("buildDependencyGraphElements", () => {
             title: "Design the dependency model"
           }
         ],
+        blockedByTruncated: false,
         issueNumber: 101,
         owner: "pmatos",
         projectName: "alpha",
@@ -96,6 +99,7 @@ describe("buildDependencyGraphElements", () => {
       },
       {
         blockedBy: [],
+        blockedByTruncated: false,
         issueNumber: 100,
         owner: "pmatos",
         projectName: "alpha",
@@ -129,6 +133,7 @@ describe("buildDependencyGraphElements", () => {
             title: "Ship the upstream fix"
           }
         ],
+        blockedByTruncated: false,
         issueNumber: 101,
         owner: "pmatos",
         projectName: "alpha",
@@ -154,6 +159,7 @@ describe("buildDependencyGraphElements", () => {
     const result = buildDependencyGraphElements([
       {
         blockedBy: [],
+        blockedByTruncated: false,
         issueNumber: 101,
         owner: "pmatos",
         parentIssueNumber: 289,
@@ -163,6 +169,7 @@ describe("buildDependencyGraphElements", () => {
       },
       {
         blockedBy: [],
+        blockedByTruncated: false,
         issueNumber: 102,
         owner: "pmatos",
         parentIssueNumber: 289,
@@ -200,6 +207,7 @@ describe("buildDependencyGraphElements", () => {
     const result = buildDependencyGraphElements([
       {
         blockedBy: [],
+        blockedByTruncated: false,
         issueNumber: 289,
         owner: "pmatos",
         projectName: "alpha",
@@ -208,6 +216,7 @@ describe("buildDependencyGraphElements", () => {
       },
       {
         blockedBy: [],
+        blockedByTruncated: false,
         issueNumber: 101,
         owner: "pmatos",
         parentIssueNumber: 289,
@@ -229,6 +238,7 @@ describe("buildDependencyGraphElements", () => {
     const result = buildDependencyGraphElements([
       {
         blockedBy: [],
+        blockedByTruncated: false,
         issueNumber: 101,
         owner: "pmatos",
         projectName: "alpha",
@@ -238,5 +248,71 @@ describe("buildDependencyGraphElements", () => {
     ]);
 
     expect(result.nodes[0]?.data.parent).toBeUndefined();
+  });
+
+  it("links to the real node when the blocker's owner/repo differ only by case", () => {
+    const result = buildDependencyGraphElements([
+      {
+        blockedBy: [
+          {
+            number: 100,
+            owner: "PMatos",
+            repo: "Symphonika",
+            state: "OPEN",
+            title: "Design the dependency model"
+          }
+        ],
+        blockedByTruncated: false,
+        issueNumber: 101,
+        owner: "pmatos",
+        projectName: "alpha",
+        repo: "symphonika",
+        title: "Add graph view"
+      },
+      {
+        blockedBy: [],
+        blockedByTruncated: false,
+        issueNumber: 100,
+        owner: "pmatos",
+        projectName: "alpha",
+        repo: "symphonika",
+        title: "Design the dependency model"
+      }
+    ]);
+
+    expect(result.nodes).toHaveLength(2);
+    expect(result.nodes.every((node) => node.data.kind === "issue")).toBe(true);
+  });
+
+  it("marks a node as truncated when the issue's blockedBy fetch was capped", () => {
+    const result = buildDependencyGraphElements([
+      {
+        blockedBy: [],
+        blockedByTruncated: true,
+        issueNumber: 101,
+        owner: "pmatos",
+        projectName: "alpha",
+        repo: "symphonika",
+        title: "Add graph view"
+      }
+    ]);
+
+    expect(result.nodes[0]?.data.truncated).toBe(true);
+  });
+
+  it("leaves truncated undefined for an issue whose fetch was not capped", () => {
+    const result = buildDependencyGraphElements([
+      {
+        blockedBy: [],
+        blockedByTruncated: false,
+        issueNumber: 101,
+        owner: "pmatos",
+        projectName: "alpha",
+        repo: "symphonika",
+        title: "Add graph view"
+      }
+    ]);
+
+    expect(result.nodes[0]?.data.truncated).toBeUndefined();
   });
 });

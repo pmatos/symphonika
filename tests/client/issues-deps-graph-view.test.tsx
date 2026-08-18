@@ -46,6 +46,7 @@ describe("IssuesDepsGraphView", () => {
       issues: [
         {
           blockedBy: [],
+          blockedByTruncated: false,
           issueNumber: 101,
           owner: "pmatos",
           projectName: "alpha",
@@ -71,6 +72,7 @@ describe("IssuesDepsGraphView", () => {
       issues: [
         {
           blockedBy: [],
+          blockedByTruncated: false,
           issueNumber: 101,
           owner: "pmatos",
           projectName: "alpha",
@@ -94,6 +96,7 @@ describe("IssuesDepsGraphView", () => {
       issues: [
         {
           blockedBy: [],
+          blockedByTruncated: false,
           issueNumber: 101,
           owner: "pmatos",
           projectName: "alpha",
@@ -147,6 +150,7 @@ describe("IssuesDepsGraphView", () => {
       issues: [
         {
           blockedBy: [],
+          blockedByTruncated: false,
           issueNumber: 101,
           owner: "pmatos",
           projectName: "team a/b",
@@ -191,5 +195,57 @@ describe("IssuesDepsGraphView", () => {
 
     const link = screen.getByRole("link", { name: /#101/ });
     expect(link.getAttribute("href")).toBe("/issues/team%20a%2Fb/101");
+  });
+
+  it("warns in the detail panel when the selected node's dependency fetch was truncated", () => {
+    window.__ISSUE_DEPS_GRAPH__ = {
+      issues: [
+        {
+          blockedBy: [],
+          blockedByTruncated: true,
+          issueNumber: 101,
+          owner: "pmatos",
+          projectName: "alpha",
+          repo: "symphonika",
+          title: "Add graph view"
+        }
+      ]
+    };
+    let tapHandler: ((event: unknown) => void) | undefined;
+    mockedCytoscape.mockReturnValue({
+      destroy: vi.fn(),
+      on: vi.fn(
+        (
+          eventName: string,
+          _selector: string,
+          handler: (event: unknown) => void
+        ) => {
+          if (eventName === "tap") {
+            tapHandler = handler;
+          }
+        }
+      )
+    } as unknown as cytoscape.Core);
+
+    renderWithFallback();
+
+    act(() => {
+      tapHandler?.({
+        target: {
+          data: () => ({
+            id: "issue:pmatos/symphonika#101",
+            issueNumber: 101,
+            kind: "issue",
+            owner: "pmatos",
+            projectName: "alpha",
+            repo: "symphonika",
+            title: "Add graph view",
+            truncated: true
+          })
+        }
+      });
+    });
+
+    expect(screen.getByText(/may be incomplete/i)).toBeDefined();
   });
 });

@@ -8,6 +8,7 @@ type DependencyGraphBlocker = {
 
 export type DependencyGraphIssue = {
   blockedBy: DependencyGraphBlocker[];
+  blockedByTruncated: boolean;
   issueNumber: number;
   owner: string;
   parentIssueNumber?: number;
@@ -26,6 +27,7 @@ type DependencyGraphNodeData = {
   repo: string;
   state?: "CLOSED" | "OPEN";
   title: string;
+  truncated?: boolean;
 };
 
 export type DependencyGraphNode = { data: DependencyGraphNodeData };
@@ -39,8 +41,14 @@ export type DependencyGraphElements = {
   nodes: DependencyGraphNode[];
 };
 
+// GitHub owner/repo lookups are case-insensitive, but a Project's configured
+// tracker.owner/repo and a blockedBy entry's GraphQL-returned owner/repo can
+// disagree in case for the identical repository -- normalized here so both
+// sides of the same physical issue always resolve to one node id. The
+// separate `owner`/`repo` fields on each node's `data` keep their original
+// casing for display.
 function issueNodeId(owner: string, repo: string, issueNumber: number): string {
-  return `issue:${owner}/${repo}#${issueNumber}`;
+  return `issue:${owner.toLowerCase()}/${repo.toLowerCase()}#${issueNumber}`;
 }
 
 export function buildDependencyGraphElements(
@@ -60,7 +68,8 @@ export function buildDependencyGraphElements(
         projectName: issue.projectName,
         repo: issue.repo,
         state: "OPEN",
-        title: issue.title
+        title: issue.title,
+        ...(issue.blockedByTruncated ? { truncated: true } : {})
       }
     });
   }

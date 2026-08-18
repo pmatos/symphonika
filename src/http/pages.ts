@@ -3863,6 +3863,7 @@ window.__CSRF_TOKEN__ = ${escapeJsonForInlineScript(input.csrfToken)};</script>
 // tsconfig boundary.
 type DependencyGraphEmbedIssue = {
   blockedBy: RawGitHubIssueDependencyRef[];
+  blockedByTruncated: boolean;
   issueNumber: number;
   owner: string;
   parentIssueNumber?: number;
@@ -3907,6 +3908,7 @@ function buildDependencyGraphIssues(input: {
       seenIssueKeys.add(issueKey);
       issues.push({
         blockedBy: snapshot.blockedBy,
+        blockedByTruncated: snapshot.blockedByTruncated,
         issueNumber: snapshot.issueNumber,
         owner: repo.owner,
         ...(snapshot.parentIssueNumber === undefined
@@ -3930,7 +3932,9 @@ function buildDependencyGraphIssues(input: {
 function renderIssueDependencyGraphFallback(
   issues: DependencyGraphEmbedIssue[]
 ): string {
-  const withBlockers = issues.filter((issue) => issue.blockedBy.length > 0);
+  const withBlockers = issues.filter(
+    (issue) => issue.blockedBy.length > 0 || issue.blockedByTruncated
+  );
   if (withBlockers.length === 0) {
     return `<p class="note">No open dependency links in this view.</p>`;
   }
@@ -3943,7 +3947,13 @@ function renderIssueDependencyGraphFallback(
           return `<li>${labelPill(blocker.state, family)} ${escapeHtml(ref)} — ${escapeHtml(blocker.title)}</li>`;
         })
         .join("");
-      return `<li><strong>${escapeHtml(issue.projectName)}#${issue.issueNumber}</strong> ${escapeHtml(issue.title)}<ul class="label-list">${blockers}</ul></li>`;
+      // A truncated fetch means the fetched blockers above -- even if every
+      // one shown is closed -- aren't the whole story; called out
+      // separately so it can't be mistaken for one more (closed) blocker.
+      const truncatedNote = issue.blockedByTruncated
+        ? `<li class="pill pill--blocked">⚠ more dependency links than could be checked</li>`
+        : "";
+      return `<li><strong>${escapeHtml(issue.projectName)}#${issue.issueNumber}</strong> ${escapeHtml(issue.title)}<ul class="label-list">${blockers}${truncatedNote}</ul></li>`;
     })
     .join("");
   return `<ul class="label-list">${rows}</ul>`;

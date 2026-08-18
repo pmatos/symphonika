@@ -35,6 +35,14 @@ const NODE_STYLE: cytoscape.StylesheetJsonBlock[] = [
     style: { "background-color": "#f8fafc", "border-color": "#cbd5e1" }
   },
   {
+    selector: "node[?truncated]",
+    style: {
+      "border-color": "#f59e0b",
+      "border-style": "dashed",
+      "border-width": 2.5
+    }
+  },
+  {
     selector: "edge",
     style: {
       "curve-style": "bezier",
@@ -126,6 +134,12 @@ export function IssuesDepsGraphView() {
                 <dd>{selected.state}</dd>
               </>
             )}
+            {selected.truncated === true ? (
+              <dd className="deps-graph-warning">
+                ⚠ this issue has more dependency links than could be checked —
+                the list shown here may be incomplete.
+              </dd>
+            ) : null}
           </dl>
         )}
       </aside>

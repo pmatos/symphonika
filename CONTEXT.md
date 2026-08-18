@@ -57,13 +57,20 @@ A normalized unit of project work read from the issue tracker.
 _Avoid_: ticket, task
 
 **Eligible Issue**:
-An open issue that matches a Dispatch Project's required labels, avoids excluded labels, and is not already claimed by the orchestrator; v1 treats excluded labels such as `blocked` as the only blocker signal.
+An open issue that matches a Dispatch Project's required labels, avoids excluded labels, is not already claimed by the orchestrator, and has no unresolved GitHub-native issue dependency (see Dependency Gate below).
 _Avoid_: active issue unless referring to tracker state
 
 **Dispatch Eligibility**:
 The question "may this Dispatch Project freshly claim this Issue?", including open state, required
-labels, excluded labels, and blocking operational labels.
+labels, excluded labels, blocking operational labels, and the Dependency Gate.
 _Avoid_: continuation eligibility when referring to first claim selection
+
+**Dependency Gate**:
+The check that an Issue has no open (non-`CLOSED`) GitHub-native `blockedBy` dependency before the
+orchestrator dispatches it; a hard block with no per-issue override. Distinct from a body-text DSL —
+Symphonika never parses issue body text to infer blockers, only GitHub's own issue-dependencies
+GraphQL relationship. See ADR-0081.
+_Avoid_: dependency graph (the `/issues/graph` display) when referring to this gating check
 
 **Continuation Eligibility**:
 The question "may this already-owned Run lifecycle keep going?", including open state for every Run,

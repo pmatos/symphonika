@@ -163,13 +163,16 @@ rather than CDN+SRI (the pattern `/runs/:id/graph` uses for the same library tod
 with ADR-0080's "self-contained, no external runtime dependency" rationale for React, and avoids
 mixing two different script-loading strategies on one page.
 
-Work splits into two independently-shippable phases, though this spec covers both and they land
-as one PR stacked on `symphonika/session-49ed7661` (PR #471's branch):
+Work splits into two independently-shippable phases; this spec covers both, but they landed as two
+stacked PRs rather than one once Phase 1 alone reached a reviewable size on its own:
 
 - **Phase 1 — no dependency on #471**: the GraphQL fetch, snapshot schema, both gates, the Deps
   column, and the issue-detail dependency list. All plain server-rendered HTML and backend logic.
-- **Phase 2 — needs #471 merged first**: the graph view. It's the only piece touching the
-  React/esbuild pipeline.
+  Opened as PR #472, stacked on `symphonika/session-49ed7661` (PR #471's branch) since it still
+  builds on that PR's React/esbuild client tooling for Phase 2, though it has no client-side code of
+  its own.
+- **Phase 2 — needs #471's client pipeline**: the graph view. It's the only piece touching the
+  React/esbuild pipeline, and lands as a second PR stacked on top of Phase 1's own branch.
 
 ## Docs Follow-Up
 
@@ -178,10 +181,11 @@ as one PR stacked on `symphonika/session-49ed7661` (PR #471's branch):
   clustering; real gating uses native GitHub `blockedBy` data, not a parsed body-text DSL.
 - `CONTEXT.md`: note that dispatch eligibility now also depends on resolved GitHub-native
   `blockedBy` links, not label state alone.
-- New ADR (numbered after `0080`, which PR #471 claims — renumber at merge time if landing order
-  shifts): records the native-`blockedBy`-as-gate-source decision, the resolved-means-closed
-  semantics, hard-block-no-override, the label-write gate's best-effort/snapshot-staleness caveat
-  vs. the daemon's authoritative one, and `## Parent`-parsing's display-only clustering scope.
+- New ADR, `docs/adr/0081-issue-dependency-gating-and-graph-view.md` (numbered after `0080`, which PR
+  #471 claims — renumber at merge time if landing order shifts): records the
+  native-`blockedBy`-as-gate-source decision, the resolved-means-closed semantics,
+  hard-block-no-override, the label-write gate's best-effort/snapshot-staleness caveat vs. the
+  daemon's authoritative one, and `## Parent`-parsing's display-only clustering scope.
 
 ## Testing
 

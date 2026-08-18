@@ -134,7 +134,7 @@ export type IssueSnapshot = {
   // separately via GraphQL during polling -- not derived from body text.
   // Optional (not every caller of this widely-used type deals in
   // dependency data): absent reads the same as "no known blockers", not
-  // "unresolved". See docs/adr (issue dependency gating).
+  // "unresolved". See docs/adr/0081-issue-dependency-gating-and-graph-view.md.
   blockedBy?: RawGitHubIssueDependencyRef[];
   blockedByTruncated?: boolean;
   body: string;

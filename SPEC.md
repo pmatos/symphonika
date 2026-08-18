@@ -26,10 +26,14 @@ repository as one real Project well enough to help implement later Symphonika is
   visualizations embedded in a server-rendered operator page (e.g. the workflow-graph view) are
   permitted — see §14 and ADR-0056 — as is a scoped client-side island, bundled with a build step,
   that owns interactive behavior on top of server-rendered data for one page (e.g. the `/issues`
-  page's bulk label-select toolbar) — see ADR-0080.
+  page's bulk label-select toolbar, or the `/issues/graph` dependency graph view) — see ADR-0080 and
+  ADR-0081.
 - Automatic issue Workspace deletion.
 - GitHub Projects board integration.
-- Parsing issue-body dependency syntax.
+- Parsing issue-body dependency syntax as a *gating* mechanism: dispatch eligibility depends on
+  GitHub's native `blockedBy` issue-dependency links, not on any body-text DSL. Symphonika does parse
+  a best-effort `## Parent` heading for the `/issues/graph` view's display-only clustering — see
+  ADR-0081 — but that parse never influences eligibility.
 
 ## 3. Implementation Stack
 
@@ -46,9 +50,11 @@ Symphonika uses a small TypeScript stack optimized for agentic coding and debugg
 - Octokit for GitHub API access
 - Vitest for tests
 - Pino for structured logging
-- React, bundled by esbuild, for one scoped client-side island (the `/issues` page's bulk
-  label-select toolbar) — not a general frontend framework adopted across the dashboard; see
-  ADR-0080
+- React, bundled by esbuild, for scoped client-side islands (the `/issues` page's bulk label-select
+  toolbar; the `/issues/graph` dependency graph view) — not a general frontend framework adopted
+  across the dashboard; see ADR-0080 and ADR-0081
+- Cytoscape.js, bundled by esbuild alongside React, for the `/issues/graph` view's interactive graph
+  rendering — scoped to that one bundle, not a general visualization dependency; see ADR-0081
 
 ## 4. Domain Model
 
@@ -110,9 +116,12 @@ An issue is eligible when all are true:
 - it has none of the configured `labels_none` labels
 - it does not have blocking operational labels
 - it is not already running, claimed, failed, blocked, or stale according to the orchestrator
+- it has no unresolved GitHub-native issue dependency (`blockedBy`): every blocker is `CLOSED`, and
+  the dependency fetch was not truncated — see ADR-0081
 
-v1 uses labels only for blocking. Symphonika does not parse issue body text, task lists, GitHub
-Projects fields, or linked PRs to infer blockers.
+Symphonika does not parse issue body text, task lists, GitHub Projects fields, or linked PRs to infer
+blockers. The one exception is GitHub's own native issue-dependencies feature (`blockedBy`), which is
+a GraphQL-queried relationship, not free text — see ADR-0081.
 
 The configured `labels_all` values are Required Eligibility Labels. Every Required Eligibility
 Label must exist in the Project repository before the Project can dispatch work. `doctor` reports

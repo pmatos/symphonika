@@ -3796,7 +3796,7 @@ function isOrchestratorLabel(label: string): boolean {
 // CLOSED, regardless of stateReason) -- kept in lockstep with
 // evaluateProjectEligibility's identical rule (src/issue-polling.ts) since
 // this route is a best-effort UX gate against the same snapshot data, not
-// a second source of truth. See docs/adr (issue dependency gating).
+// a second source of truth. See docs/adr/0081-issue-dependency-gating-and-graph-view.md.
 function unresolvedIssueDependencies(
   snapshot: ProjectIssueSnapshotRow
 ): RawGitHubIssueDependencyRef[] {

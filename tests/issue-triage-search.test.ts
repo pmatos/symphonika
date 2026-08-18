@@ -70,6 +70,8 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
+            blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
             labels: ["bug"],
@@ -84,6 +86,8 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "beta",
         rows: [
           {
+            blockedByTruncated: false,
+            blockedBy: [],
             issueNumber: 2,
             kind: "filtered",
             labels: ["needs-human"],
@@ -121,6 +125,8 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
+            blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
             labels: ["bug"],
@@ -129,6 +135,8 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
             title: "Fix the login flow"
           },
           {
+            blockedByTruncated: false,
+            blockedBy: [],
             issueNumber: 2,
             kind: "filtered",
             labels: ["needs-human"],
@@ -179,6 +187,8 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
+            blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
             labels: [],
@@ -212,6 +222,8 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
+            blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
             labels: [],
@@ -247,6 +259,8 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
+            blockedBy: [],
             issueNumber: 1,
             kind: "candidate",
             labels: [],
@@ -282,6 +296,8 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
+            blockedBy: [],
             issueNumber: 5,
             kind: "filtered",
             labels: ["sym:claimed"],
@@ -336,6 +352,173 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
       });
       const html = await (await app.request("/")).text();
       expect(html).toContain('<a href="/issues">Issues</a>');
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows an open-dependency count and link for a blocked issue, and a dash for one with no dependencies", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-08-18T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedByTruncated: false,
+            blockedBy: [
+              {
+                number: 301,
+                owner: "pmatos",
+                repo: "symphonika",
+                state: "OPEN",
+                title: "sibling slice"
+              },
+              {
+                number: 295,
+                owner: "pmatos",
+                repo: "symphonika",
+                state: "CLOSED",
+                title: "slice 6"
+              }
+            ],
+            issueNumber: 299,
+            kind: "filtered",
+            labels: ["agent-ready"],
+            priority: 1,
+            reasons: ["blocked by open dependency #301"],
+            title: "Migrate live routines"
+          },
+          {
+            blockedByTruncated: false,
+            blockedBy: [],
+            issueNumber: 300,
+            kind: "candidate",
+            labels: [],
+            priority: 1,
+            reasons: [],
+            title: "No dependencies"
+          }
+        ]
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues")).text();
+
+      expect(html).toContain("1 open");
+      expect(html).toContain(
+        'href="/issues/graph?project=alpha&amp;issue=299"'
+      );
+      expect(html).toContain("blocked: dependency #301 open");
+      expect(html).toContain("pill pill--blocked");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("renders the blocked pill for an issue that is both missing its required label and blocked by an open dependency", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-08-18T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedByTruncated: false,
+            blockedBy: [
+              {
+                number: 301,
+                owner: "pmatos",
+                repo: "symphonika",
+                state: "OPEN",
+                title: "sibling slice"
+              }
+            ],
+            issueNumber: 299,
+            kind: "filtered",
+            labels: [],
+            priority: 1,
+            reasons: [
+              "missing required label agent-ready",
+              "blocked by open dependency #301"
+            ],
+            title: "Not yet labeled and blocked"
+          }
+        ]
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues")).text();
+
+      expect(html).toContain(
+        "filtered: missing agent-ready; blocked: dependency #301 open"
+      );
+      expect(html).toContain("pill pill--blocked");
+      expect(html).not.toContain("pill pill--neutral");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("marks a truncated dependency fetch as having more blockers than shown, even when every fetched blocker is closed", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-08-18T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedByTruncated: true,
+            blockedBy: [
+              {
+                number: 295,
+                owner: "pmatos",
+                repo: "symphonika",
+                state: "CLOSED",
+                title: "slice 6"
+              }
+            ],
+            issueNumber: 299,
+            kind: "filtered",
+            labels: ["agent-ready"],
+            priority: 1,
+            reasons: [
+              "has more dependency links than could be checked - treat as unresolved until reviewed"
+            ],
+            title: "Migrate live routines"
+          }
+        ]
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues")).text();
+
+      // Every fetched blocker is closed (openCount = 0), but the fetch was
+      // truncated -- must not read as "0 open" (the same shape a fully
+      // resolved issue would show) since the gate treats this as blocked.
+      expect(html).toContain("0+ open");
+      expect(html).not.toContain(">0 open<");
     } finally {
       test.cleanup();
     }

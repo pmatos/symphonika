@@ -106,6 +106,9 @@ export type GitHubIssuesApi = {
   getIssue?: (
     input: GitHubIssueRepositoryInput & { issueNumber: number }
   ) => Promise<RawGitHubIssue | null>;
+  getIssueDependencies?: (
+    input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
+  ) => Promise<Map<number, RawGitHubIssueDependencies>>;
   listBranchCommits?: (
     input: GitHubBranchCommitsInput
   ) => Promise<RawGitHubCommit[] | null>;
@@ -127,6 +130,13 @@ export type GitHubIssuesApi = {
 };
 
 export type IssueSnapshot = {
+  // GitHub's native issue-dependencies feature (Issue.blockedBy), fetched
+  // separately via GraphQL during polling -- not derived from body text.
+  // Optional (not every caller of this widely-used type deals in
+  // dependency data): absent reads the same as "no known blockers", not
+  // "unresolved". See docs/adr/0081-issue-dependency-gating-and-graph-view.md.
+  blockedBy?: RawGitHubIssueDependencyRef[];
+  blockedByTruncated?: boolean;
   body: string;
   created_at: string;
   id: number;
@@ -311,6 +321,16 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
     });
 
     return issues;
+  }
+
+  async getIssueDependencies(
+    input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
+  ): Promise<Map<number, RawGitHubIssueDependencies>> {
+    const octokit = this.octokit(input.token);
+    return fetchIssueDependencies(
+      (query, variables) => octokit.graphql(query, variables),
+      input
+    );
   }
 
   async listIssues(input: GitHubIssuesListInput): Promise<RawGitHubIssue[]> {
@@ -543,6 +563,26 @@ export type GraphqlExecutor = (
   variables: Record<string, unknown>
 ) => Promise<unknown>;
 
+// A batch-fetched blocking issue's own state -- travels with the edge so
+// `evaluateProjectEligibility` can decide "resolved" without a second fetch
+// against the blocker's repo. See ADR (issue dependency gating).
+export type RawGitHubIssueDependencyRef = {
+  number: number;
+  owner: string;
+  repo: string;
+  state: "CLOSED" | "OPEN";
+  title: string;
+};
+
+export type RawGitHubIssueDependencies = {
+  blockedBy: RawGitHubIssueDependencyRef[];
+  // true when the issue has more `blockedBy` links than
+  // ISSUE_DEPENDENCIES_MAX_BLOCKERS_PER_ISSUE -- the overflow is not
+  // fetched, and callers must treat this as unresolved rather than silently
+  // allowing dispatch on a partial view.
+  truncated: boolean;
+};
+
 export async function fetchPullRequestFollowupState(
   executeGraphql: GraphqlExecutor,
   input: GitHubPullRequestInput
@@ -616,6 +656,150 @@ export async function fetchPullRequestFollowupState(
   };
 }
 
+// Capped rather than fully paginated: every `blockedBy` count observed
+// while designing this feature was well under this, and a truncated
+// (rather than fully-resolved-via-cursor) result is treated as unresolved
+// by callers -- fail closed on the rare issue with more links than this,
+// instead of adding pagination-following complexity for it.
+const ISSUE_DEPENDENCIES_MAX_BLOCKERS_PER_ISSUE = 25;
+
+type GraphqlIssueDependenciesBlocker = {
+  number?: number | null;
+  repository?: {
+    name?: string | null;
+    owner?: { login?: string | null } | null;
+  } | null;
+  state?: string | null;
+  title?: string | null;
+};
+
+type GraphqlIssueDependenciesIssue = {
+  blockedBy?: {
+    nodes?: Array<GraphqlIssueDependenciesBlocker | null> | null;
+    totalCount?: number | null;
+  } | null;
+  number?: number | null;
+};
+
+type GraphqlIssueDependenciesResponse = {
+  repository?: Record<string, GraphqlIssueDependenciesIssue | null> | null;
+};
+
+function issueDependenciesAlias(issueNumber: number): string {
+  return `i${issueNumber}`;
+}
+
+function buildIssueDependenciesQuery(issueNumbers: number[]): string {
+  const fields = issueNumbers
+    .map(
+      (issueNumber) => `
+        ${issueDependenciesAlias(issueNumber)}: issue(number: ${issueNumber}) {
+          number
+          blockedBy(first: ${ISSUE_DEPENDENCIES_MAX_BLOCKERS_PER_ISSUE}) {
+            totalCount
+            nodes {
+              number
+              title
+              state
+              repository {
+                owner {
+                  login
+                }
+                name
+              }
+            }
+          }
+        }`
+    )
+    .join("\n");
+  return `
+    query IssueDependencies($owner: String!, $repo: String!) {
+      repository(owner: $owner, name: $repo) {
+        ${fields}
+      }
+    }
+  `;
+}
+
+function normalizeIssueDependencyState(
+  state: string | null | undefined
+): "CLOSED" | "OPEN" {
+  return state === "CLOSED" ? "CLOSED" : "OPEN";
+}
+
+// Keeps each GraphQL call well within GitHub's query-complexity budget
+// (separate from the REST rate limit) -- validated at 20 issues/call while
+// designing this feature. A project with more open issues than this in one
+// poll cycle makes multiple calls rather than one unbounded query.
+const ISSUE_DEPENDENCIES_BATCH_SIZE = 20;
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+async function fetchIssueDependenciesBatch(
+  executeGraphql: GraphqlExecutor,
+  input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
+): Promise<Map<number, RawGitHubIssueDependencies>> {
+  const result = new Map<number, RawGitHubIssueDependencies>();
+
+  const response = (await executeGraphql(
+    buildIssueDependenciesQuery(input.issueNumbers),
+    { owner: input.owner, repo: input.repo }
+  )) as GraphqlIssueDependenciesResponse;
+
+  for (const issueNumber of input.issueNumbers) {
+    const issue = response.repository?.[issueDependenciesAlias(issueNumber)];
+    if (issue === null || issue === undefined) {
+      // The issue was deleted/transferred/otherwise unresolvable between the
+      // REST listOpenIssues call and this GraphQL fetch -- dependency state
+      // is unknown, not confirmed clear, so record the same fail-closed
+      // shape as a 25-blocker truncation (ADR 0081) rather than leaving no
+      // entry, which every caller's `?? []`/`?? false` would read as clear.
+      result.set(issueNumber, { blockedBy: [], truncated: true });
+      continue;
+    }
+    const totalCount = issue.blockedBy?.totalCount ?? 0;
+    const nodes = (issue.blockedBy?.nodes ?? []).filter(
+      (node): node is GraphqlIssueDependenciesBlocker => node !== null
+    );
+    result.set(issue.number ?? issueNumber, {
+      blockedBy: nodes.map((node) => ({
+        number: node.number ?? 0,
+        owner: node.repository?.owner?.login ?? "",
+        repo: node.repository?.name ?? "",
+        state: normalizeIssueDependencyState(node.state),
+        title: node.title ?? ""
+      })),
+      truncated: totalCount > nodes.length
+    });
+  }
+
+  return result;
+}
+
+export async function fetchIssueDependencies(
+  executeGraphql: GraphqlExecutor,
+  input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
+): Promise<Map<number, RawGitHubIssueDependencies>> {
+  const result = new Map<number, RawGitHubIssueDependencies>();
+  const batches = chunk(input.issueNumbers, ISSUE_DEPENDENCIES_BATCH_SIZE);
+  for (const batch of batches) {
+    const batchResult = await fetchIssueDependenciesBatch(executeGraphql, {
+      ...input,
+      issueNumbers: batch
+    });
+    for (const [issueNumber, dependencies] of batchResult) {
+      result.set(issueNumber, dependencies);
+    }
+  }
+  return result;
+}
+
 function collectReviewThreads(
   connection: GraphqlReviewThreadConnection | null | undefined
 ): GraphqlReviewThread[] {
@@ -659,6 +843,16 @@ export async function tryGetIssue(
     return undefined;
   }
   return api.getIssue(input);
+}
+
+export async function tryGetIssueDependencies(
+  api: GitHubIssuesApi,
+  input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
+): Promise<Map<number, RawGitHubIssueDependencies> | undefined> {
+  if (api.getIssueDependencies === undefined) {
+    return undefined;
+  }
+  return api.getIssueDependencies(input);
 }
 
 export async function tryListBranchCommits(
@@ -845,16 +1039,49 @@ async function pollProject(
     return;
   }
 
+  const issues = rawIssues
+    .filter((rawIssue) => rawIssue.pull_request === undefined)
+    .map((rawIssue) => normalizeIssueSnapshot(rawIssue, project));
+
+  let dependencies: Map<number, RawGitHubIssueDependencies> | undefined;
+  try {
+    dependencies = await tryGetIssueDependencies(githubIssuesApi, {
+      issueNumbers: issues.map((issue) => issue.number),
+      owner: project.tracker.owner,
+      repo: project.tracker.repo,
+      token
+    });
+  } catch (error) {
+    // Fails the whole project poll rather than proceeding with a partial
+    // eligibility picture -- same "leave prior snapshot untouched" handling
+    // as a failed listOpenIssues call above, and consistent with treating
+    // a truncated dependency fetch as unresolved rather than silently
+    // ignoring the gap.
+    const message = `projects.${project.name}.tracker.repository ${project.tracker.owner}/${project.tracker.repo} issue dependencies could not be checked: ${errorMessage(error)}`;
+    status.errors.push(message);
+    status.projects.push({
+      candidateIssues: 0,
+      error: message,
+      fetchedIssues: 0,
+      filteredIssues: 0,
+      lastPolledAt,
+      name: project.name,
+      ok: false,
+      weight
+    });
+    return;
+  }
+
   let fetchedIssues = 0;
   let candidateIssues = 0;
   let filteredIssues = 0;
-  for (const rawIssue of rawIssues) {
-    if (rawIssue.pull_request !== undefined) {
-      continue;
-    }
-
+  for (const issue of issues) {
     fetchedIssues += 1;
-    const issue = normalizeIssueSnapshot(rawIssue, project);
+    const issueDependencies = dependencies?.get(issue.number);
+    if (issueDependencies !== undefined) {
+      issue.blockedBy = issueDependencies.blockedBy;
+      issue.blockedByTruncated = issueDependencies.truncated;
+    }
     const reasons = issueFilterReasons(issue, project);
 
     if (reasons.length === 0) {
@@ -954,6 +1181,11 @@ function normalizeIssueSnapshot(
   const labels = normalizeLabels(rawIssue.labels ?? []);
 
   return {
+    // Populated by a separate fetchIssueDependencies GraphQL call and
+    // merged in by the poll loop, not derived here -- normalizeIssueSnapshot
+    // only ever sees the REST issue payload, which has no blockedBy field.
+    blockedBy: [],
+    blockedByTruncated: false,
     body: rawIssue.body ?? "",
     created_at: rawIssue.created_at ?? "",
     id: rawIssue.id ?? 0,
@@ -1040,10 +1272,45 @@ export function evaluateProjectEligibility(
     }
   }
 
+  // Native GitHub blockedBy links, not free-text-parsed -- see docs/adr
+  // (issue dependency gating). Unconditional (not gated behind
+  // ignoreOperationalLabels): an unresolved dependency isn't an
+  // orchestrator-owned operational label, it's the same kind of hard
+  // ineligibility as a missing required label.
+  for (const blocker of issue.blockedBy ?? []) {
+    if (blocker.state !== "CLOSED") {
+      reasons.push(
+        `blocked by open dependency ${issueDependencyRef(blocker, project)}`
+      );
+    }
+  }
+  if (issue.blockedByTruncated === true) {
+    reasons.push(
+      "has more dependency links than could be checked - treat as unresolved until reviewed"
+    );
+  }
+
   return {
     eligible: reasons.length === 0,
     reasons
   };
+}
+
+// A same-repo blocker reads as a bare `#N` (matches how every other
+// in-repo issue reference already reads across this codebase's UI and
+// logs); a cross-repo blocker is disambiguated as `owner/repo#N` so it
+// can't be confused with a local issue number.
+function issueDependencyRef(
+  blocker: RawGitHubIssueDependencyRef,
+  project: PollingProjectConfig
+): string {
+  const sameRepo =
+    project.tracker.kind === "github" &&
+    blocker.owner === project.tracker.owner &&
+    blocker.repo === project.tracker.repo;
+  return sameRepo
+    ? `#${blocker.number}`
+    : `${blocker.owner}/${blocker.repo}#${blocker.number}`;
 }
 
 export async function loadPollingProjectsByName(

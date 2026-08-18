@@ -16,6 +16,7 @@ import type {
 import {
   evaluateProjectEligibility,
   tryGetIssue,
+  tryGetIssueDependencies,
   tryGetPullRequestFollowupState,
   tryMergePullRequest
 } from "../issue-polling.js";
@@ -3791,7 +3792,42 @@ export class RunController {
     if (raw === null) {
       return null;
     }
-    return normalizeRawIssue(raw, input.project);
+    const snapshot = normalizeRawIssue(raw, input.project);
+    // Refreshed snapshots feed evaluateProjectEligibility (the same
+    // dependency gate the poll loop enforces) before executeRetry /
+    // executeContinuation re-assert their claim -- without this,
+    // blockedBy/blockedByTruncated stay undefined here, so `?? []` reads
+    // as "no blockers" and a dependency added mid-run never stops the
+    // retry/continuation. A dependency-fetch error is narrower than an
+    // issue-fetch error: the REST snapshot above is still good, so keep it
+    // and mark blockedByTruncated true (evaluateProjectEligibility's
+    // existing "truncated => treat as blocked" fail-closed path) rather
+    // than discarding the whole refresh via `return undefined` -- every
+    // caller treats undefined as "drop the scheduled work entirely",
+    // which would let one transient GraphQL error permanently cancel a
+    // retry/continuation instead of just failing the dependency check.
+    let dependencies;
+    try {
+      dependencies = await tryGetIssueDependencies(this.githubIssuesApi, {
+        issueNumbers: [input.issueNumber],
+        owner: input.repository.owner,
+        repo: input.repository.repo,
+        token: input.repository.token
+      });
+    } catch (error) {
+      this.logger?.warn(
+        { err: error },
+        "symphonika continuation dependency refresh failed"
+      );
+      snapshot.blockedByTruncated = true;
+      return snapshot;
+    }
+    const issueDependencies = dependencies?.get(input.issueNumber);
+    if (issueDependencies !== undefined) {
+      snapshot.blockedBy = issueDependencies.blockedBy;
+      snapshot.blockedByTruncated = issueDependencies.truncated;
+    }
+    return snapshot;
   }
 
   private async bestEffort(

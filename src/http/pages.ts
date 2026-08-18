@@ -29,7 +29,8 @@ import { runSavePipeline, type ReloadOutcome } from "./save-pipeline.js";
 import {
   DEFAULT_POLLING_INTERVAL_MS,
   type FilteredProjectIssueSnapshot,
-  type IssuePollStatus
+  type IssuePollStatus,
+  type RawGitHubIssueDependencyRef
 } from "../issue-polling.js";
 import {
   formatCapReachedReason,
@@ -143,6 +144,10 @@ export type RegisterPagesOptions = {
   // HttpAppOptions.getProjectRepoAliases (src/http/app.ts) — the resolver
   // itself needs runtimeConfig.projectsByName(), which only daemon.ts has.
   getProjectRepoAliases?: (projectName: string) => string[];
+  // The project's configured issue_filters.labels_all -- handleIssueLabelWrite's
+  // dependency gate only blocks adding a label in this set. See
+  // HttpAppOptions.getProjectRequiredLabels (src/http/app.ts).
+  getProjectRequiredLabels?: (projectName: string) => string[];
   // #303's "retry ETA" detail for a waiting Run.
   getScheduled?: () => ScheduledCallback[];
   getStatusSnapshot?: () => StatusSnapshot;
@@ -747,6 +752,28 @@ export function registerPages(options: RegisterPagesOptions): void {
         label,
         ok: false
       };
+    } else if (
+      action === "add" &&
+      (options.getProjectRequiredLabels?.(projectName) ?? [])
+        .map((requiredLabel) => requiredLabel.toLowerCase())
+        .includes(label.toLowerCase()) &&
+      issueDependencyGateBlocks(detail.snapshot)
+    ) {
+      // Hard block, no override (see docs/adr, issue dependency gating):
+      // the only way past this is to actually resolve the dependency on
+      // GitHub. This is best-effort UX against a snapshot that can be up
+      // to ~30s stale (ADR 0073) -- the authoritative gate is
+      // evaluateProjectEligibility, re-evaluated every poll regardless of
+      // what this route allowed. offerPollNow lets an operator who just
+      // closed the blocker refresh immediately rather than wait it out.
+      banner = {
+        action,
+        error: `${issueDependencyGateMessage(detail.snapshot)} -- resolve on GitHub, then poll now`,
+        kind: "label_write",
+        label,
+        offerPollNow: true,
+        ok: false
+      };
     } else if (options.writeIssueLabels === undefined) {
       banner = {
         action,
@@ -868,8 +895,11 @@ export function registerPages(options: RegisterPagesOptions): void {
       }
       const results = await runBulkIssueLabelWrites({
         addLabels,
+        getProjectRequiredLabels: (projectName) =>
+          options.getProjectRequiredLabels?.(projectName) ?? [],
         operations,
         removeLabels,
+        runStore: options.runStore,
         writeIssueLabels: options.writeIssueLabels
       });
       return context.json({ results }, 200);
@@ -3374,6 +3404,8 @@ type IssueSearchFilters = {
 };
 
 type IssueSearchRow = {
+  blockedBy: RawGitHubIssueDependencyRef[];
+  blockedByTruncated: boolean;
   issueNumber: number;
   labels: string[];
   polledAt: string;
@@ -3616,6 +3648,8 @@ function searchIssueSnapshots(input: {
         snapshot.reasons
       );
       rows.push({
+        blockedBy: snapshot.blockedBy,
+        blockedByTruncated: snapshot.blockedByTruncated,
         issueNumber: snapshot.issueNumber,
         labels: snapshot.labels,
         polledAt: snapshot.polledAt,
@@ -3640,11 +3674,21 @@ function issueVerdictFamily(
   if (verdict === "eligible") {
     return "ok";
   }
-  if (verdict.startsWith("blocked:")) {
-    return "blocked";
-  }
-  if (verdict.startsWith("claimed by run")) {
-    return "progress";
+  // describeIssueVerdict joins multiple reasons with "; " (e.g. an issue
+  // both missing its required label and blocked by an open dependency
+  // reads "filtered: missing ...; blocked: dependency ..."), so a
+  // whole-string prefix check would miss a blocked/claimed segment that
+  // isn't first. Scan segments in order instead -- first non-neutral wins,
+  // which preserves today's "claimed by run" precedence since operational
+  // label reasons are always pushed before dependency reasons (see
+  // evaluateProjectEligibility, src/issue-polling.ts).
+  for (const segment of verdict.split("; ")) {
+    if (segment.startsWith("blocked:")) {
+      return "blocked";
+    }
+    if (segment.startsWith("claimed by run")) {
+      return "progress";
+    }
   }
   return "neutral";
 }
@@ -3683,6 +3727,30 @@ type BulkSelectIssueData = {
   title: string;
 };
 
+// The /issues list row's "Deps" column: a bare count + link into the
+// dependency graph view (Phase 2, GET /issues/graph), independent of the
+// Verdict pill -- which already surfaces the same unresolved-dependency
+// fact in eligibility-reason form (see evaluateProjectEligibility). This
+// column exists for the itemized detail the terse verdict string doesn't
+// carry, not to duplicate the eligibility signal.
+function renderIssueSearchRowDeps(row: IssueSearchRow): string {
+  if (row.blockedBy.length === 0 && !row.blockedByTruncated) {
+    return "—";
+  }
+  const openCount = row.blockedBy.filter(
+    (blocker) => blocker.state !== "CLOSED"
+  ).length;
+  const graphLink = `/issues/graph?project=${encodeURIComponent(row.projectName)}&issue=${row.issueNumber}`;
+  // A truncated fetch means openCount is a lower bound, not the true
+  // count -- the "+" signals more blockers exist than could be checked,
+  // so this never reads as "0 open" (eligible) for an issue the gate
+  // (issueDependencyGateBlocks) is actually treating as blocked.
+  const label = row.blockedByTruncated
+    ? `${openCount}+ open`
+    : `${openCount} open`;
+  return `<a href="${escapeHtml(graphLink)}">${label} ↗</a>`;
+}
+
 function renderIssueSearchPage(input: {
   csrfToken: string;
   filters: IssueSearchFilters;
@@ -3710,13 +3778,14 @@ function renderIssueSearchPage(input: {
           : row.labels.map((label) => escapeHtml(label)).join(", ");
       const issueLink = `/issues/${encodeURIComponent(row.projectName)}/${row.issueNumber}`;
       const checkbox = `<input type="checkbox" class="bulk-issue-checkbox" data-project="${escapeHtml(row.projectName)}" data-issue="${row.issueNumber}">`;
-      return `<tr><td>${checkbox}</td><td>${escapeHtml(row.projectName)}</td><td><a href="${escapeHtml(issueLink)}">#${row.issueNumber}</a></td><td class="c-title">${escapeHtml(row.title)}</td><td>${labelPill(row.verdict, issueVerdictFamily(row.verdict))}</td><td>${labels}</td><td>${escapeHtml(age)}${preRestart}</td></tr>`;
+      const deps = renderIssueSearchRowDeps(row);
+      return `<tr><td>${checkbox}</td><td>${escapeHtml(row.projectName)}</td><td><a href="${escapeHtml(issueLink)}">#${row.issueNumber}</a></td><td class="c-title">${escapeHtml(row.title)}</td><td>${labelPill(row.verdict, issueVerdictFamily(row.verdict))}</td><td>${labels}</td><td>${deps}</td><td>${escapeHtml(age)}${preRestart}</td></tr>`;
     })
     .join("");
   const table = tableSection(
     "Issues",
     input.rows.length,
-    `<tr><th><input type="checkbox" id="bulk-select-all-checkbox"></th><th>Project</th><th>#</th><th>Title</th><th>Verdict</th><th>Labels</th><th>Polled</th></tr>`,
+    `<tr><th><input type="checkbox" id="bulk-select-all-checkbox"></th><th>Project</th><th>#</th><th>Title</th><th>Verdict</th><th>Labels</th><th>Deps</th><th>Polled</th></tr>`,
     body
   );
   const issuesData: BulkSelectIssueData[] = input.rows.map((row) => ({
@@ -3745,6 +3814,45 @@ const SYM_LABEL_PREFIX = "sym:";
 // side.
 function isOrchestratorLabel(label: string): boolean {
   return label.toLowerCase().startsWith(SYM_LABEL_PREFIX);
+}
+
+// The label-write dependency gate's own read of "resolved" (state ===
+// CLOSED, regardless of stateReason) -- kept in lockstep with
+// evaluateProjectEligibility's identical rule (src/issue-polling.ts) since
+// this route is a best-effort UX gate against the same snapshot data, not
+// a second source of truth. See docs/adr/0081-issue-dependency-gating-and-graph-view.md.
+function unresolvedIssueDependencies(
+  snapshot: ProjectIssueSnapshotRow
+): RawGitHubIssueDependencyRef[] {
+  return snapshot.blockedBy.filter((blocker) => blocker.state !== "CLOSED");
+}
+
+// A truncated fetch (more blockedBy links than
+// ISSUE_DEPENDENCIES_MAX_BLOCKERS_PER_ISSUE, src/issue-polling.ts) gates
+// exactly like an open blocker -- fail closed on the unfetched overflow
+// rather than gating only on the state of the blockers that happened to
+// fit, which would silently allow dispatch when the true state is
+// unknown.
+function issueDependencyGateBlocks(snapshot: ProjectIssueSnapshotRow): boolean {
+  return (
+    snapshot.blockedByTruncated ||
+    unresolvedIssueDependencies(snapshot).length > 0
+  );
+}
+
+function issueDependencyGateMessage(snapshot: ProjectIssueSnapshotRow): string {
+  const unresolved = unresolvedIssueDependencies(snapshot);
+  if (unresolved.length === 0 && snapshot.blockedByTruncated) {
+    return "blocked: this issue has more dependency links than could be checked";
+  }
+  return `blocked by open ${dependencyList(unresolved)}`;
+}
+
+function dependencyList(blockers: RawGitHubIssueDependencyRef[]): string {
+  const refs = blockers
+    .map((blocker) => `${blocker.owner}/${blocker.repo}#${blocker.number}`)
+    .join(", ");
+  return blockers.length === 1 ? `dependency ${refs}` : `dependencies ${refs}`;
 }
 
 type BulkIssueLabelResult =
@@ -3824,13 +3932,38 @@ const BULK_LABEL_WRITE_CONCURRENCY = 4;
 
 async function runBulkIssueLabelWrites(input: {
   addLabels: string[];
+  getProjectRequiredLabels: (projectName: string) => string[];
   operations: Array<{ issueNumber: number; projectName: string }>;
   removeLabels: string[];
+  runStore: RunStore;
   writeIssueLabels: WriteIssueLabelsFn;
 }): Promise<BulkIssueLabelResult[]> {
-  const { addLabels, operations, removeLabels, writeIssueLabels } = input;
+  const {
+    addLabels,
+    getProjectRequiredLabels,
+    operations,
+    removeLabels,
+    runStore,
+    writeIssueLabels
+  } = input;
   const results = new Array<BulkIssueLabelResult>(operations.length);
   let nextIndex = 0;
+  // Cached per project (not per operation) since a bulk selection commonly
+  // spans many issues in the same project -- avoids re-scanning
+  // listProjectIssueSnapshots once per operation.
+  const snapshotsByProject = new Map<string, ProjectIssueSnapshotRow[]>();
+
+  function snapshotFor(
+    projectName: string,
+    issueNumber: number
+  ): ProjectIssueSnapshotRow | undefined {
+    let snapshots = snapshotsByProject.get(projectName);
+    if (snapshots === undefined) {
+      snapshots = runStore.listProjectIssueSnapshots(projectName);
+      snapshotsByProject.set(projectName, snapshots);
+    }
+    return snapshots.find((row) => row.issueNumber === issueNumber);
+  }
 
   async function worker(): Promise<void> {
     for (;;) {
@@ -3839,6 +3972,43 @@ async function runBulkIssueLabelWrites(input: {
       const operation = operations[index];
       if (operation === undefined) {
         return;
+      }
+      // Mirrors handleIssueLabelWrite's hard block on the single-issue
+      // form: adding a configured required label to a dependency-blocked
+      // issue is refused here too -- the bulk toolbar is a second
+      // label-write path and must not bypass the same gate (see
+      // docs/adr/0081-issue-dependency-gating-and-graph-view.md). Both add
+      // and remove are skipped for this operation when blocked, since a
+      // single writeIssueLabels call can't apply just one half of a
+      // combined add+remove request.
+      const requiredLabels = getProjectRequiredLabels(
+        operation.projectName
+      ).map((requiredLabel) => requiredLabel.toLowerCase());
+      const addsRequiredLabel = addLabels.some((label) =>
+        requiredLabels.includes(label.toLowerCase())
+      );
+      if (addsRequiredLabel) {
+        const snapshot = snapshotFor(
+          operation.projectName,
+          operation.issueNumber
+        );
+        // A missing snapshot (not yet polled, or a stale/incorrect issue
+        // number posted straight to the API) is unknown dependency state,
+        // not clear dependency state -- fail closed the same way a
+        // truncated fetch does (ADR 0081), rather than letting the add
+        // through unchecked because there's nothing to gate against.
+        if (snapshot === undefined || issueDependencyGateBlocks(snapshot)) {
+          results[index] = {
+            error:
+              snapshot === undefined
+                ? `issue #${operation.issueNumber} is not in the current poll snapshot -- poll now, then retry`
+                : `${issueDependencyGateMessage(snapshot)} -- resolve on GitHub, then poll now`,
+            issueNumber: operation.issueNumber,
+            ok: false,
+            projectName: operation.projectName
+          };
+          continue;
+        }
       }
       // The full requested removeLabels goes to every issue, not narrowed
       // against the persisted poll snapshot -- the snapshot can lag live
@@ -3933,6 +4103,12 @@ type IssueLabelWriteBanner = {
   kind: "label_write";
   label: string;
   ok: boolean;
+  // Set on the dependency gate's own rejection: unlike every other failed
+  // write, this one is worth offering a poll-now retry for, since the
+  // fix (closing the blocker on GitHub) happens entirely outside
+  // Symphonika and a fresh poll is exactly what lets the operator retry
+  // without waiting out the poll interval.
+  offerPollNow?: boolean;
 };
 
 // #308 part 3's clear-stale-claim action: its own named banner, distinct
@@ -4056,11 +4232,16 @@ function renderIssueDetailPage(input: {
   pollNowAvailable: boolean;
 }): string {
   const { detail } = input;
+  const offerPollNow =
+    input.banner !== undefined &&
+    (input.banner.ok ||
+      (input.banner.kind === "label_write" &&
+        input.banner.offerPollNow === true));
   const bannerHtml =
     input.banner === undefined
       ? ""
-      : `${renderIssueActionBanner(input.banner)}${input.banner.ok && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/issues") : ""}`;
-  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${renderIssueLabelsSection(
+      : `${renderIssueActionBanner(input.banner)}${offerPollNow && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/issues") : ""}`;
+  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${renderIssueDependenciesSection(detail.snapshot.blockedBy, detail.snapshot.blockedByTruncated)}${renderIssueLabelsSection(
     {
       csrfToken: input.csrfToken,
       issueNumber: detail.issueNumber,
@@ -4073,6 +4254,34 @@ function renderIssueDetailPage(input: {
     labels: detail.snapshot.labels,
     projectName: detail.projectName
   })}<p class="note"><a href="/issues">← Back to search</a></p>`;
+}
+
+// Full itemized breakdown of a Deps-column count -- kind of every
+// blockedBy entry (open and closed), unlike evaluateProjectEligibility's
+// reasons, which only names the open (unresolved) ones. Absent entirely
+// for an issue with no blockedBy links, rather than an empty section.
+function renderIssueDependenciesSection(
+  blockedBy: RawGitHubIssueDependencyRef[],
+  blockedByTruncated: boolean
+): string {
+  if (blockedBy.length === 0 && !blockedByTruncated) {
+    return "";
+  }
+  const rows = blockedBy
+    .map((blocker) => {
+      const ref = `${blocker.owner}/${blocker.repo}#${blocker.number}`;
+      const family = blocker.state === "CLOSED" ? "ok" : "blocked";
+      return `<li>${labelPill(blocker.state, family)} ${escapeHtml(ref)} — ${escapeHtml(blocker.title)}</li>`;
+    })
+    .join("");
+  // Rendered even when blockedBy is empty (rather than short-circuiting
+  // above) so a truncated fetch never omits the section entirely --
+  // that would look identical to "no dependencies" for an issue the
+  // gate is actually treating as blocked.
+  const truncatedRow = blockedByTruncated
+    ? `<li>${labelPill("unknown", "blocked")} this issue has more dependency links than could be checked</li>`
+    : "";
+  return `<section><h2>Dependencies</h2><p class="note">GitHub's native issue-dependency links (not parsed from body text). An open blocker here is also why this issue may show a "blocked:" verdict.</p><ul class="label-list">${rows}${truncatedRow}</ul></section>`;
 }
 
 // #309's PR search: filter query params, all optional and combined with AND

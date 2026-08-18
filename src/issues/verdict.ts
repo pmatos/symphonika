@@ -14,6 +14,11 @@ const EXCLUDED_LABEL_REASON = /^has excluded label (.+)$/;
 const MISSING_LABEL_REASON = /^missing required label (.+)$/;
 const OPERATIONAL_LABEL_REASON = /^has operational label (.+)$/;
 const STATE_REASON = /^state (.+) is not eligible$/;
+// evaluateProjectEligibility's own dependency-gate reasons (src/issue-polling.ts) --
+// native GitHub blockedBy data, never parsed from issue-body text.
+const DEPENDENCY_REASON = /^blocked by open dependency (.+)$/;
+const DEPENDENCY_TRUNCATED_REASON =
+  /^has more dependency links than could be checked.*$/;
 
 // Operational labels whose presence means a Run may currently hold this
 // issue (see REQUIRED_OPERATIONAL_LABELS in operational-labels.ts); the
@@ -71,6 +76,15 @@ function describeReason(
   const state = STATE_REASON.exec(reason);
   if (state !== null) {
     return `filtered: state ${state[1]}`;
+  }
+
+  const dependency = DEPENDENCY_REASON.exec(reason);
+  if (dependency !== null) {
+    return `blocked: dependency ${dependency[1]} open`;
+  }
+
+  if (DEPENDENCY_TRUNCATED_REASON.test(reason)) {
+    return `blocked: ${reason}`;
   }
 
   return reason;

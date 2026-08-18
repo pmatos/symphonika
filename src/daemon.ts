@@ -1120,6 +1120,9 @@ export async function startDaemon(
       }
       return aliases;
     },
+    getProjectRequiredLabels: (projectName) =>
+      runtimeConfig.projectsByName().get(projectName)?.issue_filters
+        ?.labels_all ?? [],
     mergePullRequest: async (input): Promise<MergePullRequestResult> => {
       const project = runtimeConfig.projectsByName().get(input.projectName);
       if (project?.tracker === undefined) {
@@ -1504,6 +1507,8 @@ function projectIssueSnapshotRows(
   projectName: string,
   status: import("./issue-polling.js").IssuePollStatus
 ): Array<{
+  blockedBy: import("./issue-polling.js").RawGitHubIssueDependencyRef[];
+  blockedByTruncated: boolean;
   issueNumber: number;
   kind: "candidate" | "filtered";
   labels: string[];
@@ -1514,6 +1519,8 @@ function projectIssueSnapshotRows(
   const candidateRows = status.candidateIssues
     .filter((entry) => entry.project === projectName)
     .map((entry) => ({
+      blockedBy: entry.issue.blockedBy ?? [],
+      blockedByTruncated: entry.issue.blockedByTruncated === true,
       issueNumber: entry.issue.number,
       kind: "candidate" as const,
       labels: entry.issue.labels,
@@ -1524,6 +1531,8 @@ function projectIssueSnapshotRows(
   const filteredRows = status.filteredIssues
     .filter((entry) => entry.project === projectName)
     .map((entry) => ({
+      blockedBy: entry.issue.blockedBy ?? [],
+      blockedByTruncated: entry.issue.blockedByTruncated === true,
       issueNumber: entry.issue.number,
       kind: "filtered" as const,
       labels: entry.issue.labels,

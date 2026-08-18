@@ -2167,6 +2167,8 @@ describe("HTTP app — project detail page (#303)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
+            blockedBy: [],
             issueNumber: 286,
             kind: "candidate",
             labels: [],
@@ -2175,6 +2177,8 @@ describe("HTTP app — project detail page (#303)", () => {
             title: "Eligible issue"
           },
           {
+            blockedByTruncated: false,
+            blockedBy: [],
             issueNumber: 231,
             kind: "filtered",
             labels: ["needs-human"],
@@ -2306,6 +2310,8 @@ describe("HTTP app — project detail page (#303)", () => {
         projectName: "alpha",
         rows: [
           {
+            blockedByTruncated: false,
+            blockedBy: [],
             issueNumber: 300,
             kind: "candidate",
             labels: [],

@@ -4,7 +4,10 @@ import path from "node:path";
 import DatabaseConstructor from "better-sqlite3";
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
-import type { IssueSnapshot } from "./issue-polling.js";
+import type {
+  IssueSnapshot,
+  RawGitHubIssueDependencyRef
+} from "./issue-polling.js";
 import { isPathInside } from "./path-safety.js";
 import type { AgentProviderName, NormalizedProviderEvent } from "./provider.js";
 import type {
@@ -254,6 +257,14 @@ export type ProjectPollOutcomeInput = {
 type ProjectIssueSnapshotKind = "candidate" | "filtered";
 
 export type ProjectIssueSnapshotRow = {
+  blockedBy: RawGitHubIssueDependencyRef[];
+  // A fetched-blocker count over ISSUE_DEPENDENCIES_MAX_BLOCKERS_PER_ISSUE
+  // (src/issue-polling.ts) unfetched -- must gate exactly like an open
+  // blocker (fail closed on ambiguity), not just influence
+  // evaluateProjectEligibility's reasons. Persisted as its own column so
+  // the label-write route's snapshot-backed gate sees it too, not just the
+  // daemon's live IssueSnapshot.
+  blockedByTruncated: boolean;
   issueNumber: number;
   kind: ProjectIssueSnapshotKind;
   labels: string[];
@@ -275,6 +286,8 @@ export type ReplaceProjectIssueSnapshotsInput = {
   polledAt: string;
   projectName: string;
   rows: Array<{
+    blockedBy: RawGitHubIssueDependencyRef[];
+    blockedByTruncated: boolean;
     issueNumber: number;
     kind: ProjectIssueSnapshotKind;
     labels: string[];
@@ -644,6 +657,8 @@ type ProjectStateRow = {
 };
 
 type ProjectIssueSnapshotDbRow = {
+  blocked_by: string | null;
+  blocked_by_truncated: number;
   issue_number: number;
   kind: ProjectIssueSnapshotKind;
   labels: string | null;
@@ -1562,15 +1577,18 @@ export class RunStore {
         [
           "insert into project_issue_snapshots (",
           "project_name, issue_number, kind, title, priority, reasons, labels,",
-          "polled_at, created_at, updated_at",
+          "blocked_by, blocked_by_truncated, polled_at, created_at, updated_at",
           ") values (",
           "@project_name, @issue_number, @kind, @title, @priority, @reasons, @labels,",
-          "@polled_at, @created_at, @updated_at",
+          "@blocked_by, @blocked_by_truncated, @polled_at, @created_at, @updated_at",
           ")"
         ].join(" ")
       );
       for (const row of input.rows) {
         insert.run({
+          blocked_by:
+            row.blockedBy.length === 0 ? null : JSON.stringify(row.blockedBy),
+          blocked_by_truncated: row.blockedByTruncated ? 1 : 0,
           created_at: now,
           issue_number: row.issueNumber,
           kind: row.kind,
@@ -1592,13 +1610,19 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select issue_number, kind, title, priority, reasons, labels, polled_at",
+          "select issue_number, kind, title, priority, reasons, labels,",
+          "blocked_by, blocked_by_truncated, polled_at",
           "from project_issue_snapshots where project_name = ?",
           "order by issue_number asc"
         ].join(" ")
       )
       .all(projectName) as ProjectIssueSnapshotDbRow[];
     return rows.map((row) => ({
+      blockedBy:
+        row.blocked_by === null
+          ? []
+          : (JSON.parse(row.blocked_by) as RawGitHubIssueDependencyRef[]),
+      blockedByTruncated: row.blocked_by_truncated === 1,
       issueNumber: row.issue_number,
       kind: row.kind,
       labels: row.labels === null ? [] : (JSON.parse(row.labels) as string[]),
@@ -4724,6 +4748,12 @@ export class RunStore {
       ["routine_firings", "workspace_pruned_at", "text"],
       ["routine_firings", "fanout_id", "text"],
       ["project_issue_snapshots", "labels", "text"],
+      ["project_issue_snapshots", "blocked_by", "text"],
+      [
+        "project_issue_snapshots",
+        "blocked_by_truncated",
+        "integer not null default 0"
+      ],
       ["project_pull_request_snapshots", "labels", "text"]
     ];
 

@@ -280,6 +280,37 @@ describe("routine fire-now controls (#469, ADR 0075/0069)", () => {
     }
   });
 
+  it.each([
+    "toString",
+    "constructor",
+    "valueOf",
+    "hasOwnProperty",
+    "__proto__"
+  ])(
+    "falls back to the generic refusal message for an inherited-property fire_reason (%s), not a crash",
+    async (reason) => {
+      const test = await setup();
+      try {
+        const app = createHttpApp({
+          csrfSecret: TEST_SECRET,
+          runStore: test.runStore,
+          stateRoot: test.stateRoot,
+          version: "0.1.0"
+        });
+        const response = await app.request(
+          `/routines/audit?fire=refused&fire_reason=${encodeURIComponent(reason)}`,
+          { headers: browserHeaders() }
+        );
+        expect(response.status).toBe(200);
+        const html = await response.text();
+        expect(html).toContain("Fire refused");
+        expect(html).toContain("the routine is not currently eligible to fire");
+      } finally {
+        test.cleanup();
+      }
+    }
+  );
+
   async function postFire(app: ReturnType<typeof createHttpApp>) {
     return app.request("/api/routines/audit/fire?project=alpha", {
       body: formBody({ csrf_token: VALID_TOKEN }),

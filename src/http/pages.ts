@@ -4945,7 +4945,7 @@ function renderFireResultNotice(context: Context): string {
     case "refused": {
       const reason = context.req.query("fire_reason");
       const reasonText =
-        reason !== undefined && reason in FIRE_REFUSAL_REASON_TEXT
+        reason !== undefined && Object.hasOwn(FIRE_REFUSAL_REASON_TEXT, reason)
           ? FIRE_REFUSAL_REASON_TEXT[reason]
           : "the routine is not currently eligible to fire";
       return `<div class="alert" role="alert"><strong>Fire refused</strong><p>Refused${projectSuffix}: ${escapeHtml(reasonText ?? "")}.</p></div>`;

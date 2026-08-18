@@ -755,6 +755,12 @@ async function fetchIssueDependenciesBatch(
   for (const issueNumber of input.issueNumbers) {
     const issue = response.repository?.[issueDependenciesAlias(issueNumber)];
     if (issue === null || issue === undefined) {
+      // The issue was deleted/transferred/otherwise unresolvable between the
+      // REST listOpenIssues call and this GraphQL fetch -- dependency state
+      // is unknown, not confirmed clear, so record the same fail-closed
+      // shape as a 25-blocker truncation (ADR 0081) rather than leaving no
+      // entry, which every caller's `?? []`/`?? false` would read as clear.
+      result.set(issueNumber, { blockedBy: [], truncated: true });
       continue;
     }
     const totalCount = issue.blockedBy?.totalCount ?? 0;

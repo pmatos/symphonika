@@ -600,6 +600,24 @@ describe("fetchIssueDependencies", () => {
     expect(result.get(50)?.truncated).toBe(true);
   });
 
+  it("marks an issue truncated (fail closed) when its GraphQL alias resolves to null", async () => {
+    const executor: GraphqlExecutor = () =>
+      Promise.resolve({
+        repository: {
+          i75: null
+        }
+      });
+
+    const result = await fetchIssueDependencies(executor, {
+      issueNumbers: [75],
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "secret"
+    });
+
+    expect(result.get(75)).toEqual({ blockedBy: [], truncated: true });
+  });
+
   it("batches every requested issue into a single GraphQL call", async () => {
     const calls: Array<{ query: string; variables: Record<string, unknown> }> =
       [];

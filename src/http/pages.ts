@@ -893,8 +893,11 @@ export function registerPages(options: RegisterPagesOptions): void {
       }
       const results = await runBulkIssueLabelWrites({
         addLabels,
+        getProjectRequiredLabels: (projectName) =>
+          options.getProjectRequiredLabels?.(projectName) ?? [],
         operations,
         removeLabels,
+        runStore: options.runStore,
         writeIssueLabels: options.writeIssueLabels
       });
       return context.json({ results }, 200);
@@ -3908,13 +3911,38 @@ const BULK_LABEL_WRITE_CONCURRENCY = 4;
 
 async function runBulkIssueLabelWrites(input: {
   addLabels: string[];
+  getProjectRequiredLabels: (projectName: string) => string[];
   operations: Array<{ issueNumber: number; projectName: string }>;
   removeLabels: string[];
+  runStore: RunStore;
   writeIssueLabels: WriteIssueLabelsFn;
 }): Promise<BulkIssueLabelResult[]> {
-  const { addLabels, operations, removeLabels, writeIssueLabels } = input;
+  const {
+    addLabels,
+    getProjectRequiredLabels,
+    operations,
+    removeLabels,
+    runStore,
+    writeIssueLabels
+  } = input;
   const results = new Array<BulkIssueLabelResult>(operations.length);
   let nextIndex = 0;
+  // Cached per project (not per operation) since a bulk selection commonly
+  // spans many issues in the same project -- avoids re-scanning
+  // listProjectIssueSnapshots once per operation.
+  const snapshotsByProject = new Map<string, ProjectIssueSnapshotRow[]>();
+
+  function snapshotFor(
+    projectName: string,
+    issueNumber: number
+  ): ProjectIssueSnapshotRow | undefined {
+    let snapshots = snapshotsByProject.get(projectName);
+    if (snapshots === undefined) {
+      snapshots = runStore.listProjectIssueSnapshots(projectName);
+      snapshotsByProject.set(projectName, snapshots);
+    }
+    return snapshots.find((row) => row.issueNumber === issueNumber);
+  }
 
   async function worker(): Promise<void> {
     for (;;) {
@@ -3923,6 +3951,33 @@ async function runBulkIssueLabelWrites(input: {
       const operation = operations[index];
       if (operation === undefined) {
         return;
+      }
+      // Mirrors handleIssueLabelWrite's hard block on the single-issue
+      // form: adding a configured required label to a dependency-blocked
+      // issue is refused here too -- the bulk toolbar is a second
+      // label-write path and must not bypass the same gate (see
+      // docs/adr/0081-issue-dependency-gating-and-graph-view.md). Both add
+      // and remove are skipped for this operation when blocked, since a
+      // single writeIssueLabels call can't apply just one half of a
+      // combined add+remove request.
+      const requiredLabels = getProjectRequiredLabels(operation.projectName);
+      const addsRequiredLabel = addLabels.some((label) =>
+        requiredLabels.includes(label)
+      );
+      if (addsRequiredLabel) {
+        const snapshot = snapshotFor(
+          operation.projectName,
+          operation.issueNumber
+        );
+        if (snapshot !== undefined && issueDependencyGateBlocks(snapshot)) {
+          results[index] = {
+            error: `${issueDependencyGateMessage(snapshot)} -- resolve on GitHub, then poll now`,
+            issueNumber: operation.issueNumber,
+            ok: false,
+            projectName: operation.projectName
+          };
+          continue;
+        }
       }
       // The full requested removeLabels goes to every issue, not narrowed
       // against the persisted poll snapshot -- the snapshot can lag live

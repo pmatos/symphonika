@@ -641,3 +641,170 @@ describe("POST /api/issues/bulk-labels", () => {
     }
   });
 });
+
+describe("POST /api/issues/bulk-labels dependency gate", () => {
+  async function setupOneBlockedOneClear(): Promise<TestSetup> {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    runStore.syncProjectStates([
+      { name: "alpha", validationState: "valid", weight: 1 }
+    ]);
+    runStore.replaceProjectIssueSnapshots({
+      polledAt: "2026-08-18T10:00:00.000Z",
+      projectName: "alpha",
+      rows: [
+        {
+          blockedByTruncated: false,
+          blockedBy: [
+            {
+              number: 301,
+              owner: "pmatos",
+              repo: "symphonika",
+              state: "OPEN",
+              title: "sibling slice"
+            }
+          ],
+          issueNumber: 7,
+          kind: "filtered",
+          labels: ["needs-triage"],
+          priority: 1,
+          reasons: ["blocked by open dependency #301"],
+          title: "Blocked issue"
+        },
+        {
+          blockedByTruncated: false,
+          blockedBy: [],
+          issueNumber: 8,
+          kind: "candidate",
+          labels: ["needs-triage"],
+          priority: 1,
+          reasons: [],
+          title: "Unblocked issue"
+        }
+      ]
+    });
+    return {
+      cleanup: () => runStore.close(),
+      runStore,
+      stateRoot
+    };
+  }
+
+  it("refuses to add the project's required label to a dependency-blocked issue, but still applies it to an unblocked one in the same batch", async () => {
+    const test = await setupOneBlockedOneClear();
+    try {
+      const received: unknown[] = [];
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        getProjectRequiredLabels: () => ["agent-ready"],
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0",
+        writeIssueLabels: (input) => {
+          received.push(input);
+          return Promise.resolve({ ok: true });
+        }
+      });
+      const response = await app.request("/api/issues/bulk-labels", {
+        body: JSON.stringify({
+          addLabels: ["agent-ready"],
+          operations: [
+            { issueNumber: 7, projectName: "alpha" },
+            { issueNumber: 8, projectName: "alpha" }
+          ]
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/json"
+        },
+        method: "POST"
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        results: Array<{
+          error?: string;
+          issueNumber: number;
+          ok: boolean;
+          projectName: string;
+        }>;
+      };
+      expect(body.results).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            issueNumber: 7,
+            ok: false,
+            projectName: "alpha"
+          }),
+          { issueNumber: 8, ok: true, projectName: "alpha" }
+        ])
+      );
+      const blocked = body.results.find((result) => result.issueNumber === 7);
+      expect(blocked?.error).toContain("blocked by open dependency");
+      // Only the unblocked issue's write reaches writeIssueLabels -- the
+      // blocked one is refused before the bulk route ever calls it,
+      // mirroring the single-issue route's hard block.
+      expect(received).toEqual([
+        {
+          add: ["agent-ready"],
+          kind: "issue",
+          projectName: "alpha",
+          remove: [],
+          subjectNumber: 8
+        }
+      ]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("does not gate removeLabels-only operations on a dependency-blocked issue", async () => {
+    const test = await setupOneBlockedOneClear();
+    try {
+      const received: unknown[] = [];
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        getProjectRequiredLabels: () => ["agent-ready"],
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0",
+        writeIssueLabels: (input) => {
+          received.push(input);
+          return Promise.resolve({ ok: true });
+        }
+      });
+      const response = await app.request("/api/issues/bulk-labels", {
+        body: JSON.stringify({
+          operations: [{ issueNumber: 7, projectName: "alpha" }],
+          removeLabels: ["needs-triage"]
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/json"
+        },
+        method: "POST"
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        results: Array<{
+          issueNumber: number;
+          ok: boolean;
+          projectName: string;
+        }>;
+      };
+      expect(body.results).toEqual([
+        { issueNumber: 7, ok: true, projectName: "alpha" }
+      ]);
+      expect(received).toEqual([
+        {
+          add: [],
+          kind: "issue",
+          projectName: "alpha",
+          remove: ["needs-triage"],
+          subjectNumber: 7
+        }
+      ]);
+    } finally {
+      test.cleanup();
+    }
+  });
+});

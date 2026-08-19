@@ -932,6 +932,36 @@ describe("CLI run commands", () => {
     expect(present.output.stdout).toContain("<not yet recorded>");
   });
 
+  it("show-run displays the recorded terminal workflow state", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "show-terminal-state",
+      issue: sampleIssue({ number: 484, title: "Terminal FSM state" }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.setRunCurrentState("show-terminal-state", "implement");
+    store.recordWorkflowTerminal("show-terminal-state", {
+      terminalStateId: "done",
+      transitionReason: "implement -> done"
+    });
+    store.close();
+
+    const present = captureProgram(stateRoot);
+    await present.program.parseAsync([
+      "node",
+      "symphonika",
+      "show-run",
+      "show-terminal-state",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+
+    expect(present.output.stdout).toContain("fsm state:    done");
+  });
+
   it("show-run renders a not-yet-idle Progress Signal from persisted samples", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

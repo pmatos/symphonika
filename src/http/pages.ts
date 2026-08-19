@@ -686,7 +686,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     return context.html(
       layout(
         `Workflow graph ${detail.id}`,
-        renderWorkflowGraphPage(detail.id, detail.currentStateId, graph)
+        renderWorkflowGraphPage(detail.id, workflowStateId(detail), graph)
       )
     );
   });
@@ -5913,12 +5913,18 @@ function formatCurrentStateCell(
     : `<code>${escapeHtml(currentStateId)}</code>`;
 }
 
+function workflowStateId(
+  run: Pick<RunStatus, "currentStateId" | "terminalStateId">
+): string | null {
+  return run.currentStateId ?? run.terminalStateId;
+}
+
 function runRowHtml(
   run: RunStatus,
   watchdogByRun: Map<string, WatchdogIdleStatus>,
   nowMs: number
 ): string {
-  const currentState = formatCurrentStateCell(run.currentStateId);
+  const currentState = formatCurrentStateCell(workflowStateId(run));
   return `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td class="c-title">#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td>${statePill(run.state)}${renderWatchdogIdleBadge(watchdogByRun.get(run.id), nowMs)}</td><td>${currentState}</td><td>${escapeHtml(run.provider)}</td><td><code>${escapeHtml(run.createdAt)}</code></td><td><code>${escapeHtml(run.updatedAt)}</code></td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`;
 }
 
@@ -6054,7 +6060,7 @@ function renderRunSummary(
   <dt>Project</dt><dd>${escapeHtml(detail.project)}</dd>
   <dt>Issue</dt><dd>#${detail.issueNumber} ${escapeHtml(detail.issueTitle)}</dd>
   <dt>State</dt><dd>${statePill(detail.state)}</dd>
-  <dt>Current state</dt><dd>${formatCurrentStateCell(detail.currentStateId)}</dd>
+  <dt>Current state</dt><dd>${formatCurrentStateCell(workflowStateId(detail))}</dd>
   <dt>Provider</dt><dd>${escapeHtml(detail.provider)}</dd>
   <dt>Started</dt><dd><code>${escapeHtml(detail.createdAt)}</code></dd>
   <dt>Updated</dt><dd><code>${escapeHtml(detail.updatedAt)}</code></dd>

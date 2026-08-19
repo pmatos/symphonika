@@ -87,6 +87,95 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("keeps a recorded terminal workflow state visible across run pages", async () => {
+    const test = await setup();
+    try {
+      const evidenceDir = path.join(
+        test.stateRoot,
+        "logs",
+        "runs",
+        "run-terminal-state"
+      );
+      await mkdir(evidenceDir, { recursive: true });
+      const graphPath = path.join(evidenceDir, "workflow-graph.json");
+      await writeFile(
+        graphPath,
+        JSON.stringify({
+          contentHash: "sha256:" + "e".repeat(64),
+          initial: "implement",
+          name: "terminal_state_workflow",
+          source: { kind: "raw_fsm", path: "/repo/workflow.yml" },
+          states: [
+            {
+              action: { kind: "agent", prompt: "Implement" },
+              completeWhen: {},
+              id: "implement",
+              transitions: [{ to: "done", when: { provider_success: true } }]
+            },
+            {
+              completeWhen: {},
+              id: "done",
+              terminal: "success",
+              transitions: []
+            }
+          ],
+          templateFiles: []
+        })
+      );
+
+      test.runStore.createRun({
+        id: "run-terminal-state",
+        issue: sampleIssue({ number: 485, title: "Terminal workflow state" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.setRunCurrentState("run-terminal-state", "implement");
+      test.runStore.recordWorkflowTerminal("run-terminal-state", {
+        terminalStateId: "done",
+        transitionReason: "implement -> done"
+      });
+      test.runStore.updateRunState("run-terminal-state", "succeeded");
+      test.runStore.updateRunEvidence("run-terminal-state", {
+        branchName: "sym/run-terminal-state",
+        branchRef: "refs/heads/sym/run-terminal-state",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        rawLogPath: "",
+        workflowGraphPath: graphPath,
+        workspacePath: test.stateRoot
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const runsBody = await (await app.request("/runs")).text();
+      expect(runsBody).toContain("<code>done</code>");
+
+      const detailBody = await (
+        await app.request("/runs/run-terminal-state")
+      ).text();
+      expect(detailBody).toContain(
+        "<dt>Current state</dt><dd><code>done</code></dd>"
+      );
+
+      const graphBody = await (
+        await app.request("/runs/run-terminal-state/graph")
+      ).text();
+      expect(graphBody).toContain(
+        'window.__WORKFLOW_CURRENT_STATE__ = "done";'
+      );
+      expect(graphBody).toContain("Current state <code>done</code>");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("filters /api/runs by state and project", async () => {
     const test = await setup();
     try {

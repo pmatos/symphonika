@@ -18,16 +18,13 @@ import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
 } from "./daemon-endpoint.js";
-import type {
-  GitHubIssuesApi,
-  PollingProjectConfig,
-  PollingServiceConfig
-} from "./issue-polling.js";
+import type { GitHubIssuesApi, PollingServiceConfig } from "./issue-polling.js";
 import {
   DEFAULT_GITHUB_ISSUES_API,
   DEFAULT_POLLING_INTERVAL_MS,
   emptyIssuePollStatus,
   pollConfiguredGitHubIssuesFromConfig,
+  pollingProjectsByName,
   readConfiguredPollingIntervalMs,
   replaceIssuePollStatus,
   tryAddLabelsToIssue,
@@ -83,6 +80,7 @@ import { resolveWatchdogConfig, RuntimeConfigReloader } from "./reload.js";
 import {
   INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS,
   openRunStore,
+  type ProjectSnapshotRepository,
   type RunState,
   type SyncProjectStateInput
 } from "./run-store.js";
@@ -1228,6 +1226,7 @@ export async function startDaemon(
           ok: false
         };
       }
+      const subjectLabel = input.kind === "issue" ? "issue" : "pull request";
       const snapshotRepository =
         input.kind === "issue"
           ? runStore.getProjectIssueSnapshotRepository(
@@ -1240,11 +1239,11 @@ export async function startDaemon(
             );
       if (snapshotRepository === undefined) {
         return {
-          error: `${input.kind === "issue" ? "issue" : "pull request"} #${input.subjectNumber} snapshot repository identity is unavailable; poll the Project successfully before writing labels`,
+          error: `${subjectLabel} #${input.subjectNumber} snapshot repository identity is unavailable; poll the Project successfully before writing labels`,
           ok: false
         };
       }
-      const currentRepository = {
+      const currentRepository: ProjectSnapshotRepository = {
         owner: project.tracker.owner,
         repo: project.tracker.repo
       };
@@ -1517,6 +1516,7 @@ function persistProjectPollState(
   status: import("./issue-polling.js").IssuePollStatus,
   config: PollingServiceConfig
 ): Promise<Map<string, "dispatch" | "routine_host">> {
+  const projectsByName = pollingProjectsByName(config.projects);
   return readProjectStateInputs(configPath, status).then(
     ({ inputs, modes }) => {
       runStore.syncProjectStates(inputs);
@@ -1533,7 +1533,7 @@ function persistProjectPollState(
         // issue snapshot replaced — a failed poll leaves the last known
         // snapshot in place rather than blanking the table.
         if (project.ok) {
-          const repository = projectRepository(config, project.name);
+          const repository = projectsByName.get(project.name)?.tracker;
           if (repository === undefined) {
             continue;
           }
@@ -1606,11 +1606,12 @@ function persistProjectPullRequestPollState(
   status: import("./pull-request-polling.js").PullRequestPollStatus,
   config: PollingServiceConfig
 ): void {
+  const projectsByName = pollingProjectsByName(config.projects);
   for (const project of status.projects) {
     if (!project.ok) {
       continue;
     }
-    const repository = projectRepository(config, project.name);
+    const repository = projectsByName.get(project.name)?.tracker;
     if (repository === undefined) {
       continue;
     }
@@ -1642,28 +1643,9 @@ function persistProjectPullRequestPollState(
   }
 }
 
-function projectRepository(
-  config: PollingServiceConfig,
-  projectName: string
-): { owner: string; repo: string } | undefined {
-  // Resolve duplicate project names to the *last* match, matching
-  // RuntimeConfigReloader.projectsByName() (src/reload.ts) — the source
-  // writeIssueLabels compares against. `.find()`'s first-match semantics
-  // would silently disagree with that on a duplicated project name.
-  let tracker: PollingProjectConfig["tracker"] | undefined;
-  for (const project of config.projects) {
-    if (project.name === projectName) {
-      tracker = project.tracker;
-    }
-  }
-  return tracker === undefined
-    ? undefined
-    : { owner: tracker.owner, repo: tracker.repo };
-}
-
 function sameGitHubRepository(
-  left: { owner: string; repo: string },
-  right: { owner: string; repo: string }
+  left: ProjectSnapshotRepository,
+  right: ProjectSnapshotRepository
 ): boolean {
   return (
     left.owner.toLowerCase() === right.owner.toLowerCase() &&

@@ -1350,8 +1350,17 @@ export async function loadPollingProjectsByName(
     );
   }
 
+  return pollingProjectsByName(config.projects);
+}
+
+// Duplicate project names resolve to the *last* match, matching
+// RuntimeConfigReloader.projectsByName() (src/reload.ts): `Map#set` keeps
+// overwriting as later entries are visited, so the final value wins.
+export function pollingProjectsByName(
+  projects: PollingProjectConfig[]
+): Map<string, PollingProjectConfig> {
   const map = new Map<string, PollingProjectConfig>();
-  for (const project of config.projects) {
+  for (const project of projects) {
     map.set(project.name, project);
   }
   return map;

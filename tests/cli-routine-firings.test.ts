@@ -233,6 +233,52 @@ describe("CLI routine firing commands", () => {
     expect(output.stdout).not.toContain("old event");
   });
 
+  it("show-firing marks sequences unknown when a bounded legacy tail cannot count earlier events", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = seedRoutine(stateRoot);
+    store.createRoutineFiring({
+      id: "legacy-large-log",
+      projectName: "alpha",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      routineName: "dependency-update"
+    });
+    store.close();
+
+    const evidenceDirectory = path.join(
+      stateRoot,
+      "logs",
+      "routines",
+      "legacy-large-log"
+    );
+    await mkdir(evidenceDirectory, { recursive: true });
+    await writeFile(
+      path.join(evidenceDirectory, "provider.normalized.jsonl"),
+      [
+        JSON.stringify({ message: "x".repeat(256 * 1_024), type: "message" }),
+        JSON.stringify({ message: "recent", type: "message" }),
+        JSON.stringify({ exitCode: 0, type: "process_exit" })
+      ].join("\n") + "\n",
+      "utf8"
+    );
+
+    const { output, program } = captureProgram(stateRoot);
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "show-firing",
+      "legacy-large-log",
+      "--events",
+      "2",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+
+    expect(output.stdout).toContain("?. message  recent");
+    expect(output.stdout).toContain("?. process_exit");
+    expect(output.stdout).not.toContain("null.");
+  });
+
   it("show-firing exits non-zero with a clear error for an unknown id", async () => {
     const stateRoot = await makeTempRoot();
     const { output, program } = captureProgram(stateRoot);
@@ -576,11 +622,14 @@ describe("CLI routine firing commands", () => {
 function encodeEventIndex(lines: string[], separator: string): Buffer {
   const records: Buffer[] = [];
   let offset = 0;
+  let sequence = 1;
   for (const line of lines) {
     if (line.length > 0) {
-      const record = Buffer.alloc(8);
+      const record = Buffer.alloc(16);
       record.writeBigUInt64BE(BigInt(offset));
+      record.writeBigUInt64BE(BigInt(sequence), 8);
       records.push(record);
+      sequence += 1;
     }
     offset += Buffer.byteLength(`${line}${separator}`, "utf8");
   }

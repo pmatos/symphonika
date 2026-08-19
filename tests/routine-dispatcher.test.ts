@@ -144,6 +144,8 @@ describe("RoutineFiringDispatcher", () => {
         nextFireAt: "2026-05-23T10:00:00.000Z",
         state: "active"
       });
+      const indexRecord = Buffer.alloc(16);
+      indexRecord.writeBigUInt64BE(1n, 8);
       expect(
         await readFile(
           path.join(
@@ -154,7 +156,7 @@ describe("RoutineFiringDispatcher", () => {
             "provider.normalized.jsonl.idx"
           )
         )
-      ).toEqual(Buffer.alloc(8));
+      ).toEqual(indexRecord);
       expect(activeRuns.countInFlight()).toBe(0);
     } finally {
       finishPreparation(preparedWorkspace);

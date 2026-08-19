@@ -1,9 +1,10 @@
+import { createReadStream } from "node:fs";
 import { open, stat, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 
-export type RecentRoutineEvent = {
+type RecentRoutineEvent = {
   normalized: Record<string, unknown>;
-  sequence: number;
+  sequence: number | null;
   type: string;
 };
 
@@ -13,7 +14,12 @@ export type RecentRoutineEventTail = {
 };
 
 const EVENT_TAIL_CHUNK_BYTES = 64 * 1_024;
-const EVENT_INDEX_RECORD_BYTES = 8;
+const EVENT_INDEX_RECORD_BYTES = 16;
+
+type RoutineEventIndexRecord = {
+  offset: number;
+  sequence: number;
+};
 
 // Firing evidence is a normalized-log file on disk, not a DB-backed
 // provider_events table (a Run's own model) — this bounded suffix read is
@@ -28,20 +34,29 @@ export async function readRecentRoutineEvents(
   }
   let handle: FileHandle | undefined;
   try {
-    const indexedStart = await readIndexedTailStart(normalizedLogPath, limit);
     handle = await open(normalizedLogPath, "r");
     const { size } = await handle.stat();
-    if (indexedStart !== undefined && indexedStart.offset < size) {
-      const lines = await readEventRange(
+    const indexedRecords = await readIndexedTailRecords(
+      normalizedLogPath,
+      limit
+    );
+    if (indexedRecords !== undefined) {
+      const lines = await readValidatedIndexedEventTail(
         handle,
-        indexedStart.offset,
-        size - indexedStart.offset
+        size,
+        indexedRecords
       );
-      const events = parseRecentRoutineEvents(lines, indexedStart.sequence);
-      return {
-        events: events.slice(-limit),
-        truncated: indexedStart.sequence > 1 || events.length > limit
-      };
+      const selectedRecords = indexedRecords.slice(-limit);
+      const firstRecord = selectedRecords[0];
+      if (lines !== undefined && firstRecord !== undefined) {
+        return {
+          events: parseRecentRoutineEvents(
+            lines.slice(-limit),
+            firstRecord.sequence
+          ),
+          truncated: firstRecord.sequence > 1
+        };
+      }
     }
     const tail = await readBoundedEventSuffix(handle, size, limit);
     return {
@@ -55,71 +70,161 @@ export async function readRecentRoutineEvents(
   }
 }
 
-async function readIndexedTailStart(
+async function readIndexedTailRecords(
   normalizedLogPath: string,
   limit: number
-): Promise<{ offset: number; sequence: number } | undefined> {
-  let handle: FileHandle | undefined;
+): Promise<RoutineEventIndexRecord[] | undefined> {
   try {
-    handle = await open(routineEventIndexPath(normalizedLogPath), "r");
-    const { size } = await handle.stat();
-    const recordCount = Math.floor(size / EVENT_INDEX_RECORD_BYTES);
-    if (recordCount === 0) {
+    const indexPath = routineEventIndexPath(normalizedLogPath);
+    const { size } = await stat(indexPath);
+    if (size === 0 || size % EVENT_INDEX_RECORD_BYTES !== 0) {
       return undefined;
     }
-    const recordIndex = Math.max(0, recordCount - limit);
-    const record = Buffer.allocUnsafe(EVENT_INDEX_RECORD_BYTES);
-    const { bytesRead } = await handle.read(
-      record,
-      0,
-      record.length,
-      recordIndex * EVENT_INDEX_RECORD_BYTES
-    );
-    if (bytesRead !== record.length) {
+    const recordCount = size / EVENT_INDEX_RECORD_BYTES;
+    // Include the preceding record when one exists so a selected offset
+    // cannot silently repeat or cross its immediate neighbor.
+    const selectedCount = Math.min(limit + 1, recordCount);
+    const start = size - selectedCount * EVENT_INDEX_RECORD_BYTES;
+    const contents = await readStreamRange(indexPath, start, size - 1);
+    if (contents.length !== selectedCount * EVENT_INDEX_RECORD_BYTES) {
       return undefined;
     }
-    const offset = record.readBigUInt64BE();
-    if (offset > BigInt(Number.MAX_SAFE_INTEGER)) {
-      return undefined;
+
+    const records: RoutineEventIndexRecord[] = [];
+    for (let index = 0; index < selectedCount; index += 1) {
+      const position = index * EVENT_INDEX_RECORD_BYTES;
+      const offset = contents.readBigUInt64BE(position);
+      const sequence = contents.readBigUInt64BE(position + 8);
+      if (
+        offset > BigInt(Number.MAX_SAFE_INTEGER) ||
+        sequence < 1n ||
+        sequence > BigInt(Number.MAX_SAFE_INTEGER)
+      ) {
+        return undefined;
+      }
+      const record = {
+        offset: Number(offset),
+        sequence: Number(sequence)
+      };
+      const previous = records.at(-1);
+      if (
+        previous !== undefined &&
+        (record.offset <= previous.offset ||
+          record.sequence !== previous.sequence + 1)
+      ) {
+        return undefined;
+      }
+      records.push(record);
     }
-    return {
-      offset: Number(offset),
-      sequence: recordIndex + 1
-    };
+    return records;
   } catch {
     return undefined;
-  } finally {
-    await handle?.close();
   }
 }
 
-async function readEventRange(
-  handle: FileHandle,
-  position: number,
-  length: number
-): Promise<string[]> {
-  const contents = Buffer.allocUnsafe(length);
-  let bytesRead = 0;
-  while (bytesRead < length) {
-    const read = await handle.read(
-      contents,
-      bytesRead,
-      length - bytesRead,
-      position + bytesRead
-    );
-    if (read.bytesRead === 0) {
-      break;
-    }
-    bytesRead += read.bytesRead;
+async function readStreamRange(
+  filePath: string,
+  start: number,
+  end: number
+): Promise<Buffer> {
+  let contents = "";
+  for await (const chunk of createReadStream(filePath, {
+    encoding: "latin1",
+    end,
+    start
+  })) {
+    contents += chunk;
   }
-  return decodeRoutineEventLines(contents.subarray(0, bytesRead));
+  return Buffer.from(contents, "latin1");
+}
+
+async function readValidatedIndexedEventTail(
+  handle: FileHandle,
+  fileSize: number,
+  records: RoutineEventIndexRecord[]
+): Promise<string[] | undefined> {
+  const firstRecord = records[0];
+  if (firstRecord === undefined) {
+    return undefined;
+  }
+  for (const record of records) {
+    if (record.offset >= fileSize) {
+      return undefined;
+    }
+    if (record.offset === 0) {
+      if (record.sequence !== 1) {
+        return undefined;
+      }
+      continue;
+    }
+    const boundary = Buffer.allocUnsafe(1);
+    const { bytesRead } = await handle.read(
+      boundary,
+      0,
+      boundary.length,
+      record.offset - 1
+    );
+    if (bytesRead !== 1 || boundary[0] !== 0x0a) {
+      return undefined;
+    }
+  }
+
+  const chunks: Buffer[] = [];
+  const lineOffsets: number[] = [];
+  let currentLineHasContent = false;
+  let currentLineOffset = firstRecord.offset;
+  let position = firstRecord.offset;
+  while (position < fileSize) {
+    const length = Math.min(EVENT_TAIL_CHUNK_BYTES, fileSize - position);
+    const chunk = Buffer.allocUnsafe(length);
+    const read = await handle.read(chunk, 0, length, position);
+    if (read.bytesRead === 0) {
+      return undefined;
+    }
+    const contents =
+      read.bytesRead === chunk.length
+        ? chunk
+        : chunk.subarray(0, read.bytesRead);
+    chunks.push(contents);
+    for (let index = 0; index < contents.length; index += 1) {
+      const byte = contents[index];
+      if (byte === 0x0a) {
+        if (currentLineHasContent) {
+          lineOffsets.push(currentLineOffset);
+        }
+        currentLineHasContent = false;
+        currentLineOffset = position + index + 1;
+      } else if (byte !== 0x0d) {
+        currentLineHasContent = true;
+      }
+      if (lineOffsets.length > records.length) {
+        return undefined;
+      }
+    }
+    position += read.bytesRead;
+  }
+  if (currentLineHasContent) {
+    lineOffsets.push(currentLineOffset);
+  }
+
+  if (
+    lineOffsets.length !== records.length ||
+    records.some((record, index) => record.offset !== lineOffsets[index])
+  ) {
+    return undefined;
+  }
+  return decodeRoutineEventLines(Buffer.concat(chunks));
 }
 
 async function readBoundedEventSuffix(
   handle: FileHandle,
   fileSize: number,
   limit: number
-): Promise<{ firstSequence: number; lines: string[]; truncated: boolean }> {
+): Promise<{
+  firstSequence: number | null;
+  lines: string[];
+  truncated: boolean;
+}> {
   const reverseChunks: Buffer[] = [];
   let currentLineHasContent = false;
   let nonEmptyLineCount = 0;
@@ -163,7 +268,8 @@ async function readBoundedEventSuffix(
   const lines = decodeRoutineEventLines(Buffer.concat(reverseChunks.reverse()));
   const selectedLines = lines.slice(-limit);
   return {
-    firstSequence: position === 0 ? lines.length - selectedLines.length + 1 : 1,
+    firstSequence:
+      position === 0 ? lines.length - selectedLines.length + 1 : null,
     lines: selectedLines,
     truncated: position > 0 || lines.length > limit
   };
@@ -179,10 +285,10 @@ function decodeRoutineEventLines(contents: Buffer): string[] {
 
 function parseRecentRoutineEvents(
   lines: string[],
-  firstSequence = 1
+  firstSequence: number | null
 ): RecentRoutineEvent[] {
   return lines.map((line, index) => {
-    const sequence = firstSequence + index;
+    const sequence = firstSequence === null ? null : firstSequence + index;
     try {
       const normalized = JSON.parse(line) as unknown;
       if (
@@ -211,7 +317,7 @@ function parseRecentRoutineEvents(
   });
 }
 
-export function routineEventIndexPath(normalizedLogPath: string): string {
+function routineEventIndexPath(normalizedLogPath: string): string {
   return `${normalizedLogPath}.idx`;
 }
 

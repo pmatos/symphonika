@@ -982,6 +982,7 @@ async function runRoutineFiring(input: {
   let normalizedIndexPath: string | undefined;
   let normalizedLogPath: string | undefined;
   let normalizedLogOffset = 0;
+  let normalizedLogSequence = 1;
   let githubBefore: CapturedRoutineGithubSnapshot | null = null;
   // Bounds `state: "all"` issue pagination to records that could plausibly
   // have changed during this firing, instead of the repository's entire
@@ -1106,14 +1107,17 @@ async function runRoutineFiring(input: {
         },
         workspacePath: prepared.workspacePath
       })) {
-        normalizedLogOffset = await appendRoutineEvent({
+        const normalizedLogCursor = await appendRoutineEvent({
           event,
           normalizedIndexPath,
           normalizedLogPath,
           normalizedLogOffset,
+          normalizedLogSequence,
           rawLogPath,
           redactSecrets: input.redactSecrets
         });
+        normalizedLogOffset = normalizedLogCursor.offset;
+        normalizedLogSequence = normalizedLogCursor.sequence;
         if (event.normalized !== undefined) {
           events.push(event.normalized);
         }
@@ -1855,9 +1859,10 @@ async function appendRoutineEvent(input: {
   normalizedIndexPath: string;
   normalizedLogPath: string;
   normalizedLogOffset: number;
+  normalizedLogSequence: number;
   rawLogPath: string;
   redactSecrets: () => string[];
-}): Promise<number> {
+}): Promise<{ offset: number; sequence: number }> {
   const redactSecrets = input.redactSecrets();
   const [, normalizedLogOffset] = await Promise.all([
     appendJsonl(input.rawLogPath, input.event.raw, redactSecrets),
@@ -1868,10 +1873,17 @@ async function appendRoutineEvent(input: {
           indexPath: input.normalizedIndexPath,
           offset: input.normalizedLogOffset,
           redactSecrets,
+          sequence: input.normalizedLogSequence,
           value: input.event.normalized
         })
   ]);
-  return normalizedLogOffset;
+  return {
+    offset: normalizedLogOffset,
+    sequence:
+      input.event.normalized === undefined
+        ? input.normalizedLogSequence
+        : input.normalizedLogSequence + 1
+  };
 }
 
 async function classifyRoutineOutcome(
@@ -2163,11 +2175,13 @@ async function appendIndexedJsonl(input: {
   indexPath: string;
   offset: number;
   redactSecrets: string[];
+  sequence: number;
   value: unknown;
 }): Promise<number> {
   const line = serializeJsonl(input.value, input.redactSecrets);
-  const record = Buffer.alloc(8);
+  const record = Buffer.alloc(16);
   record.writeBigUInt64BE(BigInt(input.offset));
+  record.writeBigUInt64BE(BigInt(input.sequence), 8);
   await appendFile(input.filePath, line);
   await appendFile(input.indexPath, record);
   return input.offset + line.length;

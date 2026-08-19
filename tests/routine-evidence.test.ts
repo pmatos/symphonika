@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Readable } from "node:stream";
 
 type VirtualLog = {
   contents: Buffer<ArrayBufferLike>;
@@ -17,6 +18,38 @@ const virtualLog = vi.hoisted<VirtualLog>(() => ({
   path: "/virtual/provider.normalized.jsonl",
   reads: []
 }));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    createReadStream: (
+      filePath: Parameters<typeof actual.createReadStream>[0],
+      options?: Parameters<typeof actual.createReadStream>[1]
+    ) => {
+      if (
+        String(filePath) !== virtualLog.indexPath ||
+        virtualLog.indexContents === undefined
+      ) {
+        return actual.createReadStream(filePath, options);
+      }
+      const start =
+        typeof options === "object" && typeof options.start === "number"
+          ? options.start
+          : 0;
+      const end =
+        typeof options === "object" && typeof options.end === "number"
+          ? options.end + 1
+          : virtualLog.indexContents.length;
+      const contents = virtualLog.indexContents.subarray(start, end);
+      return Readable.from([
+        typeof options === "object" && options.encoding === "latin1"
+          ? contents.toString("latin1")
+          : contents
+      ]) as ReturnType<typeof actual.createReadStream>;
+    }
+  };
+});
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -66,6 +99,20 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         }),
         stat: () => Promise.resolve({ size: contents.length })
       } as unknown as Awaited<ReturnType<typeof actual.open>>);
+    },
+    stat: (
+      filePath: Parameters<typeof actual.stat>[0],
+      options?: Parameters<typeof actual.stat>[1]
+    ) => {
+      if (
+        String(filePath) === virtualLog.indexPath &&
+        virtualLog.indexContents !== undefined
+      ) {
+        return Promise.resolve({
+          size: virtualLog.indexContents.length
+        }) as ReturnType<typeof actual.stat>;
+      }
+      return actual.stat(filePath, options);
     }
   };
 });
@@ -82,9 +129,10 @@ afterEach(() => {
 function indexedLog(lines: string[]): { contents: Buffer; index: Buffer } {
   const records: Buffer[] = [];
   let offset = 0;
-  for (const line of lines) {
-    const record = Buffer.alloc(8);
+  for (const [index, line] of lines.entries()) {
+    const record = Buffer.alloc(16);
     record.writeBigUInt64BE(BigInt(offset));
+    record.writeBigUInt64BE(BigInt(index + 1), 8);
     records.push(record);
     offset += Buffer.byteLength(`${line}\n`, "utf8");
   }
@@ -112,12 +160,12 @@ describe("readRecentRoutineEvents", () => {
       events: [
         {
           normalized: { message: "recent", type: "message" },
-          sequence: 1,
+          sequence: null,
           type: "message"
         },
         {
           normalized: { exitCode: 0, type: "process_exit" },
-          sequence: 2,
+          sequence: null,
           type: "process_exit"
         }
       ],
@@ -173,5 +221,64 @@ describe("readRecentRoutineEvents", () => {
         .filter(({ path }) => path === virtualLog.path)
         .reduce((total, { length }) => total + length, 0)
     ).toBeLessThan(virtualLog.contents.length);
+  });
+
+  it("uses the bounded fallback when a complete index record is not a log boundary", async () => {
+    const persisted = indexedLog([
+      JSON.stringify({ message: "x".repeat(256 * 1_024), type: "message" }),
+      JSON.stringify({ message: "recent", type: "message" }),
+      JSON.stringify({ exitCode: 0, type: "process_exit" })
+    ]);
+    persisted.index.writeBigUInt64BE(1n, 16);
+    virtualLog.contents = persisted.contents;
+    virtualLog.indexContents = persisted.index;
+
+    const tail = await readRecentRoutineEvents(virtualLog.path, 2);
+
+    expect(tail).toEqual({
+      events: [
+        {
+          normalized: { message: "recent", type: "message" },
+          sequence: null,
+          type: "message"
+        },
+        {
+          normalized: { exitCode: 0, type: "process_exit" },
+          sequence: null,
+          type: "process_exit"
+        }
+      ],
+      truncated: true
+    });
+    const logBytesRead = virtualLog.reads
+      .filter(({ path }) => path === virtualLog.path)
+      .reduce((total, { length }) => total + length, 0);
+    expect(logBytesRead).toBeLessThan(virtualLog.contents.length / 2);
+  });
+
+  it("rejects an indexed offset that repeats a neighboring log boundary", async () => {
+    const persisted = indexedLog([
+      JSON.stringify({ message: "old", type: "message" }),
+      JSON.stringify({ message: "x".repeat(256 * 1_024), type: "message" }),
+      JSON.stringify({ message: "recent", type: "message" }),
+      JSON.stringify({ exitCode: 0, type: "process_exit" })
+    ]);
+    const previousOffset = persisted.index.readBigUInt64BE(16);
+    persisted.index.writeBigUInt64BE(previousOffset, 32);
+    virtualLog.contents = persisted.contents;
+    virtualLog.indexContents = persisted.index;
+
+    const tail = await readRecentRoutineEvents(virtualLog.path, 2);
+
+    expect(
+      tail.events.map(({ sequence, type }) => ({ sequence, type }))
+    ).toEqual([
+      { sequence: null, type: "message" },
+      { sequence: null, type: "process_exit" }
+    ]);
+    const logBytesRead = virtualLog.reads
+      .filter(({ path }) => path === virtualLog.path)
+      .reduce((total, { length }) => total + length, 0);
+    expect(logBytesRead).toBeLessThan(virtualLog.contents.length / 2);
   });
 });

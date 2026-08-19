@@ -6295,7 +6295,7 @@ function renderTransitionsTable(
 type CoalesceableProviderEvent = {
   createdAt?: string;
   normalized: Record<string, unknown>;
-  sequence: number;
+  sequence: number | null;
   type: string;
 };
 
@@ -6311,11 +6311,11 @@ function renderEventsTable(
       if (row.kind === "message") {
         const seq =
           row.firstSequence === row.lastSequence
-            ? `${row.firstSequence}`
-            : `${row.firstSequence}–${row.lastSequence}`;
+            ? formatEventSequence(row.firstSequence)
+            : `${formatEventSequence(row.firstSequence)}–${formatEventSequence(row.lastSequence)}`;
         return `<tr><td>${seq}</td><td>message</td><td class="c-detail"><div class="msg">${escapeHtml(row.text)}</div></td><td><code>${escapeHtml(row.createdAt || "-")}</code></td></tr>`;
       }
-      return `<tr><td>${row.sequence}</td><td>${escapeHtml(row.type)}</td><td class="c-detail"><code>${escapeHtml(row.detail)}</code></td><td><code>${escapeHtml(row.createdAt || "-")}</code></td></tr>`;
+      return `<tr><td>${formatEventSequence(row.sequence)}</td><td>${escapeHtml(row.type)}</td><td class="c-detail"><code>${escapeHtml(row.detail)}</code></td><td><code>${escapeHtml(row.createdAt || "-")}</code></td></tr>`;
     })
     .join("");
   const scope = truncated
@@ -6458,18 +6458,22 @@ function formatAbnormalExit(
 type EventDisplayRow =
   | {
       kind: "message";
-      firstSequence: number;
-      lastSequence: number;
+      firstSequence: number | null;
+      lastSequence: number | null;
       text: string;
       createdAt: string;
     }
   | {
       kind: "event";
-      sequence: number;
+      sequence: number | null;
       type: string;
       detail: string;
       createdAt: string;
     };
+
+function formatEventSequence(sequence: number | null): string {
+  return sequence === null ? "?" : String(sequence);
+}
 
 // Codex streams assistant text one token per event; merge runs of adjacent
 // message events into a single readable block, breaking on any other event.

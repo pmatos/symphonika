@@ -15,7 +15,7 @@ export function setRoutineDisabled(
   content: string,
   disabled: boolean
 ): SetRoutineDisabledResult {
-  const usesCrlf = content.includes("\r\n");
+  const lineEnding = content.match(/\r?\n/)?.[0] ?? "\n";
   const lines = content.split(/\r?\n/);
   if (lines[0]?.trim() !== "---") {
     return {
@@ -34,7 +34,10 @@ export function setRoutineDisabled(
   }
 
   const frontMatterSource = lines.slice(1, closingLine).join("\n");
-  const body = lines.slice(closingLine + 1).join("\n");
+  const body = content
+    .split(/(\r?\n)/)
+    .slice(closingLine * 2 + 2)
+    .join("");
 
   const document = parseDocument(frontMatterSource);
   if (document.errors.length > 0) {
@@ -51,11 +54,12 @@ export function setRoutineDisabled(
   // parseDocument/String(document) always emit a trailing newline; strip it
   // back to the exact shape frontMatterSource had (no trailing newline) so
   // reassembly below doesn't introduce a blank line before the closing ---.
-  const newFrontMatter = String(document).replace(/\n$/, "");
+  const newFrontMatter = String(document)
+    .replace(/\n$/, "")
+    .replaceAll("\n", lineEnding);
 
-  const assembled = ["---", newFrontMatter, "---", body].join("\n");
   return {
-    content: usesCrlf ? assembled.replaceAll("\n", "\r\n") : assembled,
+    content: ["---", newFrontMatter, "---", body].join(lineEnding),
     kind: "ok"
   };
 }

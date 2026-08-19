@@ -104,6 +104,25 @@ describe("setRoutineDisabled (#307 part 4, ADR 0076)", () => {
     }
   });
 
+  it("leaves an LF prompt body byte-for-byte untouched after CRLF front matter", () => {
+    const frontMatter = [
+      "---",
+      "name: audit",
+      "kind: report",
+      "schedule:",
+      '  at: "2026-05-22T10:00:00.000Z"',
+      "---"
+    ].join("\r\n");
+    const body = "Audit the codebase.\n\nKeep this spacing.\n";
+
+    const result = setRoutineDisabled(`${frontMatter}\r\n${body}`, true);
+
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.content.endsWith(body)).toBe(true);
+    }
+  });
+
   it("returns an error for content with no front matter", () => {
     const result = setRoutineDisabled("no front matter here\n", true);
     expect(result.kind).toBe("error");

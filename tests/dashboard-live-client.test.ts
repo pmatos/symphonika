@@ -16,6 +16,23 @@ function loadPatchFragment(): (id: string, html: string) => void {
   )() as (id: string, html: string) => void;
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolvePromise!: (value: T) => void;
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: resolvePromise };
+}
+
+async function flushMicrotasks(): Promise<void> {
+  for (let index = 0; index < 4; index += 1) {
+    await Promise.resolve();
+  }
+}
+
 describe("dashboard live-update client script (#305 part 2, ADR 0074)", () => {
   it("patchFragment replaces only the named container's content, leaving sibling DOM untouched", () => {
     document.body.innerHTML = `
@@ -87,5 +104,69 @@ describe("dashboard live-update client script (#305 part 2, ADR 0074)", () => {
     await Promise.resolve();
     expect(fetchMock).toHaveBeenCalledWith("/fragments/active-band");
     expect(fetchMock).toHaveBeenCalledWith("/fragments/projects-section");
+  });
+
+  it("ignores fragment responses from a superseded reconciliation", async () => {
+    document.body.innerHTML = `
+      <div id="live-stream-banner" style="display:none"></div>
+      <div id="active-now-band"></div>
+      <div id="projects-section"></div>
+    `;
+
+    const listeners = new Map<string, Array<() => void>>();
+    class FakeEventSource {
+      addEventListener(type: string, listener: () => void): void {
+        const existing = listeners.get(type) ?? [];
+        existing.push(listener);
+        listeners.set(type, existing);
+      }
+    }
+    (globalThis as Record<string, unknown>).EventSource = FakeEventSource;
+
+    const oldActive = deferred<{ text: () => Promise<string> }>();
+    const oldProjects = deferred<{ text: () => Promise<string> }>();
+    const newActive = deferred<{ text: () => Promise<string> }>();
+    const newProjects = deferred<{ text: () => Promise<string> }>();
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => oldActive.promise)
+      .mockImplementationOnce(() => oldProjects.promise)
+      .mockImplementationOnce(() => newActive.promise)
+      .mockImplementationOnce(() => newProjects.promise);
+    (globalThis as Record<string, unknown>).fetch = fetchMock;
+
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval, @typescript-eslint/no-unsafe-call -- see ADR 0074: the client script has no build step, so this is the literal browser source.
+    new Function(DASHBOARD_LIVE_CLIENT_JS)();
+
+    listeners.get("open")?.forEach((listener) => listener());
+    listeners.get("run-transition")?.forEach((listener) => listener());
+
+    newActive.resolve({
+      text: () => Promise.resolve("<p>new active</p>")
+    });
+    newProjects.resolve({
+      text: () => Promise.resolve("<p>new projects</p>")
+    });
+    await flushMicrotasks();
+
+    expect(document.getElementById("active-now-band")?.innerHTML).toBe(
+      "<p>new active</p>"
+    );
+    expect(document.getElementById("projects-section")?.innerHTML).toBe(
+      "<p>new projects</p>"
+    );
+
+    oldActive.resolve({ text: () => Promise.resolve("<p>old active</p>") });
+    oldProjects.resolve({
+      text: () => Promise.resolve("<p>old projects</p>")
+    });
+    await flushMicrotasks();
+
+    expect(document.getElementById("active-now-band")?.innerHTML).toBe(
+      "<p>new active</p>"
+    );
+    expect(document.getElementById("projects-section")?.innerHTML).toBe(
+      "<p>new projects</p>"
+    );
   });
 });

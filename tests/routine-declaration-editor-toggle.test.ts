@@ -98,6 +98,9 @@ describe("setRoutineDisabled (#307 part 4, ADR 0076)", () => {
     if (result.kind === "ok") {
       expect(result.content).toContain("\r\n");
       expect(result.content.replaceAll("\r\n", "")).not.toContain("\n");
+      const parsed = parseRoutineDeclaration(result.content, "/tmp/audit.md");
+      expect(parsed.errors).toEqual([]);
+      expect(parsed.routine).toMatchObject({ disabled: true });
     }
   });
 

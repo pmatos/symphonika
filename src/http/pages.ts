@@ -1493,7 +1493,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           options.startedAtMs,
           nowMs
         ),
-        renderProjectIssuesTable(issueRows),
+        renderProjectIssuesTable(name, issueRows),
         renderProjectFiringsBlock(firings),
         options.getProjectWorkflowPath?.(name) === undefined
           ? ""
@@ -2613,6 +2613,7 @@ section { margin: 0 0 var(--sp-6); }
   letter-spacing: -0.005em;
   margin: 0;
 }
+.section-action { margin-left: auto; font-size: var(--fs-meta); }
 .count {
   font-size: var(--fs-label);
   color: var(--ink-muted);
@@ -2989,19 +2990,33 @@ function renderHeader(
 ${errorList}`;
 }
 
-function sectionHead(title: string, count?: number): string {
+type SectionAction = {
+  href: string;
+  label: string;
+};
+
+function sectionHead(
+  title: string,
+  count?: number,
+  action?: SectionAction
+): string {
   const badge =
     count === undefined ? "" : `<span class="count">${count}</span>`;
-  return `<div class="section-head"><h2>${escapeHtml(title)}</h2>${badge}</div>`;
+  const actionLink =
+    action === undefined
+      ? ""
+      : `<a class="section-action" href="${escapeHtml(action.href)}">${escapeHtml(action.label)}</a>`;
+  return `<div class="section-head"><h2>${escapeHtml(title)}</h2>${badge}${actionLink}</div>`;
 }
 
 function tableSection(
   title: string,
   count: number,
   head: string,
-  rows: string
+  rows: string,
+  action?: SectionAction
 ): string {
-  return `<section>${sectionHead(title, count)}<div class="table-wrap"><table><thead>${head}</thead><tbody>${rows}</tbody></table></div></section>`;
+  return `<section>${sectionHead(title, count, action)}<div class="table-wrap"><table><thead>${head}</thead><tbody>${rows}</tbody></table></div></section>`;
 }
 
 // One row of the new Projects section, joined from ProjectState (identity +
@@ -3448,21 +3463,29 @@ function buildProjectIssueRow(input: {
   };
 }
 
-function renderProjectIssuesTable(rows: ProjectIssueRow[]): string {
+function renderProjectIssuesTable(
+  projectName: string,
+  rows: ProjectIssueRow[]
+): string {
+  const action = {
+    href: `/issues?project=${encodeURIComponent(projectName)}`,
+    label: "Edit labels →"
+  };
   if (rows.length === 0) {
-    return `<section>${sectionHead("Issues", 0)}<div class="empty"><strong>No issues</strong>No open issue is currently eligible, filtered, or claimed for this Project.</div></section>`;
+    return `<section>${sectionHead("Issues", 0, action)}<div class="empty"><strong>No issues</strong>No open issue is currently eligible, filtered, or claimed for this Project.</div></section>`;
   }
   const body = rows
-    .map(
-      (row) =>
-        `<tr><td>#${row.issueNumber}</td><td class="c-title">${escapeHtml(row.title)}</td><td>${row.pillHtml}</td><td class="c-detail">${escapeHtml(row.detail)}</td></tr>`
-    )
+    .map((row) => {
+      const issueLink = `/issues/${encodeURIComponent(projectName)}/${row.issueNumber}`;
+      return `<tr><td><a href="${escapeHtml(issueLink)}">#${row.issueNumber}</a></td><td class="c-title">${escapeHtml(row.title)}</td><td>${row.pillHtml}</td><td class="c-detail">${escapeHtml(row.detail)}</td></tr>`;
+    })
     .join("");
   return tableSection(
     "Issues",
     rows.length,
     "<tr><th>#</th><th>Title</th><th>State</th><th>Detail</th></tr>",
-    body
+    body,
+    action
   );
 }
 

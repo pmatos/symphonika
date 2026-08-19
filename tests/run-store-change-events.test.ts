@@ -122,6 +122,61 @@ describe("RunStore — change notification path (#305, ADR 0074)", () => {
     }
   });
 
+  it("does not publish a firing transition when a duplicate claim rolls back", async () => {
+    const runStore = openRunStore({ stateRoot: await makeTempRoot() });
+    try {
+      runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit.",
+          provider: "codex",
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        }
+      ]);
+
+      const events: ChangeEvent[] = [];
+      runStore.subscribeToChanges((event) => events.push(event));
+
+      const firstClaim = runStore.claimRoutineFiring({
+        firedAt: "2026-05-22T10:00:02.000Z",
+        firingId: "fire-1",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      const duplicateClaim = runStore.claimRoutineFiring({
+        firedAt: "2026-05-22T10:00:03.000Z",
+        firingId: "fire-2",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+
+      expect(firstClaim).toBe(true);
+      expect(duplicateClaim).toBe(false);
+      expect(runStore.listRoutineFirings().map((firing) => firing.id)).toEqual([
+        "fire-1"
+      ]);
+      expect(events).toEqual([
+        {
+          firingId: "fire-1",
+          kind: "firing-transition",
+          sequence: 1,
+          state: "queued"
+        }
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("publishes a project-poll event carrying only the poll outcome, not issue detail", async () => {
     const runStore = openRunStore({ stateRoot: await makeTempRoot() });
     try {

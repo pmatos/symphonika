@@ -845,6 +845,25 @@ export type ChangeEvent =
     }
   | { errors: string[]; kind: "reload-outcome"; ok: boolean };
 
+type FiringTransitionChangeEvent = Extract<
+  ChangeEvent,
+  { kind: "firing-transition" }
+>;
+
+type CreateRoutineFiringInput = {
+  branchName?: string;
+  branchRef?: string;
+  fanoutId?: string;
+  id: string;
+  projectName: string;
+  providerCommand: string;
+  providerName: AgentProviderName;
+  routineName: string;
+  scheduledAt?: string | null;
+  triggerSource?: RoutineFiringTriggerSource;
+  workspacePath?: string;
+};
+
 export class RunStore {
   private readonly changeListeners = new Set<(event: ChangeEvent) => void>();
   private readonly database: SqliteDatabase;
@@ -2782,19 +2801,13 @@ export class RunStore {
     return result.changes > 0;
   }
 
-  createRoutineFiring(input: {
-    branchName?: string;
-    branchRef?: string;
-    fanoutId?: string;
-    id: string;
-    projectName: string;
-    providerCommand: string;
-    providerName: AgentProviderName;
-    routineName: string;
-    scheduledAt?: string | null;
-    triggerSource?: RoutineFiringTriggerSource;
-    workspacePath?: string;
-  }): void {
+  createRoutineFiring(input: CreateRoutineFiringInput): void {
+    this.publishChange(this.insertRoutineFiring(input));
+  }
+
+  private insertRoutineFiring(
+    input: CreateRoutineFiringInput
+  ): FiringTransitionChangeEvent {
     const now = timestamp();
     this.database
       .prepare(
@@ -2821,7 +2834,7 @@ export class RunStore {
         updated_at: now,
         workspace_path: input.workspacePath ?? null
       });
-    this.recordRoutineFiringTransition(input.id, "queued", now);
+    return this.insertRoutineFiringTransition(input.id, "queued", now);
   }
 
   claimRoutineFiring(input: {
@@ -2840,7 +2853,7 @@ export class RunStore {
     workspacePath?: string;
   }): boolean {
     const claim = this.database.transaction(() => {
-      this.createRoutineFiring({
+      const event = this.insertRoutineFiring({
         ...(input.branchName === undefined
           ? {}
           : { branchName: input.branchName }),
@@ -2899,9 +2912,11 @@ export class RunStore {
           throw new RoutineAlreadyClaimedError();
         }
       }
+      return event;
     });
     try {
-      claim();
+      const event = claim();
+      this.publishChange(event);
       return true;
     } catch (error) {
       if (error instanceof RoutineAlreadyClaimedError) {
@@ -2940,7 +2955,7 @@ export class RunStore {
       if (eligible === undefined) {
         throw new RoutineAlreadyClaimedError();
       }
-      this.createRoutineFiring({
+      return this.insertRoutineFiring({
         ...(input.branchName === undefined
           ? {}
           : { branchName: input.branchName }),
@@ -2960,7 +2975,8 @@ export class RunStore {
       });
     });
     try {
-      claim();
+      const event = claim();
+      this.publishChange(event);
       return true;
     } catch (error) {
       if (error instanceof RoutineAlreadyClaimedError) {
@@ -4949,6 +4965,16 @@ export class RunStore {
     state: RoutineFiringState,
     createdAt: string
   ): void {
+    this.publishChange(
+      this.insertRoutineFiringTransition(firingId, state, createdAt)
+    );
+  }
+
+  private insertRoutineFiringTransition(
+    firingId: string,
+    state: RoutineFiringState,
+    createdAt: string
+  ): FiringTransitionChangeEvent {
     const sequence = nextRoutineFiringTransitionSequence(
       this.database,
       firingId
@@ -4958,12 +4984,12 @@ export class RunStore {
         "insert into routine_firing_state_transitions (firing_id, sequence, state, created_at) values (?, ?, ?, ?)"
       )
       .run(firingId, sequence, state, createdAt);
-    this.publishChange({
+    return {
       firingId,
       kind: "firing-transition",
       sequence,
       state
-    });
+    };
   }
 
   private latestRoutinePullRequestNumbers(

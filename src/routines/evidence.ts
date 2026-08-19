@@ -85,6 +85,7 @@ async function readIndexedTailRecords(
     // cannot silently repeat or cross its immediate neighbor.
     const selectedCount = Math.min(limit + 1, recordCount);
     const start = size - selectedCount * EVENT_INDEX_RECORD_BYTES;
+    const firstSequence = start / EVENT_INDEX_RECORD_BYTES + 1;
     const contents = await readStreamRange(indexPath, start, size - 1);
     if (contents.length !== selectedCount * EVENT_INDEX_RECORD_BYTES) {
       return undefined;
@@ -98,7 +99,8 @@ async function readIndexedTailRecords(
       if (
         offset > BigInt(Number.MAX_SAFE_INTEGER) ||
         sequence < 1n ||
-        sequence > BigInt(Number.MAX_SAFE_INTEGER)
+        sequence > BigInt(Number.MAX_SAFE_INTEGER) ||
+        sequence !== BigInt(firstSequence + index)
       ) {
         return undefined;
       }

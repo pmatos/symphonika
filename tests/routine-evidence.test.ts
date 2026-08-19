@@ -281,4 +281,30 @@ describe("readRecentRoutineEvents", () => {
       .reduce((total, { length }) => total + length, 0);
     expect(logBytesRead).toBeLessThan(virtualLog.contents.length / 2);
   });
+
+  it("rejects contiguous tail sequences shifted from their absolute record positions", async () => {
+    const persisted = indexedLog([
+      JSON.stringify({ message: "x".repeat(256 * 1_024), type: "message" }),
+      JSON.stringify({ message: "old", type: "message" }),
+      JSON.stringify({ message: "recent", type: "message" }),
+      JSON.stringify({ exitCode: 0, type: "process_exit" })
+    ]);
+    for (const position of [24, 40, 56]) {
+      persisted.index.writeBigUInt64BE(
+        persisted.index.readBigUInt64BE(position) + 10n,
+        position
+      );
+    }
+    virtualLog.contents = persisted.contents;
+    virtualLog.indexContents = persisted.index;
+
+    const tail = await readRecentRoutineEvents(virtualLog.path, 2);
+
+    expect(
+      tail.events.map(({ sequence, type }) => ({ sequence, type }))
+    ).toEqual([
+      { sequence: null, type: "message" },
+      { sequence: null, type: "process_exit" }
+    ]);
+  });
 });

@@ -19,7 +19,12 @@ import type {
   InitProjectOptions,
   InitProjectReport
 } from "./doctor.js";
-import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
+import {
+  pluralize,
+  runClearStale,
+  runDoctor,
+  runInitProject
+} from "./doctor.js";
 import type { InitOptions, InitProvider, InitReport } from "./init.js";
 import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
@@ -442,24 +447,16 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         options: { all?: boolean; config?: string; yes?: boolean }
       ) => {
         let target: { all: true } | { issueNumber: number };
-        if (options.all === true) {
-          if (issueNumber !== undefined) {
-            program.error(
-              "clear-stale requires exactly one of <issue-number> or --all",
-              { exitCode: 1 }
-            );
-            return;
-          }
+        if (options.all === true && issueNumber === undefined) {
           target = { all: true };
-        } else {
-          if (issueNumber === undefined) {
-            program.error(
-              "clear-stale requires exactly one of <issue-number> or --all",
-              { exitCode: 1 }
-            );
-            return;
-          }
+        } else if (options.all !== true && issueNumber !== undefined) {
           target = { issueNumber };
+        } else {
+          program.error(
+            "clear-stale requires exactly one of <issue-number> or --all",
+            { exitCode: 1 }
+          );
+          return;
         }
 
         const emittedWarnings = new Set<string>();
@@ -2736,10 +2733,6 @@ function parseProjectMode(value: string): "dispatch" | "routine_host" {
     return "routine_host";
   }
   throw new InvalidArgumentError("mode must be one of dispatch, routine-host");
-}
-
-function pluralize(word: string, count: number): string {
-  return count === 1 ? word : `${word}s`;
 }
 
 function printWarningsSection(program: Command, warnings: string[]): void {

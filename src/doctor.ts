@@ -1817,7 +1817,28 @@ async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
+export function pluralize(word: string, count: number): string {
+  return count === 1 ? word : `${word}s`;
+}
+
 const STALE_CLEAR_LABELS = ["sym:stale", "sym:claimed", "sym:running"] as const;
+
+function describeClearStaleTargets(
+  all: boolean,
+  issueNumbers: number[]
+): string {
+  if (!all) {
+    return `#${issueNumbers[0]}`;
+  }
+  if (issueNumbers.length === 0) {
+    return " issues (none)";
+  }
+  const noun = pluralize("issue", issueNumbers.length);
+  const numbers = issueNumbers
+    .map((issueNumber) => `#${issueNumber}`)
+    .join(", ");
+  return ` ${noun} ${numbers}`;
+}
 
 export async function runClearStale(
   options: ClearStaleOptions
@@ -1923,12 +1944,7 @@ export async function runClearStale(
     issueNumbers = [options.issueNumber];
   }
 
-  const targets =
-    options.all === true
-      ? issueNumbers.length === 0
-        ? " issues (none)"
-        : ` ${issueNumbers.length === 1 ? "issue" : "issues"} ${issueNumbers.map((issueNumber) => `#${issueNumber}`).join(", ")}`
-      : `#${issueNumbers[0]}`;
+  const targets = describeClearStaleTargets(options.all === true, issueNumbers);
   const warning = `clear-stale ${options.yes === true ? "will" : "would"} remove ${STALE_CLEAR_LABELS.join(", ")} from ${repositoryName}${targets}`;
   warnings.push(warning);
   options.onWarning?.(warning);

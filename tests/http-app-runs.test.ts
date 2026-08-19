@@ -2187,10 +2187,10 @@ describe("HTTP app — project detail page (#303)", () => {
       const body = await (await app.request("/projects/alpha")).text();
 
       expect(body).toContain('<a href="/issues/alpha/286">#286</a>');
-      // The "Edit labels" action is threaded through the same tableSection
-      // call as the populated rows, not just the empty-state branch.
+      // The "Edit labels" note follows the Issues section for both the
+      // populated and empty-state branches, not just one of them.
       expect(body).toContain(
-        '<a class="section-action" href="/issues?project=alpha">Edit labels →</a>'
+        '<p class="note"><a href="/issues?project=alpha">Edit labels →</a></p>'
       );
     } finally {
       test.cleanup();
@@ -2212,7 +2212,7 @@ describe("HTTP app — project detail page (#303)", () => {
       const body = await (await app.request("/projects/alpha")).text();
 
       expect(body).toContain(
-        '<a class="section-action" href="/issues?project=alpha">Edit labels →</a>'
+        '<p class="note"><a href="/issues?project=alpha">Edit labels →</a></p>'
       );
     } finally {
       test.cleanup();

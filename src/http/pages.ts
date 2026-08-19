@@ -2613,7 +2613,6 @@ section { margin: 0 0 var(--sp-6); }
   letter-spacing: -0.005em;
   margin: 0;
 }
-.section-action { margin-left: auto; font-size: var(--fs-meta); }
 .count {
   font-size: var(--fs-label);
   color: var(--ink-muted);
@@ -2990,33 +2989,19 @@ function renderHeader(
 ${errorList}`;
 }
 
-type SectionAction = {
-  href: string;
-  label: string;
-};
-
-function sectionHead(
-  title: string,
-  count?: number,
-  action?: SectionAction
-): string {
+function sectionHead(title: string, count?: number): string {
   const badge =
     count === undefined ? "" : `<span class="count">${count}</span>`;
-  const actionLink =
-    action === undefined
-      ? ""
-      : `<a class="section-action" href="${escapeHtml(action.href)}">${escapeHtml(action.label)}</a>`;
-  return `<div class="section-head"><h2>${escapeHtml(title)}</h2>${badge}${actionLink}</div>`;
+  return `<div class="section-head"><h2>${escapeHtml(title)}</h2>${badge}</div>`;
 }
 
 function tableSection(
   title: string,
   count: number,
   head: string,
-  rows: string,
-  action?: SectionAction
+  rows: string
 ): string {
-  return `<section>${sectionHead(title, count, action)}<div class="table-wrap"><table><thead>${head}</thead><tbody>${rows}</tbody></table></div></section>`;
+  return `<section>${sectionHead(title, count)}<div class="table-wrap"><table><thead>${head}</thead><tbody>${rows}</tbody></table></div></section>`;
 }
 
 // One row of the new Projects section, joined from ProjectState (identity +
@@ -3367,7 +3352,7 @@ type ProjectIssueRow = {
   title: string;
 };
 
-type ProjectIssueRowInput = {
+function buildProjectIssueRow(input: {
   inFlight: number;
   issueNumber: number;
   maxInFlight: number | undefined;
@@ -3377,18 +3362,8 @@ type ProjectIssueRowInput = {
   runStore: RunStore;
   scheduled: ScheduledCallback[];
   snapshot: ProjectIssueSnapshotRow | undefined;
-};
-
-function buildProjectIssueRow(input: ProjectIssueRowInput): ProjectIssueRow {
-  return {
-    ...buildProjectIssueRowFields(input),
-    hasSnapshot: input.snapshot !== undefined
-  };
-}
-
-function buildProjectIssueRowFields(
-  input: ProjectIssueRowInput
-): Omit<ProjectIssueRow, "hasSnapshot"> {
+}): ProjectIssueRow {
+  const hasSnapshot = input.snapshot !== undefined;
   if (input.run !== undefined) {
     const run = input.run;
     const bucket = PROJECT_ISSUE_ROW_BUCKET[run.state];
@@ -3396,6 +3371,7 @@ function buildProjectIssueRowFields(
     if (bucket === "running") {
       return {
         detail: `attempt ${run.retryCount + 1} · ${formatAge(run.updatedAt, input.nowMs)}`,
+        hasSnapshot,
         issueNumber: input.issueNumber,
         pillHtml,
         title: run.issueTitle
@@ -3410,6 +3386,7 @@ function buildProjectIssueRowFields(
             (run.state === "input_required" ? "needs operator input" : ""));
       return {
         detail,
+        hasSnapshot,
         issueNumber: input.issueNumber,
         pillHtml,
         title: run.issueTitle
@@ -3431,6 +3408,7 @@ function buildProjectIssueRowFields(
       const reason = run.terminalReason ?? run.stateTransitionReason ?? "";
       return {
         detail: `${reason}${prDetail}`,
+        hasSnapshot,
         issueNumber: input.issueNumber,
         pillHtml,
         title: run.issueTitle
@@ -3445,6 +3423,7 @@ function buildProjectIssueRowFields(
         (run.state === "queued"
           ? "queued for dispatch"
           : "preparing workspace"),
+      hasSnapshot,
       issueNumber: input.issueNumber,
       pillHtml,
       title: run.issueTitle
@@ -3455,6 +3434,7 @@ function buildProjectIssueRowFields(
   if (snapshot === undefined) {
     return {
       detail: "",
+      hasSnapshot,
       issueNumber: input.issueNumber,
       pillHtml: labelPill("unknown", "neutral"),
       title: ""
@@ -3463,6 +3443,7 @@ function buildProjectIssueRowFields(
   if (snapshot.kind === "filtered") {
     return {
       detail: snapshot.reasons.join(", "),
+      hasSnapshot,
       issueNumber: input.issueNumber,
       pillHtml: labelPill("filtered", "neutral"),
       title: snapshot.title
@@ -3474,6 +3455,7 @@ function buildProjectIssueRowFields(
     detail: atCap
       ? `queued behind cap (${input.inFlight}/${input.maxInFlight})`
       : "within cap, next by priority",
+    hasSnapshot,
     issueNumber: input.issueNumber,
     pillHtml: labelPill("eligible", "neutral"),
     title: snapshot.title
@@ -3485,12 +3467,11 @@ function renderProjectIssuesTable(
   rows: ProjectIssueRow[]
 ): string {
   const encodedProjectName = encodeURIComponent(projectName);
-  const action = {
-    href: `/issues?project=${encodedProjectName}`,
-    label: "Edit labels →"
-  };
+  // Matches the "Recent runs →" / "Edit workflow →" note-link convention
+  // already used elsewhere on this page (see renderProjectPage).
+  const editLabelsNote = `<p class="note"><a href="/issues?project=${encodedProjectName}">Edit labels →</a></p>`;
   if (rows.length === 0) {
-    return `<section>${sectionHead("Issues", 0, action)}<div class="empty"><strong>No issues</strong>No open issue is currently eligible, filtered, or claimed for this Project.</div></section>`;
+    return `<section>${sectionHead("Issues", 0)}<div class="empty"><strong>No issues</strong>No open issue is currently eligible, filtered, or claimed for this Project.</div></section>${editLabelsNote}`;
   }
   const body = rows
     .map((row) => {
@@ -3502,12 +3483,13 @@ function renderProjectIssuesTable(
       return `<tr><td>${numberCell}</td><td class="c-title">${escapeHtml(row.title)}</td><td>${row.pillHtml}</td><td class="c-detail">${escapeHtml(row.detail)}</td></tr>`;
     })
     .join("");
-  return tableSection(
-    "Issues",
-    rows.length,
-    "<tr><th>#</th><th>Title</th><th>State</th><th>Detail</th></tr>",
-    body,
-    action
+  return (
+    tableSection(
+      "Issues",
+      rows.length,
+      "<tr><th>#</th><th>Title</th><th>State</th><th>Detail</th></tr>",
+      body
+    ) + editLabelsNote
   );
 }
 

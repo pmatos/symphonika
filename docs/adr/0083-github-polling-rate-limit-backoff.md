@@ -132,6 +132,14 @@ the daemon boundary and excludes every Project whose resolved token is still in
 without allowing a carried-over candidate to reach the `sym:claimed` REST write during an active
 window. Projects using other tokens remain dispatchable.
 
+That candidate filter is an early admission check, not the claim-boundary guarantee. The PR poll is
+fire-and-forget, so it can report a rate limit and engage backoff while `dispatchOneFresh` is still
+loading Project, provider, concurrency, or Workflow Contract state for a candidate that passed the
+filter. The daemon therefore also passes a synchronous `isClaimAllowed` predicate into
+`dispatchOneFresh`; the Run Controller evaluates it inside the narrowed claim section after its
+other awaited re-checks and immediately before the `sym:claimed` label call. The deterministic
+provider-resolution failure path performs the same final check before its own fresh-claim write.
+
 GitHub's REST and GraphQL primary budgets are separate, so this gate is conservative when GraphQL
 primary exhaustion alone engaged the window. It is still required for secondary/abuse-detection
 limits, which apply across both API surfaces for the credential; the daemon intentionally treats
@@ -178,7 +186,8 @@ window, so this ADR accepts gating both identically rather than adding plumbing 
   skipped in the response. A poll-now request while only *some* projects are backing off still polls
   the rest.
 - Fresh dispatch does not claim a carried-over candidate whose token is backing off; candidates on
-  other tokens remain eligible for dispatch.
+  other tokens remain eligible for dispatch. If asynchronous PR polling activates backoff after
+  candidate filtering, the claim-boundary re-check still defers the write.
 
 ## Numbering
 

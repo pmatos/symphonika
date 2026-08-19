@@ -993,12 +993,26 @@ export async function startDaemon(
         // shared evidence intact, but do not let a carried-over candidate
         // cross the fresh-claim boundary while its credential is backing
         // off: the claim itself is another GitHub label write.
-        const result = await runController.dispatchOneFresh({
-          ...issuePollStatus,
-          candidateIssues: issuePollStatus.candidateIssues.filter((candidate) =>
-            dispatchableProjectNames.has(candidate.project)
-          )
-        });
+        const result = await runController.dispatchOneFresh(
+          {
+            ...issuePollStatus,
+            candidateIssues: issuePollStatus.candidateIssues.filter(
+              (candidate) => dispatchableProjectNames.has(candidate.project)
+            )
+          },
+          {
+            // The fire-and-forget PR poll can engage backoff after the
+            // candidate view above is formed while dispatchOneFresh is still
+            // loading config or workflow state. Re-check from inside its
+            // narrowed claim section immediately before sym:claimed.
+            isClaimAllowed: (project) => {
+              const token = resolveEnvBackedValue(project.tracker.token, env);
+              return (
+                token === undefined || !isGithubBackoffActive(Date.now(), token)
+              );
+            }
+          }
+        );
         if (result.dispatched === false) {
           logger.debug(
             { reason: result.reason },

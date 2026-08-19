@@ -949,6 +949,105 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("rechecks GitHub backoff after candidate selection and before claiming", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root, { pollingIntervalMs: 10 });
+    const prPoll = deferred<never>();
+    const codexProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { code: 1, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    let providerReads = 0;
+    const agentProviders: AgentProviderRegistry = {};
+    Object.defineProperty(agentProviders, "codex", {
+      enumerable: true,
+      get: () => {
+        providerReads += 1;
+        // launchWork's registration gate performs the first read. The
+        // second is target selection, after the daemon has already formed
+        // its dispatchable candidate view. Release the pending PR-poll rate
+        // limit exactly there to reproduce the claim-boundary race.
+        if (providerReads === 2) {
+          prPoll.reject(
+            new Error(
+              "Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+            )
+          );
+        }
+        return codexProvider;
+      }
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 93,
+          title: "Candidate selected before PR polling reports backoff"
+        })
+      ]),
+      listPullRequests: vi.fn().mockReturnValue(prPoll.promise),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const daemon = await startDaemon({
+      agentProviders,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: vi.fn().mockResolvedValue({
+        branchName: "sym/symphonika/93-candidate-selected-before-pr-polling",
+        branchRef:
+          "refs/heads/sym/symphonika/93-candidate-selected-before-pr-polling",
+        cachePath: path.join(
+          root,
+          ".symphonika",
+          "workspaces",
+          "symphonika",
+          ".cache",
+          "repo.git"
+        ),
+        issueDirectoryName: "93-candidate-selected-before-pr-polling",
+        reused: false,
+        workspacePath: path.join(
+          root,
+          ".symphonika",
+          "workspaces",
+          "symphonika",
+          "issues",
+          "93-candidate-selected-before-pr-polling"
+        )
+      })
+    });
+
+    try {
+      await waitFor(() => Promise.resolve(providerReads >= 3), {
+        timeoutMs: 2_000
+      });
+
+      const claimWrites = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+        ([input]) => {
+          const call = input as { labels: string[] };
+          return call.labels.includes("sym:claimed");
+        }
+      );
+      expect(claimWrites).toHaveLength(0);
+      expect(githubIssuesApi.listOpenIssues).toHaveBeenCalledTimes(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("continues polling valid projects when another project entry is invalid", async () => {
     const root = await makeTempRoot();
     await writeConfigWithInvalidAndValidProjects(root);

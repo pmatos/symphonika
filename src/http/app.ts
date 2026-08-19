@@ -34,6 +34,7 @@ import type { StatusSnapshot } from "../status.js";
 import type {
   ChangeEvent,
   ListRunsFilter,
+  ProjectSnapshotRepository,
   RunArtifactKind,
   RunState,
   RunStatus,
@@ -95,6 +96,7 @@ export type WriteIssueLabelsFn = (input: {
   kind: "issue" | "pull_request";
   projectName: string;
   remove: string[];
+  snapshotRepository?: ProjectSnapshotRepository | undefined;
   subjectNumber: number;
 }) => Promise<WriteIssueLabelsResult>;
 

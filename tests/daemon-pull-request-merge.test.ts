@@ -28,7 +28,13 @@ afterEach(async () => {
 
 const STATE_ROOT_RELATIVE = "./.symphonika";
 
-async function writeValidProject(root: string): Promise<void> {
+async function writeValidProject(
+  root: string,
+  repository: { owner: string; repo: string } = {
+    owner: "pmatos",
+    repo: "symphonika"
+  }
+): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(
     path.join(root, "symphonika.yml"),
@@ -48,8 +54,8 @@ async function writeValidProject(root: string): Promise<void> {
       "    weight: 1",
       "    tracker:",
       "      kind: github",
-      "      owner: pmatos",
-      "      repo: symphonika",
+      `      owner: ${repository.owner}`,
+      `      repo: ${repository.repo}`,
       '      token: "$GITHUB_TOKEN"',
       "    issue_filters:",
       '      states: ["open"]',
@@ -70,6 +76,37 @@ async function writeValidProject(root: string): Promise<void> {
     ].join("\n")
   );
   await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+}
+
+async function fetchBoundPrLabelForm(
+  url: string,
+  prPath: string
+): Promise<{
+  cookie: string;
+  csrfToken: string;
+  snapshotOwner: string;
+  snapshotRepo: string;
+}> {
+  const response = await fetch(`${url}${prPath}`);
+  const html = await response.text();
+  const csrfMatch = /name="csrf_token" value="([^"]*)"/.exec(html);
+  const ownerMatch = /name="snapshot_owner" value="([^"]*)"/.exec(html);
+  const repoMatch = /name="snapshot_repo" value="([^"]*)"/.exec(html);
+  const setCookie = response.headers.get("set-cookie");
+  if (
+    csrfMatch?.[1] === undefined ||
+    ownerMatch?.[1] === undefined ||
+    repoMatch?.[1] === undefined ||
+    setCookie === null
+  ) {
+    throw new Error(`could not extract bound PR label form from ${html}`);
+  }
+  return {
+    cookie: setCookie.split(";")[0] ?? "",
+    csrfToken: csrfMatch[1],
+    snapshotOwner: ownerMatch[1],
+    snapshotRepo: repoMatch[1]
+  };
 }
 
 async function appendDuplicateNamedProject(
@@ -349,6 +386,66 @@ describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)"
 });
 
 describe("daemon-wired POST /prs/:project/:number/labels/add (#309 part 2)", () => {
+  it("refuses a stale rendered form after a successful repository swap replaces the same PR number", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      listPullRequests: vi.fn().mockResolvedValue([orphanPullRequestFixture()])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const form = await fetchBoundPrLabelForm(
+        daemon.url,
+        "/prs/symphonika/246"
+      );
+      await writeValidProject(root, {
+        owner: "pmatos",
+        repo: "different-repository"
+      });
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
+
+      const response = await fetch(
+        `${daemon.url}/prs/symphonika/246/labels/add`,
+        {
+          body: new URLSearchParams({
+            csrf_token: form.csrfToken,
+            label: "agent-ready",
+            snapshot_owner: form.snapshotOwner,
+            snapshot_repo: form.snapshotRepo
+          }).toString(),
+          headers: {
+            cookie: form.cookie,
+            "content-type": "application/x-www-form-urlencoded",
+            origin: daemon.url
+          },
+          method: "POST"
+        }
+      );
+      const html = await response.text();
+
+      expect(html).toContain('Add label "agent-ready" failed');
+      expect(html).toContain(
+        "rendered snapshot repository pmatos/symphonika does not match current snapshot repository pmatos/different-repository"
+      );
+      expect(githubIssuesApi.addLabelsToIssue).not.toHaveBeenCalled();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("does not expose PR rows polled from a shadowed duplicate Project repository", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);

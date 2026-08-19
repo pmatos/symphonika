@@ -144,6 +144,37 @@ async function fetchIssuesCsrfToken(
   return { cookie: setCookie.split(";")[0] ?? "", csrfToken: match[1] };
 }
 
+async function fetchBoundIssueLabelForm(
+  url: string,
+  issuePath: string
+): Promise<{
+  cookie: string;
+  csrfToken: string;
+  snapshotOwner: string;
+  snapshotRepo: string;
+}> {
+  const response = await fetch(`${url}${issuePath}`);
+  const html = await response.text();
+  const csrfMatch = /name="csrf_token" value="([^"]*)"/.exec(html);
+  const ownerMatch = /name="snapshot_owner" value="([^"]*)"/.exec(html);
+  const repoMatch = /name="snapshot_repo" value="([^"]*)"/.exec(html);
+  const setCookie = response.headers.get("set-cookie");
+  if (
+    csrfMatch?.[1] === undefined ||
+    ownerMatch?.[1] === undefined ||
+    repoMatch?.[1] === undefined ||
+    setCookie === null
+  ) {
+    throw new Error(`could not extract bound label form from ${html}`);
+  }
+  return {
+    cookie: setCookie.split(";")[0] ?? "",
+    csrfToken: csrfMatch[1],
+    snapshotOwner: ownerMatch[1],
+    snapshotRepo: repoMatch[1]
+  };
+}
+
 describe("daemon-wired POST /issues/:project/:number/labels/(add|remove) (#308 part 2)", () => {
   it("calls GitHubIssuesApi.addLabelsToIssue with the project's resolved owner/repo/token", async () => {
     const root = await makeTempRoot();
@@ -166,7 +197,7 @@ describe("daemon-wired POST /issues/:project/:number/labels/(add|remove) (#308 p
     });
 
     try {
-      const { cookie, csrfToken } = await fetchIssuesCsrfToken(
+      const form = await fetchBoundIssueLabelForm(
         daemon.url,
         "/issues/symphonika/6"
       );
@@ -174,11 +205,13 @@ describe("daemon-wired POST /issues/:project/:number/labels/(add|remove) (#308 p
         `${daemon.url}/issues/symphonika/6/labels/add`,
         {
           body: new URLSearchParams({
-            csrf_token: csrfToken,
-            label: "agent-ready"
+            csrf_token: form.csrfToken,
+            label: "agent-ready",
+            snapshot_owner: form.snapshotOwner,
+            snapshot_repo: form.snapshotRepo
           }).toString(),
           headers: {
-            cookie,
+            cookie: form.cookie,
             "content-type": "application/x-www-form-urlencoded",
             origin: daemon.url
           },
@@ -195,6 +228,27 @@ describe("daemon-wired POST /issues/:project/:number/labels/(add|remove) (#308 p
         repo: "symphonika",
         token: "secret-token"
       });
+
+      const unboundResponse = await fetch(
+        `${daemon.url}/issues/symphonika/6/labels/add`,
+        {
+          body: new URLSearchParams({
+            csrf_token: form.csrfToken,
+            label: "agent-ready"
+          }).toString(),
+          headers: {
+            cookie: form.cookie,
+            "content-type": "application/x-www-form-urlencoded",
+            origin: daemon.url
+          },
+          method: "POST"
+        }
+      );
+      const unboundHtml = await unboundResponse.text();
+      expect(unboundHtml).toContain(
+        "issue #6 rendered snapshot repository identity is unavailable"
+      );
+      expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledTimes(1);
     } finally {
       await daemon.stop();
     }
@@ -223,7 +277,7 @@ describe("daemon-wired POST /issues/:project/:number/labels/(add|remove) (#308 p
     });
 
     try {
-      const { cookie, csrfToken } = await fetchIssuesCsrfToken(
+      const form = await fetchBoundIssueLabelForm(
         daemon.url,
         "/issues/symphonika/6"
       );
@@ -231,11 +285,13 @@ describe("daemon-wired POST /issues/:project/:number/labels/(add|remove) (#308 p
         `${daemon.url}/issues/symphonika/6/labels/remove`,
         {
           body: new URLSearchParams({
-            csrf_token: csrfToken,
-            label: "blocked"
+            csrf_token: form.csrfToken,
+            label: "blocked",
+            snapshot_owner: form.snapshotOwner,
+            snapshot_repo: form.snapshotRepo
           }).toString(),
           headers: {
-            cookie,
+            cookie: form.cookie,
             "content-type": "application/x-www-form-urlencoded",
             origin: daemon.url
           },
@@ -282,7 +338,7 @@ describe("daemon-wired POST /issues/:project/:number/labels/(add|remove) (#308 p
     });
 
     try {
-      const { cookie, csrfToken } = await fetchIssuesCsrfToken(
+      const form = await fetchBoundIssueLabelForm(
         daemon.url,
         "/issues/symphonika/6"
       );
@@ -299,11 +355,13 @@ describe("daemon-wired POST /issues/:project/:number/labels/(add|remove) (#308 p
         `${daemon.url}/issues/symphonika/6/labels/add`,
         {
           body: new URLSearchParams({
-            csrf_token: csrfToken,
-            label: "agent-ready"
+            csrf_token: form.csrfToken,
+            label: "agent-ready",
+            snapshot_owner: form.snapshotOwner,
+            snapshot_repo: form.snapshotRepo
           }).toString(),
           headers: {
-            cookie,
+            cookie: form.cookie,
             "content-type": "application/x-www-form-urlencoded",
             origin: daemon.url
           },
@@ -316,6 +374,146 @@ describe("daemon-wired POST /issues/:project/:number/labels/(add|remove) (#308 p
       expect(html).toContain(
         "snapshot repository pmatos/symphonika does not match current tracker repository pmatos/different-repository"
       );
+      expect(githubIssuesApi.addLabelsToIssue).not.toHaveBeenCalled();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("refuses a stale rendered form after a successful repository swap replaces the same issue number", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValue([
+          issueFixture({ labels: ["blocked"], number: 6, title: "Filtered" })
+        ])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const form = await fetchBoundIssueLabelForm(
+        daemon.url,
+        "/issues/symphonika/6"
+      );
+      await writeValidProject(root, {
+        owner: "pmatos",
+        repo: "different-repository"
+      });
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
+
+      const response = await fetch(
+        `${daemon.url}/issues/symphonika/6/labels/add`,
+        {
+          body: new URLSearchParams({
+            csrf_token: form.csrfToken,
+            label: "agent-ready",
+            snapshot_owner: form.snapshotOwner,
+            snapshot_repo: form.snapshotRepo
+          }).toString(),
+          headers: {
+            cookie: form.cookie,
+            "content-type": "application/x-www-form-urlencoded",
+            origin: daemon.url
+          },
+          method: "POST"
+        }
+      );
+      const html = await response.text();
+
+      expect(html).toContain('Add label "agent-ready" failed');
+      expect(html).toContain(
+        "rendered snapshot repository pmatos/symphonika does not match current snapshot repository pmatos/different-repository"
+      );
+      expect(githubIssuesApi.addLabelsToIssue).not.toHaveBeenCalled();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("refuses a stale bulk selection after a successful repository swap replaces the same issue number", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValue([
+          issueFixture({ labels: ["blocked"], number: 6, title: "Filtered" })
+        ])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const selection = await fetchBoundIssueLabelForm(
+        daemon.url,
+        "/issues/symphonika/6"
+      );
+      await writeValidProject(root, {
+        owner: "pmatos",
+        repo: "different-repository"
+      });
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
+
+      const response = await fetch(`${daemon.url}/api/issues/bulk-labels`, {
+        body: JSON.stringify({
+          addLabels: ["agent-ready"],
+          operations: [
+            {
+              issueNumber: 6,
+              projectName: "symphonika",
+              snapshotRepository: {
+                owner: selection.snapshotOwner,
+                repo: selection.snapshotRepo
+              }
+            }
+          ],
+          removeLabels: []
+        }),
+        headers: {
+          cookie: selection.cookie,
+          "content-type": "application/json",
+          origin: daemon.url,
+          "x-csrf-token": selection.csrfToken
+        },
+        method: "POST"
+      });
+      const body = (await response.json()) as {
+        results: Array<{ error?: string; ok: boolean }>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(body.results).toEqual([
+        {
+          error:
+            "rendered snapshot repository pmatos/symphonika does not match current snapshot repository pmatos/different-repository; reload the page before writing labels",
+          issueNumber: 6,
+          ok: false,
+          projectName: "symphonika"
+        }
+      ]);
       expect(githubIssuesApi.addLabelsToIssue).not.toHaveBeenCalled();
     } finally {
       await daemon.stop();

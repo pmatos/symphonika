@@ -1221,6 +1221,12 @@ export async function startDaemon(
         };
       }
       const subjectLabel = input.kind === "issue" ? "issue" : "pull request";
+      if (input.snapshotRepository === undefined) {
+        return {
+          error: `${subjectLabel} #${input.subjectNumber} rendered snapshot repository identity is unavailable; reload the page after a successful poll before writing labels`,
+          ok: false
+        };
+      }
       const snapshotRepository =
         input.kind === "issue"
           ? runStore.getProjectIssueSnapshotRepository(
@@ -1234,6 +1240,12 @@ export async function startDaemon(
       if (snapshotRepository === undefined) {
         return {
           error: `${subjectLabel} #${input.subjectNumber} snapshot repository identity is unavailable; poll the Project successfully before writing labels`,
+          ok: false
+        };
+      }
+      if (!sameGitHubRepository(input.snapshotRepository, snapshotRepository)) {
+        return {
+          error: `rendered snapshot repository ${input.snapshotRepository.owner}/${input.snapshotRepository.repo} does not match current snapshot repository ${snapshotRepository.owner}/${snapshotRepository.repo}; reload the page before writing labels`,
           ok: false
         };
       }

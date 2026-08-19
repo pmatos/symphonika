@@ -1281,6 +1281,43 @@ export async function startDaemon(
           ok: false
         };
       }
+      if (input.snapshotRepository === undefined) {
+        return {
+          error: `pull request #${input.prNumber} rendered snapshot repository identity is unavailable; reload the page after a successful poll before merging`,
+          freshState: undefined,
+          ok: false
+        };
+      }
+      const snapshotRepository =
+        runStore.getProjectPullRequestSnapshotRepository(
+          input.projectName,
+          input.prNumber
+        );
+      if (snapshotRepository === undefined) {
+        return {
+          error: `pull request #${input.prNumber} snapshot repository identity is unavailable; poll the Project successfully before merging`,
+          freshState: undefined,
+          ok: false
+        };
+      }
+      if (!sameGitHubRepository(input.snapshotRepository, snapshotRepository)) {
+        return {
+          error: `rendered snapshot repository ${input.snapshotRepository.owner}/${input.snapshotRepository.repo} does not match current snapshot repository ${snapshotRepository.owner}/${snapshotRepository.repo}; reload the page before merging`,
+          freshState: undefined,
+          ok: false
+        };
+      }
+      const currentRepository: ProjectSnapshotRepository = {
+        owner: project.tracker.owner,
+        repo: project.tracker.repo
+      };
+      if (!sameGitHubRepository(snapshotRepository, currentRepository)) {
+        return {
+          error: `snapshot repository ${snapshotRepository.owner}/${snapshotRepository.repo} does not match current tracker repository ${currentRepository.owner}/${currentRepository.repo}; poll the Project successfully before merging`,
+          freshState: undefined,
+          ok: false
+        };
+      }
       const token = resolveToken(project.tracker.token, env);
       if (token === undefined) {
         return {

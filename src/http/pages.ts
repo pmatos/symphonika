@@ -1323,6 +1323,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       submittedHeadSha === undefined || submittedHeadSha === ""
         ? undefined
         : submittedHeadSha;
+    const snapshotRepository = readSnapshotRepository(body);
 
     let banner: PullRequestMergeBanner;
     let liveOwnerRunId: string | undefined;
@@ -1367,7 +1368,8 @@ export function registerPages(options: RegisterPagesOptions): void {
         const result = await options.mergePullRequest({
           ...(expectedHeadSha === undefined ? {} : { expectedHeadSha }),
           prNumber,
-          projectName
+          projectName,
+          ...(snapshotRepository === undefined ? {} : { snapshotRepository })
         });
         banner = result.ok
           ? { freshState: result.freshState, kind: "merge", ok: true }
@@ -5098,6 +5100,7 @@ function renderPullRequestMergeSection(input: {
   liveOwnerRunId: string | undefined;
   prNumber: number;
   projectName: string;
+  snapshotRepository: ProjectSnapshotRepository | undefined;
 }): string {
   if (input.liveOwnerRunId !== undefined) {
     return `<section><h2>Merge</h2><p class="note">${labelPill(`owned by ${input.liveOwnerRunId}`, "progress")} Cannot be merged until that Run is cancelled.</p></section>`;
@@ -5112,7 +5115,10 @@ function renderPullRequestMergeSection(input: {
     input.headSha === null
       ? ""
       : `<input type="hidden" name="expected_head_sha" value="${escapeHtml(input.headSha)}">`;
-  return `<section><h2>Merge</h2><p class="note">No live Run owns this PR — merge is available.</p><form method="post" action="${escapeHtml(action)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">${headShaField}<button class="btn" type="submit">Merge</button></form></section>`;
+  const repositoryFields = renderSnapshotRepositoryFields(
+    input.snapshotRepository
+  );
+  return `<section><h2>Merge</h2><p class="note">No live Run owns this PR — merge is available.</p><form method="post" action="${escapeHtml(action)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">${repositoryFields}${headShaField}<button class="btn" type="submit">Merge</button></form></section>`;
 }
 
 function renderPullRequestLabelsSection(input: {
@@ -5180,7 +5186,8 @@ function renderPullRequestDetailPage(input: {
         headSha: snapshot.headSha,
         liveOwnerRunId: input.liveOwnerRunId,
         prNumber: detail.prNumber,
-        projectName: detail.projectName
+        projectName: detail.projectName,
+        snapshotRepository: detail.snapshotRepository
       });
   return `<h1 class="page-title">PR #${detail.prNumber} ${escapeHtml(snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(`${detail.trackingState}${draftNote}`, family)}</p>${urlHtml}${branchHtml}${bannerHtml}<section><h2>Pull Request State</h2>${signals}</section><section><h2>Follow-up tracking</h2><p class="note">${trackedHtml}</p></section>${renderPullRequestLabelsSection({ csrfToken: input.csrfToken, labels: snapshot.labels, prNumber: detail.prNumber, projectName: detail.projectName, snapshotRepository: detail.snapshotRepository })}${mergeSectionHtml}<p class="note"><a href="/prs">← Back to search</a></p>`;
 }

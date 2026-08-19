@@ -65,6 +65,22 @@ describe("detectGitFileState (#306 part 3/3, ADR 0075)", () => {
     }
   });
 
+  it("reports the symbolic branch for a repository with an unborn HEAD", async () => {
+    const root = await makeTempRoot();
+    await initRepo(root);
+    const filePath = path.join(root, "workflow.md");
+    await writeFile(filePath, "content\n", "utf8");
+
+    const state = await detectGitFileState(filePath);
+    expect(state.inRepo).toBe(true);
+    if (state.inRepo) {
+      expect(state).toMatchObject({
+        branch: "main",
+        detachedHeadSha: null
+      });
+    }
+  });
+
   it("reports untracked for a new, never-added file", async () => {
     const root = await makeTempRoot();
     await initRepo(root);

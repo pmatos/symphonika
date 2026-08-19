@@ -48,7 +48,7 @@ export async function detectGitFileState(
   }
 
   const [branchRaw, gitDir, statusOutput, gitignored] = await Promise.all([
-    tryGit(["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"]),
+    tryGit(["-C", repoRoot, "symbolic-ref", "--short", "HEAD"]),
     tryGit(["-C", repoRoot, "rev-parse", "--git-dir"]),
     // Untrimmed: porcelain v1's index-status column is a leading space for
     // "no staged change," which String.trim() would otherwise eat,
@@ -74,10 +74,10 @@ export async function detectGitFileState(
     ])
   ]);
 
-  const detached = branchRaw === "HEAD";
-  const detachedHeadSha = detached
-    ? ((await tryGit(["-C", repoRoot, "rev-parse", "HEAD"])) ?? null)
-    : null;
+  const detachedHeadSha =
+    branchRaw === undefined
+      ? ((await tryGit(["-C", repoRoot, "rev-parse", "HEAD"])) ?? null)
+      : null;
   const absoluteGitDir =
     gitDir === undefined
       ? path.join(repoRoot, ".git")
@@ -94,7 +94,7 @@ export async function detectGitFileState(
   ]);
 
   return {
-    branch: detached ? null : (branchRaw ?? null),
+    branch: branchRaw ?? null,
     detachedHeadSha,
     dirty: (wholeTreeStatus ?? "").length > 0,
     fileStatus: parseFileStatus(statusOutput ?? ""),

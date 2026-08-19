@@ -67,6 +67,24 @@ describe("locatedYamlErrorMessage", () => {
     expect(message).toContain("(line 3, column 1)");
   });
 
+  it("preserves coordinate-like text in the parser reason", () => {
+    let caught: unknown;
+    try {
+      parse("a: | at line 1, column 6 trailing\n x\n");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeDefined();
+
+    const message = locatedYamlErrorMessage(caught, 1);
+
+    expect(message).toContain(
+      "Not a YAML token: at line 1, column 6 trailing:"
+    );
+    expect(message).toContain("a: | at line 1, column 6 trailing");
+    expect(message).toContain("(line 2, column 6)");
+  });
+
   it("returns the bare message when the error has no linePos", () => {
     const message = locatedYamlErrorMessage(new Error("plain failure"));
     expect(message).toBe("plain failure");

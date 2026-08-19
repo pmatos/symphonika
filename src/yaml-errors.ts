@@ -13,11 +13,14 @@ export function locatedYamlErrorMessage(
   if (location === undefined) {
     return message;
   }
-  // yaml's prettifyError appends this clause immediately after the reason,
-  // before the source snippet, so the first occurrence is always the real
-  // one -- a later match would only be coincidental snippet content.
+  // yaml's prettifyError appends this clause at the end of the reason and,
+  // when it includes a source snippet, immediately before the snippet's
+  // ":\n\n" delimiter. Coordinate-like reason or snippet text is unrelated.
   const embeddedLocation = ` at line ${location.line}, column ${location.col}`;
-  const strippedMessage = message.replace(embeddedLocation, "");
+  const locationBeforeSnippet = `${embeddedLocation}:\n\n`;
+  const strippedMessage = message.endsWith(embeddedLocation)
+    ? message.slice(0, -embeddedLocation.length)
+    : message.replace(locationBeforeSnippet, ":\n\n");
   return `${strippedMessage} (line ${location.line + lineOffset}, column ${location.col})`;
 }
 

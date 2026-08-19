@@ -724,10 +724,9 @@ export class RunController {
       });
       return;
     }
-    // Raw FSM mid-walk runs ask the FSM-owned Continuation Eligibility
-    // question: the state machine keeps ownership through both label and
-    // dependency drift. Label-controlled retries re-check both. Closed issues
-    // still cancel above for every scope. See ADR 0046 and ADR 0082.
+    // Closed issues still cancel above for every scope; see
+    // evaluateRunContinuationEligibility for the fsm_owned vs
+    // label_controlled policy.
     const eligibility = evaluateRunContinuationEligibility(refreshed, project, {
       scope:
         payload.respectsIssueLabels === false ? "fsm_owned" : "label_controlled"
@@ -1000,15 +999,12 @@ export class RunController {
     if (refreshed === undefined) {
       return;
     }
-    if (refreshed === null) {
-      this.runStore.markCancelRequested(runId, "closed_issue");
-      this.runStore.updateRunState(runId, "cancelled");
-      return;
-    }
-    const eligibility = evaluateRunContinuationEligibility(refreshed, project, {
-      scope: "fsm_owned"
-    });
-    if (!eligibility.eligible) {
+    if (
+      refreshed === null ||
+      !evaluateRunContinuationEligibility(refreshed, project, {
+        scope: "fsm_owned"
+      }).eligible
+    ) {
       this.runStore.markCancelRequested(runId, "closed_issue");
       this.runStore.updateRunState(runId, "cancelled");
       return;
@@ -1326,9 +1322,8 @@ export class RunController {
       token
     };
 
-    // State advance asks the FSM-owned Continuation Eligibility question.
-    // The FSM keeps ownership through label and dependency drift; issue close
-    // still stops the walk. See ADR 0046 and ADR 0082.
+    // State advance asks the fsm_owned Continuation Eligibility question; see
+    // evaluateRunContinuationEligibility.
     const refreshed = await this.refreshIssue({
       project,
       issueNumber: payload.issue.number,
@@ -1341,13 +1336,12 @@ export class RunController {
       );
       return;
     }
-    if (refreshed === null) {
-      return;
-    }
-    const eligibility = evaluateRunContinuationEligibility(refreshed, project, {
-      scope: "fsm_owned"
-    });
-    if (!eligibility.eligible) {
+    if (
+      refreshed === null ||
+      !evaluateRunContinuationEligibility(refreshed, project, {
+        scope: "fsm_owned"
+      }).eligible
+    ) {
       return;
     }
 
@@ -1851,13 +1845,12 @@ export class RunController {
       );
       return;
     }
-    if (refreshed === null) {
-      return;
-    }
-    const eligibility = evaluateRunContinuationEligibility(refreshed, project, {
-      scope: "label_controlled"
-    });
-    if (!eligibility.eligible) {
+    if (
+      refreshed === null ||
+      !evaluateRunContinuationEligibility(refreshed, project, {
+        scope: "label_controlled"
+      }).eligible
+    ) {
       return;
     }
 
@@ -3529,9 +3522,8 @@ export class RunController {
     // implement gated only on provider_success). Fire the FSM continuation
     // before the failed branch so the next state runs even when the source
     // state's per-state result classifies as failed. State advance also skips
-    // the continuation cap and asks only the FSM-owned Continuation
-    // Eligibility question, so label and dependency drift do not interrupt an
-    // already-owned walk. See ADR 0046 and ADR 0082.
+    // the continuation cap and asks only the fsm_owned Continuation
+    // Eligibility question; see evaluateRunContinuationEligibility.
     if (input.stateAdvance != null) {
       const stateAdvance = input.stateAdvance;
       const refreshedForAdvance = await this.refreshIssue({
@@ -3702,15 +3694,12 @@ export class RunController {
     if (refreshed === undefined) {
       return;
     }
-    if (refreshed === null || refreshed.state !== "open") {
-      return;
-    }
-    const eligibility = evaluateRunContinuationEligibility(
-      refreshed,
-      input.project,
-      { scope: "label_controlled" }
-    );
-    if (!eligibility.eligible) {
+    if (
+      refreshed === null ||
+      !evaluateRunContinuationEligibility(refreshed, input.project, {
+        scope: "label_controlled"
+      }).eligible
+    ) {
       return;
     }
 

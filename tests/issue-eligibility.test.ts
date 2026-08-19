@@ -41,19 +41,19 @@ function issue(overrides: Partial<IssueSnapshot> = {}): IssueSnapshot {
   };
 }
 
+const openBlocker = {
+  number: 99,
+  owner: "pmatos",
+  repo: "symphonika",
+  state: "OPEN" as const,
+  title: "New blocker"
+};
+
 describe("run Continuation Eligibility", () => {
   it("keeps FSM-owned work eligible when a dependency appears mid-walk", () => {
     const decision = evaluateRunContinuationEligibility(
       issue({
-        blockedBy: [
-          {
-            number: 99,
-            owner: "pmatos",
-            repo: "symphonika",
-            state: "OPEN",
-            title: "New blocker"
-          }
-        ],
+        blockedBy: [openBlocker],
         blockedByTruncated: true,
         labels: ["needs-human", "sym:claimed"]
       }),
@@ -66,17 +66,7 @@ describe("run Continuation Eligibility", () => {
 
   it("blocks label-controlled work when a dependency appears", () => {
     const decision = evaluateRunContinuationEligibility(
-      issue({
-        blockedBy: [
-          {
-            number: 99,
-            owner: "pmatos",
-            repo: "symphonika",
-            state: "OPEN",
-            title: "New blocker"
-          }
-        ]
-      }),
+      issue({ blockedBy: [openBlocker] }),
       project,
       { scope: "label_controlled" }
     );

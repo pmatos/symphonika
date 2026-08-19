@@ -76,9 +76,9 @@ export async function reconcileActiveRuns(
       continue;
     }
 
-    // FSM-owned runs retain ownership through both label and dependency drift;
-    // label-controlled runs re-check both. CLOSED_ISSUE above still wins for
-    // every scope. See ADR 0046 and ADR 0082.
+    // CLOSED_ISSUE above still wins for every scope; see
+    // evaluateRunContinuationEligibility for the fsm_owned vs
+    // label_controlled policy.
     const eligibility = evaluateRunContinuationEligibility(snapshot, project, {
       scope: entry.respectsIssueLabels ? "label_controlled" : "fsm_owned"
     });

@@ -59,6 +59,25 @@ this: `persistProjectPullRequestPollState` (`daemon.ts`) gates persistence on `.
 the fetched rows still persist; `rateLimitedTokens` (`src/issue-polling.ts`) no longer short-circuits
 on `report.ok` being true, specifically so this shape is still detected.
 
+### Concurrent enrichment workers stop starting new calls once a sibling hits a rate limit
+
+The above closes the cross-tick gap (a rate limit is now detected and backs off the *next* tick), but
+`pollProjectPullRequests` enriches a project's PR list with `PULL_REQUEST_ENRICHMENT_CONCURRENCY` (4)
+concurrent workers pulling from a shared queue (`mapWithConcurrency`). Without any coordination between
+them, one worker's PR hitting a rate limit doesn't stop its siblings from continuing to pull the next
+PR off the queue and firing more GraphQL calls -- for a project with many open PRs, a rate limit
+detected early in the list still let the remaining workers drain most of the list before
+`pollProjectPullRequests` returned and the caller could react, all within the *same* tick.
+
+`pollProjectPullRequests` now holds a `let enrichmentRateLimited = false` flag shared (via closure)
+across the batch; the wrapper passed to `mapWithConcurrency` sets it the moment any worker's
+`buildSnapshot` call returns an `enrichmentError`. `buildSnapshot` itself takes an
+`isEnrichmentRateLimited` callback and checks it -- after the free cache-hit path, before the GraphQL
+call -- returning the cheap REST-only snapshot unenriched (`stateAvailable: false`) instead of placing
+another call. This only stops *new* calls from starting; a call already in flight when the flag flips
+still completes (there's no way to abort a request already sent), and every PR still gets a row per the
+existing "must not drop the row" contract -- only some of them go unenriched for that tick.
+
 ### Backoff is keyed by resolved GitHub token, not global
 
 `daemon.ts` holds `githubBackoffUntilByToken: Map<string, number>`, keyed by the token

@@ -190,11 +190,31 @@ async function pollProjectPullRequests(
   for (const raw of numberedPullRequests) {
     seenEnrichmentCacheKeys.add(enrichmentCacheKey(project.name, raw.number));
   }
+  // Shared across this batch's concurrent workers: once any of them hits a
+  // rate limit, the rest stop starting NEW enrichment calls (an in-flight
+  // call already underway when the flag flips still completes -- there's no
+  // way to abort a request already sent) instead of draining the remainder
+  // of a long PR list against an already-exhausted token. See ADR 0083.
+  let enrichmentRateLimited = false;
   const built = await mapWithConcurrency(
     numberedPullRequests,
     PULL_REQUEST_ENRICHMENT_CONCURRENCY,
     (raw) =>
-      buildSnapshot(raw, raw.number, project.name, repoInput, api, nowMs, cache)
+      buildSnapshot(
+        raw,
+        raw.number,
+        project.name,
+        repoInput,
+        api,
+        nowMs,
+        cache,
+        () => enrichmentRateLimited
+      ).then((result) => {
+        if (result.enrichmentError !== undefined) {
+          enrichmentRateLimited = true;
+        }
+        return result;
+      })
   );
   status.pullRequests.push(...built.map((entry) => entry.snapshot));
 
@@ -284,7 +304,8 @@ async function buildSnapshot(
   repoInput: GitHubIssueRepositoryInput,
   api: GitHubIssuesApi,
   nowMs: number,
-  cache: Map<string, CachedPullRequestEnrichment>
+  cache: Map<string, CachedPullRequestEnrichment>,
+  isEnrichmentRateLimited: () => boolean
 ): Promise<{ enrichmentError?: string; snapshot: ProjectPullRequestSnapshot }> {
   const base: ProjectPullRequestSnapshot = {
     branchOrigin: classifyPullRequestBranchOrigin(raw.head?.ref),
@@ -326,6 +347,14 @@ async function buildSnapshot(
         url: cached.url
       }
     };
+  }
+
+  if (isEnrichmentRateLimited()) {
+    // A sibling worker in this same batch already hit a rate limit on this
+    // token -- skip this PR's GraphQL call rather than adding to an already
+    // exhausted budget. The row still appears (from the cheap REST data
+    // above), just unenriched for this tick.
+    return { snapshot: base };
   }
 
   try {

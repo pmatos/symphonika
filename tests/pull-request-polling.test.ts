@@ -352,6 +352,32 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
     expect(status.pullRequests).toEqual([]);
   });
 
+  it("reports an unsupported PR list API as a failed poll so callers preserve the prior snapshot", async () => {
+    const api: GitHubIssuesApi = {
+      listOpenIssues: () => Promise.resolve([])
+    };
+    const status = await pollConfiguredGitHubPullRequestsFromConfig({
+      config: { projects: [project()] },
+      env: { GITHUB_TOKEN: "secret" },
+      githubIssuesApi: api
+    });
+
+    expect(status.errors).toEqual([
+      "projects.alpha.tracker.repository pmatos/symphonika pull requests could not be listed: GitHub API does not support listing pull requests"
+    ]);
+    expect(status.projects).toEqual([
+      {
+        error:
+          "projects.alpha.tracker.repository pmatos/symphonika pull requests could not be listed: GitHub API does not support listing pull requests",
+        fetchedPullRequests: 0,
+        lastPolledAt: expect.any(String) as string,
+        name: "alpha",
+        ok: false
+      }
+    ]);
+    expect(status.pullRequests).toEqual([]);
+  });
+
   it("does not re-enrich a PR whose cache entry is still fresh (bounds cross-tick GraphQL volume)", async () => {
     let enrichmentCalls = 0;
     const followup: RawGitHubPullRequestFollowupState = {

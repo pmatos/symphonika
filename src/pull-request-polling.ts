@@ -156,7 +156,11 @@ async function pollProjectPullRequests(
 
   let rawPullRequests: RawGitHubPullRequest[];
   try {
-    rawPullRequests = (await tryListPullRequests(api, repoInput)) ?? [];
+    const listedPullRequests = await tryListPullRequests(api, repoInput);
+    if (listedPullRequests === undefined) {
+      throw new Error("GitHub API does not support listing pull requests");
+    }
+    rawPullRequests = listedPullRequests;
   } catch (error) {
     const message = `projects.${project.name}.tracker.repository ${project.tracker.owner}/${project.tracker.repo} pull requests could not be listed: ${errorMessage(error)}`;
     status.errors.push(message);

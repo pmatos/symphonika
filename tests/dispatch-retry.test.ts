@@ -667,7 +667,7 @@ describe("dispatch retry policy", () => {
     }
   });
 
-  it("cancels a scheduled retry when a dependency becomes an open blocker during backoff", async () => {
+  it("cancels a scheduled retry and releases its claim when a dependency becomes an open blocker during backoff", async () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);
     await mkdir(prepared.workspacePath, { recursive: true });
@@ -778,6 +778,10 @@ describe("dispatch retry policy", () => {
       } finally {
         database.close();
       }
+
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:claimed"] })
+      );
     } finally {
       await daemon.stop();
     }

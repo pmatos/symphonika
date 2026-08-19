@@ -109,7 +109,8 @@ _Avoid_: failed run, error
 **Issue Reservation**:
 The orchestrator's exclusive claim on a Dispatch Project's Issue, whether currently in flight as an
 executing Run or scheduled for imminent dispatch as a delayed retry, Continuation, State Advance,
-or wait park.
+or wait park. When Continuation Eligibility rejects label-controlled work and no active or scheduled
+step remains, the reservation ends and the orchestrator releases `sym:claimed`.
 _Avoid_: lock, in-flight when the claim spans both in-flight and scheduled work
 
 **Workspace**:
@@ -343,6 +344,8 @@ _Avoid_: chat session
 - An **Orchestrator** may write **Operational Labels**
 - A **Stale Claim** blocks automatic dispatch until explicitly cleared in v1
 - An **Issue Reservation** prevents duplicate dispatch while an Issue is either executing or scheduled
+- A rejected label-controlled retry or **Continuation** releases its **Issue Reservation** so later
+  restored eligibility can dispatch fresh work instead of becoming a **Stale Claim**
 - A **Coding Agent** may write **Workflow Labels**
 - A **Coding Agent** owns the **PR Workflow**
 - A **PR Follow-up** watches only PRs associated with completed Symphonika **Runs**

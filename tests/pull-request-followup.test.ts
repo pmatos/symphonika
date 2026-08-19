@@ -776,6 +776,160 @@ describe("pull request follow-up", () => {
       expect(store.getRun("review-run-1")).toMatchObject({
         state: "succeeded"
       });
+      // The succeeded retry falls through to scheduleNext's continuation-
+      // scheduling eligibility re-check, which finds the issue ineligible
+      // (still missing `agent-ready`, its normal steady state while parked
+      // on PR review). That must not strip sym:claimed out from under this
+      // label-immune, still-live PR Follow-up reservation. See issue #475.
+      const claimRemovals = (
+        githubIssuesApi.removeLabelsFromIssue as ReturnType<typeof vi.fn>
+      ).mock.calls
+        .map(([call]) => call as { labels: string[] })
+        .filter((call) => call.labels[0] === "sym:claimed");
+      expect(claimRemovals).toHaveLength(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("releases the claim when a label-immune PR follow-up finishes after the issue closes", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-review-followup";
+      const workspacePath = path.join(
+        root,
+        ".symphonika",
+        "workspaces",
+        "symphonika",
+        "issues",
+        "54-review-followup"
+      );
+      await createGitWorkspaceAhead({ branchName, workspacePath });
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath
+      });
+
+      const project = projectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi
+          .fn()
+          .mockResolvedValueOnce(issueFixture())
+          .mockResolvedValueOnce(null),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider: fakeProvider([]),
+        root,
+        runStore: store,
+        workspacePath
+      });
+
+      const result = await controller.dispatchReviewFollowup({
+        issueNumber: 54,
+        parentRunId: "parent-run",
+        projectName: project.name,
+        review: {
+          headSha: "abc123",
+          pullRequestNumber: 81,
+          pullRequestUrl: "https://github.com/pmatos/symphonika/pull/81",
+          reviewDecision: "CHANGES_REQUESTED",
+          statusCheckRollupState: "SUCCESS",
+          unresolvedThreads: []
+        }
+      });
+
+      expect(result).toEqual({ dispatched: true, runId: "review-run-1" });
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:claimed"] })
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("preserves the claim when a delayed label-immune continuation loses label eligibility", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-review-followup";
+      const workspacePath = path.join(
+        root,
+        ".symphonika",
+        "workspaces",
+        "symphonika",
+        "issues",
+        "54-review-followup"
+      );
+      await createGitWorkspaceAhead({ branchName, workspacePath });
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath
+      });
+
+      const project = projectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi
+          .fn()
+          .mockResolvedValueOnce(issueFixture())
+          .mockResolvedValueOnce({
+            ...issueFixture(),
+            labels: [{ name: "agent-ready" }, { name: "sym:claimed" }]
+          })
+          .mockResolvedValueOnce(issueFixture()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const scheduledContinuations: Array<() => Promise<void>> = [];
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider: fakeProvider([]),
+        root,
+        runStore: store,
+        schedule: (input) => {
+          if (input.kind === "continuation") {
+            scheduledContinuations.push(input.fire);
+          }
+        },
+        workspacePath
+      });
+
+      const result = await controller.dispatchReviewFollowup({
+        issueNumber: 54,
+        parentRunId: "parent-run",
+        projectName: project.name,
+        review: {
+          headSha: "abc123",
+          pullRequestNumber: 81,
+          pullRequestUrl: "https://github.com/pmatos/symphonika/pull/81",
+          reviewDecision: "CHANGES_REQUESTED",
+          statusCheckRollupState: "SUCCESS",
+          unresolvedThreads: []
+        }
+      });
+
+      expect(result).toEqual({ dispatched: true, runId: "review-run-1" });
+      expect(scheduledContinuations).toHaveLength(1);
+
+      await scheduledContinuations[0]!();
+
+      const claimRemovals = (
+        githubIssuesApi.removeLabelsFromIssue as ReturnType<typeof vi.fn>
+      ).mock.calls
+        .map(([call]) => call as { labels: string[] })
+        .filter((call) => call.labels[0] === "sym:claimed");
+      expect(claimRemovals).toHaveLength(0);
     } finally {
       store.close();
     }

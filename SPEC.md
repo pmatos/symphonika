@@ -1196,11 +1196,18 @@ On closed issue:
 On eligibility loss while a label-controlled Run is running:
 
 - cancel active run
-- remove `sym:running`
+- remove `sym:running` and `sym:claimed`
 - preserve workspace and logs
 
 An admitted raw-FSM Run keeps FSM-owned Continuation Eligibility through label and dependency
 drift; issue closure and operator cancellation remain its live stop controls (ADR 0046 / ADR 0082).
+
+When label-controlled Continuation Eligibility rejects a delayed retry or Continuation:
+
+- cancel the retry row when one exists
+- release `sym:claimed` because no active or scheduled Issue Reservation remains
+- do not park or automatically reschedule the work; a later eligible poll may dispatch a fresh Run
+- preserve prior Run evidence, workspace, and logs
 
 On Watchdog no-progress termination:
 
@@ -1504,6 +1511,13 @@ Cancellation preserves workspace and logs.
 Label or dependency drift does not cancel an already-admitted raw-FSM walk. Its State Advances,
 waiting rows, and retries use FSM-owned Continuation Eligibility until the walk terminates; issue
 closure and explicit operator cancellation still apply (ADR 0046 / ADR 0082).
+
+Eligibility-loss cancellation also releases `sym:claimed`. The same release applies when an
+eligibility check consumes a delayed retry or Continuation without starting it: retaining the
+claim after the Issue Reservation ends would turn ordinary label or dependency drift into a stale
+claim that blocks later dispatch. A newly eligible Issue returns through fresh dispatch and reuses
+its deterministic Workspace and Issue Branch; label-controlled work is not parked waiting for
+eligibility to return.
 
 On graceful shutdown, the daemon first closes the active-run registry to new claims
 synchronously, before snapshotting active runs, so a dispatch still in pre-claim work can never

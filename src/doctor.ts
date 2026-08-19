@@ -1927,7 +1927,7 @@ export async function runClearStale(
     options.all === true
       ? issueNumbers.length === 0
         ? " issues (none)"
-        : ` issues ${issueNumbers.map((issueNumber) => `#${issueNumber}`).join(", ")}`
+        : ` ${issueNumbers.length === 1 ? "issue" : "issues"} ${issueNumbers.map((issueNumber) => `#${issueNumber}`).join(", ")}`
       : `#${issueNumbers[0]}`;
   const warning = `clear-stale ${options.yes === true ? "will" : "would"} remove ${STALE_CLEAR_LABELS.join(", ")} from ${repositoryName}${targets}`;
   warnings.push(warning);

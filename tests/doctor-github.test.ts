@@ -546,6 +546,59 @@ describe("runClearStale", () => {
     expect(githubApi.removeIssueLabel).not.toHaveBeenCalled();
   });
 
+  it("uses singular wording when --all selects exactly one stale Issue", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listIssueNumbersByLabel: vi.fn().mockResolvedValue([42]),
+      listLabels: vi.fn(),
+      removeIssueLabel: vi.fn(),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runClearStale({
+      all: true,
+      configPath: "symphonika.yml",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      project: "symphonika"
+    });
+
+    expect(report.warnings).toContain(
+      "clear-stale would remove sym:stale, sym:claimed, sym:running from pmatos/symphonika issue #42"
+    );
+  });
+
+  it("reports an error when the GitHub adapter does not support --all discovery", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi.fn(),
+      removeIssueLabel: vi.fn(),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runClearStale({
+      all: true,
+      configPath: "symphonika.yml",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      project: "symphonika",
+      yes: true
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain(
+      "projects.symphonika.tracker.repository pmatos/symphonika GitHub adapter does not support listIssueNumbersByLabel"
+    );
+    expect(report.outcomes).toEqual([]);
+    expect(githubApi.removeIssueLabel).not.toHaveBeenCalled();
+  });
+
   it("reports each --all outcome and continues after an Issue error", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);

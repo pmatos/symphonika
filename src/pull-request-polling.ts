@@ -1,5 +1,6 @@
 import {
   envReferenceName,
+  isRateLimitError,
   normalizeLabels,
   resolveEnvBackedValue,
   tryGetPullRequestFollowupState,
@@ -185,20 +186,32 @@ async function pollProjectPullRequests(
   for (const raw of numberedPullRequests) {
     seenEnrichmentCacheKeys.add(enrichmentCacheKey(project.name, raw.number));
   }
-  const snapshots = await mapWithConcurrency(
+  const built = await mapWithConcurrency(
     numberedPullRequests,
     PULL_REQUEST_ENRICHMENT_CONCURRENCY,
     (raw) =>
       buildSnapshot(raw, raw.number, project.name, repoInput, api, nowMs, cache)
   );
-  status.pullRequests.push(...snapshots);
+  status.pullRequests.push(...built.map((entry) => entry.snapshot));
+
+  // A rate-limited enrichment call must still surface here even though the
+  // row itself is kept (see buildSnapshot's catch) -- otherwise the caller
+  // (daemon.ts's engageGithubBackoff) never sees the rate limit and retries
+  // the same GraphQL calls every tick. See ADR 0082.
+  const rateLimitError = built.find(
+    (entry) => entry.enrichmentError !== undefined
+  )?.enrichmentError;
 
   status.projects.push({
-    fetchedPullRequests: snapshots.length,
+    ...(rateLimitError === undefined ? {} : { error: rateLimitError }),
+    fetchedPullRequests: built.length,
     lastPolledAt,
     name: project.name,
     ok: true
   });
+  if (rateLimitError !== undefined) {
+    status.errors.push(rateLimitError);
+  }
 }
 
 // Concurrent, not sequential (unlike pull-request-followup.ts's loops) --
@@ -269,7 +282,7 @@ async function buildSnapshot(
   api: GitHubIssuesApi,
   nowMs: number,
   cache: Map<string, CachedPullRequestEnrichment>
-): Promise<ProjectPullRequestSnapshot> {
+): Promise<{ enrichmentError?: string; snapshot: ProjectPullRequestSnapshot }> {
   const base: ProjectPullRequestSnapshot = {
     branchOrigin: classifyPullRequestBranchOrigin(raw.head?.ref),
     checks: null,
@@ -297,17 +310,19 @@ async function buildSnapshot(
     nowMs - cached.enrichedAtMs < PULL_REQUEST_ENRICHMENT_MIN_INTERVAL_MS
   ) {
     return {
-      ...base,
-      checks: cached.checks,
-      headSha: cached.headSha,
-      mergeable: cached.mergeable,
-      merged: cached.merged,
-      open: cached.open,
-      reviewDecision: cached.reviewDecision,
-      stateAvailable: true,
-      trackingState: cached.trackingState,
-      unresolvedReviewThreads: cached.unresolvedReviewThreads,
-      url: cached.url
+      snapshot: {
+        ...base,
+        checks: cached.checks,
+        headSha: cached.headSha,
+        mergeable: cached.mergeable,
+        merged: cached.merged,
+        open: cached.open,
+        reviewDecision: cached.reviewDecision,
+        stateAvailable: true,
+        trackingState: cached.trackingState,
+        unresolvedReviewThreads: cached.unresolvedReviewThreads,
+        url: cached.url
+      }
     };
   }
 
@@ -317,14 +332,21 @@ async function buildSnapshot(
       ...repoInput,
       pullNumber: prNumber
     });
-  } catch {
+  } catch (error) {
     // A single PR's enrichment failing must not drop the row — #259's
     // orphans are exactly the case AC4 needs visible even when GitHub
-    // follow-up state can't be fetched for them.
-    return base;
+    // follow-up state can't be fetched for them. A rate-limit-shaped
+    // failure is still surfaced (not swallowed) via enrichmentError so the
+    // caller can engage backoff instead of retrying it every tick — see
+    // ADR 0082.
+    const message = errorMessage(error);
+    return {
+      ...(isRateLimitError(message) ? { enrichmentError: message } : {}),
+      snapshot: base
+    };
   }
   if (followup === null || followup === undefined) {
-    return base;
+    return { snapshot: base };
   }
 
   const state = interpretPullRequest(followup);
@@ -341,17 +363,19 @@ async function buildSnapshot(
     url: state.url
   });
   return {
-    ...base,
-    checks: state.checks,
-    headSha: state.headSha,
-    mergeable: state.mergeable,
-    merged: state.merged,
-    open: state.open,
-    reviewDecision: state.reviewDecision,
-    stateAvailable: true,
-    trackingState: state.trackingState,
-    unresolvedReviewThreads: state.unresolvedReviewThreads,
-    url: state.url
+    snapshot: {
+      ...base,
+      checks: state.checks,
+      headSha: state.headSha,
+      mergeable: state.mergeable,
+      merged: state.merged,
+      open: state.open,
+      reviewDecision: state.reviewDecision,
+      stateAvailable: true,
+      trackingState: state.trackingState,
+      unresolvedReviewThreads: state.unresolvedReviewThreads,
+      url: state.url
+    }
   };
 }
 

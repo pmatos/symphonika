@@ -35,6 +35,30 @@ fixed hourly clock that doubling delays can't influence either way; the window's
 the daemon from flailing against an already-exhausted budget (and tripping the secondary/abuse limit
 in the process) between resets, not to time the reset itself.
 
+### A per-PR enrichment failure still counts toward detection, even though the row is kept
+
+`pollProjectPullRequests` lists a project's open PRs, then enriches each one individually
+(`buildSnapshot`) with Symphonika's own Pull Request State -- a second GraphQL round-trip per PR. A
+single PR's enrichment failing must not drop that PR's row (#259: an orphaned PR whose state can't be
+fetched is exactly the case AC4 needs visible), so `buildSnapshot` has always swallowed enrichment
+errors and returned the row with `stateAvailable: false`. Left alone, that swallowing also hid a
+rate-limited enrichment call from the project-level report `pollProjectPullRequests` returns (which
+listed the PRs fine, so it reported `ok: true` with no `error`) -- `rateLimitedTokens` never saw it,
+backoff never engaged, and every subsequent tick repeated the same GraphQL calls against an
+already-exhausted budget, for what is normally the larger share of a tick's GraphQL volume (one
+follow-up call per open PR, vs. one dependency check per project).
+
+`buildSnapshot` now also returns an `enrichmentError` alongside the (always-kept) snapshot when the
+underlying failure is rate-limit-shaped (per `isRateLimitError`); `pollProjectPullRequests` surfaces
+the first one it sees as `error` on that project's `ProjectPullRequestPollReport`, and also pushes it
+onto `status.errors`. This produces a new report shape -- `ok: true` alongside a populated `error` --
+that means "the project polled successfully overall, but a rate limit was hit during enrichment,"
+distinct from the existing `ok: false` shape used for a project the poll couldn't process at all
+(token unresolved, PR list itself failed). Both consumers that read `.error` were checked against
+this: `persistProjectPullRequestPollState` (`daemon.ts`) gates persistence on `.ok`, not `.error`, so
+the fetched rows still persist; `rateLimitedTokens` (`src/issue-polling.ts`) no longer short-circuits
+on `report.ok` being true, specifically so this shape is still detected.
+
 ### Backoff is keyed by resolved GitHub token, not global
 
 `daemon.ts` holds `githubBackoffUntilByToken: Map<string, number>`, keyed by the token

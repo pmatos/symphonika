@@ -1533,7 +1533,11 @@ export function backoffUntil(nowMs: number): number {
 // §6 permits each tracker to reference an independent $VAR_NAME, and GitHub
 // tracks rate-limit budgets per token, not per Symphonika deployment.
 // Structurally typed over `reports` so the same function serves both
-// IssuePollStatus.projects and PullRequestPollStatus.projects.
+// IssuePollStatus.projects and PullRequestPollStatus.projects. Deliberately
+// does not gate on `report.ok`: a PR-poll report can be `ok: true` (the PR
+// list itself was fetched fine) while still carrying a rate-limit error from
+// a single PR's enrichment call (see pull-request-polling.ts's buildSnapshot
+// / ADR 0082) -- that case must still engage backoff.
 export function rateLimitedTokens(
   reports: ReadonlyArray<{ error?: string; name: string; ok: boolean }>,
   projects: readonly PollingProjectConfig[],
@@ -1541,7 +1545,7 @@ export function rateLimitedTokens(
 ): Set<string> {
   const tokens = new Set<string>();
   for (const report of reports) {
-    if (report.ok || report.error === undefined) {
+    if (report.error === undefined) {
       continue;
     }
     if (!isRateLimitError(report.error)) {

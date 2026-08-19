@@ -95,6 +95,14 @@ calling the GitHub mutation API. A missing identity (including a row created bef
 or a mismatch is refused until a successful poll replaces the snapshot. This keeps the callback as
 the uniform guard for single-issue, bulk, stale-claim, and pull-request label writes.
 
+The poll result carries that source identity on both each per-Project report and each issue or pull-
+request row. Persistence uses the report's identity and selects only rows with the same Project name
+and repository; it never recovers provenance from a name-keyed Service Config lookup. This matters
+because defensive reload permits duplicate Project names and its runtime lookup intentionally lets
+the last declaration win: the last report may replace the shared name-keyed snapshot, but rows from
+an earlier repository cannot be folded into that replacement or relabelled as if the last repository
+produced them.
+
 The alternative of clearing snapshots as soon as a tracker changes was rejected because ADR 0073
 deliberately keeps last-good poll evidence when the next repository cannot be polled. Carrying the
 identity only in HTML forms was also rejected: the JSON bulk endpoint has no form, and a

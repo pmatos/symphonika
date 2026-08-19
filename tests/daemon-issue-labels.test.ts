@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -72,6 +72,41 @@ async function writeValidProject(
     ].join("\n")
   );
   await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+}
+
+async function appendDuplicateNamedProject(
+  root: string,
+  repository: { owner: string; repo: string }
+): Promise<void> {
+  await appendFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "  - name: symphonika",
+      "    disabled: false",
+      "    weight: 1",
+      "    tracker:",
+      "      kind: github",
+      `      owner: ${repository.owner}`,
+      `      repo: ${repository.repo}`,
+      '      token: "$GITHUB_TOKEN"',
+      "    issue_filters:",
+      '      states: ["open"]',
+      '      labels_all: ["agent-ready"]',
+      '      labels_none: ["blocked", "needs-human"]',
+      "    priority:",
+      "      labels: {}",
+      "      default: 99",
+      "    workspace:",
+      "      root: ./.symphonika/workspaces/symphonika-duplicate",
+      "      git:",
+      `        remote: git@github.com:${repository.owner}/${repository.repo}.git`,
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      "    workflow: ./WORKFLOW.md",
+      ""
+    ].join("\n")
+  );
 }
 
 function issueFixture(overrides: {
@@ -281,6 +316,65 @@ describe("daemon-wired POST /issues/:project/:number/labels/(add|remove) (#308 p
       expect(html).toContain(
         "snapshot repository pmatos/symphonika does not match current tracker repository pmatos/different-repository"
       );
+      expect(githubIssuesApi.addLabelsToIssue).not.toHaveBeenCalled();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("does not expose issue rows polled from a shadowed duplicate Project repository", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    await appendDuplicateNamedProject(root, {
+      owner: "pmatos",
+      repo: "different-repository"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn((input: { repo: string }) =>
+        Promise.resolve([
+          issueFixture({
+            labels: ["blocked"],
+            number: input.repo === "symphonika" ? 6 : 7,
+            title:
+              input.repo === "symphonika"
+                ? "Shadowed repository issue"
+                : "Active repository issue"
+          })
+        ])
+      )
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const { cookie, csrfToken } = await fetchIssuesCsrfToken(
+        daemon.url,
+        "/issues/symphonika/7"
+      );
+      const response = await fetch(
+        `${daemon.url}/issues/symphonika/6/labels/add`,
+        {
+          body: new URLSearchParams({
+            csrf_token: csrfToken,
+            label: "agent-ready"
+          }).toString(),
+          headers: {
+            cookie,
+            "content-type": "application/x-www-form-urlencoded",
+            origin: daemon.url
+          },
+          method: "POST"
+        }
+      );
+
+      expect(response.status).toBe(404);
       expect(githubIssuesApi.addLabelsToIssue).not.toHaveBeenCalled();
     } finally {
       await daemon.stop();

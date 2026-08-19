@@ -72,12 +72,49 @@ async function writeValidProject(root: string): Promise<void> {
   await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
 }
 
+async function appendDuplicateNamedProject(
+  root: string,
+  repository: { owner: string; repo: string }
+): Promise<void> {
+  await appendFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "  - name: symphonika",
+      "    disabled: false",
+      "    weight: 1",
+      "    tracker:",
+      "      kind: github",
+      `      owner: ${repository.owner}`,
+      `      repo: ${repository.repo}`,
+      '      token: "$GITHUB_TOKEN"',
+      "    issue_filters:",
+      '      states: ["open"]',
+      '      labels_all: ["agent-ready"]',
+      '      labels_none: ["blocked", "needs-human"]',
+      "    priority:",
+      "      labels: {}",
+      "      default: 99",
+      "    workspace:",
+      "      root: ./.symphonika/workspaces/symphonika-duplicate",
+      "      git:",
+      `        remote: git@github.com:${repository.owner}/${repository.repo}.git`,
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      "    workflow: ./WORKFLOW.md",
+      ""
+    ].join("\n")
+  );
+}
+
 // The daemon polls PRs on startup, the same tick as the issue poll (#309
 // part 1) — populating the fixture through that natural poll cycle (rather
 // than seeding project_pull_request_snapshots via a side-channel RunStore
 // write before startDaemon) avoids the poll immediately overwriting a
 // manually-seeded row with its own (empty) result.
-function orphanPullRequestFixture(): RawGitHubPullRequest {
+function orphanPullRequestFixture(
+  overrides: Partial<RawGitHubPullRequest> = {}
+): RawGitHubPullRequest {
   return {
     draft: false,
     head: { ref: "sym/symphonika/246-orphan", sha: "abc123" },
@@ -85,7 +122,8 @@ function orphanPullRequestFixture(): RawGitHubPullRequest {
     merged_at: null,
     number: 246,
     state: "open",
-    title: "Orphaned PR"
+    title: "Orphaned PR",
+    ...overrides
   };
 }
 
@@ -304,6 +342,72 @@ describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)"
       } finally {
         runStore.close();
       }
+    } finally {
+      await daemon.stop();
+    }
+  });
+});
+
+describe("daemon-wired POST /prs/:project/:number/labels/add (#309 part 2)", () => {
+  it("does not expose PR rows polled from a shadowed duplicate Project repository", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    await appendDuplicateNamedProject(root, {
+      owner: "pmatos",
+      repo: "different-repository"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      listPullRequests: vi.fn((input: { repo: string }) =>
+        Promise.resolve([
+          orphanPullRequestFixture({
+            head: {
+              ref: `sym/symphonika/${input.repo === "symphonika" ? 246 : 247}-orphan`,
+              sha: input.repo === "symphonika" ? "abc123" : "def456"
+            },
+            html_url: `https://github.com/pmatos/${input.repo}/pull/${input.repo === "symphonika" ? 246 : 247}`,
+            number: input.repo === "symphonika" ? 246 : 247,
+            title:
+              input.repo === "symphonika"
+                ? "Shadowed repository PR"
+                : "Active repository PR"
+          })
+        ])
+      )
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const { cookie, csrfToken } = await fetchPrsCsrfToken(
+        daemon.url,
+        "/prs/symphonika/247"
+      );
+      const response = await fetch(
+        `${daemon.url}/prs/symphonika/246/labels/add`,
+        {
+          body: new URLSearchParams({
+            csrf_token: csrfToken,
+            label: "agent-ready"
+          }).toString(),
+          headers: {
+            cookie,
+            "content-type": "application/x-www-form-urlencoded",
+            origin: daemon.url
+          },
+          method: "POST"
+        }
+      );
+
+      expect(response.status).toBe(404);
+      expect(githubIssuesApi.addLabelsToIssue).not.toHaveBeenCalled();
     } finally {
       await daemon.stop();
     }

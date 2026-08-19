@@ -1355,7 +1355,8 @@ describe("daemon dispatch", () => {
               updated_at: "2026-05-02T11:00:00Z",
               url: "https://github.com/pmatos/symphonika/issues/8"
             },
-            project: mutatedProject.name
+            project: mutatedProject.name,
+            repository: { owner: "pmatos", repo: "symphonika" }
           }
         ],
         errors: [],

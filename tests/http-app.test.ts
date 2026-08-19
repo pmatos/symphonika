@@ -64,7 +64,8 @@ describe("HTTP app", () => {
         number: 9
       },
       project: "p",
-      reasons: ["has operational label sym:stale"]
+      reasons: ["has operational label sym:stale"],
+      repository: { owner: "pmatos", repo: "symphonika" }
     };
     const claimed = {
       issue: {
@@ -73,7 +74,8 @@ describe("HTTP app", () => {
         number: 10
       },
       project: "p",
-      reasons: ["has operational label sym:claimed"]
+      reasons: ["has operational label sym:claimed"],
+      repository: { owner: "pmatos", repo: "symphonika" }
     };
 
     const app = createHttpApp({
@@ -364,7 +366,8 @@ describe("HTTP app", () => {
                 fetchedIssues: 3,
                 filteredIssues: 1,
                 name: "alpha",
-                ok: true
+                ok: true,
+                repository: { owner: "pmatos", repo: "symphonika" }
               }
             ]
           },
@@ -394,7 +397,8 @@ describe("HTTP app", () => {
             fetchedIssues: 3,
             filteredIssues: 1,
             name: "alpha",
-            ok: true
+            ok: true,
+            repository: { owner: "pmatos", repo: "symphonika" }
           }
         ]
       },

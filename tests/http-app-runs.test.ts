@@ -809,7 +809,14 @@ describe("HTTP app — runs API and pages", () => {
           candidateIssues: [],
           errors: [],
           filteredIssues: [],
-          projects: [{ fetchedIssues: 4, name: "alpha", ok: true }]
+          projects: [
+            {
+              fetchedIssues: 4,
+              name: "alpha",
+              ok: true,
+              repository: { owner: "pmatos", repo: "symphonika" }
+            }
+          ]
         },
         runStore: test.runStore,
         stateRoot: test.stateRoot,
@@ -1449,7 +1456,8 @@ describe("HTTP app — runs API and pages", () => {
                 url: "https://github.com/pmatos/symphonika/issues/44"
               }),
               project: "alpha",
-              reasons: ["has operational label sym:stale"]
+              reasons: ["has operational label sym:stale"],
+              repository: { owner: "pmatos", repo: "symphonika" }
             }
           ],
           projects: []
@@ -2250,7 +2258,11 @@ describe("HTTP app — dashboard IA shell (#302)", () => {
           doctorErrors: [],
           issuePolling: {
             candidateIssues: [
-              { issue: sampleIssue({ number: 22 }), project: "alpha" }
+              {
+                issue: sampleIssue({ number: 22 }),
+                project: "alpha",
+                repository: { owner: "pmatos", repo: "symphonika" }
+              }
             ],
             errors: [],
             filteredIssues: [],

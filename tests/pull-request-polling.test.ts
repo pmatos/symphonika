@@ -86,7 +86,8 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
         fetchedPullRequests: 1,
         lastPolledAt: expect.any(String) as string,
         name: "alpha",
-        ok: true
+        ok: true,
+        repository: { owner: "pmatos", repo: "symphonika" }
       }
     ]);
     expect(status.pullRequests).toHaveLength(1);
@@ -101,6 +102,7 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
       open: true,
       prNumber: 246,
       project: "alpha",
+      repository: { owner: "pmatos", repo: "symphonika" },
       stateAvailable: false,
       title: "Fix login"
     });
@@ -346,7 +348,8 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
         fetchedPullRequests: 0,
         lastPolledAt: expect.any(String) as string,
         name: "alpha",
-        ok: false
+        ok: false,
+        repository: { owner: "pmatos", repo: "symphonika" }
       }
     ]);
     expect(status.pullRequests).toEqual([]);
@@ -452,7 +455,7 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
       env,
       githubIssuesApi: api
     });
-    expect(cache.has("alpha#502")).toBe(true);
+    expect(cache.has("alpha@pmatos/symphonika#502")).toBe(true);
 
     listedPullRequests = [];
     await pollConfiguredGitHubPullRequestsFromConfig({
@@ -461,7 +464,7 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
       env,
       githubIssuesApi: api
     });
-    expect(cache.has("alpha#502")).toBe(false);
+    expect(cache.has("alpha@pmatos/symphonika#502")).toBe(false);
   });
 
   it("skips a disabled project", async () => {

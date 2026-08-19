@@ -18,13 +18,12 @@ import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
 } from "./daemon-endpoint.js";
-import type { GitHubIssuesApi, PollingServiceConfig } from "./issue-polling.js";
+import type { GitHubIssuesApi } from "./issue-polling.js";
 import {
   DEFAULT_GITHUB_ISSUES_API,
   DEFAULT_POLLING_INTERVAL_MS,
   emptyIssuePollStatus,
   pollConfiguredGitHubIssuesFromConfig,
-  pollingProjectsByName,
   readConfiguredPollingIntervalMs,
   replaceIssuePollStatus,
   tryAddLabelsToIssue,
@@ -569,8 +568,7 @@ export async function startDaemon(
       projectModes = await persistProjectPollState(
         runStore,
         state.configPath,
-        nextStatus,
-        snapshot.polling
+        nextStatus
       );
 
       // #309: a cheap per-repo PR list, persisted alongside the issue
@@ -592,11 +590,7 @@ export async function startDaemon(
                 ...(options.env === undefined ? {} : { env: options.env }),
                 githubIssuesApi
               });
-            persistProjectPullRequestPollState(
-              runStore,
-              pullRequestStatus,
-              snapshot.polling
-            );
+            persistProjectPullRequestPollState(runStore, pullRequestStatus);
             if (pullRequestStatus.errors.length > 0) {
               logger.warn(
                 { errors: pullRequestStatus.errors },
@@ -1513,10 +1507,8 @@ export async function startDaemon(
 function persistProjectPollState(
   runStore: ReturnType<typeof openRunStore>,
   configPath: string,
-  status: import("./issue-polling.js").IssuePollStatus,
-  config: PollingServiceConfig
+  status: import("./issue-polling.js").IssuePollStatus
 ): Promise<Map<string, "dispatch" | "routine_host">> {
-  const projectsByName = pollingProjectsByName(config.projects);
   return readProjectStateInputs(configPath, status).then(
     ({ inputs, modes }) => {
       runStore.syncProjectStates(inputs);
@@ -1533,15 +1525,15 @@ function persistProjectPollState(
         // issue snapshot replaced — a failed poll leaves the last known
         // snapshot in place rather than blanking the table.
         if (project.ok) {
-          const repository = projectsByName.get(project.name)?.tracker;
-          if (repository === undefined) {
-            continue;
-          }
           runStore.replaceProjectIssueSnapshots({
             polledAt: project.lastPolledAt ?? timestamp(),
             projectName: project.name,
-            repository,
-            rows: projectIssueSnapshotRows(project.name, status)
+            repository: project.repository,
+            rows: projectIssueSnapshotRows(
+              project.name,
+              project.repository,
+              status
+            )
           });
         }
       }
@@ -1552,6 +1544,7 @@ function persistProjectPollState(
 
 function projectIssueSnapshotRows(
   projectName: string,
+  repository: ProjectSnapshotRepository,
   status: import("./issue-polling.js").IssuePollStatus
 ): Array<{
   blockedBy: import("./issue-polling.js").RawGitHubIssueDependencyRef[];
@@ -1565,7 +1558,11 @@ function projectIssueSnapshotRows(
   title: string;
 }> {
   const candidateRows = status.candidateIssues
-    .filter((entry) => entry.project === projectName)
+    .filter(
+      (entry) =>
+        entry.project === projectName &&
+        sameGitHubRepository(entry.repository, repository)
+    )
     .map((entry) => ({
       blockedBy: entry.issue.blockedBy ?? [],
       blockedByTruncated: entry.issue.blockedByTruncated === true,
@@ -1580,7 +1577,11 @@ function projectIssueSnapshotRows(
       title: entry.issue.title
     }));
   const filteredRows = status.filteredIssues
-    .filter((entry) => entry.project === projectName)
+    .filter(
+      (entry) =>
+        entry.project === projectName &&
+        sameGitHubRepository(entry.repository, repository)
+    )
     .map((entry) => ({
       blockedBy: entry.issue.blockedBy ?? [],
       blockedByTruncated: entry.issue.blockedByTruncated === true,
@@ -1603,24 +1604,22 @@ function projectIssueSnapshotRows(
 // blanked.
 function persistProjectPullRequestPollState(
   runStore: ReturnType<typeof openRunStore>,
-  status: import("./pull-request-polling.js").PullRequestPollStatus,
-  config: PollingServiceConfig
+  status: import("./pull-request-polling.js").PullRequestPollStatus
 ): void {
-  const projectsByName = pollingProjectsByName(config.projects);
   for (const project of status.projects) {
     if (!project.ok) {
-      continue;
-    }
-    const repository = projectsByName.get(project.name)?.tracker;
-    if (repository === undefined) {
       continue;
     }
     runStore.replaceProjectPullRequestSnapshots({
       polledAt: project.lastPolledAt ?? timestamp(),
       projectName: project.name,
-      repository,
+      repository: project.repository,
       rows: status.pullRequests
-        .filter((entry) => entry.project === project.name)
+        .filter(
+          (entry) =>
+            entry.project === project.name &&
+            sameGitHubRepository(entry.repository, project.repository)
+        )
         .map((entry) => ({
           branchOrigin: entry.branchOrigin,
           checks: entry.checks,

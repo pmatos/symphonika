@@ -2117,7 +2117,10 @@ function readPollNowProjects(value: unknown): ProjectIssuePollReport[] {
     if (
       !isObject(entry) ||
       typeof entry.name !== "string" ||
-      typeof entry.ok !== "boolean"
+      typeof entry.ok !== "boolean" ||
+      !isObject(entry.repository) ||
+      typeof entry.repository.owner !== "string" ||
+      typeof entry.repository.repo !== "string"
     ) {
       continue;
     }
@@ -2128,7 +2131,11 @@ function readPollNowProjects(value: unknown): ProjectIssuePollReport[] {
     const project: ProjectIssuePollReport = {
       fetchedIssues,
       name: entry.name,
-      ok: entry.ok
+      ok: entry.ok,
+      repository: {
+        owner: entry.repository.owner,
+        repo: entry.repository.repo
+      }
     };
     const candidateIssues = readNonnegativeNumber(entry.candidateIssues);
     if (candidateIssues !== undefined) {

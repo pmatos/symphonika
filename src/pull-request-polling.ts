@@ -6,6 +6,7 @@ import {
   tryListPullRequests,
   type GitHubIssueRepositoryInput,
   type GitHubIssuesApi,
+  type GitHubRepositoryIdentity,
   type PollingProjectConfig,
   type PollingServiceConfig,
   type RawGitHubPullRequest
@@ -53,6 +54,7 @@ type ProjectPullRequestSnapshot = {
   open: boolean;
   prNumber: number;
   project: string;
+  repository: GitHubRepositoryIdentity;
   reviewDecision: PullRequestState["reviewDecision"] | null;
   stateAvailable: boolean;
   title: string;
@@ -67,6 +69,7 @@ type ProjectPullRequestPollReport = {
   lastPolledAt?: string;
   name: string;
   ok: boolean;
+  repository: GitHubRepositoryIdentity;
 };
 
 export type PullRequestPollStatus = {
@@ -130,6 +133,10 @@ async function pollProjectPullRequests(
   seenEnrichmentCacheKeys: Set<string>
 ): Promise<void> {
   const lastPolledAt = new Date().toISOString();
+  const repository: GitHubRepositoryIdentity = {
+    owner: project.tracker.owner,
+    repo: project.tracker.repo
+  };
   const token = resolveEnvBackedValue(project.tracker.token, env);
   if (token === undefined) {
     const variableName = envReferenceName(project.tracker.token);
@@ -143,7 +150,8 @@ async function pollProjectPullRequests(
       fetchedPullRequests: 0,
       lastPolledAt,
       name: project.name,
-      ok: false
+      ok: false,
+      repository
     });
     return;
   }
@@ -165,7 +173,8 @@ async function pollProjectPullRequests(
       fetchedPullRequests: 0,
       lastPolledAt,
       name: project.name,
-      ok: false
+      ok: false,
+      repository
     });
     return;
   }
@@ -183,13 +192,24 @@ async function pollProjectPullRequests(
   );
   const nowMs = Date.now();
   for (const raw of numberedPullRequests) {
-    seenEnrichmentCacheKeys.add(enrichmentCacheKey(project.name, raw.number));
+    seenEnrichmentCacheKeys.add(
+      enrichmentCacheKey(project.name, repository, raw.number)
+    );
   }
   const snapshots = await mapWithConcurrency(
     numberedPullRequests,
     PULL_REQUEST_ENRICHMENT_CONCURRENCY,
     (raw) =>
-      buildSnapshot(raw, raw.number, project.name, repoInput, api, nowMs, cache)
+      buildSnapshot(
+        raw,
+        raw.number,
+        project.name,
+        repository,
+        repoInput,
+        api,
+        nowMs,
+        cache
+      )
   );
   status.pullRequests.push(...snapshots);
 
@@ -197,7 +217,8 @@ async function pollProjectPullRequests(
     fetchedPullRequests: snapshots.length,
     lastPolledAt,
     name: project.name,
-    ok: true
+    ok: true,
+    repository
   });
 }
 
@@ -243,13 +264,16 @@ export type CachedPullRequestEnrichment = {
 // The default when a caller doesn't inject its own (see
 // pollConfiguredGitHubPullRequestsFromConfig): every daemon.ts polling tick
 // should share one enrichment budget, the same way a single process shares
-// one GitHub rate limit. Keyed by project name, not owner/repo, so a Project
-// rename/re-point starts a fresh cache entry rather than serving another
-// Project's stale enrichment under the old key.
+// one GitHub rate limit. Repository identity is part of the key because
+// duplicate Project names are allowed and PR numbers are repository-local.
 const defaultEnrichmentCache = new Map<string, CachedPullRequestEnrichment>();
 
-function enrichmentCacheKey(projectName: string, prNumber: number): string {
-  return `${projectName}#${prNumber}`;
+function enrichmentCacheKey(
+  projectName: string,
+  repository: GitHubRepositoryIdentity,
+  prNumber: number
+): string {
+  return `${projectName}@${repository.owner.toLowerCase()}/${repository.repo.toLowerCase()}#${prNumber}`;
 }
 
 // Enrichment is a GraphQL round-trip against the same token
@@ -265,6 +289,7 @@ async function buildSnapshot(
   raw: RawGitHubPullRequest,
   prNumber: number,
   projectName: string,
+  repository: GitHubRepositoryIdentity,
   repoInput: GitHubIssueRepositoryInput,
   api: GitHubIssuesApi,
   nowMs: number,
@@ -282,6 +307,7 @@ async function buildSnapshot(
     open: raw.state === "open",
     prNumber,
     project: projectName,
+    repository,
     reviewDecision: null,
     stateAvailable: false,
     title: raw.title ?? "",
@@ -290,7 +316,7 @@ async function buildSnapshot(
     url: raw.html_url ?? null
   };
 
-  const cacheKey = enrichmentCacheKey(projectName, prNumber);
+  const cacheKey = enrichmentCacheKey(projectName, repository, prNumber);
   const cached = cache.get(cacheKey);
   if (
     cached !== undefined &&

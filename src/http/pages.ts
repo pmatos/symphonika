@@ -995,12 +995,17 @@ export function registerPages(options: RegisterPagesOptions): void {
       );
     }
 
-    const presentClaimLabels = detail.snapshot.labels.filter((label) =>
+    const snapshotClaimLabels = detail.snapshot.labels.filter((label) =>
       STALE_CLEAR_LABELS.has(label)
     );
+    // The snapshot decides whether this named action is relevant, but it is
+    // deliberately allowed to lag live GitHub state. Always attempt the full
+    // ADR-0038 set; the GitHub adapter treats an already-absent label as an
+    // idempotent success inside its per-label loop.
+    const labelsToClear = Array.from(STALE_CLEAR_LABELS);
 
     let banner: IssueClearStaleClaimBanner;
-    if (presentClaimLabels.length === 0) {
+    if (snapshotClaimLabels.length === 0) {
       banner = {
         error: "This issue has no stale-claim labels to clear.",
         kind: "clear_stale_claim",
@@ -1039,12 +1044,12 @@ export function registerPages(options: RegisterPagesOptions): void {
             add: [],
             kind: "issue",
             projectName,
-            remove: presentClaimLabels,
+            remove: labelsToClear,
             subjectNumber: issueNumber
           });
           banner = result.ok
             ? {
-                clearedLabels: presentClaimLabels,
+                clearedLabels: labelsToClear,
                 kind: "clear_stale_claim",
                 ok: true
               }

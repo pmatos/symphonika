@@ -304,12 +304,12 @@ export class UpdateCoordinator {
             { err: error },
             "symphonika self-update: restart request interrupted by expected unit shutdown after successful cutover"
           );
-          return;
+        } else {
+          this.input.logger?.warn(
+            { err: error },
+            "symphonika self-update: automatic restart request failed after successful cutover; restart the daemon manually to run the new build"
+          );
         }
-        this.input.logger?.warn(
-          { err: error },
-          "symphonika self-update: automatic restart request failed after successful cutover; restart the daemon manually to run the new build"
-        );
       }
     } catch (error) {
       this.input.daemonHealthNotifier.observeUpdateFailure({
@@ -356,10 +356,5 @@ function wasTerminatedBySignal(
   error: unknown,
   signal: NodeJS.Signals
 ): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "signal" in error &&
-    error.signal === signal
-  );
+  return error instanceof Error && "signal" in error && error.signal === signal;
 }

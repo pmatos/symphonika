@@ -89,6 +89,14 @@ function fakeNotifier() {
   };
 }
 
+function fakeLogger(): Logger {
+  return {
+    error: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn()
+  } as unknown as Logger;
+}
+
 describe("UpdateCoordinator", () => {
   it("is a no-op when self_update is disabled", async () => {
     const ops = fakeOps();
@@ -190,11 +198,7 @@ describe("UpdateCoordinator", () => {
       restartService: () => Promise.reject(restartError)
     });
     const notifier = fakeNotifier();
-    const logger = {
-      error: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn()
-    } as unknown as Logger;
+    const logger = fakeLogger();
     const coordinator = new UpdateCoordinator({
       activeRuns: { countInFlight: () => 0 },
       currentVersion: "1.0.0",
@@ -218,11 +222,7 @@ describe("UpdateCoordinator", () => {
       restartService: () => Promise.reject(restartError)
     });
     const notifier = fakeNotifier();
-    const logger = {
-      error: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn()
-    } as unknown as Logger;
+    const logger = fakeLogger();
     const coordinator = new UpdateCoordinator({
       activeRuns: { countInFlight: () => 0 },
       currentVersion: "1.0.0",

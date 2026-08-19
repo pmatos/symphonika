@@ -19,11 +19,11 @@ function withoutEmbeddedLocation(
   message: string,
   location: { col: number; line: number }
 ): string {
+  // yaml's prettifyError appends this clause immediately after the reason,
+  // before the source snippet, so the first occurrence is always the real
+  // one -- a later match would only be coincidental snippet content.
   const embeddedLocation = ` at line ${location.line}, column ${location.col}`;
-  const index = message.lastIndexOf(embeddedLocation);
-  return index === -1
-    ? message
-    : message.slice(0, index) + message.slice(index + embeddedLocation.length);
+  return message.replace(embeddedLocation, "");
 }
 
 function yamlErrorLocation(

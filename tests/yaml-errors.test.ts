@@ -49,6 +49,24 @@ describe("locatedYamlErrorMessage", () => {
     ]);
   });
 
+  it("strips only the real embedded clause, not a coincidental match inside the source snippet", () => {
+    let caught: unknown;
+    try {
+      parse('a: [1, 2\ncomment: "value at line 2, column 1"\n');
+    } catch (error) {
+      caught = error;
+    }
+
+    const message = locatedYamlErrorMessage(caught, 1);
+
+    // The parser's own clause (immediately followed by ":" and the snippet)
+    // must be gone; the coincidental text inside the quoted snippet value
+    // must survive untouched.
+    expect(message).not.toContain(" at line 2, column 1:");
+    expect(message).toContain('comment: "value at line 2, column 1"');
+    expect(message).toContain("(line 3, column 1)");
+  });
+
   it("returns the bare message when the error has no linePos", () => {
     const message = locatedYamlErrorMessage(new Error("plain failure"));
     expect(message).toBe("plain failure");

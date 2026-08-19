@@ -1406,6 +1406,10 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             `issue:        #${displayDetail.issueNumber} ${displayDetail.issueTitle}\n`
           );
           writeOut(program, `state:        ${displayDetail.state}\n`);
+          writeOut(
+            program,
+            `fsm state:    ${displayDetail.currentStateId ?? displayDetail.terminalStateId ?? "(not recorded)"}\n`
+          );
           writeOut(program, `provider:     ${displayDetail.provider}\n`);
           writeOut(program, `started:      ${displayDetail.createdAt}\n`);
           writeOut(program, `updated:      ${displayDetail.updatedAt}\n`);

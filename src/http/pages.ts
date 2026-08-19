@@ -686,7 +686,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     return context.html(
       layout(
         `Workflow graph ${detail.id}`,
-        renderWorkflowGraphPage(detail.id, graph)
+        renderWorkflowGraphPage(detail.id, workflowStateId(detail), graph)
       )
     );
   });
@@ -5934,14 +5934,30 @@ function renderWatchdogIdleBadge(
 }
 
 const RUNS_TABLE_HEAD =
-  "<tr><th>Run id</th><th>Project</th><th>Issue</th><th>State</th><th>Provider</th><th>Started</th><th>Updated</th><th>Branch</th></tr>";
+  "<tr><th>Run id</th><th>Project</th><th>Issue</th><th>State</th><th>Current state</th><th>Provider</th><th>Started</th><th>Updated</th><th>Branch</th></tr>";
+
+function formatCurrentStateCell(
+  currentStateId: string | null,
+  mutedClass: "muted" | "wf-muted" = "muted"
+): string {
+  return currentStateId === null
+    ? `<span class="${mutedClass}">not recorded</span>`
+    : `<code>${escapeHtml(currentStateId)}</code>`;
+}
+
+function workflowStateId(
+  run: Pick<RunStatus, "currentStateId" | "terminalStateId">
+): string | null {
+  return run.currentStateId ?? run.terminalStateId;
+}
 
 function runRowHtml(
   run: RunStatus,
   watchdogByRun: Map<string, WatchdogIdleStatus>,
   nowMs: number
 ): string {
-  return `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td class="c-title">#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td>${statePill(run.state)}${renderWatchdogIdleBadge(watchdogByRun.get(run.id), nowMs)}</td><td>${escapeHtml(run.provider)}</td><td><code>${escapeHtml(run.createdAt)}</code></td><td><code>${escapeHtml(run.updatedAt)}</code></td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`;
+  const currentState = formatCurrentStateCell(workflowStateId(run));
+  return `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td class="c-title">#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td>${statePill(run.state)}${renderWatchdogIdleBadge(watchdogByRun.get(run.id), nowMs)}</td><td>${currentState}</td><td>${escapeHtml(run.provider)}</td><td><code>${escapeHtml(run.createdAt)}</code></td><td><code>${escapeHtml(run.updatedAt)}</code></td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`;
 }
 
 function renderRunsTable(
@@ -6076,6 +6092,7 @@ function renderRunSummary(
   <dt>Project</dt><dd>${escapeHtml(detail.project)}</dd>
   <dt>Issue</dt><dd>#${detail.issueNumber} ${escapeHtml(detail.issueTitle)}</dd>
   <dt>State</dt><dd>${statePill(detail.state)}</dd>
+  <dt>Current state</dt><dd>${formatCurrentStateCell(workflowStateId(detail))}</dd>
   <dt>Provider</dt><dd>${escapeHtml(detail.provider)}</dd>
   <dt>Started</dt><dd><code>${escapeHtml(detail.createdAt)}</code></dd>
   <dt>Updated</dt><dd><code>${escapeHtml(detail.updatedAt)}</code></dd>
@@ -6451,13 +6468,15 @@ function serializeGraphForScript(graph: ExpandedWorkflow): string {
 
 function renderWorkflowGraphPage(
   runId: string,
+  currentStateId: string | null,
   graph: ExpandedWorkflow
 ): string {
   const encodedId = encodeURIComponent(runId);
   const name = typeof graph.name === "string" ? graph.name : "(unknown)";
+  const currentState = formatCurrentStateCell(currentStateId, "wf-muted");
   return `<style>${WORKFLOW_GRAPH_STYLES}</style>
 <h1>Workflow graph</h1>
-<p class="wf-sub">Run <a href="/runs/${encodedId}"><code>${escapeHtml(runId)}</code></a> &middot; <code>${escapeHtml(name)}</code> &middot; <a href="/logs/runs/${encodedId}/workflow_graph">raw JSON</a></p>
+<p class="wf-sub">Run <a href="/runs/${encodedId}"><code>${escapeHtml(runId)}</code></a> &middot; <code>${escapeHtml(name)}</code> &middot; Current state ${currentState} &middot; <a href="/logs/runs/${encodedId}/workflow_graph">raw JSON</a></p>
 <div class="wf-toolbar">
   <button id="wf-fit" type="button">Fit</button>
   <button id="wf-relayout" type="button">Re-layout</button>
@@ -6468,6 +6487,7 @@ function renderWorkflowGraphPage(
   <aside class="wf-side">
     <div class="wf-card">
       <h2>Legend</h2>
+      <div class="wf-legend-row"><span class="wf-swatch" style="background:#ecfeff;border-color:#0e7490;border-width:3px"></span> current state</div>
       <div class="wf-legend-row"><span class="wf-swatch" style="background:#dbeafe;border-color:#3b82f6;border-width:2px"></span> initial state</div>
       <div class="wf-legend-row"><span class="wf-swatch" style="background:#eff6ff;border-color:#60a5fa"></span> agent action</div>
       <div class="wf-legend-row"><span class="wf-swatch" style="background:#f1f5f9;border-style:dashed"></span> wait</div>
@@ -6483,7 +6503,8 @@ function renderWorkflowGraphPage(
     </div>
   </aside>
 </div>
-<script>window.__WORKFLOW_GRAPH__ = ${serializeGraphForScript(graph)};</script>
+<script>window.__WORKFLOW_GRAPH__ = ${serializeGraphForScript(graph)};
+window.__WORKFLOW_CURRENT_STATE__ = ${escapeJsonForInlineScript(currentStateId)};</script>
 ${WORKFLOW_GRAPH_SCRIPTS}
 <script>${WORKFLOW_GRAPH_CLIENT_JS}</script>`;
 }
@@ -6505,6 +6526,7 @@ const WORKFLOW_GRAPH_STYLES = `
 .wf-swatch-line { height:0; border:none; border-top:2px dashed #cbd5e1; border-radius:0; }
 .wf-badges { display:flex; flex-wrap:wrap; gap:.3rem; margin:.2rem 0 .6rem; }
 .wf-badge { font-size:.72rem; padding:.12rem .5rem; border-radius:999px; background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; }
+.wf-badge.current { background:#ecfeff; color:#155e75; border-color:#67e8f9; }
 .wf-badge.init { background:#dbeafe; color:#1e40af; border-color:#93c5fd; }
 .wf-badge.term-ok { background:#dcfce7; color:#166534; border-color:#86efac; }
 .wf-badge.term-block { background:#fee2e2; color:#991b1b; border-color:#fca5a5; }
@@ -6523,8 +6545,9 @@ const WORKFLOW_GRAPH_SCRIPTS = `<script src="https://cdn.jsdelivr.net/npm/cytosc
 <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js" integrity="sha384-2IH3T69EIKYC4c+RXZifZRvaH5SRUdacJW7j6HtE5rQbvLhKKdawxq6vpIzJ7j9M" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js" integrity="sha384-EHCdyFVbhtbpgI+4x7ETlZUvJwOkxJublmhTpH114NSk3fqfiUgcLl6pQm8JQwg9" crossorigin="anonymous" referrerpolicy="no-referrer"></script>`;
 
-const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
+export const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
   var graph = window.__WORKFLOW_GRAPH__;
+  var currentStateId = window.__WORKFLOW_CURRENT_STATE__;
   var cyEl = document.getElementById("wf-cy");
   var detailEl = document.getElementById("wf-detail");
   if (!graph || !cyEl) return;
@@ -6543,6 +6566,7 @@ const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
   }
   function nodeClasses(st) {
     var cls = [];
+    if (st.id === currentStateId) cls.push("current");
     if (st.id === graph.initial) cls.push("initial");
     if (st.terminal === "success") cls.push("term-ok");
     else if (st.terminal) cls.push("term-block");
@@ -6578,7 +6602,8 @@ const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
   var elements = [];
   var missing = {};
   states.forEach(function (st) {
-    elements.push({ data: { id: st.id, label: st.id, state: st }, classes: nodeClasses(st) });
+    var label = st.id === currentStateId ? st.id + "\\ncurrent" : st.id;
+    elements.push({ data: { id: st.id, label: label, state: st }, classes: nodeClasses(st) });
   });
   states.forEach(function (st) {
     (st.transitions || []).forEach(function (tr, i) {
@@ -6639,6 +6664,9 @@ const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
       { selector: "node.term-ok", style: { "background-color": "#dcfce7", "border-color": "#22c55e", "border-width": 2, "color": "#14532d" } },
       { selector: "node.term-block", style: { "background-color": "#fee2e2", "border-color": "#ef4444", "border-width": 2, "color": "#7f1d1d" } },
       { selector: "node.initial", style: { "border-width": 3, "border-color": "#2563eb" } },
+      { selector: "node.current", style: {
+        "border-width": 4, "border-color": "#0e7490",
+        "underlay-color": "#06b6d4", "underlay-opacity": 0.16, "underlay-padding": 8 } },
       { selector: "node.missing", style: { "background-color": "#fff7ed", "border-color": "#fb923c", "border-style": "dotted", "color": "#9a3412" } },
       { selector: "node:selected", style: { "border-color": "#1d4ed8", "border-width": 3 } },
       { selector: "edge", style: {
@@ -6689,6 +6717,7 @@ const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
       return;
     }
     var badges = [];
+    if (st.id === currentStateId) badges.push('<span class="wf-badge current">current</span>');
     if (st.id === graph.initial) badges.push('<span class="wf-badge init">initial</span>');
     if (st.terminal === "success") badges.push('<span class="wf-badge term-ok">terminal &middot; success</span>');
     else if (st.terminal) badges.push('<span class="wf-badge term-block">terminal &middot; ' + esc(st.terminal) + '</span>');
@@ -6724,9 +6753,10 @@ const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
   }
 
   function renderFallback() {
-    var lines = ["Workflow: " + (graph.name || "(unknown)"), "Initial: " + (graph.initial || "(unknown)"), ""];
+    var lines = ["Workflow: " + (graph.name || "(unknown)"), "Current: " + (currentStateId === null ? "(not recorded)" : currentStateId), "Initial: " + (graph.initial || "(unknown)"), ""];
     states.forEach(function (st) {
       var tag = st.terminal ? " [terminal:" + st.terminal + "]" : (st.action ? " [" + st.action.kind + "]" : "");
+      if (st.id === currentStateId) tag += " [current]";
       lines.push("- " + st.id + tag);
       (st.transitions || []).forEach(function (tr) {
         var c = condLines(tr.when);

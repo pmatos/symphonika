@@ -299,7 +299,7 @@ export class UpdateCoordinator {
       try {
         await this.input.ops.restartService();
       } catch (error) {
-        if (wasTerminatedBySignal(error, "SIGTERM")) {
+        if (wasTerminatedByExternalSignal(error, "SIGTERM")) {
           this.input.logger?.info(
             { err: error },
             "symphonika self-update: restart request interrupted by expected unit shutdown after successful cutover"
@@ -352,9 +352,15 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function wasTerminatedBySignal(
+function wasTerminatedByExternalSignal(
   error: unknown,
   signal: NodeJS.Signals
 ): boolean {
-  return error instanceof Error && "signal" in error && error.signal === signal;
+  return (
+    error instanceof Error &&
+    "killed" in error &&
+    error.killed === false &&
+    "signal" in error &&
+    error.signal === signal
+  );
 }

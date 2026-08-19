@@ -216,6 +216,38 @@ describe("UpdateCoordinator", () => {
     expect(logger.error).not.toHaveBeenCalled();
   });
 
+  it("requests a manual restart when the restart request times out", async () => {
+    const restartError = Object.assign(
+      new Error(
+        "Command failed: systemctl --user restart --no-block symphonika.service"
+      ),
+      { killed: true, signal: "SIGTERM" }
+    );
+    const ops = fakeOps({
+      restartService: () => Promise.reject(restartError)
+    });
+    const notifier = fakeNotifier();
+    const logger = fakeLogger();
+    const coordinator = new UpdateCoordinator({
+      activeRuns: { countInFlight: () => 0 },
+      currentVersion: "1.0.0",
+      daemonHealthNotifier: notifier,
+      isSelfUpdateEnabled: () => true,
+      logger,
+      ops
+    });
+
+    coordinator.tick();
+    await flushMicrotasks();
+
+    expect(notifier.calls).toEqual([{ broken: false }]);
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      { err: restartError },
+      expect.stringContaining("restart the daemon manually")
+    );
+  });
+
   it("requests a manual restart without marking a completed cutover broken when restart fails", async () => {
     const restartError = new Error("systemctl user session disappeared");
     const ops = fakeOps({

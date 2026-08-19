@@ -80,6 +80,27 @@ describe("setRoutineDisabled (#307 part 4, ADR 0076)", () => {
     }
   });
 
+  it("preserves CRLF line endings when toggling a routine", () => {
+    const original = [
+      "---",
+      "name: audit",
+      "kind: report",
+      "schedule:",
+      '  at: "2026-05-22T10:00:00.000Z"',
+      "---",
+      "Audit the codebase.",
+      ""
+    ].join("\r\n");
+
+    const result = setRoutineDisabled(original, true);
+
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.content).toContain("\r\n");
+      expect(result.content.replaceAll("\r\n", "")).not.toContain("\n");
+    }
+  });
+
   it("returns an error for content with no front matter", () => {
     const result = setRoutineDisabled("no front matter here\n", true);
     expect(result.kind).toBe("error");

@@ -321,10 +321,15 @@ async function buildSnapshot(
     }
 
     const state = interpretPullRequest(followup);
+    // GraphQL normalizes an omitted headRefOid to an empty string because
+    // PR Follow-up requires a string-valued head SHA. For poll snapshots,
+    // that sentinel must not replace the real SHA from the REST list: the
+    // dashboard merge form uses this value as its reviewed-commit pin.
+    const headSha = state.headSha === "" ? base.headSha : state.headSha;
     cache.set(cacheKey, {
       checks: state.checks,
       enrichedAtMs: nowMs,
-      headSha: state.headSha,
+      headSha,
       mergeable: state.mergeable,
       merged: state.merged,
       open: state.open,
@@ -336,7 +341,7 @@ async function buildSnapshot(
     return {
       ...base,
       checks: state.checks,
-      headSha: state.headSha,
+      headSha,
       mergeable: state.mergeable,
       merged: state.merged,
       open: state.open,

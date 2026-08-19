@@ -922,6 +922,39 @@ export async function startDaemon(
             logger,
             ...(snapshot === undefined
               ? {}
+              : {
+                  onProjectRateLimited: ({ error, projectName }) => {
+                    engageGithubBackoff(
+                      [
+                        {
+                          error: errorMessage(error),
+                          name: projectName,
+                          ok: false
+                        }
+                      ],
+                      snapshot.polling.projects,
+                      env
+                    );
+                  },
+                  shouldPollProject: (projectName: string) => {
+                    const project = snapshot.polling.projects.find(
+                      (candidate) => candidate.name === projectName
+                    );
+                    if (project === undefined) {
+                      return false;
+                    }
+                    const token = resolveEnvBackedValue(
+                      project.tracker.token,
+                      env
+                    );
+                    return (
+                      token === undefined ||
+                      !isGithubBackoffActive(Date.now(), token)
+                    );
+                  }
+                }),
+            ...(snapshot === undefined
+              ? {}
               : { policy: snapshot.pullRequestPolicy }),
             projectsLoader,
             runController,

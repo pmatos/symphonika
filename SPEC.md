@@ -1612,6 +1612,12 @@ failure preserves the prior value. Resolved feedback, a raised cap, PR closure, 
 the value on the next successful observation. Cap exhaustion does not fail or cancel a parked
 workflow Run: the Run stays `waiting` for human action or a later observation.
 
+PR Follow-up shares the daemon's per-GitHub-token rate-limit backoff with issue polling and the
+repository-wide PR snapshot poll. A project whose resolved token is inside the backoff window makes
+no new PR Follow-up discovery, state, or merge calls. A rate-limit-shaped failure from any of those
+calls engages or extends the same five-minute token window immediately; projects using a different
+token remain eligible for follow-up work.
+
 Default PR follow-up policy: poll enabled, at most `3` review dispatches per PR, squash merge,
 require successful status checks, and do not require an explicit approval unless repository rules
 surface `REVIEW_REQUIRED`.

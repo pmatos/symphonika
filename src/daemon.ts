@@ -18,7 +18,7 @@ import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
 } from "./daemon-endpoint.js";
-import type { GitHubIssuesApi } from "./issue-polling.js";
+import type { GitHubIssuesApi, PollingServiceConfig } from "./issue-polling.js";
 import {
   DEFAULT_GITHUB_ISSUES_API,
   DEFAULT_POLLING_INTERVAL_MS,
@@ -567,7 +567,8 @@ export async function startDaemon(
       projectModes = await persistProjectPollState(
         runStore,
         state.configPath,
-        nextStatus
+        nextStatus,
+        snapshot.polling
       );
 
       // #309: a cheap per-repo PR list, persisted alongside the issue
@@ -589,7 +590,11 @@ export async function startDaemon(
                 ...(options.env === undefined ? {} : { env: options.env }),
                 githubIssuesApi
               });
-            persistProjectPullRequestPollState(runStore, pullRequestStatus);
+            persistProjectPullRequestPollState(
+              runStore,
+              pullRequestStatus,
+              snapshot.polling
+            );
             if (pullRequestStatus.errors.length > 0) {
               logger.warn(
                 { errors: pullRequestStatus.errors },
@@ -1219,6 +1224,32 @@ export async function startDaemon(
           ok: false
         };
       }
+      const snapshotRepository =
+        input.kind === "issue"
+          ? runStore.getProjectIssueSnapshotRepository(
+              input.projectName,
+              input.subjectNumber
+            )
+          : runStore.getProjectPullRequestSnapshotRepository(
+              input.projectName,
+              input.subjectNumber
+            );
+      if (snapshotRepository === undefined) {
+        return {
+          error: `${input.kind === "issue" ? "issue" : "pull request"} #${input.subjectNumber} snapshot repository identity is unavailable; poll the Project successfully before writing labels`,
+          ok: false
+        };
+      }
+      const currentRepository = {
+        owner: project.tracker.owner,
+        repo: project.tracker.repo
+      };
+      if (!sameGitHubRepository(snapshotRepository, currentRepository)) {
+        return {
+          error: `snapshot repository ${snapshotRepository.owner}/${snapshotRepository.repo} does not match current tracker repository ${currentRepository.owner}/${currentRepository.repo}; poll the Project successfully before writing labels`,
+          ok: false
+        };
+      }
       const token = resolveToken(project.tracker.token, env);
       if (token === undefined) {
         return {
@@ -1479,7 +1510,8 @@ export async function startDaemon(
 function persistProjectPollState(
   runStore: ReturnType<typeof openRunStore>,
   configPath: string,
-  status: import("./issue-polling.js").IssuePollStatus
+  status: import("./issue-polling.js").IssuePollStatus,
+  config: PollingServiceConfig
 ): Promise<Map<string, "dispatch" | "routine_host">> {
   return readProjectStateInputs(configPath, status).then(
     ({ inputs, modes }) => {
@@ -1497,9 +1529,14 @@ function persistProjectPollState(
         // issue snapshot replaced — a failed poll leaves the last known
         // snapshot in place rather than blanking the table.
         if (project.ok) {
+          const repository = projectRepository(config, project.name);
+          if (repository === undefined) {
+            continue;
+          }
           runStore.replaceProjectIssueSnapshots({
             polledAt: project.lastPolledAt ?? timestamp(),
             projectName: project.name,
+            repository,
             rows: projectIssueSnapshotRows(project.name, status)
           });
         }
@@ -1562,15 +1599,21 @@ function projectIssueSnapshotRows(
 // blanked.
 function persistProjectPullRequestPollState(
   runStore: ReturnType<typeof openRunStore>,
-  status: import("./pull-request-polling.js").PullRequestPollStatus
+  status: import("./pull-request-polling.js").PullRequestPollStatus,
+  config: PollingServiceConfig
 ): void {
   for (const project of status.projects) {
     if (!project.ok) {
       continue;
     }
+    const repository = projectRepository(config, project.name);
+    if (repository === undefined) {
+      continue;
+    }
     runStore.replaceProjectPullRequestSnapshots({
       polledAt: project.lastPolledAt ?? timestamp(),
       projectName: project.name,
+      repository,
       rows: status.pullRequests
         .filter((entry) => entry.project === project.name)
         .map((entry) => ({
@@ -1593,6 +1636,28 @@ function persistProjectPullRequestPollState(
         }))
     });
   }
+}
+
+function projectRepository(
+  config: PollingServiceConfig,
+  projectName: string
+): { owner: string; repo: string } | undefined {
+  const tracker = config.projects.find(
+    (project) => project.name === projectName
+  )?.tracker;
+  return tracker === undefined
+    ? undefined
+    : { owner: tracker.owner, repo: tracker.repo };
+}
+
+function sameGitHubRepository(
+  left: { owner: string; repo: string },
+  right: { owner: string; repo: string }
+): boolean {
+  return (
+    left.owner.toLowerCase() === right.owner.toLowerCase() &&
+    left.repo.toLowerCase() === right.repo.toLowerCase()
+  );
 }
 
 function timestamp(): string {

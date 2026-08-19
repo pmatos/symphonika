@@ -24,7 +24,13 @@ afterEach(async () => {
   );
 });
 
-async function writeValidProject(root: string): Promise<void> {
+async function writeValidProject(
+  root: string,
+  repository: { owner: string; repo: string } = {
+    owner: "pmatos",
+    repo: "symphonika"
+  }
+): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(
     path.join(root, "symphonika.yml"),
@@ -44,8 +50,8 @@ async function writeValidProject(root: string): Promise<void> {
       "    weight: 1",
       "    tracker:",
       "      kind: github",
-      "      owner: pmatos",
-      "      repo: symphonika",
+      `      owner: ${repository.owner}`,
+      `      repo: ${repository.repo}`,
       '      token: "$GITHUB_TOKEN"',
       "    issue_filters:",
       '      states: ["open"]',
@@ -206,6 +212,76 @@ describe("daemon-wired POST /issues/:project/:number/labels/(add|remove) (#308 p
       expect(html).toContain('Remove label "blocked" failed');
       expect(html).toContain("404 Label does not exist");
       expect(html).toContain("labels shown below are unchanged");
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("refuses a label write when hot reload points the Project at a different repository", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn(
+        (input: {
+          repo: string;
+        }): Promise<ReturnType<typeof issueFixture>[]> =>
+          input.repo === "symphonika"
+            ? Promise.resolve([
+                issueFixture({
+                  labels: ["blocked"],
+                  number: 6,
+                  title: "Filtered"
+                })
+              ])
+            : Promise.reject(new Error("new repository poll failed"))
+      )
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const { cookie, csrfToken } = await fetchIssuesCsrfToken(
+        daemon.url,
+        "/issues/symphonika/6"
+      );
+      await writeValidProject(root, {
+        owner: "pmatos",
+        repo: "different-repository"
+      });
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
+
+      const response = await fetch(
+        `${daemon.url}/issues/symphonika/6/labels/add`,
+        {
+          body: new URLSearchParams({
+            csrf_token: csrfToken,
+            label: "agent-ready"
+          }).toString(),
+          headers: {
+            cookie,
+            "content-type": "application/x-www-form-urlencoded",
+            origin: daemon.url
+          },
+          method: "POST"
+        }
+      );
+      const html = await response.text();
+
+      expect(html).toContain('Add label "agent-ready" failed');
+      expect(html).toContain(
+        "snapshot repository pmatos/symphonika does not match current tracker repository pmatos/different-repository"
+      );
+      expect(githubIssuesApi.addLabelsToIssue).not.toHaveBeenCalled();
     } finally {
       await daemon.stop();
     }

@@ -86,6 +86,22 @@ is being cleaned up here — that's out of scope), and calls `tryAddLabelsToIssu
 `src/issue-polling.ts`) so a `GitHubIssuesApi` stub without label-write methods degrades to a named
 error instead of a `TypeError`.
 
+### Snapshot repository identity gates every label write
+
+Issue and pull-request snapshot rows persist the GitHub owner/repo from the successful poll that
+produced them. `writeIssueLabels` reads that identity for the requested subject and compares it,
+case-insensitively, with the current Project tracker's owner/repo before resolving credentials or
+calling the GitHub mutation API. A missing identity (including a row created before this migration)
+or a mismatch is refused until a successful poll replaces the snapshot. This keeps the callback as
+the uniform guard for single-issue, bulk, stale-claim, and pull-request label writes.
+
+The alternative of clearing snapshots as soon as a tracker changes was rejected because ADR 0073
+deliberately keeps last-good poll evidence when the next repository cannot be polled. Carrying the
+identity only in HTML forms was also rejected: the JSON bulk endpoint has no form, and a
+caller-supplied value would not bind the durable snapshot that makes the action available. Binding
+the persisted snapshot itself preserves its diagnostic value while making stale actions fail
+closed.
+
 ### `sym:*` is refused before `writeIssueLabels` is ever called, not inside it
 
 The route handler (`handleIssueLabelWrite`, `src/http/pages.ts`) checks `isOrchestratorLabel` first

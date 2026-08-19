@@ -662,8 +662,13 @@ export async function startDaemon(
         initialErrors: errors
       });
       engageGithubBackoff(nextStatus.projects, pollableForIssues, env);
+      // A project can be pollable at tick start but skipped by the issue
+      // poll after an earlier project sharing its token hits a rate limit.
+      // Reports identify the projects actually attempted, so deriving this
+      // set from them lets mergeIssuePollStatus carry an intra-tick skip's
+      // prior entries forward just like a window-backed-off skip.
       const polledIssueProjectNames = new Set(
-        pollableForIssues.map((project) => project.name)
+        nextStatus.projects.map((project) => project.name)
       );
       // The full configured set (not just pollableForIssues) so a project
       // removed or renamed by a config reload -- absent from both sets --

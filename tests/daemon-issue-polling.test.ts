@@ -499,6 +499,73 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("preserves a same-token project's prior status when an earlier project rate-limits", async () => {
+    const root = await makeTempRoot();
+    await writeTwoProjectsWithDifferentTokens(root, { pollingIntervalMs: 10 });
+    let alphaPolls = 0;
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockImplementation(({ repo }: { repo: string }) => {
+          if (repo === "alpha") {
+            alphaPolls += 1;
+            return alphaPolls === 1
+              ? Promise.resolve([
+                  issueFixture({
+                    labels: [],
+                    number: 91,
+                    title: "Alpha prior snapshot"
+                  })
+                ])
+              : Promise.reject(new Error("API rate limit exceeded"));
+          }
+          return Promise.resolve([
+            issueFixture({
+              labels: [],
+              number: 92,
+              title: "Beta prior snapshot"
+            })
+          ]);
+        })
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: {
+        GITHUB_TOKEN_ALPHA: "shared-secret",
+        GITHUB_TOKEN_BETA: "shared-secret"
+      },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      await waitFor(async () => {
+        const response = await fetch(`${daemon.url}/api/status`);
+        const body = (await response.json()) as {
+          issuePolling: { errors: string[] };
+        };
+        return body.issuePolling.errors.some((error) =>
+          error.includes("rate limit")
+        );
+      });
+
+      const response = await fetch(`${daemon.url}/api/status`);
+      const body = (await response.json()) as {
+        filteredIssues: Array<{ issue: { number: number }; project: string }>;
+      };
+      expect(
+        body.filteredIssues.map(({ issue, project }) => ({
+          number: issue.number,
+          project
+        }))
+      ).toEqual([{ number: 92, project: "beta" }]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("does not let a stale in-flight PR poll's clean result clear a backoff a later tick engaged", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root, { pollingIntervalMs: 10 });

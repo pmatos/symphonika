@@ -78,6 +78,21 @@ another call. This only stops *new* calls from starting; a call already in fligh
 still completes (there's no way to abort a request already sent), and every PR still gets a row per the
 existing "must not drop the row" contract -- only some of them go unenriched for that tick.
 
+### Sequential issue-project polling stops on a shared token within the same tick
+
+The daemon's window-scoped `githubBackoffUntilByToken` map cannot stop a later Project in the issue
+poll's sequential loop: the map is engaged only after `pollConfiguredGitHubIssuesFromConfig`
+returns its whole batch of reports. The poll function therefore owns a second, tick-local
+`Set<string>` of resolved tokens. After one Project reports a rate-limit-shaped error, later
+Projects resolving to that token are skipped for the remainder of that call; Projects on other
+tokens continue normally. The set is discarded when the call returns, while the daemon still uses
+the first Project's report to engage the longer-lived backoff window for future ticks.
+
+An intra-tick skipped Project produces no fresh report. `refreshIssuePollStatus` consequently
+derives the set of actually polled Project names from `nextStatus.projects`, not from the larger
+tick-start-pollable input list, so `mergeIssuePollStatus` carries the skipped Project's prior
+in-memory status forward. Per-Project persistence already leaves an absent report untouched.
+
 ### Backoff is keyed by resolved GitHub token, not global
 
 `daemon.ts` holds `githubBackoffUntilByToken: Map<string, number>`, keyed by the token
@@ -151,6 +166,8 @@ window, so this ADR accepts gating both identically rather than adding plumbing 
 - `src/issue-polling.ts` exports `isRateLimitError`, `backoffUntil`, `GITHUB_RATE_LIMIT_BACKOFF_MS`,
   `rateLimitedTokens`, and `mergeIssuePollStatus` (now taking a `configuredProjectNames` parameter in
   addition to `polledProjectNames`).
+- Same-tick issue polling also keys its short-lived suppression set by the resolved token, so two
+  different `$VAR_NAME` references resolving to the same credential share one limit.
 - A `PullRequestPollStatus.projects` entry can now be `ok: true` with a populated `error` -- "polled
   successfully, but enrichment hit a rate limit" -- distinct from the pre-existing `ok: false` shape
   for a project the poll couldn't process at all. Any future reader of that field must not assume

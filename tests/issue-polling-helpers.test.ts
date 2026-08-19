@@ -1001,6 +1001,45 @@ const betaProject: PollingProjectConfig = {
   }
 };
 
+describe("pollConfiguredGitHubIssuesFromConfig same-tick rate limits", () => {
+  it("skips later projects on the rate-limited token while polling a different token", async () => {
+    const gammaProject: PollingProjectConfig = {
+      ...betaProject,
+      name: "gamma",
+      tracker: {
+        ...betaProject.tracker,
+        repo: "gamma",
+        token: "$GITHUB_TOKEN_GAMMA"
+      }
+    };
+    const polledRepositories: string[] = [];
+    const githubIssuesApi: GitHubIssuesApi = {
+      listOpenIssues: (input) => {
+        polledRepositories.push(input.repo);
+        return input.repo === "alpha"
+          ? Promise.reject(new Error("API rate limit exceeded"))
+          : Promise.resolve([]);
+      }
+    };
+
+    const status = await pollConfiguredGitHubIssuesFromConfig({
+      config: { projects: [alphaProject, betaProject, gammaProject] },
+      env: {
+        GITHUB_TOKEN_ALPHA: "shared-secret",
+        GITHUB_TOKEN_BETA: "shared-secret",
+        GITHUB_TOKEN_GAMMA: "independent-secret"
+      },
+      githubIssuesApi
+    });
+
+    expect(polledRepositories).toEqual(["alpha", "gamma"]);
+    expect(status.projects.map((project) => project.name)).toEqual([
+      "alpha",
+      "gamma"
+    ]);
+  });
+});
+
 describe("rateLimitedTokens", () => {
   const env = {
     GITHUB_TOKEN_ALPHA: "secret-alpha",

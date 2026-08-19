@@ -1032,13 +1032,28 @@ export async function pollConfiguredGitHubIssuesFromConfig(options: {
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const status = emptyIssuePollStatus();
   status.errors.push(...(options.initialErrors ?? []));
+  const tickRateLimitedTokens = new Set<string>();
 
   for (const project of options.config.projects) {
     if (project.disabled === true) {
       continue;
     }
 
+    const token = resolveEnvBackedValue(project.tracker.token, env);
+    if (token !== undefined && tickRateLimitedTokens.has(token)) {
+      continue;
+    }
+
+    const reportIndex = status.projects.length;
     await pollProject(project, env, githubIssuesApi, status);
+    const report = status.projects[reportIndex];
+    if (
+      token !== undefined &&
+      report?.error !== undefined &&
+      isRateLimitError(report.error)
+    ) {
+      tickRateLimitedTokens.add(token);
+    }
   }
 
   status.candidateIssues.sort(compareProjectIssues);

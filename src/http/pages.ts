@@ -2108,6 +2108,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         content,
         contentHash: contentHash(content),
         csrfToken,
+        expectedSourcePath: declaration.sourcePath,
         includeInactive,
         name,
         projectParam
@@ -2123,6 +2124,10 @@ export function registerPages(options: RegisterPagesOptions): void {
       const name = context.req.param("name");
       const body = await context.req.parseBody();
       const projectParam = readOptionalFormField(body, "project_param");
+      const expectedSourcePath = readOptionalFormField(
+        body,
+        "expected_source_path"
+      );
       const requestedIncludeInactive =
         readOptionalFormField(body, "include_inactive") === "true";
       const resolved = resolveNamedRoutineGroup(
@@ -2144,6 +2149,23 @@ export function registerPages(options: RegisterPagesOptions): void {
         options.runStore,
         resolved.group
       );
+      if (
+        expectedSourcePath !== undefined &&
+        declaration.sourcePath !== expectedSourcePath
+      ) {
+        return context.html(
+          layout(
+            "Save refused: Routine declaration changed",
+            renderRoutineDeclarationChangedNotice({
+              actualSourcePath: declaration.sourcePath,
+              editAction: `/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`,
+              expectedSourcePath,
+              name
+            })
+          ),
+          409
+        );
+      }
 
       const content = readRequiredFormField(body, "content");
       const expectedContentHash = readRequiredFormField(
@@ -2170,6 +2192,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           csrfToken,
           errors: validation.errors,
           expectedContentHash,
+          ...(expectedSourcePath === undefined ? {} : { expectedSourcePath }),
           includeInactive,
           name,
           onDisk,
@@ -2188,6 +2211,10 @@ export function registerPages(options: RegisterPagesOptions): void {
       const name = context.req.param("name");
       const body = await context.req.parseBody();
       const projectParam = readOptionalFormField(body, "project_param");
+      const expectedSourcePath = readOptionalFormField(
+        body,
+        "expected_source_path"
+      );
       const requestedIncludeInactive =
         readOptionalFormField(body, "include_inactive") === "true";
       const resolved = resolveNamedRoutineGroup(
@@ -2209,6 +2236,23 @@ export function registerPages(options: RegisterPagesOptions): void {
         options.runStore,
         resolved.group
       );
+      if (
+        expectedSourcePath !== undefined &&
+        declaration.sourcePath !== expectedSourcePath
+      ) {
+        return context.html(
+          layout(
+            "Save refused: Routine declaration changed",
+            renderRoutineDeclarationChangedNotice({
+              actualSourcePath: declaration.sourcePath,
+              editAction: `/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`,
+              expectedSourcePath,
+              name
+            })
+          ),
+          409
+        );
+      }
 
       const content = readRequiredFormField(body, "content");
       const expectedContentHash = readRequiredFormField(
@@ -2277,6 +2321,9 @@ export function registerPages(options: RegisterPagesOptions): void {
               csrfToken,
               errors: result.errors,
               expectedContentHash,
+              ...(expectedSourcePath === undefined
+                ? {}
+                : { expectedSourcePath }),
               includeInactive,
               name,
               onDisk: await readFile(declaration.sourcePath, "utf8").catch(
@@ -2326,6 +2373,10 @@ export function registerPages(options: RegisterPagesOptions): void {
   ): Promise<Response> {
     const body = await context.req.parseBody();
     const projectParam = readOptionalFormField(body, "project_param");
+    const expectedSourcePath = readOptionalFormField(
+      body,
+      "expected_source_path"
+    );
     const includeInactive =
       readOptionalFormField(body, "include_inactive") === "true";
     const resolved = resolveNamedRoutineGroup(
@@ -2344,6 +2395,23 @@ export function registerPages(options: RegisterPagesOptions): void {
       options.runStore,
       resolved.group
     );
+    if (
+      expectedSourcePath !== undefined &&
+      declaration.sourcePath !== expectedSourcePath
+    ) {
+      return context.html(
+        layout(
+          "Save refused: Routine declaration changed",
+          renderRoutineDeclarationChangedNotice({
+            actualSourcePath: declaration.sourcePath,
+            editAction: `/routines/${encodeURIComponent(name)}${routineQuerySuffix(projectParam, includeInactive)}`,
+            expectedSourcePath,
+            name
+          })
+        ),
+        409
+      );
+    }
     const onDisk = await readFile(declaration.sourcePath, "utf8").catch(
       () => null
     );
@@ -2376,6 +2444,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         csrfToken,
         errors: [],
         expectedContentHash: contentHash(onDisk),
+        expectedSourcePath: declaration.sourcePath,
         includeInactive,
         name,
         onDisk,
@@ -5596,6 +5665,7 @@ function renderEditorForm(input: {
   content: string;
   contentHash: string;
   csrfToken: string;
+  expectedSourcePath?: string;
   includeInactive?: boolean;
   name: string;
   projectParam: string | undefined;
@@ -5603,6 +5673,7 @@ function renderEditorForm(input: {
   return `<h1 class="page-title">Edit ${escapeHtml(input.name)}</h1><p class="note">Raw text editing — this is the exact content written to disk; comments and key ordering elsewhere in the file are untouched by a save. Saving takes you to a diff review before anything is written.</p>${input.blastRadiusHtml}<form method="post" action="${escapeHtml(input.action)}">
   <input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">
   <input type="hidden" name="expected_content_hash" value="${escapeHtml(input.contentHash)}">
+  ${input.expectedSourcePath === undefined ? "" : `<input type="hidden" name="expected_source_path" value="${escapeHtml(input.expectedSourcePath)}">`}
   ${input.projectParam === undefined ? "" : `<input type="hidden" name="project_param" value="${escapeHtml(input.projectParam)}">`}
   ${input.includeInactive === true ? '<input type="hidden" name="include_inactive" value="true">' : ""}
   <p><textarea name="content" rows="24" cols="100" class="editor">${escapeHtml(input.content)}</textarea></p>
@@ -5694,6 +5765,7 @@ function renderEditorPreview(input: {
   csrfToken: string;
   errors: string[];
   expectedContentHash: string;
+  expectedSourcePath?: string;
   // #307 AC: "Editing providers.*.command requires an explicit confirmation
   // distinct from an ordinary save." Rendered between the diff and the
   // Confirm save button (not folded into it) so it reads as a distinct
@@ -5720,6 +5792,7 @@ function renderEditorPreview(input: {
   return `<h1 class="page-title">Confirm changes to ${escapeHtml(input.name)}</h1><p class="note">This is what will be written. Nothing is saved until you confirm.</p>${diffHtml}<form method="post" action="${escapeHtml(input.confirmAction)}">
   <input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">
   <input type="hidden" name="expected_content_hash" value="${escapeHtml(input.expectedContentHash)}">
+  ${input.expectedSourcePath === undefined ? "" : `<input type="hidden" name="expected_source_path" value="${escapeHtml(input.expectedSourcePath)}">`}
   <input type="hidden" name="content" value="${escapeHtml(input.content)}">
   ${input.projectParam === undefined ? "" : `<input type="hidden" name="project_param" value="${escapeHtml(input.projectParam)}">`}
   ${input.includeInactive === true ? '<input type="hidden" name="include_inactive" value="true">' : ""}
@@ -5738,6 +5811,15 @@ function renderStaleSaveNotice(input: {
       ? "<p>The file was deleted since you opened the editor.</p>"
       : `<pre class="diff">${escapeHtml(input.currentContent)}</pre>`;
   return `<h1 class="page-title">Save refused: changed on disk</h1><div class="alert" role="alert"><strong>${escapeHtml(input.filePath)} was changed since you opened the editor</strong>Your edit was not written. Reopen the editor to start from the current content.</div>${body}<p class="note"><a href="${escapeHtml(input.editAction)}">← Reopen editor</a></p>`;
+}
+
+function renderRoutineDeclarationChangedNotice(input: {
+  actualSourcePath: string;
+  editAction: string;
+  expectedSourcePath: string;
+  name: string;
+}): string {
+  return `<h1 class="page-title">Save refused: Routine declaration changed</h1><div class="alert" role="alert"><strong>${escapeHtml(input.name)} now resolves to a different declaration</strong>The editor was opened for <code>${escapeHtml(input.expectedSourcePath)}</code>, but this request resolves to <code>${escapeHtml(input.actualSourcePath)}</code>. Nothing was written.</div><p class="note"><a href="${escapeHtml(input.editAction)}">← Reopen editor</a></p>`;
 }
 
 function renderReloadFailedNotice(input: {
@@ -5853,14 +5935,18 @@ function renderRoutineLifecycleControls(
   const includeInactiveField = includeInactive
     ? '<input type="hidden" name="include_inactive" value="true">'
     : "";
+  const expectedSourcePathField =
+    representative === undefined
+      ? ""
+      : `<input type="hidden" name="expected_source_path" value="${escapeHtml(representative.sourcePath)}">`;
   const csrfField = `<input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}">`;
   if (representative?.disabledReason === "operator") {
-    return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/enable">${csrfField}${projectField}${includeInactiveField}<button class="btn" type="submit">Enable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
+    return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/enable">${csrfField}${projectField}${includeInactiveField}${expectedSourcePathField}<button class="btn" type="submit">Enable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
   }
   if (representative?.disabledReason === "removed_from_config") {
     return "";
   }
-  return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/disable">${csrfField}${projectField}${includeInactiveField}<button class="btn" type="submit">Disable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
+  return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/disable">${csrfField}${projectField}${includeInactiveField}${expectedSourcePathField}<button class="btn" type="submit">Disable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
 }
 
 // #469: fire-now posts straight at /api/routines/:id/fire (ADR 0075),

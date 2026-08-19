@@ -449,6 +449,83 @@ describe("routine declaration editor (#307 part 1, ADR 0075/0076)", () => {
     }
   });
 
+  it("refuses confirmation after the selected declaration is replaced", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        triggerReload: () => Promise.resolve({ errors: [], ok: true }),
+        version: "0.1.0"
+      });
+      const editor = await (
+        await app.request("/routines/audit/edit", {
+          headers: browserHeaders()
+        })
+      ).text();
+      const expectedSourcePath = extractHidden(editor, "expected_source_path");
+      const editedContent = VALID_DECLARATION.replace(
+        "Audit the codebase.",
+        "Edit the originally selected declaration."
+      );
+      const preview = await app.request("/routines/audit/edit/preview", {
+        body: formBody({
+          content: editedContent,
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: contentHash(VALID_DECLARATION),
+          expected_source_path: expectedSourcePath
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+      const previewHtml = await preview.text();
+
+      test.runStore.markRoutinesInactiveForProject("alpha");
+      const replacementPath = path.join(test.stateRoot, "replacement.md");
+      await writeFile(replacementPath, VALID_DECLARATION, "utf8");
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit the codebase.",
+          provider: null,
+          projectName: "beta",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: replacementPath
+        }
+      ]);
+
+      const confirm = await app.request("/routines/audit/edit/confirm", {
+        body: formBody({
+          content: extractHidden(previewHtml, "content"),
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: extractHidden(
+            previewHtml,
+            "expected_content_hash"
+          ),
+          expected_source_path: extractHidden(
+            previewHtml,
+            "expected_source_path"
+          )
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        redirect: "manual"
+      });
+      expect(confirm.status).toBe(409);
+      expect(await readFile(replacementPath, "utf8")).toBe(VALID_DECLARATION);
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("confirm reports a real reload failure on disk instead of redirecting as saved", async () => {
     const test = await setup();
     try {

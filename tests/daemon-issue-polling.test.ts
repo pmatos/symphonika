@@ -497,6 +497,65 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("does not let a stale in-flight PR poll's clean result clear a backoff a later tick engaged", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root, { pollingIntervalMs: 10 });
+
+    const prPollStarted = deferred<void>();
+    const prPollGate = deferred<unknown[]>();
+
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockRejectedValueOnce(
+          new Error(
+            "Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+          )
+        )
+        .mockResolvedValue([]),
+      listPullRequests: vi.fn().mockImplementation(() => {
+        prPollStarted.resolve();
+        return prPollGate.promise;
+      })
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      // The startup tick's fire-and-forget PR poll is now in flight and
+      // deliberately held open by prPollGate -- this is the "stale" poll
+      // that started before any backoff existed.
+      await prPollStarted.promise;
+
+      // A later tick's issue poll hits the mocked rate limit and engages
+      // backoff while the PR poll above is still pending.
+      await waitFor(() =>
+        Promise.resolve(githubIssuesApi.listOpenIssues.mock.calls.length >= 2)
+      );
+
+      // Resolve the stale PR poll cleanly now -- the exact race: a clean
+      // result arriving after backoff was engaged, from work that began
+      // before it was.
+      prPollGate.resolve([]);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Many more 10ms ticks elapse; without the fix, the PR poll's clean
+      // result would have cleared the backoff and issue polling would have
+      // resumed.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(githubIssuesApi.listOpenIssues).toHaveBeenCalledTimes(2);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("coalesces concurrent poll-now requests into one manual polling cycle", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);

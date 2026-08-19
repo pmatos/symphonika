@@ -545,19 +545,32 @@ export async function startDaemon(
     return { errors: reloadStatus.errors, ok: !reloadBroken, snapshot };
   };
 
-  const isGithubBackoffActive = (nowMs: number): boolean =>
-    githubBackoffUntilMs !== undefined && nowMs < githubBackoffUntilMs;
+  // A clean poll result is never allowed to clear an active window -- only
+  // to let it lapse on its own once `nowMs` passes it (self-cleaning here,
+  // with a one-time log on the transition). The issue poll and the
+  // fire-and-forget PR poll each call applyGithubBackoffState with their
+  // own results; a PR poll started before backoff was engaged can still be
+  // in flight when a later tick's issue poll engages it, and that stale
+  // poll's own eventual clean result doesn't prove the limit that triggered
+  // the newer window has recovered. Proactively clearing on any clean
+  // result would let that stale result erase a still-current window.
+  const isGithubBackoffActive = (nowMs: number): boolean => {
+    if (githubBackoffUntilMs === undefined) {
+      return false;
+    }
+    if (nowMs >= githubBackoffUntilMs) {
+      githubBackoffUntilMs = undefined;
+      logger.info("symphonika GitHub API backoff window elapsed");
+      return false;
+    }
+    return true;
+  };
 
   // Engages (or extends) the shared backoff window when `errors` contains a
-  // GitHub rate-limit failure, and clears a stale window once a poll comes
-  // back clean. Logs only on the transition, not on every tick, so a
-  // sustained outage doesn't spam the log.
+  // GitHub rate-limit failure. Logs only on the transition, not on every
+  // tick, so a sustained outage doesn't spam the log.
   const applyGithubBackoffState = (errors: string[]): void => {
     if (!errors.some(isRateLimitError)) {
-      if (githubBackoffUntilMs !== undefined) {
-        logger.info("symphonika GitHub API backoff cleared");
-        githubBackoffUntilMs = undefined;
-      }
       return;
     }
     const nowMs = Date.now();

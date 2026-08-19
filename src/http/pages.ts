@@ -121,6 +121,9 @@ export type RegisterPagesOptions = {
     }>;
   };
   getLastTickAtMonotonic?: () => number | undefined;
+  // The daemon's live periodic-timer deadline. Poll-now runs the same tick
+  // without resetting this timer, so poll history cannot reconstruct it.
+  getNextPollAtMonotonic?: () => number | undefined;
   getPollingIntervalMs?: () => number | undefined;
   getTickLoopStartedAtMonotonic?: () => number | undefined;
   getPullRequestFollowupPolicy?: () => {
@@ -1454,8 +1457,11 @@ export function registerPages(options: RegisterPagesOptions): void {
     const projectCapacity = concurrency?.perProject.find(
       (entry) => entry.projectName === name
     );
-    const pollingIntervalMs =
-      options.getPollingIntervalMs?.() ?? DEFAULT_POLLING_INTERVAL_MS;
+    const nextPollAtMonotonicMs = options.getNextPollAtMonotonic?.();
+    const nextPollAtMs =
+      nextPollAtMonotonicMs === undefined
+        ? undefined
+        : nowMs + nextPollAtMonotonicMs - options.monotonicNow();
     const scheduled = options.getScheduled?.() ?? [];
 
     const runs = options.runStore.listRuns({ project: name });
@@ -1503,7 +1509,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           inFlight,
           projectCapacity?.maxInFlight,
           concurrency?.global,
-          pollingIntervalMs,
+          nextPollAtMs,
           options.startedAtMs,
           nowMs
         ),
@@ -3319,7 +3325,7 @@ function renderProjectCapacityStrip(
   inFlight: number,
   maxInFlight: number | undefined,
   globalCapacity: { inFlight: number; maxInFlight: number | null } | undefined,
-  pollingIntervalMs: number,
+  nextPollAtMs: number | undefined,
   startedAtMs: number | undefined,
   nowMs: number
 ): string {
@@ -3353,8 +3359,7 @@ function renderProjectCapacityStrip(
       ? ' <span class="muted">(pre-restart)</span>'
       : "";
   parts.push(capacityKv("poll", `${escapeHtml(pollAge)}${preRestart}`));
-  if (lastPollAt !== null) {
-    const nextPollAtMs = Date.parse(lastPollAt) + pollingIntervalMs;
+  if (nextPollAtMs !== undefined) {
     parts.push(
       capacityKv(
         "next poll",

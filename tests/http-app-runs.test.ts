@@ -2336,6 +2336,43 @@ describe("HTTP app — project detail page (#303)", () => {
     }
   });
 
+  it("keeps the next-poll ETA anchored to the periodic timer after a manual poll", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      // A manual poll just completed, nine minutes into a ten-minute
+      // automatic interval. It refreshes poll evidence but does not reset
+      // the periodic timer, whose next trigger remains one minute away.
+      test.runStore.recordProjectPollOutcome({
+        candidateIssues: 0,
+        fetchedIssues: 0,
+        filteredIssues: 0,
+        ok: true,
+        projectName: "alpha"
+      });
+      const nowMs = Date.now();
+
+      const app = createHttpApp({
+        getNextPollAtMonotonic: () => 10 * 60_000,
+        getPollingIntervalMs: () => 10 * 60_000,
+        monotonicNow: () => 9 * 60_000,
+        now: () => nowMs,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/projects/alpha")).text();
+
+      expect(body).toContain(
+        '<span class="k">next poll</span><span class="v">in 1m</span>'
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("links each issue number to its Issue detail page", async () => {
     const test = await setup();
     try {

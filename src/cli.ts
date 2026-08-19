@@ -1617,7 +1617,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
                   .join(", ")
           );
 
-          const events = await readRecentRoutineEvents(
+          const { events } = await readRecentRoutineEvents(
             evidence.normalizedLogPath,
             options.events
           );

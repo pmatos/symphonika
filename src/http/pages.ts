@@ -2372,19 +2372,11 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
     const transitions = options.runStore.listRoutineFiringTransitions(id);
     const evidence = routineEvidencePaths(options.stateRoot, id);
-    const rawEvents = await readRecentRoutineEvents(
-      evidence.normalizedLogPath,
-      EVENT_TAIL_LIMIT
-    );
-    // readRecentRoutineEvents keeps a ring buffer of `limit` lines and
-    // tracks total lines seen via each entry's own `sequence` — if the
-    // window is full and the last entry's sequence exceeds the window
-    // size, the buffer wrapped at least once, i.e. more lines existed than
-    // fit. Mirrors /runs/:id's own "fetch one extra to detect truncation"
-    // trick without changing readRecentRoutineEvents's return shape.
-    const lastEvent = rawEvents[rawEvents.length - 1];
-    const eventsTruncated =
-      lastEvent !== undefined && lastEvent.sequence > rawEvents.length;
+    const { events: rawEvents, truncated: eventsTruncated } =
+      await readRecentRoutineEvents(
+        evidence.normalizedLogPath,
+        EVENT_TAIL_LIMIT
+      );
     const artifacts = await buildFiringArtifactDescriptors(evidence);
     const firingCsrfToken = csrfTokenFor(
       options.csrfSecret,

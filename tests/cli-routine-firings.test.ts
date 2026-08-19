@@ -200,16 +200,20 @@ describe("CLI routine firing commands", () => {
         type: "message"
       })
     );
-    await writeFile(
-      path.join(evidenceDirectory, "provider.normalized.jsonl"),
-      [
-        ...oldEvents,
-        "",
-        "{malformed",
-        JSON.stringify({ exitCode: 0, type: "process_exit" })
-      ].join("\r\n"),
-      "utf8"
+    const logLines = [
+      ...oldEvents,
+      "",
+      "{malformed",
+      JSON.stringify({ exitCode: 0, type: "process_exit" })
+    ];
+    const normalizedLogPath = path.join(
+      evidenceDirectory,
+      "provider.normalized.jsonl"
     );
+    await Promise.all([
+      writeFile(normalizedLogPath, logLines.join("\r\n"), "utf8"),
+      writeFile(`${normalizedLogPath}.idx`, encodeEventIndex(logLines, "\r\n"))
+    ]);
 
     const { output, program } = captureProgram(stateRoot);
     await program.parseAsync([
@@ -568,3 +572,17 @@ describe("CLI routine firing commands", () => {
     expect(row?.trim().endsWith("-")).toBe(false);
   });
 });
+
+function encodeEventIndex(lines: string[], separator: string): Buffer {
+  const records: Buffer[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    if (line.length > 0) {
+      const record = Buffer.alloc(8);
+      record.writeBigUInt64BE(BigInt(offset));
+      records.push(record);
+    }
+    offset += Buffer.byteLength(`${line}${separator}`, "utf8");
+  }
+  return Buffer.concat(records);
+}

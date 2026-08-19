@@ -772,6 +772,17 @@ describe("pull request follow-up", () => {
       expect(store.getRun("review-run-1")).toMatchObject({
         state: "succeeded"
       });
+      // The succeeded retry falls through to scheduleNext's continuation-
+      // scheduling eligibility re-check, which finds the issue ineligible
+      // (still missing `agent-ready`, its normal steady state while parked
+      // on PR review). That must not strip sym:claimed out from under this
+      // label-immune, still-live PR Follow-up reservation. See issue #475.
+      const claimRemovals = (
+        githubIssuesApi.removeLabelsFromIssue as ReturnType<typeof vi.fn>
+      ).mock.calls
+        .map(([call]) => call as { labels: string[] })
+        .filter((call) => call.labels[0] === "sym:claimed");
+      expect(claimRemovals).toHaveLength(0);
     } finally {
       store.close();
     }

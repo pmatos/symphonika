@@ -1586,23 +1586,11 @@ export class RunController {
     repository: GitHubIssueRepositoryInput;
     runId: string;
   }): Promise<void> {
-    await this.bestEffort(
-      () =>
-        (
-          this.githubIssuesApi as LabelWritingGitHubIssuesApi
-        ).removeLabelsFromIssue({
-          ...input.repository,
-          issueNumber: input.issueNumber,
-          labels: ["sym:claimed"]
-        }),
-      {
-        issueNumber: input.issueNumber,
-        label: "sym:claimed",
-        operation: "removeLabel",
-        project: input.projectName,
-        runId: input.runId
-      }
-    );
+    await this.releaseIssueClaim({
+      issueNumber: input.issueNumber,
+      phase: input.phase,
+      repository: input.repository
+    });
     this.logger?.debug(
       { issueNumber: input.issueNumber, runId: input.runId },
       `symphonika ${
@@ -1851,6 +1839,10 @@ export class RunController {
         scope: "label_controlled"
       }).eligible
     ) {
+      // No active or scheduled step remains for this issue once the
+      // one-shot continuation callback is consumed, whether because the
+      // issue closed or because label-controlled eligibility was lost
+      // during the continuation delay. See ADR 0023.
       await this.releaseIssueClaim({
         issueNumber: payload.issue.number,
         phase: "continuation-eligibility-loss",
@@ -3491,7 +3483,13 @@ export class RunController {
 
   private async releaseIssueClaim(input: {
     issueNumber: number;
-    phase: string;
+    phase:
+      | "closed-issue-cleanup"
+      | "continuation"
+      | "continuation-eligibility-loss"
+      | "continuation-scheduling-eligibility-loss"
+      | "eligibility-loss-cleanup"
+      | "state-advance";
     repository: GitHubIssueRepositoryInput;
   }): Promise<void> {
     const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
@@ -3726,11 +3724,20 @@ export class RunController {
         scope: "label_controlled"
       }).eligible
     ) {
-      await this.releaseIssueClaim({
-        issueNumber: input.issue.number,
-        phase: "continuation-scheduling-eligibility-loss",
-        repository: input.repository
-      });
+      // Raw-FSM mid-walk / label-immune runs (respectsIssueLabels === false,
+      // e.g. a PR Follow-up dispatch) intentionally never gate continuation
+      // scheduling on labels_all/labels_none (see ADR 0046), so ineligibility
+      // here — including a closed issue — is expected steady state, not a
+      // lost reservation — releasing sym:claimed for it would strip the
+      // claim out from under a still-live parked/waiting Run that owns the
+      // same Issue Reservation.
+      if (input.respectsIssueLabels !== false) {
+        await this.releaseIssueClaim({
+          issueNumber: input.issue.number,
+          phase: "continuation-scheduling-eligibility-loss",
+          repository: input.repository
+        });
+      }
       return;
     }
 

@@ -114,6 +114,31 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
     }
   });
 
+  it("excludes removed Projects from the project filter", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "active", validationState: "valid", weight: 1 },
+        { name: "removed", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.syncProjectStates([
+        { name: "active", validationState: "valid", weight: 1 }
+      ]);
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues")).text();
+
+      expect(html).toContain('<option value="active">active</option>');
+      expect(html).not.toContain('<option value="removed">removed</option>');
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("filters by project, verdict, label, and free-text title search", async () => {
     const test = await setup();
     try {

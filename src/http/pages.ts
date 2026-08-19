@@ -710,7 +710,10 @@ export function registerPages(options: RegisterPagesOptions): void {
     const nowMs = now();
     const projectNames = Array.from(
       new Set(
-        options.runStore.listProjectStates().map((state) => state.projectName)
+        options.runStore
+          .listProjectStates()
+          .filter((state) => state.active)
+          .map((state) => state.projectName)
       )
     ).sort();
     const rows = searchIssueSnapshots({

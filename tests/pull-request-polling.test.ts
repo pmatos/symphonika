@@ -471,7 +471,8 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
         fetchedPullRequests: 0,
         lastPolledAt: expect.any(String) as string,
         name: "alpha",
-        ok: false
+        ok: false,
+        repository: { owner: "pmatos", repo: "symphonika" }
       }
     ]);
     expect(status.pullRequests).toEqual([]);

@@ -332,6 +332,78 @@ describe("routine declaration editor (#307 part 1, ADR 0075/0076)", () => {
     }
   });
 
+  it("keeps a directly opened inactive editor reachable after save", async () => {
+    const test = await setup();
+    try {
+      test.runStore.markRoutinesInactiveForProject("alpha");
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        triggerReload: () => Promise.resolve({ errors: [], ok: true }),
+        version: "0.1.0"
+      });
+
+      const editor = await (
+        await app.request("/routines/audit/edit", {
+          headers: browserHeaders()
+        })
+      ).text();
+      const includeInactive = extractHidden(editor, "include_inactive");
+
+      const editedContent = VALID_DECLARATION.replace(
+        "Audit the codebase.",
+        "Audit the directly opened inactive target."
+      );
+      const preview = await app.request("/routines/audit/edit/preview", {
+        body: formBody({
+          content: editedContent,
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: contentHash(VALID_DECLARATION),
+          include_inactive: includeInactive
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+      const previewHtml = await preview.text();
+      const confirmedIncludeInactive = extractHidden(
+        previewHtml,
+        "include_inactive"
+      );
+
+      const confirm = await app.request("/routines/audit/edit/confirm", {
+        body: formBody({
+          content: editedContent,
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: contentHash(VALID_DECLARATION),
+          include_inactive: confirmedIncludeInactive
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        redirect: "manual"
+      });
+      expect(confirm.status).toBe(303);
+      expect(confirm.headers.get("location")).toBe(
+        "/routines/audit?include_inactive=true&saved=1"
+      );
+      expect(
+        (
+          await app.request(confirm.headers.get("location") ?? "", {
+            headers: browserHeaders()
+          })
+        ).status
+      ).toBe(200);
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("confirm reports a real reload failure on disk instead of redirecting as saved", async () => {
     const test = await setup();
     try {

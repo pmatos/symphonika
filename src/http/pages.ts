@@ -2052,7 +2052,8 @@ export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/routines/:name/edit", async (context) => {
     const name = context.req.param("name");
     const projectParam = context.req.query("project");
-    const includeInactive = context.req.query("include_inactive") === "true";
+    const requestedIncludeInactive =
+      context.req.query("include_inactive") === "true";
     const resolved = resolveNamedRoutineGroup(
       options.runStore,
       name,
@@ -2065,6 +2066,9 @@ export function registerPages(options: RegisterPagesOptions): void {
         resolved.kind === "ambiguous" ? 200 : 404
       );
     }
+    const includeInactive =
+      requestedIncludeInactive ||
+      routineSelectionRequiresInactive(resolved.group, projectParam);
     const declaration = resolveRoutineDeclaration(
       options.runStore,
       resolved.group
@@ -2107,7 +2111,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       const name = context.req.param("name");
       const body = await context.req.parseBody();
       const projectParam = readOptionalFormField(body, "project_param");
-      const includeInactive =
+      const requestedIncludeInactive =
         readOptionalFormField(body, "include_inactive") === "true";
       const resolved = resolveNamedRoutineGroup(
         options.runStore,
@@ -2121,6 +2125,9 @@ export function registerPages(options: RegisterPagesOptions): void {
           resolved.kind === "ambiguous" ? 200 : 404
         );
       }
+      const includeInactive =
+        requestedIncludeInactive ||
+        routineSelectionRequiresInactive(resolved.group, projectParam);
       const declaration = resolveRoutineDeclaration(
         options.runStore,
         resolved.group
@@ -2169,7 +2176,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       const name = context.req.param("name");
       const body = await context.req.parseBody();
       const projectParam = readOptionalFormField(body, "project_param");
-      const includeInactive =
+      const requestedIncludeInactive =
         readOptionalFormField(body, "include_inactive") === "true";
       const resolved = resolveNamedRoutineGroup(
         options.runStore,
@@ -2183,6 +2190,9 @@ export function registerPages(options: RegisterPagesOptions): void {
           resolved.kind === "ambiguous" ? 200 : 404
         );
       }
+      const includeInactive =
+        requestedIncludeInactive ||
+        routineSelectionRequiresInactive(resolved.group, projectParam);
       const declaration = resolveRoutineDeclaration(
         options.runStore,
         resolved.group
@@ -5377,6 +5387,20 @@ function resolveNamedRoutineGroup(
     return { group: groups[0]!, kind: "ok" };
   }
   return { groups, kind: "ambiguous" };
+}
+
+function routineSelectionRequiresInactive(
+  group: RoutineGroup,
+  projectParam: string | undefined
+): boolean {
+  const selectedTargets =
+    projectParam === undefined
+      ? group.targets
+      : group.targets.filter((target) => target.projectName === projectParam);
+  return (
+    selectedTargets.length > 0 &&
+    selectedTargets.every((target) => target.state === "inactive")
+  );
 }
 
 // Shared by #307's editor routes for the two ways resolveNamedRoutineGroup

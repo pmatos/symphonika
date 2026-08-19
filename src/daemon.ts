@@ -1171,14 +1171,18 @@ export async function startDaemon(
           pullNumber: input.prNumber
         });
         if (!merged) {
-          mergeError = "merging is not supported by the configured GitHub API";
+          return {
+            error: "merging is not supported by the configured GitHub API",
+            freshState: undefined,
+            ok: false
+          };
         }
       } catch (error) {
         mergeError = errorMessage(error);
       }
 
-      // Re-derive the PR's actual state regardless of the merge outcome
-      // above (AC8: "the PR's displayed state is re-derived rather than
+      // Re-derive the PR's actual state after every attempted merge
+      // (AC8: "the PR's displayed state is re-derived rather than
       // assumed merged") — a thrown merge error doesn't necessarily mean
       // nothing changed (e.g. GitHub could reject the response but have
       // already applied the merge), and a reported success is not proof

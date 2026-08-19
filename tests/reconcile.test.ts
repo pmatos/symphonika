@@ -179,7 +179,7 @@ describe("reconcileActiveRuns", () => {
     });
   });
 
-  it("does not cancel a state-advance run when the issue loses required labels mid-walk", async () => {
+  it("does not cancel a state-advance run when labels and dependencies drift mid-walk", async () => {
     await withRunStore(async (store) => {
       store.createRun({
         id: "run-a",
@@ -200,10 +200,22 @@ describe("reconcileActiveRuns", () => {
         runId: "run-a"
       });
 
-      // Poll snapshot: agent-ready removed AND needs-human added. Under the
-      // default flag this would cancel with ELIGIBILITY_LOSS.
+      // Poll snapshot: agent-ready removed, needs-human added, and a new open
+      // dependency linked. Label-controlled work would cancel with
+      // ELIGIBILITY_LOSS, but this already-owned raw-FSM walk keeps going.
       const status = pollStatus([
-        snapshot({ labels: ["needs-human", "sym:claimed", "sym:running"] })
+        snapshot({
+          blockedBy: [
+            {
+              number: 99,
+              owner: "pmatos",
+              repo: "symphonika",
+              state: "OPEN",
+              title: "New blocker"
+            }
+          ],
+          labels: ["needs-human", "sym:claimed", "sym:running"]
+        })
       ]);
 
       await reconcileActiveRuns({

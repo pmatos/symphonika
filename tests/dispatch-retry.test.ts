@@ -420,7 +420,7 @@ describe("dispatch retry policy", () => {
     }
   });
 
-  it("does not cancel a state-advance retry when the issue loses eligibility during backoff", async () => {
+  it("does not cancel a state-advance retry when labels and dependencies drift during backoff", async () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);
     await createGitWorkspaceAhead(prepared);
@@ -436,7 +436,8 @@ describe("dispatch retry policy", () => {
         // call 1: state-1 (planning) succeeds and triggers state_advance.
         // call 2: state-2 (implementing) attempt 1 — transient failure.
         // call 3: state-2 (implementing) attempt 2 — succeeds. This must run
-        // even though labels drifted, because the FSM owns the walk.
+        // even though labels and dependencies drifted, because the FSM owns
+        // the walk.
         if (attempts === 2) {
           yield {
             normalized: { exitCode: 1, type: "process_exit" },
@@ -453,15 +454,41 @@ describe("dispatch retry policy", () => {
     };
 
     // After the first poll, getIssue returns the issue with the required
-    // label removed AND an excluded label added. Under the broken behavior
-    // executeRetry would cancel the state-advance retry with eligibility_loss.
-    // Under the fix, the retry runs because the run is mid-FSM-walk.
+    // label removed and an excluded label added, while the dependency fetch
+    // reports a newly-open blocker. Label-controlled work would cancel with
+    // eligibility_loss; the retry and state advance keep running because the
+    // raw FSM already owns the walk.
+    let dependencyCalls = 0;
     let listCalls = 0;
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
       getIssue: vi.fn().mockResolvedValue({
         ...baseIssue,
         labels: ["needs-human", "sym:claimed"]
+      }),
+      getIssueDependencies: vi.fn(() => {
+        dependencyCalls += 1;
+        return Promise.resolve(
+          new Map([
+            [
+              baseIssue.number,
+              dependencyCalls === 1
+                ? { blockedBy: [], truncated: false }
+                : {
+                    blockedBy: [
+                      {
+                        number: 99,
+                        owner: "pmatos",
+                        repo: "symphonika",
+                        state: "OPEN" as const,
+                        title: "New blocker"
+                      }
+                    ],
+                    truncated: false
+                  }
+            ]
+          ])
+        );
       }),
       listOpenIssues: vi.fn(() => {
         listCalls += 1;

@@ -66,10 +66,11 @@ labels, excluded labels, blocking operational labels, and the Dependency Gate.
 _Avoid_: continuation eligibility when referring to first claim selection
 
 **Dependency Gate**:
-The check that an Issue has no open (non-`CLOSED`) GitHub-native `blockedBy` dependency before the
-orchestrator dispatches it; a hard block with no per-issue override. Distinct from a body-text DSL —
-Symphonika never parses issue body text to infer blockers, only GitHub's own issue-dependencies
-GraphQL relationship. See ADR-0081.
+The check that an Issue has no open (non-`CLOSED`) GitHub-native `blockedBy` dependency before a
+fresh dispatch or label-controlled Continuation; a hard block with no per-issue override in those
+scopes. Dependency drift does not revoke an already-owned raw-FSM walk. Distinct from a body-text
+DSL — Symphonika never parses issue body text to infer blockers, only GitHub's own
+issue-dependencies GraphQL relationship. See ADR-0081 and ADR-0082.
 _Avoid_: dependency graph (the `/issues/graph` display) when referring to this gating check
 
 **Continuation Eligibility**:
@@ -289,7 +290,7 @@ A follow-up run for the same issue after a provider completed successfully but t
 _Avoid_: retry when the prior run succeeded
 
 **State Advance**:
-The dispatch path that runs the next state of a raw FSM workflow after the current state advances to a non-terminal next state. State Advance bypasses the Continuation cap and label eligibility re-check; the state machine, not the issue label set, decides what runs next.
+The dispatch path that runs the next state of a raw FSM workflow after the current state advances to a non-terminal next state. State Advance bypasses the Continuation cap plus label and Dependency Gate re-checks; the state machine, not external eligibility drift, decides what runs next.
 _Avoid_: continuation when describing FSM state walking
 
 **Bootstrap Slice**:

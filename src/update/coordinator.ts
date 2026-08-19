@@ -100,11 +100,11 @@ export function createDefaultUpdateOps(input: {
       // before observing job success, surfacing a spurious update-failed
       // notification for a restart that actually succeeded, or simply
       // never resuming because the calling process is gone. --no-block
-      // sidesteps the race by only waiting for systemd to *enqueue* the
-      // job, not for it to finish -- which is the most this call could
-      // ever meaningfully observe anyway, since the process asking the
-      // question is the one about to be replaced. Real post-restart health
-      // has to be judged after the fact (daemon-health / systemd's own
+      // narrows this race to the enqueue round trip but cannot close it:
+      // systemd can still SIGTERM the child before it reports success. The
+      // coordinator therefore treats that signal after a completed cutover
+      // as the expected unit-shutdown path. Real post-restart health has to
+      // be judged after the fact (daemon-health / systemd's own
       // Restart=on-failure + watchdog), not from this call's result.
       // `timeout` only guards the enqueue step itself hanging (e.g. a
       // wedged --user D-Bus manager), matching every other unattended
@@ -296,7 +296,21 @@ export class UpdateCoordinator {
         );
         return;
       }
-      await this.input.ops.restartService();
+      try {
+        await this.input.ops.restartService();
+      } catch (error) {
+        if (wasTerminatedByExternalSignal(error, "SIGTERM")) {
+          this.input.logger?.info(
+            { err: error },
+            "symphonika self-update: restart request interrupted by expected unit shutdown after successful cutover"
+          );
+        } else {
+          this.input.logger?.warn(
+            { err: error },
+            "symphonika self-update: automatic restart request failed after successful cutover; restart the daemon manually to run the new build"
+          );
+        }
+      }
     } catch (error) {
       this.input.daemonHealthNotifier.observeUpdateFailure({
         broken: true,
@@ -336,4 +350,17 @@ function defaultSleep(ms: number): Promise<void> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function wasTerminatedByExternalSignal(
+  error: unknown,
+  signal: NodeJS.Signals
+): boolean {
+  return (
+    error instanceof Error &&
+    "killed" in error &&
+    error.killed === false &&
+    "signal" in error &&
+    error.signal === signal
+  );
 }

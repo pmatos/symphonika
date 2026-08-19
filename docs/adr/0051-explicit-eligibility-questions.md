@@ -2,10 +2,11 @@
 
 Symphonika will split Issue eligibility into explicit questions rather than passing boolean flags
 across lifecycle modules. Dispatch Eligibility asks whether a Project may freshly claim an Issue and
-includes open state, configured `labels_all`, configured `labels_none`, and blocking operational
-labels. Continuation Eligibility asks whether already-owned lifecycle work may keep going and has
-two scopes: label-controlled work re-checks open state plus configured labels while ignoring the
-orchestrator's own active operational labels; FSM-owned work checks only open state.
+includes open state, configured `labels_all`, configured `labels_none`, blocking operational
+labels, and the Dependency Gate. Continuation Eligibility asks whether already-owned lifecycle work
+may keep going and has two scopes: label-controlled work re-checks open state, configured labels,
+and the Dependency Gate while ignoring the orchestrator's own active operational labels; FSM-owned
+work checks only open state. ADR 0082 records the dependency-drift decision behind this split.
 
 The state-advance exception from ADR 0046 lives in the lifecycle module as the choice of question,
 not as an answer stored on `ActiveRunEntry`. A state-advance, waiting-row recheck, or FSM-owned

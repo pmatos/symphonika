@@ -40,10 +40,11 @@ State advance:
 
 - skips the continuation cap entirely (the FSM bounds the walk via terminal states);
 - yields to transient retry only while retry budget remains; the retry re-enters the same FSM state
-  and carries the same mid-walk label-immunity bit when the failed state was itself reached via
-  state advance;
-- skips the `labels_all` / `labels_none` re-check (the FSM, not the issue label set, decides the
-  next state). Only the issue's open/closed state is re-verified to avoid acting on a closed issue.
+  and carries the same FSM-owned Continuation Eligibility when the failed state was itself reached
+  via state advance;
+- skips the `labels_all` / `labels_none` and Dependency Gate re-checks (the FSM, not external
+  eligibility drift, decides the next state). Only the issue's open/closed state is re-verified to
+  avoid acting on a closed issue. ADR 0082 records why dependency drift follows label drift here.
   `reconcileActiveRuns` honors the same rule for in-flight state-advance runs, and `executeRetry`
   honors it for scheduled retries of state-advance runs: both still cancel with `CLOSED_ISSUE`
   when the issue closes, but skip the labels re-check that would otherwise cancel the run with
@@ -70,10 +71,10 @@ the reconcile pass, so reordering work within a tick cannot help. Extending the 
 label-immunity flag to fresh `raw_fsm` runs closes the window uniformly.
 
 The trade-off: an operator can no longer abort a fresh `raw_fsm` run mid-flight by pulling
-`agent-ready` (or adding a `labels_none` entry such as `needs-human`) — the same stance already
-accepted for continuations. Aborts go through closing the issue (still honored as `CLOSED_ISSUE`) or
-an operator cancel. Markdown compatibility-graph workflows are unaffected: they are not `raw_fsm`,
-so their initial fresh dispatch keeps the label-driven behavior.
+`agent-ready`, adding a `labels_none` entry such as `needs-human`, or linking a new dependency — the
+same stance already accepted for continuations. Aborts go through closing the issue (still honored
+as `CLOSED_ISSUE`) or an operator cancel. Markdown compatibility-graph workflows are unaffected:
+they are not `raw_fsm`, so their initial fresh dispatch keeps the label-driven behavior.
 
 Label-driven continuations remain a distinct concept. They keep the cap, the eligibility re-check,
 and the `executeContinuation` path because their purpose is to re-dispatch the same workflow when

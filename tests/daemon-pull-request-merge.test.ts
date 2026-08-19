@@ -383,6 +383,60 @@ describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)"
       await daemon.stop();
     }
   });
+
+  it("does not record evidence when the configured GitHub API cannot attempt the merge", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      listPullRequests: vi.fn().mockResolvedValue([orphanPullRequestFixture()])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const { cookie, csrfToken, expectedHeadSha } = await fetchPrsCsrfToken(
+        daemon.url,
+        "/prs/symphonika/246"
+      );
+      const response = await fetch(`${daemon.url}/prs/symphonika/246/merge`, {
+        body: new URLSearchParams({
+          csrf_token: csrfToken,
+          expected_head_sha: expectedHeadSha
+        }).toString(),
+        headers: {
+          cookie,
+          "content-type": "application/x-www-form-urlencoded",
+          origin: daemon.url
+        },
+        method: "POST"
+      });
+      const html = await response.text();
+
+      expect(html).toContain(
+        "merging is not supported by the configured GitHub API"
+      );
+
+      const runStore = openRunStore({
+        stateRoot: path.join(root, ".symphonika")
+      });
+      try {
+        expect(
+          runStore.listPullRequestMergeAttempts("symphonika", 246)
+        ).toEqual([]);
+      } finally {
+        runStore.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
 });
 
 describe("daemon-wired POST /prs/:project/:number/labels/add (#309 part 2)", () => {

@@ -14,7 +14,6 @@ import type {
   RawGitHubPullRequestReviewThread
 } from "../issue-polling.js";
 import {
-  evaluateProjectEligibility,
   tryGetIssue,
   tryGetIssueDependencies,
   tryGetPullRequestFollowupState,
@@ -26,6 +25,7 @@ import {
   type PullRequestFollowupPolicy
 } from "../pull-request-followup.js";
 import { interpretPullRequest } from "../pull-request-state.js";
+import { evaluateRunContinuationEligibility } from "./issue-eligibility.js";
 import { projectPullRequestSignals } from "./pr-signal-projection.js";
 import type {
   AgentProvider,
@@ -724,23 +724,21 @@ export class RunController {
       });
       return;
     }
-    // Raw FSM mid-walk runs: the FSM, not the issue labels, decides whether
-    // the agent keeps running. A transient retry of such a run must not be
-    // cancelled by label drift during the retry backoff. CLOSED_ISSUE above is
-    // still honored. See ADR 0046.
-    if (payload.respectsIssueLabels !== false) {
-      const eligibility = evaluateProjectEligibility(refreshed, project, {
-        ignoreOperationalLabels: true
+    // Closed issues still cancel above for every scope; see
+    // evaluateRunContinuationEligibility for the fsm_owned vs
+    // label_controlled policy.
+    const eligibility = evaluateRunContinuationEligibility(refreshed, project, {
+      scope:
+        payload.respectsIssueLabels === false ? "fsm_owned" : "label_controlled"
+    });
+    if (!eligibility.eligible) {
+      await this.cancelScheduledLifecycleWork({
+        issueNumber: payload.issue.number,
+        reason: CANCEL_REASONS.ELIGIBILITY_LOSS,
+        repository,
+        runId: payload.runId
       });
-      if (!eligibility.eligible) {
-        await this.cancelScheduledLifecycleWork({
-          issueNumber: payload.issue.number,
-          reason: CANCEL_REASONS.ELIGIBILITY_LOSS,
-          repository,
-          runId: payload.runId
-        });
-        return;
-      }
+      return;
     }
 
     // Re-assert sym:claimed and reserve the in-flight slot under the mutex so
@@ -1001,7 +999,12 @@ export class RunController {
     if (refreshed === undefined) {
       return;
     }
-    if (refreshed === null || refreshed.state !== "open") {
+    if (
+      refreshed === null ||
+      !evaluateRunContinuationEligibility(refreshed, project, {
+        scope: "fsm_owned"
+      }).eligible
+    ) {
       this.runStore.markCancelRequested(runId, "closed_issue");
       this.runStore.updateRunState(runId, "cancelled");
       return;
@@ -1319,9 +1322,8 @@ export class RunController {
       token
     };
 
-    // State advance only re-checks that the issue is still open. The
-    // labels_all / labels_none filter is intentionally skipped: the FSM, not
-    // the issue label set, decides whether the next state runs. See ADR 0046.
+    // State advance asks the fsm_owned Continuation Eligibility question; see
+    // evaluateRunContinuationEligibility.
     const refreshed = await this.refreshIssue({
       project,
       issueNumber: payload.issue.number,
@@ -1334,7 +1336,12 @@ export class RunController {
       );
       return;
     }
-    if (refreshed === null || refreshed.state !== "open") {
+    if (
+      refreshed === null ||
+      !evaluateRunContinuationEligibility(refreshed, project, {
+        scope: "fsm_owned"
+      }).eligible
+    ) {
       return;
     }
 
@@ -1838,13 +1845,12 @@ export class RunController {
       );
       return;
     }
-    if (refreshed === null || refreshed.state !== "open") {
-      return;
-    }
-    const eligibility = evaluateProjectEligibility(refreshed, project, {
-      ignoreOperationalLabels: true
-    });
-    if (!eligibility.eligible) {
+    if (
+      refreshed === null ||
+      !evaluateRunContinuationEligibility(refreshed, project, {
+        scope: "label_controlled"
+      }).eligible
+    ) {
       return;
     }
 
@@ -3516,8 +3522,8 @@ export class RunController {
     // implement gated only on provider_success). Fire the FSM continuation
     // before the failed branch so the next state runs even when the source
     // state's per-state result classifies as failed. State advance also skips
-    // the continuation cap and the labels_all / labels_none re-check; only
-    // require that the issue is still open. See ADR 0046.
+    // the continuation cap and asks only the fsm_owned Continuation
+    // Eligibility question; see evaluateRunContinuationEligibility.
     if (input.stateAdvance != null) {
       const stateAdvance = input.stateAdvance;
       const refreshedForAdvance = await this.refreshIssue({
@@ -3528,7 +3534,9 @@ export class RunController {
       const canScheduleAdvance =
         refreshedForAdvance !== undefined &&
         refreshedForAdvance !== null &&
-        refreshedForAdvance.state === "open";
+        evaluateRunContinuationEligibility(refreshedForAdvance, input.project, {
+          scope: "fsm_owned"
+        }).eligible;
       if (canScheduleAdvance) {
         this.logger?.info(
           {
@@ -3686,13 +3694,12 @@ export class RunController {
     if (refreshed === undefined) {
       return;
     }
-    if (refreshed === null || refreshed.state !== "open") {
-      return;
-    }
-    const eligibility = evaluateProjectEligibility(refreshed, input.project, {
-      ignoreOperationalLabels: true
-    });
-    if (!eligibility.eligible) {
+    if (
+      refreshed === null ||
+      !evaluateRunContinuationEligibility(refreshed, input.project, {
+        scope: "label_controlled"
+      }).eligible
+    ) {
       return;
     }
 
@@ -3793,19 +3800,18 @@ export class RunController {
       return null;
     }
     const snapshot = normalizeRawIssue(raw, input.project);
-    // Refreshed snapshots feed evaluateProjectEligibility (the same
-    // dependency gate the poll loop enforces) before executeRetry /
-    // executeContinuation re-assert their claim -- without this,
-    // blockedBy/blockedByTruncated stay undefined here, so `?? []` reads
-    // as "no blockers" and a dependency added mid-run never stops the
-    // retry/continuation. A dependency-fetch error is narrower than an
-    // issue-fetch error: the REST snapshot above is still good, so keep it
-    // and mark blockedByTruncated true (evaluateProjectEligibility's
-    // existing "truncated => treat as blocked" fail-closed path) rather
-    // than discarding the whole refresh via `return undefined` -- every
-    // caller treats undefined as "drop the scheduled work entirely",
-    // which would let one transient GraphQL error permanently cancel a
-    // retry/continuation instead of just failing the dependency check.
+    // Refreshed snapshots feed Continuation Eligibility before scheduled
+    // work re-asserts its claim. Label-controlled work applies the same
+    // Dependency Gate as the poll loop; FSM-owned work deliberately ignores
+    // dependency drift under ADR 0082. Without this refresh, the former would
+    // read absent blockedBy fields as "no blockers". A dependency-fetch error
+    // is narrower than an issue-fetch error: the REST snapshot above is still
+    // good, so keep it and mark blockedByTruncated true (the existing
+    // fail-closed shape for label-controlled work) rather than discarding the
+    // whole refresh via `return undefined`. Every caller treats undefined as
+    // "drop the scheduled work entirely", which would let one transient
+    // GraphQL error permanently cancel work instead of applying its selected
+    // eligibility scope.
     let dependencies;
     try {
       dependencies = await tryGetIssueDependencies(this.githubIssuesApi, {

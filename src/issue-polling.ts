@@ -1261,20 +1261,23 @@ function issueFilterReasons(
   return evaluateProjectEligibility(issue, project).reasons;
 }
 
+export function issueStateReasons(
+  issue: IssueSnapshot,
+  project: PollingProjectConfig
+): string[] {
+  return !project.issue_filters.states.includes("open") ||
+    issue.state !== "open"
+    ? [`state ${issue.state} is not eligible`]
+    : [];
+}
+
 export function evaluateProjectEligibility(
   issue: IssueSnapshot,
   project: PollingProjectConfig,
   options: { ignoreOperationalLabels?: boolean } = {}
 ): { eligible: boolean; reasons: string[] } {
-  const reasons: string[] = [];
+  const reasons: string[] = [...issueStateReasons(issue, project)];
   const labels = new Set(issue.labels);
-
-  if (
-    !project.issue_filters.states.includes("open") ||
-    issue.state !== "open"
-  ) {
-    reasons.push(`state ${issue.state} is not eligible`);
-  }
 
   for (const requiredLabel of project.issue_filters.labels_all) {
     if (!labels.has(requiredLabel)) {

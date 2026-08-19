@@ -492,6 +492,7 @@ export function registerPages(options: RegisterPagesOptions): void {
 
   options.app.get("/", (context) => {
     const data = assembleDashboardData();
+    const includeInactive = context.req.query("include_inactive") === "true";
     const {
       activeFirings,
       activeRuns,
@@ -526,9 +527,10 @@ export function registerPages(options: RegisterPagesOptions): void {
         renderRoutinesSection(
           groupRoutinesByName(
             options.runStore.listRoutines({
-              includeInactive: context.req.query("include_inactive") === "true"
+              includeInactive
             })
-          )
+          ),
+          includeInactive
         ),
         `<div id="projects-section">${renderProjectsSection(snapshot, options.issuePollStatus, activeRuns, activeFirings, lastRunByProject, nowMs)}</div>`,
         renderStaleIssuesCard(options.issuePollStatus?.filteredIssues ?? []),
@@ -1963,12 +1965,13 @@ export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/routines/:name", (context) => {
     const name = context.req.param("name");
     const projectParam = context.req.query("project");
+    const includeInactive = context.req.query("include_inactive") === "true";
     const fireNotice = renderFireResultNotice(context);
     const resolved = resolveNamedRoutineGroup(
       options.runStore,
       name,
       projectParam,
-      context.req.query("include_inactive") === "true"
+      includeInactive
     );
     if (resolved.kind === "not_found") {
       return context.html(
@@ -1988,7 +1991,8 @@ export function registerPages(options: RegisterPagesOptions): void {
       return context.html(
         layout(
           name,
-          fireNotice + renderRoutineDisambiguation(name, resolved.groups)
+          fireNotice +
+            renderRoutineDisambiguation(name, resolved.groups, includeInactive)
         )
       );
     }
@@ -2025,14 +2029,21 @@ export function registerPages(options: RegisterPagesOptions): void {
         renderRoutineDeclarationCard(declaration, reloadErrors),
         renderRoutineTargetsTable(group),
         renderRoutineFiringHistory(firings),
-        `<p class="note"><a href="/routines/${encodeURIComponent(name)}/edit${projectParam === undefined ? "" : `?project=${encodeURIComponent(projectParam)}`}">Edit declaration →</a></p>`,
+        `<p class="note"><a href="${escapeHtml(`/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`)}">Edit declaration →</a></p>`,
         renderRoutineLifecycleControls(
           name,
           group,
           projectParam,
+          includeInactive,
           lifecycleCsrfToken
         ),
-        renderRoutineFireControls(name, group, projectParam, lifecycleCsrfToken)
+        renderRoutineFireControls(
+          name,
+          group,
+          projectParam,
+          includeInactive,
+          lifecycleCsrfToken
+        )
       ].join("")
     );
     return context.html(html);
@@ -2041,6 +2052,7 @@ export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/routines/:name/edit", async (context) => {
     const name = context.req.param("name");
     const projectParam = context.req.query("project");
+    const includeInactive = context.req.query("include_inactive") === "true";
     const resolved = resolveNamedRoutineGroup(
       options.runStore,
       name,
@@ -2080,6 +2092,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         content,
         contentHash: contentHash(content),
         csrfToken,
+        includeInactive,
         name,
         projectParam
       })
@@ -2094,6 +2107,8 @@ export function registerPages(options: RegisterPagesOptions): void {
       const name = context.req.param("name");
       const body = await context.req.parseBody();
       const projectParam = readOptionalFormField(body, "project_param");
+      const includeInactive =
+        readOptionalFormField(body, "include_inactive") === "true";
       const resolved = resolveNamedRoutineGroup(
         options.runStore,
         name,
@@ -2136,6 +2151,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           csrfToken,
           errors: validation.errors,
           expectedContentHash,
+          includeInactive,
           name,
           onDisk,
           projectParam,
@@ -2153,6 +2169,8 @@ export function registerPages(options: RegisterPagesOptions): void {
       const name = context.req.param("name");
       const body = await context.req.parseBody();
       const projectParam = readOptionalFormField(body, "project_param");
+      const includeInactive =
+        readOptionalFormField(body, "include_inactive") === "true";
       const resolved = resolveNamedRoutineGroup(
         options.runStore,
         name,
@@ -2199,7 +2217,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           (() => Promise.resolve({ errors: [], ok: true }))
       });
 
-      const routinePath = `/routines/${encodeURIComponent(name)}${projectParam === undefined ? "" : `?project=${encodeURIComponent(projectParam)}`}`;
+      const routinePath = `/routines/${encodeURIComponent(name)}${routineQuerySuffix(projectParam, includeInactive)}`;
       if (result.kind === "saved") {
         // The pipeline writes before reload runs, so "saved" alone doesn't
         // mean the new declaration took effect — redirecting to the detail
@@ -2210,7 +2228,7 @@ export function registerPages(options: RegisterPagesOptions): void {
             layout(
               `Saved but not active: ${name}`,
               renderReloadFailedNotice({
-                editAction: `/routines/${encodeURIComponent(name)}/edit${projectParam === undefined ? "" : `?project=${encodeURIComponent(projectParam)}`}`,
+                editAction: `/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`,
                 errors: result.reload.errors,
                 filePath: declaration.sourcePath
               })
@@ -2237,6 +2255,7 @@ export function registerPages(options: RegisterPagesOptions): void {
               csrfToken,
               errors: result.errors,
               expectedContentHash,
+              includeInactive,
               name,
               onDisk: await readFile(declaration.sourcePath, "utf8").catch(
                 () => null
@@ -2254,7 +2273,7 @@ export function registerPages(options: RegisterPagesOptions): void {
             "Save refused: changed on disk",
             renderStaleSaveNotice({
               currentContent: result.currentContent,
-              editAction: `/routines/${encodeURIComponent(name)}/edit${projectParam === undefined ? "" : `?project=${encodeURIComponent(projectParam)}`}`,
+              editAction: `/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`,
               filePath: declaration.sourcePath
             })
           ),
@@ -2285,6 +2304,8 @@ export function registerPages(options: RegisterPagesOptions): void {
   ): Promise<Response> {
     const body = await context.req.parseBody();
     const projectParam = readOptionalFormField(body, "project_param");
+    const includeInactive =
+      readOptionalFormField(body, "include_inactive") === "true";
     const resolved = resolveNamedRoutineGroup(
       options.runStore,
       name,
@@ -2333,6 +2354,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         csrfToken,
         errors: [],
         expectedContentHash: contentHash(onDisk),
+        includeInactive,
         name,
         onDisk,
         projectParam,
@@ -5267,14 +5289,18 @@ function renderRoutineGroupStatus(group: RoutineGroup): string {
   return `${routineStatePill(representative.state)}${reason}`;
 }
 
-function renderRoutinesSection(groups: RoutineGroup[]): string {
+function renderRoutinesSection(
+  groups: RoutineGroup[],
+  includeInactive: boolean
+): string {
   if (groups.length === 0) {
     return `<section>${sectionHead("Routines", 0)}<div class="empty"><strong>No Routines configured</strong>A Routine is a scheduled prompt that can launch a Coding Agent against one or more Projects without a GitHub Issue. Declare one in the service config's top-level <code>routines:</code> block to see it here.</div></section>`;
   }
   const rows = groups
     .map((group) => {
-      const routineLink = `<a href="/routines/${encodeURIComponent(group.name)}">${escapeHtml(group.name)}</a>`;
-      const targetsLink = `<a href="/routines/${encodeURIComponent(group.name)}">${group.targets.length}</a>`;
+      const href = `/routines/${encodeURIComponent(group.name)}${includeInactive ? "?include_inactive=true" : ""}`;
+      const routineLink = `<a href="${href}">${escapeHtml(group.name)}</a>`;
+      const targetsLink = `<a href="${href}">${group.targets.length}</a>`;
       return `<tr><td>${routineLink}</td><td>${escapeHtml(group.kind)}</td><td class="c-detail"><code>${escapeHtml(formatRoutineSchedule(group))}</code></td><td>${targetsLink}</td><td>${renderRoutineGroupStatus(group)}</td></tr>`;
     })
     .join("");
@@ -5294,7 +5320,8 @@ function renderRoutinesSection(groups: RoutineGroup[]): string {
 // ?project= parameter.
 function renderRoutineDisambiguation(
   name: string,
-  groups: RoutineGroup[]
+  groups: RoutineGroup[],
+  includeInactive: boolean
 ): string {
   const items = groups
     .map((group) => {
@@ -5302,10 +5329,15 @@ function renderRoutineDisambiguation(
       const sourcePath =
         representative === undefined ? "-" : representative.sourcePath;
       const targetLinks = group.targets
-        .map(
-          (target) =>
-            `<a href="/routines/${encodeURIComponent(name)}?project=${encodeURIComponent(target.projectName)}">${escapeHtml(target.projectName)}</a>`
-        )
+        .map((target) => {
+          const params = new URLSearchParams({
+            project: target.projectName
+          });
+          if (includeInactive) {
+            params.set("include_inactive", "true");
+          }
+          return `<a href="/routines/${encodeURIComponent(name)}?${escapeHtml(params.toString())}">${escapeHtml(target.projectName)}</a>`;
+        })
         .join(", ");
       return `<li><code>${escapeHtml(sourcePath)}</code> — targets: ${targetLinks}</li>`;
     })
@@ -5358,7 +5390,10 @@ function renderUneditableRoutine(
     { kind: "not_found" } | { groups: RoutineGroup[]; kind: "ambiguous" }
 ): string {
   if (resolved.kind === "ambiguous") {
-    return layout(name, renderRoutineDisambiguation(name, resolved.groups));
+    return layout(
+      name,
+      renderRoutineDisambiguation(name, resolved.groups, true)
+    );
   }
   return layout(
     "Routine not found",
@@ -5480,6 +5515,21 @@ function readRequiredFormField(
   return value;
 }
 
+function routineQuerySuffix(
+  projectParam: string | undefined,
+  includeInactive: boolean
+): string {
+  const params = new URLSearchParams();
+  if (projectParam !== undefined) {
+    params.set("project", projectParam);
+  }
+  if (includeInactive) {
+    params.set("include_inactive", "true");
+  }
+  const query = params.toString();
+  return query === "" ? "" : `?${query}`;
+}
+
 // Shared by every #307 editor (routine declaration, workflow contract,
 // service config): the raw-text-with-hidden-hash form each GET .../edit
 // route renders. blastRadiusHtml is caller-rendered rather than a fixed
@@ -5493,6 +5543,7 @@ function renderEditorForm(input: {
   content: string;
   contentHash: string;
   csrfToken: string;
+  includeInactive?: boolean;
   name: string;
   projectParam: string | undefined;
 }): string {
@@ -5500,6 +5551,7 @@ function renderEditorForm(input: {
   <input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">
   <input type="hidden" name="expected_content_hash" value="${escapeHtml(input.contentHash)}">
   ${input.projectParam === undefined ? "" : `<input type="hidden" name="project_param" value="${escapeHtml(input.projectParam)}">`}
+  ${input.includeInactive === true ? '<input type="hidden" name="include_inactive" value="true">' : ""}
   <p><textarea name="content" rows="24" cols="100" class="editor">${escapeHtml(input.content)}</textarea></p>
   <button class="btn" type="submit">Review changes</button>
 </form>`;
@@ -5595,13 +5647,18 @@ function renderEditorPreview(input: {
   // step, not decoration on the normal one. Only the service-config editor
   // ever sets this.
   extraConfirmationHtml?: string;
+  includeInactive?: boolean;
   name: string;
   onDisk: string | null;
   projectParam: string | undefined;
   reviewAction: string;
 }): string {
+  const navigationSuffix = routineQuerySuffix(
+    input.projectParam,
+    input.includeInactive === true
+  );
   if (input.errors.length > 0) {
-    return `<h1 class="page-title">Changes to ${escapeHtml(input.name)} are invalid</h1><div class="alert" role="alert"><strong>Fix these before saving</strong><ul>${input.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div><p class="note"><a href="${escapeHtml(input.reviewAction)}${input.projectParam === undefined ? "" : `?project=${encodeURIComponent(input.projectParam)}`}">← Back to editor</a></p>`;
+    return `<h1 class="page-title">Changes to ${escapeHtml(input.name)} are invalid</h1><div class="alert" role="alert"><strong>Fix these before saving</strong><ul>${input.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div><p class="note"><a href="${escapeHtml(`${input.reviewAction}${navigationSuffix}`)}">← Back to editor</a></p>`;
   }
   const diffHtml =
     input.onDisk === null
@@ -5612,9 +5669,10 @@ function renderEditorPreview(input: {
   <input type="hidden" name="expected_content_hash" value="${escapeHtml(input.expectedContentHash)}">
   <input type="hidden" name="content" value="${escapeHtml(input.content)}">
   ${input.projectParam === undefined ? "" : `<input type="hidden" name="project_param" value="${escapeHtml(input.projectParam)}">`}
+  ${input.includeInactive === true ? '<input type="hidden" name="include_inactive" value="true">' : ""}
   ${input.extraConfirmationHtml ?? ""}
   <button class="btn" type="submit">Confirm save</button>
-</form><p class="note"><a href="${escapeHtml(input.reviewAction)}${input.projectParam === undefined ? "" : `?project=${encodeURIComponent(input.projectParam)}`}">← Back to editor</a></p>`;
+</form><p class="note"><a href="${escapeHtml(`${input.reviewAction}${navigationSuffix}`)}">← Back to editor</a></p>`;
 }
 
 function renderStaleSaveNotice(input: {
@@ -5731,6 +5789,7 @@ function renderRoutineLifecycleControls(
   name: string,
   group: RoutineGroup,
   projectParam: string | undefined,
+  includeInactive: boolean,
   csrfToken: string
 ): string {
   const [representative] = group.targets;
@@ -5738,14 +5797,17 @@ function renderRoutineLifecycleControls(
     projectParam === undefined
       ? ""
       : `<input type="hidden" name="project_param" value="${escapeHtml(projectParam)}">`;
+  const includeInactiveField = includeInactive
+    ? '<input type="hidden" name="include_inactive" value="true">'
+    : "";
   const csrfField = `<input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}">`;
   if (representative?.disabledReason === "operator") {
-    return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/enable">${csrfField}${projectField}<button class="btn" type="submit">Enable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
+    return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/enable">${csrfField}${projectField}${includeInactiveField}<button class="btn" type="submit">Enable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
   }
   if (representative?.disabledReason === "removed_from_config") {
     return "";
   }
-  return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/disable">${csrfField}${projectField}<button class="btn" type="submit">Disable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
+  return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/disable">${csrfField}${projectField}${includeInactiveField}<button class="btn" type="submit">Disable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
 }
 
 // #469: fire-now posts straight at /api/routines/:id/fire (ADR 0075),
@@ -5758,6 +5820,7 @@ function renderRoutineFireControls(
   name: string,
   group: RoutineGroup,
   projectParam: string | undefined,
+  includeInactive: boolean,
   csrfToken: string
 ): string {
   const targets = group.targets.filter(
@@ -5777,7 +5840,11 @@ function renderRoutineFireControls(
         targets.length > 1
           ? `Fire now — ${escapeHtml(target.projectName)}`
           : "Fire now";
-      return `<form method="post" action="/api/routines/${encodeURIComponent(name)}/fire?project=${encodeURIComponent(target.projectName)}">${csrfField}${projectField}<button class="btn" type="submit">${label}</button></form>`;
+      const params = new URLSearchParams({ project: target.projectName });
+      if (includeInactive) {
+        params.set("include_inactive", "true");
+      }
+      return `<form method="post" action="/api/routines/${encodeURIComponent(name)}/fire?${escapeHtml(params.toString())}">${csrfField}${projectField}<button class="btn" type="submit">${label}</button></form>`;
     })
     .join("");
   return `<section>${buttons}<p class="note">Fires target the routine's last reloaded declaration, not any pending edit (#364).</p></section>`;

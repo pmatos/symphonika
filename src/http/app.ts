@@ -413,6 +413,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     async (context) => {
       const routineName = context.req.param("id");
       const projectName = context.req.query("project");
+      const includeInactive = context.req.query("include_inactive") === "true";
       // #469: a plain <form> POST from /routines/:name gets a 303 redirect
       // back to the page with the outcome encoded as query params instead
       // of the JSON body a fetch()/CLI caller expects -- same content-type
@@ -426,6 +427,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         const params = new URLSearchParams();
         if (typeof pageProject === "string") {
           params.set("project", pageProject);
+        }
+        if (includeInactive) {
+          params.set("include_inactive", "true");
         }
         params.set("fire", result.kind);
         if (projectName !== undefined) {

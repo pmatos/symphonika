@@ -3075,6 +3075,57 @@ describe("HTTP app — routine detail page (#304)", () => {
       test.cleanup();
     }
   });
+
+  it("keeps the inactive opt-in in disambiguation links", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Old declaration.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/old-audit.md"
+        }
+      ]);
+      test.runStore.syncRoutines(
+        [
+          {
+            kind: "report",
+            name: "audit",
+            prompt: "New declaration.",
+            provider: null,
+            projectName: "gamma",
+            schedule: { at: "2026-05-22T11:00:00.000Z" },
+            sourcePath: "/tmp/new-audit.md"
+          }
+        ],
+        { projects: ["alpha", "gamma"] }
+      );
+      test.runStore.markRoutinesInactiveForProject("alpha");
+      test.runStore.markRoutinesInactiveForProject("gamma");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (
+        await app.request("/routines/audit?include_inactive=true")
+      ).text();
+
+      expect(body).toContain(
+        "/routines/audit?project=alpha&amp;include_inactive=true"
+      );
+      expect(body).toContain(
+        "/routines/audit?project=gamma&amp;include_inactive=true"
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
 });
 
 describe("HTTP app — firing detail page (#304 part 2/2)", () => {

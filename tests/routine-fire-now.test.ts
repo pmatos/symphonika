@@ -383,6 +383,56 @@ describe("routine fire-now controls (#469, ADR 0075/0069)", () => {
     }
   });
 
+  it("keeps an inactive Routine reachable after a Fire now refusal", async () => {
+    const test = await setup();
+    try {
+      test.runStore.markRoutinesInactiveForProject("alpha");
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        fireRoutine: () => ({
+          error: "routine is inactive",
+          kind: "refused",
+          reason: "inactive"
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const detail = await (
+        await app.request("/routines/audit?include_inactive=true", {
+          headers: browserHeaders()
+        })
+      ).text();
+      expect(detail).toContain(
+        'action="/api/routines/audit/fire?project=alpha&amp;include_inactive=true"'
+      );
+
+      const response = await app.request(
+        "/api/routines/audit/fire?project=alpha&include_inactive=true",
+        {
+          body: formBody({ csrf_token: VALID_TOKEN }),
+          headers: {
+            ...browserHeaders(),
+            "content-type": "application/x-www-form-urlencoded"
+          },
+          method: "POST",
+          redirect: "manual"
+        }
+      );
+      expect(response.status).toBe(303);
+      const location = response.headers.get("location") ?? "";
+      expect(location).toContain("include_inactive=true");
+
+      const returned = await app.request(location, {
+        headers: browserHeaders()
+      });
+      expect(returned.status).toBe(200);
+      expect(await returned.text()).toContain("Fire refused");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("redirects with a not_found notice", async () => {
     const test = await setup();
     try {

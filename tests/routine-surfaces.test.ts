@@ -544,6 +544,28 @@ describe("routine operator surfaces", () => {
     }
   });
 
+  it("keeps the inactive opt-in in dashboard Routine links", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      seedRoutine(store);
+      store.markRoutinesInactiveForProject("alpha");
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const body = await (await app.request("/?include_inactive=true")).text();
+
+      expect(body).toContain(
+        'href="/routines/daily-report?include_inactive=true"'
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("symphonika routines lists routines per project", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

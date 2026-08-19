@@ -35,12 +35,16 @@ Preview is a POST, not GET-with-query-string, because the content can be arbitra
 nothing: it does meaningful server-side work (parse + validate) against caller-supplied content,
 and there's no reason a foreign origin should reach that either.
 
-### The diff renderer is a hand-rolled LCS, not a dependency
+### The diff renderer uses a bounded hand-rolled LCS, not a dependency
 
 `renderLineDiff` (`src/http/pages.ts`) is a straightforward O(n·m) longest-common-subsequence line
-diff, not a library. The two inputs are always already-in-memory strings — a routine declaration,
-workflow contract, or service config, never a multi-megabyte file — so the quadratic table is
-never a real cost, and pulling in a diff dependency for three call sites would be the wrong trade.
+diff for ordinary inputs, not a library. Its table is capped at 1,000,000 cells and the cap is
+checked before allocation. A larger pair uses a linear-space coarse diff that preserves the common
+prefix and suffix, renders the complete changed middle as removals and additions, and labels the
+preview so the operator knows unchanged lines inside that middle may appear changed. This keeps the
+exact behavior for routine-sized files without letting an unexpectedly large editor submission
+allocate an unbounded quadratic table; pulling in a diff dependency for three call sites remains
+the wrong trade.
 
 ### Located errors: line/column only where the parser actually gives it
 

@@ -20,7 +20,7 @@ the daemon allocate an unbounded quadratic table before the operator can confirm
 
 ## Decision
 
-Use option 1. The exact LCS path has a fixed budget of 1,000,000 line-pair cells and checks the
+Use option 1. The exact LCS path has a fixed budget of 1,000,000 table cells and checks the
 budget before allocating the table. Inputs over that budget use linear-space prefix/suffix matching:
 the common prefix remains context, the unmatched `before` region is removed, the unmatched `after`
 region is added, and the common suffix remains context. The preview displays a notice explaining

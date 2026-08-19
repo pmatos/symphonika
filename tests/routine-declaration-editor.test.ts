@@ -215,6 +215,55 @@ describe("routine declaration editor (#307 part 1, ADR 0075/0076)", () => {
     }
   });
 
+  it("preview simplifies a large diff without blocking confirmation", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const originalLines = Array.from(
+        { length: 1_100 },
+        (_, index) => `original line ${index}`
+      );
+      const editedLines = [...originalLines];
+      editedLines[550] = "edited line 550";
+      const onDisk = VALID_DECLARATION.replace(
+        "Audit the codebase.",
+        originalLines.join("\n")
+      );
+      const editedContent = VALID_DECLARATION.replace(
+        "Audit the codebase.",
+        editedLines.join("\n")
+      );
+      await writeFile(test.routinePath, onDisk, "utf8");
+
+      const response = await app.request("/routines/audit/edit/preview", {
+        body: formBody({
+          content: editedContent,
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: contentHash(onDisk)
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain("Large diff simplified");
+      expect(html).toContain("original line 550");
+      expect(html).toContain("edited line 550");
+      expect(html).toContain("Confirm save");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("confirm writes the file, triggers reload, and redirects to the routine page", async () => {
     const test = await setup();
     try {

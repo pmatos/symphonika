@@ -5644,14 +5644,17 @@ function renderReloadFailedNotice(input: {
 
 // A small line-based LCS diff -- not a general utility, just enough to
 // render the "diff before every write" requirement (#307) for the three
-// editors' confirmation screens. Deliberately hand-rolled rather than a
-// dependency: these are two known-in-memory strings, never large enough for
-// an O(n*m) LCS table to matter.
+// editors' confirmation screens. Keep the exact table bounded because an
+// editor can submit arbitrarily large content (#442); a coarse, linear-space
+// fallback still shows every line when the exact table would be too large.
+const MAX_LCS_TABLE_CELLS = 1_000_000;
+
 function renderLineDiff(before: string, after: string): string {
   const beforeLines = before.split("\n");
   const afterLines = after.split("\n");
+  const diff = diffLines(beforeLines, afterLines);
   const rows: string[] = [];
-  for (const op of diffLines(beforeLines, afterLines)) {
+  for (const op of diff.ops) {
     const cssClass =
       op.kind === "added" ? "add" : op.kind === "removed" ? "del" : "ctx";
     const marker =
@@ -5660,12 +5663,22 @@ function renderLineDiff(before: string, after: string): string {
       `<span class="diff-line diff-${cssClass}">${marker} ${escapeHtml(op.line)}</span>`
     );
   }
-  return `<pre class="diff">${rows.join("\n")}</pre>`;
+  const notice = diff.simplified
+    ? '<div class="empty"><strong>Large diff simplified</strong>The exact line comparison exceeded its safe size limit. This preview still shows the complete content, but unchanged lines inside the changed region may appear as removed and added.</div>'
+    : "";
+  return `${notice}<pre class="diff">${rows.join("\n")}</pre>`;
 }
 
 type DiffOp = { kind: "added" | "removed" | "unchanged"; line: string };
+type DiffResult = { ops: DiffOp[]; simplified: boolean };
 
-function diffLines(before: string[], after: string[]): DiffOp[] {
+function diffLines(before: string[], after: string[]): DiffResult {
+  const tableRows = before.length + 1;
+  const tableColumns = after.length + 1;
+  if (tableRows > Math.floor(MAX_LCS_TABLE_CELLS / tableColumns)) {
+    return { ops: diffLinesByEdges(before, after), simplified: true };
+  }
+
   const lcs: number[][] = Array.from({ length: before.length + 1 }, () =>
     new Array<number>(after.length + 1).fill(0)
   );
@@ -5700,6 +5713,41 @@ function diffLines(before: string[], after: string[]): DiffOp[] {
   while (j < after.length) {
     ops.push({ kind: "added", line: after[j]! });
     j++;
+  }
+  return { ops, simplified: false };
+}
+
+function diffLinesByEdges(before: string[], after: string[]): DiffOp[] {
+  let prefixLength = 0;
+  while (
+    prefixLength < before.length &&
+    prefixLength < after.length &&
+    before[prefixLength] === after[prefixLength]
+  ) {
+    prefixLength++;
+  }
+
+  let suffixLength = 0;
+  while (
+    suffixLength < before.length - prefixLength &&
+    suffixLength < after.length - prefixLength &&
+    before[before.length - suffixLength - 1] ===
+      after[after.length - suffixLength - 1]
+  ) {
+    suffixLength++;
+  }
+
+  const ops: DiffOp[] = before
+    .slice(0, prefixLength)
+    .map((line) => ({ kind: "unchanged", line }));
+  for (let i = prefixLength; i < before.length - suffixLength; i++) {
+    ops.push({ kind: "removed", line: before[i]! });
+  }
+  for (let i = prefixLength; i < after.length - suffixLength; i++) {
+    ops.push({ kind: "added", line: after[i]! });
+  }
+  for (let i = before.length - suffixLength; i < before.length; i++) {
+    ops.push({ kind: "unchanged", line: before[i]! });
   }
   return ops;
 }

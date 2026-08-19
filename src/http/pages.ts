@@ -2441,13 +2441,22 @@ const DASHBOARD_STREAM_BANNER = `<div id="live-stream-banner" class="alert" styl
 export const DASHBOARD_LIVE_CLIENT_JS = `(function () {
   ${DASHBOARD_PATCH_FRAGMENT_JS}
   var banner = document.getElementById("live-stream-banner");
+  function refreshFragment(url, id) {
+    fetch(url)
+      .then(function (r) {
+        if (!r.ok) { return null; }
+        return r.text();
+      })
+      .then(function (html) {
+        if (html !== null) { patchFragment(id, html); }
+      })
+      .catch(function () {
+        // Keep the last-good render. A later invalidation will retry.
+      });
+  }
   function reconcile() {
-    fetch("/fragments/active-band")
-      .then(function (r) { return r.text(); })
-      .then(function (html) { patchFragment("active-now-band", html); });
-    fetch("/fragments/projects-section")
-      .then(function (r) { return r.text(); })
-      .then(function (html) { patchFragment("projects-section", html); });
+    refreshFragment("/fragments/active-band", "active-now-band");
+    refreshFragment("/fragments/projects-section", "projects-section");
   }
   var source = new EventSource("/events");
   ["run-transition", "firing-transition", "project-poll"].forEach(function (kind) {

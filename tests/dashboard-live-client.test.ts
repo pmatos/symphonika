@@ -66,6 +66,7 @@ describe("dashboard live-update client script (#305 part 2, ADR 0074)", () => {
     (globalThis as Record<string, unknown>).EventSource = FakeEventSource;
 
     const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
       text: () => Promise.resolve("<p>updated</p>")
     });
     (globalThis as Record<string, unknown>).fetch = fetchMock;
@@ -87,5 +88,50 @@ describe("dashboard live-update client script (#305 part 2, ADR 0074)", () => {
     await Promise.resolve();
     expect(fetchMock).toHaveBeenCalledWith("/fragments/active-band");
     expect(fetchMock).toHaveBeenCalledWith("/fragments/projects-section");
+  });
+
+  it("keeps the last-good fragment when a refresh returns an HTTP error", async () => {
+    document.body.innerHTML = `
+      <div id="live-stream-banner" style="display:none"></div>
+      <div id="active-now-band"><p>last good active band</p></div>
+      <div id="projects-section"><p>last good projects</p></div>
+    `;
+
+    const listeners = new Map<string, Array<() => void>>();
+    class FakeEventSource {
+      addEventListener(type: string, listener: () => void): void {
+        const existing = listeners.get(type) ?? [];
+        existing.push(listener);
+        listeners.set(type, existing);
+      }
+    }
+    (globalThis as Record<string, unknown>).EventSource = FakeEventSource;
+
+    const fetchMock = vi.fn().mockImplementation((url: string) =>
+      Promise.resolve({
+        ok: url !== "/fragments/active-band",
+        text: () =>
+          Promise.resolve(
+            url === "/fragments/active-band"
+              ? "<p>500 Internal Server Error</p>"
+              : "<p>fresh projects</p>"
+          )
+      })
+    );
+    (globalThis as Record<string, unknown>).fetch = fetchMock;
+
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval, @typescript-eslint/no-unsafe-call -- see ADR 0074: the client script has no build step, so this is the literal browser source.
+    new Function(DASHBOARD_LIVE_CLIENT_JS)();
+
+    listeners.get("open")?.forEach((listener) => listener());
+    await vi.waitFor(() => {
+      expect(document.getElementById("projects-section")?.innerHTML).toBe(
+        "<p>fresh projects</p>"
+      );
+    });
+
+    expect(document.getElementById("active-now-band")?.innerHTML).toBe(
+      "<p>last good active band</p>"
+    );
   });
 });

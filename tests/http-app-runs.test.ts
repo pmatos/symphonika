@@ -58,6 +58,35 @@ async function setup(): Promise<TestSetup> {
 }
 
 describe("HTTP app — runs API and pages", () => {
+  it("shows each Run's current workflow state on /runs", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "run-current-state",
+        issue: sampleIssue({ number: 484, title: "Visible workflow state" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.setRunCurrentState("run-current-state", "code_review_fix");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/runs");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain("<th>Current state</th>");
+      expect(body).toContain("<code>code_review_fix</code>");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("filters /api/runs by state and project", async () => {
     const test = await setup();
     try {
@@ -764,6 +793,7 @@ describe("HTTP app — runs API and pages", () => {
         providerName: "codex"
       });
       test.runStore.updateRunState("run-graph", "running");
+      test.runStore.setRunCurrentState("run-graph", "code_review_fix");
       test.runStore.updateRunEvidence("run-graph", {
         branchName: "sym/run-graph",
         branchRef: "refs/heads/sym/run-graph",
@@ -788,6 +818,9 @@ describe("HTTP app — runs API and pages", () => {
       expect(body).toContain("single_agent_workflow");
       expect(body).toContain("markdown");
       expect(body).toContain("run_agent");
+      expect(body).toContain(
+        "<dt>Current state</dt><dd><code>code_review_fix</code></dd>"
+      );
       expect(body).toContain(`href="/logs/runs/run-graph/workflow_graph"`);
       expect(body).toContain(`href="/runs/run-graph/graph"`);
     } finally {
@@ -854,6 +887,7 @@ describe("HTTP app — runs API and pages", () => {
         providerCommand: "x",
         providerName: "codex"
       });
+      test.runStore.setRunCurrentState("run-graph-page", "wait_for_pr");
       test.runStore.updateRunEvidence("run-graph-page", {
         branchName: "sym/run-graph-page",
         branchRef: "refs/heads/sym/run-graph-page",
@@ -877,11 +911,15 @@ describe("HTTP app — runs API and pages", () => {
       const body = await page.text();
       // Interactive renderer wiring.
       expect(body).toContain("window.__WORKFLOW_GRAPH__");
+      expect(body).toContain(
+        'window.__WORKFLOW_CURRENT_STATE__ = "wait_for_pr";'
+      );
       expect(body).toContain("cytoscape.min.js");
       expect(body).toContain("integrity=");
       // Inlined graph data and navigation.
       expect(body).toContain("self_driving");
       expect(body).toContain("wait_for_pr");
+      expect(body).toContain("Current state <code>wait_for_pr</code>");
       expect(body).toContain("Legend");
       expect(body).toContain(`href="/logs/runs/run-graph-page/workflow_graph"`);
       // Angle brackets in inlined JSON values are unicode-escaped so a

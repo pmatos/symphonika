@@ -38,19 +38,33 @@ in the process) between resets, not to time the reset itself.
 ### One shared gate for issue polling and PR polling
 
 `daemon.ts` holds a single `githubBackoffUntilMs`, checked before both the issue-dependency poll and
-the fire-and-forget PR poll inside `refreshIssuePollStatus`, and updated from either one's errors via
+the fire-and-forget PR poll inside `refreshIssuePollStatus`, and engaged from either one's errors via
 `applyGithubBackoffState`. They draw on the same token's budget, so a rate-limit error from either
 poll backs off both rather than leaving one free to keep hammering an already-exhausted budget.
 
-### A skipped tick leaves prior state untouched, not a synthetic "backing off" status
+### A clean poll result only ever lets the window lapse, never clears it early
 
-While backing off, `refreshIssuePollStatus` returns before calling
+`applyGithubBackoffState` engages or extends the window on a rate-limit error; it has no "clear on
+success" branch. The window instead self-expires the first time `isGithubBackoffActive` is checked
+after `nowMs` has passed it (logging the transition once there, lazily, rather than from whichever
+poll happens to return clean first). The PR poll is fire-and-forget and not awaited by the issue poll,
+so a PR poll that started before a window existed can still resolve cleanly after a later tick's issue
+poll has engaged one; if a clean result were allowed to clear the window outright, that stale result
+would erase a still-current one and undo the backoff the same tick it was engaged.
+
+### A skipped tick leaves prior poll state untouched, but still reaches the tail of the function
+
+While backing off, `refreshIssuePollStatus` skips calling
 `pollConfiguredGitHubIssuesFromConfig`/`pollConfiguredGitHubPullRequestsFromConfig` at all --
 `issuePollStatus` and the persisted per-project snapshots stay exactly as the last successful poll
 left them, mirroring `pollProject`'s own "leave prior snapshot untouched" contract for a single
-failed project. Config reload (`reloadConfigAndRecordOutcome`) still runs on every tick regardless of
-backoff, so an `interval_ms` edit or a corrected token takes effect promptly rather than waiting out
-the window.
+failed project. This is expressed as an `if (!isGithubBackoffActive(...))` around the polling work,
+not an early `return`, so a backed-off tick still reaches the function's tail --
+`issueRunNotifications.schedulePending()` in particular, which must keep running every tick (it is
+itself a cheap, debounced no-op when nothing is pending) so a run that completes while backoff is
+active doesn't wait out the rest of the window before its notification is scheduled. Config reload
+(`reloadConfigAndRecordOutcome`) also runs unconditionally before the backoff check, so an
+`interval_ms` edit or a corrected token takes effect promptly rather than waiting out the window.
 
 ### Manual "poll now" is gated the same as a timer tick
 

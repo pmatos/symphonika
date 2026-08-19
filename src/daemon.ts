@@ -606,64 +606,66 @@ export async function startDaemon(
       // token still takes effect promptly), but issuePollStatus and the
       // persisted project snapshots are left exactly as the last
       // successful poll produced them, same as pollProject's own
-      // "leave prior snapshot untouched" contract on a failed project.
-      if (isGithubBackoffActive(Date.now())) {
-        return;
-      }
-      const nextStatus = await pollConfiguredGitHubIssuesFromConfig({
-        config: snapshot.polling,
-        ...(options.env === undefined ? {} : { env: options.env }),
-        ...(options.githubIssuesApi === undefined
-          ? {}
-          : { githubIssuesApi: options.githubIssuesApi }),
-        initialErrors: errors
-      });
-      applyGithubBackoffState(nextStatus.errors);
-      replaceIssuePollStatus(issuePollStatus, nextStatus);
-      projectModes = await persistProjectPollState(
-        runStore,
-        state.configPath,
-        nextStatus
-      );
+      // "leave prior snapshot untouched" contract on a failed project. This
+      // is an `if`, not an early `return`, so a backed-off tick still
+      // reaches the tail below (schedulePending) instead of skipping it.
+      if (!isGithubBackoffActive(Date.now())) {
+        const nextStatus = await pollConfiguredGitHubIssuesFromConfig({
+          config: snapshot.polling,
+          ...(options.env === undefined ? {} : { env: options.env }),
+          ...(options.githubIssuesApi === undefined
+            ? {}
+            : { githubIssuesApi: options.githubIssuesApi }),
+          initialErrors: errors
+        });
+        applyGithubBackoffState(nextStatus.errors);
+        replaceIssuePollStatus(issuePollStatus, nextStatus);
+        projectModes = await persistProjectPollState(
+          runStore,
+          state.configPath,
+          nextStatus
+        );
 
-      // #309: a cheap per-repo PR list, persisted alongside the issue
-      // snapshot above (ADR 0077). Fire-and-forget, not awaited: its
-      // GraphQL round-trips must not delay the issue-dispatch tick this
-      // function's own callers (reconcile/launchWork, and startup before
-      // the HTTP server is created) are waiting on. `prPolling` keeps two
-      // ticks' worth from overlapping if a poll runs long; a PR-poll
-      // failure must not blank out issuePollStatus, which dispatch
-      // eligibility depends on, so it's isolated in its own try/catch same
-      // as before. Also skipped while backing off (including a window the
-      // issue poll above just engaged) -- it shares the same GitHub token's
-      // rate-limit budget, so there's nothing to gain by trying anyway.
-      if (!prPolling && !isGithubBackoffActive(Date.now())) {
-        prPolling = true;
-        void (async () => {
-          try {
-            const pullRequestStatus =
-              await pollConfiguredGitHubPullRequestsFromConfig({
-                config: snapshot.polling,
-                ...(options.env === undefined ? {} : { env: options.env }),
-                githubIssuesApi
-              });
-            applyGithubBackoffState(pullRequestStatus.errors);
-            persistProjectPullRequestPollState(runStore, pullRequestStatus);
-            if (pullRequestStatus.errors.length > 0) {
+        // #309: a cheap per-repo PR list, persisted alongside the issue
+        // snapshot above (ADR 0077). Fire-and-forget, not awaited: its
+        // GraphQL round-trips must not delay the issue-dispatch tick this
+        // function's own callers (reconcile/launchWork, and startup before
+        // the HTTP server is created) are waiting on. `prPolling` keeps two
+        // ticks' worth from overlapping if a poll runs long; a PR-poll
+        // failure must not blank out issuePollStatus, which dispatch
+        // eligibility depends on, so it's isolated in its own try/catch
+        // same as before. Also skipped while backing off (including a
+        // window the issue poll above just engaged) -- it shares the same
+        // GitHub token's rate-limit budget, so there's nothing to gain by
+        // trying anyway.
+        if (!prPolling && !isGithubBackoffActive(Date.now())) {
+          prPolling = true;
+          void (async () => {
+            try {
+              const pullRequestStatus =
+                await pollConfiguredGitHubPullRequestsFromConfig({
+                  config: snapshot.polling,
+                  ...(options.env === undefined ? {} : { env: options.env }),
+                  githubIssuesApi
+                });
+              applyGithubBackoffState(pullRequestStatus.errors);
+              persistProjectPullRequestPollState(runStore, pullRequestStatus);
+              if (pullRequestStatus.errors.length > 0) {
+                logger.warn(
+                  { errors: pullRequestStatus.errors },
+                  "symphonika PR polling has errors"
+                );
+              }
+            } catch (error) {
               logger.warn(
-                { errors: pullRequestStatus.errors },
-                "symphonika PR polling has errors"
+                { error: errorMessage(error) },
+                "symphonika PR polling failed"
               );
+            } finally {
+              prPolling = false;
             }
-          } catch (error) {
-            logger.warn(
-              { error: errorMessage(error) },
-              "symphonika PR polling failed"
-            );
-          } finally {
-            prPolling = false;
-          }
-        })();
+          })();
+        }
       }
     } catch (error) {
       issuePollStatus.errors = [errorMessage(error)];

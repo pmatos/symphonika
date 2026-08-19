@@ -5,6 +5,8 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startDaemon } from "../src/daemon.js";
+import { openRunStore } from "../src/run-store.js";
+import { resolveStateRoot } from "../src/state.js";
 
 const tempRoots: string[] = [];
 
@@ -556,6 +558,94 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("still schedules pending run notifications on a tick that's skipping GitHub calls for backoff", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root, { pollingIntervalMs: 10 });
+    const { stateRoot } = resolveStateRoot({ cwd: root });
+    const runId = "run-notify-during-backoff";
+
+    // Create the terminal run (but don't mark its notification pending
+    // yet) before the daemon starts -- no concurrent DB access. The
+    // startup tick runs before any backoff exists and would otherwise
+    // reach schedulePending() regardless of this fix, which would make the
+    // assertion below pass even against the buggy early-return code; only
+    // marking the notification pending *after* backoff is confirmed
+    // active isolates the skip-tick path this fix targets.
+    const seedStore = openRunStore({ stateRoot });
+    try {
+      seedStore.createRun({
+        id: runId,
+        issue: {
+          body: "Body",
+          created_at: "2026-07-31T07:00:00.000Z",
+          id: 99,
+          labels: ["agent-ready"],
+          number: 99,
+          priority: 1,
+          state: "open" as const,
+          title: "Example issue",
+          updated_at: "2026-07-31T07:30:00.000Z",
+          url: "https://github.com/pmatos/symphonika/issues/99"
+        },
+        projectName: "symphonika",
+        providerCommand: "codex app-server",
+        providerName: "codex"
+      });
+      seedStore.recordTerminalReason(runId, "process_exit_1", "deterministic");
+      seedStore.updateRunState(runId, "failed");
+    } finally {
+      seedStore.close();
+    }
+
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            "Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+          )
+        )
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const response = await fetch(`${daemon.url}/api/status`);
+      const body = (await response.json()) as {
+        issuePolling: { errors: string[] };
+      };
+      expect(body.issuePolling.errors.join("\n")).toContain("rate limit");
+
+      // Backoff is confirmed active -- mark the notification pending now,
+      // via a brief separate connection (a single UPDATE, retried on a
+      // transient lock since the daemon holds its own open connection).
+      markPendingWithRetry(stateRoot, runId);
+
+      // Many more 10ms ticks elapse, all skipping GitHub calls for
+      // backoff -- the regression this guards against is those ticks
+      // never reaching schedulePending() at refreshIssuePollStatus's tail.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    } finally {
+      await daemon.stop();
+    }
+
+    // No email config exists in this project, so schedulePending() marks
+    // the pending notification "skipped" rather than leaving it pending --
+    // that transition only happens if a tick actually reached the tail.
+    const verifyStore = openRunStore({ stateRoot });
+    try {
+      expect(verifyStore.listPendingRunNotifications()).toEqual([]);
+    } finally {
+      verifyStore.close();
+    }
+  });
+
   it("coalesces concurrent poll-now requests into one manual polling cycle", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);
@@ -924,6 +1014,30 @@ async function writeConfigWithInvalidAndValidProjects(
       ""
     ].join("\n")
   );
+}
+
+// A single UPDATE via a second connection to the same database the live
+// daemon holds open -- better-sqlite3's default busy_timeout is 0, so an
+// attempt that lands mid-write on the daemon's own connection throws
+// SQLITE_BUSY immediately rather than waiting; retry a few times instead
+// of failing the test on that rare timing collision.
+function markPendingWithRetry(
+  stateRoot: string,
+  runId: string,
+  attemptsRemaining = 20
+): void {
+  const store = openRunStore({ stateRoot });
+  try {
+    store.markRunNotificationPending(runId);
+  } catch (error) {
+    store.close();
+    if (attemptsRemaining <= 1) {
+      throw error;
+    }
+    markPendingWithRetry(stateRoot, runId, attemptsRemaining - 1);
+    return;
+  }
+  store.close();
 }
 
 async function waitFor(

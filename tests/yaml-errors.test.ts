@@ -34,6 +34,21 @@ describe("locatedYamlErrorMessage", () => {
     expect(Number(offsetLine)).toBe(Number(baseLine) + 5);
   });
 
+  it("reports only the offset-corrected position", () => {
+    let caught: unknown;
+    try {
+      parse("a: [1, 2\n");
+    } catch (error) {
+      caught = error;
+    }
+
+    const message = locatedYamlErrorMessage(caught, 1);
+
+    expect(message.match(/(?:at line|\(line) \d+, column \d+\)?/g)).toEqual([
+      "(line 3, column 1)"
+    ]);
+  });
+
   it("returns the bare message when the error has no linePos", () => {
     const message = locatedYamlErrorMessage(new Error("plain failure"));
     expect(message).toBe("plain failure");

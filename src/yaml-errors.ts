@@ -1,5 +1,5 @@
-// Appends a (line N, column N) suffix to a YAML parse error's message when
-// the thrown error carries yaml's own linePos -- the located-error
+// Adds a single (line N, column N) suffix to a YAML parse error's message
+// when the thrown error carries yaml's own linePos -- the located-error
 // requirement from #307's issue text ("line/column where the parser gives
 // it"). Semantic validation errors (a field with the wrong type, a missing
 // required key) have no parser position to report and are left as-is by
@@ -12,7 +12,18 @@ export function locatedYamlErrorMessage(
   const location = yamlErrorLocation(error);
   return location === undefined
     ? message
-    : `${message} (line ${location.line + lineOffset}, column ${location.col})`;
+    : `${withoutEmbeddedLocation(message, location)} (line ${location.line + lineOffset}, column ${location.col})`;
+}
+
+function withoutEmbeddedLocation(
+  message: string,
+  location: { col: number; line: number }
+): string {
+  const embeddedLocation = ` at line ${location.line}, column ${location.col}`;
+  const index = message.lastIndexOf(embeddedLocation);
+  return index === -1
+    ? message
+    : message.slice(0, index) + message.slice(index + embeddedLocation.length);
 }
 
 function yamlErrorLocation(

@@ -18,7 +18,11 @@ import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
 } from "./daemon-endpoint.js";
-import type { GitHubIssuesApi, PollingServiceConfig } from "./issue-polling.js";
+import type {
+  GitHubIssuesApi,
+  PollingProjectConfig,
+  PollingServiceConfig
+} from "./issue-polling.js";
 import {
   DEFAULT_GITHUB_ISSUES_API,
   DEFAULT_POLLING_INTERVAL_MS,
@@ -1642,9 +1646,16 @@ function projectRepository(
   config: PollingServiceConfig,
   projectName: string
 ): { owner: string; repo: string } | undefined {
-  const tracker = config.projects.find(
-    (project) => project.name === projectName
-  )?.tracker;
+  // Resolve duplicate project names to the *last* match, matching
+  // RuntimeConfigReloader.projectsByName() (src/reload.ts) — the source
+  // writeIssueLabels compares against. `.find()`'s first-match semantics
+  // would silently disagree with that on a duplicated project name.
+  let tracker: PollingProjectConfig["tracker"] | undefined;
+  for (const project of config.projects) {
+    if (project.name === projectName) {
+      tracker = project.tracker;
+    }
+  }
   return tracker === undefined
     ? undefined
     : { owner: tracker.owner, repo: tracker.repo };

@@ -400,6 +400,7 @@ export async function startDaemon(
   let systemdWatchdogTimer: ReturnType<typeof setInterval> | undefined;
   let lastTickAtMs: number | undefined;
   let lastTickAtMonotonicMs: number | undefined;
+  let nextPollAtMonotonicMs: number | undefined;
   let tickLoopStartedAtMonotonicMs: number | undefined;
   let polling = false;
   // Guards the PR-enrichment fire-and-forget below (refreshIssuePollStatus)
@@ -905,6 +906,7 @@ export async function startDaemon(
     }
     pollTimer = setInterval(scheduleTick, intervalMs);
     pollTimer.unref?.();
+    nextPollAtMonotonicMs = performance.now() + intervalMs;
     tickLoopStartedAtMonotonicMs ??= performance.now();
     logger.info(
       { pollingIntervalMs: intervalMs },
@@ -912,6 +914,9 @@ export async function startDaemon(
     );
   };
   const scheduleTick = (): void => {
+    if (intervalMs !== undefined) {
+      nextPollAtMonotonicMs = performance.now() + intervalMs;
+    }
     enqueueScheduledWork(tick);
   };
   const pollNowSummary = (kind: PollNowResult["kind"]): PollNowResult => ({
@@ -1069,6 +1074,7 @@ export async function startDaemon(
       })),
     getLastTickAt: () => lastTickAtMs,
     getLastTickAtMonotonic: () => lastTickAtMonotonicMs,
+    getNextPollAtMonotonic: () => nextPollAtMonotonicMs,
     getPollingIntervalMs: () => intervalMs,
     getTickLoopStartedAtMonotonic: () => tickLoopStartedAtMonotonicMs,
     monotonicNow: () => performance.now(),
@@ -1383,6 +1389,7 @@ export async function startDaemon(
     if (intervalMs !== undefined) {
       pollTimer = setInterval(scheduleTick, intervalMs);
       pollTimer.unref?.();
+      nextPollAtMonotonicMs = performance.now() + intervalMs;
       tickLoopStartedAtMonotonicMs = performance.now();
     }
   }
@@ -1481,6 +1488,7 @@ export async function startDaemon(
       activeRuns.beginShutdown();
       if (pollTimer !== undefined) {
         clearInterval(pollTimer);
+        nextPollAtMonotonicMs = undefined;
       }
       if (systemdWatchdogTimer !== undefined) {
         clearInterval(systemdWatchdogTimer);

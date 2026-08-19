@@ -239,7 +239,8 @@ function isNothingToCommit(error: unknown): boolean {
   const output = errorOutput(error);
   return (
     output.includes("nothing to commit") ||
-    output.includes("nothing added to commit")
+    output.includes("nothing added to commit") ||
+    output.includes("no changes added to commit")
   );
 }
 

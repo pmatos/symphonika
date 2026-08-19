@@ -2054,12 +2054,20 @@ export function registerPages(options: RegisterPagesOptions): void {
     const projectParam = context.req.query("project");
     const requestedIncludeInactive =
       context.req.query("include_inactive") === "true";
-    const resolved = resolveNamedRoutineGroup(
+    let resolved = resolveNamedRoutineGroup(
       options.runStore,
       name,
       projectParam,
-      true
+      requestedIncludeInactive
     );
+    if (!requestedIncludeInactive && resolved.kind === "not_found") {
+      resolved = resolveNamedRoutineGroup(
+        options.runStore,
+        name,
+        projectParam,
+        true
+      );
+    }
     if (resolved.kind !== "ok") {
       return context.html(
         renderUneditableRoutine(name, resolved),
@@ -2117,7 +2125,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         options.runStore,
         name,
         projectParam,
-        true
+        requestedIncludeInactive
       );
       if (resolved.kind !== "ok") {
         return context.html(
@@ -2182,7 +2190,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         options.runStore,
         name,
         projectParam,
-        true
+        requestedIncludeInactive
       );
       if (resolved.kind !== "ok") {
         return context.html(

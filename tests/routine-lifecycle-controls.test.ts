@@ -212,6 +212,22 @@ describe("routine disable/enable (#307 part 4, ADR 0076)", () => {
       const html = await response.text();
       expect(html).toContain("Confirm disabling audit");
       expect(html).not.toContain("Multiple declarations share this name");
+
+      const confirm = await app.request("/routines/audit/edit/confirm", {
+        body: formBody({
+          content: extractHidden(html, "content"),
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: extractHidden(html, "expected_content_hash")
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        redirect: "manual"
+      });
+      expect(confirm.status).toBe(303);
+      expect(confirm.headers.get("location")).toBe("/routines/audit?saved=1");
     } finally {
       test.cleanup();
     }

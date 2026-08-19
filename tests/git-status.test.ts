@@ -65,11 +65,13 @@ describe("detectGitFileState (#306 part 3/3, ADR 0075)", () => {
     }
   });
 
-  it("reports the symbolic branch for a repository with an unborn HEAD", async () => {
+  it("reports the branch name for an unborn HEAD with a same-named tag", async () => {
     const root = await makeTempRoot();
     await initRepo(root);
     const filePath = path.join(root, "workflow.md");
     await writeFile(filePath, "content\n", "utf8");
+    const tagTarget = await git(root, ["hash-object", "-w", "workflow.md"]);
+    await git(root, ["tag", "main", tagTarget]);
 
     const state = await detectGitFileState(filePath);
     expect(state.inRepo).toBe(true);

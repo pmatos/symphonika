@@ -1102,7 +1102,12 @@ describe("mergeIssuePollStatus", () => {
       projects: [{ fetchedIssues: 1, name: "beta", ok: true }]
     };
 
-    const merged = mergeIssuePollStatus(prior, fresh, new Set(["beta"]));
+    const merged = mergeIssuePollStatus(
+      prior,
+      fresh,
+      new Set(["beta"]),
+      new Set(["alpha", "beta"])
+    );
 
     expect(merged.candidateIssues.map((entry) => entry.project)).toEqual([
       "alpha",
@@ -1124,10 +1129,85 @@ describe("mergeIssuePollStatus", () => {
       projects: [{ fetchedIssues: 3, name: "alpha", ok: true }]
     };
 
-    const merged = mergeIssuePollStatus(prior, fresh, new Set(["alpha"]));
+    const merged = mergeIssuePollStatus(
+      prior,
+      fresh,
+      new Set(["alpha"]),
+      new Set(["alpha"])
+    );
 
     expect(merged.projects).toEqual([
       { fetchedIssues: 3, name: "alpha", ok: true }
     ]);
+  });
+
+  it("drops a prior project's entries once it's no longer in the configured set", () => {
+    const prior = {
+      ...emptyIssuePollStatus(),
+      candidateIssues: [
+        {
+          issue: {
+            body: "",
+            created_at: "",
+            id: 1,
+            labels: [],
+            number: 1,
+            priority: 0,
+            state: "open",
+            title: "gamma issue",
+            updated_at: "",
+            url: ""
+          },
+          project: "gamma"
+        }
+      ],
+      projects: [{ fetchedIssues: 1, name: "gamma", ok: true }]
+    };
+    const fresh = {
+      ...emptyIssuePollStatus(),
+      projects: [{ fetchedIssues: 1, name: "beta", ok: true }]
+    };
+
+    // gamma was neither polled this tick nor is it configured any more
+    // (removed/renamed on reload) -- it must not be carried over.
+    const merged = mergeIssuePollStatus(
+      prior,
+      fresh,
+      new Set(["beta"]),
+      new Set(["beta"])
+    );
+
+    expect(merged.candidateIssues).toEqual([]);
+    expect(merged.projects.map((project) => project.name)).toEqual(["beta"]);
+  });
+
+  it("preserves a skipped project's rate-limit error in the merged errors array", () => {
+    const prior = {
+      ...emptyIssuePollStatus(),
+      errors: ["projects.alpha rate limit exceeded"],
+      projects: [
+        {
+          error: "projects.alpha rate limit exceeded",
+          fetchedIssues: 0,
+          name: "alpha",
+          ok: false
+        }
+      ]
+    };
+    const fresh = {
+      ...emptyIssuePollStatus(),
+      projects: [{ fetchedIssues: 2, name: "beta", ok: true }]
+    };
+
+    // alpha is still configured but was skipped this tick (backed off);
+    // beta polled clean. A clean poll of beta must not clear alpha's error.
+    const merged = mergeIssuePollStatus(
+      prior,
+      fresh,
+      new Set(["beta"]),
+      new Set(["alpha", "beta"])
+    );
+
+    expect(merged.errors).toEqual(["projects.alpha rate limit exceeded"]);
   });
 });

@@ -663,12 +663,20 @@ export async function startDaemon(
       const polledIssueProjectNames = new Set(
         pollableForIssues.map((project) => project.name)
       );
+      // The full configured set (not just pollableForIssues) so a project
+      // removed or renamed by a config reload -- absent from both sets --
+      // has its stale carried-over entries dropped rather than retained
+      // forever; see mergeIssuePollStatus.
+      const configuredIssueProjectNames = new Set(
+        snapshot.polling.projects.map((project) => project.name)
+      );
       replaceIssuePollStatus(
         issuePollStatus,
         mergeIssuePollStatus(
           issuePollStatus,
           nextStatus,
-          polledIssueProjectNames
+          polledIssueProjectNames,
+          configuredIssueProjectNames
         )
       );
       // Persisted with the polled subset only (not the merged status) --

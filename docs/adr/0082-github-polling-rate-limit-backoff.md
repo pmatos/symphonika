@@ -104,6 +104,23 @@ waiting out any project's window. `issueRunNotifications.schedulePending()` at t
 also always runs, independent of partitioning, so a run that completes while some (or all) projects
 are backing off doesn't wait out the window before its notification is scheduled.
 
+### Carry-over is limited to still-configured projects, and preserves their own errors
+
+`mergeIssuePollStatus` takes both `polledProjectNames` (this tick's pollable subset) and
+`configuredProjectNames` (every project in the just-reloaded config, pollable or not) and only carries
+a prior project's entries forward when that project is in `configuredProjectNames` but not in
+`polledProjectNames` -- i.e. it still exists in config and was specifically skipped for backoff. A
+project a config reload removes or renames satisfies neither set once its old name is
+gone, so its stale candidates/filtered-issues/report are dropped on the very next tick instead of
+persisting in `/api/status`, poll-now summaries, and CLI/smoke output indefinitely.
+
+The merge also no longer does a bare `errors: fresh.errors` replace. `fresh.errors` only ever reflects
+the projects actually polled this tick, so a carried-over (backed-off) project's own rate-limit
+message -- recorded on its carried-over `ProjectIssuePollReport.error` -- is concatenated back in.
+Without this, the first *other* project to poll clean on the same tick would wipe a still-backed-off
+project's error from `issuePollStatus.errors` and the daemon's "polling errors cleared" log line, even
+though that project never got a chance to recover.
+
 ### Manual "poll now" is gated the same as a timer tick
 
 `triggerPollNow` queues the same `tick()` a timer-driven poll runs, and `tick()` has no signal to
@@ -113,7 +130,12 @@ window, so this ADR accepts gating both identically rather than adding plumbing 
 ## Consequences
 
 - `src/issue-polling.ts` exports `isRateLimitError`, `backoffUntil`, `GITHUB_RATE_LIMIT_BACKOFF_MS`,
-  `rateLimitedTokens`, and `mergeIssuePollStatus`.
+  `rateLimitedTokens`, and `mergeIssuePollStatus` (now taking a `configuredProjectNames` parameter in
+  addition to `polledProjectNames`).
+- A `PullRequestPollStatus.projects` entry can now be `ok: true` with a populated `error` -- "polled
+  successfully, but enrichment hit a rate limit" -- distinct from the pre-existing `ok: false` shape
+  for a project the poll couldn't process at all. Any future reader of that field must not assume
+  `error` implies `ok: false`.
 - No `symphonika.yml` schema change. `polling.interval_ms` (ADR 0036) is unaffected by this decision;
   operators configuring it well below the 30-second default should still account for other traffic
   (interactive `gh`/API usage, other automation) sharing a project's token's budget.

@@ -942,35 +942,49 @@ export function replaceIssuePollStatus(
 // Like replaceIssuePollStatus, but for a tick that only polled a subset of
 // configured projects (credential-scoped backoff excludes any project whose
 // resolved token is currently backing off, see daemon.ts). Entries for a
-// polled project come from `fresh`; entries for every other project are
-// carried over from `prior` untouched, mirroring pollProject's own "leave
-// prior snapshot untouched" contract for a single failed project, just
-// applied per-project across a partial poll instead of an all-or-nothing one.
+// polled project come from `fresh`; entries for every other *currently
+// configured* project are carried over from `prior` untouched, mirroring
+// pollProject's own "leave prior snapshot untouched" contract for a single
+// failed project, just applied per-project across a partial poll instead of
+// an all-or-nothing one. `configuredProjectNames` is deliberately the full
+// configured set, not just the pollable/backed-off ones -- a project a
+// config reload removed or renamed is absent from both `polledProjectNames`
+// and `configuredProjectNames`, so it's dropped here too instead of being
+// carried over indefinitely.
 export function mergeIssuePollStatus(
   prior: IssuePollStatus,
   fresh: IssuePollStatus,
-  polledProjectNames: ReadonlySet<string>
+  polledProjectNames: ReadonlySet<string>,
+  configuredProjectNames: ReadonlySet<string>
 ): IssuePollStatus {
+  const carryOver = (name: string): boolean =>
+    !polledProjectNames.has(name) && configuredProjectNames.has(name);
+
+  const carriedOverProjects = prior.projects.filter((project) =>
+    carryOver(project.name)
+  );
+  // A carried-over project's own rate-limit error must survive the merge --
+  // otherwise the first clean poll of any OTHER project on the same tick
+  // wipes it from `errors` via a bare `fresh.errors` replace, even though
+  // the backed-off project itself never got a chance to recover. See
+  // ADR 0082.
+  const carriedOverErrors = carriedOverProjects
+    .map((project) => project.error)
+    .filter((error): error is string => error !== undefined);
+
   return {
     candidateIssues: [
-      ...prior.candidateIssues.filter(
-        (candidate) => !polledProjectNames.has(candidate.project)
+      ...prior.candidateIssues.filter((candidate) =>
+        carryOver(candidate.project)
       ),
       ...fresh.candidateIssues
     ],
-    errors: fresh.errors,
+    errors: [...carriedOverErrors, ...fresh.errors],
     filteredIssues: [
-      ...prior.filteredIssues.filter(
-        (filtered) => !polledProjectNames.has(filtered.project)
-      ),
+      ...prior.filteredIssues.filter((filtered) => carryOver(filtered.project)),
       ...fresh.filteredIssues
     ],
-    projects: [
-      ...prior.projects.filter(
-        (project) => !polledProjectNames.has(project.name)
-      ),
-      ...fresh.projects
-    ]
+    projects: [...carriedOverProjects, ...fresh.projects]
   };
 }
 

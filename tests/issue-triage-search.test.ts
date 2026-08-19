@@ -423,7 +423,60 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
     }
   });
 
-  it("shows scheduled lifecycle ownership on the issue detail page", async () => {
+  it("does not render an unpersisted contention callback id as the claimant", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedByTruncated: false,
+            blockedBy: [],
+            issueNumber: 5,
+            kind: "filtered",
+            labels: ["sym:claimed"],
+            priority: 1,
+            reasons: ["has operational label sym:claimed"],
+            title: "Claimed during continuation contention"
+          }
+        ]
+      });
+      test.runStore.createRun({
+        id: "run-parent",
+        issue: sampleIssue({ number: 5 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-parent", "succeeded");
+
+      const app = createHttpApp({
+        getScheduled: () => [
+          {
+            dueAt: Date.now() + 10_000,
+            issueNumber: 5,
+            kind: "continuation",
+            projectName: "alpha",
+            runId: "run-never-persisted"
+          }
+        ],
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues")).text();
+      expect(html).toContain("claimed by run run-parent");
+      expect(html).not.toContain("claimed by run run-never-persisted");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows the waiting Run as claimant while wait_park is scheduled", async () => {
     const test = await setup();
     try {
       test.runStore.syncProjectStates([
@@ -453,13 +506,20 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         providerName: "codex"
       });
       test.runStore.updateRunState("run-continuation", "succeeded");
+      test.runStore.createWaitingRun({
+        currentStateId: "wait-for-review",
+        id: "run-waiting",
+        issue: sampleIssue({ number: 5 }),
+        parentRunId: "run-continuation",
+        projectName: "alpha"
+      });
 
       const app = createHttpApp({
         getScheduled: () => [
           {
             dueAt: Date.now() + 1_000,
             issueNumber: 5,
-            kind: "continuation",
+            kind: "wait_park",
             projectName: "alpha",
             runId: "run-continuation"
           }
@@ -469,7 +529,8 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
         version: "0.1.0"
       });
       const html = await (await app.request("/issues/alpha/5")).text();
-      expect(html).toContain("claimed by run run-continuation");
+      expect(html).toContain("claimed by run run-waiting");
+      expect(html).not.toContain("claimed by run run-continuation");
     } finally {
       test.cleanup();
     }

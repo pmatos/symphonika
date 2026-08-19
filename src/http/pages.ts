@@ -3633,9 +3633,13 @@ function parsePositiveIntQueryParam(
 // Run id resolved through the Run Store — a local read, not a GitHub call —
 // so describeIssueVerdict (src/issues/verdict.ts) can stay pure and DB-free.
 // A scheduled callback keeps its Issue Reservation even when the backing Run
-// row is terminal. Otherwise only the non-terminal states below are current
-// claimants. Terminal history alone may legitimately retain sym:claimed for
-// operator action (SPEC 9.3), but renders as blocked/stale evidence.
+// row is terminal. Its runId is scheduling correlation, not durable claimant
+// identity: wait_park can name the terminal parent while a waiting row owns
+// the reservation, and contention reschedules can name an unpersisted id.
+// Prefer the non-terminal states below, then use scheduled issue identity to
+// resolve the latest persisted Run. Terminal history alone may legitimately
+// retain sym:claimed for operator action (SPEC 9.3), but renders as
+// blocked/stale evidence.
 const CLAIM_REASON = /^has operational label sym:(claimed|running)$/;
 const CLAIM_HOLDING_RUN_STATES: RunState[] = [
   "queued",
@@ -3643,6 +3647,17 @@ const CLAIM_HOLDING_RUN_STATES: RunState[] = [
   "running",
   "waiting"
 ];
+
+function resolveScheduledClaimantRunId(
+  runStore: RunStore,
+  callback: ScheduledCallback
+): string | undefined {
+  return runStore.listRuns({
+    issueNumber: callback.issueNumber,
+    limit: 1,
+    project: callback.projectName
+  })[0]?.id;
+}
 
 function resolveClaimedRunId(
   runStore: RunStore,
@@ -3654,20 +3669,24 @@ function resolveClaimedRunId(
   if (!reasons.some((reason) => CLAIM_REASON.test(reason))) {
     return undefined;
   }
+  const claimHoldingRun = runStore.listRuns({
+    issueNumber,
+    limit: 1,
+    project: projectName,
+    state: CLAIM_HOLDING_RUN_STATES
+  })[0];
+  if (claimHoldingRun !== undefined) {
+    return claimHoldingRun.id;
+  }
   const scheduledClaimant = scheduled.find(
     (callback) =>
       callback.projectName === projectName &&
       callback.issueNumber === issueNumber
   );
   if (scheduledClaimant !== undefined) {
-    return scheduledClaimant.runId;
+    return resolveScheduledClaimantRunId(runStore, scheduledClaimant);
   }
-  return runStore.listRuns({
-    issueNumber,
-    limit: 1,
-    project: projectName,
-    state: CLAIM_HOLDING_RUN_STATES
-  })[0]?.id;
+  return undefined;
 }
 
 // #308 part 3's clear-stale-claim liveness gate: the same three-source union
@@ -3692,15 +3711,26 @@ function collectLiveRunEntries(input: {
   // RunController.schedule (RegisterPagesOptions.getScheduled) has already
   // unregistered its slot and moved the Run row to a terminal state — the
   // only remaining ownership signal is this callback. Without it, an issue
-  // mid-backoff reads as unowned even though it will fire again.
+  // mid-backoff reads as unowned even though it will fire again. Resolve its
+  // issue identity back to a persisted Run because callback.runId is not
+  // guaranteed to name one.
   getScheduled: (() => ScheduledCallback[]) | undefined;
   runStore: RunStore;
 }): Array<{ issueNumber: number; projectName: string; runId: string }> {
-  const scheduledEntries = (input.getScheduled?.() ?? []).map((callback) => ({
-    issueNumber: callback.issueNumber,
-    projectName: callback.projectName,
-    runId: callback.runId
-  }));
+  const scheduledEntries = (input.getScheduled?.() ?? []).flatMap(
+    (callback) => {
+      const runId = resolveScheduledClaimantRunId(input.runStore, callback);
+      return runId === undefined
+        ? []
+        : [
+            {
+              issueNumber: callback.issueNumber,
+              projectName: callback.projectName,
+              runId
+            }
+          ];
+    }
+  );
   return [
     ...(input.getActiveRuns?.() ?? []),
     ...input.runStore.listActiveRunIds(),

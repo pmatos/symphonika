@@ -140,6 +140,61 @@ describe("routine disable/enable (#307 part 4, ADR 0076)", () => {
     }
   });
 
+  it("shows lifecycle controls when the first target was removed but a live target remains", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit the codebase.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: test.routinePath
+        },
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit the codebase.",
+          provider: null,
+          projectName: "beta",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: test.routinePath
+        }
+      ]);
+      test.runStore.syncRoutines(
+        [
+          {
+            kind: "report",
+            name: "audit",
+            prompt: "Audit the codebase.",
+            provider: null,
+            projectName: "beta",
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: test.routinePath
+          }
+        ],
+        { projects: ["alpha", "beta"] }
+      );
+
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (
+        await app.request("/routines/audit", { headers: browserHeaders() })
+      ).text();
+      expect(html).toContain('action="/routines/audit/disable"');
+      expect(html).toContain("Disable routine");
+      expect(html).not.toContain("Enable routine");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("POST /disable renders a confirm-diff page whose confirm posts to /edit/confirm", async () => {
     const test = await setup();
     try {

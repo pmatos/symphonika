@@ -5728,17 +5728,21 @@ function renderRoutineDeclarationCard(
 
 // #307 AC: "Disable/enable a Routine from its page affects every target; a
 // live firing is unaffected until it terminates (ADR 0060)." Every target
-// in a group shares one declaration file (ADR 0069's fan-out), so their
-// disabledReason is expected to agree; the representative target decides
-// which action (or none, for removed_from_config -- re-enabling that isn't
-// this action's job, it's controlled by config file inclusion) to offer.
+// in a group shares one declaration file (ADR 0069's fan-out). A target
+// removed from that declaration can remain beside current siblings, so it
+// must not represent the declaration's lifecycle state. When every target
+// was removed, the fallback preserves the no-action rule -- re-enabling that
+// isn't this action's job, it's controlled by config file inclusion.
 function renderRoutineLifecycleControls(
   name: string,
   group: RoutineGroup,
   projectParam: string | undefined,
   csrfToken: string
 ): string {
-  const [representative] = group.targets;
+  const representative =
+    group.targets.find(
+      (target) => target.disabledReason !== "removed_from_config"
+    ) ?? group.targets[0];
   const projectField =
     projectParam === undefined
       ? ""

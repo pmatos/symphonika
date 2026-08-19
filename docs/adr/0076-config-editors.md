@@ -148,11 +148,12 @@ incidental reuse; it is the mechanism by which "every save goes through #306's p
 AC) and "a diff against on-disk content is shown before every write" (`#307` AC) hold for the
 toggle too, without a second write path to keep in sync with the first.
 
-The toggle button offered on `/routines/:name` is decided from the representative target's
-`disabledReason`: `operator` → "Enable routine"; `removed_from_config` → neither button (that state
-is controlled by config file inclusion, not an operator action here); anything else → "Disable
-routine". Every target sharing a declaration is expected to agree on `disabledReason` (ADR-0069's
-fan-out — one file, one shared row per target), so the representative is sufficient.
+The toggle button offered on `/routines/:name` is decided from a target still backed by the current
+declaration: `operator` → "Enable routine"; anything else → "Disable routine". A target removed
+from the declaration can remain as a durable `removed_from_config` row beside current siblings
+(ADR-0069's per-target removal semantics), so it is not eligible to represent the declaration's
+lifecycle state. When every target has `disabledReason = removed_from_config`, neither button is
+shown because restoring config inclusion, not this action, is what re-enables the Routine.
 
 ### Firing cancellation needed a UI control and a redirect fix, not a new cancel mechanism
 

@@ -311,6 +311,10 @@ type ContinuationPayload = {
   issue: IssueSnapshot;
   parentRunId: string;
   projectName: string;
+  // Preserve the parent Run's Continuation Eligibility ownership while the
+  // one-shot callback is delayed. Label-immune PR Follow-up work must not
+  // release its claim solely because labels drift before the callback fires.
+  respectsIssueLabels?: boolean;
 };
 
 type StateAdvancePayload = {
@@ -1833,21 +1837,32 @@ export class RunController {
       );
       return;
     }
+    if (refreshed === null || refreshed.state !== "open") {
+      // Issue closure ends every Continuation Eligibility scope. The
+      // one-shot callback has been consumed and no replacement step will be
+      // scheduled, so the Issue Reservation ends here. See SPEC section 9.3.
+      await this.releaseIssueClaim({
+        issueNumber: payload.issue.number,
+        phase: "continuation-closed-issue",
+        repository
+      });
+      return;
+    }
     if (
-      refreshed === null ||
       !evaluateRunContinuationEligibility(refreshed, project, {
         scope: "label_controlled"
       }).eligible
     ) {
-      // No active or scheduled step remains for this issue once the
-      // one-shot continuation callback is consumed, whether because the
-      // issue closed or because label-controlled eligibility was lost
-      // during the continuation delay. See ADR 0023.
-      await this.releaseIssueClaim({
-        issueNumber: payload.issue.number,
-        phase: "continuation-eligibility-loss",
-        repository
-      });
+      // Label/dependency drift ends a label-controlled reservation, but a
+      // PR Follow-up Run remains workflow-owned and may share the claim with
+      // a parked/waiting Run. Preserve that label-immune reservation.
+      if (payload.respectsIssueLabels !== false) {
+        await this.releaseIssueClaim({
+          issueNumber: payload.issue.number,
+          phase: "continuation-eligibility-loss",
+          repository
+        });
+      }
       return;
     }
 
@@ -1896,6 +1911,9 @@ export class RunController {
         providerCommand,
         providerName,
         repository,
+        ...(payload.respectsIssueLabels === undefined
+          ? {}
+          : { respectsIssueLabels: payload.respectsIssueLabels }),
         runId
       });
     } catch (error) {
@@ -3486,7 +3504,9 @@ export class RunController {
     phase:
       | "closed-issue-cleanup"
       | "continuation"
+      | "continuation-closed-issue"
       | "continuation-eligibility-loss"
+      | "continuation-scheduling-closed-issue"
       | "continuation-scheduling-eligibility-loss"
       | "eligibility-loss-cleanup"
       | "state-advance";
@@ -3718,8 +3738,19 @@ export class RunController {
     if (refreshed === undefined) {
       return;
     }
+    if (refreshed === null || refreshed.state !== "open") {
+      // Issue closure ends every Continuation Eligibility scope, including
+      // label-immune PR Follow-up work. The completed run has already
+      // released its in-flight slot and no continuation will be scheduled,
+      // so the Issue Reservation ends here. See SPEC section 9.3.
+      await this.releaseIssueClaim({
+        issueNumber: input.issue.number,
+        phase: "continuation-scheduling-closed-issue",
+        repository: input.repository
+      });
+      return;
+    }
     if (
-      refreshed === null ||
       !evaluateRunContinuationEligibility(refreshed, input.project, {
         scope: "label_controlled"
       }).eligible
@@ -3727,10 +3758,9 @@ export class RunController {
       // Raw-FSM mid-walk / label-immune runs (respectsIssueLabels === false,
       // e.g. a PR Follow-up dispatch) intentionally never gate continuation
       // scheduling on labels_all/labels_none (see ADR 0046), so ineligibility
-      // here — including a closed issue — is expected steady state, not a
-      // lost reservation — releasing sym:claimed for it would strip the
-      // claim out from under a still-live parked/waiting Run that owns the
-      // same Issue Reservation.
+      // on an open issue is expected steady state, not a lost reservation —
+      // releasing sym:claimed for it would strip the claim out from under a
+      // still-live parked/waiting Run that owns the same Issue Reservation.
       if (input.respectsIssueLabels !== false) {
         await this.releaseIssueClaim({
           issueNumber: input.issue.number,
@@ -3802,7 +3832,10 @@ export class RunController {
         this.executeContinuation({
           issue: refreshed,
           parentRunId: input.runId,
-          projectName: input.project.name
+          projectName: input.project.name,
+          ...(input.respectsIssueLabels === false
+            ? { respectsIssueLabels: false }
+            : {})
         }),
       issueNumber: refreshed.number,
       kind: "continuation",

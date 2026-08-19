@@ -83,6 +83,7 @@ import { resolveWatchdogConfig, RuntimeConfigReloader } from "./reload.js";
 import {
   INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS,
   openRunStore,
+  type ProjectSnapshotRepository,
   type RunState,
   type SyncProjectStateInput
 } from "./run-store.js";
@@ -403,6 +404,7 @@ export async function startDaemon(
   let systemdWatchdogTimer: ReturnType<typeof setInterval> | undefined;
   let lastTickAtMs: number | undefined;
   let lastTickAtMonotonicMs: number | undefined;
+  let nextPollAtMonotonicMs: number | undefined;
   let tickLoopStartedAtMonotonicMs: number | undefined;
   let polling = false;
   // Guards the PR-enrichment fire-and-forget below (refreshIssuePollStatus)
@@ -1040,6 +1042,7 @@ export async function startDaemon(
     }
     pollTimer = setInterval(scheduleTick, intervalMs);
     pollTimer.unref?.();
+    nextPollAtMonotonicMs = performance.now() + intervalMs;
     tickLoopStartedAtMonotonicMs ??= performance.now();
     logger.info(
       { pollingIntervalMs: intervalMs },
@@ -1047,6 +1050,9 @@ export async function startDaemon(
     );
   };
   const scheduleTick = (): void => {
+    if (intervalMs !== undefined) {
+      nextPollAtMonotonicMs = performance.now() + intervalMs;
+    }
     enqueueScheduledWork(tick);
   };
   const pollNowSummary = (kind: PollNowResult["kind"]): PollNowResult => ({
@@ -1204,6 +1210,7 @@ export async function startDaemon(
       })),
     getLastTickAt: () => lastTickAtMs,
     getLastTickAtMonotonic: () => lastTickAtMonotonicMs,
+    getNextPollAtMonotonic: () => nextPollAtMonotonicMs,
     getPollingIntervalMs: () => intervalMs,
     getTickLoopStartedAtMonotonic: () => tickLoopStartedAtMonotonicMs,
     monotonicNow: () => performance.now(),
@@ -1359,6 +1366,45 @@ export async function startDaemon(
           ok: false
         };
       }
+      const subjectLabel = input.kind === "issue" ? "issue" : "pull request";
+      if (input.snapshotRepository === undefined) {
+        return {
+          error: `${subjectLabel} #${input.subjectNumber} rendered snapshot repository identity is unavailable; reload the page after a successful poll before writing labels`,
+          ok: false
+        };
+      }
+      const snapshotRepository =
+        input.kind === "issue"
+          ? runStore.getProjectIssueSnapshotRepository(
+              input.projectName,
+              input.subjectNumber
+            )
+          : runStore.getProjectPullRequestSnapshotRepository(
+              input.projectName,
+              input.subjectNumber
+            );
+      if (snapshotRepository === undefined) {
+        return {
+          error: `${subjectLabel} #${input.subjectNumber} snapshot repository identity is unavailable; poll the Project successfully before writing labels`,
+          ok: false
+        };
+      }
+      if (!sameGitHubRepository(input.snapshotRepository, snapshotRepository)) {
+        return {
+          error: `rendered snapshot repository ${input.snapshotRepository.owner}/${input.snapshotRepository.repo} does not match current snapshot repository ${snapshotRepository.owner}/${snapshotRepository.repo}; reload the page before writing labels`,
+          ok: false
+        };
+      }
+      const currentRepository: ProjectSnapshotRepository = {
+        owner: project.tracker.owner,
+        repo: project.tracker.repo
+      };
+      if (!sameGitHubRepository(snapshotRepository, currentRepository)) {
+        return {
+          error: `snapshot repository ${snapshotRepository.owner}/${snapshotRepository.repo} does not match current tracker repository ${currentRepository.owner}/${currentRepository.repo}; poll the Project successfully before writing labels`,
+          ok: false
+        };
+      }
       const token = resolveToken(project.tracker.token, env);
       if (token === undefined) {
         return {
@@ -1479,6 +1525,7 @@ export async function startDaemon(
     if (intervalMs !== undefined) {
       pollTimer = setInterval(scheduleTick, intervalMs);
       pollTimer.unref?.();
+      nextPollAtMonotonicMs = performance.now() + intervalMs;
       tickLoopStartedAtMonotonicMs = performance.now();
     }
   }
@@ -1577,6 +1624,7 @@ export async function startDaemon(
       activeRuns.beginShutdown();
       if (pollTimer !== undefined) {
         clearInterval(pollTimer);
+        nextPollAtMonotonicMs = undefined;
       }
       if (systemdWatchdogTimer !== undefined) {
         clearInterval(systemdWatchdogTimer);
@@ -1640,7 +1688,12 @@ function persistProjectPollState(
           runStore.replaceProjectIssueSnapshots({
             polledAt: project.lastPolledAt ?? timestamp(),
             projectName: project.name,
-            rows: projectIssueSnapshotRows(project.name, status)
+            repository: project.repository,
+            rows: projectIssueSnapshotRows(
+              project.name,
+              project.repository,
+              status
+            )
           });
         }
       }
@@ -1651,6 +1704,7 @@ function persistProjectPollState(
 
 function projectIssueSnapshotRows(
   projectName: string,
+  repository: ProjectSnapshotRepository,
   status: import("./issue-polling.js").IssuePollStatus
 ): Array<{
   blockedBy: import("./issue-polling.js").RawGitHubIssueDependencyRef[];
@@ -1664,7 +1718,11 @@ function projectIssueSnapshotRows(
   title: string;
 }> {
   const candidateRows = status.candidateIssues
-    .filter((entry) => entry.project === projectName)
+    .filter(
+      (entry) =>
+        entry.project === projectName &&
+        sameGitHubRepository(entry.repository, repository)
+    )
     .map((entry) => ({
       blockedBy: entry.issue.blockedBy ?? [],
       blockedByTruncated: entry.issue.blockedByTruncated === true,
@@ -1679,7 +1737,11 @@ function projectIssueSnapshotRows(
       title: entry.issue.title
     }));
   const filteredRows = status.filteredIssues
-    .filter((entry) => entry.project === projectName)
+    .filter(
+      (entry) =>
+        entry.project === projectName &&
+        sameGitHubRepository(entry.repository, repository)
+    )
     .map((entry) => ({
       blockedBy: entry.issue.blockedBy ?? [],
       blockedByTruncated: entry.issue.blockedByTruncated === true,
@@ -1711,8 +1773,13 @@ function persistProjectPullRequestPollState(
     runStore.replaceProjectPullRequestSnapshots({
       polledAt: project.lastPolledAt ?? timestamp(),
       projectName: project.name,
+      repository: project.repository,
       rows: status.pullRequests
-        .filter((entry) => entry.project === project.name)
+        .filter(
+          (entry) =>
+            entry.project === project.name &&
+            sameGitHubRepository(entry.repository, project.repository)
+        )
         .map((entry) => ({
           branchOrigin: entry.branchOrigin,
           checks: entry.checks,
@@ -1733,6 +1800,16 @@ function persistProjectPullRequestPollState(
         }))
     });
   }
+}
+
+function sameGitHubRepository(
+  left: ProjectSnapshotRepository,
+  right: ProjectSnapshotRepository
+): boolean {
+  return (
+    left.owner.toLowerCase() === right.owner.toLowerCase() &&
+    left.repo.toLowerCase() === right.repo.toLowerCase()
+  );
 }
 
 function timestamp(): string {

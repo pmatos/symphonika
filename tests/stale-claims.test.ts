@@ -82,7 +82,8 @@ function pollStatusWithFiltered(issues: IssueSnapshot[]): IssuePollStatus {
   status.filteredIssues = issues.map((issue) => ({
     issue,
     project: project.name,
-    reasons: ["fixture-filtered"]
+    reasons: ["fixture-filtered"],
+    repository: { owner: "pmatos", repo: "symphonika" }
   }));
   return status;
 }
@@ -112,8 +113,18 @@ describe("detectStaleClaims", () => {
 
       const status = emptyIssuePollStatus();
       status.filteredIssues = [
-        { issue: issueLive, project: project.name, reasons: ["fixture"] },
-        { issue: issueOrphan, project: projectB.name, reasons: ["fixture"] }
+        {
+          issue: issueLive,
+          project: project.name,
+          reasons: ["fixture"],
+          repository: { owner: "pmatos", repo: "symphonika" }
+        },
+        {
+          issue: issueOrphan,
+          project: projectB.name,
+          reasons: ["fixture"],
+          repository: { owner: "other-owner", repo: "other-repo" }
+        }
       ];
 
       const registry = new ActiveRunRegistry();

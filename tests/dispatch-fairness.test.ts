@@ -323,10 +323,15 @@ describe("dispatch fairness", () => {
 });
 
 function pollStatusFor(
-  candidateIssues: IssuePollStatus["candidateIssues"]
+  candidateIssues: Array<
+    Omit<IssuePollStatus["candidateIssues"][number], "repository">
+  >
 ): IssuePollStatus {
   return {
-    candidateIssues,
+    candidateIssues: candidateIssues.map((entry) => ({
+      ...entry,
+      repository: { owner: "pmatos", repo: entry.project }
+    })),
     errors: [],
     filteredIssues: [],
     projects: []

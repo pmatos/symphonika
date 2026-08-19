@@ -1696,7 +1696,8 @@ describe("CLI run commands", () => {
                   fetchedIssues: 3,
                   filteredIssues: 1,
                   name: "alpha",
-                  ok: true
+                  ok: true,
+                  repository: { owner: "pmatos", repo: "symphonika" }
                 }
               ]
             },

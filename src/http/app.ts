@@ -34,6 +34,7 @@ import type { StatusSnapshot } from "../status.js";
 import type {
   ChangeEvent,
   ListRunsFilter,
+  ProjectSnapshotRepository,
   RunArtifactKind,
   RunState,
   RunStatus,
@@ -95,6 +96,7 @@ export type WriteIssueLabelsFn = (input: {
   kind: "issue" | "pull_request";
   projectName: string;
   remove: string[];
+  snapshotRepository?: ProjectSnapshotRepository | undefined;
   subjectNumber: number;
 }) => Promise<WriteIssueLabelsResult>;
 
@@ -186,6 +188,7 @@ export type HttpAppOptions = {
   getLastTickAt?: () => number | undefined;
   // Internal liveness timestamps share monotonicNow's clock domain.
   getLastTickAtMonotonic?: () => number | undefined;
+  getNextPollAtMonotonic?: () => number | undefined;
   getPollingIntervalMs?: () => number | undefined;
   getTickLoopStartedAtMonotonic?: () => number | undefined;
   getPullRequestFollowupPolicy?: () => {
@@ -702,6 +705,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.getLastTickAtMonotonic === undefined
         ? {}
         : { getLastTickAtMonotonic: options.getLastTickAtMonotonic }),
+      ...(options.getNextPollAtMonotonic === undefined
+        ? {}
+        : { getNextPollAtMonotonic: options.getNextPollAtMonotonic }),
       ...(options.getScheduled === undefined
         ? {}
         : { getScheduled: options.getScheduled }),

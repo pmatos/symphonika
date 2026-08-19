@@ -61,6 +61,7 @@ async function setup(): Promise<TestSetup> {
   runStore.replaceProjectIssueSnapshots({
     polledAt: "2026-05-22T10:00:00.000Z",
     projectName: "alpha",
+    repository: { owner: "pmatos", repo: "alpha" },
     rows: [
       {
         blockedByTruncated: false,
@@ -101,6 +102,8 @@ describe("GET /issues/:project/:number (#308 part 2, ADR 0077)", () => {
       expect(html).toContain("needs-human");
       expect(html).toContain("sym:stale");
       expect(html).toContain("managed by Symphonika — not editable here");
+      expect(html).toContain('name="snapshot_owner" value="pmatos"');
+      expect(html).toContain('name="snapshot_repo" value="alpha"');
     } finally {
       test.cleanup();
     }
@@ -348,7 +351,12 @@ describe("POST /issues/:project/:number/labels/(add|remove) (#308 part 2)", () =
         }
       });
       const response = await app.request("/issues/alpha/7/labels/add", {
-        body: formBody({ csrf_token: VALID_TOKEN, label: "agent-ready" }),
+        body: formBody({
+          csrf_token: VALID_TOKEN,
+          label: "agent-ready",
+          snapshot_owner: "pmatos",
+          snapshot_repo: "alpha"
+        }),
         headers: {
           ...browserHeaders(),
           "content-type": "application/x-www-form-urlencoded"
@@ -364,6 +372,7 @@ describe("POST /issues/:project/:number/labels/(add|remove) (#308 part 2)", () =
         kind: "issue",
         projectName: "alpha",
         remove: [],
+        snapshotRepository: { owner: "pmatos", repo: "alpha" },
         subjectNumber: 7
       });
     } finally {

@@ -80,7 +80,8 @@ function pollStatus(issues: IssueSnapshot[]): IssuePollStatus {
   const status = emptyIssuePollStatus();
   status.candidateIssues = issues.map((issue) => ({
     issue,
-    project: project.name
+    project: project.name,
+    repository: { owner: "pmatos", repo: "symphonika" }
   }));
   return status;
 }

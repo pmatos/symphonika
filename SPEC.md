@@ -1196,11 +1196,18 @@ On closed issue:
 On eligibility loss while a label-controlled Run is running:
 
 - cancel active run
-- remove `sym:running`
+- remove `sym:running` and `sym:claimed`
 - preserve workspace and logs
 
 An admitted raw-FSM Run keeps FSM-owned Continuation Eligibility through label and dependency
 drift; issue closure and operator cancellation remain its live stop controls (ADR 0046 / ADR 0082).
+
+When label-controlled Continuation Eligibility rejects a delayed retry or Continuation:
+
+- cancel the retry row when one exists
+- release `sym:claimed` because no active or scheduled Issue Reservation remains
+- do not park or automatically reschedule the work; a later eligible poll may dispatch a fresh Run
+- preserve prior Run evidence, workspace, and logs
 
 On Watchdog no-progress termination:
 
@@ -1504,6 +1511,13 @@ Cancellation preserves workspace and logs.
 Label or dependency drift does not cancel an already-admitted raw-FSM walk. Its State Advances,
 waiting rows, and retries use FSM-owned Continuation Eligibility until the walk terminates; issue
 closure and explicit operator cancellation still apply (ADR 0046 / ADR 0082).
+
+Eligibility-loss cancellation also releases `sym:claimed`. The same release applies when an
+eligibility check consumes a delayed retry or Continuation without starting it: retaining the
+claim after the Issue Reservation ends would turn ordinary label or dependency drift into a stale
+claim that blocks later dispatch. A newly eligible Issue returns through fresh dispatch and reuses
+its deterministic Workspace and Issue Branch; label-controlled work is not parked waiting for
+eligibility to return.
 
 On graceful shutdown, the daemon first closes the active-run registry to new claims
 synchronously, before snapshotting active runs, so a dispatch still in pre-claim work can never
@@ -2104,6 +2118,11 @@ displayed labels unchanged" holds for both. A successful write's banner offers `
 /issues/poll-now`, a page-facing wrapper around the same `pollNow` trigger `/api/poll-now` already
 exposes to the CLI — submitted separately by the operator, never auto-fired by the write itself, so
 labelling an issue never bypasses the dispatch gates (ADR 0036) by triggering a poll as a side effect.
+Each persisted issue and pull-request snapshot records the GitHub owner/repo that produced it.
+Before any label mutation, `writeIssueLabels` compares that identity case-insensitively with the
+Project's current tracker and refuses an unbound or mismatched snapshot. A tracker identity changed
+by hot reload therefore cannot redirect an action rendered from the prior repository; a successful
+poll of the new repository must replace the snapshot first.
 
 `POST /issues/:project/:number/clear-stale-claim` (`#308` part 3) is the one `sym:*` mutation the UI
 offers, named rather than raw label surgery: it removes `sym:stale`, `sym:claimed`, and `sym:running`

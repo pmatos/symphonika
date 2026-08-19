@@ -4,7 +4,14 @@ type BulkSelectIssueData = {
   issueNumber: number;
   labels: string[];
   projectName: string;
+  snapshotRepository?: { owner: string; repo: string };
   title: string;
+};
+
+type BulkIssueOperation = {
+  issueNumber: number;
+  projectName: string;
+  snapshotRepository?: { owner: string; repo: string };
 };
 
 type BulkLabelResult =
@@ -83,9 +90,19 @@ function labelsWithPendingInput(
 export function IssuesBulkSelect() {
   const issues = window.__ISSUES__ ?? [];
   const csrfToken = window.__CSRF_TOKEN__ ?? "";
-  const [selected, setSelected] = useState<
-    Map<string, { issueNumber: number; projectName: string }>
-  >(new Map());
+  const issuesByKey = useMemo(
+    () =>
+      new Map(
+        issues.map((issue) => [
+          issueKey(issue.projectName, issue.issueNumber),
+          issue
+        ])
+      ),
+    [issues]
+  );
+  const [selected, setSelected] = useState<Map<string, BulkIssueOperation>>(
+    new Map()
+  );
   const [addLabelChips, setAddLabelChips] = useState<string[]>([]);
   const [addLabelInput, setAddLabelInput] = useState("");
   const [removeLabelChips, setRemoveLabelChips] = useState<string[]>([]);
@@ -116,10 +133,7 @@ export function IssuesBulkSelect() {
         const rowCheckboxes = document.querySelectorAll<HTMLInputElement>(
           ".bulk-issue-checkbox"
         );
-        const next = new Map<
-          string,
-          { issueNumber: number; projectName: string }
-        >();
+        const next = new Map<string, BulkIssueOperation>();
         for (const checkbox of rowCheckboxes) {
           checkbox.checked = target.checked;
           const projectName = checkbox.dataset.project;
@@ -130,9 +144,14 @@ export function IssuesBulkSelect() {
             issueNumberRaw !== undefined
           ) {
             const issueNumber = Number(issueNumberRaw);
-            next.set(issueKey(projectName, issueNumber), {
+            const key = issueKey(projectName, issueNumber);
+            const snapshotRepository = issuesByKey.get(key)?.snapshotRepository;
+            next.set(key, {
               issueNumber,
-              projectName
+              projectName,
+              ...(snapshotRepository === undefined
+                ? {}
+                : { snapshotRepository })
             });
           }
         }
@@ -152,7 +171,12 @@ export function IssuesBulkSelect() {
       setSelected((previous) => {
         const next = new Map(previous);
         if (target.checked) {
-          next.set(key, { issueNumber, projectName });
+          const snapshotRepository = issuesByKey.get(key)?.snapshotRepository;
+          next.set(key, {
+            issueNumber,
+            projectName,
+            ...(snapshotRepository === undefined ? {} : { snapshotRepository })
+          });
         } else {
           next.delete(key);
         }
@@ -162,7 +186,7 @@ export function IssuesBulkSelect() {
     }
     document.addEventListener("change", handleChange);
     return () => document.removeEventListener("change", handleChange);
-  }, []);
+  }, [issuesByKey]);
 
   const knownLabels = useMemo(() => {
     const labels = new Set<string>();

@@ -86,6 +86,36 @@ is being cleaned up here — that's out of scope), and calls `tryAddLabelsToIssu
 `src/issue-polling.ts`) so a `GitHubIssuesApi` stub without label-write methods degrades to a named
 error instead of a `TypeError`.
 
+### Snapshot repository identity gates every label write
+
+Issue and pull-request snapshot rows persist the GitHub owner/repo from the successful poll that
+produced them. Every rendered label action also carries that identity: hidden fields bind issue,
+pull-request, and clear-stale-claim forms to the row the operator saw, while each bulk-selection
+operation carries the same value in its JSON payload. `writeIssueLabels` compares the submitted
+identity first with the current durable row and then, case-insensitively, compares the durable row
+with the current Project tracker's owner/repo before resolving credentials or calling the GitHub
+mutation API. A missing identity (including a row created before this migration) or either mismatch
+is refused. This prevents a successful poll of a newly configured repository from turning an
+already-rendered same-number action into a write against that replacement row, while keeping the
+callback as the uniform guard for single-issue, bulk, stale-claim, and pull-request label writes.
+
+The poll result carries that source identity on both each per-Project report and each issue or pull-
+request row. Persistence uses the report's identity and selects only rows with the same Project name
+and repository; it never recovers provenance from a name-keyed Service Config lookup. This matters
+because defensive reload permits duplicate Project names and its runtime lookup intentionally lets
+the last declaration win: the last report may replace the shared name-keyed snapshot, but rows from
+an earlier repository cannot be folded into that replacement or relabelled as if the last repository
+produced them.
+
+The alternative of clearing snapshots as soon as a tracker changes was rejected because ADR 0073
+deliberately keeps last-good poll evidence when the next repository cannot be polled. Binding only
+the durable snapshot was also rejected: a successful replacement poll could change that row between
+render and submit. Binding only the caller-supplied identity was rejected because it would not prove
+that the current durable row came from the same repository. The request-to-row-to-tracker chain
+preserves last-good diagnostic evidence while making both kinds of stale action fail closed. A
+broader snapshot version was unnecessary for this boundary: labels and verdicts are deliberately
+poll-stale, while owner/repo is the identity whose accidental replacement can redirect a mutation.
+
 ### `sym:*` is refused before `writeIssueLabels` is ever called, not inside it
 
 The route handler (`handleIssueLabelWrite`, `src/http/pages.ts`) checks `isOrchestratorLabel` first

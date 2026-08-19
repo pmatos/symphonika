@@ -1075,10 +1075,18 @@ describe("mergeIssuePollStatus", () => {
             updated_at: "",
             url: ""
           },
-          project: "alpha"
+          project: "alpha",
+          repository: { owner: "pmatos", repo: "alpha" }
         }
       ],
-      projects: [{ fetchedIssues: 1, name: "alpha", ok: true }]
+      projects: [
+        {
+          fetchedIssues: 1,
+          name: "alpha",
+          ok: true,
+          repository: { owner: "pmatos", repo: "alpha" }
+        }
+      ]
     };
     const fresh = {
       ...emptyIssuePollStatus(),
@@ -1096,10 +1104,18 @@ describe("mergeIssuePollStatus", () => {
             updated_at: "",
             url: ""
           },
-          project: "beta"
+          project: "beta",
+          repository: { owner: "pmatos", repo: "beta" }
         }
       ],
-      projects: [{ fetchedIssues: 1, name: "beta", ok: true }]
+      projects: [
+        {
+          fetchedIssues: 1,
+          name: "beta",
+          ok: true,
+          repository: { owner: "pmatos", repo: "beta" }
+        }
+      ]
     };
 
     const merged = mergeIssuePollStatus(
@@ -1120,13 +1136,14 @@ describe("mergeIssuePollStatus", () => {
   });
 
   it("drops a project's prior entries once it's actually polled again", () => {
+    const repository = { owner: "pmatos", repo: "alpha" };
     const prior = {
       ...emptyIssuePollStatus(),
-      projects: [{ fetchedIssues: 1, name: "alpha", ok: false }]
+      projects: [{ fetchedIssues: 1, name: "alpha", ok: false, repository }]
     };
     const fresh = {
       ...emptyIssuePollStatus(),
-      projects: [{ fetchedIssues: 3, name: "alpha", ok: true }]
+      projects: [{ fetchedIssues: 3, name: "alpha", ok: true, repository }]
     };
 
     const merged = mergeIssuePollStatus(
@@ -1137,7 +1154,7 @@ describe("mergeIssuePollStatus", () => {
     );
 
     expect(merged.projects).toEqual([
-      { fetchedIssues: 3, name: "alpha", ok: true }
+      { fetchedIssues: 3, name: "alpha", ok: true, repository }
     ]);
   });
 
@@ -1158,14 +1175,29 @@ describe("mergeIssuePollStatus", () => {
             updated_at: "",
             url: ""
           },
-          project: "gamma"
+          project: "gamma",
+          repository: { owner: "pmatos", repo: "gamma" }
         }
       ],
-      projects: [{ fetchedIssues: 1, name: "gamma", ok: true }]
+      projects: [
+        {
+          fetchedIssues: 1,
+          name: "gamma",
+          ok: true,
+          repository: { owner: "pmatos", repo: "gamma" }
+        }
+      ]
     };
     const fresh = {
       ...emptyIssuePollStatus(),
-      projects: [{ fetchedIssues: 1, name: "beta", ok: true }]
+      projects: [
+        {
+          fetchedIssues: 1,
+          name: "beta",
+          ok: true,
+          repository: { owner: "pmatos", repo: "beta" }
+        }
+      ]
     };
 
     // gamma was neither polled this tick nor is it configured any more
@@ -1190,13 +1222,21 @@ describe("mergeIssuePollStatus", () => {
           error: "projects.alpha rate limit exceeded",
           fetchedIssues: 0,
           name: "alpha",
-          ok: false
+          ok: false,
+          repository: { owner: "pmatos", repo: "alpha" }
         }
       ]
     };
     const fresh = {
       ...emptyIssuePollStatus(),
-      projects: [{ fetchedIssues: 2, name: "beta", ok: true }]
+      projects: [
+        {
+          fetchedIssues: 2,
+          name: "beta",
+          ok: true,
+          repository: { owner: "pmatos", repo: "beta" }
+        }
+      ]
     };
 
     // alpha is still configured but was skipped this tick (backed off);

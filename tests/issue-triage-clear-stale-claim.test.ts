@@ -79,6 +79,7 @@ async function setup(labels: string[]): Promise<TestSetup> {
   runStore.replaceProjectIssueSnapshots({
     polledAt: "2026-05-22T10:00:00.000Z",
     projectName: "alpha",
+    repository: { owner: "pmatos", repo: "alpha" },
     rows: [
       {
         blockedByTruncated: false,
@@ -114,6 +115,8 @@ describe("clear-stale-claim visibility (#308 part 3, ADR 0077)", () => {
       ).text();
       expect(html).toContain("Clear stale claim");
       expect(html).toContain('action="/issues/alpha/9/clear-stale-claim"');
+      expect(html).toContain('name="snapshot_owner" value="pmatos"');
+      expect(html).toContain('name="snapshot_repo" value="alpha"');
     } finally {
       test.cleanup();
     }
@@ -163,7 +166,11 @@ describe("POST /issues/:project/:number/clear-stale-claim (#308 part 3)", () => 
         }
       });
       const response = await app.request("/issues/alpha/9/clear-stale-claim", {
-        body: formBody({ csrf_token: VALID_TOKEN }),
+        body: formBody({
+          csrf_token: VALID_TOKEN,
+          snapshot_owner: "pmatos",
+          snapshot_repo: "alpha"
+        }),
         headers: {
           ...browserHeaders(),
           "content-type": "application/x-www-form-urlencoded"
@@ -178,6 +185,7 @@ describe("POST /issues/:project/:number/clear-stale-claim (#308 part 3)", () => 
         kind: "issue",
         projectName: "alpha",
         remove: ["sym:stale", "sym:claimed", "sym:running"],
+        snapshotRepository: { owner: "pmatos", repo: "alpha" },
         subjectNumber: 9
       });
     } finally {

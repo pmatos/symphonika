@@ -460,6 +460,10 @@ or channel configuration beyond the boolean; toggling it to `false` mid-flight h
 update before its next phase, per the defensive reload model in §5.1. See ADR 0079 for the full
 design, including the deferred edges (no prebuilt native-module binaries, no automatic rollback
 after a post-cutover crash-loop) and `symphonika service rollback` for manual recovery.
+Once cutover and artifact pruning complete, the update is healthy: the old unit's restart client
+being terminated by the same cgroup-wide `SIGTERM` it requested is expected and must not reverse
+that result. Any other automatic restart-request error is logged as a manual-restart warning rather
+than reported as a failed cutover, because the old process cannot observe post-restart liveness.
 
 ### 5.2 Workflow Contract
 

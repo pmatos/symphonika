@@ -55,14 +55,16 @@ snapshot row's `kind`/`reasons` into the issue text's own vocabulary: `eligible`
 state <state>` for the open/closed check; `blocked: sym:<x>` for an operational label that isn't a
 claim; and `claimed by run <id>` specifically for `sym:claimed`/`sym:running`, when the caller can
 resolve an actual claim-holding Run id. Resolving that id is deliberately the caller's job
-(`pages.ts`, via `runStore.listRuns` filtered to `queued`, `preparing_workspace`, `running`, and
-`waiting`) — a local Run Store read, not a GitHub call. Terminal history is excluded because a
-terminal Run may legitimately leave `sym:claimed` behind for operator action; without a live Run,
-the verdict remains `blocked: sym:claimed` rather than presenting that history as the current
-claimant. This stays inside the "no GitHub Search API calls" constraint while keeping the verdict
-module itself free of `RunStore` — a reason string alone can't tell candidate from
-filtered-for-cause, so `kind` travels alongside it rather than being re-derived from an empty
-`reasons` array.
+(`pages.ts`): it first checks the in-process scheduled callbacks, whose Issue Reservation stays live
+while a retry, Continuation, or State Advance is delayed even though its backing Run row is already
+terminal, then falls back to `runStore.listRuns` filtered to `queued`, `preparing_workspace`,
+`running`, and `waiting`. These are local reads, not GitHub calls. Terminal history that is not
+named by scheduled work is excluded because a terminal Run may legitimately leave `sym:claimed`
+behind for operator action; without a live reservation, the verdict remains `blocked: sym:claimed`
+rather than presenting that history as the current claimant. This stays inside the "no GitHub
+Search API calls" constraint while keeping the verdict module itself free of `RunStore` — a reason
+string alone can't tell candidate from filtered-for-cause, so `kind` travels alongside it rather
+than being re-derived from an empty `reasons` array.
 
 ### This is not the same table as `/projects/:name`'s existing Issues section
 

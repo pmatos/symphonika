@@ -314,6 +314,102 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
     });
   });
 
+  it("preserves the REST head SHA when GraphQL enrichment omits headRefOid", async () => {
+    const followup: RawGitHubPullRequestFollowupState = {
+      draft: false,
+      headSha: "",
+      mergeable: "MERGEABLE",
+      merged: false,
+      number: 248,
+      reviewDecision: "APPROVED",
+      state: "OPEN",
+      statusCheckRollupState: "SUCCESS",
+      unresolvedReviewThreads: [],
+      url: "https://github.com/pmatos/symphonika/pull/248"
+    };
+    const api: GitHubIssuesApi = {
+      getPullRequestFollowupState: () => Promise.resolve(followup),
+      listOpenIssues: () => Promise.resolve([]),
+      listPullRequests: () =>
+        Promise.resolve([
+          {
+            draft: false,
+            head: { ref: "sym/alpha/3-fix", sha: "abc123" },
+            html_url: "https://github.com/pmatos/symphonika/pull/248",
+            merged_at: null,
+            number: 248,
+            state: "open",
+            title: "Keep merge pinned"
+          }
+        ])
+    };
+
+    const status = await pollConfiguredGitHubPullRequestsFromConfig({
+      config: { projects: [project()] },
+      enrichmentCache: new Map(),
+      env: { GITHUB_TOKEN: "secret" },
+      githubIssuesApi: api
+    });
+
+    expect(status.pullRequests[0]).toMatchObject({
+      checks: "success",
+      headSha: "abc123",
+      stateAvailable: true
+    });
+  });
+
+  it("refreshes the REST fallback head SHA while GraphQL enrichment is cached", async () => {
+    let enrichmentCalls = 0;
+    let restHeadSha = "abc123";
+    const followup: RawGitHubPullRequestFollowupState = {
+      draft: false,
+      headSha: "",
+      mergeable: "MERGEABLE",
+      merged: false,
+      number: 249,
+      reviewDecision: "APPROVED",
+      state: "OPEN",
+      statusCheckRollupState: "SUCCESS",
+      unresolvedReviewThreads: [],
+      url: "https://github.com/pmatos/symphonika/pull/249"
+    };
+    const api: GitHubIssuesApi = {
+      getPullRequestFollowupState: () => {
+        enrichmentCalls++;
+        return Promise.resolve(followup);
+      },
+      listOpenIssues: () => Promise.resolve([]),
+      listPullRequests: () =>
+        Promise.resolve([
+          {
+            draft: false,
+            head: { ref: "sym/alpha/4-fix", sha: restHeadSha },
+            html_url: "https://github.com/pmatos/symphonika/pull/249",
+            merged_at: null,
+            number: 249,
+            state: "open",
+            title: "Refresh merge pin"
+          }
+        ])
+    };
+    const cache = new Map<string, CachedPullRequestEnrichment>();
+    const poll = () =>
+      pollConfiguredGitHubPullRequestsFromConfig({
+        config: { projects: [project()] },
+        enrichmentCache: cache,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: api
+      });
+
+    const first = await poll();
+    restHeadSha = "def456";
+    const second = await poll();
+
+    expect(enrichmentCalls).toBe(1);
+    expect(first.pullRequests[0]?.headSha).toBe("abc123");
+    expect(second.pullRequests[0]?.headSha).toBe("def456");
+  });
+
   it("records a token-resolution error without listing pull requests", async () => {
     const api: GitHubIssuesApi = {
       listOpenIssues: () => Promise.resolve([]),

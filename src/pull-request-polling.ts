@@ -234,7 +234,6 @@ async function mapWithConcurrency<T, R>(
 export type CachedPullRequestEnrichment = {
   checks: PullRequestState["checks"] | null;
   enrichedAtMs: number;
-  headSha: string | null;
   mergeable: PullRequestState["mergeable"] | null;
   merged: boolean;
   open: boolean;
@@ -303,7 +302,6 @@ async function buildSnapshot(
     return {
       ...base,
       checks: cached.checks,
-      headSha: cached.headSha,
       mergeable: cached.mergeable,
       merged: cached.merged,
       open: cached.open,
@@ -325,31 +323,23 @@ async function buildSnapshot(
     }
 
     const state = interpretPullRequest(followup);
-    cache.set(cacheKey, {
+    const headSha = state.headSha === "" ? base.headSha : state.headSha;
+    const enriched: Omit<CachedPullRequestEnrichment, "enrichedAtMs"> = {
       checks: state.checks,
-      enrichedAtMs: nowMs,
-      headSha: state.headSha,
       mergeable: state.mergeable,
       merged: state.merged,
       open: state.open,
       reviewDecision: state.reviewDecision,
-      trackingState: state.trackingState,
-      unresolvedReviewThreads: state.unresolvedReviewThreads,
-      url: state.url
-    });
-    return {
-      ...base,
-      checks: state.checks,
-      headSha: state.headSha,
-      mergeable: state.mergeable,
-      merged: state.merged,
-      open: state.open,
-      reviewDecision: state.reviewDecision,
-      stateAvailable: true,
       trackingState: state.trackingState,
       unresolvedReviewThreads: state.unresolvedReviewThreads,
       url: state.url
     };
+    cache.set(cacheKey, { ...enriched, enrichedAtMs: nowMs });
+    // GraphQL normalizes an omitted headRefOid to an empty string because PR
+    // Follow-up requires a string-valued head SHA. Resolve that sentinel from
+    // this poll's REST result, but do not cache it: a later poll may observe a
+    // newly pushed commit while reusing the other GraphQL enrichment fields.
+    return { ...base, ...enriched, headSha, stateAvailable: true };
   } catch {
     // A single PR's enrichment failing -- during either the fetch or its
     // interpretation -- must not drop the row. #259's orphans are exactly

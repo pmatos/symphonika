@@ -94,6 +94,14 @@ while connected:
   send the next queued event as an SSE message
 ```
 
+Each connection retains at most 100 pending events. If a publisher finds that queue full, the
+subscriber is lagging behind backpressure: the handler clears its retained event references, aborts
+that stream, and unsubscribes in the loop's existing `finally` path. Dropping the oldest event or
+coalescing by event kind would also bound memory, but either can create a silent gap while the client
+still treats its connection as authoritative. Disconnecting instead uses the already-required
+`EventSource` reconnect and full-fragment reconciliation path, preserving the no-replay contract
+while bounding a stalled tab or proxy's memory use. See #432.
+
 An idle daemon (no Run/Firing/poll/reload activity) sends nothing but a heartbeat every
 `SSE_HEARTBEAT_MS` (20s) — fixed, low-frequency keepalive traffic to hold the connection open
 through intermediary proxies, not a busy loop. This is unrelated to, and does not add to, the
@@ -178,6 +186,9 @@ reimplementation of it.
   (no sequence log, no per-client cursor persistence) and is only safe because every event is
   paired with a page that can be re-fetched in full to reconcile — there is no case in this app
   where an event is the only record of something that happened.
+- A subscriber that accumulates 100 pending events is deliberately disconnected on the next event.
+  This bounds per-connection retention and makes overload visible through the same stream-down and
+  reconnect behavior as any other transport gap.
 - `#305` shipped as two stacked PRs: the first (the notification path, the SSE endpoint,
   degradation and leak-safety at the transport level, all independently testable without a
   browser) and this second one (the dashboard's fragment endpoints, the embedded client script,

@@ -273,6 +273,7 @@ export type HttpAppOptions = {
 };
 
 const SSE_HEARTBEAT_MS = 20_000;
+const SSE_MAX_PENDING_EVENTS = 100;
 
 const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
   "queued",
@@ -919,6 +920,16 @@ function streamChangeEvents(
     };
     shutdownSignal?.addEventListener("abort", onShutdown);
     const unsubscribe = runStore.subscribeToChanges((event) => {
+      if (done) {
+        return;
+      }
+      if (queue.length >= SSE_MAX_PENDING_EVENTS) {
+        done = true;
+        queue.length = 0;
+        wake?.();
+        stream.abort();
+        return;
+      }
       queue.push(event);
       wake?.();
     });

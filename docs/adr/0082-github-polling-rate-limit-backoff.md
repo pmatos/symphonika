@@ -35,36 +35,50 @@ fixed hourly clock that doubling delays can't influence either way; the window's
 the daemon from flailing against an already-exhausted budget (and tripping the secondary/abuse limit
 in the process) between resets, not to time the reset itself.
 
-### One shared gate for issue polling and PR polling
+### Backoff is keyed by resolved GitHub token, not global
 
-`daemon.ts` holds a single `githubBackoffUntilMs`, checked before both the issue-dependency poll and
-the fire-and-forget PR poll inside `refreshIssuePollStatus`, and engaged from either one's errors via
-`applyGithubBackoffState`. They draw on the same token's budget, so a rate-limit error from either
-poll backs off both rather than leaving one free to keep hammering an already-exhausted budget.
+`daemon.ts` holds `githubBackoffUntilByToken: Map<string, number>`, keyed by the token
+`resolveEnvBackedValue` resolves for a project's `tracker.token` -- not a single process-wide scalar.
+SPEC.md §6 lets each project's tracker reference an independent `$VAR_NAME`, and GitHub tracks
+rate-limit budgets per token, so a rate limit on one project's credential must not suppress polling
+for a project on a different one. `rateLimitedTokens` (`src/issue-polling.ts`) maps each rate-limited
+project's poll report back to its resolved token; `engageGithubBackoff` (`daemon.ts`) engages the
+window for every token that function returns. The map's values are only ever used as opaque keys and
+never logged -- the resolved token is a secret (SPEC.md §6's redaction requirement).
 
-### A clean poll result only ever lets the window lapse, never clears it early
+### A clean poll result only ever lets a token's window lapse, never clears it early
 
-`applyGithubBackoffState` engages or extends the window on a rate-limit error; it has no "clear on
-success" branch. The window instead self-expires the first time `isGithubBackoffActive` is checked
-after `nowMs` has passed it (logging the transition once there, lazily, rather than from whichever
-poll happens to return clean first). The PR poll is fire-and-forget and not awaited by the issue poll,
-so a PR poll that started before a window existed can still resolve cleanly after a later tick's issue
-poll has engaged one; if a clean result were allowed to clear the window outright, that stale result
-would erase a still-current one and undo the backoff the same tick it was engaged.
+`engageGithubBackoff` engages or extends a token's window on a rate-limit error; there is no "clear on
+success" path for any token. A window instead self-expires the first time `isGithubBackoffActive` is
+checked for that token after `nowMs` has passed it (logging the transition once there, lazily, rather
+than from whichever poll happens to return clean first). The PR poll is fire-and-forget and not
+awaited by the issue poll, so a PR poll that started before a window existed can still resolve cleanly
+after a later tick's issue poll has engaged one for the same token; if a clean result were allowed to
+clear the window outright, that stale result would erase a still-current one and undo the backoff the
+same tick it was engaged.
 
-### A skipped tick leaves prior poll state untouched, but still reaches the tail of the function
+### Each tick partitions projects into pollable and currently-backed-off, and polls the pollable subset
 
-While backing off, `refreshIssuePollStatus` skips calling
-`pollConfiguredGitHubIssuesFromConfig`/`pollConfiguredGitHubPullRequestsFromConfig` at all --
-`issuePollStatus` and the persisted per-project snapshots stay exactly as the last successful poll
-left them, mirroring `pollProject`'s own "leave prior snapshot untouched" contract for a single
-failed project. This is expressed as an `if (!isGithubBackoffActive(...))` around the polling work,
-not an early `return`, so a backed-off tick still reaches the function's tail --
-`issueRunNotifications.schedulePending()` in particular, which must keep running every tick (it is
-itself a cheap, debounced no-op when nothing is pending) so a run that completes while backoff is
-active doesn't wait out the rest of the window before its notification is scheduled. Config reload
-(`reloadConfigAndRecordOutcome`) also runs unconditionally before the backoff check, so an
-`interval_ms` edit or a corrected token takes effect promptly rather than waiting out the window.
+`partitionProjectsForPolling` filters the configured projects down to those whose resolved token isn't
+currently backing off; `refreshIssuePollStatus` polls only that subset (for both issues and PRs,
+re-partitioned before the PR poll so a token the issue poll just engaged is excluded from the same
+tick's PR poll too). The issue poll is still called even when the pollable subset is empty -- an
+empty `config.projects` loop is a cheap no-op, and `persistProjectPollState` afterward must run every
+tick regardless of how many projects were actually polled, since it also derives `projectModes` (the
+Routine Host dashboard state) from the full config file, independent of GitHub polling. The PR poll,
+which has no such side effect, is skipped outright when nothing is pollable.
+
+A project excluded from a tick's pollable subset keeps its `issuePollStatus` entries and persisted
+snapshot exactly as the last successful poll produced them, mirroring `pollProject`'s own "leave prior
+snapshot untouched" contract for a single failed project -- `mergeIssuePollStatus`
+(`src/issue-polling.ts`) carries a skipped project's entries forward into the in-memory status instead
+of a bare replace, while `persistProjectPollState`/`persistProjectPullRequestPollState` naturally
+leave a skipped project's DB rows untouched since both already write per-project rather than doing a
+destructive full-project-list sync. Config reload (`reloadConfigAndRecordOutcome`) runs unconditionally
+before partitioning, so an `interval_ms` edit or a corrected token takes effect promptly rather than
+waiting out any project's window. `issueRunNotifications.schedulePending()` at the function's tail
+also always runs, independent of partitioning, so a run that completes while some (or all) projects
+are backing off doesn't wait out the window before its notification is scheduled.
 
 ### Manual "poll now" is gated the same as a timer tick
 
@@ -74,14 +88,15 @@ window, so this ADR accepts gating both identically rather than adding plumbing 
 
 ## Consequences
 
-- `src/issue-polling.ts` exports `isRateLimitError`, `backoffUntil`, and
-  `GITHUB_RATE_LIMIT_BACKOFF_MS`.
+- `src/issue-polling.ts` exports `isRateLimitError`, `backoffUntil`, `GITHUB_RATE_LIMIT_BACKOFF_MS`,
+  `rateLimitedTokens`, and `mergeIssuePollStatus`.
 - No `symphonika.yml` schema change. `polling.interval_ms` (ADR 0036) is unaffected by this decision;
   operators configuring it well below the 30-second default should still account for other traffic
-  (interactive `gh`/API usage, other automation) sharing the same token's budget.
-- A poll-now request issued during an active backoff window returns whatever `issuePollStatus`
-  already held rather than making a fresh attempt; it is not separately flagged as skipped in the
-  response.
+  (interactive `gh`/API usage, other automation) sharing a project's token's budget.
+- A poll-now request issued while every configured project is backing off returns whatever
+  `issuePollStatus` already held rather than making a fresh attempt; it is not separately flagged as
+  skipped in the response. A poll-now request while only *some* projects are backing off still polls
+  the rest.
 
 ## Numbering
 

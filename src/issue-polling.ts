@@ -939,6 +939,41 @@ export function replaceIssuePollStatus(
   target.projects = source.projects;
 }
 
+// Like replaceIssuePollStatus, but for a tick that only polled a subset of
+// configured projects (credential-scoped backoff excludes any project whose
+// resolved token is currently backing off, see daemon.ts). Entries for a
+// polled project come from `fresh`; entries for every other project are
+// carried over from `prior` untouched, mirroring pollProject's own "leave
+// prior snapshot untouched" contract for a single failed project, just
+// applied per-project across a partial poll instead of an all-or-nothing one.
+export function mergeIssuePollStatus(
+  prior: IssuePollStatus,
+  fresh: IssuePollStatus,
+  polledProjectNames: ReadonlySet<string>
+): IssuePollStatus {
+  return {
+    candidateIssues: [
+      ...prior.candidateIssues.filter(
+        (candidate) => !polledProjectNames.has(candidate.project)
+      ),
+      ...fresh.candidateIssues
+    ],
+    errors: fresh.errors,
+    filteredIssues: [
+      ...prior.filteredIssues.filter(
+        (filtered) => !polledProjectNames.has(filtered.project)
+      ),
+      ...fresh.filteredIssues
+    ],
+    projects: [
+      ...prior.projects.filter(
+        (project) => !polledProjectNames.has(project.name)
+      ),
+      ...fresh.projects
+    ]
+  };
+}
+
 export async function readConfiguredPollingIntervalMs(
   configPath: string
 ): Promise<number> {
@@ -1490,6 +1525,40 @@ export const GITHUB_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
 
 export function backoffUntil(nowMs: number): number {
   return nowMs + GITHUB_RATE_LIMIT_BACKOFF_MS;
+}
+
+// Maps each rate-limited project's poll report back to the resolved GitHub
+// token its tracker used, so a caller (daemon.ts) can back off polling
+// scoped to that credential instead of every configured project -- SPEC.md
+// §6 permits each tracker to reference an independent $VAR_NAME, and GitHub
+// tracks rate-limit budgets per token, not per Symphonika deployment.
+// Structurally typed over `reports` so the same function serves both
+// IssuePollStatus.projects and PullRequestPollStatus.projects.
+export function rateLimitedTokens(
+  reports: ReadonlyArray<{ error?: string; name: string; ok: boolean }>,
+  projects: readonly PollingProjectConfig[],
+  env: NodeJS.ProcessEnv
+): Set<string> {
+  const tokens = new Set<string>();
+  for (const report of reports) {
+    if (report.ok || report.error === undefined) {
+      continue;
+    }
+    if (!isRateLimitError(report.error)) {
+      continue;
+    }
+    const project = projects.find(
+      (candidate) => candidate.name === report.name
+    );
+    if (project === undefined) {
+      continue;
+    }
+    const token = resolveEnvBackedValue(project.tracker.token, env);
+    if (token !== undefined) {
+      tokens.add(token);
+    }
+  }
+  return tokens;
 }
 
 // Swallows a 404 from a single label-removal attempt as success --

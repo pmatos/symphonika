@@ -775,6 +775,60 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("backs off polling only for the project whose token is rate-limited, not projects on other tokens", async () => {
+    const root = await makeTempRoot();
+    await writeTwoProjectsWithDifferentTokens(root, { pollingIntervalMs: 10 });
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockImplementation(({ repo }: { repo: string }) => {
+          if (repo === "alpha") {
+            return Promise.reject(
+              new Error(
+                "Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+              )
+            );
+          }
+          return Promise.resolve([]);
+        })
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: {
+        GITHUB_TOKEN_ALPHA: "secret-alpha",
+        GITHUB_TOKEN_BETA: "secret-beta"
+      },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const callsFor = (repo: string) =>
+        githubIssuesApi.listOpenIssues.mock.calls.filter((call) => {
+          const input = call[0] as { repo: string };
+          return input.repo === repo;
+        }).length;
+
+      // alpha's token hits the rate limit on the startup tick and engages
+      // backoff scoped to that token only.
+      await waitFor(() => Promise.resolve(callsFor("alpha") >= 1));
+      const alphaCallsAtBackoff = callsFor("alpha");
+
+      // beta uses a different token and must keep being polled normally --
+      // several more 10ms ticks should grow its call count well past 1.
+      await waitFor(() => Promise.resolve(callsFor("beta") >= 3), {
+        timeoutMs: 2_000
+      });
+
+      // alpha stayed backed off throughout that same wait.
+      expect(callsFor("alpha")).toBe(alphaCallsAtBackoff);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("continues polling valid projects when another project entry is invalid", async () => {
     const root = await makeTempRoot();
     await writeConfigWithInvalidAndValidProjects(root);
@@ -911,6 +965,56 @@ async function writeValidProject(
       "    agent:",
       "      provider: codex",
       "    workflow: ./WORKFLOW.md",
+      ""
+    ].join("\n")
+  );
+  await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+}
+
+async function writeTwoProjectsWithDifferentTokens(
+  root: string,
+  options: { pollingIntervalMs?: number } = {}
+): Promise<void> {
+  await mkdir(root, { recursive: true });
+  const project = (name: string, repo: string, tokenVar: string): string[] => [
+    `  - name: ${name}`,
+    "    weight: 1",
+    "    tracker:",
+    "      kind: github",
+    "      owner: pmatos",
+    `      repo: ${repo}`,
+    `      token: "$${tokenVar}"`,
+    "    issue_filters:",
+    '      states: ["open"]',
+    '      labels_all: ["agent-ready"]',
+    '      labels_none: ["blocked", "needs-human"]',
+    "    priority:",
+    "      labels: {}",
+    "      default: 99",
+    "    workspace:",
+    `      root: ./.symphonika/workspaces/${name}`,
+    "      git:",
+    `        remote: git@github.com:pmatos/${repo}.git`,
+    "        base_branch: main",
+    "    agent:",
+    "      provider: codex",
+    "    workflow: ./WORKFLOW.md"
+  ];
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "polling:",
+      `  interval_ms: ${options.pollingIntervalMs ?? 30000}`,
+      "providers:",
+      "  codex:",
+      `    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"`,
+      "  claude:",
+      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      "projects:",
+      ...project("alpha", "alpha", "GITHUB_TOKEN_ALPHA"),
+      ...project("beta", "beta", "GITHUB_TOKEN_BETA"),
       ""
     ].join("\n")
   );

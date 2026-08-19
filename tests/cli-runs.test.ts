@@ -922,7 +922,7 @@ describe("CLI run commands", () => {
     ]);
     expect(present.output.stdout).toContain("show-1");
     expect(present.output.stdout).toContain("Detail");
-    expect(present.output.stdout).toContain("current state: code_review_fix");
+    expect(present.output.stdout).toContain("fsm state:    code_review_fix");
     expect(present.output.stdout).toContain("started:");
     expect(present.output.stdout).toContain("updated:");
     expect(present.output.stdout).toContain("artifacts:    (none)");

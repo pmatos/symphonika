@@ -654,11 +654,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       renderPullRequestFollowupAttention(pullRequestFollowup),
       renderRunSummary(detail, capContext),
       renderWatchdogSection(watchdog, outputTokenGrowth5m, detailNowMs),
-      renderWorkflowGraphSummary(
-        detail.id,
-        detail.currentStateId,
-        workflowGraph
-      ),
+      renderWorkflowGraphSummary(detail.id, workflowGraph),
       renderCancelForm(detail, csrfToken),
       renderAttemptsTable(detail.attempts),
       renderTransitionsTable(detail.transitions),
@@ -5908,15 +5904,21 @@ function renderWatchdogIdleBadge(
 const RUNS_TABLE_HEAD =
   "<tr><th>Run id</th><th>Project</th><th>Issue</th><th>State</th><th>Current state</th><th>Provider</th><th>Started</th><th>Updated</th><th>Branch</th></tr>";
 
+function formatCurrentStateCell(
+  currentStateId: string | null,
+  mutedClass: "muted" | "wf-muted" = "muted"
+): string {
+  return currentStateId === null
+    ? `<span class="${mutedClass}">not recorded</span>`
+    : `<code>${escapeHtml(currentStateId)}</code>`;
+}
+
 function runRowHtml(
   run: RunStatus,
   watchdogByRun: Map<string, WatchdogIdleStatus>,
   nowMs: number
 ): string {
-  const currentState =
-    run.currentStateId === null
-      ? '<span class="muted">not recorded</span>'
-      : `<code>${escapeHtml(run.currentStateId)}</code>`;
+  const currentState = formatCurrentStateCell(run.currentStateId);
   return `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td class="c-title">#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td>${statePill(run.state)}${renderWatchdogIdleBadge(watchdogByRun.get(run.id), nowMs)}</td><td>${currentState}</td><td>${escapeHtml(run.provider)}</td><td><code>${escapeHtml(run.createdAt)}</code></td><td><code>${escapeHtml(run.updatedAt)}</code></td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`;
 }
 
@@ -6052,6 +6054,7 @@ function renderRunSummary(
   <dt>Project</dt><dd>${escapeHtml(detail.project)}</dd>
   <dt>Issue</dt><dd>#${detail.issueNumber} ${escapeHtml(detail.issueTitle)}</dd>
   <dt>State</dt><dd>${statePill(detail.state)}</dd>
+  <dt>Current state</dt><dd>${formatCurrentStateCell(detail.currentStateId)}</dd>
   <dt>Provider</dt><dd>${escapeHtml(detail.provider)}</dd>
   <dt>Started</dt><dd><code>${escapeHtml(detail.createdAt)}</code></dd>
   <dt>Updated</dt><dd><code>${escapeHtml(detail.updatedAt)}</code></dd>
@@ -6232,7 +6235,6 @@ function renderRunFileLinks(
 
 function renderWorkflowGraphSummary(
   runId: string,
-  currentStateId: string | null,
   graph: ExpandedWorkflow | undefined
 ): string {
   if (graph === undefined) {
@@ -6245,10 +6247,6 @@ function renderWorkflowGraphSummary(
     typeof graph.source?.path === "string" ? graph.source.path : "(unknown)";
   const initial =
     typeof graph.initial === "string" ? graph.initial : "(unknown)";
-  const currentState =
-    currentStateId === null
-      ? '<span class="muted">not recorded</span>'
-      : `<code>${escapeHtml(currentStateId)}</code>`;
   const stateCount = Array.isArray(graph.states) ? graph.states.length : 0;
   const contentHash =
     typeof graph.contentHash === "string" ? graph.contentHash : "(unknown)";
@@ -6257,7 +6255,6 @@ function renderWorkflowGraphSummary(
   <dt>Source kind</dt><dd>${escapeHtml(sourceKind)}</dd>
   <dt>Source path</dt><dd><code>${escapeHtml(sourcePath)}</code></dd>
   <dt>Initial state</dt><dd><code>${escapeHtml(initial)}</code></dd>
-  <dt>Current state</dt><dd>${currentState}</dd>
   <dt>States</dt><dd>${stateCount}</dd>
   <dt>Content hash</dt><dd><code>${escapeHtml(contentHash)}</code></dd>
 </dl><p class="note"><a href="/runs/${encodeURIComponent(runId)}/graph">View interactive graph &rarr;</a></p></section>`;
@@ -6438,10 +6435,7 @@ function renderWorkflowGraphPage(
 ): string {
   const encodedId = encodeURIComponent(runId);
   const name = typeof graph.name === "string" ? graph.name : "(unknown)";
-  const currentState =
-    currentStateId === null
-      ? '<span class="wf-muted">not recorded</span>'
-      : `<code>${escapeHtml(currentStateId)}</code>`;
+  const currentState = formatCurrentStateCell(currentStateId, "wf-muted");
   return `<style>${WORKFLOW_GRAPH_STYLES}</style>
 <h1>Workflow graph</h1>
 <p class="wf-sub">Run <a href="/runs/${encodedId}"><code>${escapeHtml(runId)}</code></a> &middot; <code>${escapeHtml(name)}</code> &middot; Current state ${currentState} &middot; <a href="/logs/runs/${encodedId}/workflow_graph">raw JSON</a></p>
@@ -6534,7 +6528,7 @@ export const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
   }
   function nodeClasses(st) {
     var cls = [];
-    if (st.id === currentStateId) cls.push("current");
+    if (st.isCurrent) cls.push("current");
     if (st.id === graph.initial) cls.push("initial");
     if (st.terminal === "success") cls.push("term-ok");
     else if (st.terminal) cls.push("term-block");
@@ -6570,7 +6564,8 @@ export const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
   var elements = [];
   var missing = {};
   states.forEach(function (st) {
-    var label = st.id === currentStateId ? st.id + "\\ncurrent" : st.id;
+    st.isCurrent = st.id === currentStateId;
+    var label = st.isCurrent ? st.id + "\\ncurrent" : st.id;
     elements.push({ data: { id: st.id, label: label, state: st }, classes: nodeClasses(st) });
   });
   states.forEach(function (st) {
@@ -6685,7 +6680,7 @@ export const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
       return;
     }
     var badges = [];
-    if (st.id === currentStateId) badges.push('<span class="wf-badge current">current</span>');
+    if (st.isCurrent) badges.push('<span class="wf-badge current">current</span>');
     if (st.id === graph.initial) badges.push('<span class="wf-badge init">initial</span>');
     if (st.terminal === "success") badges.push('<span class="wf-badge term-ok">terminal &middot; success</span>');
     else if (st.terminal) badges.push('<span class="wf-badge term-block">terminal &middot; ' + esc(st.terminal) + '</span>');
@@ -6721,10 +6716,10 @@ export const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
   }
 
   function renderFallback() {
-    var lines = ["Workflow: " + (graph.name || "(unknown)"), "Current: " + (currentStateId || "(not recorded)"), "Initial: " + (graph.initial || "(unknown)"), ""];
+    var lines = ["Workflow: " + (graph.name || "(unknown)"), "Current: " + (currentStateId === null ? "(not recorded)" : currentStateId), "Initial: " + (graph.initial || "(unknown)"), ""];
     states.forEach(function (st) {
       var tag = st.terminal ? " [terminal:" + st.terminal + "]" : (st.action ? " [" + st.action.kind + "]" : "");
-      if (st.id === currentStateId) tag += " [current]";
+      if (st.isCurrent) tag += " [current]";
       lines.push("- " + st.id + tag);
       (st.transitions || []).forEach(function (tr) {
         var c = condLines(tr.when);

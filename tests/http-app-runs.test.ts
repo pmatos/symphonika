@@ -1303,6 +1303,47 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("shows the Run's current FSM state on the run-detail page even without workflow-graph evidence", async () => {
+    const test = await setup();
+    try {
+      const issue = sampleIssue({
+        number: 90,
+        title: "Waiting on human input"
+      });
+      test.runStore.createRun({
+        id: "waiting-nograph-parent",
+        issue,
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("waiting-nograph-parent", "succeeded");
+      test.runStore.createWaitingRun({
+        currentStateId: "holding",
+        id: "waiting-nograph",
+        issue,
+        parentRunId: "waiting-nograph-parent",
+        projectName: "alpha"
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const runPage = await app.request("/runs/waiting-nograph");
+      expect(runPage.status).toBe(200);
+      const body = await runPage.text();
+      expect(body).not.toContain("workflow-graph.json");
+      expect(body).toContain(
+        "<dt>Current state</dt><dd><code>holding</code></dd>"
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("renders stale issues on the dashboard with project and issue number", async () => {
     const test = await setup();
     try {

@@ -287,12 +287,10 @@ describe("HTTP app — GET /events (#305, ADR 0074)", () => {
 
   it("disconnects a lagging client when its pending event queue fills", async () => {
     const test = await setup();
-    const shutdownController = new AbortController();
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
       const app = createHttpApp({
         runStore: test.runStore,
-        shutdownSignal: shutdownController.signal,
         sseHeartbeatMs: 60_000,
         stateRoot: test.stateRoot,
         version: "0.1.0"
@@ -312,7 +310,6 @@ describe("HTTP app — GET /events (#305, ADR 0074)", () => {
       expect(await waitForListenerCount(test.runStore, 0)).toBe(0);
       expect(await reader!.read()).toMatchObject({ done: true });
     } finally {
-      shutdownController.abort();
       await reader?.cancel().catch(() => undefined);
       test.cleanup();
     }

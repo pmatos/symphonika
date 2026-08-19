@@ -450,6 +450,53 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("backs off from GitHub polling after a rate-limit error instead of retrying every tick", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root, { pollingIntervalMs: 10 });
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new Error(
+            "Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+          )
+        )
+        .mockResolvedValue([
+          issueFixture({
+            labels: ["agent-ready"],
+            number: 90,
+            title: "Should not be fetched while backing off"
+          })
+        ])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      // startDaemon awaits one poll before returning, so the rejection
+      // above has already happened and surfaced by this point.
+      expect(githubIssuesApi.listOpenIssues).toHaveBeenCalledTimes(1);
+      const response = await fetch(`${daemon.url}/api/status`);
+      const body = (await response.json()) as {
+        issuePolling: { errors: string[] };
+      };
+      expect(body.issuePolling.errors.join("\n")).toContain("rate limit");
+
+      // Many more 10ms ticks elapse in real time; without backoff this
+      // would have called listOpenIssues repeatedly during the wait.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(githubIssuesApi.listOpenIssues).toHaveBeenCalledTimes(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("coalesces concurrent poll-now requests into one manual polling cycle", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);

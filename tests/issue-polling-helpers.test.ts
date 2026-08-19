@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  backoffUntil,
   fetchIssueDependencies,
   fetchPullRequestFollowupState,
+  GITHUB_RATE_LIMIT_BACKOFF_MS,
+  isRateLimitError,
   parseParentIssueNumber,
   pollConfiguredGitHubIssuesFromConfig,
   swallowLabelNotFound,
@@ -932,5 +935,43 @@ describe("tryListPullRequests", () => {
       listOpenIssues: () => Promise.resolve([])
     };
     expect(await tryListPullRequests(api, repoInput)).toBeUndefined();
+  });
+});
+
+describe("isRateLimitError", () => {
+  it("recognizes pollProject's own wrapped primary-rate-limit message shape -- a reformat here silently disables backoff", () => {
+    expect(
+      isRateLimitError(
+        "projects.symphonika.tracker.repository pmatos/symphonika issue dependencies could not be checked: Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+      )
+    ).toBe(true);
+  });
+
+  it("recognizes GitHub's secondary/abuse-detection rate limit message", () => {
+    expect(
+      isRateLimitError(
+        "You have exceeded a secondary rate limit and have been temporarily blocked from content creation. Please retry your request again later."
+      )
+    ).toBe(true);
+  });
+
+  it("is case-insensitive", () => {
+    expect(isRateLimitError("API RATE LIMIT EXCEEDED")).toBe(true);
+  });
+
+  it("returns false for an unrelated failure", () => {
+    expect(
+      isRateLimitError(
+        "projects.symphonika.tracker.repository pmatos/symphonika issues could not be listed: getaddrinfo ENOTFOUND api.github.com"
+      )
+    ).toBe(false);
+  });
+});
+
+describe("backoffUntil", () => {
+  it("returns a fixed window from the given time, not exponential", () => {
+    const nowMs = 1_000_000;
+    expect(backoffUntil(nowMs)).toBe(nowMs + GITHUB_RATE_LIMIT_BACKOFF_MS);
+    expect(backoffUntil(nowMs)).toBe(backoffUntil(nowMs));
   });
 });

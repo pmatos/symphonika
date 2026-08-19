@@ -20,9 +20,11 @@ import {
 } from "./daemon-endpoint.js";
 import type { GitHubIssuesApi } from "./issue-polling.js";
 import {
+  backoffUntil,
   DEFAULT_GITHUB_ISSUES_API,
   DEFAULT_POLLING_INTERVAL_MS,
   emptyIssuePollStatus,
+  isRateLimitError,
   pollConfiguredGitHubIssuesFromConfig,
   readConfiguredPollingIntervalMs,
   replaceIssuePollStatus,
@@ -406,6 +408,11 @@ export async function startDaemon(
   // its own GraphQL round-trips must not gate issue dispatch, so it isn't
   // awaited by refreshIssuePollStatus and needs its own reentrancy check.
   let prPolling = false;
+  // Shared between issue polling and PR polling below -- both draw on the
+  // same GitHub token's rate-limit budget, so a rate-limit error from
+  // either one backs off both rather than letting the other keep hammering
+  // an already-exhausted budget.
+  let githubBackoffUntilMs: number | undefined;
   let scheduledWork = Promise.resolve();
   let lastPollErrorsKey = "";
   let lastPullRequestFollowupAt = Date.now();
@@ -538,6 +545,32 @@ export async function startDaemon(
     return { errors: reloadStatus.errors, ok: !reloadBroken, snapshot };
   };
 
+  const isGithubBackoffActive = (nowMs: number): boolean =>
+    githubBackoffUntilMs !== undefined && nowMs < githubBackoffUntilMs;
+
+  // Engages (or extends) the shared backoff window when `errors` contains a
+  // GitHub rate-limit failure, and clears a stale window once a poll comes
+  // back clean. Logs only on the transition, not on every tick, so a
+  // sustained outage doesn't spam the log.
+  const applyGithubBackoffState = (errors: string[]): void => {
+    if (!errors.some(isRateLimitError)) {
+      if (githubBackoffUntilMs !== undefined) {
+        logger.info("symphonika GitHub API backoff cleared");
+        githubBackoffUntilMs = undefined;
+      }
+      return;
+    }
+    const nowMs = Date.now();
+    const wasActive = isGithubBackoffActive(nowMs);
+    githubBackoffUntilMs = backoffUntil(nowMs);
+    if (!wasActive) {
+      logger.warn(
+        { backoffUntilMs: githubBackoffUntilMs },
+        "symphonika GitHub API rate limited; backing off polling"
+      );
+    }
+  };
+
   const refreshIssuePollStatus = async (): Promise<void> => {
     if (!state.configExists || polling) {
       return;
@@ -555,6 +588,15 @@ export async function startDaemon(
         });
         return;
       }
+      // Skip the actual GitHub calls while backing off -- config reload
+      // above still runs every tick (so an interval_ms edit or a fixed
+      // token still takes effect promptly), but issuePollStatus and the
+      // persisted project snapshots are left exactly as the last
+      // successful poll produced them, same as pollProject's own
+      // "leave prior snapshot untouched" contract on a failed project.
+      if (isGithubBackoffActive(Date.now())) {
+        return;
+      }
       const nextStatus = await pollConfiguredGitHubIssuesFromConfig({
         config: snapshot.polling,
         ...(options.env === undefined ? {} : { env: options.env }),
@@ -563,6 +605,7 @@ export async function startDaemon(
           : { githubIssuesApi: options.githubIssuesApi }),
         initialErrors: errors
       });
+      applyGithubBackoffState(nextStatus.errors);
       replaceIssuePollStatus(issuePollStatus, nextStatus);
       projectModes = await persistProjectPollState(
         runStore,
@@ -578,8 +621,10 @@ export async function startDaemon(
       // ticks' worth from overlapping if a poll runs long; a PR-poll
       // failure must not blank out issuePollStatus, which dispatch
       // eligibility depends on, so it's isolated in its own try/catch same
-      // as before.
-      if (!prPolling) {
+      // as before. Also skipped while backing off (including a window the
+      // issue poll above just engaged) -- it shares the same GitHub token's
+      // rate-limit budget, so there's nothing to gain by trying anyway.
+      if (!prPolling && !isGithubBackoffActive(Date.now())) {
         prPolling = true;
         void (async () => {
           try {
@@ -589,6 +634,7 @@ export async function startDaemon(
                 ...(options.env === undefined ? {} : { env: options.env }),
                 githubIssuesApi
               });
+            applyGithubBackoffState(pullRequestStatus.errors);
             persistProjectPullRequestPollState(runStore, pullRequestStatus);
             if (pullRequestStatus.errors.length > 0) {
               logger.warn(

@@ -1468,6 +1468,30 @@ function isOctokitNotFound(error: unknown): boolean {
   );
 }
 
+// Matches both GitHub's primary hourly rate limit ("API rate limit ...
+// exceeded") and its secondary/abuse-detection limit (rapid repeated
+// requests) -- REST and GraphQL errors surface these as message text rather
+// than a shared status/type field, so callers that only see the rendered
+// poll-failure string (e.g. daemon.ts's IssuePollStatus.errors) need a
+// message-based check rather than an error-shape check like
+// isOctokitNotFound above.
+const RATE_LIMIT_MESSAGE_PATTERN = /rate limit|abuse detection/i;
+
+export function isRateLimitError(message: string): boolean {
+  return RATE_LIMIT_MESSAGE_PATTERN.test(message);
+}
+
+// A fixed window rather than exponential backoff: GitHub's primary rate
+// limit resets on a fixed hourly clock that doubling can't influence either
+// way. The window exists to stop the poller from flailing against an
+// already-exhausted budget (and tripping the secondary/abuse limit in the
+// process), not to time the primary reset.
+export const GITHUB_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
+
+export function backoffUntil(nowMs: number): number {
+  return nowMs + GITHUB_RATE_LIMIT_BACKOFF_MS;
+}
+
 // Swallows a 404 from a single label-removal attempt as success --
 // idempotent by design: if the label is already absent, that isn't a
 // failure worth surfacing. GitHub's remove-label endpoint also 404s when

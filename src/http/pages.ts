@@ -1967,7 +1967,8 @@ export function registerPages(options: RegisterPagesOptions): void {
     const resolved = resolveNamedRoutineGroup(
       options.runStore,
       name,
-      projectParam
+      projectParam,
+      context.req.query("include_inactive") === "true"
     );
     if (resolved.kind === "not_found") {
       return context.html(
@@ -5315,13 +5316,14 @@ function renderRoutineDisambiguation(
 function resolveNamedRoutineGroup(
   runStore: RunStore,
   name: string,
-  projectParam: string | undefined
+  projectParam: string | undefined,
+  includeInactive = true
 ):
   | { kind: "not_found" }
   | { groups: RoutineGroup[]; kind: "ambiguous" }
   | { group: RoutineGroup; kind: "ok" } {
   const groups = groupRoutinesByName(
-    runStore.listRoutines({ includeInactive: true })
+    runStore.listRoutines({ includeInactive })
   ).filter((group) => group.name === name);
 
   if (groups.length === 0) {

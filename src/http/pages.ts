@@ -2875,6 +2875,79 @@ td code { color: var(--ink-2); }
   padding: var(--sp-2);
 }
 
+.bulk-select-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--sp-3) var(--sp-4);
+  margin: 0 0 var(--sp-5);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.bulk-select-toolbar > span { font-size: var(--fs-meta); color: var(--ink-muted); }
+.bulk-select-toolbar label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  color: var(--ink-muted);
+}
+.bulk-select-toolbar label > input {
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  min-width: 14ch;
+}
+.bulk-select-chips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+.bulk-select-chips:empty { display: none; }
+.bulk-select-chips li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  padding: 0.14rem 0.5rem;
+  border-radius: 999px;
+  font-size: var(--fs-label);
+  color: var(--accent-ink);
+  background: var(--accent-quiet);
+  border: 1px solid color-mix(in oklch, var(--accent) 22%, transparent);
+}
+.bulk-select-chips button {
+  font-family: var(--font-mono);
+  font-size: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  line-height: 1;
+}
+.bulk-select-error { flex-basis: 100%; margin: 0; color: var(--fail-ink); font-size: var(--fs-meta); }
+.bulk-select-results {
+  flex-basis: 100%;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: var(--fs-meta);
+  color: var(--ink-2);
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .pill--progress.is-running .pill-dot { animation: pulse 1.8s ease-in-out infinite; }
 }

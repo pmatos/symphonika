@@ -82,6 +82,23 @@ describe("GET /issues bulk-select UI (React island wiring)", () => {
     }
   });
 
+  it("ships layout CSS for the bulk-select toolbar so Add/Remove label fields don't visually swap", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues")).text();
+      expect(html).toContain(".bulk-select-toolbar {");
+      expect(html).toContain(".bulk-select-toolbar label {");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("renders the React mount point and the bulk-select bundle script tag", async () => {
     const test = await setup();
     try {

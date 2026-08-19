@@ -1478,7 +1478,11 @@ export async function startDaemon(
         configPath: state.configPath,
         routineSourcePaths: runStore
           .listRoutines({ includeInactive: true })
-          .filter((routine) => routine.disabledReason !== "removed_from_config")
+          .filter(
+            (routine) =>
+              routine.state !== "inactive" &&
+              routine.disabledReason !== "removed_from_config"
+          )
           .map((routine) => routine.sourcePath),
         workflowPaths: [...runtimeConfig.projectsByName().values()]
           .map((project) => project.workflow)

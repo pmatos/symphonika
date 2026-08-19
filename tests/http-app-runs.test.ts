@@ -2156,6 +2156,69 @@ describe("HTTP app — project detail page (#303)", () => {
     }
   });
 
+  it("links each issue number to its Issue detail page", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueNumber: 286,
+            kind: "candidate",
+            labels: ["agent-ready"],
+            priority: 1,
+            reasons: [],
+            title: "Eligible issue"
+          }
+        ]
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/projects/alpha")).text();
+
+      expect(body).toContain('<a href="/issues/alpha/286">#286</a>');
+      // The "Edit labels" note follows the Issues section for both the
+      // populated and empty-state branches, not just one of them.
+      expect(body).toContain(
+        '<p class="note"><a href="/issues?project=alpha">Edit labels →</a></p>'
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("offers project-filtered label editing from the Issues section", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/projects/alpha")).text();
+
+      expect(body).toContain(
+        '<p class="note"><a href="/issues?project=alpha">Edit labels →</a></p>'
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("renders the capacity strip and every issue-keyed row bucket with its reason, for a Dispatch Project", async () => {
     const test = await setup();
     try {
@@ -2463,6 +2526,11 @@ describe("HTTP app — project detail page (#303)", () => {
 
       expect(body).toContain("Closed since last poll");
       expect(body).toContain("succeeded");
+      // The row still renders (with a plain, unlinked issue number) --
+      // /issues/:project/:number only resolves snapshot-backed issues, and
+      // this one has no snapshot row, so linking it would 404.
+      expect(body).toContain("#900");
+      expect(body).not.toContain('href="/issues/alpha/900"');
     } finally {
       test.cleanup();
     }

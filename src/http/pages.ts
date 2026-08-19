@@ -1493,7 +1493,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           options.startedAtMs,
           nowMs
         ),
-        renderProjectIssuesTable(issueRows),
+        renderProjectIssuesTable(name, issueRows),
         renderProjectFiringsBlock(firings),
         options.getProjectWorkflowPath?.(name) === undefined
           ? ""
@@ -3395,6 +3395,12 @@ const PROJECT_ISSUE_ROW_BUCKET: Record<
 
 type ProjectIssueRow = {
   detail: string;
+  // /issues/:project/:number (loadIssueDetail) resolves only against the
+  // persisted snapshot table, never against Run history -- a row can exist
+  // here from a Run alone (#303's union join) with no snapshot behind it.
+  // This says whether that detail page actually exists for this row, so the
+  // renderer knows whether "#N" may safely become a link.
+  hasSnapshot: boolean;
   issueNumber: number;
   pillHtml: string;
   title: string;
@@ -3411,6 +3417,7 @@ function buildProjectIssueRow(input: {
   scheduled: ScheduledCallback[];
   snapshot: ProjectIssueSnapshotRow | undefined;
 }): ProjectIssueRow {
+  const hasSnapshot = input.snapshot !== undefined;
   if (input.run !== undefined) {
     const run = input.run;
     const bucket = PROJECT_ISSUE_ROW_BUCKET[run.state];
@@ -3418,6 +3425,7 @@ function buildProjectIssueRow(input: {
     if (bucket === "running") {
       return {
         detail: `attempt ${run.retryCount + 1} · ${formatAge(run.updatedAt, input.nowMs)}`,
+        hasSnapshot,
         issueNumber: input.issueNumber,
         pillHtml,
         title: run.issueTitle
@@ -3432,6 +3440,7 @@ function buildProjectIssueRow(input: {
             (run.state === "input_required" ? "needs operator input" : ""));
       return {
         detail,
+        hasSnapshot,
         issueNumber: input.issueNumber,
         pillHtml,
         title: run.issueTitle
@@ -3453,6 +3462,7 @@ function buildProjectIssueRow(input: {
       const reason = run.terminalReason ?? run.stateTransitionReason ?? "";
       return {
         detail: `${reason}${prDetail}`,
+        hasSnapshot,
         issueNumber: input.issueNumber,
         pillHtml,
         title: run.issueTitle
@@ -3467,6 +3477,7 @@ function buildProjectIssueRow(input: {
         (run.state === "queued"
           ? "queued for dispatch"
           : "preparing workspace"),
+      hasSnapshot,
       issueNumber: input.issueNumber,
       pillHtml,
       title: run.issueTitle
@@ -3477,6 +3488,7 @@ function buildProjectIssueRow(input: {
   if (snapshot === undefined) {
     return {
       detail: "",
+      hasSnapshot,
       issueNumber: input.issueNumber,
       pillHtml: labelPill("unknown", "neutral"),
       title: ""
@@ -3485,6 +3497,7 @@ function buildProjectIssueRow(input: {
   if (snapshot.kind === "filtered") {
     return {
       detail: snapshot.reasons.join(", "),
+      hasSnapshot,
       issueNumber: input.issueNumber,
       pillHtml: labelPill("filtered", "neutral"),
       title: snapshot.title
@@ -3496,27 +3509,41 @@ function buildProjectIssueRow(input: {
     detail: atCap
       ? `queued behind cap (${input.inFlight}/${input.maxInFlight})`
       : "within cap, next by priority",
+    hasSnapshot,
     issueNumber: input.issueNumber,
     pillHtml: labelPill("eligible", "neutral"),
     title: snapshot.title
   };
 }
 
-function renderProjectIssuesTable(rows: ProjectIssueRow[]): string {
+function renderProjectIssuesTable(
+  projectName: string,
+  rows: ProjectIssueRow[]
+): string {
+  const encodedProjectName = encodeURIComponent(projectName);
+  // Matches the "Recent runs →" / "Edit workflow →" note-link convention
+  // already used elsewhere on this page (see renderProjectPage).
+  const editLabelsNote = `<p class="note"><a href="/issues?project=${encodedProjectName}">Edit labels →</a></p>`;
   if (rows.length === 0) {
-    return `<section>${sectionHead("Issues", 0)}<div class="empty"><strong>No issues</strong>No open issue is currently eligible, filtered, or claimed for this Project.</div></section>`;
+    return `<section>${sectionHead("Issues", 0)}<div class="empty"><strong>No issues</strong>No open issue is currently eligible, filtered, or claimed for this Project.</div></section>${editLabelsNote}`;
   }
   const body = rows
-    .map(
-      (row) =>
-        `<tr><td>#${row.issueNumber}</td><td class="c-title">${escapeHtml(row.title)}</td><td>${row.pillHtml}</td><td class="c-detail">${escapeHtml(row.detail)}</td></tr>`
-    )
+    .map((row) => {
+      // Only snapshot-backed rows have a working detail page (see
+      // ProjectIssueRow.hasSnapshot) -- a Run-only row would 404.
+      const numberCell = row.hasSnapshot
+        ? `<a href="${escapeHtml(`/issues/${encodedProjectName}/${row.issueNumber}`)}">#${row.issueNumber}</a>`
+        : `#${row.issueNumber}`;
+      return `<tr><td>${numberCell}</td><td class="c-title">${escapeHtml(row.title)}</td><td>${row.pillHtml}</td><td class="c-detail">${escapeHtml(row.detail)}</td></tr>`;
+    })
     .join("");
-  return tableSection(
-    "Issues",
-    rows.length,
-    "<tr><th>#</th><th>Title</th><th>State</th><th>Detail</th></tr>",
-    body
+  return (
+    tableSection(
+      "Issues",
+      rows.length,
+      "<tr><th>#</th><th>Title</th><th>State</th><th>Detail</th></tr>",
+      body
+    ) + editLabelsNote
   );
 }
 

@@ -4,18 +4,13 @@ on:
   push:
     tags:
       - "v*"
-  workflow_call:
+  workflow_call: &tag_input
     inputs:
       tag:
         description: Release tag to build and publish (e.g. v0.1.5)
         required: true
         type: string
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Release tag to build and publish (e.g. v0.1.5)
-        required: true
-        type: string
+  workflow_dispatch: *tag_input
 
 permissions:
   contents: read
@@ -32,16 +27,12 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
-      - name: Resolve release tag
-        id: resolve
-        run: |
-          tag="${{ inputs.tag || github.ref_name }}"
-          echo "tag=${tag}" >>"$GITHUB_OUTPUT"
-
       - uses: actions/checkout@v7
         with:
-          ref: ${{ steps.resolve.outputs.tag }}
+          ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
 
       - uses: actions/setup-node@v7
@@ -53,11 +44,10 @@ jobs:
 
       - name: Verify tag matches package.json version
         run: |
-          tag="${{ steps.resolve.outputs.tag }}"
-          tag_version="${tag#v}"
+          tag_version="${RELEASE_TAG#v}"
           package_version="$(node -p "require('./package.json').version")"
           if [ "$tag_version" != "$package_version" ]; then
-            echo "::error::tag ${tag} (version ${tag_version}) does not match package.json version ${package_version}" >&2
+            echo "::error::tag ${RELEASE_TAG} (version ${tag_version}) does not match package.json version ${package_version}" >&2
             exit 1
           fi
           echo "RELEASE_VERSION=${package_version}" >>"$GITHUB_ENV"
@@ -80,9 +70,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${{ steps.resolve.outputs.tag }}"
-          gh release create "${tag}" \
-            --title "${tag}" \
+          gh release create "${RELEASE_TAG}" \
+            --title "${RELEASE_TAG}" \
             --generate-notes \
             "${TARBALL}" \
             SHA256SUMS.txt

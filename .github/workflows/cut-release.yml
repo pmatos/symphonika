@@ -37,7 +37,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: main
-          fetch-depth: 0
 
       - uses: actions/setup-node@v7
         with:
@@ -58,10 +57,13 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run format:check
+      - run: npm run knip
+      - uses: raven-actions/actionlint@v2
       - run: npm test
       - run: npm run build
 
       - name: Open and merge version bump PR
+        id: pr
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -76,16 +78,19 @@ jobs:
           git push origin "$branch"
           pr_url="$(gh pr create \
             --title "chore: bump version to ${version}" \
-            --body "Automated version bump, opened by the Cut Release workflow. Quality gate (lint, typecheck, format:check, test, build) already ran on this commit before the PR was opened; PR-triggered CI checks won't run since GitHub doesn't fire pull_request events for PRs opened by the default GITHUB_TOKEN." \
+            --body "Automated version bump, opened by the Cut Release workflow. Quality gate (lint, typecheck, format:check, knip, actionlint, test, build) already ran on this commit before the PR was opened; PR-triggered CI checks won't run since GitHub doesn't fire pull_request events for PRs opened by the default GITHUB_TOKEN." \
             --base main --head "$branch")"
           gh pr merge "$pr_url" --squash --delete-branch
+          merge_sha="$(gh pr view "$pr_url" --json mergeCommit --jq .mergeCommit.oid)"
+          echo "merge_sha=${merge_sha}" >>"$GITHUB_OUTPUT"
 
       - name: Tag release commit
         run: |
           set -euo pipefail
           tag="${{ steps.bump.outputs.tag }}"
-          git fetch origin main
-          git tag "$tag" origin/main
+          sha="${{ steps.pr.outputs.merge_sha }}"
+          git fetch origin "$sha"
+          git tag "$tag" "$sha"
           git push origin "$tag"
 
   release:

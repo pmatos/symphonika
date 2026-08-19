@@ -179,7 +179,7 @@ export type ClearStaleOptions = DoctorOptions & {
   yes?: boolean;
 } & ({ all: true; issueNumber?: never } | { all?: false; issueNumber: number });
 
-export type ClearStaleIssueOutcome = {
+type ClearStaleIssueOutcome = {
   errors: string[];
   issueNumber: number;
   removedLabels: string[];

@@ -2044,7 +2044,8 @@ export function registerPages(options: RegisterPagesOptions): void {
     const resolved = resolveNamedRoutineGroup(
       options.runStore,
       name,
-      projectParam
+      projectParam,
+      true
     );
     if (resolved.kind !== "ok") {
       return context.html(
@@ -2096,7 +2097,8 @@ export function registerPages(options: RegisterPagesOptions): void {
       const resolved = resolveNamedRoutineGroup(
         options.runStore,
         name,
-        projectParam
+        projectParam,
+        true
       );
       if (resolved.kind !== "ok") {
         return context.html(
@@ -2154,7 +2156,8 @@ export function registerPages(options: RegisterPagesOptions): void {
       const resolved = resolveNamedRoutineGroup(
         options.runStore,
         name,
-        projectParam
+        projectParam,
+        true
       );
       if (resolved.kind !== "ok") {
         return context.html(
@@ -2285,7 +2288,8 @@ export function registerPages(options: RegisterPagesOptions): void {
     const resolved = resolveNamedRoutineGroup(
       options.runStore,
       name,
-      projectParam
+      projectParam,
+      true
     );
     if (resolved.kind !== "ok") {
       return context.html(
@@ -5317,7 +5321,7 @@ function resolveNamedRoutineGroup(
   runStore: RunStore,
   name: string,
   projectParam: string | undefined,
-  includeInactive = true
+  includeInactive: boolean
 ):
   | { kind: "not_found" }
   | { groups: RoutineGroup[]; kind: "ambiguous" }

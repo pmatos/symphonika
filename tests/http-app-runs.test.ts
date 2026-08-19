@@ -2828,7 +2828,9 @@ describe("HTTP app — routine detail page (#304)", () => {
 
       expect(hiddenResponse.status).toBe(404);
       expect(includedResponse.status).toBe(200);
-      expect(includedBody).toContain("inactive");
+      expect(includedBody).toContain(
+        'aria-hidden="true"></span>inactive</span>'
+      );
     } finally {
       test.cleanup();
     }

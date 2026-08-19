@@ -3615,9 +3615,16 @@ function parsePositiveIntQueryParam(
 // A claim-shaped operational-label reason (sym:claimed/sym:running) gets its
 // Run id resolved through the Run Store — a local read, not a GitHub call —
 // so describeIssueVerdict (src/issues/verdict.ts) can stay pure and DB-free.
-// The most recent Run for the issue is the one holding the claim; an issue
-// can only be claimed by one Run at a time in practice.
+// Only non-terminal Runs can currently hold the claim. A terminal Run can
+// legitimately leave sym:claimed behind for operator action (SPEC 9.3), in
+// which case the label is blocked/stale evidence rather than a live claimant.
 const CLAIM_REASON = /^has operational label sym:(claimed|running)$/;
+const CLAIM_HOLDING_RUN_STATES: RunState[] = [
+  "queued",
+  "preparing_workspace",
+  "running",
+  "waiting"
+];
 
 function resolveClaimedRunId(
   runStore: RunStore,
@@ -3628,8 +3635,12 @@ function resolveClaimedRunId(
   if (!reasons.some((reason) => CLAIM_REASON.test(reason))) {
     return undefined;
   }
-  return runStore.listRuns({ issueNumber, limit: 1, project: projectName })[0]
-    ?.id;
+  return runStore.listRuns({
+    issueNumber,
+    limit: 1,
+    project: projectName,
+    state: CLAIM_HOLDING_RUN_STATES
+  })[0]?.id;
 }
 
 // #308 part 3's clear-stale-claim liveness gate: the same three-source union

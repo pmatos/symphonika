@@ -327,6 +327,50 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
     }
   });
 
+  it("does not show a terminal Run as a sym:claimed issue's current claimant", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedByTruncated: false,
+            blockedBy: [],
+            issueNumber: 5,
+            kind: "filtered",
+            labels: ["sym:claimed"],
+            priority: 1,
+            reasons: ["has operational label sym:claimed"],
+            title: "Stale claimed issue"
+          }
+        ]
+      });
+      test.runStore.createRun({
+        id: "run-terminal",
+        issue: sampleIssue({ number: 5 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-terminal", "failed");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues")).text();
+      expect(html).toContain("blocked: sym:claimed");
+      expect(html).not.toContain("claimed by run run-terminal");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("renders an empty-state message when no snapshot rows exist", async () => {
     const test = await setup();
     try {

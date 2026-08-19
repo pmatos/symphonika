@@ -967,7 +967,7 @@ export function mergeIssuePollStatus(
   // otherwise the first clean poll of any OTHER project on the same tick
   // wipes it from `errors` via a bare `fresh.errors` replace, even though
   // the backed-off project itself never got a chance to recover. See
-  // ADR 0082.
+  // ADR 0083.
   const carriedOverErrors = carriedOverProjects
     .map((project) => project.error)
     .filter((error): error is string => error !== undefined);
@@ -1310,20 +1310,23 @@ function issueFilterReasons(
   return evaluateProjectEligibility(issue, project).reasons;
 }
 
+export function issueStateReasons(
+  issue: IssueSnapshot,
+  project: PollingProjectConfig
+): string[] {
+  return !project.issue_filters.states.includes("open") ||
+    issue.state !== "open"
+    ? [`state ${issue.state} is not eligible`]
+    : [];
+}
+
 export function evaluateProjectEligibility(
   issue: IssueSnapshot,
   project: PollingProjectConfig,
   options: { ignoreOperationalLabels?: boolean } = {}
 ): { eligible: boolean; reasons: string[] } {
-  const reasons: string[] = [];
+  const reasons: string[] = [...issueStateReasons(issue, project)];
   const labels = new Set(issue.labels);
-
-  if (
-    !project.issue_filters.states.includes("open") ||
-    issue.state !== "open"
-  ) {
-    reasons.push(`state ${issue.state} is not eligible`);
-  }
 
   for (const requiredLabel of project.issue_filters.labels_all) {
     if (!labels.has(requiredLabel)) {
@@ -1551,7 +1554,7 @@ export function backoffUntil(nowMs: number): number {
 // does not gate on `report.ok`: a PR-poll report can be `ok: true` (the PR
 // list itself was fetched fine) while still carrying a rate-limit error from
 // a single PR's enrichment call (see pull-request-polling.ts's buildSnapshot
-// / ADR 0082) -- that case must still engage backoff.
+// / ADR 0083) -- that case must still engage backoff.
 export function rateLimitedTokens(
   reports: ReadonlyArray<{ error?: string; name: string; ok: boolean }>,
   projects: readonly PollingProjectConfig[],

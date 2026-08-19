@@ -121,6 +121,11 @@ Symphonika does not parse issue body text, task lists, GitHub Projects fields, o
 blockers. The one exception is GitHub's own native issue-dependencies feature (`blockedBy`), which is
 a GraphQL-queried relationship, not free text — see ADR-0081.
 
+The Dependency Gate is an admission rule for fresh dispatch and label-controlled Continuation
+Eligibility. It does not revoke an already-admitted raw-FSM walk: State Advances, waiting-row
+rechecks, and FSM-owned retries ignore later label and dependency drift while the Issue remains
+open. Issue closure and explicit operator cancellation still stop the walk. See ADR-0082.
+
 The configured `labels_all` values are Required Eligibility Labels. Every Required Eligibility
 Label must exist in the Project repository before the Project can dispatch work. `doctor` reports
 missing Required Eligibility Labels as validation errors, and `init-project` offers to create them
@@ -460,6 +465,10 @@ or channel configuration beyond the boolean; toggling it to `false` mid-flight h
 update before its next phase, per the defensive reload model in §5.1. See ADR 0079 for the full
 design, including the deferred edges (no prebuilt native-module binaries, no automatic rollback
 after a post-cutover crash-loop) and `symphonika service rollback` for manual recovery.
+Once cutover and artifact pruning complete, the update is healthy: the old unit's restart client
+being terminated by the same cgroup-wide `SIGTERM` it requested is expected and must not reverse
+that result. Any other automatic restart-request error is logged as a manual-restart warning rather
+than reported as a failed cutover, because the old process cannot observe post-restart liveness.
 
 ### 5.2 Workflow Contract
 
@@ -1184,11 +1193,14 @@ On closed issue:
 - remove operational labels best-effort
 - preserve workspace and logs
 
-On eligibility loss while running:
+On eligibility loss while a label-controlled Run is running:
 
 - cancel active run
 - remove `sym:running`
 - preserve workspace and logs
+
+An admitted raw-FSM Run keeps FSM-owned Continuation Eligibility through label and dependency
+drift; issue closure and operator cancellation remain its live stop controls (ADR 0046 / ADR 0082).
 
 On Watchdog no-progress termination:
 
@@ -1446,7 +1458,8 @@ Retry only transient infrastructure or provider failures.
 For raw FSM workflows, retryable transient failures consume the retry budget before non-terminal
 FSM transitions matching the failure signals are allowed to advance or park the workflow. The retry
 re-enters the same FSM state and preserves the state-advance label-immunity bit when the failed run
-was already mid-walk. Terminal `failure` / `blocked` transitions remain workflow-authored
+was already mid-walk; this FSM-owned Continuation Eligibility also ignores dependency drift.
+Terminal `failure` / `blocked` transitions remain workflow-authored
 deterministic verdicts and pre-empt retry — `failure` maps to RunState `failed` (`sym:failed`),
 `blocked` maps to RunState `blocked` (`sym:blocked`). After the retry budget is exhausted, the final
 attempt's signals are evaluated normally by the FSM; if no workflow transition handles them, the run
@@ -1482,11 +1495,15 @@ After retry exhaustion:
 Cancel active provider process when:
 
 - issue is closed
-- issue loses eligibility
+- a label-controlled Run loses eligibility
 - operator cancels through CLI or UI
 - the daemon begins graceful shutdown
 
 Cancellation preserves workspace and logs.
+
+Label or dependency drift does not cancel an already-admitted raw-FSM walk. Its State Advances,
+waiting rows, and retries use FSM-owned Continuation Eligibility until the walk terminates; issue
+closure and explicit operator cancellation still apply (ADR 0046 / ADR 0082).
 
 On graceful shutdown, the daemon first closes the active-run registry to new claims
 synchronously, before snapshotting active runs, so a dispatch still in pre-claim work can never
@@ -1618,9 +1635,9 @@ Lifecycle:
 5. Issue close cancels a waiting Run with `cancel_reason = "closed_issue"`. Operator cancel marks
    the cancel reason; the next re-evaluation tick observes the cancel-requested flag and
    transitions the Run to `cancelled`.
-6. Label drift does not cancel a waiting Run. Mid-walk runs are immune to `labels_all` and
-   `labels_none` re-checks; the FSM owns transitions while the walk is in flight (ADR 0046,
-   carried over to wait states by ADR 0047).
+6. Label or dependency drift does not cancel a waiting Run. Mid-walk runs are immune to
+   `labels_all`, `labels_none`, and Dependency Gate re-checks; the FSM owns transitions while the
+   walk is in flight (ADR 0046 and ADR 0082, carried over to wait states by ADR 0047).
 
 Mergeability `UNKNOWN`/`null` is intentionally projected as the predicate key omitted — workflow
 transitions writing `mergeable: false` will not match on unknown values, so the wait stays parked
@@ -2091,8 +2108,10 @@ labelling an issue never bypasses the dispatch gates (ADR 0036) by triggering a 
 `POST /issues/:project/:number/clear-stale-claim` (`#308` part 3) is the one `sym:*` mutation the UI
 offers, named rather than raw label surgery: it removes `sym:stale`, `sym:claimed`, and `sym:running`
 together, the same set `clear-stale` (`doctor`, ADR 0038) removes, and only appears on the page when
-at least one is present. It is refused — no GitHub write attempted — when a live Run exists for the
-issue, checked against the same three sources `detectStaleClaims`'s own liveness check unions
+at least one is present in the persisted poll snapshot. Once invoked, it attempts all three against
+live GitHub state rather than narrowing the write to that deliberately stale snapshot; an
+already-absent label is an idempotent per-label success. It is refused — no GitHub write attempted —
+when a live Run exists for the issue, checked against the same three sources `detectStaleClaims`'s own liveness check unions
 (the in-process active-run registry, `queued`/`preparing_workspace`/`running` Run rows, and parked
 `waiting` rows, which keep `sym:claimed` across the wait per ADR 0047): hand-clearing a claim on a Run
 that is still live is exactly the double-dispatch ADR 0038 exists to prevent. This closes the one gap

@@ -45,6 +45,15 @@ daemon`), self-update completes the cutover and logs that a manual restart is re
 than attempting a self-restart with no supervisor to bring it back (ADR 0064's existing
 graceful-degrade precedent for `systemd-run --user` unavailability).
 
+The `systemctl --no-block` client still starts inside the daemon unit's cgroup. `--no-block` narrows
+the race to the D-Bus enqueue round trip but cannot close it: under `KillMode=control-group`, the
+restart job may SIGTERM that client before it reports the successfully enqueued request. Once
+cutover and artifact pruning have completed, that external SIGTERM is therefore an expected
+unit-shutdown outcome and does not reclassify the update as failed. Any other restart-request error
+also leaves the completed cutover healthy and logs a warning to restart manually. The old process
+cannot reliably observe whether the new process starts; daemon-start health and systemd remain the
+post-restart evidence surfaces.
+
 ### 3. Unit regeneration
 
 The install-path swap (below) is a pure content update at a stable absolute path
@@ -100,12 +109,15 @@ consistent with the flag's opt-in framing.
 
 ## Failure reporting
 
-Every failure — checksum mismatch, extraction failure, `npm ci` failure, failed smoke check, cutover
-error — is reported through the existing edge-triggered `DaemonHealthNotifier` (a new
+Every failure through cutover — checksum mismatch, extraction failure, `npm ci` failure, failed
+smoke check, cutover error — is reported through the existing edge-triggered
+`DaemonHealthNotifier` (a new
 `observeUpdateFailure` method, mirroring `observeReload`'s exact transition-only-fires shape) rather
 than a new notification mechanism: once on transition into failure, once on recovery, never once per
 tick. Any failure that occurs at or after the drain flag is set clears it before reporting, so a
-failed update never leaves the daemon permanently refusing new dispatch.
+failed update never leaves the daemon permanently refusing new dispatch. Errors from requesting the
+restart after a completed cutover are outside that failure boundary: an expected cgroup SIGTERM is
+informational, while any other request error warns that a manual restart is required.
 
 ## Consequences
 

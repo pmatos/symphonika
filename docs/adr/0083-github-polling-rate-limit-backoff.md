@@ -146,5 +146,6 @@ window, so this ADR accepts gating both identically rather than adding plumbing 
 
 ## Numbering
 
-ADR `0081` (issue dependency gating and the dependency graph view) is the most recent number in tree;
-this ADR is `0082`.
+ADR `0081` (issue dependency gating and the dependency graph view) was the most recent number when
+this ADR was drafted; `0082` (dependency drift does not revoke FSM-owned Continuation Eligibility)
+landed on `main` concurrently and claimed that number first, so this ADR is `0083`.

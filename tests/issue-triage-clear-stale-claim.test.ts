@@ -139,8 +139,8 @@ describe("clear-stale-claim visibility (#308 part 3, ADR 0077)", () => {
 });
 
 describe("POST /issues/:project/:number/clear-stale-claim (#308 part 3)", () => {
-  it("removes every present claim label and offers poll-now on success", async () => {
-    const test = await setup(["sym:stale", "sym:claimed"]);
+  it("attempts every stale-claim label despite an incomplete poll snapshot and offers poll-now on success", async () => {
+    const test = await setup(["sym:stale"]);
     try {
       let received: unknown;
       const app = createHttpApp({
@@ -177,7 +177,7 @@ describe("POST /issues/:project/:number/clear-stale-claim (#308 part 3)", () => 
         add: [],
         kind: "issue",
         projectName: "alpha",
-        remove: ["sym:stale", "sym:claimed"],
+        remove: ["sym:stale", "sym:claimed", "sym:running"],
         subjectNumber: 9
       });
     } finally {

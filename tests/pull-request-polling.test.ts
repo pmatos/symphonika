@@ -106,7 +106,7 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
     });
   });
 
-  it("surfaces a rate-limited enrichment call on the project report instead of swallowing it (ADR 0082)", async () => {
+  it("surfaces a rate-limited enrichment call on the project report instead of swallowing it (ADR 0083)", async () => {
     const api: GitHubIssuesApi = {
       getPullRequestFollowupState: () =>
         Promise.reject(new Error("API rate limit exceeded for user ID 1")),
@@ -150,6 +150,114 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
       prNumber: 246,
       stateAvailable: false
     });
+  });
+
+  it("keeps polling every Project when one PR enrichment cannot be interpreted", async () => {
+    const validFollowup: RawGitHubPullRequestFollowupState = {
+      draft: false,
+      headSha: "def456",
+      mergeable: "MERGEABLE",
+      merged: false,
+      number: 2,
+      reviewDecision: "APPROVED",
+      state: "OPEN",
+      statusCheckRollupState: "SUCCESS",
+      unresolvedReviewThreads: [],
+      url: "https://github.com/pmatos/symphonika/pull/2"
+    };
+    const api: GitHubIssuesApi = {
+      getPullRequestFollowupState: (input) =>
+        Promise.resolve(
+          input.pullNumber === 1
+            ? ({
+                ...validFollowup,
+                number: 1,
+                unresolvedReviewThreads: undefined,
+                url: "https://github.com/pmatos/symphonika/pull/1"
+              } as unknown as RawGitHubPullRequestFollowupState)
+            : { ...validFollowup, number: input.pullNumber }
+        ),
+      listOpenIssues: () => Promise.resolve([]),
+      listPullRequests: (input) =>
+        Promise.resolve(
+          input.repo === "symphonika"
+            ? [
+                {
+                  number: 1,
+                  state: "open" as const,
+                  title: "Malformed enrichment"
+                },
+                {
+                  number: 2,
+                  state: "open" as const,
+                  title: "Valid sibling"
+                }
+              ]
+            : [
+                {
+                  number: 3,
+                  state: "open" as const,
+                  title: "Valid second Project"
+                }
+              ]
+        )
+    };
+
+    const status = await pollConfiguredGitHubPullRequestsFromConfig({
+      config: {
+        projects: [
+          project(),
+          project({
+            name: "beta",
+            tracker: {
+              kind: "github",
+              owner: "pmatos",
+              repo: "beta",
+              token: "$GITHUB_TOKEN"
+            }
+          })
+        ]
+      },
+      enrichmentCache: new Map(),
+      env: { GITHUB_TOKEN: "secret" },
+      githubIssuesApi: api
+    });
+
+    expect(status.projects).toEqual([
+      expect.objectContaining({
+        fetchedPullRequests: 2,
+        name: "alpha",
+        ok: true
+      }),
+      expect.objectContaining({
+        fetchedPullRequests: 1,
+        name: "beta",
+        ok: true
+      })
+    ]);
+    expect(status.pullRequests).toHaveLength(3);
+    expect(status.pullRequests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          prNumber: 1,
+          project: "alpha",
+          stateAvailable: false,
+          title: "Malformed enrichment"
+        }),
+        expect.objectContaining({
+          prNumber: 2,
+          project: "alpha",
+          stateAvailable: true,
+          title: "Valid sibling"
+        }),
+        expect.objectContaining({
+          prNumber: 3,
+          project: "beta",
+          stateAvailable: true,
+          title: "Valid second Project"
+        })
+      ])
+    );
   });
 
   it("caps concurrent per-PR state fetches instead of bursting every open PR at once", async () => {
@@ -252,6 +360,102 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
     });
   });
 
+  it("preserves the REST head SHA when GraphQL enrichment omits headRefOid", async () => {
+    const followup: RawGitHubPullRequestFollowupState = {
+      draft: false,
+      headSha: "",
+      mergeable: "MERGEABLE",
+      merged: false,
+      number: 248,
+      reviewDecision: "APPROVED",
+      state: "OPEN",
+      statusCheckRollupState: "SUCCESS",
+      unresolvedReviewThreads: [],
+      url: "https://github.com/pmatos/symphonika/pull/248"
+    };
+    const api: GitHubIssuesApi = {
+      getPullRequestFollowupState: () => Promise.resolve(followup),
+      listOpenIssues: () => Promise.resolve([]),
+      listPullRequests: () =>
+        Promise.resolve([
+          {
+            draft: false,
+            head: { ref: "sym/alpha/3-fix", sha: "abc123" },
+            html_url: "https://github.com/pmatos/symphonika/pull/248",
+            merged_at: null,
+            number: 248,
+            state: "open",
+            title: "Keep merge pinned"
+          }
+        ])
+    };
+
+    const status = await pollConfiguredGitHubPullRequestsFromConfig({
+      config: { projects: [project()] },
+      enrichmentCache: new Map(),
+      env: { GITHUB_TOKEN: "secret" },
+      githubIssuesApi: api
+    });
+
+    expect(status.pullRequests[0]).toMatchObject({
+      checks: "success",
+      headSha: "abc123",
+      stateAvailable: true
+    });
+  });
+
+  it("refreshes the REST fallback head SHA while GraphQL enrichment is cached", async () => {
+    let enrichmentCalls = 0;
+    let restHeadSha = "abc123";
+    const followup: RawGitHubPullRequestFollowupState = {
+      draft: false,
+      headSha: "",
+      mergeable: "MERGEABLE",
+      merged: false,
+      number: 249,
+      reviewDecision: "APPROVED",
+      state: "OPEN",
+      statusCheckRollupState: "SUCCESS",
+      unresolvedReviewThreads: [],
+      url: "https://github.com/pmatos/symphonika/pull/249"
+    };
+    const api: GitHubIssuesApi = {
+      getPullRequestFollowupState: () => {
+        enrichmentCalls++;
+        return Promise.resolve(followup);
+      },
+      listOpenIssues: () => Promise.resolve([]),
+      listPullRequests: () =>
+        Promise.resolve([
+          {
+            draft: false,
+            head: { ref: "sym/alpha/4-fix", sha: restHeadSha },
+            html_url: "https://github.com/pmatos/symphonika/pull/249",
+            merged_at: null,
+            number: 249,
+            state: "open",
+            title: "Refresh merge pin"
+          }
+        ])
+    };
+    const cache = new Map<string, CachedPullRequestEnrichment>();
+    const poll = () =>
+      pollConfiguredGitHubPullRequestsFromConfig({
+        config: { projects: [project()] },
+        enrichmentCache: cache,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: api
+      });
+
+    const first = await poll();
+    restHeadSha = "def456";
+    const second = await poll();
+
+    expect(enrichmentCalls).toBe(1);
+    expect(first.pullRequests[0]?.headSha).toBe("abc123");
+    expect(second.pullRequests[0]?.headSha).toBe("def456");
+  });
+
   it("records a token-resolution error without listing pull requests", async () => {
     const api: GitHubIssuesApi = {
       listOpenIssues: () => Promise.resolve([]),
@@ -281,6 +485,32 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
       {
         error:
           "projects.alpha.tracker.token references unset environment variable $MISSING_TOKEN",
+        fetchedPullRequests: 0,
+        lastPolledAt: expect.any(String) as string,
+        name: "alpha",
+        ok: false
+      }
+    ]);
+    expect(status.pullRequests).toEqual([]);
+  });
+
+  it("reports an unsupported PR list API as a failed poll so callers preserve the prior snapshot", async () => {
+    const api: GitHubIssuesApi = {
+      listOpenIssues: () => Promise.resolve([])
+    };
+    const status = await pollConfiguredGitHubPullRequestsFromConfig({
+      config: { projects: [project()] },
+      env: { GITHUB_TOKEN: "secret" },
+      githubIssuesApi: api
+    });
+
+    expect(status.errors).toEqual([
+      "projects.alpha.tracker.repository pmatos/symphonika pull requests could not be listed: GitHub API does not support listing pull requests"
+    ]);
+    expect(status.projects).toEqual([
+      {
+        error:
+          "projects.alpha.tracker.repository pmatos/symphonika pull requests could not be listed: GitHub API does not support listing pull requests",
         fetchedPullRequests: 0,
         lastPolledAt: expect.any(String) as string,
         name: "alpha",

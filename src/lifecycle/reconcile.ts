@@ -1,7 +1,6 @@
 import type { Logger } from "pino";
 
 import {
-  evaluateProjectEligibility,
   tryGetIssue,
   type GitHubIssuesApi,
   type IssuePollStatus,
@@ -10,6 +9,7 @@ import {
 import type { RunStore } from "../run-store.js";
 
 import { ActiveRunRegistry, CANCEL_REASONS } from "./active-runs.js";
+import { evaluateRunContinuationEligibility } from "./issue-eligibility.js";
 import type {
   DispatchProjectConfig,
   RunController,
@@ -76,15 +76,11 @@ export async function reconcileActiveRuns(
       continue;
     }
 
-    // State-advance runs (raw FSM walks) intentionally do not re-evaluate
-    // labels_all / labels_none — the state machine owns transitions while the
-    // walk is in flight. CLOSED_ISSUE above is still honored. See ADR 0046.
-    if (!entry.respectsIssueLabels) {
-      continue;
-    }
-
-    const eligibility = evaluateProjectEligibility(snapshot, project, {
-      ignoreOperationalLabels: true
+    // CLOSED_ISSUE above still wins for every scope; see
+    // evaluateRunContinuationEligibility for the fsm_owned vs
+    // label_controlled policy.
+    const eligibility = evaluateRunContinuationEligibility(snapshot, project, {
+      scope: entry.respectsIssueLabels ? "label_controlled" : "fsm_owned"
     });
     if (!eligibility.eligible) {
       cancellations.push(

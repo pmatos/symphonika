@@ -94,13 +94,14 @@ while connected:
   send the next queued event as an SSE message
 ```
 
-Each connection retains at most 100 pending events. If a publisher finds that queue full, the
-subscriber is lagging behind backpressure: the handler clears its retained event references, aborts
-that stream, and unsubscribes in the loop's existing `finally` path. Dropping the oldest event or
-coalescing by event kind would also bound memory, but either can create a silent gap while the client
-still treats its connection as authoritative. Disconnecting instead uses the already-required
-`EventSource` reconnect and full-fragment reconciliation path, preserving the no-replay contract
-while bounding a stalled tab or proxy's memory use. See #432.
+Each connection retains at most 100 pending events. If a publisher finds that queue full — whether
+because the subscriber itself is lagging, or because a single publish burst outran the read loop's
+next turn — the handler clears its retained event references, aborts that stream, and unsubscribes
+in the loop's existing `finally` path. Dropping the oldest event or coalescing by event kind would
+also bound memory, but either can create a silent gap while the client still treats its connection
+as authoritative. Disconnecting instead uses the already-required `EventSource` reconnect and
+full-fragment reconciliation path, preserving the no-replay contract while bounding a stalled tab or
+proxy's memory use. See #432.
 
 An idle daemon (no Run/Firing/poll/reload activity) sends nothing but a heartbeat every
 `SSE_HEARTBEAT_MS` (20s) — fixed, low-frequency keepalive traffic to hold the connection open

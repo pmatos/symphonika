@@ -1,5 +1,6 @@
 import {
   envReferenceName,
+  isRateLimitError,
   normalizeLabels,
   resolveEnvBackedValue,
   tryGetPullRequestFollowupState,
@@ -200,7 +201,13 @@ async function pollProjectPullRequests(
       enrichmentCacheKey(project.name, repository, raw.number)
     );
   }
-  const snapshots = await mapWithConcurrency(
+  // Shared across this batch's concurrent workers: once any of them hits a
+  // rate limit, the rest stop starting NEW enrichment calls (an in-flight
+  // call already underway when the flag flips still completes -- there's no
+  // way to abort a request already sent) instead of draining the remainder
+  // of a long PR list against an already-exhausted token. See ADR 0083.
+  let enrichmentRateLimited = false;
+  const built = await mapWithConcurrency(
     numberedPullRequests,
     PULL_REQUEST_ENRICHMENT_CONCURRENCY,
     (raw) =>
@@ -212,18 +219,36 @@ async function pollProjectPullRequests(
         repoInput,
         api,
         nowMs,
-        cache
-      )
+        cache,
+        () => enrichmentRateLimited
+      ).then((result) => {
+        if (result.enrichmentError !== undefined) {
+          enrichmentRateLimited = true;
+        }
+        return result;
+      })
   );
-  status.pullRequests.push(...snapshots);
+  status.pullRequests.push(...built.map((entry) => entry.snapshot));
+
+  // A rate-limited enrichment call must still surface here even though the
+  // row itself is kept (see buildSnapshot's catch) -- otherwise the caller
+  // (daemon.ts's engageGithubBackoff) never sees the rate limit and retries
+  // the same GraphQL calls every tick. See ADR 0083.
+  const rateLimitError = built.find(
+    (entry) => entry.enrichmentError !== undefined
+  )?.enrichmentError;
 
   status.projects.push({
-    fetchedPullRequests: snapshots.length,
+    ...(rateLimitError === undefined ? {} : { error: rateLimitError }),
+    fetchedPullRequests: built.length,
     lastPolledAt,
     name: project.name,
     ok: true,
     repository
   });
+  if (rateLimitError !== undefined) {
+    status.errors.push(rateLimitError);
+  }
 }
 
 // Concurrent, not sequential (unlike pull-request-followup.ts's loops) --
@@ -296,8 +321,9 @@ async function buildSnapshot(
   repoInput: GitHubIssueRepositoryInput,
   api: GitHubIssuesApi,
   nowMs: number,
-  cache: Map<string, CachedPullRequestEnrichment>
-): Promise<ProjectPullRequestSnapshot> {
+  cache: Map<string, CachedPullRequestEnrichment>,
+  isEnrichmentRateLimited: () => boolean
+): Promise<{ enrichmentError?: string; snapshot: ProjectPullRequestSnapshot }> {
   const base: ProjectPullRequestSnapshot = {
     branchOrigin: classifyPullRequestBranchOrigin(raw.head?.ref),
     checks: null,
@@ -326,17 +352,27 @@ async function buildSnapshot(
     nowMs - cached.enrichedAtMs < PULL_REQUEST_ENRICHMENT_MIN_INTERVAL_MS
   ) {
     return {
-      ...base,
-      checks: cached.checks,
-      mergeable: cached.mergeable,
-      merged: cached.merged,
-      open: cached.open,
-      reviewDecision: cached.reviewDecision,
-      stateAvailable: true,
-      trackingState: cached.trackingState,
-      unresolvedReviewThreads: cached.unresolvedReviewThreads,
-      url: cached.url
+      snapshot: {
+        ...base,
+        checks: cached.checks,
+        mergeable: cached.mergeable,
+        merged: cached.merged,
+        open: cached.open,
+        reviewDecision: cached.reviewDecision,
+        stateAvailable: true,
+        trackingState: cached.trackingState,
+        unresolvedReviewThreads: cached.unresolvedReviewThreads,
+        url: cached.url
+      }
     };
+  }
+
+  if (isEnrichmentRateLimited()) {
+    // A sibling worker in this same batch already hit a rate limit on this
+    // token -- skip this PR's GraphQL call rather than adding to an already
+    // exhausted budget. The row still appears (from the cheap REST data
+    // above), just unenriched for this tick.
+    return { snapshot: base };
   }
 
   try {
@@ -345,7 +381,7 @@ async function buildSnapshot(
       pullNumber: prNumber
     });
     if (followup === null || followup === undefined) {
-      return base;
+      return { snapshot: base };
     }
 
     const state = interpretPullRequest(followup);
@@ -365,13 +401,21 @@ async function buildSnapshot(
     // Follow-up requires a string-valued head SHA. Resolve that sentinel from
     // this poll's REST result, but do not cache it: a later poll may observe a
     // newly pushed commit while reusing the other GraphQL enrichment fields.
-    return { ...base, ...enriched, headSha, stateAvailable: true };
-  } catch {
+    return {
+      snapshot: { ...base, ...enriched, headSha, stateAvailable: true }
+    };
+  } catch (error) {
     // A single PR's enrichment failing -- during either the fetch or its
     // interpretation -- must not drop the row. #259's orphans are exactly
     // the case AC4 needs visible even when GitHub follow-up state can't be
-    // used for them.
-    return base;
+    // used for them. A rate-limit-shaped failure is still surfaced (not
+    // swallowed) via enrichmentError so the caller can engage backoff
+    // instead of retrying it every tick -- see ADR 0083.
+    const message = errorMessage(error);
+    return {
+      ...(isRateLimitError(message) ? { enrichmentError: message } : {}),
+      snapshot: base
+    };
   }
 }
 

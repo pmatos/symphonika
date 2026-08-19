@@ -60,7 +60,7 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
   it("persists the cheap REST fields even when per-PR state enrichment fails", async () => {
     const api: GitHubIssuesApi = {
       getPullRequestFollowupState: () =>
-        Promise.reject(new Error("rate limited")),
+        Promise.reject(new Error("network blip")),
       listOpenIssues: () => Promise.resolve([]),
       listPullRequests: () =>
         Promise.resolve([
@@ -106,6 +106,107 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
       stateAvailable: false,
       title: "Fix login"
     });
+  });
+
+  it("surfaces a rate-limited enrichment call on the project report instead of swallowing it (ADR 0083)", async () => {
+    const api: GitHubIssuesApi = {
+      getPullRequestFollowupState: () =>
+        Promise.reject(new Error("API rate limit exceeded for user ID 1")),
+      listOpenIssues: () => Promise.resolve([]),
+      listPullRequests: () =>
+        Promise.resolve([
+          {
+            draft: false,
+            head: { ref: "sym/alpha/1-fix", sha: "abc123" },
+            html_url: "https://github.com/pmatos/symphonika/pull/246",
+            merged_at: null,
+            number: 246,
+            state: "open",
+            title: "Fix login"
+          }
+        ])
+    };
+    const status = await pollConfiguredGitHubPullRequestsFromConfig({
+      config: { projects: [project()] },
+      env: { GITHUB_TOKEN: "secret" },
+      githubIssuesApi: api
+    });
+
+    // ok: true (the row is still kept, per the test above) but the
+    // rate-limit message must still be attached -- otherwise a caller
+    // scanning for rate-limited projects (daemon.ts's engageGithubBackoff /
+    // rateLimitedTokens) never sees it and retries the same GraphQL call
+    // every tick.
+    expect(status.projects).toEqual([
+      {
+        error: "API rate limit exceeded for user ID 1",
+        fetchedPullRequests: 1,
+        lastPolledAt: expect.any(String) as string,
+        name: "alpha",
+        ok: true,
+        repository: { owner: "pmatos", repo: "symphonika" }
+      }
+    ]);
+    expect(status.errors).toEqual(["API rate limit exceeded for user ID 1"]);
+    expect(status.pullRequests).toHaveLength(1);
+    expect(status.pullRequests[0]).toMatchObject({
+      prNumber: 246,
+      stateAvailable: false
+    });
+  });
+
+  it("stops starting new enrichment calls once a sibling worker hits a rate limit (ADR 0083)", async () => {
+    const totalPullRequests = PULL_REQUEST_ENRICHMENT_CONCURRENCY * 3;
+    let callCount = 0;
+    const api: GitHubIssuesApi = {
+      getPullRequestFollowupState: async (input) => {
+        callCount++;
+        if (input.pullNumber === 0) {
+          // The first PR's enrichment rate-limits essentially immediately.
+          throw new Error("API rate limit exceeded for user ID 1");
+        }
+        // Every other call is still in flight (or not yet started) when
+        // PR 0's rejection is observed.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return {
+          draft: false,
+          headSha: "abc123",
+          mergeable: "MERGEABLE",
+          merged: false,
+          number: input.pullNumber,
+          reviewDecision: "APPROVED",
+          state: "OPEN",
+          statusCheckRollupState: "SUCCESS",
+          unresolvedReviewThreads: [],
+          url: `https://github.com/pmatos/symphonika/pull/${input.pullNumber}`
+        };
+      },
+      listOpenIssues: () => Promise.resolve([]),
+      listPullRequests: () =>
+        Promise.resolve(
+          Array.from({ length: totalPullRequests }, (_, index) => ({
+            draft: false,
+            head: { ref: `sym/alpha/${index}-fix`, sha: "abc123" },
+            html_url: `https://github.com/pmatos/symphonika/pull/${index}`,
+            merged_at: null,
+            number: index,
+            state: "open" as const,
+            title: `Fix ${index}`
+          }))
+        )
+    };
+    const status = await pollConfiguredGitHubPullRequestsFromConfig({
+      config: { projects: [project()] },
+      env: { GITHUB_TOKEN: "secret" },
+      githubIssuesApi: api
+    });
+
+    // Every PR still gets a row (the #259 "must not drop the row"
+    // contract) even though not all of them were actually enriched --
+    // just fewer enrichment calls were made than there were PRs, once the
+    // rate limit was observed.
+    expect(status.pullRequests).toHaveLength(totalPullRequests);
+    expect(callCount).toBeLessThan(totalPullRequests);
   });
 
   it("keeps polling every Project when one PR enrichment cannot be interpreted", async () => {

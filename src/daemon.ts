@@ -18,14 +18,18 @@ import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
 } from "./daemon-endpoint.js";
-import type { GitHubIssuesApi } from "./issue-polling.js";
+import type { GitHubIssuesApi, PollingProjectConfig } from "./issue-polling.js";
 import {
+  backoffUntil,
   DEFAULT_GITHUB_ISSUES_API,
   DEFAULT_POLLING_INTERVAL_MS,
   emptyIssuePollStatus,
+  mergeIssuePollStatus,
   pollConfiguredGitHubIssuesFromConfig,
+  rateLimitedTokens,
   readConfiguredPollingIntervalMs,
   replaceIssuePollStatus,
+  resolveEnvBackedValue,
   tryAddLabelsToIssue,
   tryGetPullRequestFollowupState,
   tryMergePullRequest,
@@ -408,6 +412,15 @@ export async function startDaemon(
   // its own GraphQL round-trips must not gate issue dispatch, so it isn't
   // awaited by refreshIssuePollStatus and needs its own reentrancy check.
   let prPolling = false;
+  // Keyed by resolved GitHub token -- shared between issue polling and PR
+  // polling below (both draw on the same per-token rate-limit budget for a
+  // given project, so a rate-limit error from either one backs off both),
+  // but scoped per token rather than globally: SPEC.md §6 lets each
+  // project's tracker reference an independent $VAR_NAME, and GitHub
+  // tracks rate-limit budgets per token, not per Symphonika deployment.
+  // Values are only ever used as opaque Map keys, never logged (the
+  // resolved token is a secret -- see SPEC.md §6's redaction requirement).
+  const githubBackoffUntilByToken = new Map<string, number>();
   let scheduledWork = Promise.resolve();
   let lastPollErrorsKey = "";
   let lastPullRequestFollowupAt = Date.now();
@@ -540,6 +553,69 @@ export async function startDaemon(
     return { errors: reloadStatus.errors, ok: !reloadBroken, snapshot };
   };
 
+  // A clean poll result is never allowed to clear an active window -- only
+  // to let it lapse on its own once `nowMs` passes it (self-cleaning here,
+  // with a one-time log on the transition, per token). The issue poll and
+  // the fire-and-forget PR poll each call engageGithubBackoff with their
+  // own results; a PR poll started before backoff was engaged can still be
+  // in flight when a later tick's issue poll engages it, and that stale
+  // poll's own eventual clean result doesn't prove the limit that triggered
+  // the newer window has recovered. Proactively clearing on any clean
+  // result would let that stale result erase a still-current window.
+  const isGithubBackoffActive = (nowMs: number, token: string): boolean => {
+    const until = githubBackoffUntilByToken.get(token);
+    if (until === undefined) {
+      return false;
+    }
+    if (nowMs >= until) {
+      githubBackoffUntilByToken.delete(token);
+      logger.info(
+        "symphonika GitHub API backoff window elapsed for one credential"
+      );
+      return false;
+    }
+    return true;
+  };
+
+  // Engages (or extends) the backoff window for every rate-limited token
+  // found in `reports` (each project's own poll report, e.g.
+  // IssuePollStatus.projects / PullRequestPollStatus.projects). Logs only
+  // on a given token's transition, not on every tick, so a sustained
+  // outage doesn't spam the log.
+  const engageGithubBackoff = (
+    reports: ReadonlyArray<{ error?: string; name: string; ok: boolean }>,
+    projects: readonly PollingProjectConfig[],
+    env: NodeJS.ProcessEnv
+  ): void => {
+    const nowMs = Date.now();
+    for (const token of rateLimitedTokens(reports, projects, env)) {
+      const wasActive = isGithubBackoffActive(nowMs, token);
+      githubBackoffUntilByToken.set(token, backoffUntil(nowMs));
+      if (!wasActive) {
+        logger.warn(
+          { backoffUntilMs: githubBackoffUntilByToken.get(token) },
+          "symphonika GitHub API rate limited; backing off polling for one credential"
+        );
+      }
+    }
+  };
+
+  // Splits `projects` into those whose resolved token isn't currently
+  // backing off (pollable now) and the rest (currently skipped). A project
+  // whose token can't be resolved (e.g. an unset $VAR_NAME) is always
+  // pollable here -- pollProject reports that failure itself, unrelated to
+  // rate-limit backoff.
+  const partitionProjectsForPolling = (
+    projects: readonly PollingProjectConfig[],
+    env: NodeJS.ProcessEnv,
+    nowMs: number
+  ): PollingProjectConfig[] => {
+    return projects.filter((project) => {
+      const token = resolveEnvBackedValue(project.tracker.token, env);
+      return token === undefined || !isGithubBackoffActive(nowMs, token);
+    });
+  };
+
   const refreshIssuePollStatus = async (): Promise<void> => {
     if (!state.configExists || polling) {
       return;
@@ -557,15 +633,59 @@ export async function startDaemon(
         });
         return;
       }
+      const env = options.env ?? process.env;
+      // Excludes any project whose resolved token is currently backing off
+      // -- config reload above still runs every tick regardless (so an
+      // interval_ms edit or a fixed token still takes effect promptly),
+      // and a project excluded here keeps its issuePollStatus entries and
+      // persisted snapshot exactly as the last successful poll produced
+      // them, same as pollProject's own "leave prior snapshot untouched"
+      // contract on a failed project -- mergeIssuePollStatus below carries
+      // those entries forward instead of a bare replace.
+      const pollableForIssues = partitionProjectsForPolling(
+        snapshot.polling.projects,
+        env,
+        Date.now()
+      );
+      // Always called, even with zero pollable projects (a cheap no-op
+      // loop in that case) -- persistProjectPollState below must still run
+      // every tick regardless, since it also derives projectModes (the
+      // Routine Host dashboard state) from the full config file via
+      // readProjectStateInputs, independent of which projects were
+      // actually polled for GitHub issues this tick.
       const nextStatus = await pollConfiguredGitHubIssuesFromConfig({
-        config: snapshot.polling,
-        ...(options.env === undefined ? {} : { env: options.env }),
+        config: { ...snapshot.polling, projects: pollableForIssues },
+        env,
         ...(options.githubIssuesApi === undefined
           ? {}
           : { githubIssuesApi: options.githubIssuesApi }),
         initialErrors: errors
       });
-      replaceIssuePollStatus(issuePollStatus, nextStatus);
+      engageGithubBackoff(nextStatus.projects, pollableForIssues, env);
+      const polledIssueProjectNames = new Set(
+        pollableForIssues.map((project) => project.name)
+      );
+      // The full configured set (not just pollableForIssues) so a project
+      // removed or renamed by a config reload -- absent from both sets --
+      // has its stale carried-over entries dropped rather than retained
+      // forever; see mergeIssuePollStatus.
+      const configuredIssueProjectNames = new Set(
+        snapshot.polling.projects.map((project) => project.name)
+      );
+      replaceIssuePollStatus(
+        issuePollStatus,
+        mergeIssuePollStatus(
+          issuePollStatus,
+          nextStatus,
+          polledIssueProjectNames,
+          configuredIssueProjectNames
+        )
+      );
+      // Persisted with the polled subset only (not the merged status) --
+      // recordProjectPollOutcome/replaceProjectIssueSnapshots below are
+      // per-project upserts, so a project left out of nextStatus.projects
+      // is simply never touched this tick rather than redundantly
+      // rewritten with the same carried-over data.
       projectModes = await persistProjectPollState(
         runStore,
         state.configPath,
@@ -580,17 +700,33 @@ export async function startDaemon(
       // ticks' worth from overlapping if a poll runs long; a PR-poll
       // failure must not blank out issuePollStatus, which dispatch
       // eligibility depends on, so it's isolated in its own try/catch same
-      // as before.
-      if (!prPolling) {
+      // as before. Re-partitioned rather than reusing pollableForIssues --
+      // the issue poll above may have just engaged backoff for a token,
+      // and that project's PR poll must be excluded from this same tick
+      // too, not just the next one. Unlike the issue poll, genuinely
+      // skipped (not called with an empty list) when nothing is pollable,
+      // since PR-poll persistence has no routine-host-adjacent side effect
+      // to preserve.
+      const pollableForPrs = partitionProjectsForPolling(
+        snapshot.polling.projects,
+        env,
+        Date.now()
+      );
+      if (!prPolling && pollableForPrs.length > 0) {
         prPolling = true;
         void (async () => {
           try {
             const pullRequestStatus =
               await pollConfiguredGitHubPullRequestsFromConfig({
-                config: snapshot.polling,
-                ...(options.env === undefined ? {} : { env: options.env }),
+                config: { ...snapshot.polling, projects: pollableForPrs },
+                env,
                 githubIssuesApi
               });
+            engageGithubBackoff(
+              pullRequestStatus.projects,
+              pollableForPrs,
+              env
+            );
             persistProjectPullRequestPollState(runStore, pullRequestStatus);
             if (pullRequestStatus.errors.length > 0) {
               logger.warn(

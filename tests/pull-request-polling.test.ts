@@ -106,6 +106,114 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
     });
   });
 
+  it("keeps polling every Project when one PR enrichment cannot be interpreted", async () => {
+    const validFollowup: RawGitHubPullRequestFollowupState = {
+      draft: false,
+      headSha: "def456",
+      mergeable: "MERGEABLE",
+      merged: false,
+      number: 2,
+      reviewDecision: "APPROVED",
+      state: "OPEN",
+      statusCheckRollupState: "SUCCESS",
+      unresolvedReviewThreads: [],
+      url: "https://github.com/pmatos/symphonika/pull/2"
+    };
+    const api: GitHubIssuesApi = {
+      getPullRequestFollowupState: (input) =>
+        Promise.resolve(
+          input.pullNumber === 1
+            ? ({
+                ...validFollowup,
+                number: 1,
+                unresolvedReviewThreads: undefined,
+                url: "https://github.com/pmatos/symphonika/pull/1"
+              } as unknown as RawGitHubPullRequestFollowupState)
+            : { ...validFollowup, number: input.pullNumber }
+        ),
+      listOpenIssues: () => Promise.resolve([]),
+      listPullRequests: (input) =>
+        Promise.resolve(
+          input.repo === "symphonika"
+            ? [
+                {
+                  number: 1,
+                  state: "open" as const,
+                  title: "Malformed enrichment"
+                },
+                {
+                  number: 2,
+                  state: "open" as const,
+                  title: "Valid sibling"
+                }
+              ]
+            : [
+                {
+                  number: 3,
+                  state: "open" as const,
+                  title: "Valid second Project"
+                }
+              ]
+        )
+    };
+
+    const status = await pollConfiguredGitHubPullRequestsFromConfig({
+      config: {
+        projects: [
+          project(),
+          project({
+            name: "beta",
+            tracker: {
+              kind: "github",
+              owner: "pmatos",
+              repo: "beta",
+              token: "$GITHUB_TOKEN"
+            }
+          })
+        ]
+      },
+      enrichmentCache: new Map(),
+      env: { GITHUB_TOKEN: "secret" },
+      githubIssuesApi: api
+    });
+
+    expect(status.projects).toEqual([
+      expect.objectContaining({
+        fetchedPullRequests: 2,
+        name: "alpha",
+        ok: true
+      }),
+      expect.objectContaining({
+        fetchedPullRequests: 1,
+        name: "beta",
+        ok: true
+      })
+    ]);
+    expect(status.pullRequests).toHaveLength(3);
+    expect(status.pullRequests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          prNumber: 1,
+          project: "alpha",
+          stateAvailable: false,
+          title: "Malformed enrichment"
+        }),
+        expect.objectContaining({
+          prNumber: 2,
+          project: "alpha",
+          stateAvailable: true,
+          title: "Valid sibling"
+        }),
+        expect.objectContaining({
+          prNumber: 3,
+          project: "beta",
+          stateAvailable: true,
+          title: "Valid second Project"
+        })
+      ])
+    );
+  });
+
   it("caps concurrent per-PR state fetches instead of bursting every open PR at once", async () => {
     const totalPullRequests = PULL_REQUEST_ENRICHMENT_CONCURRENCY * 3;
     let inFlight = 0;

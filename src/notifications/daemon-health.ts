@@ -5,6 +5,7 @@ import {
   type EmailNotificationConfig
 } from "./config.js";
 import { deliverNotificationBestEffort } from "./delivery.js";
+import { escapeHtml, htmlShell, symphonikaSubject } from "./message.js";
 import type { NotificationMessage, NotificationSink } from "./types.js";
 
 export class DaemonHealthNotifier {
@@ -160,28 +161,17 @@ function renderDaemonHealthNotification(event: {
   subject: string;
 }): NotificationMessage {
   return {
-    html: [
-      '<div style="font-family:system-ui,sans-serif;max-width:720px;line-height:1.5">',
+    html: htmlShell([
       `<h1>${escapeHtml(event.subject)}</h1>`,
       "<ul>",
       ...event.details.map((detail) => `<li>${escapeHtml(detail)}</li>`),
-      "</ul>",
-      "</div>"
-    ].join("\n"),
-    subject: `[Symphonika] ${event.subject}`,
+      "</ul>"
+    ]),
+    subject: symphonikaSubject(event.subject),
     text: [
       event.subject,
       "",
       ...event.details.map((detail) => `- ${detail}`)
     ].join("\n")
   };
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }

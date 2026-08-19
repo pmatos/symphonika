@@ -151,11 +151,12 @@ toggle too, without a second write path to keep in sync with the first.
 The toggle button offered on `/routines/:name` is decided from a target still backed by the current
 declaration: `operator` → "Enable routine"; anything else → "Disable routine". An `operator` target
 takes precedence over other current targets because a Project-cascade `inactive` target clears its
-routine-level `disabledReason`. A target removed from the declaration can remain as a durable
-`removed_from_config` row beside current siblings (ADR-0069's per-target removal semantics), so it
-is not eligible to represent the declaration's lifecycle state. When every target has
-`disabledReason = removed_from_config`, neither button is shown because restoring config inclusion,
-not this action, is what re-enables the Routine.
+routine-level `disabledReason`; when every current target is inactive, the page parses valid
+front matter for the shared declaration's `disabled` state instead. A target removed from the
+declaration can remain as a durable `removed_from_config` row beside current siblings (ADR-0069's
+per-target removal semantics), so it is not eligible to represent the declaration's lifecycle
+state. When every target has `disabledReason = removed_from_config`, neither button is shown because
+restoring config inclusion, not this action, is what re-enables the Routine.
 
 ### Firing cancellation needed a UI control and a redirect fix, not a new cancel mechanism
 

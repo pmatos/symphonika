@@ -2074,10 +2074,11 @@ action (`#307`): a "Disable routine" / "Enable routine" button (whichever the ro
 `disabledReason` calls for). The action derives that state from a target still backed by the current
 declaration, so a historical `removed_from_config` target cannot hide the control for a live
 sibling. An `operator` reason takes precedence over other current targets because a Project-cascade
-`inactive` target deliberately carries no routine-level reason; neither button renders when every
-target is `removed_from_config`, since that state is controlled by config file inclusion, not this
-action. The form posts to `/routines/:name/disable` or `/enable`, which computes the toggled
-`disabled:` value via a targeted structured edit
+`inactive` target deliberately carries no routine-level reason. When every current target is
+`inactive`, valid front matter supplies the declaration's `disabled` state as a fallback; neither
+button renders when every target is `removed_from_config`, since that state is controlled by config
+file inclusion, not this action. The form posts to `/routines/:name/disable` or `/enable`, which
+computes the toggled `disabled:` value via a targeted structured edit
 (`setRoutineDisabled`, `src/routines/declaration-editor.ts` — the `yaml` document API, preserving
 every other comment and key in the front matter) and renders the same diff-before-write
 confirmation the raw-text editor uses; the confirm button posts to the same

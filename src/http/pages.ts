@@ -1966,7 +1966,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
   );
 
-  options.app.get("/routines/:name", (context) => {
+  options.app.get("/routines/:name", async (context) => {
     const name = context.req.param("name");
     const projectParam = context.req.query("project");
     const fireNotice = renderFireResultNotice(context);
@@ -2000,6 +2000,10 @@ export function registerPages(options: RegisterPagesOptions): void {
     const { group } = resolved;
 
     const declaration = resolveRoutineDeclaration(options.runStore, group);
+    const declarationDisabled = await readRoutineDisabledFallback(
+      group,
+      declaration.sourcePath
+    );
     const groupProjectNames = new Set(
       group.targets.map((target) => target.projectName)
     );
@@ -2035,7 +2039,8 @@ export function registerPages(options: RegisterPagesOptions): void {
           name,
           group,
           projectParam,
-          lifecycleCsrfToken
+          lifecycleCsrfToken,
+          declarationDisabled
         ),
         renderRoutineFireControls(name, group, projectParam, lifecycleCsrfToken)
       ].join("")
@@ -5732,31 +5737,57 @@ function renderRoutineDeclarationCard(
 // removed from that declaration can remain beside current siblings, so it
 // must not represent the declaration's lifecycle state. An inactive Project
 // target also clears its disabledReason, so an operator-disabled current
-// target takes precedence over other current targets. When every target was
-// removed, the fallback preserves the no-action rule -- re-enabling that
-// isn't this action's job, it's controlled by config file inclusion.
+// target takes precedence over other current targets. When every current
+// target is inactive, readRoutineDisabledFallback recovers that state from
+// valid front matter. When every target was removed, the no-action rule is
+// preserved -- re-enabling that isn't this action's job, it's controlled by
+// config file inclusion.
+async function readRoutineDisabledFallback(
+  group: RoutineGroup,
+  sourcePath: string
+): Promise<boolean | undefined> {
+  const currentTargets = group.targets.filter(
+    (target) => target.disabledReason !== "removed_from_config"
+  );
+  if (
+    currentTargets.length === 0 ||
+    currentTargets.some(
+      (target) =>
+        target.disabledReason === "operator" || target.state !== "inactive"
+    )
+  ) {
+    return undefined;
+  }
+  const contents = await readFile(sourcePath, "utf8").catch(() => null);
+  if (contents === null) {
+    return undefined;
+  }
+  return parseRoutineDeclaration(contents, sourcePath).routine?.disabled;
+}
+
 function renderRoutineLifecycleControls(
   name: string,
   group: RoutineGroup,
   projectParam: string | undefined,
-  csrfToken: string
+  csrfToken: string,
+  declarationDisabled: boolean | undefined
 ): string {
-  const representative =
-    group.targets.find((target) => target.disabledReason === "operator") ??
-    group.targets.find(
-      (target) => target.disabledReason !== "removed_from_config"
-    ) ??
-    group.targets[0];
+  const currentTargets = group.targets.filter(
+    (target) => target.disabledReason !== "removed_from_config"
+  );
+  if (currentTargets.length === 0) {
+    return "";
+  }
+  const operatorDisabled =
+    declarationDisabled === true ||
+    currentTargets.some((target) => target.disabledReason === "operator");
   const projectField =
     projectParam === undefined
       ? ""
       : `<input type="hidden" name="project_param" value="${escapeHtml(projectParam)}">`;
   const csrfField = `<input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}">`;
-  if (representative?.disabledReason === "operator") {
+  if (operatorDisabled) {
     return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/enable">${csrfField}${projectField}<button class="btn" type="submit">Enable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
-  }
-  if (representative?.disabledReason === "removed_from_config") {
-    return "";
   }
   return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/disable">${csrfField}${projectField}<button class="btn" type="submit">Disable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
 }

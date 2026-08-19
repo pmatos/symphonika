@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import type { Logger } from "pino";
+import { describe, expect, it, vi } from "vitest";
 
 import { UpdateCoordinator } from "../../src/update/coordinator.js";
 import type { UpdateOps } from "../../src/update/coordinator.js";
@@ -86,6 +87,14 @@ function fakeNotifier() {
       calls.push(input);
     }
   };
+}
+
+function fakeLogger(): Logger {
+  return {
+    error: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn()
+  } as unknown as Logger;
 }
 
 describe("UpdateCoordinator", () => {
@@ -176,6 +185,94 @@ describe("UpdateCoordinator", () => {
       "restartService"
     ]);
     expect(coordinator.isDrainRequested()).toBe(false);
+  });
+
+  it("keeps a completed cutover healthy when unit shutdown interrupts the restart request", async () => {
+    const restartError = Object.assign(
+      new Error(
+        "Command failed: systemctl --user restart --no-block symphonika.service"
+      ),
+      { killed: false, signal: "SIGTERM" }
+    );
+    const ops = fakeOps({
+      restartService: () => Promise.reject(restartError)
+    });
+    const notifier = fakeNotifier();
+    const logger = fakeLogger();
+    const coordinator = new UpdateCoordinator({
+      activeRuns: { countInFlight: () => 0 },
+      currentVersion: "1.0.0",
+      daemonHealthNotifier: notifier,
+      isSelfUpdateEnabled: () => true,
+      logger,
+      ops
+    });
+
+    coordinator.tick();
+    await flushMicrotasks();
+
+    expect(ops.calls).toContain("cutOver");
+    expect(notifier.calls).toEqual([{ broken: false }]);
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it("requests a manual restart when the restart request times out", async () => {
+    const restartError = Object.assign(
+      new Error(
+        "Command failed: systemctl --user restart --no-block symphonika.service"
+      ),
+      { killed: true, signal: "SIGTERM" }
+    );
+    const ops = fakeOps({
+      restartService: () => Promise.reject(restartError)
+    });
+    const notifier = fakeNotifier();
+    const logger = fakeLogger();
+    const coordinator = new UpdateCoordinator({
+      activeRuns: { countInFlight: () => 0 },
+      currentVersion: "1.0.0",
+      daemonHealthNotifier: notifier,
+      isSelfUpdateEnabled: () => true,
+      logger,
+      ops
+    });
+
+    coordinator.tick();
+    await flushMicrotasks();
+
+    expect(notifier.calls).toEqual([{ broken: false }]);
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      { err: restartError },
+      expect.stringContaining("restart the daemon manually")
+    );
+  });
+
+  it("requests a manual restart without marking a completed cutover broken when restart fails", async () => {
+    const restartError = new Error("systemctl user session disappeared");
+    const ops = fakeOps({
+      restartService: () => Promise.reject(restartError)
+    });
+    const notifier = fakeNotifier();
+    const logger = fakeLogger();
+    const coordinator = new UpdateCoordinator({
+      activeRuns: { countInFlight: () => 0 },
+      currentVersion: "1.0.0",
+      daemonHealthNotifier: notifier,
+      isSelfUpdateEnabled: () => true,
+      logger,
+      ops
+    });
+
+    coordinator.tick();
+    await flushMicrotasks();
+
+    expect(notifier.calls).toEqual([{ broken: false }]);
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      { err: restartError },
+      expect.stringContaining("restart the daemon manually")
+    );
   });
 
   it("logs and skips restartService when no systemd session is available", async () => {

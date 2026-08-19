@@ -45,6 +45,7 @@ import type {
   ListRunsFilter,
   ProjectIssueSnapshotRow,
   ProjectPullRequestSnapshotRow,
+  ProjectSnapshotRepository,
   ProjectState,
   ProviderEventRecord,
   PullRequestBranchOrigin,
@@ -808,6 +809,7 @@ export function registerPages(options: RegisterPagesOptions): void {
 
     const body = (await context.req.parseBody()) as Record<string, unknown>;
     const label = (readOptionalFormField(body, "label") ?? "").trim();
+    const snapshotRepository = readSnapshotRepository(body);
 
     let banner: IssueLabelWriteBanner;
     if (label.length === 0) {
@@ -863,6 +865,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         kind: "issue",
         projectName,
         remove: action === "remove" ? [label] : [],
+        snapshotRepository,
         subjectNumber: issueNumber
       });
       banner = result.ok
@@ -995,6 +998,9 @@ export function registerPages(options: RegisterPagesOptions): void {
       );
     }
 
+    const body = (await context.req.parseBody()) as Record<string, unknown>;
+    const snapshotRepository = readSnapshotRepository(body);
+
     const snapshotClaimLabels = detail.snapshot.labels.filter((label) =>
       STALE_CLEAR_LABELS.has(label)
     );
@@ -1045,6 +1051,7 @@ export function registerPages(options: RegisterPagesOptions): void {
             kind: "issue",
             projectName,
             remove: labelsToClear,
+            snapshotRepository,
             subjectNumber: issueNumber
           });
           banner = result.ok
@@ -1187,6 +1194,7 @@ export function registerPages(options: RegisterPagesOptions): void {
 
     const body = (await context.req.parseBody()) as Record<string, unknown>;
     const label = (readOptionalFormField(body, "label") ?? "").trim();
+    const snapshotRepository = readSnapshotRepository(body);
 
     let banner: PullRequestLabelWriteBanner;
     if (label.length === 0) {
@@ -1220,6 +1228,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         kind: "pull_request",
         projectName,
         remove: action === "remove" ? [label] : [],
+        snapshotRepository,
         subjectNumber: prNumber
       });
       banner = result.ok
@@ -3572,6 +3581,7 @@ type IssueSearchRow = {
   polledAt: string;
   preRestart: boolean;
   projectName: string;
+  snapshotRepository: ProjectSnapshotRepository | undefined;
   title: string;
   verdict: string;
 };
@@ -3826,6 +3836,10 @@ function searchIssueSnapshots(input: {
         polledAt: snapshot.polledAt,
         preRestart: isPreRestartSnapshot(snapshot.polledAt, input.startedAtMs),
         projectName,
+        snapshotRepository: input.runStore.getProjectIssueSnapshotRepository(
+          projectName,
+          snapshot.issueNumber
+        ),
         title: snapshot.title,
         verdict: describeIssueVerdict(snapshot, claimedRunId)
       });
@@ -3895,6 +3909,7 @@ type BulkSelectIssueData = {
   issueNumber: number;
   labels: string[];
   projectName: string;
+  snapshotRepository: ProjectSnapshotRepository | undefined;
   title: string;
 };
 
@@ -3963,6 +3978,7 @@ function renderIssueSearchPage(input: {
     issueNumber: row.issueNumber,
     labels: row.labels,
     projectName: row.projectName,
+    snapshotRepository: row.snapshotRepository,
     title: row.title
   }));
   const bulkSelectMount = `<div id="issues-bulk-root"></div>
@@ -4208,9 +4224,15 @@ function asStringArray(
   return { ok: true, values };
 }
 
+type BulkIssueOperation = {
+  issueNumber: number;
+  projectName: string;
+  snapshotRepository?: ProjectSnapshotRepository;
+};
+
 function asBulkIssueOperations(
   value: unknown
-): ArrayValidationResult<{ issueNumber: number; projectName: string }> {
+): ArrayValidationResult<BulkIssueOperation> {
   if (value === undefined) {
     return { ok: true, values: [] };
   }
@@ -4220,23 +4242,39 @@ function asBulkIssueOperations(
       ok: false
     };
   }
-  const values: Array<{ issueNumber: number; projectName: string }> = [];
+  const values: BulkIssueOperation[] = [];
   for (const entry of value) {
-    const issueNumber = (entry as Record<string, unknown> | null)?.issueNumber;
+    const record = entry as Record<string, unknown> | null;
+    const issueNumber = record?.issueNumber;
+    const projectName = record?.projectName;
+    const repository = record?.snapshotRepository;
     if (
       typeof entry !== "object" ||
       entry === null ||
       typeof issueNumber !== "number" ||
       !Number.isInteger(issueNumber) ||
       issueNumber <= 0 ||
-      typeof (entry as Record<string, unknown>).projectName !== "string"
+      typeof projectName !== "string" ||
+      (repository !== undefined &&
+        (typeof repository !== "object" ||
+          repository === null ||
+          typeof (repository as Record<string, unknown>).owner !== "string" ||
+          (repository as Record<string, unknown>).owner === "" ||
+          typeof (repository as Record<string, unknown>).repo !== "string" ||
+          (repository as Record<string, unknown>).repo === ""))
     ) {
       return {
         error: "operations must be an array of {issueNumber, projectName}",
         ok: false
       };
     }
-    values.push(entry as { issueNumber: number; projectName: string });
+    values.push({
+      issueNumber,
+      projectName,
+      ...(repository === undefined
+        ? {}
+        : { snapshotRepository: repository as ProjectSnapshotRepository })
+    });
   }
   return { ok: true, values };
 }
@@ -4248,7 +4286,7 @@ const BULK_LABEL_WRITE_CONCURRENCY = 4;
 async function runBulkIssueLabelWrites(input: {
   addLabels: string[];
   getProjectRequiredLabels: (projectName: string) => string[];
-  operations: Array<{ issueNumber: number; projectName: string }>;
+  operations: BulkIssueOperation[];
   removeLabels: string[];
   runStore: RunStore;
   writeIssueLabels: WriteIssueLabelsFn;
@@ -4341,6 +4379,7 @@ async function runBulkIssueLabelWrites(input: {
         kind: "issue",
         projectName: operation.projectName,
         remove: removeLabels,
+        snapshotRepository: operation.snapshotRepository,
         subjectNumber: operation.issueNumber
       });
       results[index] = outcome.ok
@@ -4367,6 +4406,7 @@ type IssueDetail = {
   claimedRunId: string | undefined;
   issueNumber: number;
   projectName: string;
+  snapshotRepository: ProjectSnapshotRepository | undefined;
   snapshot: ProjectIssueSnapshotRow;
   verdict: string;
 };
@@ -4395,6 +4435,10 @@ function loadIssueDetail(
     claimedRunId,
     issueNumber,
     projectName,
+    snapshotRepository: runStore.getProjectIssueSnapshotRepository(
+      projectName,
+      issueNumber
+    ),
     snapshot,
     verdict: describeIssueVerdict(snapshot, claimedRunId)
   };
@@ -4501,6 +4545,7 @@ function renderClearStaleClaimSection(input: {
   issueNumber: number;
   labels: string[];
   projectName: string;
+  snapshotRepository: ProjectSnapshotRepository | undefined;
 }): string {
   const hasClaimLabel = input.labels.some((label) =>
     STALE_CLEAR_LABELS.has(label)
@@ -4515,7 +4560,7 @@ function renderClearStaleClaimSection(input: {
     .map((label) => `<code>${escapeHtml(label)}</code>`)
     .join(
       ", "
-    )} together (ADR 0038) — refused if a live Run still holds this issue, so it never invites a double dispatch.</p><form method="post" action="${escapeHtml(action)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}"><button class="btn" type="submit">Clear stale claim</button></form></section>`;
+    )} together (ADR 0038) — refused if a live Run still holds this issue, so it never invites a double dispatch.</p><form method="post" action="${escapeHtml(action)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">${renderSnapshotRepositoryFields(input.snapshotRepository)}<button class="btn" type="submit">Clear stale claim</button></form></section>`;
 }
 
 function renderIssueLabelsSection(input: {
@@ -4523,20 +4568,24 @@ function renderIssueLabelsSection(input: {
   issueNumber: number;
   labels: string[];
   projectName: string;
+  snapshotRepository: ProjectSnapshotRepository | undefined;
 }): string {
+  const repositoryFields = renderSnapshotRepositoryFields(
+    input.snapshotRepository
+  );
   const rows = input.labels.map((label) => {
     if (isOrchestratorLabel(label)) {
       return `<li>${labelPill(label, "neutral")} <span class="muted">managed by Symphonika — not editable here</span></li>`;
     }
     const removeAction = `/issues/${encodeURIComponent(input.projectName)}/${input.issueNumber}/labels/remove`;
-    return `<li>${labelPill(label, "neutral")} <form method="post" action="${escapeHtml(removeAction)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}"><input type="hidden" name="label" value="${escapeHtml(label)}"><button class="btn" type="submit">Remove</button></form></li>`;
+    return `<li>${labelPill(label, "neutral")} <form method="post" action="${escapeHtml(removeAction)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">${repositoryFields}<input type="hidden" name="label" value="${escapeHtml(label)}"><button class="btn" type="submit">Remove</button></form></li>`;
   });
   const list =
     rows.length === 0
       ? `<p class="muted">No labels.</p>`
       : `<ul class="label-list">${rows.join("")}</ul>`;
   const addAction = `/issues/${encodeURIComponent(input.projectName)}/${input.issueNumber}/labels/add`;
-  const addForm = `<form method="post" action="${escapeHtml(addAction)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}"><label>Add a label<input type="text" name="label" placeholder="agent-ready" required></label> <button class="btn" type="submit">Add</button></form>`;
+  const addForm = `<form method="post" action="${escapeHtml(addAction)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">${repositoryFields}<label>Add a label<input type="text" name="label" placeholder="agent-ready" required></label> <button class="btn" type="submit">Add</button></form>`;
   return `<section><h2>Labels</h2><p class="note"><code>sym:*</code> labels are how Symphonika tracks dispatch state (ADR 0002/0024) — removing one by hand can trigger a double dispatch or silently block an issue, so they render here but can't be edited.</p>${list}${addForm}</section>`;
 }
 
@@ -4561,13 +4610,15 @@ function renderIssueDetailPage(input: {
       csrfToken: input.csrfToken,
       issueNumber: detail.issueNumber,
       labels: detail.snapshot.labels,
-      projectName: detail.projectName
+      projectName: detail.projectName,
+      snapshotRepository: detail.snapshotRepository
     }
   )}${renderClearStaleClaimSection({
     csrfToken: input.csrfToken,
     issueNumber: detail.issueNumber,
     labels: detail.snapshot.labels,
-    projectName: detail.projectName
+    projectName: detail.projectName,
+    snapshotRepository: detail.snapshotRepository
   })}<p class="note"><a href="/issues">← Back to search</a></p>`;
 }
 
@@ -4892,6 +4943,7 @@ type PullRequestDetail = {
   liveRoutineFiringId: string | undefined;
   prNumber: number;
   projectName: string;
+  snapshotRepository: ProjectSnapshotRepository | undefined;
   snapshot: ProjectPullRequestSnapshotRow;
   trackedRunId: string | undefined;
   trackingState: "closed" | "merged" | "open";
@@ -4942,6 +4994,10 @@ function loadPullRequestDetail(
     liveRoutineFiringId: liveRoutineFiring?.firingId,
     prNumber,
     projectName,
+    snapshotRepository: runStore.getProjectPullRequestSnapshotRepository(
+      projectName,
+      prNumber
+    ),
     snapshot,
     trackedRunId: tracked?.runId ?? untrackedLiveRun?.runId,
     trackingState: pullRequestTrackingStateLabel(snapshot)
@@ -5053,20 +5109,24 @@ function renderPullRequestLabelsSection(input: {
   labels: string[];
   prNumber: number;
   projectName: string;
+  snapshotRepository: ProjectSnapshotRepository | undefined;
 }): string {
+  const repositoryFields = renderSnapshotRepositoryFields(
+    input.snapshotRepository
+  );
   const rows = input.labels.map((label) => {
     if (isOrchestratorLabel(label)) {
       return `<li>${labelPill(label, "neutral")} <span class="muted">managed by Symphonika — not editable here</span></li>`;
     }
     const removeAction = `/prs/${encodeURIComponent(input.projectName)}/${input.prNumber}/labels/remove`;
-    return `<li>${labelPill(label, "neutral")} <form method="post" action="${escapeHtml(removeAction)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}"><input type="hidden" name="label" value="${escapeHtml(label)}"><button class="btn" type="submit">Remove</button></form></li>`;
+    return `<li>${labelPill(label, "neutral")} <form method="post" action="${escapeHtml(removeAction)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">${repositoryFields}<input type="hidden" name="label" value="${escapeHtml(label)}"><button class="btn" type="submit">Remove</button></form></li>`;
   });
   const list =
     rows.length === 0
       ? `<p class="muted">No labels.</p>`
       : `<ul class="label-list">${rows.join("")}</ul>`;
   const addAction = `/prs/${encodeURIComponent(input.projectName)}/${input.prNumber}/labels/add`;
-  const addForm = `<form method="post" action="${escapeHtml(addAction)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}"><label>Add a label<input type="text" name="label" placeholder="agent-ready" required></label> <button class="btn" type="submit">Add</button></form>`;
+  const addForm = `<form method="post" action="${escapeHtml(addAction)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">${repositoryFields}<label>Add a label<input type="text" name="label" placeholder="agent-ready" required></label> <button class="btn" type="submit">Add</button></form>`;
   return `<section><h2>Labels</h2><p class="note">Labels are written under the same policy as issues (#308) — <code>sym:*</code> labels are how Symphonika tracks state (ADR 0002/0024) and render here as read-only.</p>${list}${addForm}</section>`;
 }
 
@@ -5111,7 +5171,7 @@ function renderPullRequestDetailPage(input: {
         prNumber: detail.prNumber,
         projectName: detail.projectName
       });
-  return `<h1 class="page-title">PR #${detail.prNumber} ${escapeHtml(snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(`${detail.trackingState}${draftNote}`, family)}</p>${urlHtml}${branchHtml}${bannerHtml}<section><h2>Pull Request State</h2>${signals}</section><section><h2>Follow-up tracking</h2><p class="note">${trackedHtml}</p></section>${renderPullRequestLabelsSection({ csrfToken: input.csrfToken, labels: snapshot.labels, prNumber: detail.prNumber, projectName: detail.projectName })}${mergeSectionHtml}<p class="note"><a href="/prs">← Back to search</a></p>`;
+  return `<h1 class="page-title">PR #${detail.prNumber} ${escapeHtml(snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(`${detail.trackingState}${draftNote}`, family)}</p>${urlHtml}${branchHtml}${bannerHtml}<section><h2>Pull Request State</h2>${signals}</section><section><h2>Follow-up tracking</h2><p class="note">${trackedHtml}</p></section>${renderPullRequestLabelsSection({ csrfToken: input.csrfToken, labels: snapshot.labels, prNumber: detail.prNumber, projectName: detail.projectName, snapshotRepository: detail.snapshotRepository })}${mergeSectionHtml}<p class="note"><a href="/prs">← Back to search</a></p>`;
 }
 
 // A Routine name is globally unique across the *current* declared config
@@ -5380,6 +5440,27 @@ function readOptionalFormField(
 ): string | undefined {
   const value = body[key];
   return typeof value === "string" ? value : undefined;
+}
+
+function readSnapshotRepository(
+  body: Record<string, unknown>
+): ProjectSnapshotRepository | undefined {
+  const owner = readOptionalFormField(body, "snapshot_owner")?.trim();
+  const repo = readOptionalFormField(body, "snapshot_repo")?.trim();
+  return owner === undefined ||
+    owner.length === 0 ||
+    repo === undefined ||
+    repo.length === 0
+    ? undefined
+    : { owner, repo };
+}
+
+function renderSnapshotRepositoryFields(
+  repository: ProjectSnapshotRepository | undefined
+): string {
+  return repository === undefined
+    ? ""
+    : `<input type="hidden" name="snapshot_owner" value="${escapeHtml(repository.owner)}"><input type="hidden" name="snapshot_repo" value="${escapeHtml(repository.repo)}">`;
 }
 
 function readRequiredFormField(

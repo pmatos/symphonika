@@ -560,7 +560,13 @@ describe("merge_pr state lifecycle", () => {
       });
 
       const result = await controller.dispatchOneFresh({
-        candidateIssues: [{ issue, project: project.name }],
+        candidateIssues: [
+          {
+            issue,
+            project: project.name,
+            repository: { owner: "pmatos", repo: "symphonika" }
+          }
+        ],
         errors: [],
         filteredIssues: [],
         projects: []

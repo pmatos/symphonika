@@ -20,12 +20,14 @@ function renderWithServerRows(): void {
       issueNumber: 7,
       labels: ["bug", "agent-ready"],
       projectName: "alpha",
+      snapshotRepository: { owner: "pmatos", repo: "alpha" },
       title: "First"
     },
     {
       issueNumber: 8,
       labels: ["needs-triage"],
       projectName: "alpha",
+      snapshotRepository: { owner: "pmatos", repo: "alpha" },
       title: "Second"
     }
   ];
@@ -107,8 +109,16 @@ describe("IssuesBulkSelect", () => {
     expect(body.removeLabels).toEqual(["needs-triage"]);
     expect(body.operations).toEqual(
       expect.arrayContaining([
-        { issueNumber: 7, projectName: "alpha" },
-        { issueNumber: 8, projectName: "alpha" }
+        {
+          issueNumber: 7,
+          projectName: "alpha",
+          snapshotRepository: { owner: "pmatos", repo: "alpha" }
+        },
+        {
+          issueNumber: 8,
+          projectName: "alpha",
+          snapshotRepository: { owner: "pmatos", repo: "alpha" }
+        }
       ])
     );
     expect(body.operations).toHaveLength(2);

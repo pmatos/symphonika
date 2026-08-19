@@ -1820,7 +1820,13 @@ describe("wait state lifecycle", () => {
       };
 
       const dispatchPromise = controller.dispatchOneFresh({
-        candidateIssues: [{ issue, project: "symphonika" }],
+        candidateIssues: [
+          {
+            issue,
+            project: "symphonika",
+            repository: { owner: "pmatos", repo: "symphonika" }
+          }
+        ],
         errors: [],
         filteredIssues: [],
         projects: []

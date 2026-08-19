@@ -278,6 +278,11 @@ export type ProjectIssueSnapshotRow = {
   title: string;
 };
 
+export type ProjectSnapshotRepository = {
+  owner: string;
+  repo: string;
+};
+
 // Persists #303's per-project issue poll snapshot (ADR 0073): the daemon
 // replaces a project's rows wholesale on every *successful* poll for that
 // project, so an issue that stops being returned (closed, relabeled) ages
@@ -289,6 +294,11 @@ export type ProjectIssueSnapshotRow = {
 export type ReplaceProjectIssueSnapshotsInput = {
   polledAt: string;
   projectName: string;
+  // Optional only for pre-repository-binding callers and migration tests.
+  // Production poll persistence always supplies it; an unbound legacy row
+  // is deliberately ineligible for a label write until the next successful
+  // poll replaces it.
+  repository?: ProjectSnapshotRepository;
   rows: Array<{
     blockedBy: RawGitHubIssueDependencyRef[];
     blockedByTruncated: boolean;
@@ -345,6 +355,7 @@ export type ProjectPullRequestSnapshotRow = {
 export type ReplaceProjectPullRequestSnapshotsInput = {
   polledAt: string;
   projectName: string;
+  repository?: ProjectSnapshotRepository;
   rows: Array<Omit<ProjectPullRequestSnapshotRow, "polledAt">>;
 };
 
@@ -1583,11 +1594,13 @@ export class RunStore {
         [
           "insert into project_issue_snapshots (",
           "project_name, issue_number, kind, title, priority, reasons, labels,",
-          "blocked_by, blocked_by_truncated, parent_issue_number, polled_at,",
+          "blocked_by, blocked_by_truncated, parent_issue_number,",
+          "repository_owner, repository_name, polled_at,",
           "created_at, updated_at",
           ") values (",
           "@project_name, @issue_number, @kind, @title, @priority, @reasons, @labels,",
-          "@blocked_by, @blocked_by_truncated, @parent_issue_number, @polled_at,",
+          "@blocked_by, @blocked_by_truncated, @parent_issue_number,",
+          "@repository_owner, @repository_name, @polled_at,",
           "@created_at, @updated_at",
           ")"
         ].join(" ")
@@ -1605,6 +1618,8 @@ export class RunStore {
           polled_at: input.polledAt,
           priority: row.priority,
           project_name: input.projectName,
+          repository_name: input.repository?.repo ?? null,
+          repository_owner: input.repository?.owner ?? null,
           reasons:
             row.reasons.length === 0 ? null : JSON.stringify(row.reasons),
           title: row.title,
@@ -1613,6 +1628,20 @@ export class RunStore {
       }
     });
     apply();
+  }
+
+  getProjectIssueSnapshotRepository(
+    projectName: string,
+    issueNumber: number
+  ): ProjectSnapshotRepository | undefined {
+    const row = this.database
+      .prepare(
+        "select repository_owner, repository_name from project_issue_snapshots where project_name = ? and issue_number = ?"
+      )
+      .get(projectName, issueNumber) as
+      | { repository_name: string | null; repository_owner: string | null }
+      | undefined;
+    return snapshotRepository(row);
   }
 
   listProjectIssueSnapshots(projectName: string): ProjectIssueSnapshotRow[] {
@@ -1662,12 +1691,12 @@ export class RunStore {
           "project_name, pr_number, title, url, draft, open, merged,",
           "head_ref, head_sha, labels, branch_origin, state_available, mergeable,",
           "checks, review_decision, tracking_state, unresolved_review_threads,",
-          "polled_at, created_at, updated_at",
+          "repository_owner, repository_name, polled_at, created_at, updated_at",
           ") values (",
           "@project_name, @pr_number, @title, @url, @draft, @open, @merged,",
           "@head_ref, @head_sha, @labels, @branch_origin, @state_available, @mergeable,",
           "@checks, @review_decision, @tracking_state, @unresolved_review_threads,",
-          "@polled_at, @created_at, @updated_at",
+          "@repository_owner, @repository_name, @polled_at, @created_at, @updated_at",
           ")"
         ].join(" ")
       );
@@ -1687,6 +1716,8 @@ export class RunStore {
           pr_number: row.prNumber,
           project_name: input.projectName,
           review_decision: row.reviewDecision,
+          repository_name: input.repository?.repo ?? null,
+          repository_owner: input.repository?.owner ?? null,
           state_available: row.stateAvailable ? 1 : 0,
           title: row.title,
           tracking_state: row.trackingState,
@@ -1697,6 +1728,20 @@ export class RunStore {
       }
     });
     apply();
+  }
+
+  getProjectPullRequestSnapshotRepository(
+    projectName: string,
+    prNumber: number
+  ): ProjectSnapshotRepository | undefined {
+    const row = this.database
+      .prepare(
+        "select repository_owner, repository_name from project_pull_request_snapshots where project_name = ? and pr_number = ?"
+      )
+      .get(projectName, prNumber) as
+      | { repository_name: string | null; repository_owner: string | null }
+      | undefined;
+    return snapshotRepository(row);
   }
 
   listProjectPullRequestSnapshots(
@@ -4495,6 +4540,8 @@ export class RunStore {
         priority integer not null default 0,
         reasons text,
         labels text,
+        repository_owner text,
+        repository_name text,
         polled_at text not null,
         created_at text not null,
         updated_at text not null,
@@ -4519,6 +4566,8 @@ export class RunStore {
         review_decision text,
         tracking_state text,
         unresolved_review_threads integer,
+        repository_owner text,
+        repository_name text,
         polled_at text not null,
         created_at text not null,
         updated_at text not null,
@@ -4767,7 +4816,11 @@ export class RunStore {
         "integer not null default 0"
       ],
       ["project_issue_snapshots", "parent_issue_number", "integer"],
-      ["project_pull_request_snapshots", "labels", "text"]
+      ["project_issue_snapshots", "repository_owner", "text"],
+      ["project_issue_snapshots", "repository_name", "text"],
+      ["project_pull_request_snapshots", "labels", "text"],
+      ["project_pull_request_snapshots", "repository_owner", "text"],
+      ["project_pull_request_snapshots", "repository_name", "text"]
     ];
 
     const apply = this.database.transaction(() => {
@@ -5255,6 +5308,21 @@ function mapProjectStateRow(row: ProjectStateRow): ProjectState {
     validationState: row.validation_state,
     weight: row.weight
   };
+}
+
+function snapshotRepository(
+  row:
+    | { repository_name: string | null; repository_owner: string | null }
+    | undefined
+): ProjectSnapshotRepository | undefined {
+  if (
+    row === undefined ||
+    row.repository_owner === null ||
+    row.repository_name === null
+  ) {
+    return undefined;
+  }
+  return { owner: row.repository_owner, repo: row.repository_name };
 }
 
 function mapRoutineRow(row: RoutineRow): RoutineStatus {

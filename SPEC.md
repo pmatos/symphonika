@@ -2104,6 +2104,11 @@ displayed labels unchanged" holds for both. A successful write's banner offers `
 /issues/poll-now`, a page-facing wrapper around the same `pollNow` trigger `/api/poll-now` already
 exposes to the CLI — submitted separately by the operator, never auto-fired by the write itself, so
 labelling an issue never bypasses the dispatch gates (ADR 0036) by triggering a poll as a side effect.
+Each persisted issue and pull-request snapshot records the GitHub owner/repo that produced it.
+Before any label mutation, `writeIssueLabels` compares that identity case-insensitively with the
+Project's current tracker and refuses an unbound or mismatched snapshot. A tracker identity changed
+by hot reload therefore cannot redirect an action rendered from the prior repository; a successful
+poll of the new repository must replace the snapshot first.
 
 `POST /issues/:project/:number/clear-stale-claim` (`#308` part 3) is the one `sym:*` mutation the UI
 offers, named rather than raw label surgery: it removes `sym:stale`, `sym:claimed`, and `sym:running`

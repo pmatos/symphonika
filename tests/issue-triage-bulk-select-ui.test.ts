@@ -43,6 +43,7 @@ async function setup(): Promise<TestSetup> {
   runStore.replaceProjectIssueSnapshots({
     polledAt: "2026-05-22T10:00:00.000Z",
     projectName: "alpha",
+    repository: { owner: "pmatos", repo: "alpha" },
     rows: [
       {
         blockedByTruncated: false,
@@ -141,6 +142,7 @@ describe("GET /issues bulk-select UI (React island wiring)", () => {
           issueNumber: 7,
           labels: ["bug", "agent-ready"],
           projectName: "alpha",
+          snapshotRepository: { owner: "pmatos", repo: "alpha" },
           title: "Fix the login flow"
         }
       ]);

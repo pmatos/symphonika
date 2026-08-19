@@ -275,8 +275,16 @@ describe("POST /api/issues/bulk-labels", () => {
         body: JSON.stringify({
           addLabels: ["agent-ready"],
           operations: [
-            { issueNumber: 7, projectName: "alpha" },
-            { issueNumber: 8, projectName: "alpha" }
+            {
+              issueNumber: 7,
+              projectName: "alpha",
+              snapshotRepository: { owner: "pmatos", repo: "alpha" }
+            },
+            {
+              issueNumber: 8,
+              projectName: "alpha",
+              snapshotRepository: { owner: "pmatos", repo: "alpha" }
+            }
           ],
           removeLabels: ["needs-triage"]
         }),
@@ -308,6 +316,7 @@ describe("POST /api/issues/bulk-labels", () => {
             kind: "issue",
             projectName: "alpha",
             remove: ["needs-triage"],
+            snapshotRepository: { owner: "pmatos", repo: "alpha" },
             subjectNumber: 7
           },
           {
@@ -315,6 +324,7 @@ describe("POST /api/issues/bulk-labels", () => {
             kind: "issue",
             projectName: "alpha",
             remove: ["needs-triage"],
+            snapshotRepository: { owner: "pmatos", repo: "alpha" },
             subjectNumber: 8
           }
         ])

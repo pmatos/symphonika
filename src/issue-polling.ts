@@ -156,6 +156,7 @@ export type IssueSnapshot = {
 type ProjectIssueSnapshot = {
   issue: IssueSnapshot;
   project: string;
+  repository: GitHubRepositoryIdentity;
 };
 
 export type FilteredProjectIssueSnapshot = ProjectIssueSnapshot & {
@@ -169,8 +170,14 @@ export type ProjectIssuePollReport = {
   lastPolledAt?: string;
   name: string;
   ok: boolean;
+  repository: GitHubRepositoryIdentity;
   weight?: number;
   error?: string;
+};
+
+export type GitHubRepositoryIdentity = {
+  owner: string;
+  repo: string;
 };
 
 export type IssuePollStatus = {
@@ -998,6 +1005,10 @@ async function pollProject(
   status: IssuePollStatus
 ): Promise<void> {
   const lastPolledAt = new Date().toISOString();
+  const repository: GitHubRepositoryIdentity = {
+    owner: project.tracker.owner,
+    repo: project.tracker.repo
+  };
   const weight = project.weight ?? 1;
   const token = resolveEnvBackedValue(project.tracker.token, env);
   if (token === undefined) {
@@ -1015,6 +1026,7 @@ async function pollProject(
       lastPolledAt,
       name: project.name,
       ok: false,
+      repository,
       weight
     });
     return;
@@ -1038,6 +1050,7 @@ async function pollProject(
       lastPolledAt,
       name: project.name,
       ok: false,
+      repository,
       weight
     });
     return;
@@ -1071,6 +1084,7 @@ async function pollProject(
       lastPolledAt,
       name: project.name,
       ok: false,
+      repository,
       weight
     });
     return;
@@ -1092,7 +1106,8 @@ async function pollProject(
       candidateIssues += 1;
       status.candidateIssues.push({
         issue,
-        project: project.name
+        project: project.name,
+        repository
       });
       continue;
     }
@@ -1101,7 +1116,8 @@ async function pollProject(
     status.filteredIssues.push({
       issue,
       project: project.name,
-      reasons
+      reasons,
+      repository
     });
   }
 
@@ -1112,6 +1128,7 @@ async function pollProject(
     lastPolledAt,
     name: project.name,
     ok: true,
+    repository,
     weight
   });
 }
@@ -1353,8 +1370,17 @@ export async function loadPollingProjectsByName(
     );
   }
 
+  return pollingProjectsByName(config.projects);
+}
+
+// Duplicate project names resolve to the *last* match, matching
+// RuntimeConfigReloader.projectsByName() (src/reload.ts): `Map#set` keeps
+// overwriting as later entries are visited, so the final value wins.
+function pollingProjectsByName(
+  projects: PollingProjectConfig[]
+): Map<string, PollingProjectConfig> {
   const map = new Map<string, PollingProjectConfig>();
-  for (const project of config.projects) {
+  for (const project of projects) {
     map.set(project.name, project);
   }
   return map;

@@ -631,7 +631,11 @@ describe("pull request follow-up", () => {
       // review on run-controller.ts:710-723.
       const reconcilePollStatus = emptyIssuePollStatus();
       reconcilePollStatus.candidateIssues = [
-        { issue: normalizedIssue(), project: project.name }
+        {
+          issue: normalizedIssue(),
+          project: project.name,
+          repository: { owner: "pmatos", repo: "symphonika" }
+        }
       ];
 
       const githubIssuesApi: GitHubIssuesApi = {

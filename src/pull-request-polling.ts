@@ -311,48 +311,48 @@ async function buildSnapshot(
     };
   }
 
-  let followup;
   try {
-    followup = await tryGetPullRequestFollowupState(api, {
+    const followup = await tryGetPullRequestFollowupState(api, {
       ...repoInput,
       pullNumber: prNumber
     });
-  } catch {
-    // A single PR's enrichment failing must not drop the row — #259's
-    // orphans are exactly the case AC4 needs visible even when GitHub
-    // follow-up state can't be fetched for them.
-    return base;
-  }
-  if (followup === null || followup === undefined) {
-    return base;
-  }
+    if (followup === null || followup === undefined) {
+      return base;
+    }
 
-  const state = interpretPullRequest(followup);
-  cache.set(cacheKey, {
-    checks: state.checks,
-    enrichedAtMs: nowMs,
-    headSha: state.headSha,
-    mergeable: state.mergeable,
-    merged: state.merged,
-    open: state.open,
-    reviewDecision: state.reviewDecision,
-    trackingState: state.trackingState,
-    unresolvedReviewThreads: state.unresolvedReviewThreads,
-    url: state.url
-  });
-  return {
-    ...base,
-    checks: state.checks,
-    headSha: state.headSha,
-    mergeable: state.mergeable,
-    merged: state.merged,
-    open: state.open,
-    reviewDecision: state.reviewDecision,
-    stateAvailable: true,
-    trackingState: state.trackingState,
-    unresolvedReviewThreads: state.unresolvedReviewThreads,
-    url: state.url
-  };
+    const state = interpretPullRequest(followup);
+    cache.set(cacheKey, {
+      checks: state.checks,
+      enrichedAtMs: nowMs,
+      headSha: state.headSha,
+      mergeable: state.mergeable,
+      merged: state.merged,
+      open: state.open,
+      reviewDecision: state.reviewDecision,
+      trackingState: state.trackingState,
+      unresolvedReviewThreads: state.unresolvedReviewThreads,
+      url: state.url
+    });
+    return {
+      ...base,
+      checks: state.checks,
+      headSha: state.headSha,
+      mergeable: state.mergeable,
+      merged: state.merged,
+      open: state.open,
+      reviewDecision: state.reviewDecision,
+      stateAvailable: true,
+      trackingState: state.trackingState,
+      unresolvedReviewThreads: state.unresolvedReviewThreads,
+      url: state.url
+    };
+  } catch {
+    // A single PR's enrichment failing -- during either the fetch or its
+    // interpretation -- must not drop the row. #259's orphans are exactly
+    // the case AC4 needs visible even when GitHub follow-up state can't be
+    // used for them.
+    return base;
+  }
 }
 
 function errorMessage(error: unknown): string {

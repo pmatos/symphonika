@@ -1608,6 +1608,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           expectedContentHash,
           name: `${name} workflow`,
           onDisk,
+          previewAction: `/projects/${encodeURIComponent(name)}/workflow/edit/preview`,
           projectParam: undefined,
           reviewAction: `/projects/${encodeURIComponent(name)}/workflow/edit`
         })
@@ -1699,6 +1700,7 @@ export function registerPages(options: RegisterPagesOptions): void {
               expectedContentHash,
               name: `${name} workflow`,
               onDisk: await readFile(workflow.path, "utf8").catch(() => null),
+              previewAction: `/projects/${encodeURIComponent(name)}/workflow/edit/preview`,
               projectParam: undefined,
               reviewAction: `/projects/${encodeURIComponent(name)}/workflow/edit`
             })
@@ -1815,6 +1817,7 @@ export function registerPages(options: RegisterPagesOptions): void {
             : {}),
           name: "service config",
           onDisk,
+          previewAction: "/config/edit/preview",
           projectParam: undefined,
           reviewAction: "/config/edit"
         })
@@ -1868,6 +1871,7 @@ export function registerPages(options: RegisterPagesOptions): void {
               extraConfirmationHtml: renderProviderCommandConfirmation(),
               name: "service config",
               onDisk,
+              previewAction: "/config/edit/preview",
               projectParam: undefined,
               reviewAction: "/config/edit"
             })
@@ -1936,6 +1940,7 @@ export function registerPages(options: RegisterPagesOptions): void {
               expectedContentHash,
               name: "service config",
               onDisk,
+              previewAction: "/config/edit/preview",
               projectParam: undefined,
               reviewAction: "/config/edit"
             })
@@ -2141,6 +2146,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           expectedContentHash,
           name,
           onDisk,
+          previewAction: `/routines/${encodeURIComponent(name)}/edit/preview`,
           projectParam,
           reviewAction: `/routines/${encodeURIComponent(name)}/edit`
         })
@@ -2243,6 +2249,7 @@ export function registerPages(options: RegisterPagesOptions): void {
               onDisk: await readFile(declaration.sourcePath, "utf8").catch(
                 () => null
               ),
+              previewAction: `/routines/${encodeURIComponent(name)}/edit/preview`,
               projectParam,
               reviewAction: `/routines/${encodeURIComponent(name)}/edit`
             })
@@ -2336,6 +2343,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         expectedContentHash: contentHash(onDisk),
         name,
         onDisk,
+        previewAction: `/routines/${encodeURIComponent(name)}/edit/preview`,
         projectParam,
         reviewAction: `/routines/${encodeURIComponent(name)}`
       })
@@ -5602,11 +5610,18 @@ function renderEditorPreview(input: {
   extraConfirmationHtml?: string;
   name: string;
   onDisk: string | null;
+  previewAction: string;
   projectParam: string | undefined;
   reviewAction: string;
 }): string {
   if (input.errors.length > 0) {
-    return `<h1 class="page-title">Changes to ${escapeHtml(input.name)} are invalid</h1><div class="alert" role="alert"><strong>Fix these before saving</strong><ul>${input.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div><p class="note"><a href="${escapeHtml(input.reviewAction)}${input.projectParam === undefined ? "" : `?project=${encodeURIComponent(input.projectParam)}`}">← Back to editor</a></p>`;
+    return `<h1 class="page-title">Changes to ${escapeHtml(input.name)} are invalid</h1><div class="alert" role="alert"><strong>Fix these before saving</strong><ul>${input.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div><form method="post" action="${escapeHtml(input.previewAction)}">
+  <input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">
+  <input type="hidden" name="expected_content_hash" value="${escapeHtml(input.expectedContentHash)}">
+  ${input.projectParam === undefined ? "" : `<input type="hidden" name="project_param" value="${escapeHtml(input.projectParam)}">`}
+  <p><textarea name="content" rows="24" cols="100" class="editor">${escapeHtml(input.content)}</textarea></p>
+  <button class="btn" type="submit">Review changes</button>
+</form><p class="note"><a href="${escapeHtml(input.reviewAction)}${input.projectParam === undefined ? "" : `?project=${encodeURIComponent(input.projectParam)}`}">← Discard draft and reopen from disk</a></p>`;
   }
   const diffHtml =
     input.onDisk === null

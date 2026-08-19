@@ -149,7 +149,7 @@ describe("routine declaration editor (#307 part 1, ADR 0075/0076)", () => {
     }
   });
 
-  it("preview reports validation errors and shows no diff for invalid content", async () => {
+  it("preview reports validation errors and preserves the submitted content in the editor", async () => {
     const test = await setup();
     try {
       const app = createHttpApp({
@@ -158,9 +158,14 @@ describe("routine declaration editor (#307 part 1, ADR 0075/0076)", () => {
         stateRoot: test.stateRoot,
         version: "0.1.0"
       });
+      const invalidContent = `---
+name: audit
+---
+Unsaved draft content.
+`;
       const response = await app.request("/routines/audit/edit/preview", {
         body: formBody({
-          content: "---\nname: audit\n---\n",
+          content: invalidContent,
           csrf_token: VALID_TOKEN,
           expected_content_hash: contentHash(VALID_DECLARATION)
         }),
@@ -174,6 +179,8 @@ describe("routine declaration editor (#307 part 1, ADR 0075/0076)", () => {
       const html = await response.text();
       expect(html).toContain("kind is required");
       expect(html).not.toContain("Confirm save");
+      expect(html).toContain('<textarea name="content"');
+      expect(html).toContain(`${invalidContent}</textarea>`);
     } finally {
       test.cleanup();
     }

@@ -2077,9 +2077,13 @@ export function registerPages(options: RegisterPagesOptions): void {
     const includeInactive =
       requestedIncludeInactive ||
       routineSelectionRequiresInactive(resolved.group, projectParam);
-    const declaration = resolveRoutineDeclaration(
+    const disclosureGroup = includeInactiveRoutineTargets(
       options.runStore,
       resolved.group
+    );
+    const declaration = resolveRoutineDeclaration(
+      options.runStore,
+      disclosureGroup
     );
 
     let content: string;
@@ -2100,7 +2104,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       `Edit ${name}`,
       renderEditorForm({
         action: `/routines/${encodeURIComponent(name)}/edit/preview`,
-        blastRadiusHtml: renderRoutineEditBlastRadius(resolved.group.targets),
+        blastRadiusHtml: renderRoutineEditBlastRadius(disclosureGroup.targets),
         content,
         contentHash: contentHash(content),
         csrfToken,
@@ -5408,6 +5412,23 @@ function routineSelectionRequiresInactive(
   return (
     selectedTargets.length > 0 &&
     selectedTargets.every((target) => target.state === "inactive")
+  );
+}
+
+function includeInactiveRoutineTargets(
+  runStore: RunStore,
+  selectedGroup: RoutineGroup
+): RoutineGroup {
+  const sourcePath = selectedGroup.targets[0]?.sourcePath;
+  if (sourcePath === undefined) {
+    return selectedGroup;
+  }
+  return (
+    groupRoutinesByName(runStore.listRoutines({ includeInactive: true })).find(
+      (candidate) =>
+        candidate.name === selectedGroup.name &&
+        candidate.targets[0]?.sourcePath === sourcePath
+    ) ?? selectedGroup
   );
 }
 

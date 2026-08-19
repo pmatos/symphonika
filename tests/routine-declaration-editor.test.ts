@@ -131,6 +131,51 @@ describe("routine declaration editor (#307 part 1, ADR 0075/0076)", () => {
     }
   });
 
+  it("discloses inactive sibling targets of the selected declaration", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit the codebase.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: test.routinePath
+        },
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit the codebase.",
+          provider: null,
+          projectName: "beta",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: test.routinePath
+        }
+      ]);
+      test.runStore.markRoutinesInactiveForProject("beta");
+
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const editor = await (
+        await app.request("/routines/audit/edit", {
+          headers: browserHeaders()
+        })
+      ).text();
+
+      expect(editor).toContain("This save affects");
+      expect(editor).toContain("alpha");
+      expect(editor).toContain("beta");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("returns 404 for a routine name with no declaration", async () => {
     const test = await setup();
     try {

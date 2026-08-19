@@ -2187,6 +2187,11 @@ describe("HTTP app — project detail page (#303)", () => {
       const body = await (await app.request("/projects/alpha")).text();
 
       expect(body).toContain('<a href="/issues/alpha/286">#286</a>');
+      // The "Edit labels" action is threaded through the same tableSection
+      // call as the populated rows, not just the empty-state branch.
+      expect(body).toContain(
+        '<a class="section-action" href="/issues?project=alpha">Edit labels →</a>'
+      );
     } finally {
       test.cleanup();
     }
@@ -2521,6 +2526,11 @@ describe("HTTP app — project detail page (#303)", () => {
 
       expect(body).toContain("Closed since last poll");
       expect(body).toContain("succeeded");
+      // The row still renders (with a plain, unlinked issue number) --
+      // /issues/:project/:number only resolves snapshot-backed issues, and
+      // this one has no snapshot row, so linking it would 404.
+      expect(body).toContain("#900");
+      expect(body).not.toContain('href="/issues/alpha/900"');
     } finally {
       test.cleanup();
     }

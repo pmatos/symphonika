@@ -2091,8 +2091,10 @@ labelling an issue never bypasses the dispatch gates (ADR 0036) by triggering a 
 `POST /issues/:project/:number/clear-stale-claim` (`#308` part 3) is the one `sym:*` mutation the UI
 offers, named rather than raw label surgery: it removes `sym:stale`, `sym:claimed`, and `sym:running`
 together, the same set `clear-stale` (`doctor`, ADR 0038) removes, and only appears on the page when
-at least one is present. It is refused — no GitHub write attempted — when a live Run exists for the
-issue, checked against the same three sources `detectStaleClaims`'s own liveness check unions
+at least one is present in the persisted poll snapshot. Once invoked, it attempts all three against
+live GitHub state rather than narrowing the write to that deliberately stale snapshot; an
+already-absent label is an idempotent per-label success. It is refused — no GitHub write attempted —
+when a live Run exists for the issue, checked against the same three sources `detectStaleClaims`'s own liveness check unions
 (the in-process active-run registry, `queued`/`preparing_workspace`/`running` Run rows, and parked
 `waiting` rows, which keep `sym:claimed` across the wait per ADR 0047): hand-clearing a claim on a Run
 that is still live is exactly the double-dispatch ADR 0038 exists to prevent. This closes the one gap

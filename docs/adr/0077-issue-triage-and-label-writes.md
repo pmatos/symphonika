@@ -159,15 +159,18 @@ action — the same call `#307` part 2 made for `validateWorkflowContractContent
 `readWorkflowSnapshot`'s near-identical branch: a narrow, parallel implementation for the new caller,
 with the duplication named here rather than justifying a refactor with no requesting caller.
 
-### The action removes whichever of the three labels are present, not always all three
+### The action attempts all three labels, regardless of the snapshot subset
 
 `STALE_CLEAR_LABELS` (`sym:stale`, `sym:claimed`, `sym:running`) mirrors `doctor.ts`'s own constant of
 the same name and ADR-0038's rule that all three must go together (leaving `sym:claimed` or
 `sym:running` behind would re-trigger `sym:stale` on the next poll). The button only renders when at
-least one is present, and the write removes exactly the subset actually on the issue — calling
-`removeLabelsFromIssue` for a label that was never there risks a needless 404 from GitHub's API for
-no benefit, and `writeIssueLabels` already surfaces that kind of failure honestly if it happened
-anyway.
+least one is present in the persisted poll snapshot, but the write always attempts the complete set
+against live GitHub state. Narrowing the write to the snapshot subset can miss a label added after
+that deliberately stale read. `OctokitGitHubIssuesApi.removeLabelsFromIssue` makes an already-absent
+label idempotent by swallowing GitHub's absent-label 404 inside each loop iteration, so one missing
+label does not prevent the remaining labels from being attempted; generic 404s and other failures
+still surface honestly. This amends the original subset decision after issue #451 identified the
+stale-read race.
 
 ## Consequences
 

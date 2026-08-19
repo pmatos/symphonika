@@ -177,6 +177,28 @@ describe("RunStore — change notification path (#305, ADR 0074)", () => {
     }
   });
 
+  it("does not publish a firing transition when a manual claim rolls back", async () => {
+    const runStore = openRunStore({ stateRoot: await makeTempRoot() });
+    try {
+      const events: ChangeEvent[] = [];
+      runStore.subscribeToChanges((event) => events.push(event));
+
+      const claimed = runStore.claimManualRoutineFiring({
+        firingId: "manual-fire-1",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "no-such-routine"
+      });
+
+      expect(claimed).toBe(false);
+      expect(runStore.listRoutineFirings()).toEqual([]);
+      expect(events).toEqual([]);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("publishes a project-poll event carrying only the poll outcome, not issue detail", async () => {
     const runStore = openRunStore({ stateRoot: await makeTempRoot() });
     try {

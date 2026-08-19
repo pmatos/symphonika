@@ -850,6 +850,11 @@ type FiringTransitionChangeEvent = Extract<
   { kind: "firing-transition" }
 >;
 
+type RunTransitionChangeEvent = Extract<
+  ChangeEvent,
+  { kind: "run-transition" }
+>;
+
 type CreateRoutineFiringInput = {
   branchName?: string;
   branchRef?: string;
@@ -913,14 +918,16 @@ export class RunStore {
   }
 
   createRun(input: CreateRunInput): void {
-    this.insertRunRow({
-      ...input,
-      isContinuation: false,
-      parentRunId: null,
-      providerCommand: input.providerCommand,
-      providerName: input.providerName,
-      state: "queued"
-    });
+    this.publishChange(
+      this.insertRunRow({
+        ...input,
+        isContinuation: false,
+        parentRunId: null,
+        providerCommand: input.providerCommand,
+        providerName: input.providerName,
+        state: "queued"
+      })
+    );
   }
 
   createWaitingRun(input: {
@@ -936,7 +943,7 @@ export class RunStore {
     // single SQLite transaction so the row either exists with both fields set
     // or not at all.
     const apply = this.database.transaction(() => {
-      this.insertRunRow({
+      const event = this.insertRunRow({
         id: input.id,
         isContinuation: true,
         issue: input.issue,
@@ -947,8 +954,9 @@ export class RunStore {
         state: "waiting"
       });
       this.setRunCurrentState(input.id, input.currentStateId);
+      return event;
     });
-    apply();
+    this.publishChange(apply());
   }
 
   // Includes cancel-requested rows on purpose: a waiting run cancelled via
@@ -999,19 +1007,21 @@ export class RunStore {
       parentRunId: string;
     }
   ): void {
-    this.insertRunRow({
-      ...(input.evidenceIgnore === undefined
-        ? {}
-        : { evidenceIgnore: input.evidenceIgnore }),
-      id: input.id,
-      isContinuation: true,
-      issue: input.issue,
-      parentRunId: input.parentRunId,
-      projectName: input.projectName,
-      providerCommand: input.providerCommand,
-      providerName: input.providerName,
-      state: "queued"
-    });
+    this.publishChange(
+      this.insertRunRow({
+        ...(input.evidenceIgnore === undefined
+          ? {}
+          : { evidenceIgnore: input.evidenceIgnore }),
+        id: input.id,
+        isContinuation: true,
+        issue: input.issue,
+        parentRunId: input.parentRunId,
+        projectName: input.projectName,
+        providerCommand: input.providerCommand,
+        providerName: input.providerName,
+        state: "queued"
+      })
+    );
     if (input.inheritParentState === false) {
       return;
     }
@@ -1031,16 +1041,18 @@ export class RunStore {
     projectName: string;
     reason: string;
   }): void {
-    this.insertRunRow({
-      id: input.id,
-      isContinuation: true,
-      issue: input.issue,
-      parentRunId: input.parentRunId,
-      projectName: input.projectName,
-      providerCommand: null,
-      providerName: null,
-      state: "failed"
-    });
+    this.publishChange(
+      this.insertRunRow({
+        id: input.id,
+        isContinuation: true,
+        issue: input.issue,
+        parentRunId: input.parentRunId,
+        projectName: input.projectName,
+        providerCommand: null,
+        providerName: null,
+        state: "failed"
+      })
+    );
     this.database
       .prepare(
         "update runs set terminal_reason = ?, failure_classification = 'deterministic', updated_at = ? where id = ?"
@@ -1389,7 +1401,7 @@ export class RunStore {
     providerCommand: string | null;
     providerName: AgentProviderName | null;
     state: RunState;
-  }): void {
+  }): RunTransitionChangeEvent {
     const now = timestamp();
     this.database
       .prepare(
@@ -1422,7 +1434,7 @@ export class RunStore {
         state: input.state,
         updated_at: now
       });
-    this.recordRunTransition(input.id, input.state, now);
+    return this.insertRunTransition(input.id, input.state, now);
   }
 
   countSucceededContinuations(
@@ -4289,6 +4301,7 @@ export class RunStore {
       ].join(" ")
     );
     const apply = this.database.transaction(() => {
+      const events: RunTransitionChangeEvent[] = [];
       for (const entry of entries) {
         const updatedAt = timestamp();
         update.run(entry.reason, updatedAt, entry.runId);
@@ -4299,11 +4312,19 @@ export class RunStore {
         // unconfirmed, unboundedly, in a table rendered verbatim on the
         // dashboard.
         if (entry.previousState !== "stale") {
-          this.recordRunTransition(entry.runId, "stale", updatedAt);
+          events.push(
+            this.insertRunTransition(entry.runId, "stale", updatedAt)
+          );
         }
       }
+      return events;
     });
-    apply();
+    // Publish only after the transaction commits (see claimRoutineFiring):
+    // publishing per-entry inside the loop would leak an event for a row
+    // whose write gets rolled back by a later entry's failure.
+    for (const event of apply()) {
+      this.publishChange(event);
+    }
   }
 
   findLeakedRoutineFirings(): {
@@ -4368,6 +4389,7 @@ export class RunStore {
       ].join(" ")
     );
     const apply = this.database.transaction(() => {
+      const events: FiringTransitionChangeEvent[] = [];
       for (const entry of entries) {
         const updatedAt = timestamp();
         update.run(entry.reason, updatedAt, entry.firingId);
@@ -4375,15 +4397,23 @@ export class RunStore {
         // already 'failed') isn't changing state, so skip the duplicate
         // transition record.
         if (entry.previousState !== "failed") {
-          this.recordRoutineFiringTransition(
-            entry.firingId,
-            "failed",
-            updatedAt
+          events.push(
+            this.insertRoutineFiringTransition(
+              entry.firingId,
+              "failed",
+              updatedAt
+            )
           );
         }
       }
+      return events;
     });
-    apply();
+    // Publish only after the transaction commits (see claimRoutineFiring):
+    // publishing per-entry inside the loop would leak an event for a row
+    // whose write gets rolled back by a later entry's failure.
+    for (const event of apply()) {
+      this.publishChange(event);
+    }
   }
 
   failLegacyInputRequiredRuns(
@@ -4425,6 +4455,7 @@ export class RunStore {
       ].join(" ")
     );
     const apply = this.database.transaction(() => {
+      const events: RunTransitionChangeEvent[] = [];
       for (const entry of migrated) {
         const updatedAt = timestamp();
         update.run(
@@ -4432,10 +4463,13 @@ export class RunStore {
           updatedAt,
           entry.runId
         );
-        this.recordRunTransition(entry.runId, "failed", updatedAt);
+        events.push(this.insertRunTransition(entry.runId, "failed", updatedAt));
       }
+      return events;
     });
-    apply();
+    for (const event of apply()) {
+      this.publishChange(event);
+    }
     return migrated;
   }
 
@@ -4951,13 +4985,21 @@ export class RunStore {
     state: RunState,
     createdAt: string
   ): void {
+    this.publishChange(this.insertRunTransition(runId, state, createdAt));
+  }
+
+  private insertRunTransition(
+    runId: string,
+    state: RunState,
+    createdAt: string
+  ): RunTransitionChangeEvent {
     const sequence = nextTransitionSequence(this.database, runId);
     this.database
       .prepare(
         "insert into run_state_transitions (run_id, sequence, state, created_at) values (?, ?, ?, ?)"
       )
       .run(runId, sequence, state, createdAt);
-    this.publishChange({ kind: "run-transition", runId, sequence, state });
+    return { kind: "run-transition", runId, sequence, state };
   }
 
   private recordRoutineFiringTransition(

@@ -2320,7 +2320,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       options.runStore,
       name,
       projectParam,
-      true
+      includeInactive
     );
     if (resolved.kind !== "ok") {
       return context.html(

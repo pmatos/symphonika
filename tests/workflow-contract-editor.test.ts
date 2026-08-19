@@ -1,5 +1,14 @@
 import { randomBytes } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -286,6 +295,88 @@ describe("workflow contract editor (#307 part 2, ADR 0076)", () => {
       expect(response.headers.get("location")).toBe("/projects/alpha?saved=1");
       expect(await readFile(test.workflowPath, "utf8")).toBe(editedContent);
       expect(reloadCalls).toBe(1);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("confirm validates relative prompt paths from a symlinked workflow's logical directory", async () => {
+    const test = await setup();
+    const logicalDir = path.join(test.stateRoot, "configured");
+    const targetDir = path.join(test.stateRoot, "shared");
+    const logicalWorkflowPath = path.join(logicalDir, "workflow.yml");
+    const targetWorkflowPath = path.join(targetDir, "workflow.yml");
+    const originalContent = [
+      "workflow:",
+      "  name: original",
+      "  initial: done",
+      "  states:",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n");
+    const editedContent = [
+      "workflow:",
+      "  name: symlinked",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        prompt: prompts/plan.md",
+      "      transitions:",
+      "        - to: done",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n");
+    await mkdir(path.join(logicalDir, "prompts"), { recursive: true });
+    await mkdir(targetDir, { recursive: true });
+    await writeFile(
+      path.join(logicalDir, "prompts", "plan.md"),
+      "Plan the work.\n",
+      "utf8"
+    );
+    await writeFile(targetWorkflowPath, originalContent, "utf8");
+    await symlink(targetWorkflowPath, logicalWorkflowPath);
+
+    try {
+      const app = appFor(test, {
+        getProjectWorkflowPath: (projectName) =>
+          projectName === "alpha"
+            ? { format: "raw_fsm", path: logicalWorkflowPath }
+            : undefined,
+        resolveWritePath: (candidatePath) => realpath(candidatePath)
+      });
+      const form = {
+        content: editedContent,
+        csrf_token: VALID_TOKEN,
+        expected_content_hash: contentHash(originalContent)
+      };
+      const headers = {
+        ...browserHeaders(),
+        "content-type": "application/x-www-form-urlencoded"
+      };
+
+      const previewResponse = await app.request(
+        "/projects/alpha/workflow/edit/preview",
+        { body: formBody(form), headers, method: "POST" }
+      );
+      expect(await previewResponse.text()).toContain("Confirm save");
+
+      const confirmResponse = await app.request(
+        "/projects/alpha/workflow/edit/confirm",
+        {
+          body: formBody(form),
+          headers,
+          method: "POST",
+          redirect: "manual"
+        }
+      );
+
+      expect(confirmResponse.status).toBe(303);
+      expect(await readFile(targetWorkflowPath, "utf8")).toBe(editedContent);
+      expect((await lstat(logicalWorkflowPath)).isSymbolicLink()).toBe(true);
     } finally {
       test.cleanup();
     }

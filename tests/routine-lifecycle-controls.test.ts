@@ -195,6 +195,49 @@ describe("routine disable/enable (#307 part 4, ADR 0076)", () => {
     }
   });
 
+  it("shows Enable when an inactive target sorts before an operator-disabled target", async () => {
+    const test = await setup();
+    try {
+      const disabledDeclaration = {
+        disabled: true,
+        kind: "report" as const,
+        name: "audit",
+        prompt: "Audit the codebase.",
+        provider: null,
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: test.routinePath
+      };
+      test.runStore.syncRoutines([
+        { ...disabledDeclaration, projectName: "alpha" },
+        { ...disabledDeclaration, projectName: "beta" },
+        { ...disabledDeclaration, projectName: "gamma" }
+      ]);
+      test.runStore.syncRoutines(
+        [
+          { ...disabledDeclaration, projectName: "beta" },
+          { ...disabledDeclaration, projectName: "gamma" }
+        ],
+        { projects: ["alpha", "beta", "gamma"] }
+      );
+      test.runStore.markRoutinesInactiveForProject("beta");
+
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (
+        await app.request("/routines/audit", { headers: browserHeaders() })
+      ).text();
+      expect(html).toContain('action="/routines/audit/enable"');
+      expect(html).toContain("Enable routine");
+      expect(html).not.toContain("Disable routine");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("POST /disable renders a confirm-diff page whose confirm posts to /edit/confirm", async () => {
     const test = await setup();
     try {

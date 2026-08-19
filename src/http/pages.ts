@@ -5730,8 +5730,10 @@ function renderRoutineDeclarationCard(
 // live firing is unaffected until it terminates (ADR 0060)." Every target
 // in a group shares one declaration file (ADR 0069's fan-out). A target
 // removed from that declaration can remain beside current siblings, so it
-// must not represent the declaration's lifecycle state. When every target
-// was removed, the fallback preserves the no-action rule -- re-enabling that
+// must not represent the declaration's lifecycle state. An inactive Project
+// target also clears its disabledReason, so an operator-disabled current
+// target takes precedence over other current targets. When every target was
+// removed, the fallback preserves the no-action rule -- re-enabling that
 // isn't this action's job, it's controlled by config file inclusion.
 function renderRoutineLifecycleControls(
   name: string,
@@ -5740,9 +5742,11 @@ function renderRoutineLifecycleControls(
   csrfToken: string
 ): string {
   const representative =
+    group.targets.find((target) => target.disabledReason === "operator") ??
     group.targets.find(
       (target) => target.disabledReason !== "removed_from_config"
-    ) ?? group.targets[0];
+    ) ??
+    group.targets[0];
   const projectField =
     projectParam === undefined
       ? ""

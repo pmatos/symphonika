@@ -5,6 +5,11 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startDaemon } from "../src/daemon.js";
+import type {
+  AgentProvider,
+  AgentProviderRegistry,
+  ProviderEvent
+} from "../src/provider.js";
 import { openRunStore } from "../src/run-store.js";
 import { resolveStateRoot } from "../src/state.js";
 
@@ -824,6 +829,121 @@ describe("daemon GitHub issue polling", () => {
 
       // alpha stayed backed off throughout that same wait.
       expect(callsFor("alpha")).toBe(alphaCallsAtBackoff);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("does not claim a carried-over candidate whose GitHub token is backing off", async () => {
+    const root = await makeTempRoot();
+    await writeTwoProjectsWithDifferentTokens(root, { pollingIntervalMs: 10 });
+    const agentProviders: AgentProviderRegistry = {};
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockImplementation(({ repo }: { repo: string }) =>
+        Promise.resolve([
+          issueFixture({
+            labels: ["agent-ready"],
+            number: repo === "alpha" ? 91 : 92,
+            title: `${repo} candidate`
+          })
+        ])
+      ),
+      listPullRequests: vi
+        .fn()
+        .mockImplementation(({ repo }: { repo: string }) =>
+          repo === "alpha"
+            ? Promise.reject(
+                new Error(
+                  "Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+                )
+              )
+            : Promise.resolve([])
+        ),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { code: 1, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    const daemon = await startDaemon({
+      agentProviders,
+      cwd: root,
+      env: {
+        GITHUB_TOKEN_ALPHA: "secret-alpha",
+        GITHUB_TOKEN_BETA: "secret-beta"
+      },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: vi.fn().mockResolvedValue({
+        branchName: "sym/beta/92-beta-candidate",
+        branchRef: "refs/heads/sym/beta/92-beta-candidate",
+        cachePath: path.join(
+          root,
+          ".symphonika",
+          "workspaces",
+          "beta",
+          ".cache",
+          "repo.git"
+        ),
+        issueDirectoryName: "92-beta-candidate",
+        reused: false,
+        workspacePath: path.join(
+          root,
+          ".symphonika",
+          "workspaces",
+          "beta",
+          "issues",
+          "92-beta-candidate"
+        )
+      })
+    });
+
+    try {
+      const issuePollsFor = (repo: string) =>
+        githubIssuesApi.listOpenIssues.mock.calls.filter((call) => {
+          const input = call[0] as { repo: string };
+          return input.repo === repo;
+        }).length;
+
+      await waitFor(() => Promise.resolve(issuePollsFor("beta") >= 3), {
+        timeoutMs: 2_000
+      });
+      expect(issuePollsFor("alpha")).toBe(1);
+
+      const response = await fetch(`${daemon.url}/api/status`);
+      const status = (await response.json()) as {
+        candidateIssues: Array<{ issue: { number: number }; project: string }>;
+      };
+      expect(
+        status.candidateIssues.map((candidate) => candidate.project).sort()
+      ).toEqual(["alpha", "beta"]);
+
+      agentProviders.codex = codexProvider;
+      await waitFor(() =>
+        Promise.resolve(
+          githubIssuesApi.addLabelsToIssue.mock.calls.some(([input]) => {
+            const call = input as { labels: string[] };
+            return call.labels.includes("sym:claimed");
+          })
+        )
+      );
+
+      const claimedRepositories = githubIssuesApi.addLabelsToIssue.mock.calls
+        .map(([input]) => input as { labels: string[]; repo: string })
+        .filter((input) => input.labels.includes("sym:claimed"))
+        .map((input) => input.repo);
+      expect(claimedRepositories).toEqual(["beta"]);
     } finally {
       await daemon.stop();
     }

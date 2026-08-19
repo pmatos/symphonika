@@ -123,6 +123,21 @@ waiting out any project's window. `issueRunNotifications.schedulePending()` at t
 also always runs, independent of partitioning, so a run that completes while some (or all) projects
 are backing off doesn't wait out the window before its notification is scheduled.
 
+### Fresh dispatch filters carried-over candidates by active token backoff
+
+The full `issuePollStatus` remains the operator-facing last-known snapshot while a Project is
+backing off, including its candidate issues. Fresh dispatch derives a separate candidate view at
+the daemon boundary and excludes every Project whose resolved token is still in
+`githubBackoffUntilByToken` before calling `dispatchOneFresh`. This keeps snapshot/status continuity
+without allowing a carried-over candidate to reach the `sym:claimed` REST write during an active
+window. Projects using other tokens remain dispatchable.
+
+GitHub's REST and GraphQL primary budgets are separate, so this gate is conservative when GraphQL
+primary exhaustion alone engaged the window. It is still required for secondary/abuse-detection
+limits, which apply across both API surfaces for the credential; the daemon intentionally treats
+the established per-token window as the admission rule rather than trying to infer which budget
+produced a message-shaped rate-limit error.
+
 ### Carry-over is limited to still-configured projects, and preserves their own errors
 
 `mergeIssuePollStatus` takes both `polledProjectNames` (this tick's pollable subset) and
@@ -162,6 +177,8 @@ window, so this ADR accepts gating both identically rather than adding plumbing 
   `issuePollStatus` already held rather than making a fresh attempt; it is not separately flagged as
   skipped in the response. A poll-now request while only *some* projects are backing off still polls
   the rest.
+- Fresh dispatch does not claim a carried-over candidate whose token is backing off; candidates on
+  other tokens remain eligible for dispatch.
 
 ## Numbering
 

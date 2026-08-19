@@ -980,7 +980,25 @@ export async function startDaemon(
           );
           return;
         }
-        const result = await runController.dispatchOneFresh(issuePollStatus);
+        const snapshot = runtimeConfig.getSnapshot();
+        const dispatchableProjectNames = new Set(
+          partitionProjectsForPolling(
+            snapshot?.polling.projects ?? [],
+            env,
+            Date.now()
+          ).map((project) => project.name)
+        );
+        // ADR 0083 deliberately carries backed-off Projects' candidates in
+        // issuePollStatus for status and snapshot continuity. Keep that
+        // shared evidence intact, but do not let a carried-over candidate
+        // cross the fresh-claim boundary while its credential is backing
+        // off: the claim itself is another GitHub label write.
+        const result = await runController.dispatchOneFresh({
+          ...issuePollStatus,
+          candidateIssues: issuePollStatus.candidateIssues.filter((candidate) =>
+            dispatchableProjectNames.has(candidate.project)
+          )
+        });
         if (result.dispatched === false) {
           logger.debug(
             { reason: result.reason },

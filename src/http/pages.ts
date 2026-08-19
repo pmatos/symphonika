@@ -6528,7 +6528,7 @@ export const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
   }
   function nodeClasses(st) {
     var cls = [];
-    if (st.isCurrent) cls.push("current");
+    if (st.id === currentStateId) cls.push("current");
     if (st.id === graph.initial) cls.push("initial");
     if (st.terminal === "success") cls.push("term-ok");
     else if (st.terminal) cls.push("term-block");
@@ -6564,8 +6564,7 @@ export const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
   var elements = [];
   var missing = {};
   states.forEach(function (st) {
-    st.isCurrent = st.id === currentStateId;
-    var label = st.isCurrent ? st.id + "\\ncurrent" : st.id;
+    var label = st.id === currentStateId ? st.id + "\\ncurrent" : st.id;
     elements.push({ data: { id: st.id, label: label, state: st }, classes: nodeClasses(st) });
   });
   states.forEach(function (st) {
@@ -6680,7 +6679,7 @@ export const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
       return;
     }
     var badges = [];
-    if (st.isCurrent) badges.push('<span class="wf-badge current">current</span>');
+    if (st.id === currentStateId) badges.push('<span class="wf-badge current">current</span>');
     if (st.id === graph.initial) badges.push('<span class="wf-badge init">initial</span>');
     if (st.terminal === "success") badges.push('<span class="wf-badge term-ok">terminal &middot; success</span>');
     else if (st.terminal) badges.push('<span class="wf-badge term-block">terminal &middot; ' + esc(st.terminal) + '</span>');
@@ -6719,7 +6718,7 @@ export const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
     var lines = ["Workflow: " + (graph.name || "(unknown)"), "Current: " + (currentStateId === null ? "(not recorded)" : currentStateId), "Initial: " + (graph.initial || "(unknown)"), ""];
     states.forEach(function (st) {
       var tag = st.terminal ? " [terminal:" + st.terminal + "]" : (st.action ? " [" + st.action.kind + "]" : "");
-      if (st.isCurrent) tag += " [current]";
+      if (st.id === currentStateId) tag += " [current]";
       lines.push("- " + st.id + tag);
       (st.transitions || []).forEach(function (tr) {
         var c = condLines(tr.when);

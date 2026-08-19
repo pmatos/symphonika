@@ -2857,7 +2857,7 @@ td code { color: var(--ink-2); }
   gap: var(--sp-3) var(--sp-4);
   margin: 0 0 var(--sp-5);
 }
-.filters label {
+.filters label, .bulk-select-toolbar label {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
@@ -2865,7 +2865,7 @@ td code { color: var(--ink-2); }
   font-size: var(--fs-meta);
   color: var(--ink-muted);
 }
-.filters input, .filters select {
+.filters input, .filters select, .bulk-select-toolbar label > input {
   font-family: var(--font-mono);
   font-size: var(--fs-meta);
   color: var(--ink);
@@ -2887,24 +2887,7 @@ td code { color: var(--ink-2); }
   background: var(--surface);
 }
 .bulk-select-toolbar > span { font-size: var(--fs-meta); color: var(--ink-muted); }
-.bulk-select-toolbar label {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  font-family: var(--font-mono);
-  font-size: var(--fs-meta);
-  color: var(--ink-muted);
-}
-.bulk-select-toolbar label > input {
-  font-family: var(--font-mono);
-  font-size: var(--fs-meta);
-  color: var(--ink);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: var(--sp-2);
-  min-width: 14ch;
-}
+.bulk-select-toolbar label > input { min-width: 14ch; }
 .bulk-select-chips {
   list-style: none;
   margin: 0;
@@ -2935,16 +2918,14 @@ td code { color: var(--ink-2); }
   cursor: pointer;
   line-height: 1;
 }
-.bulk-select-error { flex-basis: 100%; margin: 0; color: var(--fail-ink); font-size: var(--fs-meta); }
+.bulk-select-error, .bulk-select-results { flex-basis: 100%; margin: 0; font-size: var(--fs-meta); }
+.bulk-select-error { color: var(--fail-ink); }
 .bulk-select-results {
-  flex-basis: 100%;
   list-style: none;
-  margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
-  font-size: var(--fs-meta);
   color: var(--ink-2);
 }
 

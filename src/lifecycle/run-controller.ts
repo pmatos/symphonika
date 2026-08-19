@@ -1851,6 +1851,11 @@ export class RunController {
         scope: "label_controlled"
       }).eligible
     ) {
+      await this.releaseIssueClaim({
+        issueNumber: payload.issue.number,
+        phase: "continuation-eligibility-loss",
+        repository
+      });
       return;
     }
 
@@ -3370,21 +3375,20 @@ export class RunController {
           phase: "cancelled"
         }
       );
+      if (
+        reason === CANCEL_REASONS.CLOSED_ISSUE ||
+        reason === CANCEL_REASONS.ELIGIBILITY_LOSS
+      ) {
+        await this.releaseIssueClaim({
+          issueNumber: input.issueNumber,
+          phase:
+            reason === CANCEL_REASONS.CLOSED_ISSUE
+              ? "closed-issue-cleanup"
+              : "eligibility-loss-cleanup",
+          repository: input.repository
+        });
+      }
       if (reason === CANCEL_REASONS.CLOSED_ISSUE) {
-        await this.bestEffort(
-          () =>
-            api.removeLabelsFromIssue({
-              ...input.repository,
-              issueNumber: input.issueNumber,
-              labels: ["sym:claimed"]
-            }),
-          {
-            issueNumber: input.issueNumber,
-            label: "sym:claimed",
-            operation: "removeLabel",
-            phase: "closed-issue-cleanup"
-          }
-        );
         await this.bestEffort(
           () =>
             api.removeLabelsFromIssue({
@@ -3483,6 +3487,28 @@ export class RunController {
         });
       }
     }
+  }
+
+  private async releaseIssueClaim(input: {
+    issueNumber: number;
+    phase: string;
+    repository: GitHubIssueRepositoryInput;
+  }): Promise<void> {
+    const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
+    await this.bestEffort(
+      () =>
+        api.removeLabelsFromIssue({
+          ...input.repository,
+          issueNumber: input.issueNumber,
+          labels: ["sym:claimed"]
+        }),
+      {
+        issueNumber: input.issueNumber,
+        label: "sym:claimed",
+        operation: "removeLabel",
+        phase: input.phase
+      }
+    );
   }
 
   private async scheduleNext(input: {
@@ -3700,6 +3726,11 @@ export class RunController {
         scope: "label_controlled"
       }).eligible
     ) {
+      await this.releaseIssueClaim({
+        issueNumber: input.issue.number,
+        phase: "continuation-scheduling-eligibility-loss",
+        repository: input.repository
+      });
       return;
     }
 

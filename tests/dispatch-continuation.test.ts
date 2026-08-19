@@ -355,6 +355,84 @@ describe("dispatch continuation cap", () => {
     }
   }, 70_000);
 
+  it("releases the claim when a dependency refresh rejects continuation scheduling", async () => {
+    const root = await makeTempRoot();
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
+    await writeProject(root);
+
+    let runAttemptCount = 0;
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        runAttemptCount += 1;
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi
+        .fn()
+        .mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
+      getIssueDependencies: vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Map([[baseIssue.number, { blockedBy: [], truncated: false }]])
+        )
+        .mockRejectedValue(new Error("transient GraphQL failure")),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
+        .mockResolvedValue([
+          { ...baseIssue, labels: ["agent-ready", "sym:claimed"] }
+        ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
+    );
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => "run-cont-dependency-refresh",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: fastContinuationPolicy,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      await waitForCondition(daemon.url, ({ runs }) =>
+        runs.some((run) => run["state"] === "succeeded")
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as {
+        runs: Array<Record<string, unknown>>;
+      };
+      expect(status.runs).toHaveLength(1);
+      expect(runAttemptCount).toBe(1);
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:claimed"] })
+      );
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("terminalizes a scheduled continuation when its provider command disappears", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
@@ -465,7 +543,7 @@ describe("dispatch continuation cap", () => {
     }
   });
 
-  it("does not start scheduled continuation when issue loses eligibility during delay", async () => {
+  it("releases the claim without starting a scheduled continuation when the issue loses eligibility during the delay", async () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);
     await createGitWorkspaceAhead(prepared);
@@ -538,6 +616,9 @@ describe("dispatch continuation cap", () => {
       expect(status.runs[0]?.["isContinuation"]).toBe(false);
       expect(runAttemptCount).toBe(1);
       expect(prepareIssueWorkspace).toHaveBeenCalledTimes(1);
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:claimed"] })
+      );
     } finally {
       await daemon.stop();
     }

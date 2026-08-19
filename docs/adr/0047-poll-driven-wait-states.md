@@ -60,12 +60,12 @@ ADR's implementation onward. Valid waits with `current_state_id` set are not tou
 startup sweep — `reconcileWaitingRuns` re-evaluates them on the next tick after restart, and that
 is the only termination path the wait lifecycle recognises.
 
-Label immunity carries over from ADR 0046. A waiting run skips the `labels_all` / `labels_none`
-re-check because the FSM, not the issue label set, decides when the wait advances; the
-`sym:claimed` label remains set across the wait, which keeps the existing fresh-dispatch guard
-against starting a second parallel agent on the same issue. Issue close is still honored — a
-waiting row whose issue transitions to `closed` is cancelled with `cancel_reason="closed_issue"`,
-matching the cancellation semantics of in-flight agent runs.
+FSM-owned Continuation Eligibility carries over from ADR 0046 and ADR 0082. A waiting run skips the
+`labels_all` / `labels_none` and Dependency Gate re-checks because the FSM, not external eligibility
+drift, decides when the wait advances; the `sym:claimed` label remains set across the wait, which
+keeps the existing fresh-dispatch guard against starting a second parallel agent on the same issue.
+Issue close is still honored — a waiting row whose issue transitions to `closed` is cancelled with
+`cancel_reason="closed_issue"`, matching the cancellation semantics of in-flight agent runs.
 
 Two predicates are intentionally out of scope for this slice. `timeout` stays defined in the
 predicate set but unimplemented; adding it requires tracking a wait-entered-at timestamp and a

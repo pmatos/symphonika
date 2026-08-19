@@ -54,6 +54,11 @@ its own stated prerequisites, defeating the purpose of gating on them at all. A 
 hits the 25-per-issue cap sets `blockedByTruncated`, which gates identically to an open blocker (fail
 closed on the unfetched overflow) rather than gating only on the blockers that happened to fit.
 
+ADR 0082 clarifies the scope of this hard block. It governs fresh Dispatch Eligibility and
+label-controlled Continuation Eligibility, with no override in either scope. It does not revoke an
+already-admitted raw-FSM walk: FSM-owned State Advances, waits, and retries continue through later
+dependency drift while the Issue remains open.
+
 ### Two gates, one snapshot-staleness caveat
 
 `evaluateProjectEligibility` (`src/issue-polling.ts`) is the authoritative gate: the daemon refuses to

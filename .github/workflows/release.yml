@@ -4,6 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to build and publish (e.g. v0.1.5)
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and publish (e.g. v0.1.5)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -21,8 +33,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Resolve release tag
+        id: resolve
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          echo "tag=${tag}" >>"$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v7
         with:
+          ref: ${{ steps.resolve.outputs.tag }}
           persist-credentials: false
 
       - uses: actions/setup-node@v7
@@ -34,7 +53,7 @@ jobs:
 
       - name: Verify tag matches package.json version
         run: |
-          tag="${GITHUB_REF_NAME}"
+          tag="${{ steps.resolve.outputs.tag }}"
           tag_version="${tag#v}"
           package_version="$(node -p "require('./package.json').version")"
           if [ "$tag_version" != "$package_version" ]; then
@@ -61,8 +80,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
+          tag="${{ steps.resolve.outputs.tag }}"
+          gh release create "${tag}" \
+            --title "${tag}" \
             --generate-notes \
             "${TARBALL}" \
             SHA256SUMS.txt

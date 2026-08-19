@@ -1,0 +1,98 @@
+name: Cut Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump type
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  FORCE_COLOR: "1"
+  NPM_CONFIG_FUND: "false"
+  NPM_CONFIG_AUDIT: "false"
+
+concurrency:
+  group: cut-release
+  cancel-in-progress: false
+
+jobs:
+  bump-and-merge:
+    name: Bump version and merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Bump version
+        id: bump
+        run: |
+          set -euo pipefail
+          npm version "${{ inputs.bump }}" --no-git-tag-version
+          version="$(node -p "require('./package.json').version")"
+          echo "version=${version}" >>"$GITHUB_OUTPUT"
+          echo "tag=v${version}" >>"$GITHUB_OUTPUT"
+
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run format:check
+      - run: npm test
+      - run: npm run build
+
+      - name: Open and merge version bump PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.bump.outputs.version }}"
+          branch="chore/bump-version-${version}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add package.json package-lock.json
+          git commit -m "chore: bump version to ${version}"
+          git push origin "$branch"
+          pr_url="$(gh pr create \
+            --title "chore: bump version to ${version}" \
+            --body "Automated version bump, opened by the Cut Release workflow. Quality gate (lint, typecheck, format:check, test, build) already ran on this commit before the PR was opened; PR-triggered CI checks won't run since GitHub doesn't fire pull_request events for PRs opened by the default GITHUB_TOKEN." \
+            --base main --head "$branch")"
+          gh pr merge "$pr_url" --squash --delete-branch
+
+      - name: Tag release commit
+        run: |
+          set -euo pipefail
+          tag="${{ steps.bump.outputs.tag }}"
+          git fetch origin main
+          git tag "$tag" origin/main
+          git push origin "$tag"
+
+  release:
+    name: Publish release
+    needs: bump-and-merge
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.bump-and-merge.outputs.tag }}

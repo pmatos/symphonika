@@ -19,7 +19,12 @@ import type {
   InitProjectOptions,
   InitProjectReport
 } from "./doctor.js";
-import { runClearStale, runDoctor, runInitProject } from "./doctor.js";
+import {
+  pluralize,
+  runClearStale,
+  runDoctor,
+  runInitProject
+} from "./doctor.js";
 import type { InitOptions, InitProvider, InitReport } from "./init.js";
 import { runInit } from "./init.js";
 import type { ProjectIssuePollReport } from "./issue-polling.js";
@@ -428,22 +433,36 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   program
     .command("clear-stale")
     .description(
-      "remove sym:stale, sym:claimed, and sym:running from a target issue after explicit confirmation"
+      "remove stale-claim labels from one or every stale issue after explicit confirmation"
     )
     .argument("<project>", "project name from symphonika.yml")
-    .argument("<issue-number>", "GitHub issue number", parseIssueNumber)
+    .argument("[issue-number]", "GitHub issue number", parseIssueNumber)
+    .option("--all", "target every issue carrying sym:stale")
     .option("--config <path>", "service config path")
     .option("--yes", "remove labels without an interactive prompt")
     .action(
       async (
         project: string,
-        issueNumber: number,
-        options: { config?: string; yes?: boolean }
+        issueNumber: number | undefined,
+        options: { all?: boolean; config?: string; yes?: boolean }
       ) => {
+        let target: { all: true } | { issueNumber: number };
+        if (options.all === true && issueNumber === undefined) {
+          target = { all: true };
+        } else if (options.all !== true && issueNumber !== undefined) {
+          target = { issueNumber };
+        } else {
+          program.error(
+            "clear-stale requires exactly one of <issue-number> or --all",
+            { exitCode: 1 }
+          );
+          return;
+        }
+
         const emittedWarnings = new Set<string>();
         const report = await clearStale({
           ...withConfigPath(options.config),
-          issueNumber,
+          ...target,
           onWarning: (warning) => {
             emittedWarnings.add(warning);
             writeErr(program, `warning: ${warning}\n`);
@@ -459,6 +478,17 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           writeErr(program, `warning: ${warning}\n`);
         }
 
+        for (const outcome of report.outcomes) {
+          const removed =
+            outcome.removedLabels.length === 0
+              ? ""
+              : ` (${outcome.removedLabels.join(", ")})`;
+          writeOut(
+            program,
+            `- #${outcome.issueNumber}: ${outcome.status}${removed}\n`
+          );
+        }
+
         if (!report.ok) {
           writeErr(program, "clear-stale failed:\n");
           for (const error of report.errors) {
@@ -470,11 +500,8 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
 
         writeOut(
           program,
-          `clear-stale ok: removed ${report.removedLabels.length} ${pluralize("label", report.removedLabels.length)} from ${report.repository}#${report.issueNumber}\n`
+          `clear-stale ok: processed ${report.outcomes.length} ${pluralize("issue", report.outcomes.length)} in ${report.repository}\n`
         );
-        for (const label of report.removedLabels) {
-          writeOut(program, `- ${label}\n`);
-        }
       }
     );
 
@@ -2706,10 +2733,6 @@ function parseProjectMode(value: string): "dispatch" | "routine_host" {
     return "routine_host";
   }
   throw new InvalidArgumentError("mode must be one of dispatch, routine-host");
-}
-
-function pluralize(word: string, count: number): string {
-  return count === 1 ? word : `${word}s`;
 }
 
 function printWarningsSection(program: Command, warnings: string[]): void {

@@ -315,10 +315,16 @@ describe("CLI", () => {
         return Promise.resolve({
           configPath: "/tmp/symphonika.yml",
           errors: [],
-          issueNumber: options.issueNumber,
           ok: true,
+          outcomes: [
+            {
+              errors: [],
+              issueNumber: 42,
+              removedLabels: ["sym:stale", "sym:claimed", "sym:running"],
+              status: "cleared"
+            }
+          ],
           project: options.project,
-          removedLabels: ["sym:stale", "sym:claimed", "sym:running"],
           repository: "pmatos/symphonika",
           warnings: [
             "clear-stale will remove sym:stale, sym:claimed, sym:running from pmatos/symphonika#42"
@@ -356,6 +362,106 @@ describe("CLI", () => {
     expect(output.stdout).toContain("sym:running");
   });
 
+  it("clear-stale --all forwards a batch target and prints each Issue outcome", async () => {
+    const calls: ClearStaleOptions[] = [];
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({
+      registerSignalHandlers: false,
+      runClearStale: (options) => {
+        calls.push(options);
+        return Promise.resolve({
+          configPath: "/tmp/symphonika.yml",
+          errors: [],
+          ok: true,
+          outcomes: [
+            {
+              errors: [],
+              issueNumber: 41,
+              removedLabels: ["sym:stale", "sym:claimed", "sym:running"],
+              status: "cleared"
+            },
+            {
+              errors: [],
+              issueNumber: 42,
+              removedLabels: [],
+              status: "already-removed"
+            }
+          ],
+          project: options.project,
+          repository: "pmatos/symphonika",
+          warnings: [
+            "clear-stale will remove sym:stale, sym:claimed, sym:running from pmatos/symphonika issues #41, #42"
+          ]
+        });
+      }
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "clear-stale",
+      "symphonika",
+      "--all",
+      "--yes"
+    ]);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      all: true,
+      project: "symphonika",
+      yes: true
+    });
+    expect(output.stdout).toContain("#41: cleared");
+    expect(output.stdout).toContain("#42: already-removed");
+  });
+
+  it.each([
+    ["both selectors", ["42", "--all"]],
+    ["neither selector", []]
+  ])("clear-stale rejects %s as a usage error", async (_name, selectors) => {
+    const runClearStale = vi.fn().mockResolvedValue({
+      configPath: "/tmp/symphonika.yml",
+      errors: [],
+      ok: true,
+      outcomes: [],
+      project: "symphonika",
+      repository: "pmatos/symphonika",
+      warnings: []
+    } satisfies ClearStaleReport);
+    const program = buildCli({ registerSignalHandlers: false, runClearStale });
+    program.exitOverride();
+    for (const command of program.commands) {
+      command.exitOverride();
+    }
+    program.configureOutput({
+      writeErr: () => {
+        /* swallow Commander's stderr noise */
+      },
+      writeOut: () => {
+        /* swallow Commander's stdout noise */
+      }
+    });
+
+    await expect(
+      program.parseAsync([
+        "node",
+        "symphonika",
+        "clear-stale",
+        "symphonika",
+        ...selectors
+      ])
+    ).rejects.toThrow(/exactly one of <issue-number> or --all/i);
+    expect(runClearStale).not.toHaveBeenCalled();
+  });
+
   it("clear-stale exits non-zero when the runner reports failure (no --yes)", async () => {
     const previousExitCode = process.exitCode;
     process.exitCode = 0;
@@ -366,10 +472,9 @@ describe("CLI", () => {
         Promise.resolve({
           configPath: "/tmp/symphonika.yml",
           errors: ["pass --yes to remove stale-claim labels non-interactively"],
-          issueNumber: 7,
           ok: false,
+          outcomes: [],
           project: "symphonika",
-          removedLabels: [],
           repository: "pmatos/symphonika",
           warnings: [
             "clear-stale would remove sym:stale, sym:claimed, sym:running from pmatos/symphonika#7"

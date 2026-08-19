@@ -1,17 +1,11 @@
 import type { RoutineFanoutStatus } from "../run-store.js";
 import { renderRoutineFanoutNotification } from "../routines/fanout-summary.js";
-import {
-  emailNotificationSourceEnabled,
-  type EmailDeliveryPolicy,
-  type EmailNotificationConfig
-} from "./config.js";
+import type { EmailDeliveryPolicy, EmailNotificationConfig } from "./config.js";
 import type { NotificationSink } from "./types.js";
-import { deliverNotificationBestEffort } from "./delivery.js";
-
-export type RoutineFanoutNotificationDeliveryOutcome =
-  | { state: "sent" }
-  | { state: "skipped"; reason: "disabled" | "policy" }
-  | { state: "failed"; error: string };
+import {
+  deliverSourceNotification,
+  type SourceNotificationDeliveryOutcome
+} from "./message.js";
 
 export async function deliverRoutineFanoutNotification(input: {
   config: EmailNotificationConfig;
@@ -19,19 +13,14 @@ export async function deliverRoutineFanoutNotification(input: {
   notifyEnabled: boolean;
   sink: NotificationSink;
   timeoutMs?: number;
-}): Promise<RoutineFanoutNotificationDeliveryOutcome> {
-  if (
-    !input.notifyEnabled ||
-    !emailNotificationSourceEnabled(input.config, "routine_fanouts")
-  ) {
-    return { reason: "disabled", state: "skipped" };
-  }
-  if (!shouldNotifyRoutineFanout(input.fanout, input.config.on)) {
-    return { reason: "policy", state: "skipped" };
-  }
-  return deliverNotificationBestEffort({
-    message: renderRoutineFanoutNotification(input.fanout),
+}): Promise<SourceNotificationDeliveryOutcome> {
+  return deliverSourceNotification({
+    config: input.config,
+    message: () => renderRoutineFanoutNotification(input.fanout),
+    notifyEnabled: input.notifyEnabled,
+    shouldNotify: shouldNotifyRoutineFanout(input.fanout, input.config.on),
     sink: input.sink,
+    source: "routine_fanouts",
     ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs })
   });
 }

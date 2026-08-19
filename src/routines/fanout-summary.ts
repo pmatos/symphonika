@@ -2,6 +2,7 @@ import type {
   RoutineFanoutStatus,
   RoutineFanoutTargetStatus
 } from "../run-store.js";
+import { escapeHtml, htmlShell } from "../notifications/message.js";
 
 export type RoutineFanoutNotification = {
   fanout: RoutineFanoutStatus;
@@ -24,8 +25,7 @@ export function renderRoutineFanoutNotification(
     "Projects:",
     ...targetLines
   ].join("\n");
-  const html = [
-    '<div style="font-family:system-ui,sans-serif;max-width:720px;line-height:1.5">',
+  const html = htmlShell([
     `<h1>${escapeHtml(fanout.routineName)}</h1>`,
     `<p><strong>Scheduled:</strong> ${escapeHtml(fanout.scheduledAt)}<br>`,
     `<strong>Fan-out:</strong> ${escapeHtml(fanout.id)}</p>`,
@@ -35,9 +35,8 @@ export function renderRoutineFanoutNotification(
       (target) =>
         `<li><strong>${escapeHtml(target.projectName)}:</strong> ${escapeHtml(targetSummary(target))}</li>`
     ),
-    "</ul>",
-    "</div>"
-  ].join("\n");
+    "</ul>"
+  ]);
   return {
     fanout,
     html,
@@ -64,13 +63,4 @@ function targetSummary(target: RoutineFanoutTargetStatus): string {
       ? ""
       : ` (${target.firing.terminalReason})`;
   return `${target.firing.state}${terminalReason}${pullRequests}`;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }

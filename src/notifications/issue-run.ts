@@ -8,6 +8,7 @@ import {
 } from "./config.js";
 import type { NotificationMessage, NotificationSink } from "./types.js";
 import { deliverNotificationBestEffort } from "./delivery.js";
+import { escapeHtml, htmlShell, symphonikaSubject } from "./message.js";
 
 const NON_FAILURE_TERMINAL_REASONS = new Set([
   "no_workspace_changes",
@@ -163,26 +164,15 @@ function renderIssueRunDigest(runs: readonly RunStatus[]): NotificationMessage {
     lines.push(`- ${omitted} additional Runs omitted`);
   }
   const text = [title, "", ...lines].join("\n");
-  const html = [
-    '<div style="font-family:system-ui,sans-serif;max-width:720px;line-height:1.5">',
+  const html = htmlShell([
     `<h1>${title}</h1>`,
     "<ul>",
     ...lines.map((line) => `<li>${escapeHtml(line.slice(2))}</li>`),
-    "</ul>",
-    "</div>"
-  ].join("\n");
+    "</ul>"
+  ]);
   return {
     html,
-    subject: `[Symphonika] ${title}`,
+    subject: symphonikaSubject(title),
     text
   };
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }

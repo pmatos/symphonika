@@ -3,17 +3,17 @@ import {
   formatRoutineOutcomeLine,
   type RoutineOutcome
 } from "../routines/outcome.js";
-import {
-  emailNotificationSourceEnabled,
-  type EmailDeliveryPolicy,
-  type EmailNotificationConfig
-} from "./config.js";
+import type { EmailDeliveryPolicy, EmailNotificationConfig } from "./config.js";
 import type { NotificationMessage } from "./types.js";
 import type { NotificationSink } from "./types.js";
+import { DEFAULT_DELIVERY_TIMEOUT_MS } from "./delivery.js";
 import {
-  DEFAULT_DELIVERY_TIMEOUT_MS,
-  deliverNotificationBestEffort
-} from "./delivery.js";
+  deliverSourceNotification,
+  escapeHtml,
+  htmlShell,
+  symphonikaSubject,
+  type SourceNotificationDeliveryOutcome
+} from "./message.js";
 
 export { DEFAULT_DELIVERY_TIMEOUT_MS };
 
@@ -32,30 +32,20 @@ export type RoutineFiringNotification = {
   title: string;
 };
 
-export type RoutineNotificationDeliveryOutcome =
-  | { state: "sent" }
-  | { state: "skipped"; reason: "disabled" | "policy" }
-  | { state: "failed"; error: string };
-
 export async function deliverRoutineFiringNotification(input: {
   config: EmailNotificationConfig;
   firing: RoutineFiringNotification;
   notifyEnabled: boolean;
   sink: NotificationSink;
   timeoutMs?: number;
-}): Promise<RoutineNotificationDeliveryOutcome> {
-  if (
-    !input.notifyEnabled ||
-    !emailNotificationSourceEnabled(input.config, "routine_firings")
-  ) {
-    return { reason: "disabled", state: "skipped" };
-  }
-  if (!shouldNotifyRoutineFiring(input.firing, input.config.on)) {
-    return { reason: "policy", state: "skipped" };
-  }
-  return deliverNotificationBestEffort({
-    message: renderRoutineFiringNotification(input.firing),
+}): Promise<SourceNotificationDeliveryOutcome> {
+  return deliverSourceNotification({
+    config: input.config,
+    message: () => renderRoutineFiringNotification(input.firing),
+    notifyEnabled: input.notifyEnabled,
+    shouldNotify: shouldNotifyRoutineFiring(input.firing, input.config.on),
     sink: input.sink,
+    source: "routine_firings",
     ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs })
   });
 }
@@ -97,8 +87,7 @@ export function renderRoutineFiringNotification(
     "Report output:",
     reportOutput
   ].join("\n");
-  const html = [
-    '<div style="font-family:system-ui,sans-serif;max-width:720px;line-height:1.5">',
+  const html = htmlShell([
     `<h1>${escapeHtml(firing.title)}</h1>`,
     `<p><strong>Outcome</strong><br>${escapeHtml(outcomeLine)}</p>`,
     "<dl>",
@@ -113,13 +102,12 @@ export function renderRoutineFiringNotification(
     detail("Pull requests", pullRequests),
     "</dl>",
     "<h2>Report output</h2>",
-    renderMinimalMarkdown(reportOutput),
-    "</div>"
-  ].join("\n");
+    renderMinimalMarkdown(reportOutput)
+  ]);
 
   return {
     html,
-    subject: `[Symphonika] ${firing.title} — ${firing.state}`,
+    subject: symphonikaSubject(`${firing.title} — ${firing.state}`),
     text
   };
 }
@@ -185,15 +173,6 @@ function renderInline(value: string): string {
   return escapeHtml(value)
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(?!\s)(.+?)\*/g, "<em>$1</em>");
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 function formatDuration(durationMs: number): string {

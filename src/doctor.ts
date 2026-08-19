@@ -161,6 +161,9 @@ export type GitHubApi = {
   createLabel: (
     input: GitHubRepositoryInput & { name: string }
   ) => Promise<void>;
+  listIssueNumbersByLabel?: (
+    input: GitHubRepositoryInput & { label: string }
+  ) => Promise<number[]>;
   listLabels: (input: GitHubRepositoryInput) => Promise<string[]>;
   removeIssueLabel?: (
     input: GitHubRepositoryInput & { issueNumber: number; name: string }
@@ -171,19 +174,24 @@ export type GitHubApi = {
 };
 
 export type ClearStaleOptions = DoctorOptions & {
-  issueNumber: number;
   onWarning?: (warning: string) => void;
   project: string;
   yes?: boolean;
+} & ({ all: true; issueNumber?: never } | { all?: false; issueNumber: number });
+
+export type ClearStaleIssueOutcome = {
+  errors: string[];
+  issueNumber: number;
+  removedLabels: string[];
+  status: "already-removed" | "cleared" | "error";
 };
 
 export type ClearStaleReport = {
   configPath: string;
   errors: string[];
-  issueNumber: number;
   ok: boolean;
+  outcomes: ClearStaleIssueOutcome[];
   project: string;
-  removedLabels: string[];
   repository: string;
   warnings: string[];
 };
@@ -1824,14 +1832,13 @@ export async function runClearStale(
   const configPath = resolvedConfig.configPath;
   const errors: string[] = [];
   const warnings: string[] = [];
-  const removedLabels: string[] = [];
+  const outcomes: ClearStaleIssueOutcome[] = [];
   const result = (repository: string, ok = false): ClearStaleReport => ({
     configPath,
     errors,
-    issueNumber: options.issueNumber,
     ok,
+    outcomes,
     project: options.project,
-    removedLabels,
     repository,
     warnings
   });
@@ -1889,13 +1896,50 @@ export async function runClearStale(
     return result(repositoryName);
   }
 
-  const warning = `clear-stale ${options.yes === true ? "will" : "would"} remove ${STALE_CLEAR_LABELS.join(", ")} from ${repositoryName}#${options.issueNumber}`;
+  let issueNumbers: number[];
+  if (options.all === true) {
+    if (githubApi.listIssueNumbersByLabel === undefined) {
+      errors.push(
+        `projects.${project.name}.tracker.repository ${repositoryName} GitHub adapter does not support listIssueNumbersByLabel`
+      );
+      return result(repositoryName);
+    }
+    try {
+      issueNumbers = [
+        ...new Set(
+          await githubApi.listIssueNumbersByLabel({
+            ...repository,
+            label: "sym:stale"
+          })
+        )
+      ].sort((left, right) => left - right);
+    } catch (error) {
+      errors.push(
+        `projects.${project.name}.tracker.repository ${repositoryName} could not list issues carrying sym:stale: ${errorMessage(error)}`
+      );
+      return result(repositoryName);
+    }
+  } else {
+    issueNumbers = [options.issueNumber];
+  }
+
+  const targets =
+    options.all === true
+      ? issueNumbers.length === 0
+        ? " issues (none)"
+        : ` issues ${issueNumbers.map((issueNumber) => `#${issueNumber}`).join(", ")}`
+      : `#${issueNumbers[0]}`;
+  const warning = `clear-stale ${options.yes === true ? "will" : "would"} remove ${STALE_CLEAR_LABELS.join(", ")} from ${repositoryName}${targets}`;
   warnings.push(warning);
   options.onWarning?.(warning);
 
   if (options.yes !== true) {
     errors.push("pass --yes to remove stale-claim labels non-interactively");
     return result(repositoryName);
+  }
+
+  if (issueNumbers.length === 0) {
+    return result(repositoryName, true);
   }
 
   if (githubApi.removeIssueLabel === undefined) {
@@ -1906,24 +1950,40 @@ export async function runClearStale(
   }
 
   let allOk = true;
-  for (const label of STALE_CLEAR_LABELS) {
-    try {
-      await githubApi.removeIssueLabel({
-        ...repository,
-        issueNumber: options.issueNumber,
-        name: label
-      });
-      removedLabels.push(label);
-    } catch (error) {
-      if (isOctokitNotFoundError(error)) {
+  for (const issueNumber of issueNumbers) {
+    const removedLabels: string[] = [];
+    const outcomeErrors: string[] = [];
+
+    for (const label of STALE_CLEAR_LABELS) {
+      try {
+        await githubApi.removeIssueLabel({
+          ...repository,
+          issueNumber,
+          name: label
+        });
         removedLabels.push(label);
-        continue;
+      } catch (error) {
+        if (isOctokitNotFoundError(error)) {
+          continue;
+        }
+        allOk = false;
+        const message = `projects.${project.name}.tracker.repository ${repositoryName} could not remove label ${label} from issue ${issueNumber}: ${errorMessage(error)}`;
+        errors.push(message);
+        outcomeErrors.push(message);
       }
-      allOk = false;
-      errors.push(
-        `projects.${project.name}.tracker.repository ${repositoryName} could not remove label ${label} from issue ${options.issueNumber}: ${errorMessage(error)}`
-      );
     }
+
+    outcomes.push({
+      errors: outcomeErrors,
+      issueNumber,
+      removedLabels,
+      status:
+        outcomeErrors.length > 0
+          ? "error"
+          : removedLabels.length === 0
+            ? "already-removed"
+            : "cleared"
+    });
   }
 
   return result(repositoryName, allOk);
@@ -1969,6 +2029,23 @@ class OctokitGitHubApi implements GitHubApi {
     );
 
     return labels.map((label) => label.name);
+  }
+
+  async listIssueNumbersByLabel(
+    input: GitHubRepositoryInput & { label: string }
+  ): Promise<number[]> {
+    const octokit = this.octokit(input.token);
+    const issues = await octokit.paginate(octokit.rest.issues.listForRepo, {
+      labels: input.label,
+      owner: input.owner,
+      per_page: 100,
+      repo: input.repo,
+      state: "all"
+    });
+
+    return issues
+      .filter((issue) => issue.pull_request === undefined)
+      .map((issue) => issue.number);
   }
 
   async createLabel(

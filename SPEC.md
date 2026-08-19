@@ -1695,7 +1695,7 @@ Bootstrap CLI commands:
 - `symphonika show-run <run-id> [--config <path>]`
 - `symphonika show-firing <firing-id> [--config <path>] [--events <n>]`
 - `symphonika cancel <run-id> [--config <path>]`
-- `symphonika clear-stale <project> <issue-number> [--config <path>] --yes`
+- `symphonika clear-stale <project> (<issue-number> | --all) [--config <path>] --yes`
 
 When neither a project-local config nor a user config exists, `doctor` reports the missing user
 config path and points the operator to `symphonika init`.
@@ -1772,7 +1772,11 @@ branch identity, deterministic prompt and provider-log paths, terminal/cancellat
 discovered pull requests, and recent Normalized Event Log entries. `--events` defaults to 25.
 Deterministic artifact paths are rendered even when retention has removed the files.
 
-`clear-stale` removes `sym:stale`, `sym:claimed`, and `sym:running` only after explicit confirmation.
+`clear-stale` requires exactly one of an Issue number or `--all` and removes `sym:stale`,
+`sym:claimed`, and `sym:running` only after explicit confirmation. `--all` selects every Issue in
+the Project's tracker repository that GitHub currently reports with `sym:stale`, lists the selected
+Issue numbers before requiring `--yes`, and processes them best-effort. The command reports each
+Issue as cleared, already removed, or errored and continues after an individual Issue failure.
 
 `test-email` renders a representative fake Routine Firing and sends it through the configured
 renderer, retry policy, and SMTP sink. It forces delivery regardless of `email.on` and

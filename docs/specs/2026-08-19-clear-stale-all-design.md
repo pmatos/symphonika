@@ -64,8 +64,9 @@ For each selected Issue, the runner attempts all three labels in ADR-0038 order:
 - `cleared`: at least one label removal succeeded and no removal returned a non-404 error.
 - `already-removed`: all three removals returned GitHub 404, so no target label remained by the
   time the command acted.
-- `error`: at least one removal returned a non-404 error. Successful and 404 removals for that Issue
-  are retained as evidence, and processing continues with the next Issue.
+- `error`: at least one removal returned a non-404 error. Successful removals and error details for
+  that Issue are retained as evidence, 404 responses contribute to absence classification, and
+  processing continues with the next Issue.
 
 The overall report is successful only when selection and validation succeed and no Issue outcome is
 `error`. The CLI prints every Issue outcome even when the overall exit status is non-zero, so a

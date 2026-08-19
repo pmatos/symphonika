@@ -510,6 +510,134 @@ describe("GitHub Project initialization", () => {
 });
 
 describe("runClearStale", () => {
+  it("lists every stale Issue before requiring --yes for --all", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listIssueNumbersByLabel: vi.fn().mockResolvedValue([42, 7, 42]),
+      listLabels: vi.fn(),
+      removeIssueLabel: vi.fn(),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runClearStale({
+      all: true,
+      configPath: "symphonika.yml",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      project: "symphonika"
+    });
+
+    expect(githubApi.listIssueNumbersByLabel).toHaveBeenCalledWith({
+      label: "sym:stale",
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "secret-token"
+    });
+    expect(report.warnings).toContain(
+      "clear-stale would remove sym:stale, sym:claimed, sym:running from pmatos/symphonika issues #7, #42"
+    );
+    expect(report.errors).toContain(
+      "pass --yes to remove stale-claim labels non-interactively"
+    );
+    expect(report.outcomes).toEqual([]);
+    expect(githubApi.removeIssueLabel).not.toHaveBeenCalled();
+  });
+
+  it("reports each --all outcome and continues after an Issue error", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const notFound = Object.assign(new Error("Not Found"), { status: 404 });
+    const removeIssueLabel = vi.fn(
+      (input: { issueNumber: number; name: string }) => {
+        if (input.issueNumber === 12) {
+          return Promise.reject(notFound);
+        }
+        if (input.issueNumber === 13 && input.name === "sym:stale") {
+          return Promise.reject(new Error("write failed"));
+        }
+        if (input.issueNumber === 13 && input.name === "sym:running") {
+          return Promise.reject(notFound);
+        }
+        return Promise.resolve();
+      }
+    );
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listIssueNumbersByLabel: vi.fn().mockResolvedValue([11, 12, 13]),
+      listLabels: vi.fn(),
+      removeIssueLabel,
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runClearStale({
+      all: true,
+      configPath: "symphonika.yml",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      project: "symphonika",
+      yes: true
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.outcomes).toEqual([
+      {
+        errors: [],
+        issueNumber: 11,
+        removedLabels: ["sym:stale", "sym:claimed", "sym:running"],
+        status: "cleared"
+      },
+      {
+        errors: [],
+        issueNumber: 12,
+        removedLabels: [],
+        status: "already-removed"
+      },
+      {
+        errors: [
+          "projects.symphonika.tracker.repository pmatos/symphonika could not remove label sym:stale from issue 13: write failed"
+        ],
+        issueNumber: 13,
+        removedLabels: ["sym:claimed"],
+        status: "error"
+      }
+    ]);
+    expect(removeIssueLabel).toHaveBeenCalledTimes(9);
+  });
+
+  it("succeeds without writes when --all finds no stale Issues", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listIssueNumbersByLabel: vi.fn().mockResolvedValue([]),
+      listLabels: vi.fn(),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runClearStale({
+      all: true,
+      configPath: "symphonika.yml",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      project: "symphonika",
+      yes: true
+    });
+
+    expect(report).toMatchObject({
+      errors: [],
+      ok: true,
+      outcomes: [],
+      warnings: [
+        "clear-stale will remove sym:stale, sym:claimed, sym:running from pmatos/symphonika issues (none)"
+      ]
+    });
+  });
+
   it("refuses to remove labels without --yes", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);
@@ -536,7 +664,7 @@ describe("runClearStale", () => {
     expect(report.errors).toContain(
       "pass --yes to remove stale-claim labels non-interactively"
     );
-    expect(report.removedLabels).toEqual([]);
+    expect(report.outcomes).toEqual([]);
     expect(githubApi.removeIssueLabel).not.toHaveBeenCalled();
   });
 
@@ -561,10 +689,13 @@ describe("runClearStale", () => {
     });
 
     expect(report.ok).toBe(true);
-    expect(report.removedLabels).toEqual([
-      "sym:stale",
-      "sym:claimed",
-      "sym:running"
+    expect(report.outcomes).toEqual([
+      {
+        errors: [],
+        issueNumber: 42,
+        removedLabels: ["sym:stale", "sym:claimed", "sym:running"],
+        status: "cleared"
+      }
     ]);
     expect(report.repository).toBe("pmatos/symphonika");
     expect(report.warnings).toContain(
@@ -620,10 +751,13 @@ describe("runClearStale", () => {
     });
 
     expect(report.ok).toBe(true);
-    expect(report.removedLabels).toEqual([
-      "sym:stale",
-      "sym:claimed",
-      "sym:running"
+    expect(report.outcomes).toEqual([
+      {
+        errors: [],
+        issueNumber: 99,
+        removedLabels: ["sym:claimed", "sym:running"],
+        status: "cleared"
+      }
     ]);
   });
 

@@ -14,7 +14,7 @@ export type RecentRoutineEventTail = {
 };
 
 const EVENT_TAIL_CHUNK_BYTES = 64 * 1_024;
-export const EVENT_INDEX_RECORD_BYTES = 16;
+const EVENT_INDEX_RECORD_BYTES = 16;
 
 type RoutineEventIndexRecord = {
   offset: number;

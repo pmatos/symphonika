@@ -2060,6 +2060,11 @@ export function registerPages(options: RegisterPagesOptions): void {
       projectParam,
       requestedIncludeInactive
     );
+    // resolveNamedRoutineGroup was already queried with includeInactive:
+    // true below, so resolved.group already carries every inactive
+    // sibling target -- unlike the fallthrough case, there's nothing left
+    // for includeInactiveRoutineTargets to add.
+    let resolvedWithInactive = requestedIncludeInactive;
     if (!requestedIncludeInactive && resolved.kind === "not_found") {
       resolved = resolveNamedRoutineGroup(
         options.runStore,
@@ -2067,6 +2072,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         projectParam,
         true
       );
+      resolvedWithInactive = true;
     }
     if (resolved.kind !== "ok") {
       return context.html(
@@ -2075,12 +2081,11 @@ export function registerPages(options: RegisterPagesOptions): void {
       );
     }
     const includeInactive =
-      requestedIncludeInactive ||
+      resolvedWithInactive ||
       routineSelectionRequiresInactive(resolved.group, projectParam);
-    const disclosureGroup = includeInactiveRoutineTargets(
-      options.runStore,
-      resolved.group
-    );
+    const disclosureGroup = resolvedWithInactive
+      ? resolved.group
+      : includeInactiveRoutineTargets(options.runStore, resolved.group);
     const declaration = resolveRoutineDeclaration(
       options.runStore,
       disclosureGroup
@@ -2128,13 +2133,13 @@ export function registerPages(options: RegisterPagesOptions): void {
         body,
         "expected_source_path"
       );
-      const requestedIncludeInactive =
+      const includeInactive =
         readOptionalFormField(body, "include_inactive") === "true";
       const resolved = resolveNamedRoutineGroup(
         options.runStore,
         name,
         projectParam,
-        requestedIncludeInactive
+        includeInactive
       );
       if (resolved.kind !== "ok") {
         return context.html(
@@ -2142,29 +2147,18 @@ export function registerPages(options: RegisterPagesOptions): void {
           resolved.kind === "ambiguous" ? 200 : 404
         );
       }
-      const includeInactive =
-        requestedIncludeInactive ||
-        routineSelectionRequiresInactive(resolved.group, projectParam);
       const declaration = resolveRoutineDeclaration(
         options.runStore,
         resolved.group
       );
-      if (
-        expectedSourcePath !== undefined &&
-        declaration.sourcePath !== expectedSourcePath
-      ) {
-        return context.html(
-          layout(
-            "Save refused: Routine declaration changed",
-            renderRoutineDeclarationChangedNotice({
-              actualSourcePath: declaration.sourcePath,
-              editAction: `/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`,
-              expectedSourcePath,
-              name
-            })
-          ),
-          409
-        );
+      const staleDeclarationResponse = checkStaleRoutineDeclaration(context, {
+        declaration,
+        editAction: `/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`,
+        expectedSourcePath,
+        name
+      });
+      if (staleDeclarationResponse !== undefined) {
+        return staleDeclarationResponse;
       }
 
       const content = readRequiredFormField(body, "content");
@@ -2215,13 +2209,13 @@ export function registerPages(options: RegisterPagesOptions): void {
         body,
         "expected_source_path"
       );
-      const requestedIncludeInactive =
+      const includeInactive =
         readOptionalFormField(body, "include_inactive") === "true";
       const resolved = resolveNamedRoutineGroup(
         options.runStore,
         name,
         projectParam,
-        requestedIncludeInactive
+        includeInactive
       );
       if (resolved.kind !== "ok") {
         return context.html(
@@ -2229,29 +2223,18 @@ export function registerPages(options: RegisterPagesOptions): void {
           resolved.kind === "ambiguous" ? 200 : 404
         );
       }
-      const includeInactive =
-        requestedIncludeInactive ||
-        routineSelectionRequiresInactive(resolved.group, projectParam);
       const declaration = resolveRoutineDeclaration(
         options.runStore,
         resolved.group
       );
-      if (
-        expectedSourcePath !== undefined &&
-        declaration.sourcePath !== expectedSourcePath
-      ) {
-        return context.html(
-          layout(
-            "Save refused: Routine declaration changed",
-            renderRoutineDeclarationChangedNotice({
-              actualSourcePath: declaration.sourcePath,
-              editAction: `/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`,
-              expectedSourcePath,
-              name
-            })
-          ),
-          409
-        );
+      const staleDeclarationResponse = checkStaleRoutineDeclaration(context, {
+        declaration,
+        editAction: `/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`,
+        expectedSourcePath,
+        name
+      });
+      if (staleDeclarationResponse !== undefined) {
+        return staleDeclarationResponse;
       }
 
       const content = readRequiredFormField(body, "content");
@@ -2395,22 +2378,14 @@ export function registerPages(options: RegisterPagesOptions): void {
       options.runStore,
       resolved.group
     );
-    if (
-      expectedSourcePath !== undefined &&
-      declaration.sourcePath !== expectedSourcePath
-    ) {
-      return context.html(
-        layout(
-          "Save refused: Routine declaration changed",
-          renderRoutineDeclarationChangedNotice({
-            actualSourcePath: declaration.sourcePath,
-            editAction: `/routines/${encodeURIComponent(name)}${routineQuerySuffix(projectParam, includeInactive)}`,
-            expectedSourcePath,
-            name
-          })
-        ),
-        409
-      );
+    const staleDeclarationResponse = checkStaleRoutineDeclaration(context, {
+      declaration,
+      editAction: `/routines/${encodeURIComponent(name)}${routineQuerySuffix(projectParam, includeInactive)}`,
+      expectedSourcePath,
+      name
+    });
+    if (staleDeclarationResponse !== undefined) {
+      return staleDeclarationResponse;
     }
     const onDisk = await readFile(declaration.sourcePath, "utf8").catch(
       () => null
@@ -5389,7 +5364,7 @@ function renderRoutinesSection(
   }
   const rows = groups
     .map((group) => {
-      const href = `/routines/${encodeURIComponent(group.name)}${includeInactive ? "?include_inactive=true" : ""}`;
+      const href = `/routines/${encodeURIComponent(group.name)}${routineQuerySuffix(undefined, includeInactive)}`;
       const routineLink = `<a href="${href}">${escapeHtml(group.name)}</a>`;
       const targetsLink = `<a href="${href}">${group.targets.length}</a>`;
       return `<tr><td>${routineLink}</td><td>${escapeHtml(group.kind)}</td><td class="c-detail"><code>${escapeHtml(formatRoutineSchedule(group))}</code></td><td>${targetsLink}</td><td>${renderRoutineGroupStatus(group)}</td></tr>`;
@@ -5421,13 +5396,11 @@ function renderRoutineDisambiguation(
         representative === undefined ? "-" : representative.sourcePath;
       const targetLinks = group.targets
         .map((target) => {
-          const params = new URLSearchParams({
-            project: target.projectName
-          });
-          if (includeInactive) {
-            params.set("include_inactive", "true");
-          }
-          return `<a href="/routines/${encodeURIComponent(name)}?${escapeHtml(params.toString())}">${escapeHtml(target.projectName)}</a>`;
+          const suffix = routineQuerySuffix(
+            target.projectName,
+            includeInactive
+          );
+          return `<a href="${escapeHtml(`/routines/${encodeURIComponent(name)}${suffix}`)}">${escapeHtml(target.projectName)}</a>`;
         })
         .join(", ");
       return `<li><code>${escapeHtml(sourcePath)}</code> — targets: ${targetLinks}</li>`;
@@ -5635,6 +5608,40 @@ function readRequiredFormField(
     throw new Error(`missing required form field "${key}"`);
   }
   return value;
+}
+
+// Shared by the routine editor's preview/confirm routes and the
+// disable/enable toggle preview: refuses a save when the routine name now
+// resolves to a different declaration file than the one the form was
+// opened for (e.g. the on-disk declaration was replaced between GET and
+// POST), rather than silently writing to whatever it resolves to now.
+function checkStaleRoutineDeclaration(
+  context: Context,
+  input: {
+    declaration: RoutineDeclarationView;
+    editAction: string;
+    expectedSourcePath: string | undefined;
+    name: string;
+  }
+): Response | undefined {
+  if (
+    input.expectedSourcePath === undefined ||
+    input.declaration.sourcePath === input.expectedSourcePath
+  ) {
+    return undefined;
+  }
+  return context.html(
+    layout(
+      "Save refused: Routine declaration changed",
+      renderRoutineDeclarationChangedNotice({
+        actualSourcePath: input.declaration.sourcePath,
+        editAction: input.editAction,
+        expectedSourcePath: input.expectedSourcePath,
+        name: input.name
+      })
+    ),
+    409
+  );
 }
 
 function routineQuerySuffix(
@@ -5979,11 +5986,8 @@ function renderRoutineFireControls(
         targets.length > 1
           ? `Fire now — ${escapeHtml(target.projectName)}`
           : "Fire now";
-      const params = new URLSearchParams({ project: target.projectName });
-      if (includeInactive) {
-        params.set("include_inactive", "true");
-      }
-      return `<form method="post" action="/api/routines/${encodeURIComponent(name)}/fire?${escapeHtml(params.toString())}">${csrfField}${projectField}<button class="btn" type="submit">${label}</button></form>`;
+      const suffix = routineQuerySuffix(target.projectName, includeInactive);
+      return `<form method="post" action="${escapeHtml(`/api/routines/${encodeURIComponent(name)}/fire${suffix}`)}">${csrfField}${projectField}<button class="btn" type="submit">${label}</button></form>`;
     })
     .join("");
   return `<section>${buttons}<p class="note">Fires target the routine's last reloaded declaration, not any pending edit (#364).</p></section>`;

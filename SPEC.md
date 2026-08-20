@@ -1985,18 +1985,18 @@ the same base the real reload uses.
 Routine's declaration file, no generated form — the file is Markdown-with-YAML-front-matter, and a
 form round-trip would reformat it. Saving is two steps, never one: `POST .../edit/preview`
 re-validates the submitted content with `parseRoutineDeclaration` and, when valid, renders a diff
-against the current on-disk content (a small in-process LCS line diff — the two texts are always
-in memory already, never large enough to warrant a dependency); nothing is written until the
-operator submits the resulting confirm form to `POST .../edit/confirm`, which resolves the write
-target through `resolveWritePath` and calls `runSavePipeline` with the daemon's real reload as the
-`reload` callback. A stale write (content changed on disk since the editor opened) is refused with
-the current content shown, never silently overwritten. A YAML syntax error surfaces the parser's
-own line/column (`locatedYamlErrorMessage`, `src/yaml-errors.ts`); a semantic validation error (a
-missing or malformed field) has no parser position to report and is shown as plain text. The
-schedule and next-fire-time effect of a saved edit lands on the next dispatch tick, same as any
-other config reload — the page shows whatever the store's current row holds on next visit, not a
-synthetic post-save preview. The editor states which Routine Targets a save affects and their
-current next-fire time before the operator commits.
+against the current on-disk content (a small in-process line diff: exact LCS is limited to
+1,000,000 table cells, with an operator-labelled, linear-space prefix/suffix fallback for larger
+inputs); nothing is written until the operator submits the resulting confirm form to `POST
+.../edit/confirm`, which resolves the write target through `resolveWritePath` and calls
+`runSavePipeline` with the daemon's real reload as the `reload` callback. A stale write (content
+changed on disk since the editor opened) is refused with the current content shown, never silently
+overwritten. A YAML syntax error surfaces the parser's own line/column (`locatedYamlErrorMessage`,
+`src/yaml-errors.ts`); a semantic validation error (a missing or malformed field) has no parser
+position to report and is shown as plain text. The schedule and next-fire-time effect of a saved
+edit lands on the next dispatch tick, same as any other config reload — the page shows whatever
+the store's current row holds on next visit, not a synthetic post-save preview. The editor states
+which Routine Targets a save affects and their current next-fire time before the operator commits.
 
 `GET /projects/:name/workflow/edit` follows the identical two-step shape for a Dispatch Project's
 workflow contract (a Routine Host has no workflow and gets no edit link). Validation

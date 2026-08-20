@@ -414,10 +414,17 @@ async function gitInProcessGroup(
   const stderr = new BoundedGitOutput();
   let settled = false;
   let groupShutdown: Promise<void> | undefined;
+  let rejectGroupShutdownFailure: ((reason?: unknown) => void) | undefined;
+  const groupShutdownFailure = new Promise<never>((_resolve, reject) => {
+    rejectGroupShutdownFailure = reject;
+  });
   let outputError: Error | undefined;
   const stopGroup = (): void => {
-    if (!settled) {
-      groupShutdown ??= terminateGitProcessGroup(child.pid);
+    if (!settled && groupShutdown === undefined) {
+      groupShutdown = terminateGitProcessGroup(child.pid);
+      void groupShutdown.catch((error: unknown) => {
+        rejectGroupShutdownFailure?.(error);
+      });
     }
   };
   const captureOutput = (
@@ -450,24 +457,27 @@ async function gitInProcessGroup(
 
   let processError: unknown;
   try {
-    await new Promise<void>((resolve, reject) => {
-      child.once("error", reject);
-      child.once("close", (code, exitSignal) => {
-        settled = true;
-        if (code === 0) {
-          resolve();
-          return;
-        }
-        reject(
-          Object.assign(
-            new Error(
-              `Command failed: git ${args.join(" ")}\n${stderr.toString()}`
-            ),
-            { code, killed: child.killed, signal: exitSignal }
-          )
-        );
-      });
-    });
+    await Promise.race([
+      new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code, exitSignal) => {
+          settled = true;
+          if (code === 0) {
+            resolve();
+            return;
+          }
+          reject(
+            Object.assign(
+              new Error(
+                `Command failed: git ${args.join(" ")}\n${stderr.toString()}`
+              ),
+              { code, killed: child.killed, signal: exitSignal }
+            )
+          );
+        });
+      }),
+      groupShutdownFailure
+    ]);
   } catch (error) {
     processError = error;
   } finally {

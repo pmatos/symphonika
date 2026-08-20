@@ -502,6 +502,96 @@ exec "${realGitOutput.trim()}" "$@"
     }
   );
 
+  it("surfaces output-overflow group shutdown failures before child close", async () => {
+    const root = await makeTempRoot();
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const wrapperRoot = path.join(root, "git-wrapper");
+    const wrapperPath = path.join(wrapperRoot, "git");
+    const startedPath = path.join(root, "overflow-started");
+    const releasePath = path.join(root, "release-overflow");
+    const helperPidPath = path.join(root, "overflow-pid");
+    const noisyOutputPath = path.join(root, "stdout-noise");
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    await mkdir(wrapperRoot, { recursive: true });
+    await writeFile(noisyOutputPath, Buffer.alloc(1024 * 1024 + 1, "x"));
+    await writeFile(
+      wrapperPath,
+      `#!/bin/sh
+if [ "$1" = "clone" ]; then
+  echo $$ > "${helperPidPath}"
+  touch "${startedPath}"
+  trap '' TERM
+  while [ ! -f "${releasePath}" ]; do
+    sleep 0.1
+  done
+  cat "${noisyOutputPath}"
+  while true; do
+    sleep 1
+  done
+fi
+exec "${realGitOutput.trim()}" "$@"
+`
+    );
+    await chmod(wrapperPath, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+    const controller = new AbortController();
+    const originalKill = process.kill.bind(process);
+
+    try {
+      const preparation = rejectionOf(
+        prepareRoutineWorkspace({
+          configDir: root,
+          firingId: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+          kind: "git",
+          project: {
+            name: "alpha",
+            workspace: {
+              git: {
+                base_branch: "main",
+                remote: path.join(root, "remote")
+              },
+              root: workspaceRoot
+            }
+          },
+          routineName: "dependency-update",
+          signal: controller.signal
+        })
+      );
+      await waitForPath(startedPath);
+      const helperPid = await readPid(helperPidPath);
+      process.kill = (pid: number, signal?: NodeJS.Signals | number) => {
+        if (pid === -helperPid && signal === "SIGTERM") {
+          throw Object.assign(new Error("group signaling denied"), {
+            code: "EPERM"
+          });
+        }
+        return signal === undefined
+          ? originalKill(pid)
+          : originalKill(pid, signal);
+      };
+      await writeFile(releasePath, "released\n");
+
+      const error = await settleWithin(preparation, 1_000);
+      expect(error).toBeInstanceOf(Error);
+      if (!(error instanceof Error)) {
+        throw new Error("expected group shutdown to reject with an Error");
+      }
+      expect(error.name).toBe("WorkspacePreparationCleanupError");
+      expect(error.message).toContain(
+        "failed to stop aborted Git process group"
+      );
+    } finally {
+      process.kill = originalKill;
+      await killRecordedProcessGroup(helperPidPath);
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
+  });
+
   it("preserves the process umask on an atomically published cache", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

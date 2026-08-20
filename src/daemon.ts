@@ -694,8 +694,9 @@ export async function startDaemon(
       );
       // Name-keyed runtime lookup lets the last declaration win. Persisted
       // project state and issue snapshots use that same name key, so only
-      // that declaration may replace them; a shadowed declaration can still
-      // contribute diagnostics to the in-memory poll status.
+      // that declaration may replace them or expose dispatch candidates; a
+      // shadowed declaration can still contribute diagnostics to the
+      // in-memory poll status.
       const selectedIssueProjectKeysByName = new Map(
         snapshot.polling.projects.map((project) => [
           project.name,
@@ -713,7 +714,8 @@ export async function startDaemon(
           issuePollStatus,
           nextStatus,
           polledIssueProjectKeys,
-          configuredIssueProjectKeys
+          configuredIssueProjectKeys,
+          selectedIssueProjectKeysByName
         )
       );
       // Persisted with the polled subset only (not the merged status).

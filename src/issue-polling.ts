@@ -957,12 +957,15 @@ export function replaceIssuePollStatus(
 // the full enabled configured set, not just the pollable/backed-off ones -- a
 // project a config reload disabled, removed, or renamed is absent from both
 // `polledProjectKeys` and `configuredProjectKeys`, so it's dropped here too
-// instead of being carried over indefinitely.
+// instead of being carried over indefinitely. Candidate issues are narrower:
+// only the last declaration selected for a Project name may reach dispatch,
+// while repository-specific reports and filtered diagnostics remain visible.
 export function mergeIssuePollStatus(
   prior: IssuePollStatus,
   fresh: IssuePollStatus,
   polledProjectKeys: ReadonlySet<string>,
-  configuredProjectKeys: ReadonlySet<string>
+  configuredProjectKeys: ReadonlySet<string>,
+  selectedProjectKeysByName: ReadonlyMap<string, string>
 ): IssuePollStatus {
   const carryOver = (
     name: string,
@@ -983,6 +986,9 @@ export function mergeIssuePollStatus(
   const carriedOverErrors = carriedOverProjects
     .map((project) => project.error)
     .filter((error): error is string => error !== undefined);
+  const selectedCandidate = (candidate: ProjectIssueSnapshot): boolean =>
+    selectedProjectKeysByName.get(candidate.project) ===
+    projectPollIdentityKey(candidate.project, candidate.repository);
 
   return {
     candidateIssues: [
@@ -990,7 +996,7 @@ export function mergeIssuePollStatus(
         carryOver(candidate.project, candidate.repository)
       ),
       ...fresh.candidateIssues
-    ],
+    ].filter(selectedCandidate),
     errors: [...carriedOverErrors, ...fresh.errors],
     filteredIssues: [
       ...prior.filteredIssues.filter((filtered) =>

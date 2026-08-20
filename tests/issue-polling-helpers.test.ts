@@ -1098,6 +1098,76 @@ describe("rateLimitedTokens", () => {
 });
 
 describe("mergeIssuePollStatus", () => {
+  it("exposes candidates only from the selected duplicate-name declaration", () => {
+    const candidateIssue = (number: number, repo: string) => ({
+      issue: {
+        body: "",
+        created_at: "",
+        id: number,
+        labels: [],
+        number,
+        priority: 0,
+        state: "open" as const,
+        title: `${repo} issue`,
+        updated_at: "",
+        url: ""
+      },
+      project: "shared",
+      repository: { owner: "pmatos", repo }
+    });
+    const prior = {
+      ...emptyIssuePollStatus(),
+      candidateIssues: [candidateIssue(1, "alpha")],
+      projects: [
+        {
+          fetchedIssues: 1,
+          name: "shared",
+          ok: true,
+          repository: { owner: "pmatos", repo: "alpha" }
+        }
+      ]
+    };
+    const fresh = {
+      ...emptyIssuePollStatus(),
+      candidateIssues: [candidateIssue(2, "beta")],
+      projects: [
+        {
+          fetchedIssues: 1,
+          name: "shared",
+          ok: true,
+          repository: { owner: "pmatos", repo: "beta" }
+        }
+      ]
+    };
+    const selectedProjectKeysByName = new Map([
+      [
+        "shared",
+        projectPollIdentityKey("shared", { owner: "pmatos", repo: "beta" })
+      ]
+    ]);
+
+    const merged = mergeIssuePollStatus(
+      prior,
+      fresh,
+      new Set([
+        projectPollIdentityKey("shared", { owner: "pmatos", repo: "beta" })
+      ]),
+      new Set([
+        projectPollIdentityKey("shared", { owner: "pmatos", repo: "alpha" }),
+        projectPollIdentityKey("shared", { owner: "pmatos", repo: "beta" })
+      ]),
+      selectedProjectKeysByName
+    );
+
+    expect(
+      merged.candidateIssues.map((candidate) => candidate.repository.repo)
+    ).toEqual(["beta"]);
+    expect(merged.projects.map((project) => project.repository.repo)).toEqual([
+      "alpha",
+      "beta"
+    ]);
+  });
+
   it("keeps a skipped project's prior entries and replaces only the polled project's", () => {
     const prior = {
       ...emptyIssuePollStatus(),
@@ -1167,6 +1237,16 @@ describe("mergeIssuePollStatus", () => {
       new Set([
         projectPollIdentityKey("alpha", { owner: "pmatos", repo: "alpha" }),
         projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ]),
+      new Map([
+        [
+          "alpha",
+          projectPollIdentityKey("alpha", { owner: "pmatos", repo: "alpha" })
+        ],
+        [
+          "beta",
+          projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+        ]
       ])
     );
 
@@ -1195,7 +1275,8 @@ describe("mergeIssuePollStatus", () => {
       prior,
       fresh,
       new Set([projectPollIdentityKey("alpha", repository)]),
-      new Set([projectPollIdentityKey("alpha", repository)])
+      new Set([projectPollIdentityKey("alpha", repository)]),
+      new Map([["alpha", projectPollIdentityKey("alpha", repository)]])
     );
 
     expect(merged.projects).toEqual([
@@ -1255,6 +1336,12 @@ describe("mergeIssuePollStatus", () => {
       ]),
       new Set([
         projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ]),
+      new Map([
+        [
+          "beta",
+          projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+        ]
       ])
     );
 
@@ -1299,6 +1386,16 @@ describe("mergeIssuePollStatus", () => {
       new Set([
         projectPollIdentityKey("alpha", { owner: "pmatos", repo: "alpha" }),
         projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ]),
+      new Map([
+        [
+          "alpha",
+          projectPollIdentityKey("alpha", { owner: "pmatos", repo: "alpha" })
+        ],
+        [
+          "beta",
+          projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+        ]
       ])
     );
 

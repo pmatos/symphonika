@@ -98,7 +98,10 @@ when their repository is the last declaration selected by the runtime name looku
 declaration that rate-limits therefore cannot invalidate the selected declaration's carried-over
 state while the selected declaration is skipped.
 `mergeIssuePollStatus` uses those identities to carry the skipped Project's prior in-memory status
-forward.
+forward. Before exposing the merged candidates to dispatch, it also filters both carried-over and
+fresh candidates against the same last-declaration-wins identity map. Repository-specific reports
+and filtered diagnostics remain available, but an Issue from a shadowed repository cannot be
+dispatched through the selected declaration's token and Workspace.
 
 Poll-outcome and issue-snapshot persistence already iterate only fresh reports. The raw-config
 `syncProjectStates` pass still has to run for every tick so removal, mode, and weight changes remain

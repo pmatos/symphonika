@@ -14,6 +14,7 @@ import type {
   ProviderRunInput
 } from "../provider.js";
 import { renderProviderCommandTemplate } from "../provider-command-template.js";
+import { parseProviderCommand, type ProviderLabel } from "./command-parse.js";
 import {
   providerProcessExitResult,
   shutdownProviderProcess,
@@ -21,6 +22,8 @@ import {
 } from "./provider-process.js";
 
 type JsonObject = Record<string, unknown>;
+
+const PROVIDER_LABEL: ProviderLabel = "Oh My Pi";
 
 type ActiveOmpRun = {
   assistantText?: string;
@@ -133,7 +136,7 @@ export function createOmpProvider(
       ).rendered;
       const command = await processScope.wrapForProviderScope(
         input.run,
-        parseCommand(renderedCommand)
+        parseProviderCommand(renderedCommand, PROVIDER_LABEL)
       );
       if (activeRun.cancelled) {
         activeRuns.delete(input.run.id);
@@ -298,7 +301,7 @@ export function createOmpProvider(
     },
     validate: async (command) => {
       const rendered = renderProviderCommandTemplate(command, {}).rendered;
-      const parsed = parseCommand(rendered);
+      const parsed = parseProviderCommand(rendered, PROVIDER_LABEL);
       validateOmpProtocolFlags(parsed.args);
       await validateOmpRpcCommand(parsed);
     }
@@ -1318,96 +1321,6 @@ function decodeBase64(value: string): Buffer {
     throw new Error("invalid Oh My Pi RPC chunk data");
   }
   return decoded;
-}
-
-function parseCommand(command: string): {
-  args: string[];
-  executable: string;
-} {
-  const parts = splitCommand(command);
-  const executable = parts[0];
-  if (executable === undefined || executable.length === 0) {
-    throw new Error("Oh My Pi provider command is empty");
-  }
-  return {
-    args: parts.slice(1),
-    executable
-  };
-}
-
-function splitCommand(command: string): string[] {
-  const parts: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | undefined;
-  let escaping = false;
-  const trimmedCommand = command.trim();
-
-  for (let index = 0; index < trimmedCommand.length; index += 1) {
-    const character = trimmedCommand[index] ?? "";
-    if (escaping) {
-      current += character;
-      escaping = false;
-      continue;
-    }
-
-    if (quote !== undefined) {
-      if (character === "\\") {
-        const nextCharacter = trimmedCommand[index + 1];
-        if (nextCharacter === quote || nextCharacter === "\\") {
-          current += nextCharacter;
-          index += 1;
-        } else {
-          current += character;
-        }
-        continue;
-      }
-      if (character === quote) {
-        quote = undefined;
-      } else {
-        current += character;
-      }
-      continue;
-    }
-
-    if (character === "\\") {
-      const nextCharacter = trimmedCommand[index + 1];
-      if (
-        nextCharacter === "'" ||
-        nextCharacter === '"' ||
-        (nextCharacter !== undefined && /\s/.test(nextCharacter))
-      ) {
-        escaping = true;
-      } else {
-        current += character;
-      }
-      continue;
-    }
-
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-
-    if (/\s/.test(character)) {
-      if (current.length > 0) {
-        parts.push(current);
-        current = "";
-      }
-      continue;
-    }
-    current += character;
-  }
-
-  if (escaping) {
-    current += "\\";
-  }
-  if (quote !== undefined) {
-    throw new Error("Oh My Pi provider command has an unterminated quote");
-  }
-  if (current.length > 0) {
-    parts.push(current);
-  }
-  return parts;
 }
 
 function validateOmpProtocolFlags(args: string[]): void {

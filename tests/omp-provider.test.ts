@@ -1858,6 +1858,14 @@ describe("Oh My Pi RPC provider", () => {
     ).rejects.toThrow("must select exactly one --mode rpc");
   });
 
+  it("surfaces the Oh My Pi provider label when the command has an unterminated quote", async () => {
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    await expect(provider.validate('omp "')).rejects.toThrow(
+      "Oh My Pi provider command has an unterminated quote"
+    );
+  });
+
   it("caps the stderr retained by the validation probe", async () => {
     const root = await makeTempRoot();
     const spewPath = path.join(root, "stderr-spew.mjs");

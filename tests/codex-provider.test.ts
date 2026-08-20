@@ -1039,6 +1039,14 @@ describe("Codex provider validate", () => {
     ).rejects.toThrow(/\[profiles\.symphonika\][\s\S]*memories\s*=\s*false/);
   });
 
+  it("surfaces the Codex provider label when the command has an unterminated quote", async () => {
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
+
+    await expect(provider.validate('codex "app-server')).rejects.toThrow(
+      "Codex provider command has an unterminated quote"
+    );
+  });
+
   it("fails validation when the profile probe times out instead of silently treating it as success", async () => {
     const root = await makeTempRoot();
     const fakePath = path.join(root, "fake-codex-validate.mjs");

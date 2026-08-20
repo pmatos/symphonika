@@ -14,6 +14,7 @@ import type {
   ProviderRunInput
 } from "../provider.js";
 import { renderProviderCommandTemplate } from "../provider-command-template.js";
+import { parseProviderCommand, type ProviderLabel } from "./command-parse.js";
 import {
   providerProcessExitResult,
   shutdownProviderProcess,
@@ -21,6 +22,8 @@ import {
 } from "./provider-process.js";
 
 type JsonObject = Record<string, unknown>;
+
+const PROVIDER_LABEL: ProviderLabel = "Claude";
 
 type ActiveClaudeRun = {
   cancelled: boolean;
@@ -104,7 +107,10 @@ export function createClaudeProvider(
       const command = await processScope.wrapForProviderScope(
         input.run,
         withOutputSchema(
-          applyRoutineArguments(parseCommand(renderedCommand), input.routine),
+          applyRoutineArguments(
+            parseProviderCommand(renderedCommand, PROVIDER_LABEL),
+            input.routine
+          ),
           input.outputSchema
         )
       );
@@ -174,7 +180,7 @@ export function createClaudeProvider(
     },
     validate: async (command) => {
       const rendered = renderProviderCommandTemplate(command, {}).rendered;
-      const parsed = parseCommand(rendered);
+      const parsed = parseProviderCommand(rendered, PROVIDER_LABEL);
       validateClaudeProtocolFlags(parsed.args);
       await validateClaudeStreamJsonCommand(parsed);
     }
@@ -766,19 +772,6 @@ function hasOptionValue(
   });
 }
 
-function parseCommand(command: string): { args: string[]; executable: string } {
-  const parts = splitCommand(command);
-  const executable = parts[0];
-  if (executable === undefined) {
-    throw new Error("Claude provider command is empty");
-  }
-
-  return {
-    args: parts.slice(1),
-    executable
-  };
-}
-
 // model/effort/permissionMode reach the command via the operator's own
 // {{tag}} placement (see renderProviderCommandTemplate above) — this only
 // adds the anti-backgrounding guard, which is not a declared per-routine
@@ -801,86 +794,6 @@ function applyRoutineArguments(
     ],
     executable: command.executable
   };
-}
-
-function splitCommand(command: string): string[] {
-  const parts: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | undefined;
-  let escaping = false;
-  const trimmedCommand = command.trim();
-
-  for (let index = 0; index < trimmedCommand.length; index += 1) {
-    const character = trimmedCommand[index] ?? "";
-    if (escaping) {
-      current += character;
-      escaping = false;
-      continue;
-    }
-
-    if (quote !== undefined) {
-      if (character === "\\") {
-        const nextCharacter = trimmedCommand[index + 1];
-        if (nextCharacter === quote || nextCharacter === "\\") {
-          current += nextCharacter;
-          index += 1;
-        } else {
-          current += character;
-        }
-        continue;
-      }
-
-      if (character === quote) {
-        quote = undefined;
-      } else {
-        current += character;
-      }
-      continue;
-    }
-
-    if (character === "\\") {
-      const nextCharacter = trimmedCommand[index + 1];
-      if (
-        nextCharacter === "'" ||
-        nextCharacter === '"' ||
-        (nextCharacter !== undefined && /\s/.test(nextCharacter))
-      ) {
-        escaping = true;
-      } else {
-        current += character;
-      }
-      continue;
-    }
-
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-
-    if (/\s/.test(character)) {
-      if (current.length > 0) {
-        parts.push(current);
-        current = "";
-      }
-      continue;
-    }
-
-    current += character;
-  }
-
-  if (escaping) {
-    current += "\\";
-  }
-
-  if (quote !== undefined) {
-    throw new Error("Claude provider command has an unterminated quote");
-  }
-
-  if (current.length > 0) {
-    parts.push(current);
-  }
-
-  return parts;
 }
 
 function arrayField(value: unknown, key: string): unknown[] {

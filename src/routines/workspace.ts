@@ -296,7 +296,10 @@ async function gitSucceeds(
     await git(args, signal);
     return true;
   } catch (error) {
-    if (isAbortError(error)) {
+    if (
+      isAbortError(error) ||
+      error instanceof WorkspacePreparationCleanupError
+    ) {
       throw error;
     }
     return false;

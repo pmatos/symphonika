@@ -177,7 +177,8 @@ export function formatRoutineOutcomeLine(
   outcome: RoutineOutcome
 ): string {
   if (outcome.status === "error") {
-    return `❌ ${projectName} — failed (${outcome.summary || "error"})`;
+    const unverified = outcome.verified ? "" : " (unverified)";
+    return `❌ ${projectName} — failed (${outcome.summary || "error"})${unverified}`;
   }
   if (outcome.action === "none") {
     const unverified = outcome.verified ? "" : " (unverified)";

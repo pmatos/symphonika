@@ -38,6 +38,20 @@ describe("Routine Outcome reconciliation", () => {
     ).toBe("⏭️  rightkey — nothing to do (unverified)");
   });
 
+  it("preserves the unverified marker on an error outcome", () => {
+    expect(
+      formatRoutineOutcomeLine("rightkey", {
+        action: "none",
+        source: "symphonika",
+        status: "error",
+        summary: "process_exit_1",
+        title: "",
+        url: null,
+        verified: false
+      })
+    ).toBe("❌ rightkey — failed (process_exit_1) (unverified)");
+  });
+
   it("observes an issue changing from open to closed", () => {
     expect(
       diffRoutineGithubSnapshots(

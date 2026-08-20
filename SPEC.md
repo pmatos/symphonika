@@ -1014,7 +1014,9 @@ reconciliation treats every leaked firing with a recorded workspace path as unkn
 After a Routine Firing reaches a terminal state, Symphonika evaluates its Routine notification
 policy. Delivery occurs after `kind: git` PR discovery, uses both plain text and an escaped HTML
 alternative, and includes the canonical outcome as one ptt-style line with action, title, URL, and
-an unverified marker when applicable. The final claim JSON is excluded from report-output content.
+an `(unverified)` marker whenever `verified` is false, including for an error outcome. The marker is
+omitted whenever `verified` is true because outcome status and verification are independent. The
+final claim JSON is excluded from report-output content.
 Delivery gets two total attempts within one 30-second orchestration deadline and runs after the
 firing releases its concurrency slot. Delivery failure or timeout never changes the firing state:
 `notification_state = failed` and the final sanitized `notification_error` remain durable. Policy
@@ -1793,8 +1795,9 @@ whose latest sample has `idle_since` set.
 shows each Project's `state`, `next_fire_at`, `last_fired_at`, `last_attempted_at`,
 `last_skip_reason`, `last_skip_at`, rolling 24-hour skip counts per reason, and the latest canonical
 Routine Outcome plus PR numbers discovered for the latest firing. Outcome rendering includes action,
-title, URL, and an `(unverified)` marker when applicable. Inactive targets are hidden by default;
-`--include-inactive` includes them. `--project` narrows the grouped view to one target.
+title, URL, and an `(unverified)` marker whenever `verified` is false, including for an error
+outcome. Inactive targets are hidden by default; `--include-inactive` includes them. `--project`
+narrows the grouped view to one target.
 
 `prune-workspaces` reclaims terminal Routine Firing worktrees eligible under the effective
 service-level retention policy. `--dry-run` lists candidates without changing Git registrations,

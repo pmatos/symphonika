@@ -70,6 +70,12 @@ One pure reconciliation function produces the persisted outcome:
 6. A failed or cancelled firing with no observed external action records an error outcome sourced
    to `symphonika` and retains the terminal reason in its summary.
 
+Outcome `status` and `verified` are independent evidence dimensions. Operator-facing formatting
+therefore appends `(unverified)` whenever `verified` is false, including on an error outcome, and
+omits it whenever `verified` is true. This distinction is not constant for errors: for example, a
+provider may report `status: error` with a commit action that a successful `kind: git` workspace
+inspection verifies under rule 3.
+
 Routine Outcome is evidence alongside lifecycle state and terminal reason; it does not replace or
 rewrite either.
 

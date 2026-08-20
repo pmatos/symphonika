@@ -146,7 +146,10 @@ intermediate lifecycle rows.
 `getRoutineFiring` and `listRoutineFirings` expose `outcome`. Therefore
 `GET /api/routines/:id/firings` exposes the same object without route-specific
 mapping. `symphonika routines` renders the latest firing outcome in a compact
-one-line form including action, title, URL, and an `(unverified)` marker.
+one-line form including action, title, URL, and an `(unverified)` marker whenever
+`verified` is false. This applies to error outcomes as well as action and
+no-action outcomes because `status` and `verified` are independent: a verified
+commit claim may retain the provider's `error` status.
 
 Slice 3's SMTP sink was implemented independently in PR #347. This slice stacks
 that prerequisite commit and integrates the shared one-line Routine Outcome

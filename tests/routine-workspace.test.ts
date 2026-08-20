@@ -3,11 +3,14 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
   writeFile
 } from "node:fs/promises";
+import { promises as fsPromises } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -189,6 +192,44 @@ done
       expect(cache.mode & 0o777).toBe(0o775);
     } finally {
       process.umask(previousUmask);
+    }
+  });
+
+  it("removes its owned clone staging directory when mode adjustment fails", async () => {
+    const root = await makeTempRoot();
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const cacheParent = path.join(workspaceRoot, ".cache");
+    const originalChmod = fsPromises.chmod;
+    fsPromises.chmod = async (filePath, mode) => {
+      if (String(filePath).includes(".repo.git.clone-")) {
+        throw Object.assign(new Error("chmod is unsupported"), {
+          code: "ENOTSUP"
+        });
+      }
+      await originalChmod(filePath, mode);
+    };
+    syncBuiltinESMExports();
+
+    try {
+      await expect(
+        prepareRoutineWorkspace({
+          configDir: root,
+          firingId: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+          kind: "git",
+          project: {
+            name: "alpha",
+            workspace: {
+              git: { base_branch: "main", remote: path.join(root, "remote") },
+              root: workspaceRoot
+            }
+          },
+          routineName: "dependency-update"
+        })
+      ).rejects.toThrow("chmod is unsupported");
+      await expect(readdir(cacheParent)).resolves.toEqual([]);
+    } finally {
+      fsPromises.chmod = originalChmod;
+      syncBuiltinESMExports();
     }
   });
 

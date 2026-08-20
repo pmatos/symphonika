@@ -267,11 +267,11 @@ async function createRepositoryCache(
   const stagingPath = await mkdtemp(
     path.join(cacheParent, `.${path.basename(cachePath)}.clone-`)
   );
-  // mkdtemp always creates its directory 0700, unlike a direct `git clone
-  // --bare` into a not-yet-existing path, which follows the process umask.
-  // Restore that parity before publishing, including group-sharing umasks.
-  await chmod(stagingPath, 0o777 & ~process.umask());
   try {
+    // mkdtemp always creates its directory 0700, unlike a direct `git clone
+    // --bare` into a not-yet-existing path, which follows the process umask.
+    // Restore that parity before publishing, including group-sharing umasks.
+    await chmod(stagingPath, 0o777 & ~process.umask());
     await git(
       ["clone", "--bare", project.workspace.git.remote, stagingPath],
       signal

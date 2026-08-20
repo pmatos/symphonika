@@ -5712,6 +5712,65 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("does not create a restart fan-out for a newly disabled routine", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const provider = quietProvider();
+    const routine = minuteRoutine(root);
+    const delivered: NotificationMessage[] = [];
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T10:00:30.000Z")
+    });
+
+    try {
+      const result = await dispatchDueRoutines({
+        ...recurringDispatchInput({
+          activeRuns: new ActiveRunRegistry(),
+          provider,
+          root,
+          routine: { ...routine, disabled: true },
+          runStore
+        }),
+        createFanoutId: () => "fanout-disabled-restart",
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:01:30.000Z"),
+        recomputeSchedulesFromNow: true
+      });
+
+      expect(result).toEqual({ fired: [], skipped: [] });
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(delivered).toEqual([]);
+      expect(
+        runStore.getRoutineFanout("fanout-disabled-restart")
+      ).toBeUndefined();
+      expect(
+        runStore.getRoutine({ name: "minute-report", projectName: "alpha" })
+      ).toMatchObject({
+        lastSkipReason: null,
+        state: "disabled"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("records an ungrouped catch-up window skip when a restart target misses an already-durable fan-out", async () => {
     // A Routine Fan-out for this exact (routine, scheduled_at) can already
     // be durable from an earlier restart with narrower membership than what

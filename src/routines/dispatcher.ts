@@ -407,6 +407,7 @@ export async function dispatchDueRoutines(
         const declaration = declarations.get(persisted.name);
         if (
           declaration === undefined ||
+          declaration.disabled === true ||
           !("cron" in declaration.schedule) ||
           (declaration.catchUp ?? "skip") !== "skip" ||
           persisted.state !== "active" ||

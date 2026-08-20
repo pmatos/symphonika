@@ -416,6 +416,97 @@ exec "${realGitOutput.trim()}" "$@"
     }
   });
 
+  it("preserves Git process-group cleanup errors from cache origin probes", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const project = {
+      name: "alpha",
+      workspace: {
+        git: { base_branch: "main", remote: remotePath },
+        root: workspaceRoot
+      }
+    };
+    await prepareRoutineWorkspace({
+      configDir: root,
+      firingId: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+      kind: "report",
+      project,
+      routineName: "weekly-report"
+    });
+
+    const wrapperRoot = path.join(root, "git-wrapper");
+    const wrapperPath = path.join(wrapperRoot, "git");
+    const startedPath = path.join(root, "origin-probe-started");
+    const helperPidPath = path.join(root, "origin-probe-pid");
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    await mkdir(wrapperRoot, { recursive: true });
+    await writeFile(
+      wrapperPath,
+      `#!/bin/sh
+if [ "$3" = "config" ] && [ "$4" = "--get" ] && [ "$5" = "remote.origin.url" ]; then
+  echo $$ > "${helperPidPath}"
+  touch "${startedPath}"
+  while true; do
+    sleep 0.1
+  done
+fi
+exec "${realGitOutput.trim()}" "$@"
+`
+    );
+    await chmod(wrapperPath, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+    const controller = new AbortController();
+    const originalKill = process.kill.bind(process);
+
+    try {
+      const preparation = rejectionOf(
+        prepareRoutineWorkspace({
+          configDir: root,
+          firingId: "01KABCDEFGHJKMNPQRSTVWXYZ12",
+          kind: "report",
+          project,
+          routineName: "weekly-report",
+          signal: controller.signal
+        })
+      );
+      await waitForPath(startedPath);
+      const helperPid = await readPid(helperPidPath);
+      process.kill = (pid: number, signal?: NodeJS.Signals | number) => {
+        if (pid === -helperPid && signal === "SIGTERM") {
+          throw Object.assign(new Error("group signaling denied"), {
+            code: "EPERM"
+          });
+        }
+        return signal === undefined
+          ? originalKill(pid)
+          : originalKill(pid, signal);
+      };
+      controller.abort();
+
+      const error = await settleWithin(preparation, 1_000);
+      expect(error).toBeInstanceOf(Error);
+      if (!(error instanceof Error)) {
+        throw new Error(
+          "expected origin probe cleanup to reject with an Error"
+        );
+      }
+      expect(error.name).toBe("WorkspacePreparationCleanupError");
+      expect(error.message).toContain(
+        "failed to stop aborted Git process group"
+      );
+    } finally {
+      process.kill = originalKill;
+      await killRecordedProcessGroup(helperPidPath);
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
+  });
+
   it.each(["stdout", "stderr"] as const)(
     "bounds cancellable Git %s and stops its process group on overflow",
     async (stream) => {

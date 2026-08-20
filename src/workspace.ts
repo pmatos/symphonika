@@ -330,7 +330,10 @@ async function ensureRepositoryCacheRemote(
       signal
     );
   } catch (error) {
-    if (isAbortError(error)) {
+    if (
+      isAbortError(error) ||
+      error instanceof WorkspacePreparationCleanupError
+    ) {
       throw error;
     }
     throw new WorkspacePreparationError(

@@ -114,6 +114,31 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
     }
   });
 
+  it("excludes removed Projects from the project filter", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "active", validationState: "valid", weight: 1 },
+        { name: "removed", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.syncProjectStates([
+        { name: "active", validationState: "valid", weight: 1 }
+      ]);
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues")).text();
+
+      expect(html).toContain('<option value="active">active</option>');
+      expect(html).not.toContain('<option value="removed">removed</option>');
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("filters by project, verdict, label, and free-text title search", async () => {
     const test = await setup();
     try {
@@ -322,6 +347,215 @@ describe("GET /issues (#308 part 1, ADR 0077)", () => {
       });
       const html = await (await app.request("/issues")).text();
       expect(html).toContain("claimed by run run-42");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("does not show a terminal Run as a sym:claimed issue's current claimant", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedByTruncated: false,
+            blockedBy: [],
+            issueNumber: 5,
+            kind: "filtered",
+            labels: ["sym:claimed"],
+            priority: 1,
+            reasons: ["has operational label sym:claimed"],
+            title: "Stale claimed issue"
+          }
+        ]
+      });
+      test.runStore.createRun({
+        id: "run-terminal",
+        issue: sampleIssue({ number: 5 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-terminal", "failed");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues")).text();
+      expect(html).toContain("blocked: sym:claimed");
+      expect(html).not.toContain("claimed by run run-terminal");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows a terminal Run as the claimant while scheduled lifecycle work holds its reservation", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedByTruncated: false,
+            blockedBy: [],
+            issueNumber: 5,
+            kind: "filtered",
+            labels: ["sym:claimed"],
+            priority: 1,
+            reasons: ["has operational label sym:claimed"],
+            title: "Claimed during retry backoff"
+          }
+        ]
+      });
+      test.runStore.createRun({
+        id: "run-scheduled",
+        issue: sampleIssue({ number: 5 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-scheduled", "failed");
+
+      const app = createHttpApp({
+        getScheduled: () => [
+          {
+            dueAt: Date.now() + 10_000,
+            issueNumber: 5,
+            kind: "retry",
+            projectName: "alpha",
+            runId: "run-scheduled"
+          }
+        ],
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues")).text();
+      expect(html).toContain("claimed by run run-scheduled");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("does not render an unpersisted contention callback id as the claimant", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedByTruncated: false,
+            blockedBy: [],
+            issueNumber: 5,
+            kind: "filtered",
+            labels: ["sym:claimed"],
+            priority: 1,
+            reasons: ["has operational label sym:claimed"],
+            title: "Claimed during continuation contention"
+          }
+        ]
+      });
+      test.runStore.createRun({
+        id: "run-parent",
+        issue: sampleIssue({ number: 5 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-parent", "succeeded");
+
+      const app = createHttpApp({
+        getScheduled: () => [
+          {
+            dueAt: Date.now() + 10_000,
+            issueNumber: 5,
+            kind: "continuation",
+            projectName: "alpha",
+            runId: "run-never-persisted"
+          }
+        ],
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues")).text();
+      expect(html).toContain("claimed by run run-parent");
+      expect(html).not.toContain("claimed by run run-never-persisted");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows the waiting Run as claimant while wait_park is scheduled", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedByTruncated: false,
+            blockedBy: [],
+            issueNumber: 5,
+            kind: "filtered",
+            labels: ["sym:claimed"],
+            priority: 1,
+            reasons: ["has operational label sym:claimed"],
+            title: "Claimed continuation"
+          }
+        ]
+      });
+      test.runStore.createRun({
+        id: "run-continuation",
+        issue: sampleIssue({ number: 5 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-continuation", "succeeded");
+      test.runStore.createWaitingRun({
+        currentStateId: "wait-for-review",
+        id: "run-waiting",
+        issue: sampleIssue({ number: 5 }),
+        parentRunId: "run-continuation",
+        projectName: "alpha"
+      });
+
+      const app = createHttpApp({
+        getScheduled: () => [
+          {
+            dueAt: Date.now() + 1_000,
+            issueNumber: 5,
+            kind: "wait_park",
+            projectName: "alpha",
+            runId: "run-continuation"
+          }
+        ],
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues/alpha/5")).text();
+      expect(html).toContain("claimed by run run-waiting");
+      expect(html).not.toContain("claimed by run run-continuation");
     } finally {
       test.cleanup();
     }

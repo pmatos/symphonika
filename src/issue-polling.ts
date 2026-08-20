@@ -946,6 +946,55 @@ export function replaceIssuePollStatus(
   target.projects = source.projects;
 }
 
+// Like replaceIssuePollStatus, but for a tick that only polled a subset of
+// configured projects (credential-scoped backoff excludes any project whose
+// resolved token is currently backing off, see daemon.ts). Entries for a
+// polled project come from `fresh`; entries for every other *currently
+// configured* project are carried over from `prior` untouched, mirroring
+// pollProject's own "leave prior snapshot untouched" contract for a single
+// failed project, just applied per-project across a partial poll instead of
+// an all-or-nothing one. `configuredProjectNames` is deliberately the full
+// configured set, not just the pollable/backed-off ones -- a project a
+// config reload removed or renamed is absent from both `polledProjectNames`
+// and `configuredProjectNames`, so it's dropped here too instead of being
+// carried over indefinitely.
+export function mergeIssuePollStatus(
+  prior: IssuePollStatus,
+  fresh: IssuePollStatus,
+  polledProjectNames: ReadonlySet<string>,
+  configuredProjectNames: ReadonlySet<string>
+): IssuePollStatus {
+  const carryOver = (name: string): boolean =>
+    !polledProjectNames.has(name) && configuredProjectNames.has(name);
+
+  const carriedOverProjects = prior.projects.filter((project) =>
+    carryOver(project.name)
+  );
+  // A carried-over project's own rate-limit error must survive the merge --
+  // otherwise the first clean poll of any OTHER project on the same tick
+  // wipes it from `errors` via a bare `fresh.errors` replace, even though
+  // the backed-off project itself never got a chance to recover. See
+  // ADR 0083.
+  const carriedOverErrors = carriedOverProjects
+    .map((project) => project.error)
+    .filter((error): error is string => error !== undefined);
+
+  return {
+    candidateIssues: [
+      ...prior.candidateIssues.filter((candidate) =>
+        carryOver(candidate.project)
+      ),
+      ...fresh.candidateIssues
+    ],
+    errors: [...carriedOverErrors, ...fresh.errors],
+    filteredIssues: [
+      ...prior.filteredIssues.filter((filtered) => carryOver(filtered.project)),
+      ...fresh.filteredIssues
+    ],
+    projects: [...carriedOverProjects, ...fresh.projects]
+  };
+}
+
 export async function readConfiguredPollingIntervalMs(
   configPath: string
 ): Promise<number> {
@@ -1495,6 +1544,68 @@ function isOctokitNotFound(error: unknown): boolean {
     "status" in error &&
     (error as { status?: unknown }).status === 404
   );
+}
+
+// Matches both GitHub's primary hourly rate limit ("API rate limit ...
+// exceeded") and its secondary/abuse-detection limit (rapid repeated
+// requests) -- REST and GraphQL errors surface these as message text rather
+// than a shared status/type field, so callers that only see the rendered
+// poll-failure string (e.g. daemon.ts's IssuePollStatus.errors) need a
+// message-based check rather than an error-shape check like
+// isOctokitNotFound above.
+const RATE_LIMIT_MESSAGE_PATTERN = /rate limit|abuse detection/i;
+
+export function isRateLimitError(message: string): boolean {
+  return RATE_LIMIT_MESSAGE_PATTERN.test(message);
+}
+
+// A fixed window rather than exponential backoff: GitHub's primary rate
+// limit resets on a fixed hourly clock that doubling can't influence either
+// way. The window exists to stop the poller from flailing against an
+// already-exhausted budget (and tripping the secondary/abuse limit in the
+// process), not to time the primary reset.
+export const GITHUB_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
+
+export function backoffUntil(nowMs: number): number {
+  return nowMs + GITHUB_RATE_LIMIT_BACKOFF_MS;
+}
+
+// Maps each rate-limited project's poll report back to the resolved GitHub
+// token its tracker used, so a caller (daemon.ts) can back off polling
+// scoped to that credential instead of every configured project -- SPEC.md
+// §6 permits each tracker to reference an independent $VAR_NAME, and GitHub
+// tracks rate-limit budgets per token, not per Symphonika deployment.
+// Structurally typed over `reports` so the same function serves both
+// IssuePollStatus.projects and PullRequestPollStatus.projects. Deliberately
+// does not gate on `report.ok`: a PR-poll report can be `ok: true` (the PR
+// list itself was fetched fine) while still carrying a rate-limit error from
+// a single PR's enrichment call (see pull-request-polling.ts's buildSnapshot
+// / ADR 0083) -- that case must still engage backoff.
+export function rateLimitedTokens(
+  reports: ReadonlyArray<{ error?: string; name: string; ok: boolean }>,
+  projects: readonly PollingProjectConfig[],
+  env: NodeJS.ProcessEnv
+): Set<string> {
+  const tokens = new Set<string>();
+  for (const report of reports) {
+    if (report.error === undefined) {
+      continue;
+    }
+    if (!isRateLimitError(report.error)) {
+      continue;
+    }
+    const project = projects.find(
+      (candidate) => candidate.name === report.name
+    );
+    if (project === undefined) {
+      continue;
+    }
+    const token = resolveEnvBackedValue(project.tracker.token, env);
+    if (token !== undefined) {
+      tokens.add(token);
+    }
+  }
+  return tokens;
 }
 
 // Swallows a 404 from a single label-removal attempt as success --

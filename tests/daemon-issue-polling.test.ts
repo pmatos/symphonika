@@ -5,6 +5,13 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startDaemon } from "../src/daemon.js";
+import type {
+  AgentProvider,
+  AgentProviderRegistry,
+  ProviderEvent
+} from "../src/provider.js";
+import { openRunStore } from "../src/run-store.js";
+import { resolveStateRoot } from "../src/state.js";
 
 const tempRoots: string[] = [];
 
@@ -450,6 +457,281 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("backs off from GitHub polling after a rate-limit error instead of retrying every tick", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root, { pollingIntervalMs: 10 });
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new Error(
+            "Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+          )
+        )
+        .mockResolvedValue([
+          issueFixture({
+            labels: ["agent-ready"],
+            number: 90,
+            title: "Should not be fetched while backing off"
+          })
+        ])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      // startDaemon awaits one poll before returning, so the rejection
+      // above has already happened and surfaced by this point.
+      expect(githubIssuesApi.listOpenIssues).toHaveBeenCalledTimes(1);
+      const response = await fetch(`${daemon.url}/api/status`);
+      const body = (await response.json()) as {
+        issuePolling: { errors: string[] };
+      };
+      expect(body.issuePolling.errors.join("\n")).toContain("rate limit");
+
+      // Many more 10ms ticks elapse in real time; without backoff this
+      // would have called listOpenIssues repeatedly during the wait.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(githubIssuesApi.listOpenIssues).toHaveBeenCalledTimes(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("backs off PR follow-up after its GitHub call hits a rate limit", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root, { pollingIntervalMs: 10 });
+    const { stateRoot } = resolveStateRoot({ cwd: root });
+    const seedStore = openRunStore({ stateRoot });
+    try {
+      seedStore.createRun({
+        id: "run-with-tracked-pr",
+        issue: {
+          body: "Body",
+          created_at: "2026-08-19T10:00:00.000Z",
+          id: 500,
+          labels: [],
+          number: 500,
+          priority: 1,
+          state: "open",
+          title: "Tracked pull request",
+          updated_at: "2026-08-19T10:00:00.000Z",
+          url: "https://github.com/pmatos/symphonika/issues/500"
+        },
+        projectName: "symphonika",
+        providerCommand: "codex app-server",
+        providerName: "codex"
+      });
+      seedStore.updateRunState("run-with-tracked-pr", "succeeded");
+      seedStore.trackPullRequest({
+        branchName: "sym/symphonika/500-tracked-pr",
+        headSha: "abc123",
+        issueNumber: 500,
+        prNumber: 501,
+        prUrl: "https://github.com/pmatos/symphonika/pull/501",
+        projectName: "symphonika",
+        runId: "run-with-tracked-pr"
+      });
+    } finally {
+      seedStore.close();
+    }
+
+    const githubIssuesApi = {
+      getPullRequestFollowupState: vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            "Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+          )
+        ),
+      listOpenIssues: vi.fn().mockResolvedValue([])
+    };
+    const wallNow = Date.now();
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(wallNow);
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      // Advance only the wall clock used by the follow-up throttle. The
+      // interval timer stays real, so the next 10ms tick runs follow-up.
+      dateNow.mockReturnValue(wallNow + 1_001);
+      await waitFor(() =>
+        Promise.resolve(
+          githubIssuesApi.getPullRequestFollowupState.mock.calls.length >= 1
+        )
+      );
+
+      // Another follow-up interval elapses, but the rate-limit failure above
+      // should have engaged the shared five-minute credential backoff.
+      dateNow.mockReturnValue(wallNow + 2_002);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(githubIssuesApi.getPullRequestFollowupState).toHaveBeenCalledTimes(
+        1
+      );
+    } finally {
+      await daemon.stop();
+      dateNow.mockRestore();
+    }
+  });
+
+  it("does not let a stale in-flight PR poll's clean result clear a backoff a later tick engaged", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root, { pollingIntervalMs: 10 });
+
+    const prPollStarted = deferred<void>();
+    const prPollGate = deferred<unknown[]>();
+
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockRejectedValueOnce(
+          new Error(
+            "Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+          )
+        )
+        .mockResolvedValue([]),
+      listPullRequests: vi.fn().mockImplementation(() => {
+        prPollStarted.resolve();
+        return prPollGate.promise;
+      })
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      // The startup tick's fire-and-forget PR poll is now in flight and
+      // deliberately held open by prPollGate -- this is the "stale" poll
+      // that started before any backoff existed.
+      await prPollStarted.promise;
+
+      // A later tick's issue poll hits the mocked rate limit and engages
+      // backoff while the PR poll above is still pending.
+      await waitFor(() =>
+        Promise.resolve(githubIssuesApi.listOpenIssues.mock.calls.length >= 2)
+      );
+
+      // Resolve the stale PR poll cleanly now -- the exact race: a clean
+      // result arriving after backoff was engaged, from work that began
+      // before it was.
+      prPollGate.resolve([]);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Many more 10ms ticks elapse; without the fix, the PR poll's clean
+      // result would have cleared the backoff and issue polling would have
+      // resumed.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(githubIssuesApi.listOpenIssues).toHaveBeenCalledTimes(2);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("still schedules pending run notifications on a tick that's skipping GitHub calls for backoff", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root, { pollingIntervalMs: 10 });
+    const { stateRoot } = resolveStateRoot({ cwd: root });
+    const runId = "run-notify-during-backoff";
+
+    // Create the terminal run (but don't mark its notification pending
+    // yet) before the daemon starts -- no concurrent DB access. The
+    // startup tick runs before any backoff exists and would otherwise
+    // reach schedulePending() regardless of this fix, which would make the
+    // assertion below pass even against the buggy early-return code; only
+    // marking the notification pending *after* backoff is confirmed
+    // active isolates the skip-tick path this fix targets.
+    const seedStore = openRunStore({ stateRoot });
+    try {
+      seedStore.createRun({
+        id: runId,
+        issue: {
+          body: "Body",
+          created_at: "2026-07-31T07:00:00.000Z",
+          id: 99,
+          labels: ["agent-ready"],
+          number: 99,
+          priority: 1,
+          state: "open" as const,
+          title: "Example issue",
+          updated_at: "2026-07-31T07:30:00.000Z",
+          url: "https://github.com/pmatos/symphonika/issues/99"
+        },
+        projectName: "symphonika",
+        providerCommand: "codex app-server",
+        providerName: "codex"
+      });
+      seedStore.recordTerminalReason(runId, "process_exit_1", "deterministic");
+      seedStore.updateRunState(runId, "failed");
+    } finally {
+      seedStore.close();
+    }
+
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            "Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+          )
+        )
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const response = await fetch(`${daemon.url}/api/status`);
+      const body = (await response.json()) as {
+        issuePolling: { errors: string[] };
+      };
+      expect(body.issuePolling.errors.join("\n")).toContain("rate limit");
+
+      // Backoff is confirmed active -- mark the notification pending now,
+      // via a brief separate connection (a single UPDATE, retried on a
+      // transient lock since the daemon holds its own open connection).
+      markPendingWithRetry(stateRoot, runId);
+
+      // Many more 10ms ticks elapse, all skipping GitHub calls for
+      // backoff -- the regression this guards against is those ticks
+      // never reaching schedulePending() at refreshIssuePollStatus's tail.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    } finally {
+      await daemon.stop();
+    }
+
+    // No email config exists in this project, so schedulePending() marks
+    // the pending notification "skipped" rather than leaving it pending --
+    // that transition only happens if a tick actually reached the tail.
+    const verifyStore = openRunStore({ stateRoot });
+    try {
+      expect(verifyStore.listPendingRunNotifications()).toEqual([]);
+    } finally {
+      verifyStore.close();
+    }
+  });
+
   it("coalesces concurrent poll-now requests into one manual polling cycle", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);
@@ -579,6 +861,252 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("backs off polling only for the project whose token is rate-limited, not projects on other tokens", async () => {
+    const root = await makeTempRoot();
+    await writeTwoProjectsWithDifferentTokens(root, { pollingIntervalMs: 10 });
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockImplementation(({ repo }: { repo: string }) => {
+          if (repo === "alpha") {
+            return Promise.reject(
+              new Error(
+                "Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+              )
+            );
+          }
+          return Promise.resolve([]);
+        })
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: {
+        GITHUB_TOKEN_ALPHA: "secret-alpha",
+        GITHUB_TOKEN_BETA: "secret-beta"
+      },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const callsFor = (repo: string) =>
+        githubIssuesApi.listOpenIssues.mock.calls.filter((call) => {
+          const input = call[0] as { repo: string };
+          return input.repo === repo;
+        }).length;
+
+      // alpha's token hits the rate limit on the startup tick and engages
+      // backoff scoped to that token only.
+      await waitFor(() => Promise.resolve(callsFor("alpha") >= 1));
+      const alphaCallsAtBackoff = callsFor("alpha");
+
+      // beta uses a different token and must keep being polled normally --
+      // several more 10ms ticks should grow its call count well past 1.
+      await waitFor(() => Promise.resolve(callsFor("beta") >= 3), {
+        timeoutMs: 2_000
+      });
+
+      // alpha stayed backed off throughout that same wait.
+      expect(callsFor("alpha")).toBe(alphaCallsAtBackoff);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("does not claim a carried-over candidate whose GitHub token is backing off", async () => {
+    const root = await makeTempRoot();
+    await writeTwoProjectsWithDifferentTokens(root, { pollingIntervalMs: 10 });
+    const agentProviders: AgentProviderRegistry = {};
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockImplementation(({ repo }: { repo: string }) =>
+        Promise.resolve([
+          issueFixture({
+            labels: ["agent-ready"],
+            number: repo === "alpha" ? 91 : 92,
+            title: `${repo} candidate`
+          })
+        ])
+      ),
+      listPullRequests: vi
+        .fn()
+        .mockImplementation(({ repo }: { repo: string }) =>
+          repo === "alpha"
+            ? Promise.reject(
+                new Error(
+                  "Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+                )
+              )
+            : Promise.resolve([])
+        ),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const codexProvider = makeExitingCodexProvider();
+
+    const daemon = await startDaemon({
+      agentProviders,
+      cwd: root,
+      env: {
+        GITHUB_TOKEN_ALPHA: "secret-alpha",
+        GITHUB_TOKEN_BETA: "secret-beta"
+      },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: vi.fn().mockResolvedValue({
+        branchName: "sym/beta/92-beta-candidate",
+        branchRef: "refs/heads/sym/beta/92-beta-candidate",
+        cachePath: path.join(
+          root,
+          ".symphonika",
+          "workspaces",
+          "beta",
+          ".cache",
+          "repo.git"
+        ),
+        issueDirectoryName: "92-beta-candidate",
+        reused: false,
+        workspacePath: path.join(
+          root,
+          ".symphonika",
+          "workspaces",
+          "beta",
+          "issues",
+          "92-beta-candidate"
+        )
+      })
+    });
+
+    try {
+      const issuePollsFor = (repo: string) =>
+        githubIssuesApi.listOpenIssues.mock.calls.filter((call) => {
+          const input = call[0] as { repo: string };
+          return input.repo === repo;
+        }).length;
+
+      await waitFor(() => Promise.resolve(issuePollsFor("beta") >= 3), {
+        timeoutMs: 2_000
+      });
+      expect(issuePollsFor("alpha")).toBe(1);
+
+      const response = await fetch(`${daemon.url}/api/status`);
+      const status = (await response.json()) as {
+        candidateIssues: Array<{ issue: { number: number }; project: string }>;
+      };
+      expect(
+        status.candidateIssues.map((candidate) => candidate.project).sort()
+      ).toEqual(["alpha", "beta"]);
+
+      agentProviders.codex = codexProvider;
+      await waitFor(() =>
+        Promise.resolve(
+          githubIssuesApi.addLabelsToIssue.mock.calls.some(([input]) => {
+            const call = input as { labels: string[] };
+            return call.labels.includes("sym:claimed");
+          })
+        )
+      );
+
+      const claimedRepositories = githubIssuesApi.addLabelsToIssue.mock.calls
+        .map(([input]) => input as { labels: string[]; repo: string })
+        .filter((input) => input.labels.includes("sym:claimed"))
+        .map((input) => input.repo);
+      expect(claimedRepositories).toEqual(["beta"]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("rechecks GitHub backoff after candidate selection and before claiming", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root, { pollingIntervalMs: 10 });
+    const prPoll = deferred<never>();
+    const codexProvider = makeExitingCodexProvider();
+    let providerReads = 0;
+    const agentProviders: AgentProviderRegistry = {};
+    Object.defineProperty(agentProviders, "codex", {
+      enumerable: true,
+      get: () => {
+        providerReads += 1;
+        // launchWork's registration gate performs the first read. The
+        // second is target selection, after the daemon has already formed
+        // its dispatchable candidate view. Release the pending PR-poll rate
+        // limit exactly there to reproduce the claim-boundary race.
+        if (providerReads === 2) {
+          prPoll.reject(
+            new Error(
+              "Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+            )
+          );
+        }
+        return codexProvider;
+      }
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 93,
+          title: "Candidate selected before PR polling reports backoff"
+        })
+      ]),
+      listPullRequests: vi.fn().mockReturnValue(prPoll.promise),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const daemon = await startDaemon({
+      agentProviders,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: vi.fn().mockResolvedValue({
+        branchName: "sym/symphonika/93-candidate-selected-before-pr-polling",
+        branchRef:
+          "refs/heads/sym/symphonika/93-candidate-selected-before-pr-polling",
+        cachePath: path.join(
+          root,
+          ".symphonika",
+          "workspaces",
+          "symphonika",
+          ".cache",
+          "repo.git"
+        ),
+        issueDirectoryName: "93-candidate-selected-before-pr-polling",
+        reused: false,
+        workspacePath: path.join(
+          root,
+          ".symphonika",
+          "workspaces",
+          "symphonika",
+          "issues",
+          "93-candidate-selected-before-pr-polling"
+        )
+      })
+    });
+
+    try {
+      await waitFor(() => Promise.resolve(providerReads >= 3), {
+        timeoutMs: 2_000
+      });
+
+      const claimWrites = githubIssuesApi.addLabelsToIssue.mock.calls.filter(
+        ([input]) => {
+          const call = input as { labels: string[] };
+          return call.labels.includes("sym:claimed");
+        }
+      );
+      expect(claimWrites).toHaveLength(0);
+      expect(githubIssuesApi.listOpenIssues).toHaveBeenCalledTimes(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("continues polling valid projects when another project entry is invalid", async () => {
     const root = await makeTempRoot();
     await writeConfigWithInvalidAndValidProjects(root);
@@ -641,6 +1169,21 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 });
+
+function makeExitingCodexProvider(): AgentProvider {
+  return {
+    cancel: vi.fn().mockResolvedValue(undefined),
+    name: "codex",
+    runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+      await Promise.resolve();
+      yield {
+        normalized: { exitCode: 1, type: "process_exit" },
+        raw: { code: 1, kind: "exit" }
+      };
+    }),
+    validate: vi.fn().mockResolvedValue(undefined)
+  } satisfies AgentProvider;
+}
 
 function issueFixture(overrides: {
   labels: unknown[];
@@ -715,6 +1258,56 @@ async function writeValidProject(
       "    agent:",
       "      provider: codex",
       "    workflow: ./WORKFLOW.md",
+      ""
+    ].join("\n")
+  );
+  await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+}
+
+async function writeTwoProjectsWithDifferentTokens(
+  root: string,
+  options: { pollingIntervalMs?: number } = {}
+): Promise<void> {
+  await mkdir(root, { recursive: true });
+  const project = (name: string, repo: string, tokenVar: string): string[] => [
+    `  - name: ${name}`,
+    "    weight: 1",
+    "    tracker:",
+    "      kind: github",
+    "      owner: pmatos",
+    `      repo: ${repo}`,
+    `      token: "$${tokenVar}"`,
+    "    issue_filters:",
+    '      states: ["open"]',
+    '      labels_all: ["agent-ready"]',
+    '      labels_none: ["blocked", "needs-human"]',
+    "    priority:",
+    "      labels: {}",
+    "      default: 99",
+    "    workspace:",
+    `      root: ./.symphonika/workspaces/${name}`,
+    "      git:",
+    `        remote: git@github.com:pmatos/${repo}.git`,
+    "        base_branch: main",
+    "    agent:",
+    "      provider: codex",
+    "    workflow: ./WORKFLOW.md"
+  ];
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "polling:",
+      `  interval_ms: ${options.pollingIntervalMs ?? 30000}`,
+      "providers:",
+      "  codex:",
+      `    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"`,
+      "  claude:",
+      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      "projects:",
+      ...project("alpha", "alpha", "GITHUB_TOKEN_ALPHA"),
+      ...project("beta", "beta", "GITHUB_TOKEN_BETA"),
       ""
     ].join("\n")
   );
@@ -818,6 +1411,30 @@ async function writeConfigWithInvalidAndValidProjects(
       ""
     ].join("\n")
   );
+}
+
+// A single UPDATE via a second connection to the same database the live
+// daemon holds open -- better-sqlite3's default busy_timeout is 0, so an
+// attempt that lands mid-write on the daemon's own connection throws
+// SQLITE_BUSY immediately rather than waiting; retry a few times instead
+// of failing the test on that rare timing collision.
+function markPendingWithRetry(
+  stateRoot: string,
+  runId: string,
+  attemptsRemaining = 20
+): void {
+  const store = openRunStore({ stateRoot });
+  try {
+    store.markRunNotificationPending(runId);
+  } catch (error) {
+    store.close();
+    if (attemptsRemaining <= 1) {
+      throw error;
+    }
+    markPendingWithRetry(stateRoot, runId, attemptsRemaining - 1);
+    return;
+  }
+  store.close();
 }
 
 async function waitFor(

@@ -18,14 +18,18 @@ import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
 } from "./daemon-endpoint.js";
-import type { GitHubIssuesApi } from "./issue-polling.js";
+import type { GitHubIssuesApi, PollingProjectConfig } from "./issue-polling.js";
 import {
+  backoffUntil,
   DEFAULT_GITHUB_ISSUES_API,
   DEFAULT_POLLING_INTERVAL_MS,
   emptyIssuePollStatus,
+  mergeIssuePollStatus,
   pollConfiguredGitHubIssuesFromConfig,
+  rateLimitedTokens,
   readConfiguredPollingIntervalMs,
   replaceIssuePollStatus,
+  resolveEnvBackedValue,
   tryAddLabelsToIssue,
   tryGetPullRequestFollowupState,
   tryMergePullRequest,
@@ -400,6 +404,7 @@ export async function startDaemon(
   let systemdWatchdogTimer: ReturnType<typeof setInterval> | undefined;
   let lastTickAtMs: number | undefined;
   let lastTickAtMonotonicMs: number | undefined;
+  let nextPollAtMonotonicMs: number | undefined;
   let tickLoopStartedAtMonotonicMs: number | undefined;
   let polling = false;
   // Guards the PR-enrichment fire-and-forget below (refreshIssuePollStatus)
@@ -407,6 +412,15 @@ export async function startDaemon(
   // its own GraphQL round-trips must not gate issue dispatch, so it isn't
   // awaited by refreshIssuePollStatus and needs its own reentrancy check.
   let prPolling = false;
+  // Keyed by resolved GitHub token -- shared between issue polling and PR
+  // polling below (both draw on the same per-token rate-limit budget for a
+  // given project, so a rate-limit error from either one backs off both),
+  // but scoped per token rather than globally: SPEC.md §6 lets each
+  // project's tracker reference an independent $VAR_NAME, and GitHub
+  // tracks rate-limit budgets per token, not per Symphonika deployment.
+  // Values are only ever used as opaque Map keys, never logged (the
+  // resolved token is a secret -- see SPEC.md §6's redaction requirement).
+  const githubBackoffUntilByToken = new Map<string, number>();
   let scheduledWork = Promise.resolve();
   let lastPollErrorsKey = "";
   let lastPullRequestFollowupAt = Date.now();
@@ -539,6 +553,77 @@ export async function startDaemon(
     return { errors: reloadStatus.errors, ok: !reloadBroken, snapshot };
   };
 
+  // A clean poll result is never allowed to clear an active window -- only
+  // to let it lapse on its own once `nowMs` passes it (self-cleaning here,
+  // with a one-time log on the transition, per token). The issue poll and
+  // the fire-and-forget PR poll each call engageGithubBackoff with their
+  // own results; a PR poll started before backoff was engaged can still be
+  // in flight when a later tick's issue poll engages it, and that stale
+  // poll's own eventual clean result doesn't prove the limit that triggered
+  // the newer window has recovered. Proactively clearing on any clean
+  // result would let that stale result erase a still-current window.
+  const isGithubBackoffActive = (nowMs: number, token: string): boolean => {
+    const until = githubBackoffUntilByToken.get(token);
+    if (until === undefined) {
+      return false;
+    }
+    if (nowMs >= until) {
+      githubBackoffUntilByToken.delete(token);
+      logger.info(
+        "symphonika GitHub API backoff window elapsed for one credential"
+      );
+      return false;
+    }
+    return true;
+  };
+
+  // Engages (or extends) the backoff window for every rate-limited token
+  // found in `reports` (each project's own poll report, e.g.
+  // IssuePollStatus.projects / PullRequestPollStatus.projects). Logs only
+  // on a given token's transition, not on every tick, so a sustained
+  // outage doesn't spam the log.
+  const engageGithubBackoff = (
+    reports: ReadonlyArray<{ error?: string; name: string; ok: boolean }>,
+    projects: readonly PollingProjectConfig[],
+    env: NodeJS.ProcessEnv
+  ): void => {
+    const nowMs = Date.now();
+    for (const token of rateLimitedTokens(reports, projects, env)) {
+      const wasActive = isGithubBackoffActive(nowMs, token);
+      githubBackoffUntilByToken.set(token, backoffUntil(nowMs));
+      if (!wasActive) {
+        logger.warn(
+          { backoffUntilMs: githubBackoffUntilByToken.get(token) },
+          "symphonika GitHub API rate limited; backing off polling for one credential"
+        );
+      }
+    }
+  };
+
+  // A project whose token can't be resolved (e.g. an unset $VAR_NAME) is
+  // always pollable here -- pollProject reports that failure itself,
+  // unrelated to rate-limit backoff. Structurally typed on tracker alone
+  // (rather than the full PollingProjectConfig) so the fresh-claim boundary
+  // re-check (ADR 0083) below can reuse it for a DispatchProjectConfig too.
+  const isProjectPollable = (
+    project: { tracker: PollingProjectConfig["tracker"] },
+    env: NodeJS.ProcessEnv,
+    nowMs: number
+  ): boolean => {
+    const token = resolveEnvBackedValue(project.tracker.token, env);
+    return token === undefined || !isGithubBackoffActive(nowMs, token);
+  };
+
+  // Splits `projects` into those whose resolved token isn't currently
+  // backing off (pollable now) and the rest (currently skipped).
+  const partitionProjectsForPolling = (
+    projects: readonly PollingProjectConfig[],
+    env: NodeJS.ProcessEnv,
+    nowMs: number
+  ): PollingProjectConfig[] => {
+    return projects.filter((project) => isProjectPollable(project, env, nowMs));
+  };
+
   const refreshIssuePollStatus = async (): Promise<void> => {
     if (!state.configExists || polling) {
       return;
@@ -556,15 +641,59 @@ export async function startDaemon(
         });
         return;
       }
+      const env = options.env ?? process.env;
+      // Excludes any project whose resolved token is currently backing off
+      // -- config reload above still runs every tick regardless (so an
+      // interval_ms edit or a fixed token still takes effect promptly),
+      // and a project excluded here keeps its issuePollStatus entries and
+      // persisted snapshot exactly as the last successful poll produced
+      // them, same as pollProject's own "leave prior snapshot untouched"
+      // contract on a failed project -- mergeIssuePollStatus below carries
+      // those entries forward instead of a bare replace.
+      const pollableForIssues = partitionProjectsForPolling(
+        snapshot.polling.projects,
+        env,
+        Date.now()
+      );
+      // Always called, even with zero pollable projects (a cheap no-op
+      // loop in that case) -- persistProjectPollState below must still run
+      // every tick regardless, since it also derives projectModes (the
+      // Routine Host dashboard state) from the full config file via
+      // readProjectStateInputs, independent of which projects were
+      // actually polled for GitHub issues this tick.
       const nextStatus = await pollConfiguredGitHubIssuesFromConfig({
-        config: snapshot.polling,
-        ...(options.env === undefined ? {} : { env: options.env }),
+        config: { ...snapshot.polling, projects: pollableForIssues },
+        env,
         ...(options.githubIssuesApi === undefined
           ? {}
           : { githubIssuesApi: options.githubIssuesApi }),
         initialErrors: errors
       });
-      replaceIssuePollStatus(issuePollStatus, nextStatus);
+      engageGithubBackoff(nextStatus.projects, pollableForIssues, env);
+      const polledIssueProjectNames = new Set(
+        pollableForIssues.map((project) => project.name)
+      );
+      // The full configured set (not just pollableForIssues) so a project
+      // removed or renamed by a config reload -- absent from both sets --
+      // has its stale carried-over entries dropped rather than retained
+      // forever; see mergeIssuePollStatus.
+      const configuredIssueProjectNames = new Set(
+        snapshot.polling.projects.map((project) => project.name)
+      );
+      replaceIssuePollStatus(
+        issuePollStatus,
+        mergeIssuePollStatus(
+          issuePollStatus,
+          nextStatus,
+          polledIssueProjectNames,
+          configuredIssueProjectNames
+        )
+      );
+      // Persisted with the polled subset only (not the merged status) --
+      // recordProjectPollOutcome/replaceProjectIssueSnapshots below are
+      // per-project upserts, so a project left out of nextStatus.projects
+      // is simply never touched this tick rather than redundantly
+      // rewritten with the same carried-over data.
       projectModes = await persistProjectPollState(
         runStore,
         state.configPath,
@@ -579,17 +708,33 @@ export async function startDaemon(
       // ticks' worth from overlapping if a poll runs long; a PR-poll
       // failure must not blank out issuePollStatus, which dispatch
       // eligibility depends on, so it's isolated in its own try/catch same
-      // as before.
-      if (!prPolling) {
+      // as before. Re-partitioned rather than reusing pollableForIssues --
+      // the issue poll above may have just engaged backoff for a token,
+      // and that project's PR poll must be excluded from this same tick
+      // too, not just the next one. Unlike the issue poll, genuinely
+      // skipped (not called with an empty list) when nothing is pollable,
+      // since PR-poll persistence has no routine-host-adjacent side effect
+      // to preserve.
+      const pollableForPrs = partitionProjectsForPolling(
+        snapshot.polling.projects,
+        env,
+        Date.now()
+      );
+      if (!prPolling && pollableForPrs.length > 0) {
         prPolling = true;
         void (async () => {
           try {
             const pullRequestStatus =
               await pollConfiguredGitHubPullRequestsFromConfig({
-                config: snapshot.polling,
-                ...(options.env === undefined ? {} : { env: options.env }),
+                config: { ...snapshot.polling, projects: pollableForPrs },
+                env,
                 githubIssuesApi
               });
+            engageGithubBackoff(
+              pullRequestStatus.projects,
+              pollableForPrs,
+              env
+            );
             persistProjectPullRequestPollState(runStore, pullRequestStatus);
             if (pullRequestStatus.errors.length > 0) {
               logger.warn(
@@ -778,14 +923,45 @@ export async function startDaemon(
         ) {
           lastPullRequestFollowupAt = now;
           const snapshot = runtimeConfig.getSnapshot();
+          const projectsByName =
+            snapshot === undefined
+              ? undefined
+              : new Map(
+                  snapshot.polling.projects.map((project) => [
+                    project.name,
+                    project
+                  ])
+                );
           prResult = await runPullRequestFollowup({
             configPath: state.configPath,
             env,
             githubIssuesApi,
             logger,
-            ...(snapshot === undefined
+            ...(snapshot === undefined || projectsByName === undefined
               ? {}
-              : { policy: snapshot.pullRequestPolicy }),
+              : {
+                  onProjectRateLimited: ({ error, projectName }) => {
+                    engageGithubBackoff(
+                      [
+                        {
+                          error: errorMessage(error),
+                          name: projectName,
+                          ok: false
+                        }
+                      ],
+                      snapshot.polling.projects,
+                      env
+                    );
+                  },
+                  policy: snapshot.pullRequestPolicy,
+                  shouldPollProject: (projectName: string) => {
+                    const project = projectsByName.get(projectName);
+                    return (
+                      project !== undefined &&
+                      isProjectPollable(project, env, Date.now())
+                    );
+                  }
+                }),
             projectsLoader,
             runController,
             runStore
@@ -843,7 +1019,35 @@ export async function startDaemon(
           );
           return;
         }
-        const result = await runController.dispatchOneFresh(issuePollStatus);
+        const snapshot = runtimeConfig.getSnapshot();
+        const dispatchableProjectNames = new Set(
+          partitionProjectsForPolling(
+            snapshot?.polling.projects ?? [],
+            env,
+            Date.now()
+          ).map((project) => project.name)
+        );
+        // ADR 0083 deliberately carries backed-off Projects' candidates in
+        // issuePollStatus for status and snapshot continuity. Keep that
+        // shared evidence intact, but do not let a carried-over candidate
+        // cross the fresh-claim boundary while its credential is backing
+        // off: the claim itself is another GitHub label write.
+        const result = await runController.dispatchOneFresh(
+          {
+            ...issuePollStatus,
+            candidateIssues: issuePollStatus.candidateIssues.filter(
+              (candidate) => dispatchableProjectNames.has(candidate.project)
+            )
+          },
+          {
+            // The fire-and-forget PR poll can engage backoff after the
+            // candidate view above is formed while dispatchOneFresh is still
+            // loading config or workflow state. Re-check from inside its
+            // narrowed claim section immediately before sym:claimed.
+            isClaimAllowed: (project) =>
+              isProjectPollable(project, env, Date.now())
+          }
+        );
         if (result.dispatched === false) {
           logger.debug(
             { reason: result.reason },
@@ -905,6 +1109,7 @@ export async function startDaemon(
     }
     pollTimer = setInterval(scheduleTick, intervalMs);
     pollTimer.unref?.();
+    nextPollAtMonotonicMs = performance.now() + intervalMs;
     tickLoopStartedAtMonotonicMs ??= performance.now();
     logger.info(
       { pollingIntervalMs: intervalMs },
@@ -912,6 +1117,9 @@ export async function startDaemon(
     );
   };
   const scheduleTick = (): void => {
+    if (intervalMs !== undefined) {
+      nextPollAtMonotonicMs = performance.now() + intervalMs;
+    }
     enqueueScheduledWork(tick);
   };
   const pollNowSummary = (kind: PollNowResult["kind"]): PollNowResult => ({
@@ -1069,6 +1277,7 @@ export async function startDaemon(
       })),
     getLastTickAt: () => lastTickAtMs,
     getLastTickAtMonotonic: () => lastTickAtMonotonicMs,
+    getNextPollAtMonotonic: () => nextPollAtMonotonicMs,
     getPollingIntervalMs: () => intervalMs,
     getTickLoopStartedAtMonotonic: () => tickLoopStartedAtMonotonicMs,
     monotonicNow: () => performance.now(),
@@ -1138,6 +1347,23 @@ export async function startDaemon(
           freshState: undefined,
           ok: false
         };
+      }
+      const repositoryError = verifySnapshotRepositoryBinding({
+        action: "merging",
+        currentRepository: {
+          owner: project.tracker.owner,
+          repo: project.tracker.repo
+        },
+        renderedRepository: input.snapshotRepository,
+        resolveSnapshotRepository: () =>
+          runStore.getProjectPullRequestSnapshotRepository(
+            input.projectName,
+            input.prNumber
+          ),
+        subjectLabel: `pull request #${input.prNumber}`
+      });
+      if (repositoryError !== undefined) {
+        return { error: repositoryError, freshState: undefined, ok: false };
       }
       const token = resolveToken(project.tracker.token, env);
       if (token === undefined) {
@@ -1225,43 +1451,27 @@ export async function startDaemon(
         };
       }
       const subjectLabel = input.kind === "issue" ? "issue" : "pull request";
-      if (input.snapshotRepository === undefined) {
-        return {
-          error: `${subjectLabel} #${input.subjectNumber} rendered snapshot repository identity is unavailable; reload the page after a successful poll before writing labels`,
-          ok: false
-        };
-      }
-      const snapshotRepository =
-        input.kind === "issue"
-          ? runStore.getProjectIssueSnapshotRepository(
-              input.projectName,
-              input.subjectNumber
-            )
-          : runStore.getProjectPullRequestSnapshotRepository(
-              input.projectName,
-              input.subjectNumber
-            );
-      if (snapshotRepository === undefined) {
-        return {
-          error: `${subjectLabel} #${input.subjectNumber} snapshot repository identity is unavailable; poll the Project successfully before writing labels`,
-          ok: false
-        };
-      }
-      if (!sameGitHubRepository(input.snapshotRepository, snapshotRepository)) {
-        return {
-          error: `rendered snapshot repository ${input.snapshotRepository.owner}/${input.snapshotRepository.repo} does not match current snapshot repository ${snapshotRepository.owner}/${snapshotRepository.repo}; reload the page before writing labels`,
-          ok: false
-        };
-      }
-      const currentRepository: ProjectSnapshotRepository = {
-        owner: project.tracker.owner,
-        repo: project.tracker.repo
-      };
-      if (!sameGitHubRepository(snapshotRepository, currentRepository)) {
-        return {
-          error: `snapshot repository ${snapshotRepository.owner}/${snapshotRepository.repo} does not match current tracker repository ${currentRepository.owner}/${currentRepository.repo}; poll the Project successfully before writing labels`,
-          ok: false
-        };
+      const repositoryError = verifySnapshotRepositoryBinding({
+        action: "writing labels",
+        currentRepository: {
+          owner: project.tracker.owner,
+          repo: project.tracker.repo
+        },
+        renderedRepository: input.snapshotRepository,
+        resolveSnapshotRepository: () =>
+          input.kind === "issue"
+            ? runStore.getProjectIssueSnapshotRepository(
+                input.projectName,
+                input.subjectNumber
+              )
+            : runStore.getProjectPullRequestSnapshotRepository(
+                input.projectName,
+                input.subjectNumber
+              ),
+        subjectLabel: `${subjectLabel} #${input.subjectNumber}`
+      });
+      if (repositoryError !== undefined) {
+        return { error: repositoryError, ok: false };
       }
       const token = resolveToken(project.tracker.token, env);
       if (token === undefined) {
@@ -1334,8 +1544,11 @@ export async function startDaemon(
     resolveWritePath: async (candidatePath: string) => {
       const referenced = await computeReferencedRealPaths({
         configPath: state.configPath,
+        // listRoutines()'s default already excludes state = 'inactive'; disabled_reason
+        // only means anything on state = 'disabled', so this filter alone also excludes
+        // routines dropped from config via the whole-project inactive cascade.
         routineSourcePaths: runStore
-          .listRoutines({ includeInactive: true })
+          .listRoutines()
           .filter((routine) => routine.disabledReason !== "removed_from_config")
           .map((routine) => routine.sourcePath),
         workflowPaths: [...runtimeConfig.projectsByName().values()]
@@ -1383,6 +1596,7 @@ export async function startDaemon(
     if (intervalMs !== undefined) {
       pollTimer = setInterval(scheduleTick, intervalMs);
       pollTimer.unref?.();
+      nextPollAtMonotonicMs = performance.now() + intervalMs;
       tickLoopStartedAtMonotonicMs = performance.now();
     }
   }
@@ -1481,6 +1695,7 @@ export async function startDaemon(
       activeRuns.beginShutdown();
       if (pollTimer !== undefined) {
         clearInterval(pollTimer);
+        nextPollAtMonotonicMs = undefined;
       }
       if (systemdWatchdogTimer !== undefined) {
         clearInterval(systemdWatchdogTimer);
@@ -1666,6 +1881,33 @@ function sameGitHubRepository(
     left.owner.toLowerCase() === right.owner.toLowerCase() &&
     left.repo.toLowerCase() === right.repo.toLowerCase()
   );
+}
+
+// Shared by mergePullRequest and writeIssueLabels (ADR 0078/0077): both bind
+// a rendered form value through the durable snapshot to the current tracker
+// before mutating anything. `resolveSnapshotRepository` stays a callback so a
+// missing rendered value fails closed without an unnecessary store lookup.
+function verifySnapshotRepositoryBinding(input: {
+  action: string;
+  currentRepository: ProjectSnapshotRepository;
+  renderedRepository: ProjectSnapshotRepository | undefined;
+  resolveSnapshotRepository: () => ProjectSnapshotRepository | undefined;
+  subjectLabel: string;
+}): string | undefined {
+  if (input.renderedRepository === undefined) {
+    return `${input.subjectLabel} rendered snapshot repository identity is unavailable; reload the page after a successful poll before ${input.action}`;
+  }
+  const snapshotRepository = input.resolveSnapshotRepository();
+  if (snapshotRepository === undefined) {
+    return `${input.subjectLabel} snapshot repository identity is unavailable; poll the Project successfully before ${input.action}`;
+  }
+  if (!sameGitHubRepository(input.renderedRepository, snapshotRepository)) {
+    return `rendered snapshot repository ${input.renderedRepository.owner}/${input.renderedRepository.repo} does not match current snapshot repository ${snapshotRepository.owner}/${snapshotRepository.repo}; reload the page before ${input.action}`;
+  }
+  if (!sameGitHubRepository(snapshotRepository, input.currentRepository)) {
+    return `snapshot repository ${snapshotRepository.owner}/${snapshotRepository.repo} does not match current tracker repository ${input.currentRepository.owner}/${input.currentRepository.repo}; poll the Project successfully before ${input.action}`;
+  }
+  return undefined;
 }
 
 function timestamp(): string {

@@ -299,7 +299,7 @@ describe("dispatch cancellation", () => {
     }
   });
 
-  it("cancels active run on eligibility loss and removes only sym:running", async () => {
+  it("cancels an active run on eligibility loss and releases its claim", async () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);
     await mkdir(prepared.workspacePath, { recursive: true });
@@ -358,7 +358,7 @@ describe("dispatch cancellation", () => {
         true
       );
       expect(removeCalls.some((call) => call.labels[0] === "sym:claimed")).toBe(
-        false
+        true
       );
 
       const addCalls = githubIssuesApi.addLabelsToIssue.mock.calls.map(

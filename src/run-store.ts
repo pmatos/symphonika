@@ -845,6 +845,42 @@ export type ChangeEvent =
     }
   | { errors: string[]; kind: "reload-outcome"; ok: boolean };
 
+type FiringTransitionChangeEvent = Extract<
+  ChangeEvent,
+  { kind: "firing-transition" }
+>;
+
+type RunTransitionChangeEvent = Extract<
+  ChangeEvent,
+  { kind: "run-transition" }
+>;
+
+type InsertRunRowInput = {
+  evidenceIgnore?: readonly string[];
+  id: string;
+  isContinuation: boolean;
+  issue: IssueSnapshot;
+  parentRunId: string | null;
+  projectName: string;
+  providerCommand: string | null;
+  providerName: AgentProviderName | null;
+  state: RunState;
+};
+
+type CreateRoutineFiringInput = {
+  branchName?: string;
+  branchRef?: string;
+  fanoutId?: string;
+  id: string;
+  projectName: string;
+  providerCommand: string;
+  providerName: AgentProviderName;
+  routineName: string;
+  scheduledAt?: string | null;
+  triggerSource?: RoutineFiringTriggerSource;
+  workspacePath?: string;
+};
+
 export class RunStore {
   private readonly changeListeners = new Set<(event: ChangeEvent) => void>();
   private readonly database: SqliteDatabase;
@@ -865,6 +901,16 @@ export class RunStore {
       } catch {
         // Isolated per docs/adr/0074: a subscriber's failure is its own.
       }
+    }
+  }
+
+  // Publishes events collected from inside a transaction, after the
+  // transaction has committed — see docs/adr/0074 and #433. Publishing
+  // per-entry inside the transaction loop would leak an event for a row
+  // whose write gets rolled back by a later entry's failure.
+  private publishAll(events: readonly ChangeEvent[]): void {
+    for (const event of events) {
+      this.publishChange(event);
     }
   }
 
@@ -894,7 +940,7 @@ export class RunStore {
   }
 
   createRun(input: CreateRunInput): void {
-    this.insertRunRow({
+    this.recordRunRow({
       ...input,
       isContinuation: false,
       parentRunId: null,
@@ -917,7 +963,7 @@ export class RunStore {
     // single SQLite transaction so the row either exists with both fields set
     // or not at all.
     const apply = this.database.transaction(() => {
-      this.insertRunRow({
+      const event = this.insertRunRow({
         id: input.id,
         isContinuation: true,
         issue: input.issue,
@@ -928,8 +974,9 @@ export class RunStore {
         state: "waiting"
       });
       this.setRunCurrentState(input.id, input.currentStateId);
+      return event;
     });
-    apply();
+    this.publishChange(apply());
   }
 
   // Includes cancel-requested rows on purpose: a waiting run cancelled via
@@ -980,7 +1027,7 @@ export class RunStore {
       parentRunId: string;
     }
   ): void {
-    this.insertRunRow({
+    this.recordRunRow({
       ...(input.evidenceIgnore === undefined
         ? {}
         : { evidenceIgnore: input.evidenceIgnore }),
@@ -1012,7 +1059,7 @@ export class RunStore {
     projectName: string;
     reason: string;
   }): void {
-    this.insertRunRow({
+    this.recordRunRow({
       id: input.id,
       isContinuation: true,
       issue: input.issue,
@@ -1360,17 +1407,11 @@ export class RunStore {
     }));
   }
 
-  private insertRunRow(input: {
-    evidenceIgnore?: readonly string[];
-    id: string;
-    isContinuation: boolean;
-    issue: IssueSnapshot;
-    parentRunId: string | null;
-    projectName: string;
-    providerCommand: string | null;
-    providerName: AgentProviderName | null;
-    state: RunState;
-  }): void {
+  private recordRunRow(input: InsertRunRowInput): void {
+    this.publishChange(this.insertRunRow(input));
+  }
+
+  private insertRunRow(input: InsertRunRowInput): RunTransitionChangeEvent {
     const now = timestamp();
     this.database
       .prepare(
@@ -1403,7 +1444,7 @@ export class RunStore {
         state: input.state,
         updated_at: now
       });
-    this.recordRunTransition(input.id, input.state, now);
+    return this.insertRunTransition(input.id, input.state, now);
   }
 
   countSucceededContinuations(
@@ -1457,18 +1498,15 @@ export class RunStore {
           });
       }
 
-      const rows = this.database
-        .prepare("select project_name from project_states where active = 1")
-        .all() as { project_name: string }[];
-      for (const row of rows) {
-        if (activeNames.has(row.project_name)) {
+      for (const projectName of this.listActiveProjectNames()) {
+        if (activeNames.has(projectName)) {
           continue;
         }
         this.database
           .prepare(
             "update project_states set active = 0, validation_state = 'inactive', validation_message = null, updated_at = ? where project_name = ?"
           )
-          .run(now, row.project_name);
+          .run(now, projectName);
       }
     });
     apply();
@@ -1582,6 +1620,15 @@ export class RunStore {
       )
       .all() as ProjectStateRow[];
     return rows.map((row) => mapProjectStateRow(row));
+  }
+
+  listActiveProjectNames(): string[] {
+    const rows = this.database
+      .prepare(
+        "select project_name from project_states where active = 1 order by project_name asc"
+      )
+      .all() as { project_name: string }[];
+    return rows.map((row) => row.project_name);
   }
 
   replaceProjectIssueSnapshots(input: ReplaceProjectIssueSnapshotsInput): void {
@@ -2782,19 +2829,13 @@ export class RunStore {
     return result.changes > 0;
   }
 
-  createRoutineFiring(input: {
-    branchName?: string;
-    branchRef?: string;
-    fanoutId?: string;
-    id: string;
-    projectName: string;
-    providerCommand: string;
-    providerName: AgentProviderName;
-    routineName: string;
-    scheduledAt?: string | null;
-    triggerSource?: RoutineFiringTriggerSource;
-    workspacePath?: string;
-  }): void {
+  createRoutineFiring(input: CreateRoutineFiringInput): void {
+    this.publishChange(this.insertRoutineFiring(input));
+  }
+
+  private insertRoutineFiring(
+    input: CreateRoutineFiringInput
+  ): FiringTransitionChangeEvent {
     const now = timestamp();
     this.database
       .prepare(
@@ -2821,7 +2862,7 @@ export class RunStore {
         updated_at: now,
         workspace_path: input.workspacePath ?? null
       });
-    this.recordRoutineFiringTransition(input.id, "queued", now);
+    return this.insertRoutineFiringTransition(input.id, "queued", now);
   }
 
   claimRoutineFiring(input: {
@@ -2840,7 +2881,7 @@ export class RunStore {
     workspacePath?: string;
   }): boolean {
     const claim = this.database.transaction(() => {
-      this.createRoutineFiring({
+      const event = this.insertRoutineFiring({
         ...(input.branchName === undefined
           ? {}
           : { branchName: input.branchName }),
@@ -2899,9 +2940,11 @@ export class RunStore {
           throw new RoutineAlreadyClaimedError();
         }
       }
+      return event;
     });
     try {
-      claim();
+      const event = claim();
+      this.publishChange(event);
       return true;
     } catch (error) {
       if (error instanceof RoutineAlreadyClaimedError) {
@@ -2940,7 +2983,7 @@ export class RunStore {
       if (eligible === undefined) {
         throw new RoutineAlreadyClaimedError();
       }
-      this.createRoutineFiring({
+      return this.insertRoutineFiring({
         ...(input.branchName === undefined
           ? {}
           : { branchName: input.branchName }),
@@ -2960,7 +3003,8 @@ export class RunStore {
       });
     });
     try {
-      claim();
+      const event = claim();
+      this.publishChange(event);
       return true;
     } catch (error) {
       if (error instanceof RoutineAlreadyClaimedError) {
@@ -4273,6 +4317,7 @@ export class RunStore {
       ].join(" ")
     );
     const apply = this.database.transaction(() => {
+      const events: RunTransitionChangeEvent[] = [];
       for (const entry of entries) {
         const updatedAt = timestamp();
         update.run(entry.reason, updatedAt, entry.runId);
@@ -4283,11 +4328,14 @@ export class RunStore {
         // unconfirmed, unboundedly, in a table rendered verbatim on the
         // dashboard.
         if (entry.previousState !== "stale") {
-          this.recordRunTransition(entry.runId, "stale", updatedAt);
+          events.push(
+            this.insertRunTransition(entry.runId, "stale", updatedAt)
+          );
         }
       }
+      return events;
     });
-    apply();
+    this.publishAll(apply());
   }
 
   findLeakedRoutineFirings(): {
@@ -4352,6 +4400,7 @@ export class RunStore {
       ].join(" ")
     );
     const apply = this.database.transaction(() => {
+      const events: FiringTransitionChangeEvent[] = [];
       for (const entry of entries) {
         const updatedAt = timestamp();
         update.run(entry.reason, updatedAt, entry.firingId);
@@ -4359,15 +4408,18 @@ export class RunStore {
         // already 'failed') isn't changing state, so skip the duplicate
         // transition record.
         if (entry.previousState !== "failed") {
-          this.recordRoutineFiringTransition(
-            entry.firingId,
-            "failed",
-            updatedAt
+          events.push(
+            this.insertRoutineFiringTransition(
+              entry.firingId,
+              "failed",
+              updatedAt
+            )
           );
         }
       }
+      return events;
     });
-    apply();
+    this.publishAll(apply());
   }
 
   failLegacyInputRequiredRuns(
@@ -4409,6 +4461,7 @@ export class RunStore {
       ].join(" ")
     );
     const apply = this.database.transaction(() => {
+      const events: RunTransitionChangeEvent[] = [];
       for (const entry of migrated) {
         const updatedAt = timestamp();
         update.run(
@@ -4416,10 +4469,11 @@ export class RunStore {
           updatedAt,
           entry.runId
         );
-        this.recordRunTransition(entry.runId, "failed", updatedAt);
+        events.push(this.insertRunTransition(entry.runId, "failed", updatedAt));
       }
+      return events;
     });
-    apply();
+    this.publishAll(apply());
     return migrated;
   }
 
@@ -4935,13 +4989,21 @@ export class RunStore {
     state: RunState,
     createdAt: string
   ): void {
+    this.publishChange(this.insertRunTransition(runId, state, createdAt));
+  }
+
+  private insertRunTransition(
+    runId: string,
+    state: RunState,
+    createdAt: string
+  ): RunTransitionChangeEvent {
     const sequence = nextTransitionSequence(this.database, runId);
     this.database
       .prepare(
         "insert into run_state_transitions (run_id, sequence, state, created_at) values (?, ?, ?, ?)"
       )
       .run(runId, sequence, state, createdAt);
-    this.publishChange({ kind: "run-transition", runId, sequence, state });
+    return { kind: "run-transition", runId, sequence, state };
   }
 
   private recordRoutineFiringTransition(
@@ -4949,6 +5011,16 @@ export class RunStore {
     state: RoutineFiringState,
     createdAt: string
   ): void {
+    this.publishChange(
+      this.insertRoutineFiringTransition(firingId, state, createdAt)
+    );
+  }
+
+  private insertRoutineFiringTransition(
+    firingId: string,
+    state: RoutineFiringState,
+    createdAt: string
+  ): FiringTransitionChangeEvent {
     const sequence = nextRoutineFiringTransitionSequence(
       this.database,
       firingId
@@ -4958,12 +5030,12 @@ export class RunStore {
         "insert into routine_firing_state_transitions (firing_id, sequence, state, created_at) values (?, ?, ?, ?)"
       )
       .run(firingId, sequence, state, createdAt);
-    this.publishChange({
+    return {
       firingId,
       kind: "firing-transition",
       sequence,
       state
-    });
+    };
   }
 
   private latestRoutinePullRequestNumbers(

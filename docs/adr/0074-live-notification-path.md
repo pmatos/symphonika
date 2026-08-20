@@ -17,18 +17,18 @@ Two shapes were on the table:
   wakes on change and diffs rendered fragments. Fewer call sites, coarser granularity, and a
   built-in fallback if a mutation forgets to bump.
 
-The "touching every mutation site" cost turned out not to apply here. `RunStore` already funnels
-essentially every Run/Firing state change through two private methods:
+The "touching every mutation site" cost turned out not to apply here. `RunStore` funnels Run and
+Routine Firing transition persistence through `insertRunTransition` and
+`insertRoutineFiringTransition`. Their `recordRunTransition` and
+`recordRoutineFiringTransition` wrappers cover mutations that are not part of a wider transaction:
+each wrapper persists one transition and immediately publishes the returned event.
 
-- `recordRunTransition` — called from `insertRunRow` (a new Run's initial state, i.e. the dispatch
-  decision), `updateRunState`, and the two stale/failed sweep paths. 5 call sites total.
-- `recordRoutineFiringTransition` — called from the Firing insert (`queued`, i.e. its own dispatch
-  decision), `updateRoutineFiringState`, `completeRoutineFiring`, and the sweep path. 5 call sites
-  total.
-
-Both are already the single place every state write passes through, so instrumenting them gives
-precise per-mutation events at close to version-counter cost, without a parallel "did every writer
-remember to bump the counter" discipline to maintain. `recordProjectPollOutcome` is the same shape
+Transactional mutations cannot use those publishing wrappers safely. Scheduled and manual Routine
+Firing claims, atomic waiting-Run creation, startup orphan sweeps, and legacy `input_required`
+backfill instead persist through the `insert*Transition` primitives, return or collect their typed
+events from the transaction callback, and publish only after the transaction returns successfully.
+This keeps transition persistence centralized without letting an in-process subscriber observe a
+write that SQLite later rolls back. `recordProjectPollOutcome` remains the equivalent single path
 for poll completion: one method, called once per project per tick from `persistProjectPollState`.
 
 Reload outcome is the one signal that does not live on `RunStore` — it is decided in `daemon.ts`'s
@@ -45,13 +45,26 @@ needs no cross-process transport, no queue, no polling of the database for chang
 
 ## Decision
 
-### `RunStore` owns a change bus; three existing methods publish to it
+### `RunStore` owns a change bus; transactional callers publish only after commit
 
 `RunStore` gets a `Set<(event: ChangeEvent) => void>` of listeners, a private `publishChange`, and
-a public `subscribeToChanges(listener): () => void` (the returned function unsubscribes).
-`recordRunTransition`, `recordRoutineFiringTransition`, and `recordProjectPollOutcome` each call
-`publishChange` as their last line. `publishReloadOutcome` is a fourth, public entry point called
-once per tick from `daemon.ts`.
+a public `subscribeToChanges(listener): () => void` (the returned function unsubscribes). Run and
+Routine Firing transitions have two explicit persistence/delivery paths:
+
+- A mutation with no enclosing transaction calls `recordRunTransition` or
+  `recordRoutineFiringTransition`. The wrapper persists through its `insert*Transition` primitive
+  and publishes the returned event as its last step.
+- A mutation inside a wider SQLite transaction calls `insertRunTransition` or
+  `insertRoutineFiringTransition` directly. The transaction callback returns one event or an event
+  list; its caller publishes those events only after the transaction has committed successfully.
+  A thrown callback or commit failure therefore publishes nothing.
+
+Firing-row insertion follows the same split: `insertRoutineFiring` persists the row and queued
+transition and returns the event; `createRoutineFiring` publishes directly, while scheduled and
+manual claim methods publish only after their transactions commit. Run-row insertion likewise
+returns its initial transition event so atomic waiting-Run creation cannot leak a rolled-back
+`waiting` event. `recordProjectPollOutcome` publishes poll completion directly, and
+`publishReloadOutcome` is a public entry point called once per tick from `daemon.ts`.
 
 ```ts
 export type ChangeEvent =
@@ -64,6 +77,12 @@ export type ChangeEvent =
 A listener that throws (a broken SSE write, most likely) is isolated with a per-listener
 `try`/`catch` inside `publishChange` — a state-transition write must never fail because one
 subscriber's connection is in a bad state.
+
+This is commit-safe in-process invalidation, not a transactional outbox. A process crash after the
+database commits but before `publishChange` runs may lose an event. That is acceptable because
+events are invalidation signals rather than durable evidence, and reconnect performs a reconciling
+fragment fetch as described below. Publishing before commit is not acceptable because it would
+invent state that the reconciling read cannot find.
 
 ### Events are invalidation signals, not a replay log
 
@@ -93,6 +112,15 @@ while connected:
   if queue still empty: send a heartbeat comment, continue
   send the next queued event as an SSE message
 ```
+
+Each connection retains at most 100 pending events. If a publisher finds that queue full — whether
+because the subscriber itself is lagging, or because a single publish burst outran the read loop's
+next turn — the handler clears its retained event references, unsubscribes immediately so the rest
+of that publish burst costs nothing more for this connection, and aborts that stream. Dropping the
+oldest event or coalescing by event kind would also bound memory, but either can create a silent gap
+while the client still treats its connection as authoritative. Disconnecting instead uses the
+already-required `EventSource` reconnect and full-fragment reconciliation path, preserving the
+no-replay contract while bounding a stalled tab or proxy's memory use. See #432.
 
 An idle daemon (no Run/Firing/poll/reload activity) sends nothing but a heartbeat every
 `SSE_HEARTBEAT_MS` (20s) — fixed, low-frequency keepalive traffic to hold the connection open
@@ -152,9 +180,12 @@ in-region preservation, because no in-region state exists to preserve.
 `EventSource` already reconnects on its own at a fixed retry interval; this slice does not
 hand-roll a custom backoff on top of it; there is no evidence yet that the browser's default retry
 cadence is a problem for a same-machine, same-process daemon. The client's `error` listener shows a
-`#live-stream-banner` ("Live updates disconnected... Refresh"); the `open` listener (fired on first
-connect and every successful reconnect) hides it and triggers one reconciling fetch of both
-fragments — the client-side counterpart to "no replay on reconnect" above.
+`#live-stream-banner` ("Live updates unavailable... Refresh"). The `open` listener (fired on first
+connect and every successful reconnect) triggers one reconciling fetch of both fragments and hides
+the banner only after both refreshes succeed. An HTTP, network, or body-read failure keeps the
+last-good fragment and shows the same banner, so a failed reconciliation cannot leave stale data
+presented as current when no later invalidation arrives. This is the client-side counterpart to
+"no replay on reconnect" above.
 
 ### Testability without a build step
 
@@ -170,14 +201,17 @@ reimplementation of it.
 
 ## Consequences
 
-- `RunStore` gains a fourth responsibility (change notification) alongside persistence, but it adds
-  four call sites total to already-existing chokepoints, not one per mutation — the risk the
-  version-counter alternative was chosen to avoid didn't materialize once the chokepoints were
-  checked.
+- `RunStore` gains a fourth responsibility (change notification) alongside persistence, but
+  transition rows still pass through two typed insertion chokepoints. Mutation sites choose the
+  immediate `record*Transition` wrapper or the post-commit `insert*Transition` path according to
+  whether they are enclosed by a wider transaction.
 - No delivery guarantee across a disconnect. This is a deliberate trade for a much simpler server
   (no sequence log, no per-client cursor persistence) and is only safe because every event is
   paired with a page that can be re-fetched in full to reconcile — there is no case in this app
   where an event is the only record of something that happened.
+- A subscriber that accumulates 100 pending events is deliberately disconnected on the next event.
+  This bounds per-connection retention and makes overload visible through the same stream-down and
+  reconnect behavior as any other transport gap.
 - `#305` shipped as two stacked PRs: the first (the notification path, the SSE endpoint,
   degradation and leak-safety at the transport level, all independently testable without a
   browser) and this second one (the dashboard's fragment endpoints, the embedded client script,
@@ -189,8 +223,10 @@ reimplementation of it.
   wording ("the active band and the affected Project row"). `/runs/:id`, `/firings/:id`,
   `/routines/:name`, and `/projects/:name` still require a manual reload to see a transition; wiring
   those up is follow-on work, not part of `#305`'s stated scope.
-- A future mutation site that changes user-visible state but isn't one of the four instrumented
-  methods will not notify anyone — same class of risk the "store emits events" option always
-  carried, just narrowed to four places rather than every `RunStore` method. If a fifth chokepoint
-  is needed later (e.g. an editor save in `#307`), add it the same way: a `publishChange` call at
-  the one place that state actually changes.
+- A future mutation site that changes user-visible state but bypasses these instrumented persistence
+  paths will not notify anyone — the same class of risk the "store emits events" option always
+  carried. New non-transactional Run/Firing mutations use the `record*Transition` wrappers. New
+  transactional mutations must use the `insert*Transition` primitives and publish their returned
+  events only after the transaction returns; calling a publishing wrapper from inside a transaction
+  reintroduces the rolled-back-event bug fixed by `#433`. A new state category (for example an
+  editor save in `#307`) needs its own equivalent chokepoint and the same commit boundary rule.

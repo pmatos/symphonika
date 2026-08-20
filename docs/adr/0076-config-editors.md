@@ -35,12 +35,16 @@ Preview is a POST, not GET-with-query-string, because the content can be arbitra
 nothing: it does meaningful server-side work (parse + validate) against caller-supplied content,
 and there's no reason a foreign origin should reach that either.
 
-### The diff renderer is a hand-rolled LCS, not a dependency
+### The diff renderer uses a bounded hand-rolled LCS, not a dependency
 
 `renderLineDiff` (`src/http/pages.ts`) is a straightforward O(n·m) longest-common-subsequence line
-diff, not a library. The two inputs are always already-in-memory strings — a routine declaration,
-workflow contract, or service config, never a multi-megabyte file — so the quadratic table is
-never a real cost, and pulling in a diff dependency for three call sites would be the wrong trade.
+diff for ordinary inputs, not a library. Its table is capped at 1,000,000 cells and the cap is
+checked before allocation. A larger pair uses a linear-space coarse diff that preserves the common
+prefix and suffix, renders the complete changed middle as removals and additions, and labels the
+preview so the operator knows unchanged lines inside that middle may appear changed. This keeps the
+exact behavior for routine-sized files without letting an unexpectedly large editor submission
+allocate an unbounded quadratic table; pulling in a diff dependency for three call sites remains
+the wrong trade.
 
 ### Located errors: line/column only where the parser actually gives it
 
@@ -148,11 +152,15 @@ incidental reuse; it is the mechanism by which "every save goes through #306's p
 AC) and "a diff against on-disk content is shown before every write" (`#307` AC) hold for the
 toggle too, without a second write path to keep in sync with the first.
 
-The toggle button offered on `/routines/:name` is decided from the representative target's
-`disabledReason`: `operator` → "Enable routine"; `removed_from_config` → neither button (that state
-is controlled by config file inclusion, not an operator action here); anything else → "Disable
-routine". Every target sharing a declaration is expected to agree on `disabledReason` (ADR-0069's
-fan-out — one file, one shared row per target), so the representative is sufficient.
+The toggle button offered on `/routines/:name` is decided from a target still backed by the current
+declaration: `operator` → "Enable routine"; anything else → "Disable routine". An `operator` target
+takes precedence over other current targets because a Project-cascade `inactive` target clears its
+routine-level `disabledReason`; when every current target is inactive, the page parses valid
+front matter for the shared declaration's `disabled` state instead. A target removed from the
+declaration can remain as a durable `removed_from_config` row beside current siblings (ADR-0069's
+per-target removal semantics), so it is not eligible to represent the declaration's lifecycle
+state. When every target has `disabledReason = removed_from_config`, neither button is shown because
+restoring config inclusion, not this action, is what re-enables the Routine.
 
 ### Firing cancellation needed a UI control and a redirect fix, not a new cancel mechanism
 
@@ -176,6 +184,14 @@ attacker-controlled; it comes from `resolveRoutineDeclaration`, itself derived f
 already looked up against the run store, so there is no arbitrary-file-read surface to confine.
 Confining a read that can only ever target a legitimately-tracked declaration would add a check
 with nothing to check against.
+
+For a symlinked Workflow Contract, confirm deliberately keeps two paths: `resolveWritePath`'s real
+target is used for the stale check and atomic rename so the save updates the target without
+replacing the symlink, while the configured logical Workflow Contract path is passed separately as
+`runSavePipeline.validationPath`. Reload calls `readWorkflowSnapshot` with that same logical path,
+so relative raw-FSM prompt references must be validated from its directory. Validating from the
+resolved target's directory would let preview and reload agree while confirm alone rejects (or
+accepts) the same submitted contract against a different filesystem base.
 
 ### Ambiguous name resolution reuses the existing disambiguation page
 

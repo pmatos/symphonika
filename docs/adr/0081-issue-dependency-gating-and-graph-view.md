@@ -81,6 +81,23 @@ separate "resolved" boolean anywhere in the data model, keeping "is this blocker
 predicate (`state !== "CLOSED"`) evaluated at each gate site instead of a persisted derived fact that
 could drift from the field it's derived from.
 
+### A Continuation Eligibility rejection releases label-controlled work
+
+Label-controlled retries and Continuations re-run the Dependency Gate before starting. If that
+check rejects the work, Symphonika cancels the retry row when one exists and releases
+`sym:claimed`; a Continuation rejected either before scheduling or when its one-shot callback fires
+also releases `sym:claimed`. The completed callback is no longer an Issue Reservation, so retaining
+the claim would cause stale-claim detection to add `sym:stale` and prevent the Issue from becoming
+dispatchable after its blocker closes. A dependency-fetch failure still fails the current check
+closed through `blockedByTruncated`, but it cannot turn that conservative decision into a permanent
+manual-cleanup requirement.
+
+This is cancellation and claim release, not a dependency-specific waiting state. Once the blocker
+is resolved, a later poll may freshly dispatch the Issue and reuse its deterministic Workspace and
+Branch. Label-filter loss follows the same cleanup rule rather than introducing a second mapping;
+see ADR 0023. Whether the Dependency Gate also applies to raw-FSM State Advances and label-immune
+retries remains the separate ADR 0046/0081 interaction tracked by issue #474.
+
 ### The dependency reason reuses the existing `reasons` → verdict pipeline, on purpose
 
 An unresolved dependency is pushed onto the same `reasons` array `evaluateProjectEligibility` already

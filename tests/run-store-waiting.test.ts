@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { IssueSnapshot } from "../src/issue-polling.js";
+import type { ChangeEvent } from "../src/run-store.js";
 import { openRunStore, RunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
@@ -137,6 +138,8 @@ describe("RunStore waiting-run helpers", () => {
 
     try {
       seedParent(store, "parent-atomic");
+      const events: ChangeEvent[] = [];
+      store.subscribeToChanges((event) => events.push(event));
 
       expect(() =>
         store.createWaitingRun({
@@ -152,6 +155,7 @@ describe("RunStore waiting-run helpers", () => {
       expect(
         store.listRuns().find((entry) => entry.id === "wait-atomic")
       ).toBeUndefined();
+      expect(events).toEqual([]);
     } finally {
       spy.mockRestore();
       store.close();

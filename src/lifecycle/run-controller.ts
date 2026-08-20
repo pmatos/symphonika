@@ -219,6 +219,10 @@ export type RunControllerOptions = {
 export type DispatchOneFreshResult =
   { dispatched: false; reason: string } | { dispatched: true; runId: string };
 
+export type DispatchOneFreshOptions = {
+  isClaimAllowed?: (project: DispatchProjectConfig) => boolean;
+};
+
 export type ReviewFollowupContext = {
   headSha: string;
   pullRequestNumber: number;
@@ -311,6 +315,10 @@ type ContinuationPayload = {
   issue: IssueSnapshot;
   parentRunId: string;
   projectName: string;
+  // Preserve the parent Run's Continuation Eligibility ownership while the
+  // one-shot callback is delayed. Label-immune PR Follow-up work must not
+  // release its claim solely because labels drift before the callback fires.
+  respectsIssueLabels?: boolean;
 };
 
 type StateAdvancePayload = {
@@ -346,6 +354,10 @@ class CapBreachedError extends Error {
 
 class IssueReservedError extends Error {
   readonly name = "IssueReservedError";
+}
+
+class FreshClaimDeferredError extends Error {
+  readonly name = "FreshClaimDeferredError";
 }
 
 export class RunController {
@@ -403,7 +415,8 @@ export class RunController {
   }
 
   async dispatchOneFresh(
-    pollStatus: IssuePollStatus
+    pollStatus: IssuePollStatus,
+    options: DispatchOneFreshOptions = {}
   ): Promise<DispatchOneFreshResult> {
     // Snapshot candidates before any await so a concurrent poll cannot wipe them.
     const candidates = pollStatus.candidateIssues.slice();
@@ -448,6 +461,12 @@ export class RunController {
       repo: target.project.tracker.repo,
       token
     };
+    const claimProject = target.project;
+    const isClaimAllowed = options.isClaimAllowed;
+    const claimGuard =
+      isClaimAllowed === undefined
+        ? undefined
+        : () => isClaimAllowed(claimProject);
 
     // Honor action.provider on the initial raw-FSM state, matching the
     // per-state routing executeStateAdvance applies to subsequent advances.
@@ -489,6 +508,7 @@ export class RunController {
         providerCommand.trim().length === 0
       ) {
         await this.failFreshDispatchBeforeProvider({
+          ...(claimGuard === undefined ? {} : { claimGuard }),
           issue: target.candidate.issue,
           project: target.project,
           providerCommand: providerCommand ?? "",
@@ -503,6 +523,7 @@ export class RunController {
       const provider = this.agentProviders[providerName];
       if (provider === undefined) {
         await this.failFreshDispatchBeforeProvider({
+          ...(claimGuard === undefined ? {} : { claimGuard }),
           issue: target.candidate.issue,
           project: target.project,
           providerCommand,
@@ -516,6 +537,7 @@ export class RunController {
 
       await this.runFreshLifecycle({
         attemptNumber: 1,
+        ...(claimGuard === undefined ? {} : { claimGuard }),
         isContinuation: false,
         issue: target.candidate.issue,
         parentRunId: null,
@@ -537,15 +559,17 @@ export class RunController {
       }
       if (
         error instanceof CapBreachedError ||
-        error instanceof IssueReservedError
+        error instanceof IssueReservedError ||
+        error instanceof FreshClaimDeferredError
       ) {
-        // A concurrent dispatch took the slot between
-        // pickTargetFromCandidates (lock-free) and claimAndPersistRun's
-        // in-mutex re-check. Next tick will pick this candidate again once
-        // the cap clears. See ADR 0053.
+        // A concurrent dispatch may have taken the slot between the
+        // lock-free picker and claimAndPersistRun's in-mutex re-check, or a
+        // caller-owned admission guard may have closed in that same window.
+        // A later tick can reconsider the candidate once the gate clears.
+        // See ADR 0053 / ADR 0083.
         this.logger?.debug(
           { reason: error.message, runId },
-          "symphonika fresh dispatch skipped: contended at claim"
+          "symphonika fresh dispatch skipped at claim boundary"
         );
         return { dispatched: false, reason: error.message };
       }
@@ -556,6 +580,7 @@ export class RunController {
   }
 
   private async failFreshDispatchBeforeProvider(input: {
+    claimGuard?: () => boolean;
     issue: IssueSnapshot;
     project: RunControllerProjectConfig;
     providerCommand: string;
@@ -567,6 +592,11 @@ export class RunController {
     if (this.activeRuns.isShuttingDown()) {
       throw new RegistryShutdownError(
         `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
+      );
+    }
+    if (input.claimGuard?.() === false) {
+      throw new FreshClaimDeferredError(
+        `fresh issue claim deferred for project ${input.project.name}`
       );
     }
     await this.bestEffort(
@@ -1586,23 +1616,11 @@ export class RunController {
     repository: GitHubIssueRepositoryInput;
     runId: string;
   }): Promise<void> {
-    await this.bestEffort(
-      () =>
-        (
-          this.githubIssuesApi as LabelWritingGitHubIssuesApi
-        ).removeLabelsFromIssue({
-          ...input.repository,
-          issueNumber: input.issueNumber,
-          labels: ["sym:claimed"]
-        }),
-      {
-        issueNumber: input.issueNumber,
-        label: "sym:claimed",
-        operation: "removeLabel",
-        project: input.projectName,
-        runId: input.runId
-      }
-    );
+    await this.releaseIssueClaim({
+      issueNumber: input.issueNumber,
+      phase: input.phase,
+      repository: input.repository
+    });
     this.logger?.debug(
       { issueNumber: input.issueNumber, runId: input.runId },
       `symphonika ${
@@ -1845,12 +1863,32 @@ export class RunController {
       );
       return;
     }
+    if (refreshed === null || refreshed.state !== "open") {
+      // Issue closure ends every Continuation Eligibility scope. The
+      // one-shot callback has been consumed and no replacement step will be
+      // scheduled, so the Issue Reservation ends here. See SPEC section 9.3.
+      await this.releaseIssueClaim({
+        issueNumber: payload.issue.number,
+        phase: "continuation-closed-issue",
+        repository
+      });
+      return;
+    }
     if (
-      refreshed === null ||
       !evaluateRunContinuationEligibility(refreshed, project, {
         scope: "label_controlled"
       }).eligible
     ) {
+      // Label/dependency drift ends a label-controlled reservation, but a
+      // PR Follow-up Run remains workflow-owned and may share the claim with
+      // a parked/waiting Run. Preserve that label-immune reservation.
+      if (payload.respectsIssueLabels !== false) {
+        await this.releaseIssueClaim({
+          issueNumber: payload.issue.number,
+          phase: "continuation-eligibility-loss",
+          repository
+        });
+      }
       return;
     }
 
@@ -1899,6 +1937,9 @@ export class RunController {
         providerCommand,
         providerName,
         repository,
+        ...(payload.respectsIssueLabels === undefined
+          ? {}
+          : { respectsIssueLabels: payload.respectsIssueLabels }),
         runId
       });
     } catch (error) {
@@ -2204,6 +2245,7 @@ export class RunController {
 
   private async runFreshLifecycle(input: {
     attemptNumber: number;
+    claimGuard?: () => boolean;
     extraInstructions?: string;
     inheritParentState?: boolean;
     isContinuation: boolean;
@@ -2255,6 +2297,7 @@ export class RunController {
   }
 
   private async claimAndPersistRun(input: {
+    claimGuard?: () => boolean;
     inheritParentState?: boolean;
     isContinuation: boolean;
     issue: IssueSnapshot;
@@ -2314,6 +2357,12 @@ export class RunController {
     ) {
       throw new IssueReservedError(
         `issue ${input.project.name}#${input.issue.number} is already reserved`
+      );
+    }
+
+    if (input.claimGuard?.() === false) {
+      throw new FreshClaimDeferredError(
+        `fresh issue claim deferred for project ${input.project.name}`
       );
     }
 
@@ -3370,21 +3419,20 @@ export class RunController {
           phase: "cancelled"
         }
       );
+      if (
+        reason === CANCEL_REASONS.CLOSED_ISSUE ||
+        reason === CANCEL_REASONS.ELIGIBILITY_LOSS
+      ) {
+        await this.releaseIssueClaim({
+          issueNumber: input.issueNumber,
+          phase:
+            reason === CANCEL_REASONS.CLOSED_ISSUE
+              ? "closed-issue-cleanup"
+              : "eligibility-loss-cleanup",
+          repository: input.repository
+        });
+      }
       if (reason === CANCEL_REASONS.CLOSED_ISSUE) {
-        await this.bestEffort(
-          () =>
-            api.removeLabelsFromIssue({
-              ...input.repository,
-              issueNumber: input.issueNumber,
-              labels: ["sym:claimed"]
-            }),
-          {
-            issueNumber: input.issueNumber,
-            label: "sym:claimed",
-            operation: "removeLabel",
-            phase: "closed-issue-cleanup"
-          }
-        );
         await this.bestEffort(
           () =>
             api.removeLabelsFromIssue({
@@ -3483,6 +3531,36 @@ export class RunController {
         });
       }
     }
+  }
+
+  private async releaseIssueClaim(input: {
+    issueNumber: number;
+    phase:
+      | "closed-issue-cleanup"
+      | "continuation"
+      | "continuation-closed-issue"
+      | "continuation-eligibility-loss"
+      | "continuation-scheduling-closed-issue"
+      | "continuation-scheduling-eligibility-loss"
+      | "eligibility-loss-cleanup"
+      | "state-advance";
+    repository: GitHubIssueRepositoryInput;
+  }): Promise<void> {
+    const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
+    await this.bestEffort(
+      () =>
+        api.removeLabelsFromIssue({
+          ...input.repository,
+          issueNumber: input.issueNumber,
+          labels: ["sym:claimed"]
+        }),
+      {
+        issueNumber: input.issueNumber,
+        label: "sym:claimed",
+        operation: "removeLabel",
+        phase: input.phase
+      }
+    );
   }
 
   private async scheduleNext(input: {
@@ -3694,12 +3772,36 @@ export class RunController {
     if (refreshed === undefined) {
       return;
     }
+    if (refreshed === null || refreshed.state !== "open") {
+      // Issue closure ends every Continuation Eligibility scope, including
+      // label-immune PR Follow-up work. The completed run has already
+      // released its in-flight slot and no continuation will be scheduled,
+      // so the Issue Reservation ends here. See SPEC section 9.3.
+      await this.releaseIssueClaim({
+        issueNumber: input.issue.number,
+        phase: "continuation-scheduling-closed-issue",
+        repository: input.repository
+      });
+      return;
+    }
     if (
-      refreshed === null ||
       !evaluateRunContinuationEligibility(refreshed, input.project, {
         scope: "label_controlled"
       }).eligible
     ) {
+      // Raw-FSM mid-walk / label-immune runs (respectsIssueLabels === false,
+      // e.g. a PR Follow-up dispatch) intentionally never gate continuation
+      // scheduling on labels_all/labels_none (see ADR 0046), so ineligibility
+      // on an open issue is expected steady state, not a lost reservation —
+      // releasing sym:claimed for it would strip the claim out from under a
+      // still-live parked/waiting Run that owns the same Issue Reservation.
+      if (input.respectsIssueLabels !== false) {
+        await this.releaseIssueClaim({
+          issueNumber: input.issue.number,
+          phase: "continuation-scheduling-eligibility-loss",
+          repository: input.repository
+        });
+      }
       return;
     }
 
@@ -3764,7 +3866,10 @@ export class RunController {
         this.executeContinuation({
           issue: refreshed,
           parentRunId: input.runId,
-          projectName: input.project.name
+          projectName: input.project.name,
+          ...(input.respectsIssueLabels === false
+            ? { respectsIssueLabels: false }
+            : {})
         }),
       issueNumber: refreshed.number,
       kind: "continuation",

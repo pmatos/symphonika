@@ -88,6 +88,16 @@ schedule:
 Audit the codebase.
 `;
 
+const DISABLED_DECLARATION = `---
+name: audit
+kind: report
+disabled: true
+schedule:
+  at: "2026-05-22T10:00:00.000Z"
+---
+Audit the codebase.
+`;
+
 type TestSetup = {
   cleanup: () => void;
   routinePath: string;
@@ -135,6 +145,143 @@ describe("routine disable/enable (#307 part 4, ADR 0076)", () => {
       expect(html).toContain('action="/routines/audit/disable"');
       expect(html).toContain("Disable routine");
       expect(html).not.toContain("Enable routine");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows lifecycle controls when the first target was removed but a live target remains", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit the codebase.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: test.routinePath
+        },
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit the codebase.",
+          provider: null,
+          projectName: "beta",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: test.routinePath
+        }
+      ]);
+      test.runStore.syncRoutines(
+        [
+          {
+            kind: "report",
+            name: "audit",
+            prompt: "Audit the codebase.",
+            provider: null,
+            projectName: "beta",
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: test.routinePath
+          }
+        ],
+        { projects: ["alpha", "beta"] }
+      );
+
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (
+        await app.request("/routines/audit", { headers: browserHeaders() })
+      ).text();
+      expect(html).toContain('action="/routines/audit/disable"');
+      expect(html).toContain("Disable routine");
+      expect(html).not.toContain("Enable routine");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows Enable when an inactive target sorts before an operator-disabled target", async () => {
+    const test = await setup();
+    try {
+      const disabledDeclaration = {
+        disabled: true,
+        kind: "report" as const,
+        name: "audit",
+        prompt: "Audit the codebase.",
+        provider: null,
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: test.routinePath
+      };
+      test.runStore.syncRoutines([
+        { ...disabledDeclaration, projectName: "alpha" },
+        { ...disabledDeclaration, projectName: "beta" },
+        { ...disabledDeclaration, projectName: "gamma" }
+      ]);
+      test.runStore.syncRoutines(
+        [
+          { ...disabledDeclaration, projectName: "beta" },
+          { ...disabledDeclaration, projectName: "gamma" }
+        ],
+        { projects: ["alpha", "beta", "gamma"] }
+      );
+      test.runStore.markRoutinesInactiveForProject("beta");
+
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (
+        await app.request("/routines/audit", { headers: browserHeaders() })
+      ).text();
+      expect(html).toContain('action="/routines/audit/enable"');
+      expect(html).toContain("Enable routine");
+      expect(html).not.toContain("Disable routine");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows Enable when every operator-disabled target is inactive", async () => {
+    const test = await setup();
+    try {
+      await writeFile(test.routinePath, DISABLED_DECLARATION, "utf8");
+      const disabledDeclaration = {
+        disabled: true,
+        kind: "report" as const,
+        name: "audit",
+        prompt: "Audit the codebase.",
+        provider: null,
+        schedule: { at: "2026-05-22T10:00:00.000Z" },
+        sourcePath: test.routinePath
+      };
+      test.runStore.syncRoutines([
+        { ...disabledDeclaration, projectName: "alpha" },
+        { ...disabledDeclaration, projectName: "beta" }
+      ]);
+      test.runStore.markRoutinesInactiveForProject("alpha");
+      test.runStore.markRoutinesInactiveForProject("beta");
+
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (
+        await app.request("/routines/audit?include_inactive=true", {
+          headers: browserHeaders()
+        })
+      ).text();
+      expect(html).toContain('action="/routines/audit/enable"');
+      expect(html).toContain("Enable routine");
+      expect(html).not.toContain("Disable routine");
     } finally {
       test.cleanup();
     }

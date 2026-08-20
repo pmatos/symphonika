@@ -3363,22 +3363,24 @@ export class RunStore {
         "updated_at = @updated_at where id = @id"
       ].join(" ")
     );
-    this.database.transaction(() => {
-      if (state === "preparing_workspace") {
-        // A Run row is reused across transient retry attempts, while the
-        // latest Watchdog sample and remembered turn IDs are keyed by run_id.
-        // Clear those attempt-local values before exposing the new attempt's
-        // preparing state so operator surfaces cannot read prior-attempt data.
-        // Append-only sample history remains durable evidence.
+    if (state === "preparing_workspace") {
+      // A Run row is reused across transient retry attempts, while the
+      // latest Watchdog sample and remembered turn IDs are keyed by run_id.
+      // Clear those attempt-local values before exposing the new attempt's
+      // preparing state so operator surfaces cannot read prior-attempt data.
+      // Append-only sample history remains durable evidence.
+      this.database.transaction(() => {
         this.database
           .prepare("delete from watchdog_samples where run_id = ?")
           .run(runId);
         this.database
           .prepare("delete from watchdog_turn_ids where run_id = ?")
           .run(runId);
-      }
+        update.run({ id: runId, state, updated_at: now });
+      })();
+    } else {
       update.run({ id: runId, state, updated_at: now });
-    })();
+    }
     this.recordRunTransition(runId, state, now);
     if (state === "waiting") {
       // ADR 0054: idle_since is a persisted wall-clock timestamp and the

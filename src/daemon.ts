@@ -600,6 +600,18 @@ export async function startDaemon(
     }
   };
 
+  // The single-project admission rule `partitionProjectsForPolling` filters
+  // by, factored out so the fresh-claim boundary re-check (ADR 0083) applies
+  // the exact same rule instead of a second inline copy.
+  const isProjectDispatchable = (
+    project: { tracker: PollingProjectConfig["tracker"] },
+    env: NodeJS.ProcessEnv,
+    nowMs: number
+  ): boolean => {
+    const token = resolveEnvBackedValue(project.tracker.token, env);
+    return token === undefined || !isGithubBackoffActive(nowMs, token);
+  };
+
   // Splits `projects` into those whose resolved token isn't currently
   // backing off (pollable now) and the rest (currently skipped). A project
   // whose token can't be resolved (e.g. an unset $VAR_NAME) is always
@@ -610,10 +622,9 @@ export async function startDaemon(
     env: NodeJS.ProcessEnv,
     nowMs: number
   ): PollingProjectConfig[] => {
-    return projects.filter((project) => {
-      const token = resolveEnvBackedValue(project.tracker.token, env);
-      return token === undefined || !isGithubBackoffActive(nowMs, token);
-    });
+    return projects.filter((project) =>
+      isProjectDispatchable(project, env, nowMs)
+    );
   };
 
   const refreshIssuePollStatus = async (): Promise<void> => {
@@ -1005,12 +1016,8 @@ export async function startDaemon(
             // candidate view above is formed while dispatchOneFresh is still
             // loading config or workflow state. Re-check from inside its
             // narrowed claim section immediately before sym:claimed.
-            isClaimAllowed: (project) => {
-              const token = resolveEnvBackedValue(project.tracker.token, env);
-              return (
-                token === undefined || !isGithubBackoffActive(Date.now(), token)
-              );
-            }
+            isClaimAllowed: (project) =>
+              isProjectDispatchable(project, env, Date.now())
           }
         );
         if (result.dispatched === false) {

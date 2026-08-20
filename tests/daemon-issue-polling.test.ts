@@ -862,18 +862,7 @@ describe("daemon GitHub issue polling", () => {
         ),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
-    const codexProvider = {
-      cancel: vi.fn().mockResolvedValue(undefined),
-      name: "codex",
-      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
-        await Promise.resolve();
-        yield {
-          normalized: { exitCode: 1, type: "process_exit" },
-          raw: { code: 1, kind: "exit" }
-        };
-      }),
-      validate: vi.fn().mockResolvedValue(undefined)
-    } satisfies AgentProvider;
+    const codexProvider = makeExitingCodexProvider();
 
     const daemon = await startDaemon({
       agentProviders,
@@ -953,18 +942,7 @@ describe("daemon GitHub issue polling", () => {
     const root = await makeTempRoot();
     await writeValidProject(root, { pollingIntervalMs: 10 });
     const prPoll = deferred<never>();
-    const codexProvider = {
-      cancel: vi.fn().mockResolvedValue(undefined),
-      name: "codex",
-      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
-        await Promise.resolve();
-        yield {
-          normalized: { exitCode: 1, type: "process_exit" },
-          raw: { code: 1, kind: "exit" }
-        };
-      }),
-      validate: vi.fn().mockResolvedValue(undefined)
-    } satisfies AgentProvider;
+    const codexProvider = makeExitingCodexProvider();
     let providerReads = 0;
     const agentProviders: AgentProviderRegistry = {};
     Object.defineProperty(agentProviders, "codex", {
@@ -1110,6 +1088,21 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 });
+
+function makeExitingCodexProvider(): AgentProvider {
+  return {
+    cancel: vi.fn().mockResolvedValue(undefined),
+    name: "codex",
+    runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+      await Promise.resolve();
+      yield {
+        normalized: { exitCode: 1, type: "process_exit" },
+        raw: { code: 1, kind: "exit" }
+      };
+    }),
+    validate: vi.fn().mockResolvedValue(undefined)
+  } satisfies AgentProvider;
+}
 
 function issueFixture(overrides: {
   labels: unknown[];

@@ -347,8 +347,11 @@ async function processTrackedPullRequests(input: {
     const state = interpretPullRequest(rawState);
     // GraphQL normalizes an omitted headRefOid to an empty string (see
     // pull-request-polling.ts). Fall back to the last known-good head SHA so
-    // neither the tracked row nor a merge/review-dispatch call ever records
-    // or pins an empty string.
+    // a merge is never pinned to an empty string. tracked.lastSeenHeadSha
+    // can itself still be "" (e.g. no head SHA has ever been observed for
+    // this row) -- recordPullRequestObservation below still records that,
+    // and the merge guard further down refuses to pin an empty SHA; the row
+    // self-corrects the next tick GraphQL returns a real headRefOid.
     const headSha =
       state.headSha === "" ? tracked.lastSeenHeadSha : state.headSha;
     const trackingState = trackedStateFor(state);

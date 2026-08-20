@@ -3964,7 +3964,7 @@ function renderReviewFollowupInstructions(
     "",
     "Symphonika detected unaddressed reviewer feedback on an existing pull request for this issue.",
     `PR: #${review.pullRequestNumber} ${review.pullRequestUrl}`,
-    `Head SHA: ${review.headSha}`,
+    `Head SHA: ${review.headSha || "unknown"}`,
     `Review decision: ${review.reviewDecision ?? "none"}`,
     `Status checks: ${review.statusCheckRollupState ?? "unknown"}`,
     "",

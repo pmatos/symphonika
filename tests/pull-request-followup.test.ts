@@ -1430,6 +1430,110 @@ describe("pull request follow-up", () => {
     }
   });
 
+  it("dispatches review follow-up with an 'unknown' head SHA placeholder when the tracked row has never observed one", async () => {
+    // Regression for the second P1 follow-up on #530: unlike the merge
+    // path, review-followup dispatch must not skip-and-retry on an empty
+    // headSha (that would permanently strand review followup for a row
+    // whose lastSeenHeadSha is genuinely empty). Render a placeholder in
+    // the dispatched instructions instead, matching the adjacent
+    // `?? "none"` / `?? "unknown"` fields in renderReviewFollowupInstructions.
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-review-followup-never-observed";
+      const workspacePath = path.join(
+        root,
+        ".symphonika",
+        "workspaces",
+        "symphonika",
+        "issues",
+        "54-review-followup-never-observed"
+      );
+      await createGitWorkspaceAhead({ branchName, workspacePath });
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath
+      });
+      // Simulates a row corrupted by the pre-fix code: last_seen_head_sha
+      // already "" before this tick runs.
+      store.trackPullRequest({
+        branchName,
+        headSha: "",
+        issueNumber: 54,
+        prNumber: 81,
+        prUrl: "https://github.com/pmatos/symphonika/pull/81",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const providerInputs: ProviderRunInput[] = [];
+      const provider = fakeProvider(providerInputs);
+      const project = projectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue(issueFixture()),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(
+          prState({
+            headSha: "",
+            reviewDecision: "CHANGES_REQUESTED",
+            unresolvedReviewThreads: [
+              {
+                comments: [
+                  {
+                    author: "reviewer",
+                    body: "Please wire this into the daemon poll loop.",
+                    createdAt: "2026-05-04T10:00:00Z",
+                    line: 24,
+                    path: "src/daemon.ts",
+                    url: "https://github.com/pmatos/symphonika/pull/81#discussion_r1"
+                  }
+                ],
+                id: "PRRT_kwDO",
+                isResolved: false,
+                line: 24,
+                path: "src/daemon.ts"
+              }
+            ]
+          })
+        ),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider,
+        root,
+        runStore: store,
+        workspacePath
+      });
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        logger: pino({ enabled: false }),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      expect(result).toEqual({
+        action: "review_dispatch",
+        prNumber: 81,
+        runId: "review-run-1"
+      });
+      expect(providerInputs).toHaveLength(1);
+      expect(providerInputs[0]!.prompt).toContain("Head SHA: unknown");
+    } finally {
+      store.close();
+    }
+  });
+
   it("skips the review-followup dispatch when a state_advance is already scheduled for the same issue", async () => {
     // Regression for the wait→agent race: reconcileWaitingRuns advances a
     // wait state into an agent state and schedules a state_advance, but the

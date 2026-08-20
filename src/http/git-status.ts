@@ -47,8 +47,8 @@ export async function detectGitFileState(
     return { inRepo: false };
   }
 
-  const [branchRaw, gitDir, statusOutput, gitignored] = await Promise.all([
-    tryGit(["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"]),
+  const [branchRef, gitDir, statusOutput, gitignored] = await Promise.all([
+    tryGit(["-C", repoRoot, "symbolic-ref", "HEAD"]),
     tryGit(["-C", repoRoot, "rev-parse", "--git-dir"]),
     // Untrimmed: porcelain v1's index-status column is a leading space for
     // "no staged change," which String.trim() would otherwise eat,
@@ -74,27 +74,25 @@ export async function detectGitFileState(
     ])
   ]);
 
-  const detached = branchRaw === "HEAD";
-  const detachedHeadSha = detached
-    ? ((await tryGit(["-C", repoRoot, "rev-parse", "HEAD"])) ?? null)
-    : null;
+  const branch = branchRef?.replace(/^refs\/heads\//, "");
   const absoluteGitDir =
     gitDir === undefined
       ? path.join(repoRoot, ".git")
       : path.resolve(repoRoot, gitDir);
-  const midRebase =
-    (await pathExists(path.join(absoluteGitDir, "rebase-merge"))) ||
-    (await pathExists(path.join(absoluteGitDir, "rebase-apply")));
 
-  const wholeTreeStatus = await tryGit([
-    "-C",
-    repoRoot,
-    "status",
-    "--porcelain=v1"
+  const [detachedHeadSha, midRebase, wholeTreeStatus] = await Promise.all([
+    branch === undefined
+      ? tryGit(["-C", repoRoot, "rev-parse", "HEAD"]).then((sha) => sha ?? null)
+      : Promise.resolve(null),
+    Promise.all([
+      pathExists(path.join(absoluteGitDir, "rebase-merge")),
+      pathExists(path.join(absoluteGitDir, "rebase-apply"))
+    ]).then(([rebaseMerge, rebaseApply]) => rebaseMerge || rebaseApply),
+    tryGit(["-C", repoRoot, "status", "--porcelain=v1"])
   ]);
 
   return {
-    branch: detached ? null : (branchRaw ?? null),
+    branch: branch ?? null,
     detachedHeadSha,
     dirty: (wholeTreeStatus ?? "").length > 0,
     fileStatus: parseFileStatus(statusOutput ?? ""),

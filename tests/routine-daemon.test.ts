@@ -1,10 +1,11 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildCli } from "../src/cli.js";
+import { contentHash } from "../src/content-hash.js";
 import { startDaemon } from "../src/daemon.js";
 import { openRunStore } from "../src/run-store.js";
 import type {
@@ -847,6 +848,68 @@ describe("daemon routine firing", () => {
       const restored = await waitForRoutine(daemon.url, "expired");
       expect(restored[0]?.lastFiredAt).toBe(fired[0]?.lastFiredAt);
       expect(provider.runAttempt).toHaveBeenCalledTimes(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("refuses declaration writes for inactive Routine Targets", async () => {
+    const root = await makeTempRoot();
+    await writeRoutineProject(root, "2030-05-22T10:00:00.000Z");
+    const routinePath = path.join(root, "daily-report.md");
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: quietProvider() },
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareRoutineWorkspace: vi.fn()
+    });
+
+    try {
+      await waitForRoutine(daemon.url, "active");
+      await writeProjectConfig(root, "alpha", ["./daily-report.md"], true);
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      await waitForNoRoutines(daemon.url);
+      const inactive = (await fetch(
+        `${daemon.url}/api/routines?include_inactive=true`
+      ).then((result) => result.json())) as { routines: RoutineApiRow[] };
+      expect(inactive.routines).toEqual([
+        expect.objectContaining({
+          name: "daily-report",
+          projectName: "alpha",
+          state: "inactive"
+        })
+      ]);
+
+      const originalContent = await readFile(routinePath, "utf8");
+      const response = await fetch(
+        `${daemon.url}/routines/daily-report/edit/confirm`,
+        {
+          body: new URLSearchParams({
+            content: originalContent.replace(
+              "Routine {{routine.name}} for {{project.name}}.",
+              "Changed while inactive."
+            ),
+            expected_content_hash: contentHash(originalContent)
+          }),
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          method: "POST",
+          redirect: "manual"
+        }
+      );
+
+      expect(response.status).toBe(403);
+      expect(await response.text()).toContain(
+        "is not a path the current configuration references"
+      );
+      expect(await readFile(routinePath, "utf8")).toBe(originalContent);
     } finally {
       await daemon.stop();
     }

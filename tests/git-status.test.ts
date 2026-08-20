@@ -65,6 +65,22 @@ describe("detectGitFileState (#306 part 3/3, ADR 0075)", () => {
     }
   });
 
+  it("reports the branch name for an unborn HEAD with a same-named tag", async () => {
+    const root = await makeTempRoot();
+    await initRepo(root);
+    const filePath = path.join(root, "workflow.md");
+    await writeFile(filePath, "content\n", "utf8");
+    const tagTarget = await git(root, ["hash-object", "-w", "workflow.md"]);
+    await git(root, ["tag", "main", tagTarget]);
+
+    const state = await detectGitFileState(filePath);
+    expect(state.inRepo).toBe(true);
+    if (state.inRepo) {
+      expect(state.branch).toBe("main");
+      expect(state.detachedHeadSha).toBeNull();
+    }
+  });
+
   it("reports untracked for a new, never-added file", async () => {
     const root = await makeTempRoot();
     await initRepo(root);

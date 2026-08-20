@@ -23,7 +23,10 @@ import type { AsyncMutex } from "../lifecycle/async-mutex.js";
 import type { PullRequestState } from "../pull-request-state.js";
 import { describeIssueVerdict } from "../issues/verdict.js";
 import { setRoutineDisabled } from "../routines/declaration-editor.js";
-import { parseRoutineDeclaration } from "../routines/declaration-loader.js";
+import {
+  loadRoutineDeclaration,
+  parseRoutineDeclaration
+} from "../routines/declaration-loader.js";
 import { validateWorkflowContractContent } from "../workflow/fsm-expansion.js";
 import { runSavePipeline, type ReloadOutcome } from "./save-pipeline.js";
 import {
@@ -1323,6 +1326,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       submittedHeadSha === undefined || submittedHeadSha === ""
         ? undefined
         : submittedHeadSha;
+    const snapshotRepository = readSnapshotRepository(body);
 
     let banner: PullRequestMergeBanner;
     let liveOwnerRunId: string | undefined;
@@ -1367,7 +1371,8 @@ export function registerPages(options: RegisterPagesOptions): void {
         const result = await options.mergePullRequest({
           ...(expectedHeadSha === undefined ? {} : { expectedHeadSha }),
           prNumber,
-          projectName
+          projectName,
+          ...(snapshotRepository === undefined ? {} : { snapshotRepository })
         });
         banner = result.ok
           ? { freshState: result.freshState, kind: "merge", ok: true }
@@ -1608,6 +1613,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           expectedContentHash,
           name: `${name} workflow`,
           onDisk,
+          previewAction: `/projects/${encodeURIComponent(name)}/workflow/edit/preview`,
           projectParam: undefined,
           reviewAction: `/projects/${encodeURIComponent(name)}/workflow/edit`
         })
@@ -1659,6 +1665,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         reload:
           options.triggerReload ??
           (() => Promise.resolve({ errors: [], ok: true })),
+        validationPath: workflow.path,
         workflowFormat: workflow.format
       });
 
@@ -1699,6 +1706,7 @@ export function registerPages(options: RegisterPagesOptions): void {
               expectedContentHash,
               name: `${name} workflow`,
               onDisk: await readFile(workflow.path, "utf8").catch(() => null),
+              previewAction: `/projects/${encodeURIComponent(name)}/workflow/edit/preview`,
               projectParam: undefined,
               reviewAction: `/projects/${encodeURIComponent(name)}/workflow/edit`
             })
@@ -1815,6 +1823,7 @@ export function registerPages(options: RegisterPagesOptions): void {
             : {}),
           name: "service config",
           onDisk,
+          previewAction: "/config/edit/preview",
           projectParam: undefined,
           reviewAction: "/config/edit"
         })
@@ -1868,6 +1877,7 @@ export function registerPages(options: RegisterPagesOptions): void {
               extraConfirmationHtml: renderProviderCommandConfirmation(),
               name: "service config",
               onDisk,
+              previewAction: "/config/edit/preview",
               projectParam: undefined,
               reviewAction: "/config/edit"
             })
@@ -1936,6 +1946,7 @@ export function registerPages(options: RegisterPagesOptions): void {
               expectedContentHash,
               name: "service config",
               onDisk,
+              previewAction: "/config/edit/preview",
               projectParam: undefined,
               reviewAction: "/config/edit"
             })
@@ -1966,7 +1977,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
   );
 
-  options.app.get("/routines/:name", (context) => {
+  options.app.get("/routines/:name", async (context) => {
     const name = context.req.param("name");
     const projectParam = context.req.query("project");
     const fireNotice = renderFireResultNotice(context);
@@ -2000,6 +2011,11 @@ export function registerPages(options: RegisterPagesOptions): void {
     const { group } = resolved;
 
     const declaration = resolveRoutineDeclaration(options.runStore, group);
+    const currentTargets = currentRoutineTargets(group);
+    const declarationDisabledPromise = readRoutineDisabledFallback(
+      currentTargets,
+      declaration.sourcePath
+    );
     const groupProjectNames = new Set(
       group.targets.map((target) => target.projectName)
     );
@@ -2022,6 +2038,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       options.csrfSecret,
       ensureSession(context)
     );
+    const declarationDisabled = await declarationDisabledPromise;
     const html = layout(
       name,
       [
@@ -2033,11 +2050,17 @@ export function registerPages(options: RegisterPagesOptions): void {
         `<p class="note"><a href="/routines/${encodeURIComponent(name)}/edit${projectParam === undefined ? "" : `?project=${encodeURIComponent(projectParam)}`}">Edit declaration →</a></p>`,
         renderRoutineLifecycleControls(
           name,
-          group,
+          currentTargets,
+          projectParam,
+          lifecycleCsrfToken,
+          declarationDisabled
+        ),
+        renderRoutineFireControls(
+          name,
+          currentTargets,
           projectParam,
           lifecycleCsrfToken
-        ),
-        renderRoutineFireControls(name, group, projectParam, lifecycleCsrfToken)
+        )
       ].join("")
     );
     return context.html(html);
@@ -2141,6 +2164,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           expectedContentHash,
           name,
           onDisk,
+          previewAction: `/routines/${encodeURIComponent(name)}/edit/preview`,
           projectParam,
           reviewAction: `/routines/${encodeURIComponent(name)}/edit`
         })
@@ -2243,6 +2267,7 @@ export function registerPages(options: RegisterPagesOptions): void {
               onDisk: await readFile(declaration.sourcePath, "utf8").catch(
                 () => null
               ),
+              previewAction: `/routines/${encodeURIComponent(name)}/edit/preview`,
               projectParam,
               reviewAction: `/routines/${encodeURIComponent(name)}/edit`
             })
@@ -2336,6 +2361,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         expectedContentHash: contentHash(onDisk),
         name,
         onDisk,
+        previewAction: `/routines/${encodeURIComponent(name)}/edit/preview`,
         projectParam,
         reviewAction: `/routines/${encodeURIComponent(name)}`
       })
@@ -5098,6 +5124,7 @@ function renderPullRequestMergeSection(input: {
   liveOwnerRunId: string | undefined;
   prNumber: number;
   projectName: string;
+  snapshotRepository: ProjectSnapshotRepository | undefined;
 }): string {
   if (input.liveOwnerRunId !== undefined) {
     return `<section><h2>Merge</h2><p class="note">${labelPill(`owned by ${input.liveOwnerRunId}`, "progress")} Cannot be merged until that Run is cancelled.</p></section>`;
@@ -5112,7 +5139,10 @@ function renderPullRequestMergeSection(input: {
     input.headSha === null
       ? ""
       : `<input type="hidden" name="expected_head_sha" value="${escapeHtml(input.headSha)}">`;
-  return `<section><h2>Merge</h2><p class="note">No live Run owns this PR — merge is available.</p><form method="post" action="${escapeHtml(action)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">${headShaField}<button class="btn" type="submit">Merge</button></form></section>`;
+  const repositoryFields = renderSnapshotRepositoryFields(
+    input.snapshotRepository
+  );
+  return `<section><h2>Merge</h2><p class="note">No live Run owns this PR — merge is available.</p><form method="post" action="${escapeHtml(action)}"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">${repositoryFields}${headShaField}<button class="btn" type="submit">Merge</button></form></section>`;
 }
 
 function renderPullRequestLabelsSection(input: {
@@ -5180,7 +5210,8 @@ function renderPullRequestDetailPage(input: {
         headSha: snapshot.headSha,
         liveOwnerRunId: input.liveOwnerRunId,
         prNumber: detail.prNumber,
-        projectName: detail.projectName
+        projectName: detail.projectName,
+        snapshotRepository: detail.snapshotRepository
       });
   return `<h1 class="page-title">PR #${detail.prNumber} ${escapeHtml(snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(`${detail.trackingState}${draftNote}`, family)}</p>${urlHtml}${branchHtml}${bannerHtml}<section><h2>Pull Request State</h2>${signals}</section><section><h2>Follow-up tracking</h2><p class="note">${trackedHtml}</p></section>${renderPullRequestLabelsSection({ csrfToken: input.csrfToken, labels: snapshot.labels, prNumber: detail.prNumber, projectName: detail.projectName, snapshotRepository: detail.snapshotRepository })}${mergeSectionHtml}<p class="note"><a href="/prs">← Back to search</a></p>`;
 }
@@ -5501,7 +5532,21 @@ function renderEditorForm(input: {
   name: string;
   projectParam: string | undefined;
 }): string {
-  return `<h1 class="page-title">Edit ${escapeHtml(input.name)}</h1><p class="note">Raw text editing — this is the exact content written to disk; comments and key ordering elsewhere in the file are untouched by a save. Saving takes you to a diff review before anything is written.</p>${input.blastRadiusHtml}<form method="post" action="${escapeHtml(input.action)}">
+  return `<h1 class="page-title">Edit ${escapeHtml(input.name)}</h1><p class="note">Raw text editing — this is the exact content written to disk; comments and key ordering elsewhere in the file are untouched by a save. Saving takes you to a diff review before anything is written.</p>${input.blastRadiusHtml}${renderContentTextareaForm(input)}`;
+}
+
+// The raw-text-with-hidden-hash form body shared by renderEditorForm's fresh
+// edit and renderEditorPreview's invalid-resubmit branch -- kept as one
+// function so the two forms can't silently drift apart (missing hidden
+// field, changed textarea attrs) as they're extended.
+function renderContentTextareaForm(input: {
+  action: string;
+  content: string;
+  contentHash: string;
+  csrfToken: string;
+  projectParam: string | undefined;
+}): string {
+  return `<form method="post" action="${escapeHtml(input.action)}">
   <input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">
   <input type="hidden" name="expected_content_hash" value="${escapeHtml(input.contentHash)}">
   ${input.projectParam === undefined ? "" : `<input type="hidden" name="project_param" value="${escapeHtml(input.projectParam)}">`}
@@ -5602,11 +5647,20 @@ function renderEditorPreview(input: {
   extraConfirmationHtml?: string;
   name: string;
   onDisk: string | null;
+  previewAction: string;
   projectParam: string | undefined;
   reviewAction: string;
 }): string {
   if (input.errors.length > 0) {
-    return `<h1 class="page-title">Changes to ${escapeHtml(input.name)} are invalid</h1><div class="alert" role="alert"><strong>Fix these before saving</strong><ul>${input.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div><p class="note"><a href="${escapeHtml(input.reviewAction)}${input.projectParam === undefined ? "" : `?project=${encodeURIComponent(input.projectParam)}`}">← Back to editor</a></p>`;
+    return `<h1 class="page-title">Changes to ${escapeHtml(input.name)} are invalid</h1><div class="alert" role="alert"><strong>Fix these before saving</strong><ul>${input.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div>${renderContentTextareaForm(
+      {
+        action: input.previewAction,
+        content: input.content,
+        contentHash: input.expectedContentHash,
+        csrfToken: input.csrfToken,
+        projectParam: input.projectParam
+      }
+    )}<p class="note"><a href="${escapeHtml(input.reviewAction)}${input.projectParam === undefined ? "" : `?project=${encodeURIComponent(input.projectParam)}`}">← Discard draft and reopen from disk</a></p>`;
   }
   const diffHtml =
     input.onDisk === null
@@ -5644,14 +5698,17 @@ function renderReloadFailedNotice(input: {
 
 // A small line-based LCS diff -- not a general utility, just enough to
 // render the "diff before every write" requirement (#307) for the three
-// editors' confirmation screens. Deliberately hand-rolled rather than a
-// dependency: these are two known-in-memory strings, never large enough for
-// an O(n*m) LCS table to matter.
+// editors' confirmation screens. Keep the exact table bounded because an
+// editor can submit arbitrarily large content (#442); a coarse, linear-space
+// fallback still shows every line when the exact table would be too large.
+const MAX_LCS_TABLE_CELLS = 1_000_000;
+
 function renderLineDiff(before: string, after: string): string {
   const beforeLines = before.split("\n");
   const afterLines = after.split("\n");
+  const diff = diffLines(beforeLines, afterLines);
   const rows: string[] = [];
-  for (const op of diffLines(beforeLines, afterLines)) {
+  for (const op of diff.ops) {
     const cssClass =
       op.kind === "added" ? "add" : op.kind === "removed" ? "del" : "ctx";
     const marker =
@@ -5660,14 +5717,24 @@ function renderLineDiff(before: string, after: string): string {
       `<span class="diff-line diff-${cssClass}">${marker} ${escapeHtml(op.line)}</span>`
     );
   }
-  return `<pre class="diff">${rows.join("\n")}</pre>`;
+  const notice = diff.simplified
+    ? '<div class="empty"><strong>Large diff simplified</strong>The exact line comparison exceeded its safe size limit. This preview still shows the complete content, but unchanged lines inside the changed region may appear as removed and added.</div>'
+    : "";
+  return `${notice}<pre class="diff">${rows.join("\n")}</pre>`;
 }
 
 type DiffOp = { kind: "added" | "removed" | "unchanged"; line: string };
+type DiffResult = { ops: DiffOp[]; simplified: boolean };
 
-function diffLines(before: string[], after: string[]): DiffOp[] {
-  const lcs: number[][] = Array.from({ length: before.length + 1 }, () =>
-    new Array<number>(after.length + 1).fill(0)
+function diffLines(before: string[], after: string[]): DiffResult {
+  const tableRows = before.length + 1;
+  const tableColumns = after.length + 1;
+  if (tableRows > Math.floor(MAX_LCS_TABLE_CELLS / tableColumns)) {
+    return { ops: diffLinesByEdges(before, after), simplified: true };
+  }
+
+  const lcs: number[][] = Array.from({ length: tableRows }, () =>
+    new Array<number>(tableColumns).fill(0)
   );
   for (let i = before.length - 1; i >= 0; i--) {
     for (let j = after.length - 1; j >= 0; j--) {
@@ -5701,6 +5768,45 @@ function diffLines(before: string[], after: string[]): DiffOp[] {
     ops.push({ kind: "added", line: after[j]! });
     j++;
   }
+  return { ops, simplified: false };
+}
+
+function diffLinesByEdges(before: string[], after: string[]): DiffOp[] {
+  let prefixLength = 0;
+  while (
+    prefixLength < before.length &&
+    prefixLength < after.length &&
+    before[prefixLength] === after[prefixLength]
+  ) {
+    prefixLength++;
+  }
+
+  let suffixLength = 0;
+  while (
+    suffixLength < before.length - prefixLength &&
+    suffixLength < after.length - prefixLength &&
+    before[before.length - suffixLength - 1] ===
+      after[after.length - suffixLength - 1]
+  ) {
+    suffixLength++;
+  }
+
+  const beforeChangedEnd = before.length - suffixLength;
+  const afterChangedEnd = after.length - suffixLength;
+
+  const ops: DiffOp[] = [];
+  for (let i = 0; i < prefixLength; i++) {
+    ops.push({ kind: "unchanged", line: before[i]! });
+  }
+  for (let i = prefixLength; i < beforeChangedEnd; i++) {
+    ops.push({ kind: "removed", line: before[i]! });
+  }
+  for (let i = prefixLength; i < afterChangedEnd; i++) {
+    ops.push({ kind: "added", line: after[i]! });
+  }
+  for (let i = beforeChangedEnd; i < before.length; i++) {
+    ops.push({ kind: "unchanged", line: before[i]! });
+  }
   return ops;
 }
 
@@ -5726,29 +5832,60 @@ function renderRoutineDeclarationCard(
 </dl></section><section>${sectionHead("Prompt")}${promptSection}</section>`;
 }
 
+// A target removed from its declaration can remain as a durable
+// removed_from_config row beside current siblings (ADR 0069), so it must
+// not represent the declaration's lifecycle state -- unlike
+// resolveRoutineDeclaration, which picks a target to carry the
+// declaration's *content* and so orders by validity instead.
+function currentRoutineTargets(group: RoutineGroup): RoutineStatus[] {
+  return group.targets.filter(
+    (target) => target.disabledReason !== "removed_from_config"
+  );
+}
+
 // #307 AC: "Disable/enable a Routine from its page affects every target; a
-// live firing is unaffected until it terminates (ADR 0060)." Every target
-// in a group shares one declaration file (ADR 0069's fan-out), so their
-// disabledReason is expected to agree; the representative target decides
-// which action (or none, for removed_from_config -- re-enabling that isn't
-// this action's job, it's controlled by config file inclusion) to offer.
+// live firing is unaffected until it terminates (ADR 0060)." An inactive
+// Project target clears its disabledReason, so an operator-disabled
+// current target takes precedence over other current targets. When every
+// current target is inactive, this recovers that state from valid front
+// matter instead.
+async function readRoutineDisabledFallback(
+  currentTargets: RoutineStatus[],
+  sourcePath: string
+): Promise<boolean | undefined> {
+  if (
+    currentTargets.length === 0 ||
+    currentTargets.some(
+      (target) =>
+        target.disabledReason === "operator" || target.state !== "inactive"
+    )
+  ) {
+    return undefined;
+  }
+  const declaration = await loadRoutineDeclaration(sourcePath);
+  return declaration.routine?.disabled;
+}
+
 function renderRoutineLifecycleControls(
   name: string,
-  group: RoutineGroup,
+  currentTargets: RoutineStatus[],
   projectParam: string | undefined,
-  csrfToken: string
+  csrfToken: string,
+  declarationDisabled: boolean | undefined
 ): string {
-  const [representative] = group.targets;
+  if (currentTargets.length === 0) {
+    return "";
+  }
+  const operatorDisabled =
+    declarationDisabled === true ||
+    currentTargets.some((target) => target.disabledReason === "operator");
   const projectField =
     projectParam === undefined
       ? ""
       : `<input type="hidden" name="project_param" value="${escapeHtml(projectParam)}">`;
   const csrfField = `<input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}">`;
-  if (representative?.disabledReason === "operator") {
+  if (operatorDisabled) {
     return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/enable">${csrfField}${projectField}<button class="btn" type="submit">Enable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
-  }
-  if (representative?.disabledReason === "removed_from_config") {
-    return "";
   }
   return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/disable">${csrfField}${projectField}<button class="btn" type="submit">Disable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
 }
@@ -5761,14 +5898,11 @@ function renderRoutineLifecycleControls(
 // once a Routine fans out to more than one Project (ADR 0069).
 function renderRoutineFireControls(
   name: string,
-  group: RoutineGroup,
+  currentTargets: RoutineStatus[],
   projectParam: string | undefined,
   csrfToken: string
 ): string {
-  const targets = group.targets.filter(
-    (target) => target.disabledReason !== "removed_from_config"
-  );
-  if (targets.length === 0) {
+  if (currentTargets.length === 0) {
     return "";
   }
   const projectField =
@@ -5776,10 +5910,10 @@ function renderRoutineFireControls(
       ? ""
       : `<input type="hidden" name="project_param" value="${escapeHtml(projectParam)}">`;
   const csrfField = `<input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}">`;
-  const buttons = targets
+  const buttons = currentTargets
     .map((target) => {
       const label =
-        targets.length > 1
+        currentTargets.length > 1
           ? `Fire now — ${escapeHtml(target.projectName)}`
           : "Fire now";
       return `<form method="post" action="/api/routines/${encodeURIComponent(name)}/fire?project=${encodeURIComponent(target.projectName)}">${csrfField}${projectField}<button class="btn" type="submit">${label}</button></form>`;

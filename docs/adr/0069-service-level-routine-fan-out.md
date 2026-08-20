@@ -77,7 +77,10 @@ is recorded directly on the fan-out without creating a firing row.
 Restart schedule recomputation is also a matched clock event for this purpose. Before advancing any
 missed schedule, the dispatcher groups active persisted Routine Targets by Routine name and missed
 `next_fire_at`, creates or resolves one fan-out for that immutable membership snapshot, and records
-each `catch_up_window` skip against its target leg.
+each `catch_up_window` skip against its target leg — unless the resolved fan-out's notification has
+already left `pending` (its one-shot summary already delivered while a target stayed `held`, per
+ADR 0084), in which case the advance is recorded as an ungrouped `catch_up_window` skip instead of
+rewriting that delivered snapshot.
 
 Expected membership is immutable after creation. A re-entrant reload can configure a new one-shot
 Routine Target whose elapsed `at` value matches an existing fan-out, but that target does not join

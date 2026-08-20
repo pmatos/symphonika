@@ -2849,7 +2849,18 @@ export class RunStore {
         });
       return true;
     });
-    return apply();
+    try {
+      return apply();
+    } catch (error) {
+      // Mirrors claimRoutineFiring/claimManualRoutineFiring: a fanoutId
+      // whose target row already left pending/held (e.g. a racing claim or
+      // skip from another writer) is a benign miss, not a crash — report it
+      // the same way a 0-row update would.
+      if (error instanceof RoutineAlreadyClaimedError) {
+        return false;
+      }
+      throw error;
+    }
   }
 
   markRoutineExpired(input: {

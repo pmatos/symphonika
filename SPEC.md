@@ -1030,8 +1030,12 @@ then advances `next_fire_at` strictly beyond the current clock. Without the opt-
 past the missed window without firing and records a `catch_up_window` skip. Before advancing any
 target, Symphonika groups every active persisted target sharing the Routine name and missed
 `next_fire_at` into one Routine Fan-out, so the outage occurrence has the same durable membership
-and completion evidence as every other matched clock event. Timezone and DST behavior comes from
-`cron-parser`; the Orchestrator does not implement separate DST rules.
+and completion evidence as every other matched clock event, unless that Routine name and
+`next_fire_at` already resolve to a fan-out whose notification has left `pending` (e.g. a held
+target's group already delivered its one-shot summary); that later target's advance is instead
+recorded as an ungrouped `catch_up_window` skip so the delivered snapshot is never rewritten.
+Timezone and DST behavior comes from `cron-parser`; the Orchestrator does not implement separate
+DST rules.
 
 Routine Firings consume the same per-Project and global `max_in_flight` slots as issue Runs.
 Fan-out admission is per target rather than atomic: admitted siblings start concurrently, while a

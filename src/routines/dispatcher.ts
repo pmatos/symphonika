@@ -456,17 +456,12 @@ export async function dispatchDueRoutines(
     // group; otherwise record the schedule advance as an ungrouped
     // catch_up_window skip without rewriting that snapshot.
     const pendingTargetProjectNames = ensured.created
-      ? new Set(projectNames)
-      : (() => {
-          const fanout = input.runStore.getRoutineFanout(fanoutId);
-          return fanout?.notificationState === "pending"
-            ? new Set(fanout.targets.map((target) => target.projectName))
-            : new Set<string>();
-        })();
+      ? undefined
+      : input.runStore.getPendingRoutineFanoutTargetProjectNames(fanoutId);
     for (const target of group.targets) {
-      const shouldSettleFanout = pendingTargetProjectNames.has(
-        target.projectName
-      );
+      const shouldSettleFanout =
+        pendingTargetProjectNames === undefined ||
+        pendingTargetProjectNames.has(target.projectName);
       if (
         input.runStore.skipRoutineFiring({
           attemptedAt: now.toISOString(),

@@ -30,7 +30,7 @@ export type PreparedRoutineWorkspace = {
 
 export type RoutineWorkspacePathPlan = Omit<PreparedRoutineWorkspace, "reused">;
 
-export class RoutineWorkspaceCleanupError extends WorkspacePreparationCleanupError {
+class RoutineWorkspaceCleanupError extends WorkspacePreparationCleanupError {
   constructor(workspacePath: string, cause: unknown) {
     super(`failed to clean aborted routine worktree ${workspacePath}`, cause);
     this.name = "RoutineWorkspaceCleanupError";

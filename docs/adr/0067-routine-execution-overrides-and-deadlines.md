@@ -33,8 +33,9 @@ clone/fetch and firing-specific branch/worktree Git commands, and the dispatcher
 settlement before recording the timeout. First-cache clones publish atomically from an owned staging
 directory so abort cleanup cannot leave a partial bare repository at the shared cache path. On
 POSIX, cancellable Git commands run as separate process groups with bounded `SIGTERM` to `SIGKILL`
-escalation, so transports, hooks, and helpers cannot outlive preparation settlement. Staging modes
-follow the process umask, and incomplete owned-path cleanup is surfaced without replacing the
+escalation, so transports, hooks, and helpers cannot continue executing after preparation settles;
+Linux groups with only zombie members count as stopped even when PID 1 delays reaping them. Staging
+modes follow the process umask, and incomplete owned-path cleanup is surfaced without replacing the
 deadline's terminal classification. This resolves the temporary limitation tracked in #353.
 
 ## Context

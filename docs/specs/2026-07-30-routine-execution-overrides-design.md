@@ -27,8 +27,9 @@ post-terminal pull-request discovery does not. Provider cancellation uses the pr
 boundary delivered by #341. During workspace preparation the same deadline's `AbortSignal` cancels
 the shared cache clone/fetch and firing-specific branch/worktree Git commands. POSIX Git commands
 run in separately killable process groups with bounded `SIGTERM` to `SIGKILL` escalation, covering
-their transports, hooks, and helpers. The dispatcher awaits that preparation promise before
-recording the terminal firing. First-cache clones publish from an owned staging directory only after
+their transports, hooks, and helpers. Linux zombie-only groups count as stopped after escalation
+because they can no longer execute. The dispatcher awaits that preparation promise before recording
+the terminal firing. First-cache clones publish from an owned staging directory only after
 completion, with a mode derived from the process umask, so abort cleanup cannot expose a partial or
 mis-permissioned bare cache to later Routine Firings or issue Runs. Incomplete owned
 cache-staging or branch/worktree cleanup is logged while `firing_timeout` remains the terminal

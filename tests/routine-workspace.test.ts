@@ -167,6 +167,85 @@ done
     }
   });
 
+  it("treats a zombie-only Git process group as stopped after escalation", async () => {
+    const root = await makeTempRoot();
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const wrapperRoot = path.join(root, "git-wrapper");
+    const wrapperPath = path.join(wrapperRoot, "git");
+    const startedPath = path.join(root, "clone-started");
+    const helperPidPath = path.join(root, "clone-pid");
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    await mkdir(wrapperRoot, { recursive: true });
+    await writeFile(
+      wrapperPath,
+      `#!/bin/sh
+if [ "$1" = "clone" ]; then
+  echo $$ > "${helperPidPath}"
+  touch "${startedPath}"
+  trap '' TERM
+  while true; do
+    sleep 1
+  done
+fi
+exec "${realGitOutput.trim()}" "$@"
+`
+    );
+    await chmod(wrapperPath, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+    const controller = new AbortController();
+    const originalKill = process.kill.bind(process);
+
+    try {
+      const preparation = rejectionOf(
+        prepareRoutineWorkspace({
+          configDir: root,
+          firingId: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+          kind: "git",
+          project: {
+            name: "alpha",
+            workspace: {
+              git: { base_branch: "main", remote: path.join(root, "remote") },
+              root: workspaceRoot
+            }
+          },
+          routineName: "dependency-update",
+          signal: controller.signal
+        })
+      );
+      await waitForPath(startedPath);
+      const helperPid = await readPid(helperPidPath);
+      let groupWasKilled = false;
+      process.kill = (pid: number, signal?: NodeJS.Signals | number) => {
+        if (pid === -helperPid && signal === "SIGKILL") {
+          groupWasKilled = true;
+        }
+        if (pid === -helperPid && signal === 0 && groupWasKilled) {
+          // Linux kill(2) continues to report a process group whose only
+          // remaining member is a zombie. Simulate that kernel probe while
+          // the real group has already stopped so the assertion is stable on
+          // hosts whose PID 1 eagerly reaps orphaned helpers.
+          return true;
+        }
+        return signal === undefined
+          ? originalKill(pid)
+          : originalKill(pid, signal);
+      };
+      controller.abort();
+
+      const error = await settleWithin(preparation, 2_000);
+      expect(error).toMatchObject({ code: "ABORT_ERR", name: "AbortError" });
+    } finally {
+      process.kill = originalKill;
+      await killRecordedProcess(helperPidPath);
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
+  });
+
   it("preserves the process umask on an atomically published cache", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);
@@ -748,12 +827,31 @@ async function waitForProcessExit(pid: number): Promise<void> {
       }
       throw error;
     }
+    if (await processIsZombie(pid)) {
+      return;
+    }
     if (Date.now() >= expiresAt) {
       throw new Error(`timed out waiting for process ${pid} to exit`);
     }
     await new Promise<void>((resolve) => {
       setTimeout(resolve, 5);
     });
+  }
+}
+
+async function processIsZombie(pid: number): Promise<boolean> {
+  if (process.platform !== "linux") {
+    return false;
+  }
+  try {
+    const statContents = await readFile(`/proc/${pid}/stat`, "utf8");
+    const commandEnd = statContents.lastIndexOf(")");
+    return statContents
+      .slice(commandEnd + 1)
+      .trimStart()
+      .startsWith("Z ");
+  } catch {
+    return false;
   }
 }
 

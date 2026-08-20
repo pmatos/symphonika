@@ -33,7 +33,10 @@ for an earlier caller, so an already-expired firing never starts a queued Git co
 uses Node's signal support directly on non-POSIX hosts. On POSIX it additionally makes the direct
 Git child the leader of a detached process group, signals the whole group with `SIGTERM`, and
 escalates survivors to `SIGKILL` after a one-second grace period. The Git promise awaits that bounded
-shutdown, keeping the cache lock owned until transports, hooks, and helpers have stopped.
+shutdown, keeping the cache lock owned until transports, hooks, and helpers have stopped. On Linux,
+the post-`SIGKILL` check reads procfs process state and treats a zombie-only group as stopped: those
+entries cannot execute, and a non-reaping container PID 1 must not turn the original abort into a
+false cleanup failure.
 
 When no cache exists, preparation clones into a unique sibling staging directory. A successful clone
 is renamed atomically to `cachePath`; any failed or aborted clone removes only that staging directory.

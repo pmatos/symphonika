@@ -3,6 +3,8 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
+  readFile,
   realpath,
   rename,
   rm,
@@ -482,7 +484,7 @@ async function terminateGitProcessGroup(
     return;
   }
   signalProcessGroup(pid, "SIGKILL");
-  if (!(await waitForProcessGroupExit(pid, GIT_ABORT_GRACE_MS))) {
+  if (!(await waitForProcessGroupExit(pid, GIT_ABORT_GRACE_MS, true))) {
     throw new Error(`Git process group ${pid} survived SIGKILL`);
   }
 }
@@ -501,10 +503,11 @@ function signalProcessGroup(pid: number, signal: NodeJS.Signals): boolean {
 
 async function waitForProcessGroupExit(
   pid: number,
-  timeoutMs: number
+  timeoutMs: number,
+  acceptZombieOnly = false
 ): Promise<boolean> {
   const expiresAt = Date.now() + timeoutMs;
-  while (processGroupExists(pid)) {
+  while (await processGroupCanExecute(pid, acceptZombieOnly)) {
     if (Date.now() >= expiresAt) {
       return false;
     }
@@ -513,6 +516,74 @@ async function waitForProcessGroupExit(
     });
   }
   return true;
+}
+
+async function processGroupCanExecute(
+  pid: number,
+  acceptZombieOnly: boolean
+): Promise<boolean> {
+  if (!processGroupExists(pid)) {
+    return false;
+  }
+  if (!acceptZombieOnly || process.platform !== "linux") {
+    return true;
+  }
+  return await linuxProcessGroupHasNonZombieMember(pid);
+}
+
+async function linuxProcessGroupHasNonZombieMember(
+  processGroupId: number
+): Promise<boolean> {
+  let entries: string[];
+  try {
+    entries = await readdir("/proc");
+  } catch {
+    // A host without a readable procfs cannot distinguish zombies from
+    // executable members, so retain the conservative process-group probe.
+    return true;
+  }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) {
+      continue;
+    }
+    let statContents: string;
+    try {
+      statContents = await readFile(`/proc/${entry}/stat`, "utf8");
+    } catch {
+      // Processes can disappear between readdir and readFile.
+      continue;
+    }
+    const processStat = parseLinuxProcessStat(statContents);
+    if (
+      processStat?.processGroupId === processGroupId &&
+      processStat.state !== "Z" &&
+      processStat.state !== "X"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseLinuxProcessStat(
+  statContents: string
+): { processGroupId: number; state: string } | undefined {
+  // /proc/<pid>/stat wraps comm in parentheses; comm itself may contain a
+  // closing parenthesis, so field parsing must begin after the final one.
+  const commandEnd = statContents.lastIndexOf(")");
+  if (commandEnd < 0) {
+    return undefined;
+  }
+  const fields = statContents
+    .slice(commandEnd + 1)
+    .trim()
+    .split(/\s+/);
+  const processGroupId = Number.parseInt(fields[2] ?? "", 10);
+  const state = fields[0];
+  if (state === undefined || !Number.isSafeInteger(processGroupId)) {
+    return undefined;
+  }
+  return { processGroupId, state };
 }
 
 function processGroupExists(pid: number): boolean {

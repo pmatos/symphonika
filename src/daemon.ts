@@ -26,6 +26,7 @@ import {
   emptyIssuePollStatus,
   mergeIssuePollStatus,
   pollConfiguredGitHubIssuesFromConfig,
+  projectPollIdentityKey,
   rateLimitedTokens,
   readConfiguredPollingIntervalMs,
   replaceIssuePollStatus,
@@ -670,40 +671,61 @@ export async function startDaemon(
       engageGithubBackoff(nextStatus.projects, pollableForIssues, env);
       // A project can be pollable at tick start but skipped by the issue
       // poll after an earlier project sharing its token hits a rate limit.
-      // Reports identify the projects actually attempted, so deriving this
-      // set from them lets mergeIssuePollStatus carry an intra-tick skip's
-      // prior entries forward just like a window-backed-off skip.
-      const polledIssueProjectNames = new Set(
-        nextStatus.projects.map((project) => project.name)
+      // Reports identify the name and repository actually attempted, so
+      // deriving these keys from them lets mergeIssuePollStatus carry an
+      // intra-tick skip's prior entries forward just like a window-backed-off
+      // skip, even when declarations share a Project name.
+      const polledIssueProjectKeys = new Set(
+        nextStatus.projects.map((project) =>
+          projectPollIdentityKey(project.name, project.repository)
+        )
       );
       // The full enabled configured set (not just pollableForIssues) so an
       // enabled project skipped for backoff keeps its prior status, while a
       // project disabled, removed, or renamed by a config reload -- absent
       // from this set -- has its stale carried-over entries dropped rather
       // than retained forever; see mergeIssuePollStatus.
-      const configuredIssueProjectNames = new Set(
+      const configuredIssueProjectKeys = new Set(
         snapshot.polling.projects
           .filter((project) => project.disabled !== true)
-          .map((project) => project.name)
+          .map((project) =>
+            projectPollIdentityKey(project.name, project.tracker)
+          )
+      );
+      // Name-keyed runtime lookup lets the last declaration win. Persisted
+      // project state and issue snapshots use that same name key, so only
+      // that declaration may replace them; a shadowed declaration can still
+      // contribute diagnostics to the in-memory poll status.
+      const selectedIssueProjectKeysByName = new Map(
+        snapshot.polling.projects.map((project) => [
+          project.name,
+          projectPollIdentityKey(project.name, project.tracker)
+        ])
+      );
+      const skippedIssueProjectKeys = new Set(
+        Array.from(configuredIssueProjectKeys).filter(
+          (key) => !polledIssueProjectKeys.has(key)
+        )
       );
       replaceIssuePollStatus(
         issuePollStatus,
         mergeIssuePollStatus(
           issuePollStatus,
           nextStatus,
-          polledIssueProjectNames,
-          configuredIssueProjectNames
+          polledIssueProjectKeys,
+          configuredIssueProjectKeys
         )
       );
-      // Persisted with the polled subset only (not the merged status) --
-      // recordProjectPollOutcome/replaceProjectIssueSnapshots below are
-      // per-project upserts, so a project left out of nextStatus.projects
-      // is simply never touched this tick rather than redundantly
-      // rewritten with the same carried-over data.
+      // Persisted with the polled subset only (not the merged status).
+      // Poll outcome and issue-snapshot writes iterate only fresh reports;
+      // project-state sync still reconciles the full raw config, but retains
+      // the prior validation result for identities skipped by backoff.
       projectModes = await persistProjectPollState(
         runStore,
         state.configPath,
-        nextStatus
+        nextStatus,
+        skippedIssueProjectKeys,
+        selectedIssueProjectKeysByName
       );
 
       // #309: a cheap per-repo PR list, persisted alongside the issue
@@ -1716,39 +1738,48 @@ export async function startDaemon(
 function persistProjectPollState(
   runStore: ReturnType<typeof openRunStore>,
   configPath: string,
-  status: import("./issue-polling.js").IssuePollStatus
+  status: import("./issue-polling.js").IssuePollStatus,
+  skippedProjectKeys: ReadonlySet<string>,
+  selectedProjectKeysByName: ReadonlyMap<string, string>
 ): Promise<Map<string, "dispatch" | "routine_host">> {
-  return readProjectStateInputs(configPath, status).then(
-    ({ inputs, modes }) => {
-      runStore.syncProjectStates(inputs);
-      for (const project of status.projects) {
-        runStore.recordProjectPollOutcome({
-          candidateIssues: project.candidateIssues ?? 0,
-          error: project.error ?? null,
-          fetchedIssues: project.fetchedIssues,
-          filteredIssues: project.filteredIssues ?? 0,
-          ok: project.ok,
-          projectName: project.name
-        });
-        // ADR 0073: only a project whose poll succeeded this tick gets its
-        // issue snapshot replaced — a failed poll leaves the last known
-        // snapshot in place rather than blanking the table.
-        if (project.ok) {
-          runStore.replaceProjectIssueSnapshots({
-            polledAt: project.lastPolledAt ?? timestamp(),
-            projectName: project.name,
-            repository: project.repository,
-            rows: projectIssueSnapshotRows(
-              project.name,
-              project.repository,
-              status
-            )
-          });
-        }
+  return readProjectStateInputs(configPath, status, {
+    priorProjectStates: runStore.getProjectStatesByName(),
+    skippedProjectKeys
+  }).then(({ inputs, modes }) => {
+    runStore.syncProjectStates(inputs);
+    for (const project of status.projects) {
+      if (
+        selectedProjectKeysByName.get(project.name) !==
+        projectPollIdentityKey(project.name, project.repository)
+      ) {
+        continue;
       }
-      return modes;
+      runStore.recordProjectPollOutcome({
+        candidateIssues: project.candidateIssues ?? 0,
+        error: project.error ?? null,
+        fetchedIssues: project.fetchedIssues,
+        filteredIssues: project.filteredIssues ?? 0,
+        ok: project.ok,
+        projectName: project.name
+      });
+      // ADR 0073: only a project whose poll succeeded this tick gets its
+      // issue snapshot replaced — a failed poll leaves the last known
+      // snapshot in place rather than blanking the table.
+      if (project.ok) {
+        runStore.replaceProjectIssueSnapshots({
+          polledAt: project.lastPolledAt ?? timestamp(),
+          projectName: project.name,
+          repository: project.repository,
+          rows: projectIssueSnapshotRows(
+            project.name,
+            project.repository,
+            status
+          )
+        });
+      }
     }
-  );
+    return modes;
+  });
 }
 
 function projectIssueSnapshotRows(
@@ -1903,12 +1934,27 @@ type ProjectStateInputs = {
   modes: Map<string, "dispatch" | "routine_host">;
 };
 
+type ReadProjectStateInputsOptions = {
+  priorProjectStates: ReadonlyMap<
+    string,
+    {
+      validationMessage: string | null;
+      validationState: "inactive" | "invalid" | "valid";
+    }
+  >;
+  skippedProjectKeys: ReadonlySet<string>;
+};
+
 async function readProjectStateInputs(
   configPath: string,
-  status: import("./issue-polling.js").IssuePollStatus
+  status: import("./issue-polling.js").IssuePollStatus,
+  options: ReadProjectStateInputsOptions
 ): Promise<ProjectStateInputs> {
   const reports = new Map(
-    status.projects.map((project) => [project.name, project])
+    status.projects.map((project) => [
+      projectPollIdentityKey(project.name, project.repository),
+      project
+    ])
   );
   let raw: unknown;
   try {
@@ -1932,7 +1978,9 @@ async function readProjectStateInputs(
       return;
     }
     modes.set(project["name"], rawProjectMode(project["mode"]));
-    const report = reports.get(project["name"]);
+    const projectKey = rawProjectPollIdentityKey(project["name"], project);
+    const report =
+      projectKey === undefined ? undefined : reports.get(projectKey);
     if (report !== undefined) {
       inputs.push(projectStateInputFromReport(report));
       return;
@@ -1940,14 +1988,47 @@ async function readProjectStateInputs(
     const errors = status.errors.filter((error) =>
       error.startsWith(`projects.${index}.`)
     );
+    if (errors.length > 0) {
+      inputs.push({
+        name: project["name"],
+        validationMessage: errors.join("; "),
+        validationState: "invalid",
+        weight: rawProjectWeight(project["weight"])
+      });
+      return;
+    }
+    const prior =
+      projectKey !== undefined && options.skippedProjectKeys.has(projectKey)
+        ? options.priorProjectStates.get(project["name"])
+        : undefined;
     inputs.push({
       name: project["name"],
-      validationMessage: errors.length === 0 ? null : errors.join("; "),
-      validationState: errors.length === 0 ? "valid" : "invalid",
+      validationMessage:
+        prior?.validationState === "invalid" ? prior.validationMessage : null,
+      validationState:
+        prior?.validationState === "invalid" ? "invalid" : "valid",
       weight: rawProjectWeight(project["weight"])
     });
   });
   return { inputs, modes };
+}
+
+function rawProjectPollIdentityKey(
+  name: string,
+  project: Record<string, unknown>
+): string | undefined {
+  const tracker = project["tracker"];
+  if (
+    !isRecord(tracker) ||
+    typeof tracker["owner"] !== "string" ||
+    typeof tracker["repo"] !== "string"
+  ) {
+    return undefined;
+  }
+  return projectPollIdentityKey(name, {
+    owner: tracker["owner"],
+    repo: tracker["repo"]
+  });
 }
 
 // Mirrors the schema default: an omitted or unrecognized `mode` is a

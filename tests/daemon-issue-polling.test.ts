@@ -565,6 +565,157 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("preserves a later duplicate-name repository's prior status when the first repository rate-limits", async () => {
+    const root = await makeTempRoot();
+    await writeTwoProjectsWithDifferentTokens(root, {
+      projectNames: ["shared", "shared"]
+    });
+    let alphaPolls = 0;
+    const polledRepositories: string[] = [];
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockImplementation(({ repo }: { repo: string }) => {
+          polledRepositories.push(repo);
+          if (repo === "alpha") {
+            alphaPolls += 1;
+            return alphaPolls === 1
+              ? Promise.resolve([
+                  issueFixture({
+                    labels: [],
+                    number: 95,
+                    title: "First declaration prior snapshot"
+                  })
+                ])
+              : Promise.reject(new Error("API rate limit exceeded"));
+          }
+          return Promise.resolve([
+            issueFixture({
+              labels: [],
+              number: 96,
+              title: "Last declaration prior snapshot"
+            })
+          ]);
+        })
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: {
+        GITHUB_TOKEN_ALPHA: "shared-secret",
+        GITHUB_TOKEN_BETA: "shared-secret"
+      },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
+
+      const response = await fetch(`${daemon.url}/api/status`);
+      const body = (await response.json()) as {
+        filteredIssues: Array<{
+          issue: { number: number };
+          project: string;
+          repository: { owner: string; repo: string };
+        }>;
+        projectStates: Array<{
+          projectName: string;
+          validationMessage: string | null;
+          validationState: string;
+        }>;
+      };
+      expect(
+        body.filteredIssues.map(({ issue, project, repository }) => ({
+          number: issue.number,
+          project,
+          repository
+        }))
+      ).toEqual([
+        {
+          number: 96,
+          project: "shared",
+          repository: { owner: "pmatos", repo: "beta" }
+        }
+      ]);
+      expect(
+        body.projectStates.find((project) => project.projectName === "shared")
+      ).toMatchObject({
+        projectName: "shared",
+        validationMessage: null,
+        validationState: "valid"
+      });
+      expect(polledRepositories).toEqual(["alpha", "beta", "alpha"]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("preserves a skipped same-token project's invalid persisted state", async () => {
+    const root = await makeTempRoot();
+    await writeTwoProjectsWithDifferentTokens(root);
+    let alphaPolls = 0;
+    const polledRepositories: string[] = [];
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockImplementation(({ repo }: { repo: string }) => {
+          polledRepositories.push(repo);
+          if (repo === "alpha") {
+            alphaPolls += 1;
+            return alphaPolls === 1
+              ? Promise.resolve([])
+              : Promise.reject(new Error("API rate limit exceeded"));
+          }
+          return Promise.reject(new Error("beta tracker unavailable"));
+        })
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: {
+        GITHUB_TOKEN_ALPHA: "shared-secret",
+        GITHUB_TOKEN_BETA: "shared-secret"
+      },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
+
+      const response = await fetch(`${daemon.url}/api/status`);
+      const body = (await response.json()) as {
+        projectStates: Array<{
+          projectName: string;
+          validationMessage: string | null;
+          validationState: string;
+        }>;
+      };
+      const betaState = body.projectStates.find(
+        (project) => project.projectName === "beta"
+      );
+      expect(betaState).toMatchObject({
+        projectName: "beta",
+        validationState: "invalid"
+      });
+      expect(betaState?.validationMessage).toContain(
+        "beta tracker unavailable"
+      );
+      expect(polledRepositories).toEqual(["alpha", "beta", "alpha"]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("backs off PR follow-up after its GitHub call hits a rate limit", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root, { pollingIntervalMs: 10 });
@@ -1191,6 +1342,7 @@ async function writeTwoProjectsWithDifferentTokens(
   options: {
     disabledProjects?: readonly string[];
     pollingIntervalMs?: number;
+    projectNames?: readonly [string, string];
   } = {}
 ): Promise<void> {
   await mkdir(root, { recursive: true });
@@ -1213,7 +1365,7 @@ async function writeTwoProjectsWithDifferentTokens(
     "      labels: {}",
     "      default: 99",
     "    workspace:",
-    `      root: ./.symphonika/workspaces/${name}`,
+    `      root: ./.symphonika/workspaces/${repo}`,
     "      git:",
     `        remote: git@github.com:pmatos/${repo}.git`,
     "        base_branch: main",
@@ -1234,8 +1386,16 @@ async function writeTwoProjectsWithDifferentTokens(
       "  claude:",
       '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
       "projects:",
-      ...project("alpha", "alpha", "GITHUB_TOKEN_ALPHA"),
-      ...project("beta", "beta", "GITHUB_TOKEN_BETA"),
+      ...project(
+        options.projectNames?.[0] ?? "alpha",
+        "alpha",
+        "GITHUB_TOKEN_ALPHA"
+      ),
+      ...project(
+        options.projectNames?.[1] ?? "beta",
+        "beta",
+        "GITHUB_TOKEN_BETA"
+      ),
       ""
     ].join("\n")
   );

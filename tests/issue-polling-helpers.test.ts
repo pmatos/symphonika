@@ -10,6 +10,7 @@ import {
   mergeIssuePollStatus,
   parseParentIssueNumber,
   pollConfiguredGitHubIssuesFromConfig,
+  projectPollIdentityKey,
   rateLimitedTokens,
   swallowLabelNotFound,
   tryAddLabelsToIssue,
@@ -1160,8 +1161,13 @@ describe("mergeIssuePollStatus", () => {
     const merged = mergeIssuePollStatus(
       prior,
       fresh,
-      new Set(["beta"]),
-      new Set(["alpha", "beta"])
+      new Set([
+        projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ]),
+      new Set([
+        projectPollIdentityKey("alpha", { owner: "pmatos", repo: "alpha" }),
+        projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ])
     );
 
     expect(merged.candidateIssues.map((entry) => entry.project)).toEqual([
@@ -1188,8 +1194,8 @@ describe("mergeIssuePollStatus", () => {
     const merged = mergeIssuePollStatus(
       prior,
       fresh,
-      new Set(["alpha"]),
-      new Set(["alpha"])
+      new Set([projectPollIdentityKey("alpha", repository)]),
+      new Set([projectPollIdentityKey("alpha", repository)])
     );
 
     expect(merged.projects).toEqual([
@@ -1244,8 +1250,12 @@ describe("mergeIssuePollStatus", () => {
     const merged = mergeIssuePollStatus(
       prior,
       fresh,
-      new Set(["beta"]),
-      new Set(["beta"])
+      new Set([
+        projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ]),
+      new Set([
+        projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ])
     );
 
     expect(merged.candidateIssues).toEqual([]);
@@ -1283,8 +1293,13 @@ describe("mergeIssuePollStatus", () => {
     const merged = mergeIssuePollStatus(
       prior,
       fresh,
-      new Set(["beta"]),
-      new Set(["alpha", "beta"])
+      new Set([
+        projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ]),
+      new Set([
+        projectPollIdentityKey("alpha", { owner: "pmatos", repo: "alpha" }),
+        projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ])
     );
 
     expect(merged.errors).toEqual(["projects.alpha rate limit exceeded"]);

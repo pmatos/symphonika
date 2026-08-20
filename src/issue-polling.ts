@@ -953,22 +953,27 @@ export function replaceIssuePollStatus(
 // *currently enabled and configured* are carried over from `prior` untouched,
 // mirroring pollProject's own "leave prior snapshot untouched" contract for a
 // single failed project, just applied per-project across a partial poll
-// instead of an all-or-nothing one. `configuredProjectNames` is deliberately
+// instead of an all-or-nothing one. `configuredProjectKeys` is deliberately
 // the full enabled configured set, not just the pollable/backed-off ones -- a
 // project a config reload disabled, removed, or renamed is absent from both
-// `polledProjectNames` and `configuredProjectNames`, so it's dropped here too
+// `polledProjectKeys` and `configuredProjectKeys`, so it's dropped here too
 // instead of being carried over indefinitely.
 export function mergeIssuePollStatus(
   prior: IssuePollStatus,
   fresh: IssuePollStatus,
-  polledProjectNames: ReadonlySet<string>,
-  configuredProjectNames: ReadonlySet<string>
+  polledProjectKeys: ReadonlySet<string>,
+  configuredProjectKeys: ReadonlySet<string>
 ): IssuePollStatus {
-  const carryOver = (name: string): boolean =>
-    !polledProjectNames.has(name) && configuredProjectNames.has(name);
+  const carryOver = (
+    name: string,
+    repository: GitHubRepositoryIdentity
+  ): boolean => {
+    const key = projectPollIdentityKey(name, repository);
+    return !polledProjectKeys.has(key) && configuredProjectKeys.has(key);
+  };
 
   const carriedOverProjects = prior.projects.filter((project) =>
-    carryOver(project.name)
+    carryOver(project.name, project.repository)
   );
   // A carried-over project's own rate-limit error must survive the merge --
   // otherwise the first clean poll of any OTHER project on the same tick
@@ -982,17 +987,30 @@ export function mergeIssuePollStatus(
   return {
     candidateIssues: [
       ...prior.candidateIssues.filter((candidate) =>
-        carryOver(candidate.project)
+        carryOver(candidate.project, candidate.repository)
       ),
       ...fresh.candidateIssues
     ],
     errors: [...carriedOverErrors, ...fresh.errors],
     filteredIssues: [
-      ...prior.filteredIssues.filter((filtered) => carryOver(filtered.project)),
+      ...prior.filteredIssues.filter((filtered) =>
+        carryOver(filtered.project, filtered.repository)
+      ),
       ...fresh.filteredIssues
     ],
     projects: [...carriedOverProjects, ...fresh.projects]
   };
+}
+
+export function projectPollIdentityKey(
+  name: string,
+  repository: GitHubRepositoryIdentity
+): string {
+  return JSON.stringify([
+    name,
+    repository.owner.toLowerCase(),
+    repository.repo.toLowerCase()
+  ]);
 }
 
 export async function readConfiguredPollingIntervalMs(

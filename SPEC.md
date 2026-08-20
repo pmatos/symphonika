@@ -1395,8 +1395,9 @@ unreferenced-field declaration-load check (§5.4): unlike `model`/`effort`, a ro
 `permission_mode` purely as documentation of intent without its resolved provider command
 referencing the tag, since no provider currently requires it to appear in the command for full
 permission to take effect (the default commands above already carry a fixed policy flag literally).
-Claude Routine Firings additionally append `--disallowedTools ScheduleWakeup Monitor CronCreate`
-(outside the template, appended by the adapter directly) and set
+Claude Routine Firings additionally ensure one `--disallowedTools` option whose variadic values
+merge any operator-authored restrictions with `ScheduleWakeup`, `Monitor`, and `CronCreate`
+(outside the template, applied by the adapter directly), and set
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child environment.
 
 Future sandboxing, if added, should be outside the provider through host, container, VM, network, or

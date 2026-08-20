@@ -5712,6 +5712,90 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("records an ungrouped catch-up window skip when a restart target misses an already-durable fan-out", async () => {
+    // A Routine Fan-out for this exact (routine, scheduled_at) can already
+    // be durable from an earlier restart with narrower membership than what
+    // this recompute pass just found — ensureRoutineFanout never extends an
+    // existing row's targets (see the comment above its call site). This
+    // simulates that by seeding the fan-out directly with only "alpha" as a
+    // target before dispatch discovers both "alpha" and "beta" due at the
+    // same missed clock event.
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const provider = quietProvider();
+    const routine = minuteRoutine(root);
+    const declarations = ["alpha", "beta"].map((projectName) => ({
+      ...routine,
+      projectName
+    }));
+    runStore.syncRoutines(declarations, {
+      now: new Date("2026-05-22T10:00:30.000Z")
+    });
+    runStore.ensureRoutineFanout({
+      id: "pre-existing-fanout",
+      projectNames: ["alpha"],
+      routineName: "minute-report",
+      scheduledAt: "2026-05-22T10:01:00.000Z"
+    });
+
+    try {
+      const result = await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-should-not-be-created",
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:01:30.000Z"),
+        prepareRoutineWorkspace: vi.fn(),
+        projects: new Map(
+          declarations.map((declaration) => [
+            declaration.projectName,
+            {
+              ...runStoreProjectFixture(),
+              name: declaration.projectName,
+              routines: [declaration]
+            }
+          ])
+        ),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        recomputeSchedulesFromNow: true,
+        runStore,
+        stateRoot
+      });
+
+      expect(result.fired).toEqual([]);
+      expect(result.skipped).toEqual(
+        expect.arrayContaining([
+          {
+            projectName: "alpha",
+            reason: "catch_up_window",
+            routineName: "minute-report"
+          },
+          {
+            projectName: "beta",
+            reason: "catch_up_window",
+            routineName: "minute-report"
+          }
+        ])
+      );
+      expect(runStore.getRoutineFanout("pre-existing-fanout")).toMatchObject({
+        targets: [
+          {
+            disposition: "skipped",
+            projectName: "alpha",
+            skipReason: "catch_up_window"
+          }
+        ]
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("records a catch-up window skip on restart when catch-up is omitted", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

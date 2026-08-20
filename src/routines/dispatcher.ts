@@ -418,7 +418,7 @@ export async function dispatchDueRoutines(
           continue;
         }
         const scheduledAt = persisted.nextFireAt;
-        const fanoutKey = `${persisted.name}\0${scheduledAt}`;
+        const fanoutKey = routineFanoutKey(persisted.name, scheduledAt);
         const group = recomputedCatchUpGroups.get(fanoutKey) ?? {
           routineName: persisted.name,
           scheduledAt,
@@ -444,10 +444,23 @@ export async function dispatchDueRoutines(
     }).id;
     fanoutIds.set(fanoutKey, fanoutId);
     for (const target of group.targets) {
+      // ensureRoutineFanout never extends membership on an existing row
+      // (comment above), so a fan-out already durable from an earlier
+      // restart may not include every Project this pass just found
+      // eligible. skipRoutineFiring requires an existing pending/held
+      // target row for a fanoutId and throws otherwise (unlike
+      // claimRoutineFiring, it does not treat that as a normal miss) — so
+      // only pass fanoutId when this target actually belongs to it, and
+      // fall back to the same ungrouped catch_up_window skip used below for
+      // a later one-shot reload that misses an in-progress fan-out.
+      const hasTarget = input.runStore.hasRoutineFanoutTarget({
+        id: fanoutId,
+        projectName: target.projectName
+      });
       if (
         input.runStore.skipRoutineFiring({
           attemptedAt: now.toISOString(),
-          fanoutId,
+          ...(hasTarget ? { fanoutId } : {}),
           name: group.routineName,
           nextFireAt: target.nextFireAt,
           projectName: target.projectName,
@@ -547,7 +560,7 @@ export async function dispatchDueRoutines(
         continue;
       }
       const scheduledAt = routine.nextFireAt ?? now.toISOString();
-      const fanoutKey = `${routine.name}\0${scheduledAt}`;
+      const fanoutKey = routineFanoutKey(routine.name, scheduledAt);
       let fanoutId = fanoutIds.get(fanoutKey);
       if (fanoutId === undefined) {
         const targetProjectNames = input.runStore
@@ -2179,6 +2192,14 @@ function routineSchedule(routine: RoutineStatus): RoutineSchedule {
     );
   }
   return { at: routine.scheduleAt };
+}
+
+// Shared by both places dispatchDueRoutines groups Routine Targets by clock
+// event: the restart catch-up recompute pass and the normal due-event loop.
+// A NUL separator can't appear in either a routine name or an ISO timestamp,
+// so this stays collision-free without escaping.
+function routineFanoutKey(routineName: string, scheduledAt: string): string {
+  return `${routineName}\0${scheduledAt}`;
 }
 
 function recordDueRoutineSkip(

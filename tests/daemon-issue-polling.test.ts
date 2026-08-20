@@ -646,6 +646,74 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("drops a disabled project's prior status when an earlier same-token project rate-limits", async () => {
+    const root = await makeTempRoot();
+    await writeTwoProjectsWithDifferentTokens(root);
+    let alphaPolls = 0;
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockImplementation(({ repo }: { repo: string }) => {
+          if (repo === "alpha") {
+            alphaPolls += 1;
+            return alphaPolls === 1
+              ? Promise.resolve([
+                  issueFixture({
+                    labels: [],
+                    number: 93,
+                    title: "Alpha prior snapshot"
+                  })
+                ])
+              : Promise.reject(new Error("API rate limit exceeded"));
+          }
+          return Promise.resolve([
+            issueFixture({
+              labels: [],
+              number: 94,
+              title: "Beta disabled snapshot"
+            })
+          ]);
+        })
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: {
+        GITHUB_TOKEN_ALPHA: "shared-secret",
+        GITHUB_TOKEN_BETA: "shared-secret"
+      },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      await writeTwoProjectsWithDifferentTokens(root, {
+        disabledProjects: ["beta"]
+      });
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
+
+      const response = await fetch(`${daemon.url}/api/status`);
+      const body = (await response.json()) as {
+        filteredIssues: Array<{ issue: { number: number }; project: string }>;
+        issuePolling: {
+          errors: string[];
+          projects: Array<{ name: string }>;
+        };
+      };
+      expect(body.filteredIssues).toEqual([]);
+      expect(body.issuePolling.projects.map((project) => project.name)).toEqual(
+        ["alpha"]
+      );
+      expect(body.issuePolling.errors.join("\n")).toContain("rate limit");
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("does not let a stale in-flight PR poll's clean result clear a backoff a later tick engaged", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root, { pollingIntervalMs: 10 });
@@ -1120,11 +1188,17 @@ async function writeValidProject(
 
 async function writeTwoProjectsWithDifferentTokens(
   root: string,
-  options: { pollingIntervalMs?: number } = {}
+  options: {
+    disabledProjects?: readonly string[];
+    pollingIntervalMs?: number;
+  } = {}
 ): Promise<void> {
   await mkdir(root, { recursive: true });
   const project = (name: string, repo: string, tokenVar: string): string[] => [
     `  - name: ${name}`,
+    ...(options.disabledProjects?.includes(name) === true
+      ? ["    disabled: true"]
+      : []),
     "    weight: 1",
     "    tracker:",
     "      kind: github",

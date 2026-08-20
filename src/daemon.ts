@@ -676,12 +676,15 @@ export async function startDaemon(
       const polledIssueProjectNames = new Set(
         nextStatus.projects.map((project) => project.name)
       );
-      // The full configured set (not just pollableForIssues) so a project
-      // removed or renamed by a config reload -- absent from both sets --
-      // has its stale carried-over entries dropped rather than retained
-      // forever; see mergeIssuePollStatus.
+      // The full enabled configured set (not just pollableForIssues) so an
+      // enabled project skipped for backoff keeps its prior status, while a
+      // project disabled, removed, or renamed by a config reload -- absent
+      // from this set -- has its stale carried-over entries dropped rather
+      // than retained forever; see mergeIssuePollStatus.
       const configuredIssueProjectNames = new Set(
-        snapshot.polling.projects.map((project) => project.name)
+        snapshot.polling.projects
+          .filter((project) => project.disabled !== true)
+          .map((project) => project.name)
       );
       replaceIssuePollStatus(
         issuePollStatus,

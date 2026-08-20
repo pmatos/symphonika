@@ -949,15 +949,15 @@ export function replaceIssuePollStatus(
 // Like replaceIssuePollStatus, but for a tick that only polled a subset of
 // configured projects (credential-scoped backoff excludes any project whose
 // resolved token is currently backing off, see daemon.ts). Entries for a
-// polled project come from `fresh`; entries for every other *currently
-// configured* project are carried over from `prior` untouched, mirroring
-// pollProject's own "leave prior snapshot untouched" contract for a single
-// failed project, just applied per-project across a partial poll instead of
-// an all-or-nothing one. `configuredProjectNames` is deliberately the full
-// configured set, not just the pollable/backed-off ones -- a project a
-// config reload removed or renamed is absent from both `polledProjectNames`
-// and `configuredProjectNames`, so it's dropped here too instead of being
-// carried over indefinitely.
+// polled project come from `fresh`; entries for every other Project that is
+// *currently enabled and configured* are carried over from `prior` untouched,
+// mirroring pollProject's own "leave prior snapshot untouched" contract for a
+// single failed project, just applied per-project across a partial poll
+// instead of an all-or-nothing one. `configuredProjectNames` is deliberately
+// the full enabled configured set, not just the pollable/backed-off ones -- a
+// project a config reload disabled, removed, or renamed is absent from both
+// `polledProjectNames` and `configuredProjectNames`, so it's dropped here too
+// instead of being carried over indefinitely.
 export function mergeIssuePollStatus(
   prior: IssuePollStatus,
   fresh: IssuePollStatus,

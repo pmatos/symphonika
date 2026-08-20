@@ -138,15 +138,17 @@ waiting out any project's window. `issueRunNotifications.schedulePending()` at t
 also always runs, independent of partitioning, so a run that completes while some (or all) projects
 are backing off doesn't wait out the window before its notification is scheduled.
 
-### Carry-over is limited to still-configured projects, and preserves their own errors
+### Carry-over is limited to still-enabled configured projects, and preserves their own errors
 
 `mergeIssuePollStatus` takes both `polledProjectNames` (this tick's pollable subset) and
-`configuredProjectNames` (every project in the just-reloaded config, pollable or not) and only carries
-a prior project's entries forward when that project is in `configuredProjectNames` but not in
-`polledProjectNames` -- i.e. it still exists in config and was specifically skipped for backoff. A
-project a config reload removes or renames satisfies neither set once its old name is
-gone, so its stale candidates/filtered-issues/report are dropped on the very next tick instead of
-persisting in `/api/status`, poll-now summaries, and CLI/smoke output indefinitely.
+`configuredProjectNames` (every enabled project in the just-reloaded config, pollable or not) and
+only carries a prior project's entries forward when that project is in `configuredProjectNames` but
+not in `polledProjectNames` -- i.e. it remains enabled and was specifically skipped for backoff. A
+project a config reload disables, removes, or renames satisfies neither set once the new snapshot is
+active, so its stale candidates/filtered-issues/report are dropped on the very next tick instead of
+persisting in `/api/status`, poll-now summaries, and CLI/smoke output indefinitely. Disabled Projects
+still retain their last persisted per-Project issue snapshot as historical operator evidence; this
+rule only prevents that evidence from masquerading as current in-memory polling status.
 
 The merge also no longer does a bare `errors: fresh.errors` replace. `fresh.errors` only ever reflects
 the projects actually polled this tick, so a carried-over (backed-off) project's own rate-limit

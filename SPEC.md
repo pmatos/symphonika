@@ -1936,7 +1936,11 @@ or Firing transition, and a reload outcome, push the instant they happen; a `pro
 fires at the daemon's existing ~30-second poll cadence (ADR-0036) and only invalidates the poll-age
 display already on the page — receiving one never means issue eligibility itself just became live.
 Each connection subscribes and unsubscribes independently, so concurrent tabs do not share a cursor
-and a disconnect (tab close, navigation, network drop) cannot leak a listener.
+and a disconnect (tab close, navigation, network drop) cannot leak a listener. A connection retains
+at most 100 pending invalidations; if another event arrives while that queue is full, the server
+disconnects the subscriber and drops the queued events rather than silently coalescing them. The
+browser's normal reconnect then performs the same full-fragment reconciliation used after any other
+stream gap.
 
 The dashboard (`/`) is the one page wired to this stream. `renderActiveNowBand` and
 `renderProjectsSection` render inside stable `#active-now-band` / `#projects-section` containers,

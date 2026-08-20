@@ -278,6 +278,7 @@ export type HttpAppOptions = {
 };
 
 const SSE_HEARTBEAT_MS = 20_000;
+const SSE_MAX_PENDING_EVENTS = 100;
 
 const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
   "queued",
@@ -912,21 +913,34 @@ function streamChangeEvents(
       done = true;
       wake?.();
     });
+    // A writeSSE already blocked on a stalled client's backpressure never
+    // resolves on its own, so waking the idle-wait is not enough. Aborting
+    // errors the underlying writer, which makes that pending write return
+    // and lets the loop reach its finally.
+    const closeStream = () => {
+      done = true;
+      wake?.();
+      stream.abort();
+    };
     // Node's server.close() waits for every open connection to end on its
     // own; an SSE stream never does that by itself, so without this a
     // daemon shutdown would hang as long as any /events tab stayed open.
     // stopServer aborts this signal before calling close() (daemon.ts).
-    const onShutdown = () => {
-      done = true;
-      wake?.();
-      // A writeSSE already blocked on a stalled client's backpressure never
-      // resolves on its own, so waking the idle-wait is not enough. Aborting
-      // errors the underlying writer, which makes that pending write return
-      // and lets the loop reach its finally.
-      stream.abort();
-    };
-    shutdownSignal?.addEventListener("abort", onShutdown);
+    shutdownSignal?.addEventListener("abort", closeStream);
     const unsubscribe = runStore.subscribeToChanges((event) => {
+      if (done) {
+        return;
+      }
+      if (queue.length >= SSE_MAX_PENDING_EVENTS) {
+        queue.length = 0;
+        closeStream();
+        // Unsubscribe immediately rather than waiting for the loop's
+        // finally: a synchronous publish burst would otherwise keep
+        // paying a Set-iteration and try/catch per remaining event for a
+        // listener that already does nothing but check `done`.
+        unsubscribe();
+        return;
+      }
       queue.push(event);
       wake?.();
     });
@@ -965,7 +979,7 @@ function streamChangeEvents(
       }
     } finally {
       unsubscribe();
-      shutdownSignal?.removeEventListener("abort", onShutdown);
+      shutdownSignal?.removeEventListener("abort", closeStream);
     }
   });
 }

@@ -3102,6 +3102,47 @@ td code { color: var(--ink-2); }
   .fields dt { margin-top: var(--sp-2); }
 }`;
 
+const LOCAL_TIME_CLIENT_JS = `(function () {
+  var selector = "time[data-local-time]";
+  function localizeTimestamp(element) {
+    var value = element.getAttribute("datetime");
+    if (!value) { return; }
+    var date = new Date(value);
+    if (Number.isNaN(date.getTime())) { return; }
+    element.textContent = date.toLocaleString();
+  }
+  function localizeWithin(root) {
+    if (root.nodeType === 1 && root.matches(selector)) {
+      localizeTimestamp(root);
+    }
+    if (!root.querySelectorAll) { return; }
+    var timestamps = root.querySelectorAll(selector);
+    for (var i = 0; i < timestamps.length; i++) {
+      localizeTimestamp(timestamps[i]);
+    }
+  }
+  localizeWithin(document);
+  new MutationObserver(function (records) {
+    for (var i = 0; i < records.length; i++) {
+      var nodes = records[i].addedNodes;
+      for (var j = 0; j < nodes.length; j++) {
+        localizeWithin(nodes[j]);
+      }
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+})();`;
+
+function renderTimestamp(
+  value: string | null | undefined,
+  fallback = "-"
+): string {
+  if (!value) {
+    return escapeHtml(fallback);
+  }
+  const escaped = escapeHtml(value);
+  return `<time datetime="${escaped}" data-local-time>${escaped}</time>`;
+}
+
 function layout(title: string, body: string): string {
   return `<!doctype html>
 <html lang="en">
@@ -3120,6 +3161,7 @@ function layout(title: string, body: string): string {
 <main>
 ${body}
 </main>
+<script data-local-time-client>${LOCAL_TIME_CLIENT_JS}</script>
 </body>
 </html>`;
 }
@@ -5436,15 +5478,17 @@ function groupRoutinesByName(routines: RoutineStatus[]): RoutineGroup[] {
 // Widened past RoutineGroup so #304's declaration card can format a
 // specific resolved target's schedule (see resolveRoutineDeclaration)
 // without a duplicate copy of this two-line rule.
-function formatRoutineSchedule(schedule: {
+function renderRoutineSchedule(schedule: {
   scheduleAt: string | null;
   scheduleCron: string | null;
   scheduleTz: string | null;
 }): string {
   if (schedule.scheduleCron !== null) {
-    return `${schedule.scheduleCron} (${schedule.scheduleTz ?? "UTC"})`;
+    return escapeHtml(
+      `${schedule.scheduleCron} (${schedule.scheduleTz ?? "UTC"})`
+    );
   }
-  return schedule.scheduleAt ?? "-";
+  return renderTimestamp(schedule.scheduleAt);
 }
 
 // A group with no active target shows its shared lifecycle state (plus
@@ -5461,7 +5505,7 @@ function renderRoutineGroupStatus(group: RoutineGroup): string {
       active.length === group.targets.length
         ? ""
         : ` <span class="muted">(${active.length}/${group.targets.length} active)</span>`;
-    return `<code>${escapeHtml(nextFireAt ?? "-")}</code>${partial}`;
+    return `<code>${renderTimestamp(nextFireAt)}</code>${partial}`;
   }
   const [representative] = group.targets;
   if (representative === undefined) {
@@ -5486,7 +5530,7 @@ function renderRoutinesSection(
       const href = `/routines/${encodeURIComponent(group.name)}${routineQuerySuffix(undefined, includeInactive)}`;
       const routineLink = `<a href="${href}">${escapeHtml(group.name)}</a>`;
       const targetsLink = `<a href="${href}">${group.targets.length}</a>`;
-      return `<tr><td>${routineLink}</td><td>${escapeHtml(group.kind)}</td><td class="c-detail"><code>${escapeHtml(formatRoutineSchedule(group))}</code></td><td>${targetsLink}</td><td>${renderRoutineGroupStatus(group)}</td></tr>`;
+      return `<tr><td>${routineLink}</td><td>${escapeHtml(group.kind)}</td><td class="c-detail"><code>${renderRoutineSchedule(group)}</code></td><td>${targetsLink}</td><td>${renderRoutineGroupStatus(group)}</td></tr>`;
     })
     .join("");
   return tableSection(
@@ -5832,7 +5876,7 @@ function renderRoutineEditBlastRadius(targets: RoutineStatus[]): string {
   const items = targets
     .map(
       (target) =>
-        `<li>${escapeHtml(target.projectName)} — next fire: <code>${target.nextFireAt === null ? "—" : escapeHtml(target.nextFireAt)}</code></li>`
+        `<li>${escapeHtml(target.projectName)} — next fire: <code>${renderTimestamp(target.nextFireAt, "—")}</code></li>`
     )
     .join("");
   return `<div class="empty"><strong>This save affects</strong>Every target below picks up the edited schedule and prompt on the next dispatch tick.<ul>${items}</ul></div>`;
@@ -6114,7 +6158,7 @@ function renderRoutineDeclarationCard(
   return `${errorBanner}<section><dl class="fields">
   <dt>Kind</dt><dd>${escapeHtml(declaration.kind)}</dd>
   <dt>Provider</dt><dd>${declaration.provider === null ? '<span class="muted">inherited</span>' : escapeHtml(declaration.provider)}</dd>
-  <dt>Schedule</dt><dd><code>${escapeHtml(formatRoutineSchedule(declaration))}</code></dd>
+  <dt>Schedule</dt><dd><code>${renderRoutineSchedule(declaration)}</code></dd>
   <dt>Allow overlap</dt><dd>${declaration.allowOverlap ? "yes" : "no"}</dd>
   <dt>Catch up</dt><dd>${escapeHtml(declaration.catchUp)}</dd>
   <dt>Source</dt><dd><code>${escapeHtml(declaration.sourcePath)}</code></dd>
@@ -6277,9 +6321,9 @@ function renderRoutineTargetsTable(group: RoutineGroup): string {
       const skip =
         target.lastSkipReason === null
           ? '<span class="muted">none</span>'
-          : `${escapeHtml(target.lastSkipReason)} <code>${escapeHtml(target.lastSkipAt ?? "-")}</code>`;
+          : `${escapeHtml(target.lastSkipReason)} <code>${renderTimestamp(target.lastSkipAt)}</code>`;
       const counts = `overlap ${target.skipCounts24h.overlap} · cap ${target.skipCounts24h.concurrency_cap} · catch-up ${target.skipCounts24h.catch_up_window}`;
-      return `<tr><td>${escapeHtml(target.projectName)}</td><td>${routineStatePill(target.state)}${reason}</td><td><code>${escapeHtml(target.nextFireAt ?? "-")}</code></td><td><code>${escapeHtml(target.lastFiredAt ?? "-")}</code></td><td class="c-detail">${skip}</td><td class="c-detail">${counts}</td></tr>`;
+      return `<tr><td>${escapeHtml(target.projectName)}</td><td>${routineStatePill(target.state)}${reason}</td><td><code>${renderTimestamp(target.nextFireAt)}</code></td><td><code>${renderTimestamp(target.lastFiredAt)}</code></td><td class="c-detail">${skip}</td><td class="c-detail">${counts}</td></tr>`;
     })
     .join("");
   return tableSection(
@@ -6328,7 +6372,7 @@ function renderRoutineFiringHistory(firings: RoutineFiringStatus[]): string {
         .sort((a, b) => a.projectName.localeCompare(b.projectName))
         .map(
           (firing) =>
-            `<tr><td class="c-detail">${escapeHtml(eventLabel)}</td><td><a href="/firings/${encodeURIComponent(firing.id)}"><code>${escapeHtml(firing.id)}</code></a></td><td>${escapeHtml(firing.projectName)}</td><td>${statePill(firing.state)}</td><td class="c-detail">${escapeHtml(firing.terminalReason ?? "")}</td><td><code>${escapeHtml(firing.createdAt)}</code></td></tr>`
+            `<tr><td class="c-detail">${escapeHtml(eventLabel)}</td><td><a href="/firings/${encodeURIComponent(firing.id)}"><code>${escapeHtml(firing.id)}</code></a></td><td>${escapeHtml(firing.projectName)}</td><td>${statePill(firing.state)}</td><td class="c-detail">${escapeHtml(firing.terminalReason ?? "")}</td><td><code>${renderTimestamp(firing.createdAt)}</code></td></tr>`
         );
     })
     .join("");
@@ -6368,9 +6412,9 @@ function renderFiringSummary(
   <dt>State</dt><dd>${statePill(detail.state)}</dd>
   <dt>Provider</dt><dd>${escapeHtml(detail.provider)}</dd>
   <dt>Trigger</dt><dd>${escapeHtml(detail.triggerSource)}</dd>
-  <dt>Scheduled</dt><dd><code>${escapeHtml(detail.scheduledAt ?? "-")}</code></dd>
-  <dt>Started</dt><dd><code>${escapeHtml(startedAt ?? "-")}</code></dd>
-  <dt>Ended</dt><dd><code>${escapeHtml(endedAt ?? "-")}</code></dd>
+  <dt>Scheduled</dt><dd><code>${renderTimestamp(detail.scheduledAt)}</code></dd>
+  <dt>Started</dt><dd><code>${renderTimestamp(startedAt)}</code></dd>
+  <dt>Ended</dt><dd><code>${renderTimestamp(endedAt)}</code></dd>
   <dt>Workspace</dt><dd><code>${escapeHtml(detail.workspacePath)}</code></dd>
   <dt>Branch</dt><dd><code>${escapeHtml(detail.branchName)}</code></dd>
   ${terminalRow}
@@ -6480,7 +6524,7 @@ function runRowHtml(
   nowMs: number
 ): string {
   const currentState = formatCurrentStateCell(workflowStateId(run));
-  return `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td class="c-title">#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td>${statePill(run.state)}${renderWatchdogIdleBadge(watchdogByRun.get(run.id), nowMs)}</td><td>${currentState}</td><td>${escapeHtml(run.provider)}</td><td><code>${escapeHtml(run.createdAt)}</code></td><td><code>${escapeHtml(run.updatedAt)}</code></td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`;
+  return `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td class="c-title">#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td>${statePill(run.state)}${renderWatchdogIdleBadge(watchdogByRun.get(run.id), nowMs)}</td><td>${currentState}</td><td>${escapeHtml(run.provider)}</td><td><code>${renderTimestamp(run.createdAt)}</code></td><td><code>${renderTimestamp(run.updatedAt)}</code></td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`;
 }
 
 function renderRunsTable(
@@ -6506,7 +6550,7 @@ const ROUTINE_FIRINGS_TABLE_HEAD =
   "<tr><th>Routine</th><th>Project</th><th>State</th><th>Started</th></tr>";
 
 function firingRowHtml(firing: RoutineFiringStatus): string {
-  return `<tr><td><a href="/routines/${encodeURIComponent(firing.routineName)}">${escapeHtml(firing.routineName)}</a></td><td>${escapeHtml(firing.projectName)}</td><td>${statePill(firing.state)}</td><td><code>${escapeHtml(firing.createdAt)}</code></td></tr>`;
+  return `<tr><td><a href="/routines/${encodeURIComponent(firing.routineName)}">${escapeHtml(firing.routineName)}</a></td><td>${escapeHtml(firing.projectName)}</td><td>${statePill(firing.state)}</td><td><code>${renderTimestamp(firing.createdAt)}</code></td></tr>`;
 }
 
 // The active-now band (#302): every in-flight Run and Routine Firing,
@@ -6617,8 +6661,8 @@ function renderRunSummary(
   <dt>State</dt><dd>${statePill(detail.state)}</dd>
   <dt>Current state</dt><dd>${formatCurrentStateCell(workflowStateId(detail))}</dd>
   <dt>Provider</dt><dd>${escapeHtml(detail.provider)}</dd>
-  <dt>Started</dt><dd><code>${escapeHtml(detail.createdAt)}</code></dd>
-  <dt>Updated</dt><dd><code>${escapeHtml(detail.updatedAt)}</code></dd>
+  <dt>Started</dt><dd><code>${renderTimestamp(detail.createdAt)}</code></dd>
+  <dt>Updated</dt><dd><code>${renderTimestamp(detail.updatedAt)}</code></dd>
   <dt>Branch</dt><dd><code>${escapeHtml(detail.branchName)}</code></dd>
   <dt>Workspace</dt><dd><code>${escapeHtml(detail.workspacePath)}</code></dd>
   <dt>Retries</dt><dd>${detail.retryCount}${detail.isContinuation ? " (continuation)" : ""}</dd>
@@ -6641,7 +6685,7 @@ function renderWatchdogSection(
   }
   const idleRow =
     watchdog.idleSince !== undefined
-      ? `<dt>idle_since</dt><dd><code>${escapeHtml(watchdog.idleSince)}</code></dd>`
+      ? `<dt>idle_since</dt><dd><code>${renderTimestamp(watchdog.idleSince)}</code></dd>`
       : "";
   const graceRow =
     watchdog.graceRemainingMs !== undefined
@@ -6699,7 +6743,7 @@ function renderAttemptsTable(
   const rows = attempts
     .map(
       (attempt) =>
-        `<tr><td>${attempt.attemptNumber}</td><td><code>${escapeHtml(attempt.id)}</code></td><td>${statePill(attempt.state)}</td><td>${escapeHtml(attempt.providerName)}</td><td><code>${escapeHtml(attempt.createdAt)}</code></td><td><code>${escapeHtml(attempt.updatedAt)}</code></td><td><code>${escapeHtml(attempt.branchName)}</code></td></tr>`
+        `<tr><td>${attempt.attemptNumber}</td><td><code>${escapeHtml(attempt.id)}</code></td><td>${statePill(attempt.state)}</td><td>${escapeHtml(attempt.providerName)}</td><td><code>${renderTimestamp(attempt.createdAt)}</code></td><td><code>${renderTimestamp(attempt.updatedAt)}</code></td><td><code>${escapeHtml(attempt.branchName)}</code></td></tr>`
     )
     .join("");
   return tableSection(
@@ -6723,7 +6767,7 @@ function renderTransitionsTable(
   const rows = transitions
     .map(
       (transition) =>
-        `<tr><td>${transition.sequence}</td><td>${statePill(transition.state)}</td><td><code>${escapeHtml(transition.createdAt)}</code></td></tr>`
+        `<tr><td>${transition.sequence}</td><td>${statePill(transition.state)}</td><td><code>${renderTimestamp(transition.createdAt)}</code></td></tr>`
     )
     .join("");
   return tableSection(
@@ -6763,9 +6807,9 @@ function renderEventsTable(
           row.firstSequence === row.lastSequence
             ? formatEventSequence(row.firstSequence)
             : `${formatEventSequence(row.firstSequence)}–${formatEventSequence(row.lastSequence)}`;
-        return `<tr><td>${seq}</td><td>message</td><td class="c-detail"><div class="msg">${escapeHtml(row.text)}</div></td><td><code>${escapeHtml(row.createdAt || "-")}</code></td></tr>`;
+        return `<tr><td>${seq}</td><td>message</td><td class="c-detail"><div class="msg">${escapeHtml(row.text)}</div></td><td><code>${renderTimestamp(row.createdAt)}</code></td></tr>`;
       }
-      return `<tr><td>${formatEventSequence(row.sequence)}</td><td>${escapeHtml(row.type)}</td><td class="c-detail"><code>${escapeHtml(row.detail)}</code></td><td><code>${escapeHtml(row.createdAt || "-")}</code></td></tr>`;
+      return `<tr><td>${formatEventSequence(row.sequence)}</td><td>${escapeHtml(row.type)}</td><td class="c-detail"><code>${escapeHtml(row.detail)}</code></td><td><code>${renderTimestamp(row.createdAt)}</code></td></tr>`;
     })
     .join("");
   const scope = truncated

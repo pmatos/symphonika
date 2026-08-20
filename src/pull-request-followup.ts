@@ -265,7 +265,7 @@ async function discoverPullRequests(input: {
         branch: run.branchName
       });
     } catch (error) {
-      reportRateLimit(input, run.projectName, error);
+      reportRateLimit(input.onProjectRateLimited, run.projectName, error);
       input.logger?.warn(
         { branch: run.branchName, err: error },
         "symphonika PR follow-up discovery failed"
@@ -399,7 +399,7 @@ async function processTrackedPullRequests(input: {
     if (input.shouldPollProject?.(tracked.projectName) === false) {
       continue;
     }
-    let merged: boolean | undefined;
+    let merged: boolean;
     try {
       merged = await tryMergePullRequest(input.githubIssuesApi, {
         ...repository,
@@ -408,7 +408,9 @@ async function processTrackedPullRequests(input: {
         pullNumber: tracked.prNumber
       });
     } catch (error) {
-      if (!reportRateLimit(input, tracked.projectName, error)) {
+      if (
+        !reportRateLimit(input.onProjectRateLimited, tracked.projectName, error)
+      ) {
         throw error;
       }
       continue;
@@ -488,7 +490,7 @@ async function loadRawPullRequestState(input: {
       pullNumber: input.tracked.prNumber
     });
   } catch (error) {
-    reportRateLimit(input, input.projectName, error);
+    reportRateLimit(input.onProjectRateLimited, input.projectName, error);
     input.logger?.warn(
       { err: error, prNumber: input.tracked.prNumber },
       "symphonika PR follow-up poll failed"
@@ -498,17 +500,15 @@ async function loadRawPullRequestState(input: {
 }
 
 function reportRateLimit(
-  input: {
-    onProjectRateLimited?: RunPullRequestFollowupOptions["onProjectRateLimited"];
-  },
+  onProjectRateLimited: RunPullRequestFollowupOptions["onProjectRateLimited"],
   projectName: string,
   error: unknown
 ): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  if (!isRateLimitError(message) || input.onProjectRateLimited === undefined) {
+  if (!isRateLimitError(message) || onProjectRateLimited === undefined) {
     return false;
   }
-  input.onProjectRateLimited({ error, projectName });
+  onProjectRateLimited({ error, projectName });
   return true;
 }
 

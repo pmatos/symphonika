@@ -600,20 +600,26 @@ export async function startDaemon(
     }
   };
 
+  // A project whose token can't be resolved (e.g. an unset $VAR_NAME) is
+  // always pollable here -- pollProject reports that failure itself,
+  // unrelated to rate-limit backoff.
+  const isProjectPollable = (
+    project: PollingProjectConfig,
+    env: NodeJS.ProcessEnv,
+    nowMs: number
+  ): boolean => {
+    const token = resolveEnvBackedValue(project.tracker.token, env);
+    return token === undefined || !isGithubBackoffActive(nowMs, token);
+  };
+
   // Splits `projects` into those whose resolved token isn't currently
-  // backing off (pollable now) and the rest (currently skipped). A project
-  // whose token can't be resolved (e.g. an unset $VAR_NAME) is always
-  // pollable here -- pollProject reports that failure itself, unrelated to
-  // rate-limit backoff.
+  // backing off (pollable now) and the rest (currently skipped).
   const partitionProjectsForPolling = (
     projects: readonly PollingProjectConfig[],
     env: NodeJS.ProcessEnv,
     nowMs: number
   ): PollingProjectConfig[] => {
-    return projects.filter((project) => {
-      const token = resolveEnvBackedValue(project.tracker.token, env);
-      return token === undefined || !isGithubBackoffActive(nowMs, token);
-    });
+    return projects.filter((project) => isProjectPollable(project, env, nowMs));
   };
 
   const refreshIssuePollStatus = async (): Promise<void> => {
@@ -915,12 +921,21 @@ export async function startDaemon(
         ) {
           lastPullRequestFollowupAt = now;
           const snapshot = runtimeConfig.getSnapshot();
+          const projectsByName =
+            snapshot === undefined
+              ? undefined
+              : new Map(
+                  snapshot.polling.projects.map((project) => [
+                    project.name,
+                    project
+                  ])
+                );
           prResult = await runPullRequestFollowup({
             configPath: state.configPath,
             env,
             githubIssuesApi,
             logger,
-            ...(snapshot === undefined
+            ...(snapshot === undefined || projectsByName === undefined
               ? {}
               : {
                   onProjectRateLimited: ({ error, projectName }) => {
@@ -936,26 +951,15 @@ export async function startDaemon(
                       env
                     );
                   },
+                  policy: snapshot.pullRequestPolicy,
                   shouldPollProject: (projectName: string) => {
-                    const project = snapshot.polling.projects.find(
-                      (candidate) => candidate.name === projectName
-                    );
-                    if (project === undefined) {
-                      return false;
-                    }
-                    const token = resolveEnvBackedValue(
-                      project.tracker.token,
-                      env
-                    );
+                    const project = projectsByName.get(projectName);
                     return (
-                      token === undefined ||
-                      !isGithubBackoffActive(Date.now(), token)
+                      project !== undefined &&
+                      isProjectPollable(project, env, Date.now())
                     );
                   }
                 }),
-            ...(snapshot === undefined
-              ? {}
-              : { policy: snapshot.pullRequestPolicy }),
             projectsLoader,
             runController,
             runStore

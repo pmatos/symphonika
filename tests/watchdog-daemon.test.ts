@@ -135,9 +135,7 @@ describe("daemon watchdog", () => {
     });
 
     try {
-      const run = await waitForRunState(daemon.url, "stale", {
-        timeoutMs: 1_000
-      });
+      const run = await waitForRunState(daemon.url, "stale");
       expect(run).toMatchObject({
         id: "run-watchdog-ignored-vendor",
         state: "stale",

@@ -214,10 +214,15 @@ export type RoutineFiringStateTransition = {
   state: RoutineFiringState;
 };
 
+export type RoutineFanoutHoldReason =
+  | `provider_command_missing: ${AgentProviderName}`
+  | `provider_not_registered: ${AgentProviderName}`;
+
 export type RoutineFanoutTargetStatus = {
-  disposition: "pending" | "firing" | "skipped";
+  disposition: "pending" | "held" | "firing" | "skipped";
   firing: RoutineFiringStatus | null;
   firingId: string | null;
+  holdReason: RoutineFanoutHoldReason | null;
   projectName: string;
   skipReason: RoutineSkipReason | "target_unavailable" | null;
 };
@@ -808,8 +813,9 @@ type RoutineFanoutTargetRow = {
   disposition: RoutineFanoutTargetStatus["disposition"];
   fanout_id: string;
   firing_id: string | null;
+  hold_reason: RoutineFanoutHoldReason | null;
   project_name: string;
-  skip_reason: RoutineSkipReason | null;
+  skip_reason: RoutineSkipReason | "target_unavailable" | null;
 };
 
 const PULL_REQUEST_DISCOVERY_LIMIT = 25;
@@ -2266,7 +2272,7 @@ export class RunStore {
     const targets = this.database
       .prepare(
         [
-          "select fanout_id, project_name, disposition, firing_id, skip_reason",
+          "select fanout_id, project_name, disposition, firing_id, hold_reason, skip_reason",
           "from routine_fanout_targets where fanout_id = ?",
           "order by project_name asc"
         ].join(" ")
@@ -2279,6 +2285,7 @@ export class RunStore {
           ? null
           : (this.getRoutineFiring(target.firing_id) ?? null),
       firingId: target.firing_id,
+      holdReason: target.hold_reason,
       projectName: target.project_name,
       skipReason: target.skip_reason
     }));
@@ -2288,6 +2295,7 @@ export class RunStore {
     );
     const failureCount = mappedTargets.filter(
       (target) =>
+        target.disposition === "held" ||
         target.firing?.state === "failed" ||
         target.firing?.state === "cancelled"
     ).length;
@@ -2310,6 +2318,9 @@ export class RunStore {
   }
 
   listReadyRoutineFanouts(): RoutineFanoutStatus[] {
+    // `held` is deliberately absent from the outstanding predicate: ADR
+    // 0084 makes provider admission failures summary-terminal while leaving
+    // their clock events claimable.
     const rows = this.database
       .prepare(
         [
@@ -2425,13 +2436,34 @@ export class RunStore {
     return result.changes;
   }
 
+  holdRoutineFanoutTarget(input: {
+    fanoutId: string;
+    projectName: string;
+    reason: RoutineFanoutHoldReason;
+  }): boolean {
+    // Repeated daemon ticks refresh the durable reason without touching the
+    // Routine Target's due clock or skip evidence. A racing claim/skip wins
+    // by moving the leg out of the accepted dispositions.
+    const result = this.database
+      .prepare(
+        [
+          "update routine_fanout_targets",
+          "set disposition = 'held', hold_reason = ?, skip_reason = null, updated_at = ?",
+          "where fanout_id = ? and project_name = ?",
+          "and disposition in ('pending', 'held')"
+        ].join(" ")
+      )
+      .run(input.reason, timestamp(), input.fanoutId, input.projectName);
+    return result.changes > 0;
+  }
+
   settleUnavailableRoutineFanoutTargets(): number {
     const result = this.database
       .prepare(
         [
           "update routine_fanout_targets",
-          "set disposition = 'skipped', skip_reason = 'target_unavailable', updated_at = ?",
-          "where disposition = 'pending'",
+          "set disposition = 'skipped', hold_reason = null, skip_reason = 'target_unavailable', updated_at = ?",
+          "where disposition in ('pending', 'held')",
           "and not exists (",
           "select 1 from routine_fanouts f",
           "join routines r on r.name = f.routine_name",
@@ -2777,12 +2809,15 @@ export class RunStore {
         return false;
       }
       if (input.fanoutId !== undefined) {
+        // A repaired held leg may encounter an ordinary admission skip, so
+        // it remains consumable by the same atomic clock-advance path as a
+        // newly evaluated pending leg (ADR 0084).
         const target = this.database
           .prepare(
             [
               "update routine_fanout_targets set",
-              "disposition = 'skipped', skip_reason = ?, updated_at = ?",
-              "where fanout_id = ? and project_name = ? and disposition = 'pending'"
+              "disposition = 'skipped', hold_reason = null, skip_reason = ?, updated_at = ?",
+              "where fanout_id = ? and project_name = ? and disposition in ('pending', 'held')"
             ].join(" ")
           )
           .run(input.reason, timestamp(), input.fanoutId, input.projectName);
@@ -2927,12 +2962,15 @@ export class RunStore {
         throw new RoutineAlreadyClaimedError();
       }
       if (input.fanoutId !== undefined) {
+        // A held leg remains schedule-claimable after its one-shot summary,
+        // so provider repair uses the same atomic claim path as a newly
+        // evaluated pending leg (ADR 0084).
         const target = this.database
           .prepare(
             [
               "update routine_fanout_targets set",
-              "disposition = 'firing', firing_id = ?, skip_reason = null, updated_at = ?",
-              "where fanout_id = ? and project_name = ? and disposition = 'pending'"
+              "disposition = 'firing', firing_id = ?, hold_reason = null, skip_reason = null, updated_at = ?",
+              "where fanout_id = ? and project_name = ? and disposition in ('pending', 'held')"
             ].join(" ")
           )
           .run(input.firingId, timestamp(), input.fanoutId, input.projectName);
@@ -4788,6 +4826,7 @@ export class RunStore {
         project_name text not null,
         disposition text not null default 'pending',
         firing_id text,
+        hold_reason text,
         skip_reason text,
         created_at text not null,
         updated_at text not null,
@@ -4862,6 +4901,7 @@ export class RunStore {
       ["routine_firings", "notification_error", "text"],
       ["routine_firings", "workspace_pruned_at", "text"],
       ["routine_firings", "fanout_id", "text"],
+      ["routine_fanout_targets", "hold_reason", "text"],
       ["project_issue_snapshots", "labels", "text"],
       ["project_issue_snapshots", "blocked_by", "text"],
       [

@@ -336,20 +336,17 @@ export function fireRoutineNow(
       // notification delivery starts. The daemon-owned tracker drains it
       // during graceful shutdown without keeping manual firing completion
       // open on SMTP I/O (ADR 0085).
-      input.notification?.deliveries.enqueue(() =>
-        recordRoutineFiringNotification(
-          {
-            env: input.env ?? process.env,
-            firingId,
-            logger: input.logger,
-            notification: input.notification,
-            project,
-            routine: detail,
-            runStore: input.runStore
-          },
-          firingResult.events,
-          firingResult.prepared
-        )
+      enqueueRoutineFiringNotification(
+        {
+          env: input.env ?? process.env,
+          firingId,
+          logger: input.logger,
+          notification: input.notification,
+          project,
+          routine: detail,
+          runStore: input.runStore
+        },
+        firingResult
       );
     });
   return {
@@ -792,20 +789,17 @@ export async function dispatchDueRoutines(
           // SMTP server allows (see ADR 0067); enqueue it after the slot is
           // released so a stalled relay holds neither project capacity nor
           // this routine dispatch open (ADR 0085).
-          input.notification?.deliveries.enqueue(() =>
-            recordRoutineFiringNotification(
-              {
-                env: input.env ?? process.env,
-                firingId,
-                logger: input.logger,
-                notification: input.notification,
-                project,
-                routine: routineDetail,
-                runStore: input.runStore
-              },
-              firingResult.events,
-              firingResult.prepared
-            )
+          enqueueRoutineFiringNotification(
+            {
+              env: input.env ?? process.env,
+              firingId,
+              logger: input.logger,
+              notification: input.notification,
+              project,
+              routine: routineDetail,
+              runStore: input.runStore
+            },
+            firingResult
           );
         });
       firingTasks.push(firingTask);
@@ -813,8 +807,9 @@ export async function dispatchDueRoutines(
   }
 
   await Promise.all(firingTasks);
-  input.notification?.deliveries.enqueue(() =>
-    deliverReadyRoutineFanouts(input)
+  input.notification?.deliveries.enqueue(
+    () => deliverReadyRoutineFanouts(input),
+    { scope: "routine_fanout" }
   );
   return { fired, skipped };
 }
@@ -1433,6 +1428,24 @@ async function inspectRoutineCommitsAhead(input: {
     );
     return true;
   }
+}
+
+// Shared by fireRoutineNow and dispatchDueRoutines's per-firing task chain so
+// both enqueue notification delivery identically instead of each hand-rolling
+// the same `.deliveries.enqueue(...)` call.
+function enqueueRoutineFiringNotification(
+  input: Parameters<typeof recordRoutineFiringNotification>[0],
+  firingResult: RoutineFiringResult
+): void {
+  input.notification?.deliveries.enqueue(
+    () =>
+      recordRoutineFiringNotification(
+        input,
+        firingResult.events,
+        firingResult.prepared
+      ),
+    { firingId: input.firingId }
+  );
 }
 
 async function recordRoutineFiringNotification(

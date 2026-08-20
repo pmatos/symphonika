@@ -5,19 +5,28 @@ export class NotificationDeliveryTracker {
 
   constructor(private readonly logger?: Logger) {}
 
-  enqueue(deliver: () => Promise<void>): void {
+  enqueue(
+    deliver: () => Promise<void>,
+    context?: Record<string, unknown>
+  ): void {
     const task = Promise.resolve()
       .then(deliver)
       .catch((error: unknown) => {
         this.logger?.warn(
-          { err: error },
+          { ...context, err: error },
           "symphonika background notification delivery failed"
         );
       });
     this.inFlight.add(task);
-    void task.finally(() => {
-      this.inFlight.delete(task);
-    });
+    // A trailing no-op .catch(): the .catch() above already contains a
+    // delivery rejection, so this guards only against that handler itself
+    // throwing (e.g. a logging failure), keeping the ADR 0085 guarantee that
+    // a background task can never surface as an unhandled rejection.
+    void task
+      .finally(() => {
+        this.inFlight.delete(task);
+      })
+      .catch(() => undefined);
   }
 
   async settled(): Promise<void> {

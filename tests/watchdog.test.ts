@@ -503,8 +503,8 @@ describe("reconcileWatchdog", () => {
       try {
         await vi.waitFor(() => {
           expect(cancelA).toHaveBeenCalledOnce();
+          expect(cancelB).toHaveBeenCalledOnce();
         });
-        expect(cancelB).toHaveBeenCalledOnce();
       } finally {
         resolveA?.();
         resolveB?.();

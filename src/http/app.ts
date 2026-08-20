@@ -109,6 +109,9 @@ export type WriteIssueLabelsFn = (input: {
 // unsupported by the configured GitHub API — distinct from a fetch that
 // succeeded and genuinely reported an unresolved/unknown field, the same
 // stateAvailable honesty the poll snapshot itself carries (ADR 0078).
+// `snapshotRepository` is the repository identity rendered with the Merge
+// action. It stays optional at this boundary so missing or malformed form
+// input reaches the daemon guard and fails closed before GitHub.
 // `method` is always "merge" here — a dashboard click is the operator
 // explicitly overriding the FSM's own configured merge policy (ADR 0044),
 // not subject to it.
@@ -120,6 +123,7 @@ export type MergePullRequestFn = (input: {
   expectedHeadSha?: string;
   prNumber: number;
   projectName: string;
+  snapshotRepository?: ProjectSnapshotRepository | undefined;
 }) => Promise<MergePullRequestResult>;
 
 type FireRoutineRequest = {

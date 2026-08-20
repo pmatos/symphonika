@@ -2201,14 +2201,19 @@ claim uses — the in-process registry, active `runs` rows, and parked `waiting`
 a PR under a `merge_pr` FSM state), the section instead shows "owned by run `<id>`, cannot be merged
 until that Run is cancelled" and renders no button at all — refused both in the UI and, independently,
 server-side on the `POST` route, so a replayed or hand-crafted request gets the identical refusal a
-test covers directly. Merging goes through `mergePullRequest` (`src/daemon.ts`), which resolves the
-Project's tracker token, calls `GitHubIssuesApi.mergePullRequest` with the persisted snapshot's
-`headSha` as `expectedHeadSha` (so GitHub refuses a merge of commits the operator never saw), and —
-regardless of whether that call succeeds or GitHub refuses it — immediately re-fetches the PR's Pull
-Request State and renders that fresh result in the outcome banner, never assuming success or failure
-implies a particular state. Every attempt that reaches GitHub (successful or refused) is recorded as
-a durable evidence row, independent of any Run — the `#259` orphan case that motivates this feature
-has no Run to key evidence off of.
+test covers directly. The Merge form carries both the persisted snapshot's repository identity and
+its `headSha`. Merging goes through `mergePullRequest` (`src/daemon.ts`), which fails closed unless
+the rendered owner/repository matches the current durable PR snapshot and that durable identity
+matches the Project's current tracker; a missing identity or mismatch reaches neither GitHub nor
+merge-attempt evidence. After that guard it resolves the tracker token and calls
+`GitHubIssuesApi.mergePullRequest` with the rendered `headSha` as `expectedHeadSha` (so GitHub
+refuses a merge of commits the operator never saw). Repository binding remains required when the
+rendered snapshot has no head SHA because commit identity is not repository identity. Regardless of
+whether the GitHub call succeeds or GitHub refuses it, Symphonika immediately re-fetches the PR's
+Pull Request State and renders that fresh result in the outcome banner, never assuming success or
+failure implies a particular state. Every attempt that reaches GitHub (successful or refused) is
+recorded as a durable evidence row, independent of any Run — the `#259` orphan case that motivates
+this feature has no Run to key evidence off of.
 
 ## 15. Bootstrap Acceptance Bar
 

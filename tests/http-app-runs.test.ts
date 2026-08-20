@@ -1918,7 +1918,7 @@ describe("HTTP app — runs API and pages", () => {
 
       const idleBody = await (await app.request("/runs/idle-run")).text();
       expect(idleBody).toContain(
-        "<dt>idle_since</dt><dd><code>2026-05-22T11:45:00.000Z</code></dd>"
+        '<dt>idle_since</dt><dd><code><time datetime="2026-05-22T11:45:00.000Z" data-local-time>2026-05-22T11:45:00.000Z</time></code></dd>'
       );
       expect(idleBody).toContain("<dt>Grace remaining</dt><dd>15m</dd>");
 
@@ -1973,7 +1973,7 @@ describe("HTTP app — runs API and pages", () => {
         "<dt>Workspace mtime</dt><dd>31m ago</dd>"
       );
       expect(terminatedBody).toContain(
-        "<dt>idle_since</dt><dd><code>2026-05-22T09:00:00.000Z</code></dd>"
+        '<dt>idle_since</dt><dd><code><time datetime="2026-05-22T09:00:00.000Z" data-local-time>2026-05-22T09:00:00.000Z</time></code></dd>'
       );
       expect(terminatedBody).toContain("<dt>Grace remaining</dt><dd>-1m</dd>");
 

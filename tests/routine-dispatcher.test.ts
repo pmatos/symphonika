@@ -715,8 +715,10 @@ describe("RoutineFiringDispatcher", () => {
                 preparationSettled = true;
                 reject(
                   Object.assign(
-                    new Error("failed to clean aborted routine worktree"),
-                    { name: "RoutineWorkspaceCleanupError" }
+                    new Error(
+                      "failed to clean repository cache staging directory"
+                    ),
+                    { name: "WorkspacePreparationCleanupError" }
                   )
                 );
               }, 10);
@@ -750,7 +752,7 @@ describe("RoutineFiringDispatcher", () => {
       expect(provider.runAttempt).not.toHaveBeenCalled();
       expect(logWarn).toHaveBeenCalledWith(
         expect.objectContaining({
-          err: "failed to clean aborted routine worktree",
+          err: "failed to clean repository cache staging directory",
           firing: "fire-workspace-timeout"
         }),
         "symphonika timed-out routine workspace cleanup failed"

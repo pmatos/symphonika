@@ -31,7 +31,8 @@ their transports, hooks, and helpers. The dispatcher awaits that preparation pro
 recording the terminal firing. First-cache clones publish from an owned staging directory only after
 completion, with a mode derived from the process umask, so abort cleanup cannot expose a partial or
 mis-permissioned bare cache to later Routine Firings or issue Runs. Incomplete owned
-branch/worktree cleanup is logged while `firing_timeout` remains the terminal classification (#353).
+cache-staging or branch/worktree cleanup is logged while `firing_timeout` remains the terminal
+classification (#353).
 
 ## Public test seams
 

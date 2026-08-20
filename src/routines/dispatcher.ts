@@ -31,6 +31,7 @@ import { deliverRoutineFanoutNotification } from "../notifications/routine-fanou
 import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
 import type { NotificationSink } from "../notifications/types.js";
 import type { RunStore } from "../run-store.js";
+import { WorkspacePreparationCleanupError } from "../workspace.js";
 import {
   evaluateRoutineSchedule,
   nextRecurringFireAt,
@@ -62,7 +63,6 @@ import { createUlid } from "./ulid.js";
 import {
   planRoutineWorkspacePaths,
   prepareRoutineWorkspace as defaultPrepareRoutineWorkspace,
-  RoutineWorkspaceCleanupError,
   type PreparedRoutineWorkspace,
   type PrepareRoutineWorkspaceInput
 } from "./workspace.js";
@@ -1268,9 +1268,10 @@ async function runRoutineFiring(input: {
         (preparationError: unknown) => preparationError
       );
       if (
-        preparationError instanceof RoutineWorkspaceCleanupError ||
+        preparationError instanceof WorkspacePreparationCleanupError ||
         (preparationError instanceof Error &&
-          preparationError.name === "RoutineWorkspaceCleanupError")
+          (preparationError.name === "WorkspacePreparationCleanupError" ||
+            preparationError.name === "RoutineWorkspaceCleanupError"))
       ) {
         input.logger?.warn(
           {

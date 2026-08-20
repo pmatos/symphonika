@@ -65,6 +65,13 @@ export class WorkspacePreparationError extends Error {
   }
 }
 
+export class WorkspacePreparationCleanupError extends Error {
+  constructor(message: string, cause: unknown) {
+    super(message, { cause });
+    this.name = "WorkspacePreparationCleanupError";
+  }
+}
+
 export async function prepareIssueWorkspace(
   input: PrepareIssueWorkspaceInput
 ): Promise<PreparedIssueWorkspace> {
@@ -267,6 +274,8 @@ async function createRepositoryCache(
   const stagingPath = await mkdtemp(
     path.join(cacheParent, `.${path.basename(cachePath)}.clone-`)
   );
+  let operationError: unknown;
+  let operationFailed = false;
   try {
     // mkdtemp always creates its directory 0700, unlike a direct `git clone
     // --bare` into a not-yet-existing path, which follows the process umask.
@@ -285,10 +294,24 @@ async function createRepositoryCache(
       }
       await ensureRepositoryCacheRemote(project, cachePath, signal);
     }
-  } finally {
-    // A no-op after a successful rename: the staging path is already gone
-    // and `force` swallows the resulting ENOENT.
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
+  }
+  // A no-op after a successful rename: the staging path is already gone
+  // and `force` swallows the resulting ENOENT.
+  try {
     await rm(stagingPath, { force: true, recursive: true });
+  } catch (cleanupError) {
+    throw new WorkspacePreparationCleanupError(
+      `failed to clean repository cache staging directory ${stagingPath}`,
+      operationFailed
+        ? new AggregateError([operationError, cleanupError])
+        : cleanupError
+    );
+  }
+  if (operationFailed) {
+    throw operationError;
   }
 }
 

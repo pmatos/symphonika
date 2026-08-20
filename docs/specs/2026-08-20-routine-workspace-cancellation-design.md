@@ -40,7 +40,8 @@ is renamed atomically to `cachePath`; any failed or aborted clone removes only t
 If another owner populated `cachePath` before publication, the invocation discards its staging clone
 and validates the winner normally. Because `mkdtemp` starts at `0700`, preparation changes the
 staging root to `0777 & ~process.umask()` before publication, matching the mode a direct clone would
-have inherited rather than hard-coding one sharing policy. Fetch interruption preserves the
+have inherited rather than hard-coding one sharing policy; that adjustment is itself inside the
+owned-path cleanup scope. Fetch interruption preserves the
 previously validated cache; Git's own ref updates remain atomic and the dispatcher waits for the
 whole Git process group to stop before a later caller can enter the cache serializer.
 
@@ -58,7 +59,9 @@ Abort errors remain abort errors at the workspace seam when cleanup completes. T
 retains ownership of terminal classification, so deadline-driven aborts persist `firing_timeout`;
 non-deadline callers can distinguish cancellation from deterministic `WorkspacePreparationError`
 conflicts. Cleanup is awaited, and an incomplete cleanup is propagated as
-`RoutineWorkspaceCleanupError` and logged rather than silently retaining owned state.
+`WorkspacePreparationCleanupError` and logged rather than silently retaining owned state.
+`RoutineWorkspaceCleanupError` is its firing-worktree-specific subtype; failed clone-staging removal
+uses the shared base type so the deadline handler reports either cleanup boundary.
 
 ## Public test seams
 

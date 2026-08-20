@@ -233,6 +233,85 @@ done
     }
   });
 
+  it("surfaces failed cleanup of an aborted clone staging directory", async () => {
+    const root = await makeTempRoot();
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const wrapperRoot = path.join(root, "git-wrapper");
+    const wrapperPath = path.join(wrapperRoot, "git");
+    const startedPath = path.join(root, "clone-started");
+    const helperPidPath = path.join(root, "clone-pid");
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    await mkdir(wrapperRoot, { recursive: true });
+    await writeFile(
+      wrapperPath,
+      `#!/bin/sh
+if [ "$1" = "clone" ]; then
+  echo $$ > "${helperPidPath}"
+  touch "${startedPath}"
+  trap '' TERM
+  while true; do
+    sleep 1
+  done
+fi
+exec "${realGitOutput.trim()}" "$@"
+`
+    );
+    await chmod(wrapperPath, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+    const controller = new AbortController();
+    const originalRm = fsPromises.rm;
+
+    try {
+      const preparation = rejectionOf(
+        prepareRoutineWorkspace({
+          configDir: root,
+          firingId: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+          kind: "git",
+          project: {
+            name: "alpha",
+            workspace: {
+              git: { base_branch: "main", remote: path.join(root, "remote") },
+              root: workspaceRoot
+            }
+          },
+          routineName: "dependency-update",
+          signal: controller.signal
+        })
+      );
+      await waitForPath(startedPath);
+      fsPromises.rm = async (filePath, options) => {
+        if (String(filePath).includes(".repo.git.clone-")) {
+          throw Object.assign(new Error("staging removal denied"), {
+            code: "EACCES"
+          });
+        }
+        await originalRm(filePath, options);
+      };
+      syncBuiltinESMExports();
+      controller.abort();
+
+      const error = await settleWithin(preparation, 2_500);
+      expect(error).toBeInstanceOf(Error);
+      if (!(error instanceof Error)) {
+        throw new Error("expected staging cleanup to reject with an Error");
+      }
+      expect(error.name).toBe("WorkspacePreparationCleanupError");
+      expect(error.message).toContain(
+        "failed to clean repository cache staging directory"
+      );
+    } finally {
+      fsPromises.rm = originalRm;
+      syncBuiltinESMExports();
+      await killRecordedProcess(helperPidPath);
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
+  });
+
   it("removes a firing-owned branch when branch creation is aborted after the ref is written", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

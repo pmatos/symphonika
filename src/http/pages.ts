@@ -5509,7 +5509,21 @@ function renderEditorForm(input: {
   name: string;
   projectParam: string | undefined;
 }): string {
-  return `<h1 class="page-title">Edit ${escapeHtml(input.name)}</h1><p class="note">Raw text editing — this is the exact content written to disk; comments and key ordering elsewhere in the file are untouched by a save. Saving takes you to a diff review before anything is written.</p>${input.blastRadiusHtml}<form method="post" action="${escapeHtml(input.action)}">
+  return `<h1 class="page-title">Edit ${escapeHtml(input.name)}</h1><p class="note">Raw text editing — this is the exact content written to disk; comments and key ordering elsewhere in the file are untouched by a save. Saving takes you to a diff review before anything is written.</p>${input.blastRadiusHtml}${renderContentTextareaForm(input)}`;
+}
+
+// The raw-text-with-hidden-hash form body shared by renderEditorForm's fresh
+// edit and renderEditorPreview's invalid-resubmit branch -- kept as one
+// function so the two forms can't silently drift apart (missing hidden
+// field, changed textarea attrs) as they're extended.
+function renderContentTextareaForm(input: {
+  action: string;
+  content: string;
+  contentHash: string;
+  csrfToken: string;
+  projectParam: string | undefined;
+}): string {
+  return `<form method="post" action="${escapeHtml(input.action)}">
   <input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">
   <input type="hidden" name="expected_content_hash" value="${escapeHtml(input.contentHash)}">
   ${input.projectParam === undefined ? "" : `<input type="hidden" name="project_param" value="${escapeHtml(input.projectParam)}">`}
@@ -5615,13 +5629,15 @@ function renderEditorPreview(input: {
   reviewAction: string;
 }): string {
   if (input.errors.length > 0) {
-    return `<h1 class="page-title">Changes to ${escapeHtml(input.name)} are invalid</h1><div class="alert" role="alert"><strong>Fix these before saving</strong><ul>${input.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div><form method="post" action="${escapeHtml(input.previewAction)}">
-  <input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">
-  <input type="hidden" name="expected_content_hash" value="${escapeHtml(input.expectedContentHash)}">
-  ${input.projectParam === undefined ? "" : `<input type="hidden" name="project_param" value="${escapeHtml(input.projectParam)}">`}
-  <p><textarea name="content" rows="24" cols="100" class="editor">${escapeHtml(input.content)}</textarea></p>
-  <button class="btn" type="submit">Review changes</button>
-</form><p class="note"><a href="${escapeHtml(input.reviewAction)}${input.projectParam === undefined ? "" : `?project=${encodeURIComponent(input.projectParam)}`}">← Discard draft and reopen from disk</a></p>`;
+    return `<h1 class="page-title">Changes to ${escapeHtml(input.name)} are invalid</h1><div class="alert" role="alert"><strong>Fix these before saving</strong><ul>${input.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div>${renderContentTextareaForm(
+      {
+        action: input.previewAction,
+        content: input.content,
+        contentHash: input.expectedContentHash,
+        csrfToken: input.csrfToken,
+        projectParam: input.projectParam
+      }
+    )}<p class="note"><a href="${escapeHtml(input.reviewAction)}${input.projectParam === undefined ? "" : `?project=${encodeURIComponent(input.projectParam)}`}">← Discard draft and reopen from disk</a></p>`;
   }
   const diffHtml =
     input.onDisk === null

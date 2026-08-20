@@ -278,22 +278,15 @@ describe("RunStore routines", () => {
         scheduledAt: "2026-05-22T10:00:00.000Z"
       });
 
-      let caught: unknown;
-      try {
+      expect(() =>
         store.skipRoutineFiring({
           attemptedAt: "2026-05-22T10:00:01.000Z",
           fanoutId: "fanout-1",
           name: "refactor-audit",
           projectName: "beta",
           reason: "concurrency_cap"
-        });
-      } catch (error) {
-        caught = error;
-      }
-      expect(caught).toBeInstanceOf(RoutineFanoutInvariantError);
-      expect((caught as Error).message).toBe(
-        'routine fan-out "fanout-1" has no claimable target for Project "beta"'
-      );
+        })
+      ).toThrow(new RoutineFanoutInvariantError("fanout-1", "beta"));
       // The clock-column update inside the same transaction must roll back
       // too, not just the fan-out update: this is what makes the failure an
       // atomic no-op rather than a partially-applied skip attempt.
@@ -360,22 +353,15 @@ describe("RunStore routines", () => {
         store.hasRoutineFanoutTarget({ id: "fanout-1", projectName: "beta" })
       ).toBe(true);
 
-      let caught: unknown;
-      try {
+      expect(() =>
         store.skipRoutineFiring({
           attemptedAt: "2026-05-22T10:00:01.000Z",
           fanoutId: "fanout-1",
           name: "refactor-audit",
           projectName: "beta",
           reason: "concurrency_cap"
-        });
-      } catch (error) {
-        caught = error;
-      }
-      expect(caught).toBeInstanceOf(RoutineFanoutInvariantError);
-      expect((caught as Error).message).toBe(
-        'routine fan-out "fanout-1" has no claimable target for Project "beta"'
-      );
+        })
+      ).toThrow(new RoutineFanoutInvariantError("fanout-1", "beta"));
       expect(
         store.getRoutine({ name: "refactor-audit", projectName: "beta" })
       ).toMatchObject({

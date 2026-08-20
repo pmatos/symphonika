@@ -5679,8 +5679,8 @@ function diffLines(before: string[], after: string[]): DiffResult {
     return { ops: diffLinesByEdges(before, after), simplified: true };
   }
 
-  const lcs: number[][] = Array.from({ length: before.length + 1 }, () =>
-    new Array<number>(after.length + 1).fill(0)
+  const lcs: number[][] = Array.from({ length: tableRows }, () =>
+    new Array<number>(tableColumns).fill(0)
   );
   for (let i = before.length - 1; i >= 0; i--) {
     for (let j = after.length - 1; j >= 0; j--) {
@@ -5737,16 +5737,20 @@ function diffLinesByEdges(before: string[], after: string[]): DiffOp[] {
     suffixLength++;
   }
 
-  const ops: DiffOp[] = before
-    .slice(0, prefixLength)
-    .map((line) => ({ kind: "unchanged", line }));
-  for (let i = prefixLength; i < before.length - suffixLength; i++) {
+  const beforeChangedEnd = before.length - suffixLength;
+  const afterChangedEnd = after.length - suffixLength;
+
+  const ops: DiffOp[] = [];
+  for (let i = 0; i < prefixLength; i++) {
+    ops.push({ kind: "unchanged", line: before[i]! });
+  }
+  for (let i = prefixLength; i < beforeChangedEnd; i++) {
     ops.push({ kind: "removed", line: before[i]! });
   }
-  for (let i = prefixLength; i < after.length - suffixLength; i++) {
+  for (let i = prefixLength; i < afterChangedEnd; i++) {
     ops.push({ kind: "added", line: after[i]! });
   }
-  for (let i = before.length - suffixLength; i < before.length; i++) {
+  for (let i = beforeChangedEnd; i < before.length; i++) {
     ops.push({ kind: "unchanged", line: before[i]! });
   }
   return ops;

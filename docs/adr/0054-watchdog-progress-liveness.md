@@ -114,16 +114,23 @@ provider executing yet, so they have no liveness signal to advance and must not 
 already has `cancel_requested` set is also skipped: a cancellation with a more specific
 `cancel_reason` (e.g. `closed_issue` or `eligibility_loss`) is already in flight, so the Watchdog
 must not overwrite it with `no_progress` — this mirrors the existing `reconcileActiveRuns` guard
-(`if (entry.cancelRequested) continue`). For each sampled `running` Run, it:
+(`if (entry.cancelRequested) continue`).
+
+Attempt start owns a transition-time reset that the sampling loop cannot provide: before a Run is
+exposed as `preparing_workspace`, the same Run Store transaction deletes its latest
+`watchdog_samples` row and remembered `watchdog_turn_ids`. The append-only sample history remains
+durable. This applies to the first attempt as a no-op and to every retry, so CLI, HTTP, and future
+readers see no current Progress Signal during preparation rather than prior-attempt data.
+
+For each sampled `running` Run, the Watchdog:
 
 1. Reads the previous `WatchdogSample` from the run-store. A sample is scoped to the Run's active
-   attempt: it stores the `attempt_id` it was taken under, the per-attempt event offset (provider
-   `sequence` restarts at 1 on each attempt and the event log is keyed by `(run_id, attempt_id,
-   sequence)`), the last cumulative output-token total (the Codex delta baseline; Claude sums
-   per-turn `output_tokens` and does not need it — see signal 4), and the `idle_since` timestamp.
-   The Run's `created_at` is the implicit zero before the first sample.
+   attempt because the attempt-start hook removed the prior latest row. It stores the per-attempt
+   normalized-log path and byte offset, the last cumulative output-token total (the Codex delta
+   baseline; Claude sums per-turn `output_tokens` and does not need it — see signal 4), and the
+   `idle_since` timestamp. The Run's `created_at` is the implicit zero before the first sample.
 2. Computes a fresh Progress Signal. The Normalized Event Log is read forward from the previous
-   sample's stored offset within the active `attempt_id`; the workspace stat walk uses a single
+   sample's stored offset within the active normalized-log path; the workspace stat walk uses a single
    `fs.readdir` per directory and applies the exclude set at two levels: an excluded directory tree
    (e.g. `target/`) is never descended, and any individual file whose workspace-relative path
    matches an `mtime_ignore` glob is dropped from the mtime computation so it cannot advance
@@ -135,7 +142,9 @@ must not overwrite it with `no_progress` — this mirrors the existing `reconcil
    hide the retry's events (via `sequence > lastOffset`) nor suppress its output-token growth until
    it surpasses the prior attempt's total, and the grace clock starts fresh for the retry. (A
    transient retry re-enters a `running` agent state per ADR 0020, not `waiting`, so the
-   `waiting`-entry hook does not fire and `idle_since` must be reset here.)
+   `waiting`-entry hook does not fire. This path-change handling remains a defensive reset for
+   legacy or partially-upgraded state; the normal lifecycle already cleared the latest row before
+   preparation.)
 3. If progress was observed, writes the new sample and clears any persisted `idle_since`.
 4. If no progress was observed, `idle_since` is already set, and `now - idle_since >= grace_minutes`,
    transitions the Run to `stale` with `terminal_reason = "no_progress"` and calls
@@ -161,12 +170,11 @@ last-known-good snapshot behavior as other Workflow Contract validation failures
 prune matching directory entries before metadata reads or descent; the service-config
 `mtime_ignore` glob layer continues to filter individual files.
 
-Separately from the per-tick steps above, `idle_since` is cleared as a transition-time hook
-whenever a Run leaves `running` for `waiting`. This cannot be a step of the sampling loop, which
-never runs on `waiting` Runs; but because `idle_since` is a persisted wall-clock timestamp and
-step 5 only sets it when unset, clearing it on `waiting` entry is what stops step 4's
-`now - idle_since` from absorbing an unsampled wait excursion as idle time (see the ADR 0047
-interaction below).
+The lifecycle owns one other transition-time hook: `idle_since` is cleared whenever a Run leaves
+`running` for `waiting`. This cannot be a step of the sampling loop, which never runs on `waiting`
+Runs; but because `idle_since` is a persisted wall-clock timestamp and step 5 only sets it when
+unset, clearing it on `waiting` entry is what stops step 4's `now - idle_since` from absorbing an
+unsampled wait excursion as idle time (see the ADR 0047 interaction below).
 
 Sampling is bounded work: the event log is never re-scanned in full, and the workspace walk skips
 known build-output directories at the top of the descent rather than per file.

@@ -93,12 +93,10 @@ export async function reconcileWatchdog(
     });
     const progress =
       previous === undefined ? false : watchdogProgressObserved(previous, next);
-    // ADR 0054: a transient retry starts a new attempt (a new normalized log
-    // path) and must restart the grace clock. Drop the previous attempt's
-    // idle_since on an attempt change so the retry gets a fresh grace window
-    // rather than inheriting pre-retry idle time. (A retry re-enters a running
-    // agent state per ADR 0020, not waiting, so the waiting-entry hook does not
-    // fire and idle_since must be reset here.)
+    // ADR 0054: attempt start normally clears the latest sample before
+    // preparing_workspace. Keep path-change detection as a defensive fallback
+    // for legacy or partially-upgraded state so a surviving prior-attempt row
+    // still cannot carry its idle clock into the new attempt.
     const attemptChanged =
       previous !== undefined &&
       previous.normalizedLogPath !== run.normalizedLogPath;
@@ -195,13 +193,10 @@ async function sampleRun(input: {
   sampledAt: string;
 }): Promise<WatchdogSample> {
   // A retry attempt writes a fresh normalized log path
-  // (provider.normalized.attempt-N.jsonl). Per-attempt baselines (the byte
-  // offset and the output-token high-water mark) belong to the previous
-  // attempt's file, so carry them over only when the path is unchanged. On a
-  // path change we restart the offset at 0 (so the new attempt's early events
-  // are not skipped) and the token baseline at 0 (so a new process whose output
-  // token counter restarts below the failed attempt's total still registers as
-  // progress instead of being suppressed by Math.max).
+  // (provider.normalized.attempt-N.jsonl). Attempt start normally removes the
+  // previous latest sample; if legacy or partially-upgraded state survives,
+  // carry per-attempt baselines over only while the path remains unchanged.
+  // A path change restarts the offset and token baseline at zero.
   const carryOver =
     input.previous !== undefined &&
     input.previous.normalizedLogPath === input.run.normalizedLogPath

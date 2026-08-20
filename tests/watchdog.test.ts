@@ -873,13 +873,19 @@ describe("reconcileWatchdog", () => {
     await mkdir(workspacePath, { recursive: true });
     const attempt1 = path.join(root, "provider.normalized.jsonl");
     const attempt2 = path.join(root, "provider.normalized.attempt-2.jsonl");
-    await writeFile(attempt1, JSON.stringify({ type: "usage_updated" }) + "\n");
+    await writeFile(
+      attempt1,
+      JSON.stringify({ turnId: "attempt-1", type: "usage_updated" }) + "\n"
+    );
     // A longer file whose early bytes carry a tool_call: reusing the previous
     // attempt's offset would start mid-line and skip this event entirely.
     await writeFile(
       attempt2,
-      JSON.stringify({ toolName: "bash", turnId: "t1", type: "tool_call" }) +
-        "\n"
+      JSON.stringify({
+        toolName: "bash",
+        turnId: "attempt-2",
+        type: "tool_call"
+      }) + "\n"
     );
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     const evidence = (normalizedLogPath: string) => ({
@@ -956,9 +962,14 @@ describe("reconcileWatchdog", () => {
       const afterFirst = store.getWatchdogSample("run-retry");
       expect(afterFirst?.lastToolCallAt).toBeNull();
       expect(afterFirst?.normalizedLogOffset).toBeGreaterThan(0);
+      expect(afterFirst?.turnIdSetSize).toBe(1);
 
-      // The retry attempt switches to a new log path for the same run.
+      // The retry begins before it switches to a new log path for the same
+      // Run. Attempt-local samples and turn IDs must not cross this boundary.
+      store.updateRunState("run-retry", "failed");
+      store.updateRunState("run-retry", "preparing_workspace");
       store.updateRunEvidence("run-retry", evidence(attempt2));
+      store.updateRunState("run-retry", "running");
 
       await reconcileWatchdog({
         activeRuns,

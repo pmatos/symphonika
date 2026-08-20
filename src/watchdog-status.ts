@@ -78,11 +78,12 @@ export function buildWatchdogIdleStatus(input: {
 }
 
 // Sampling only ever runs against `state = 'running'` Runs (see
-// listWatchdogCandidateRuns) -- every other state (terminal, waiting,
-// queued, or preparing_workspace for a retry) can be carrying a sample from
-// before the Run left 'running', which a live clock would render as a
-// misleading, ever-drifting countdown for data that no longer describes
-// what the Run is currently doing. `runs.updated_at` is not a safe stand-in
+// listWatchdogCandidateRuns). Terminal and waiting Runs can carry their last
+// running sample; attempt start clears it before entering preparing_workspace,
+// while a queued first attempt has none. A live clock against a preserved
+// non-running sample would render a misleading, ever-drifting countdown for
+// data that no longer describes what the Run is currently doing.
+// `runs.updated_at` is not a safe stand-in
 // for "stopped being sampled" either: it can keep advancing for unrelated
 // reasons (e.g. PR-discovery polling bumps it for succeeded Runs). All
 // Progress Signal consumers (CLI show-run, the HTTP API, and the web UI)

@@ -1559,10 +1559,13 @@ path change as a counter reset), never by re-scanning the Normalized Event Log. 
 survives daemon restart, so a Run that was already observed idle resumes its grace window from the
 first idle observation rather than from process boot. It is cleared on entry to `waiting` (so an
 unsampled wait excursion does not accrue idle time). When a Run begins any new attempt, its
-transition to `preparing_workspace` atomically clears the latest sample and remembered turn-id set
-while preserving append-only sample history. A transient retry therefore exposes no current
-Progress Signal during workspace preparation and starts every attempt-local baseline and idle grace
-window fresh when sampling resumes.
+transition to `preparing_workspace` advances a per-Run Watchdog generation and atomically clears the
+latest sample and remembered turn-id set while preserving append-only sample history. Every
+Watchdog mutation is conditional on the `running` state and generation captured before sampling,
+so an old attempt's tick that finishes asynchronous log or Workspace I/O after the transition is
+discarded instead of recreating data or terminating the new attempt. A transient retry therefore
+exposes no current Progress Signal during workspace preparation and starts every attempt-local
+baseline and idle grace window fresh when sampling resumes.
 
 Sampling reads the Normalized Event Log only forward of the stored byte offset and walks the
 Workspace tree once. A transient retry writes a new per-attempt log path; its first sample reads

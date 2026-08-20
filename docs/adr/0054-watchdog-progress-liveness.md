@@ -117,18 +117,24 @@ must not overwrite it with `no_progress` — this mirrors the existing `reconcil
 (`if (entry.cancelRequested) continue`).
 
 Attempt start owns a transition-time reset that the sampling loop cannot provide: before a Run is
-exposed as `preparing_workspace`, the same Run Store transaction deletes its latest
-`watchdog_samples` row and remembered `watchdog_turn_ids`. The append-only sample history remains
-durable. This applies to the first attempt as a no-op and to every retry, so CLI, HTTP, and future
-readers see no current Progress Signal during preparation rather than prior-attempt data.
+exposed as `preparing_workspace`, the same Run Store transaction advances a per-Run Watchdog
+generation and deletes its latest `watchdog_samples` row and remembered `watchdog_turn_ids`. The
+append-only sample history remains durable. Every turn-id insertion, current/history sample write,
+and `no_progress` transition performed by reconciliation is conditional on the `running` state and
+generation captured when the candidate was selected. A prior attempt's tick that finishes
+asynchronous log or Workspace I/O after the reset is therefore discarded rather than undoing it or
+terminating the new attempt. This applies to the first attempt as a no-op reset and to every retry,
+so CLI, HTTP, and future readers see no current Progress Signal during preparation rather than
+prior-attempt data.
 
 For each sampled `running` Run, the Watchdog:
 
 1. Reads the previous `WatchdogSample` from the run-store. A sample is scoped to the Run's active
-   attempt because the attempt-start hook removed the prior latest row. It stores the per-attempt
-   normalized-log path and byte offset, the last cumulative output-token total (the Codex delta
-   baseline; Claude sums per-turn `output_tokens` and does not need it — see signal 4), and the
-   `idle_since` timestamp. The Run's `created_at` is the implicit zero before the first sample.
+   attempt because the attempt-start hook removed the prior latest row, and the candidate carries
+   the generation that fences every later mutation. It stores the per-attempt normalized-log path
+   and byte offset, the last cumulative output-token total (the Codex delta baseline; Claude sums
+   per-turn `output_tokens` and does not need it — see signal 4), and the `idle_since` timestamp.
+   The Run's `created_at` is the implicit zero before the first sample.
 2. Computes a fresh Progress Signal. The Normalized Event Log is read forward from the previous
    sample's stored offset within the active normalized-log path; the workspace stat walk uses a single
    `fs.readdir` per directory and applies the exclude set at two levels: an excluded directory tree

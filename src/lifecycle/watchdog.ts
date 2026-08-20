@@ -91,12 +91,16 @@ export async function reconcileWatchdog(
       runStore: input.runStore,
       sampledAt
     });
+    if (next === undefined) {
+      continue;
+    }
     const progress =
       previous === undefined ? false : watchdogProgressObserved(previous, next);
-    // ADR 0054: attempt start normally clears the latest sample before
-    // preparing_workspace. Keep path-change detection as a defensive fallback
-    // for legacy or partially-upgraded state so a surviving prior-attempt row
-    // still cannot carry its idle clock into the new attempt.
+    // ADR 0054: attempt start normally clears the latest sample and advances
+    // the generation fence before preparing_workspace. Keep path-change
+    // detection as a defensive fallback for legacy or partially-upgraded state
+    // so a surviving prior-attempt row still cannot carry its idle clock into
+    // the new attempt.
     const attemptChanged =
       previous !== undefined &&
       previous.normalizedLogPath !== run.normalizedLogPath;
@@ -109,7 +113,11 @@ export async function reconcileWatchdog(
       ...next,
       idleSince
     };
-    input.runStore.upsertWatchdogSample(persisted);
+    if (
+      !input.runStore.upsertWatchdogSample(persisted, run.watchdogGeneration)
+    ) {
+      continue;
+    }
     sampled += 1;
 
     if (progress || idleSince === null) {
@@ -119,7 +127,11 @@ export async function reconcileWatchdog(
       continue;
     }
 
-    const marked = input.runStore.markRunNoProgressStale(run.runId, sampledAt);
+    const marked = input.runStore.markRunNoProgressStale(
+      run.runId,
+      sampledAt,
+      run.watchdogGeneration
+    );
     if (!marked) {
       continue;
     }
@@ -191,7 +203,7 @@ async function sampleRun(input: {
   run: WatchdogCandidateRun;
   runStore: RunStore;
   sampledAt: string;
-}): Promise<WatchdogSample> {
+}): Promise<WatchdogSample | undefined> {
   // A retry attempt writes a fresh normalized log path
   // (provider.normalized.attempt-N.jsonl). Attempt start normally removes the
   // previous latest sample; if legacy or partially-upgraded state survives,
@@ -209,8 +221,12 @@ async function sampleRun(input: {
   const turnIds = collectTurnIds(log.events);
   const turnIdSetSize = input.runStore.rememberWatchdogTurnIds(
     input.run.runId,
-    turnIds
+    turnIds,
+    input.run.watchdogGeneration
   );
+  if (turnIdSetSize === undefined) {
+    return undefined;
+  }
   return {
     idleSince: null,
     lastMessageAt: latestMessageAt(

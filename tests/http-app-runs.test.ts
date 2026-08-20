@@ -2522,7 +2522,9 @@ describe("HTTP app — project detail page (#303)", () => {
         getScheduled: () => [
           {
             dueAt: Date.now() + 3 * 60_000,
+            issueNumber: 285,
             kind: "wait_park",
+            projectName: "alpha",
             runId: "run-waiting"
           }
         ],

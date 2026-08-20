@@ -56,7 +56,6 @@ import type {
   RoutineFiringStatus,
   RunArtifactDescriptor,
   RunArtifactKind,
-  RunDetail,
   RunState,
   RunStatus,
   RunStore,
@@ -94,7 +93,9 @@ import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 // fields.
 export type ScheduledCallback = {
   dueAt: number;
+  issueNumber: number;
   kind: "retry" | "continuation" | "state_advance" | "wait_park";
+  projectName: string;
   runId: string;
 };
 
@@ -721,6 +722,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       nowMs,
       projectNames,
       runStore: options.runStore,
+      scheduled: options.getScheduled?.() ?? [],
       startedAtMs: options.startedAtMs
     });
     const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
@@ -778,7 +780,12 @@ export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/issues/:project/:number", (context) => {
     const projectName = context.req.param("project");
     const issueNumber = Number.parseInt(context.req.param("number"), 10);
-    const detail = loadIssueDetail(options.runStore, projectName, issueNumber);
+    const detail = loadIssueDetail(
+      options.runStore,
+      projectName,
+      issueNumber,
+      options.getScheduled?.() ?? []
+    );
     if (detail === undefined) {
       return context.html(
         renderIssueNotFound(projectName, context.req.param("number")),
@@ -805,7 +812,12 @@ export function registerPages(options: RegisterPagesOptions): void {
     action: "add" | "remove"
   ): Promise<Response> {
     const issueNumber = Number.parseInt(issueNumberParam, 10);
-    const detail = loadIssueDetail(options.runStore, projectName, issueNumber);
+    const detail = loadIssueDetail(
+      options.runStore,
+      projectName,
+      issueNumber,
+      options.getScheduled?.() ?? []
+    );
     if (detail === undefined) {
       return context.html(
         renderIssueNotFound(projectName, issueNumberParam),
@@ -996,7 +1008,12 @@ export function registerPages(options: RegisterPagesOptions): void {
     issueNumberParam: string
   ): Promise<Response> {
     const issueNumber = Number.parseInt(issueNumberParam, 10);
-    const detail = loadIssueDetail(options.runStore, projectName, issueNumber);
+    const detail = loadIssueDetail(
+      options.runStore,
+      projectName,
+      issueNumber,
+      options.getScheduled?.() ?? []
+    );
     if (detail === undefined) {
       return context.html(
         renderIssueNotFound(projectName, issueNumberParam),
@@ -3641,21 +3658,61 @@ function parsePositiveIntQueryParam(
 // A claim-shaped operational-label reason (sym:claimed/sym:running) gets its
 // Run id resolved through the Run Store — a local read, not a GitHub call —
 // so describeIssueVerdict (src/issues/verdict.ts) can stay pure and DB-free.
-// The most recent Run for the issue is the one holding the claim; an issue
-// can only be claimed by one Run at a time in practice.
+// A scheduled callback keeps its Issue Reservation even when the backing Run
+// row is terminal. Its runId is scheduling correlation, not durable claimant
+// identity: wait_park can name the terminal parent while a waiting row owns
+// the reservation, and contention reschedules can name an unpersisted id.
+// Prefer the non-terminal states below, then use scheduled issue identity to
+// resolve the latest persisted Run. Terminal history alone may legitimately
+// retain sym:claimed for operator action (SPEC 9.3), but renders as
+// blocked/stale evidence.
 const CLAIM_REASON = /^has operational label sym:(claimed|running)$/;
+const CLAIM_HOLDING_RUN_STATES: RunState[] = [
+  "queued",
+  "preparing_workspace",
+  "running",
+  "waiting"
+];
+
+function resolveScheduledClaimantRunId(
+  runStore: RunStore,
+  callback: ScheduledCallback
+): string | undefined {
+  return runStore.listRuns({
+    issueNumber: callback.issueNumber,
+    limit: 1,
+    project: callback.projectName
+  })[0]?.id;
+}
 
 function resolveClaimedRunId(
   runStore: RunStore,
   projectName: string,
   issueNumber: number,
-  reasons: string[]
+  reasons: string[],
+  scheduled: ScheduledCallback[]
 ): string | undefined {
   if (!reasons.some((reason) => CLAIM_REASON.test(reason))) {
     return undefined;
   }
-  return runStore.listRuns({ issueNumber, limit: 1, project: projectName })[0]
-    ?.id;
+  const claimHoldingRun = runStore.listRuns({
+    issueNumber,
+    limit: 1,
+    project: projectName,
+    state: CLAIM_HOLDING_RUN_STATES
+  })[0];
+  if (claimHoldingRun !== undefined) {
+    return claimHoldingRun.id;
+  }
+  const scheduledClaimant = scheduled.find(
+    (callback) =>
+      callback.projectName === projectName &&
+      callback.issueNumber === issueNumber
+  );
+  if (scheduledClaimant !== undefined) {
+    return resolveScheduledClaimantRunId(runStore, scheduledClaimant);
+  }
+  return undefined;
 }
 
 // #308 part 3's clear-stale-claim liveness gate: the same three-source union
@@ -3673,6 +3730,10 @@ function resolveClaimedRunId(
 // under a merge_pr FSM state). A single shared read means both callers
 // filter one union rather than each re-deriving it.
 function collectLiveRunEntries(input: {
+  // Scoped to the issue being checked so scheduled-callback resolution below
+  // only queries the Run Store for a match, not once per in-flight callback
+  // across every project.
+  aliasNames: Set<string>;
   getActiveRuns:
     | (() => Array<{ issueNumber: number; projectName: string; runId: string }>)
     | undefined;
@@ -3680,20 +3741,34 @@ function collectLiveRunEntries(input: {
   // RunController.schedule (RegisterPagesOptions.getScheduled) has already
   // unregistered its slot and moved the Run row to a terminal state — the
   // only remaining ownership signal is this callback. Without it, an issue
-  // mid-backoff reads as unowned even though it will fire again. runStore
-  // resolves each callback's runId back to its (project, issue) pair since
-  // ScheduledCallback carries neither.
+  // mid-backoff reads as unowned even though it will fire again. Resolve its
+  // issue identity back to a persisted Run because callback.runId is not
+  // guaranteed to name one.
   getScheduled: (() => ScheduledCallback[]) | undefined;
+  issueNumber: number;
   runStore: RunStore;
 }): Array<{ issueNumber: number; projectName: string; runId: string }> {
-  const scheduledEntries = (input.getScheduled?.() ?? [])
-    .map((callback) => input.runStore.getRun(callback.runId))
-    .filter((run): run is RunDetail => run !== undefined)
-    .map((run) => ({
-      issueNumber: run.issueNumber,
-      projectName: run.project,
-      runId: run.id
-    }));
+  const scheduledEntries: Array<{
+    issueNumber: number;
+    projectName: string;
+    runId: string;
+  }> = [];
+  for (const callback of input.getScheduled?.() ?? []) {
+    if (
+      !input.aliasNames.has(callback.projectName) ||
+      callback.issueNumber !== input.issueNumber
+    ) {
+      continue;
+    }
+    const runId = resolveScheduledClaimantRunId(input.runStore, callback);
+    if (runId !== undefined) {
+      scheduledEntries.push({
+        issueNumber: callback.issueNumber,
+        projectName: callback.projectName,
+        runId
+      });
+    }
+  }
   return [
     ...(input.getActiveRuns?.() ?? []),
     ...input.runStore.listActiveRunIds(),
@@ -3734,7 +3809,7 @@ function findLiveRunIdForIssue(input: {
   const aliasNames = new Set(
     input.getProjectRepoAliases?.(input.projectName) ?? [input.projectName]
   );
-  return collectLiveRunEntries(input).find(
+  return collectLiveRunEntries({ ...input, aliasNames }).find(
     (entry) =>
       aliasNames.has(entry.projectName) &&
       entry.issueNumber === input.issueNumber
@@ -3826,6 +3901,7 @@ function searchIssueSnapshots(input: {
   nowMs: number;
   projectNames: string[];
   runStore: RunStore;
+  scheduled: ScheduledCallback[];
   startedAtMs: number | undefined;
 }): IssueSearchRow[] {
   const targetProjects =
@@ -3863,7 +3939,8 @@ function searchIssueSnapshots(input: {
         input.runStore,
         projectName,
         snapshot.issueNumber,
-        snapshot.reasons
+        snapshot.reasons,
+        input.scheduled
       );
       rows.push({
         blockedBy: snapshot.blockedBy,
@@ -4451,7 +4528,8 @@ type IssueDetail = {
 function loadIssueDetail(
   runStore: RunStore,
   projectName: string,
-  issueNumber: number
+  issueNumber: number,
+  scheduled: ScheduledCallback[]
 ): IssueDetail | undefined {
   if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
     return undefined;
@@ -4466,7 +4544,8 @@ function loadIssueDetail(
     runStore,
     projectName,
     issueNumber,
-    snapshot.reasons
+    snapshot.reasons,
+    scheduled
   );
   return {
     claimedRunId,

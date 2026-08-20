@@ -54,11 +54,20 @@ snapshot row's `kind`/`reasons` into the issue text's own vocabulary: `eligible`
 <label>` for an excluded label; `filtered: missing <label>` for a missing required label; `filtered:
 state <state>` for the open/closed check; `blocked: sym:<x>` for an operational label that isn't a
 claim; and `claimed by run <id>` specifically for `sym:claimed`/`sym:running`, when the caller can
-resolve an actual Run id. Resolving that id is deliberately the caller's job (`pages.ts`, via
-`runStore.listRuns({ project, issueNumber, limit: 1 })`) — a local Run Store read, not a GitHub call,
-so it stays inside the "no GitHub Search API calls" constraint while keeping the verdict module
-itself free of `RunStore` — a reason string alone can't tell candidate from filtered-for-cause, so
-`kind` travels alongside it rather than being re-derived from an empty `reasons` array.
+resolve an actual claim-holding Run id. Resolving that id is deliberately the caller's job
+(`pages.ts`): it first checks `runStore.listRuns` filtered to `queued`, `preparing_workspace`,
+`running`, and `waiting`. If none exists but an in-process scheduled callback still holds the
+Issue Reservation, it uses the callback's Project/Issue identity to resolve the latest persisted
+Run, which may already be terminal while a retry, Continuation, or State Advance is delayed. It
+does not trust the callback's `runId`: `wait_park` can name the terminal parent while a separate
+waiting Run owns the reservation, and a contention reschedule can carry a newly generated id that
+was never persisted. These are local reads, not GitHub calls. Terminal history that has no
+scheduled work is excluded because a terminal Run may legitimately leave `sym:claimed` behind for
+operator action; without a live reservation, the verdict remains `blocked: sym:claimed` rather
+than presenting that history as the current claimant. This stays inside the "no GitHub Search API
+calls" constraint while keeping the verdict module itself free of `RunStore` — a reason string
+alone can't tell candidate from filtered-for-cause, so `kind` travels alongside it rather than
+being re-derived from an empty `reasons` array.
 
 ### This is not the same table as `/projects/:name`'s existing Issues section
 

@@ -36,7 +36,9 @@ escalates survivors to `SIGKILL` after a one-second grace period. The Git promis
 shutdown, keeping the cache lock owned until transports, hooks, and helpers have stopped. On Linux,
 the post-`SIGKILL` check reads procfs process state and treats a zombie-only group as stopped: those
 entries cannot execute, and a non-reaping container PID 1 must not turn the original abort into a
-false cleanup failure.
+false cleanup failure. Stdout and stderr each retain at most the 1 MiB default previously enforced by
+`execFile`; overflow starts the same whole-group shutdown and rejects with Node's max-buffer error
+instead of allowing a noisy transport, hook, or helper to grow daemon memory without bound.
 
 When no cache exists, preparation clones into a unique sibling staging directory. A successful clone
 is renamed atomically to `cachePath`; any failed or aborted clone removes only that staging directory.
@@ -73,8 +75,9 @@ uses the shared base type so the deadline handler reports either cleanup boundar
   and persists `failed / firing_timeout`.
 - `prepareRoutineWorkspace` proves aborted first-clone and established-cache fetch preparations kill
   their helper process trees without a test-only release signal, leave no poisoned cache/workspace,
-  preserve the process-umask cache mode, remove only firing-owned branch/worktree state, surface
-  incomplete cleanup, and allow a later preparation for the same Project to succeed.
+  preserve the process-umask cache mode, bound stdout and stderr while stopping the overflowing
+  process group, remove only firing-owned branch/worktree state, surface incomplete cleanup, and
+  allow a later preparation for the same Project to succeed.
 - Existing `prepareIssueWorkspace` and Routine Workspace tests prove completed caches and worktrees
   remain reusable.
 

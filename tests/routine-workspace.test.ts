@@ -416,6 +416,92 @@ exec "${realGitOutput.trim()}" "$@"
     }
   });
 
+  it.each(["stdout", "stderr"] as const)(
+    "bounds cancellable Git %s and stops its process group on overflow",
+    async (stream) => {
+      const root = await makeTempRoot();
+      const workspaceRoot = path.join(root, "workspaces", "alpha");
+      const cacheParent = path.join(workspaceRoot, ".cache");
+      const cachePath = path.join(cacheParent, "repo.git");
+      const wrapperRoot = path.join(root, "git-wrapper");
+      const wrapperPath = path.join(wrapperRoot, "git");
+      const startedPath = path.join(root, `${stream}-started`);
+      const helperPidPath = path.join(root, `${stream}-pid`);
+      const noisyOutputPath = path.join(root, `${stream}-noise`);
+      const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+      await mkdir(wrapperRoot, { recursive: true });
+      await writeFile(noisyOutputPath, Buffer.alloc(1024 * 1024 + 1, "x"));
+      await writeFile(
+        wrapperPath,
+        `#!/bin/sh
+if [ "$1" = "clone" ]; then
+  echo $$ > "${helperPidPath}"
+  touch "${startedPath}"
+  trap '' TERM
+  if [ "${stream}" = "stdout" ]; then
+    cat "${noisyOutputPath}"
+  else
+    cat "${noisyOutputPath}" >&2
+  fi
+  while true; do
+    sleep 1
+  done
+fi
+exec "${realGitOutput.trim()}" "$@"
+`
+      );
+      await chmod(wrapperPath, 0o755);
+      const previousPath = process.env.PATH;
+      process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+      const controller = new AbortController();
+
+      try {
+        const preparation = rejectionOf(
+          prepareRoutineWorkspace({
+            configDir: root,
+            firingId: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+            kind: "git",
+            project: {
+              name: "alpha",
+              workspace: {
+                git: {
+                  base_branch: "main",
+                  remote: path.join(root, "remote")
+                },
+                root: workspaceRoot
+              }
+            },
+            routineName: "dependency-update",
+            signal: controller.signal
+          })
+        );
+        await waitForPath(startedPath);
+        const helperPid = await readPid(helperPidPath);
+
+        const error = await settleWithin(preparation, 2_500);
+        expect(error).toMatchObject({
+          code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+          name: "RangeError"
+        });
+        expect(error).toBeInstanceOf(Error);
+        if (!(error instanceof Error)) {
+          throw new Error("expected output overflow to reject with an Error");
+        }
+        expect(error.message).toContain(`${stream} maxBuffer length exceeded`);
+        await waitForProcessExit(helperPid);
+        await expect(pathExists(cachePath)).resolves.toBe(false);
+        await expect(readdir(cacheParent)).resolves.toEqual([]);
+      } finally {
+        await killRecordedProcessGroup(helperPidPath);
+        if (previousPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = previousPath;
+        }
+      }
+    }
+  );
+
   it("preserves the process umask on an atomically published cache", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);
@@ -992,6 +1078,26 @@ async function killRecordedProcess(filePath: string): Promise<void> {
       throw error;
     }
     throw new Error(`failed to kill test process ${pid}`, { cause: error });
+  }
+}
+
+async function killRecordedProcessGroup(filePath: string): Promise<void> {
+  if (!(await pathExists(filePath))) {
+    return;
+  }
+  const pid = await readPid(filePath);
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ESRCH")) {
+      return;
+    }
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new Error(`failed to kill test process group ${pid}`, {
+      cause: error
+    });
   }
 }
 

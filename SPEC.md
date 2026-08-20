@@ -959,11 +959,12 @@ the same deadline aborts every in-flight `git` command and awaits preparation cl
 firing becomes terminal or releases its in-flight slot. On POSIX, each cancellable Git command is
 the leader of its own process group; abort sends `SIGTERM` to the whole group and escalates surviving
 helpers, transports, or hooks to `SIGKILL` after a bounded grace period. Non-POSIX hosts retain
-direct-child abort behavior. After escalation, Linux process groups containing only zombies count
-as stopped because none of their members can execute; delayed PID 1 reaping does not replace the
-original abort outcome with a cleanup failure. A caller queued on the shared per-cache fetch
-serializer checks the signal after reaching the head of the queue and does not begin new Git work
-after its deadline.
+direct-child abort behavior. Git stdout and stderr retention remains capped at 1 MiB per stream;
+exceeding that limit stops the POSIX process group before returning the max-buffer failure. After
+escalation, Linux process groups containing only zombies count as stopped because none of their
+members can execute; delayed PID 1 reaping does not replace the original abort outcome with a
+cleanup failure. A caller queued on the shared per-cache fetch serializer checks the signal after
+reaching the head of the queue and does not begin new Git work after its deadline.
 
 First-time bare-cache creation clones into a unique sibling staging directory and atomically renames
 the completed repository to the shared cache path. Failed or aborted clones remove only their owned

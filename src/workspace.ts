@@ -21,6 +21,7 @@ import {
 const execFileAsync = promisify(execFile);
 const GIT_ABORT_GRACE_MS = 1_000;
 const GIT_GROUP_POLL_MS = 10;
+const GIT_MAX_BUFFER_BYTES = 1024 * 1024;
 
 export type WorkspaceProject = {
   name: string;
@@ -409,18 +410,39 @@ async function gitInProcessGroup(
     signal,
     stdio: ["ignore", "pipe", "pipe"]
   });
-  const stdout: Buffer[] = [];
-  const stderr: Buffer[] = [];
-  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-
+  const stdout = new BoundedGitOutput();
+  const stderr = new BoundedGitOutput();
   let settled = false;
   let groupShutdown: Promise<void> | undefined;
+  let outputError: Error | undefined;
   const stopGroup = (): void => {
     if (!settled) {
       groupShutdown ??= terminateGitProcessGroup(child.pid);
     }
   };
+  const captureOutput = (
+    stream: "stdout" | "stderr",
+    output: BoundedGitOutput,
+    chunk: Buffer
+  ): void => {
+    if (outputError !== undefined || !output.append(chunk)) {
+      return;
+    }
+    outputError = Object.assign(
+      new RangeError(`${stream} maxBuffer length exceeded`),
+      {
+        cmd: `git ${args.join(" ")}`,
+        code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+      }
+    );
+    stopGroup();
+  };
+  child.stdout.on("data", (chunk: Buffer) => {
+    captureOutput("stdout", stdout, chunk);
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    captureOutput("stderr", stderr, chunk);
+  });
   signal.addEventListener("abort", stopGroup, { once: true });
   if (signal.aborted) {
     stopGroup();
@@ -439,7 +461,7 @@ async function gitInProcessGroup(
         reject(
           Object.assign(
             new Error(
-              `Command failed: git ${args.join(" ")}\n${Buffer.concat(stderr).toString("utf8")}`
+              `Command failed: git ${args.join(" ")}\n${stderr.toString()}`
             ),
             { code, killed: child.killed, signal: exitSignal }
           )
@@ -461,6 +483,9 @@ async function gitInProcessGroup(
       cleanupError
     );
   }
+  if (outputError !== undefined) {
+    throw outputError;
+  }
   if (processError !== undefined) {
     if (processError instanceof Error) {
       throw processError;
@@ -469,7 +494,30 @@ async function gitInProcessGroup(
       cause: processError
     });
   }
-  return Buffer.concat(stdout).toString("utf8").trim();
+  return stdout.toString().trim();
+}
+
+class BoundedGitOutput {
+  readonly #chunks: Buffer[] = [];
+  #length = 0;
+
+  append(chunk: Buffer): boolean {
+    const remaining = GIT_MAX_BUFFER_BYTES - this.#length;
+    if (chunk.length <= remaining) {
+      this.#chunks.push(chunk);
+      this.#length += chunk.length;
+      return false;
+    }
+    if (remaining > 0) {
+      this.#chunks.push(chunk.subarray(0, remaining));
+      this.#length = GIT_MAX_BUFFER_BYTES;
+    }
+    return true;
+  }
+
+  toString(): string {
+    return Buffer.concat(this.#chunks, this.#length).toString("utf8");
+  }
 }
 
 async function terminateGitProcessGroup(

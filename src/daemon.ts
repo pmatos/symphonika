@@ -1476,13 +1476,12 @@ export async function startDaemon(
     resolveWritePath: async (candidatePath: string) => {
       const referenced = await computeReferencedRealPaths({
         configPath: state.configPath,
+        // listRoutines()'s default already excludes state = 'inactive'; disabled_reason
+        // only means anything on state = 'disabled', so this filter alone also excludes
+        // routines dropped from config via the whole-project inactive cascade.
         routineSourcePaths: runStore
-          .listRoutines({ includeInactive: true })
-          .filter(
-            (routine) =>
-              routine.state !== "inactive" &&
-              routine.disabledReason !== "removed_from_config"
-          )
+          .listRoutines()
+          .filter((routine) => routine.disabledReason !== "removed_from_config")
           .map((routine) => routine.sourcePath),
         workflowPaths: [...runtimeConfig.projectsByName().values()]
           .map((project) => project.workflow)

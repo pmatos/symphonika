@@ -27,6 +27,13 @@ actually work" moved to an opt-in functional probe, `doctor --live-check <provid
 the real command with a trivial prompt and waits for a reply — see SPEC.md §11.3. Everything else in
 this ADR is unchanged.
 
+**Third amendment note:** Routine Firing Deadline expiry now cooperatively cancels workspace
+preparation as well as provider execution. The deadline's `AbortSignal` reaches the shared cache
+clone/fetch and firing-specific branch/worktree Git commands, and the dispatcher awaits preparation
+settlement before recording the timeout. First-cache clones publish atomically from an owned staging
+directory so abort cleanup cannot leave a partial bare repository at the shared cache path. This
+resolves the temporary limitation tracked in #353.
+
 ## Context
 
 The live ptt routines require different model, effort, permission, and 60-minute execution
@@ -100,9 +107,12 @@ the provider adapter's existing cancellation method and persists `failed / firin
 regardless of the cancellation-generated process-exit event. Terminal outcome classification is
 also inside the deadline; post-terminal pull-request discovery is not. The process-group
 implementation from #341 and ADR 0064 makes that cancellation a whole-tree termination once a
-provider process exists. Expiry during workspace preparation only stops the dispatcher from
-waiting on that stage — the underlying `git` subprocesses are not cancelled and can keep running
-in the background (tracked in #353).
+provider process exists. During workspace preparation, expiry aborts the stage's Git subprocesses
+and awaits preparation settlement before the firing becomes terminal or releases its concurrency
+slot. Cache creation clones to an invocation-owned sibling staging directory and atomically
+publishes a complete bare repository; abort removes the staging directory, while an interrupted
+fetch preserves the already-validated shared cache. Cleanup likewise removes only a newly-owned
+firing worktree, never a reused one.
 
 ## Consequences
 
@@ -121,7 +131,6 @@ in the background (tracked in #353).
   mode; it is unenforced, not unsupported. A Routine still runs headless (`-p`, no
   `--permission-prompt-tool`), so a mode that relies on a human answering a prompt cannot make
   progress on gated actions in practice — the operator's own responsibility, not a Symphonika check.
-- A firing that times out during workspace preparation leaves its `git` clone/fetch running
-  unattended; because `ensureRepositoryCache` serializes callers per project repository cache, that
-  abandoned work can delay the next firing's or Run's workspace preparation for the same project
-  (#353).
+- A firing that times out during workspace preparation retains its concurrency slot until the
+  aborted Git command and owned-path cleanup settle. Later callers of the same repository cache can
+  then proceed without awaiting abandoned work or repairing a partial clone.

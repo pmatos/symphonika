@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -15,6 +15,7 @@ export type PrepareRoutineWorkspaceInput = {
   kind: RoutineKind;
   project: WorkspaceProject;
   routineName: string;
+  signal?: AbortSignal;
 };
 
 export type PreparedRoutineWorkspace = {
@@ -64,8 +65,11 @@ export async function prepareRoutineWorkspace(
 ): Promise<PreparedRoutineWorkspace> {
   const { branchName, branchRef, cachePath, workspacePath } =
     planRoutineWorkspacePaths(input);
-  await ensureRepositoryCache(input.project, cachePath);
+  input.signal?.throwIfAborted();
+  await ensureRepositoryCache(input.project, cachePath, input.signal);
+  input.signal?.throwIfAborted();
   if (await exists(workspacePath)) {
+    input.signal?.throwIfAborted();
     return {
       branchName,
       branchRef,
@@ -76,30 +80,46 @@ export async function prepareRoutineWorkspace(
   }
   if (
     input.kind === "git" &&
-    !(await gitSucceeds(["-C", cachePath, "show-ref", "--verify", branchRef]))
+    !(await gitSucceeds(
+      ["-C", cachePath, "show-ref", "--verify", branchRef],
+      input.signal
+    ))
   ) {
-    await git([
-      "-C",
-      cachePath,
-      "branch",
-      branchName,
-      `origin/${input.project.workspace.git.base_branch}`
-    ]);
+    await git(
+      [
+        "-C",
+        cachePath,
+        "branch",
+        branchName,
+        `origin/${input.project.workspace.git.base_branch}`
+      ],
+      input.signal
+    );
   }
+  input.signal?.throwIfAborted();
   await mkdir(path.dirname(workspacePath), { recursive: true });
-  await git(
-    input.kind === "git"
-      ? ["-C", cachePath, "worktree", "add", workspacePath, branchName]
-      : [
-          "-C",
-          cachePath,
-          "worktree",
-          "add",
-          "--detach",
-          workspacePath,
-          `origin/${input.project.workspace.git.base_branch}`
-        ]
-  );
+  try {
+    await git(
+      input.kind === "git"
+        ? ["-C", cachePath, "worktree", "add", workspacePath, branchName]
+        : [
+            "-C",
+            cachePath,
+            "worktree",
+            "add",
+            "--detach",
+            workspacePath,
+            `origin/${input.project.workspace.git.base_branch}`
+          ],
+      input.signal
+    );
+    input.signal?.throwIfAborted();
+  } catch (error) {
+    if (input.signal?.aborted === true) {
+      await cleanupAbortedRoutineWorktree(cachePath, workspacePath);
+    }
+    throw error;
+  }
   return {
     branchName,
     branchRef,
@@ -135,16 +155,40 @@ async function exists(filePath: string): Promise<boolean> {
   }
 }
 
-async function git(args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args);
+async function cleanupAbortedRoutineWorktree(
+  cachePath: string,
+  workspacePath: string
+): Promise<void> {
+  await git([
+    "-C",
+    cachePath,
+    "worktree",
+    "remove",
+    "--force",
+    workspacePath
+  ]).catch(() => undefined);
+  await rm(workspacePath, { force: true, recursive: true });
+}
+
+async function git(args: string[], signal?: AbortSignal): Promise<string> {
+  const { stdout } =
+    signal === undefined
+      ? await execFileAsync("git", args)
+      : await execFileAsync("git", args, { signal });
   return stdout.trim();
 }
 
-async function gitSucceeds(args: string[]): Promise<boolean> {
+async function gitSucceeds(
+  args: string[],
+  signal?: AbortSignal
+): Promise<boolean> {
   try {
-    await git(args);
+    await git(args, signal);
     return true;
-  } catch {
+  } catch (error) {
+    if (signal?.aborted === true) {
+      throw error;
+    }
     return false;
   }
 }

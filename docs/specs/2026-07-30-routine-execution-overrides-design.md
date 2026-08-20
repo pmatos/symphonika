@@ -24,10 +24,11 @@ timer rather than receiving fresh per-stage budgets. If it expires during provid
 dispatcher awaits provider cancellation and stream cleanup, then writes the deterministic
 `failed / firing_timeout` outcome. Terminal classification remains inside the deadline;
 post-terminal pull-request discovery does not. Provider cancellation uses the process-group
-boundary delivered by #341. If it expires during workspace preparation instead, no provider process
-exists yet to cancel: the dispatcher stops waiting on `prepareRoutineWorkspace`, but its in-flight
-`git` subprocesses are not killed and can keep running, serialized against later callers of the
-same project's repository cache (#353).
+boundary delivered by #341. During workspace preparation the same deadline's `AbortSignal` cancels
+the shared cache clone/fetch and firing-specific branch/worktree Git commands. The dispatcher awaits
+that preparation promise before recording the terminal firing. First-cache clones publish from an
+owned staging directory only after completion, so abort cleanup cannot expose a partial bare cache
+to later Routine Firings or issue Runs (#353).
 
 ## Public test seams
 
@@ -36,5 +37,8 @@ same project's repository cache (#353).
 - `RunStore.syncRoutines` / `getRoutine` prove effective settings survive until a clock firing.
 - `AgentProvider.runAttempt` proves final Claude, Codex, and OMP spawn arguments and Claude
   environment guards.
-- `dispatchDueRoutines` proves timeout cancellation and the persisted terminal reason.
+- `dispatchDueRoutines` proves timeout cancellation, preparation settlement, and the persisted
+  terminal reason.
+- `prepareRoutineWorkspace` proves aborted clone and fetch work leave the shared cache reusable by
+  a later firing.
 - `renderRoutinePrompt` proves the provider-neutral one-shot statement.

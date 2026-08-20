@@ -50,16 +50,16 @@ later materializes the directory.
 Abort errors remain abort errors at the workspace seam. The deadline race retains ownership of
 terminal classification, so deadline-driven aborts persist `firing_timeout`; non-deadline callers
 can distinguish cancellation from deterministic `WorkspacePreparationError` conflicts. Cleanup is
-best-effort but awaited. A cleanup failure is attached to the preparation failure rather than
-silently publishing a partial cache.
+awaited, and a cleanup failure is propagated rather than silently publishing a partial cache.
 
 ## Public test seams
 
 - `dispatchDueRoutines` proves that deadline expiry aborts its
   `PrepareRoutineWorkspaceInput.signal`, awaits preparation settlement, never launches a provider,
   and persists `failed / firing_timeout`.
-- `prepareRoutineWorkspace` proves an aborted first preparation leaves no poisoned cache/workspace
-  and a later preparation for the same Project succeeds.
+- `prepareRoutineWorkspace` proves aborted first-clone and established-cache fetch preparations
+  leave no poisoned cache/workspace, removes an aborted firing-owned worktree path without touching
+  an existing firing, and allows a later preparation for the same Project to succeed.
 - Existing `prepareIssueWorkspace` and Routine Workspace tests prove completed caches and worktrees
   remain reusable.
 

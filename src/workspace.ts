@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, realpath, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -207,25 +207,30 @@ const fetchLocks = new Map<string, Promise<unknown>>();
 
 export async function ensureRepositoryCache(
   project: WorkspaceProject,
-  cachePath: string
+  cachePath: string,
+  signal?: AbortSignal
 ): Promise<void> {
   const prior = fetchLocks.get(cachePath) ?? Promise.resolve();
   const next = prior
     .catch(() => undefined)
     .then(async () => {
+      signal?.throwIfAborted();
       if (!(await exists(cachePath))) {
-        await mkdir(path.dirname(cachePath), { recursive: true });
-        await git(["clone", "--bare", project.workspace.git.remote, cachePath]);
+        await createRepositoryCache(project, cachePath, signal);
       } else {
-        await ensureRepositoryCacheRemote(project, cachePath);
+        await ensureRepositoryCacheRemote(project, cachePath, signal);
       }
-      await git([
-        "-C",
-        cachePath,
-        "fetch",
-        "origin",
-        `${project.workspace.git.base_branch}:refs/remotes/origin/${project.workspace.git.base_branch}`
-      ]);
+      signal?.throwIfAborted();
+      await git(
+        [
+          "-C",
+          cachePath,
+          "fetch",
+          "origin",
+          `${project.workspace.git.base_branch}:refs/remotes/origin/${project.workspace.git.base_branch}`
+        ],
+        signal
+      );
     });
   fetchLocks.set(cachePath, next);
   try {
@@ -238,20 +243,58 @@ export async function ensureRepositoryCache(
   }
 }
 
+async function createRepositoryCache(
+  project: WorkspaceProject,
+  cachePath: string,
+  signal: AbortSignal | undefined
+): Promise<void> {
+  const cacheParent = path.dirname(cachePath);
+  await mkdir(cacheParent, { recursive: true });
+  signal?.throwIfAborted();
+  // The shared cache path is published only after clone completion. An
+  // interrupted first clone can therefore remove its owned staging path
+  // without deleting a cache that may already own live worktrees.
+  const stagingPath = await mkdtemp(
+    path.join(cacheParent, `.${path.basename(cachePath)}.clone-`)
+  );
+  let published = false;
+  try {
+    await git(
+      ["clone", "--bare", project.workspace.git.remote, stagingPath],
+      signal
+    );
+    signal?.throwIfAborted();
+    try {
+      await rename(stagingPath, cachePath);
+      published = true;
+    } catch (error) {
+      if (!(await exists(cachePath))) {
+        throw error;
+      }
+      await ensureRepositoryCacheRemote(project, cachePath, signal);
+    }
+  } finally {
+    if (!published) {
+      await rm(stagingPath, { force: true, recursive: true });
+    }
+  }
+}
+
 async function ensureRepositoryCacheRemote(
   project: WorkspaceProject,
-  cachePath: string
+  cachePath: string,
+  signal?: AbortSignal
 ): Promise<void> {
   let originUrl: string;
   try {
-    originUrl = await git([
-      "-C",
-      cachePath,
-      "config",
-      "--get",
-      "remote.origin.url"
-    ]);
+    originUrl = await git(
+      ["-C", cachePath, "config", "--get", "remote.origin.url"],
+      signal
+    );
   } catch (error) {
+    if (signal?.aborted === true) {
+      throw error;
+    }
     throw new WorkspacePreparationError(
       "cache_conflict",
       `repository cache ${cachePath} is not a reusable Git repository with origin ${project.workspace.git.remote}`,
@@ -306,8 +349,11 @@ async function exists(filePath: string): Promise<boolean> {
   }
 }
 
-async function git(args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args);
+async function git(args: string[], signal?: AbortSignal): Promise<string> {
+  const { stdout } =
+    signal === undefined
+      ? await execFileAsync("git", args)
+      : await execFileAsync("git", args, { signal });
   return stdout.trim();
 }
 

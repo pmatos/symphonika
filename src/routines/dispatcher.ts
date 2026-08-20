@@ -443,24 +443,26 @@ export async function dispatchDueRoutines(
       scheduledAt: group.scheduledAt
     }).id;
     fanoutIds.set(fanoutKey, fanoutId);
+    const fanout = input.runStore.getRoutineFanout(fanoutId);
+    const pendingTargetProjectNames =
+      fanout?.notificationState === "pending"
+        ? new Set(fanout.targets.map((target) => target.projectName))
+        : new Set<string>();
     for (const target of group.targets) {
       // ensureRoutineFanout never extends membership on an existing row
       // (comment above), so a fan-out already durable from an earlier
       // restart may not include every Project this pass just found
-      // eligible. skipRoutineFiring requires an existing pending/held
-      // target row for a fanoutId and throws otherwise (unlike
-      // claimRoutineFiring, it does not treat that as a normal miss) — so
-      // only pass fanoutId when this target actually belongs to it, and
-      // fall back to the same ungrouped catch_up_window skip used below for
-      // a later one-shot reload that misses an in-progress fan-out.
-      const hasTarget = input.runStore.hasRoutineFanoutTarget({
-        id: fanoutId,
-        projectName: target.projectName
-      });
+      // eligible. A sent or policy-skipped fan-out is also an immutable
+      // one-shot snapshot (ADR 0084). Only settle a target that belongs to
+      // a notification-pending group; otherwise record the schedule advance
+      // as an ungrouped catch_up_window skip without rewriting that snapshot.
+      const shouldSettleFanout = pendingTargetProjectNames.has(
+        target.projectName
+      );
       if (
         input.runStore.skipRoutineFiring({
           attemptedAt: now.toISOString(),
-          ...(hasTarget ? { fanoutId } : {}),
+          ...(shouldSettleFanout ? { fanoutId } : {}),
           name: group.routineName,
           nextFireAt: target.nextFireAt,
           projectName: target.projectName,

@@ -5796,6 +5796,85 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it.each(["sent", "skipped"] as const)(
+    "keeps a %s fan-out snapshot unchanged when restart catch-up consumes a held target",
+    async (notificationState) => {
+      const root = await makeTempRoot();
+      const stateRoot = path.join(root, ".symphonika");
+      const runStore = openRunStore({ stateRoot });
+      const provider = quietProvider();
+      const routine = minuteRoutine(root);
+      runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+        now: new Date("2026-05-22T10:00:30.000Z")
+      });
+      runStore.ensureRoutineFanout({
+        id: "delivered-held-fanout",
+        projectNames: ["alpha"],
+        routineName: "minute-report",
+        scheduledAt: "2026-05-22T10:01:00.000Z"
+      });
+      expect(
+        runStore.holdRoutineFanoutTarget({
+          fanoutId: "delivered-held-fanout",
+          projectName: "alpha",
+          reason: "provider_not_registered: codex"
+        })
+      ).toBe(true);
+      expect(
+        runStore.claimRoutineFanoutNotification("delivered-held-fanout")
+      ).toBe(true);
+      runStore.completeRoutineFanoutNotification({
+        id: "delivered-held-fanout",
+        state: notificationState
+      });
+
+      try {
+        const result = await dispatchDueRoutines({
+          ...recurringDispatchInput({
+            activeRuns: new ActiveRunRegistry(),
+            provider,
+            root,
+            routine,
+            runStore
+          }),
+          createFanoutId: () => "fanout-must-not-be-created",
+          now: new Date("2026-05-22T10:01:30.000Z"),
+          recomputeSchedulesFromNow: true
+        });
+
+        expect(result).toEqual({
+          fired: [],
+          skipped: [
+            {
+              projectName: "alpha",
+              reason: "catch_up_window",
+              routineName: "minute-report"
+            }
+          ]
+        });
+        expect(
+          runStore.getRoutineFanout("delivered-held-fanout")
+        ).toMatchObject({
+          notificationState,
+          targets: [
+            {
+              disposition: "held",
+              holdReason: "provider_not_registered: codex",
+              projectName: "alpha",
+              skipReason: null
+            }
+          ]
+        });
+        expect(runStore.listRoutines({ project: "alpha" })[0]).toMatchObject({
+          lastSkipReason: "catch_up_window",
+          nextFireAt: "2026-05-22T10:02:00.000Z"
+        });
+      } finally {
+        runStore.close();
+      }
+    }
+  );
+
   it("records a catch-up window skip on restart when catch-up is omitted", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

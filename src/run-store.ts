@@ -2458,12 +2458,19 @@ export class RunStore {
   }
 
   settleUnavailableRoutineFanoutTargets(): number {
+    // Terminal or in-flight notifications already represent immutable
+    // one-shot snapshots; only a still-pending group may be reconciled.
     const result = this.database
       .prepare(
         [
           "update routine_fanout_targets",
           "set disposition = 'skipped', hold_reason = null, skip_reason = 'target_unavailable', updated_at = ?",
           "where disposition in ('pending', 'held')",
+          "and exists (",
+          "select 1 from routine_fanouts writable_fanout",
+          "where writable_fanout.id = routine_fanout_targets.fanout_id",
+          "and writable_fanout.notification_state = 'pending'",
+          ")",
           "and not exists (",
           "select 1 from routine_fanouts f",
           "join routines r on r.name = f.routine_name",

@@ -18,6 +18,7 @@ import type {
 } from "../provider.js";
 import { renderProviderCommandTemplate } from "../provider-command-template.js";
 import { VERSION } from "../version.js";
+import { parseProviderCommand, type ProviderLabel } from "./command-parse.js";
 import {
   providerProcessExitResult,
   shutdownProviderProcess,
@@ -25,6 +26,8 @@ import {
 } from "./provider-process.js";
 
 type JsonObject = Record<string, unknown>;
+
+const PROVIDER_LABEL: ProviderLabel = "Codex";
 
 type ActiveCodexRun = {
   cancelled: boolean;
@@ -141,7 +144,7 @@ export function createCodexProvider(
       ).rendered;
       const command = await processScope.wrapForProviderScope(
         input.run,
-        parseCommand(renderedCommand)
+        parseProviderCommand(renderedCommand, PROVIDER_LABEL)
       );
       if (activeRun.cancelled) {
         // Outside the try/finally below (which owns the only other
@@ -320,7 +323,7 @@ export function createCodexProvider(
     },
     validate: async (command) => {
       const rendered = renderProviderCommandTemplate(command, {}).rendered;
-      const parsed = parseCommand(rendered);
+      const parsed = parseProviderCommand(rendered, PROVIDER_LABEL);
       if (!parsed.args.includes("app-server")) {
         throw new Error(
           "Codex provider command must include the app-server subcommand"
@@ -1155,77 +1158,6 @@ function missingProfileMessage(profile: string, stderr: string): string {
     `  codex_hooks      = false`,
     `  image_generation = false`
   ].join("\n");
-}
-
-function parseCommand(command: string): { args: string[]; executable: string } {
-  const parts = splitCommand(command);
-  const executable = parts[0];
-  if (executable === undefined) {
-    throw new Error("Codex provider command is empty");
-  }
-
-  return {
-    args: parts.slice(1),
-    executable
-  };
-}
-
-function splitCommand(command: string): string[] {
-  const parts: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | undefined;
-  let escaping = false;
-
-  for (const character of command.trim()) {
-    if (escaping) {
-      current += character;
-      escaping = false;
-      continue;
-    }
-
-    if (character === "\\") {
-      escaping = true;
-      continue;
-    }
-
-    if (quote !== undefined) {
-      if (character === quote) {
-        quote = undefined;
-      } else {
-        current += character;
-      }
-      continue;
-    }
-
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-
-    if (/\s/.test(character)) {
-      if (current.length > 0) {
-        parts.push(current);
-        current = "";
-      }
-      continue;
-    }
-
-    current += character;
-  }
-
-  if (escaping) {
-    current += "\\";
-  }
-
-  if (quote !== undefined) {
-    throw new Error("Codex provider command has an unterminated quote");
-  }
-
-  if (current.length > 0) {
-    parts.push(current);
-  }
-
-  return parts;
 }
 
 function responseId(value: unknown): string | number | undefined {

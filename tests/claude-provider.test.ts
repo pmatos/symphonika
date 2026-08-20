@@ -767,6 +767,14 @@ describe("Claude stream-json provider", () => {
       )
     ).rejects.toThrow("--verbose");
   });
+
+  it("surfaces the Claude provider label when the command has an unterminated quote", async () => {
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
+
+    await expect(provider.validate('"claude')).rejects.toThrow(
+      "Claude provider command has an unterminated quote"
+    );
+  });
 });
 
 async function collectProviderEvents(

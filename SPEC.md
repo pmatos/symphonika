@@ -1952,11 +1952,12 @@ embedded script (`DASHBOARD_LIVE_CLIENT_JS`, a plain string constant matching th
 fragments via `element.replaceChildren(...)` — a full-region replace, not a diffing morph, since
 today neither fragment contains an editor or other state worth preserving across a swap (`#307`
 introduces editors; a preservation mechanism belongs there, against a real element, not built ahead
-of one). `EventSource`'s own reconnect handles drops; `error` shows a `#live-stream-banner` with a
-manual refresh link, `open` hides it and reconciles both fragments once, matching "no replay on
-reconnect." Every other page (`/runs/:id`, `/firings/:id`, `/routines/:name`, `/projects/:name`)
-still requires a manual reload to see a transition — wiring those up is follow-on work. See #305,
-ADR-0074.
+of one). `EventSource`'s own reconnect handles drops; `error` or any HTTP, network, or body-read
+failure while refreshing a fragment shows a `#live-stream-banner` with a manual refresh link.
+`open` reconciles both fragments once and hides the banner only after both refreshes succeed,
+matching "no replay on reconnect" without presenting a failed reconciliation as current. Every
+other page (`/runs/:id`, `/firings/:id`, `/routines/:name`, `/projects/:name`) still requires a
+manual reload to see a transition — wiring those up is follow-on work. See #305, ADR-0074.
 
 The v1 mutating local HTTP API actions are explicit active-run cancellation, a manual poll-now
 trigger that uses the normal daemon scheduler path, and daemon-owned manual Routine firing. The

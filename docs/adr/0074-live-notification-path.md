@@ -180,9 +180,12 @@ in-region preservation, because no in-region state exists to preserve.
 `EventSource` already reconnects on its own at a fixed retry interval; this slice does not
 hand-roll a custom backoff on top of it; there is no evidence yet that the browser's default retry
 cadence is a problem for a same-machine, same-process daemon. The client's `error` listener shows a
-`#live-stream-banner` ("Live updates disconnected... Refresh"); the `open` listener (fired on first
-connect and every successful reconnect) hides it and triggers one reconciling fetch of both
-fragments — the client-side counterpart to "no replay on reconnect" above.
+`#live-stream-banner` ("Live updates unavailable... Refresh"). The `open` listener (fired on first
+connect and every successful reconnect) triggers one reconciling fetch of both fragments and hides
+the banner only after both refreshes succeed. An HTTP, network, or body-read failure keeps the
+last-good fragment and shows the same banner, so a failed reconciliation cannot leave stale data
+presented as current when no later invalidation arrives. This is the client-side counterpart to
+"no replay on reconnect" above.
 
 ### Testability without a build step
 

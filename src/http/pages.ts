@@ -2471,38 +2471,55 @@ export const DASHBOARD_PATCH_FRAGMENT_JS = `function patchFragment(id, html) {
   el.replaceChildren.apply(el, nodes);
 }`;
 
-const DASHBOARD_STREAM_BANNER = `<div id="live-stream-banner" class="alert" style="display:none" role="status">Live updates disconnected — showing the page as of its last load. <a href="/">Refresh</a></div>`;
+const DASHBOARD_STREAM_BANNER = `<div id="live-stream-banner" class="alert" style="display:none" role="status">Live updates unavailable — some dashboard data may be stale. <a href="/">Refresh</a></div>`;
 
-// EventSource reconnects on its own (fixed retry interval); this only
-// reacts to open/error to show/hide DASHBOARD_STREAM_BANNER and to
-// reconcile once per (re)connect — GET /events carries no replay, so a
-// client that was disconnected must re-fetch to catch up (ADR 0074).
+// EventSource reconnects on its own (fixed retry interval). The banner
+// remains visible across a reconnect until both fragments reconcile;
+// GET /events carries no replay, so a client that was disconnected must
+// successfully re-fetch the current state before it is current (ADR 0074).
 export const DASHBOARD_LIVE_CLIENT_JS = `(function () {
   ${DASHBOARD_PATCH_FRAGMENT_JS}
   var banner = document.getElementById("live-stream-banner");
   var reconcileGeneration = 0;
+  var streamOpen = false;
+  function showReconciliationFailure(generation) {
+    if (generation === reconcileGeneration && banner) { banner.style.display = ""; }
+  }
+  function refreshFragment(url, id, generation) {
+    return fetch(url)
+      .then(function (r) {
+        if (!r.ok) { showReconciliationFailure(generation); return false; }
+        return r.text().then(function (html) {
+          if (generation === reconcileGeneration) { patchFragment(id, html); }
+          return true;
+        });
+      })
+      .catch(function () {
+        showReconciliationFailure(generation);
+        return false;
+      });
+  }
   function reconcile() {
     var generation = ++reconcileGeneration;
-    fetch("/fragments/active-band")
-      .then(function (r) { return r.text(); })
-      .then(function (html) {
-        if (generation === reconcileGeneration) { patchFragment("active-now-band", html); }
-      });
-    fetch("/fragments/projects-section")
-      .then(function (r) { return r.text(); })
-      .then(function (html) {
-        if (generation === reconcileGeneration) { patchFragment("projects-section", html); }
-      });
+    Promise.all([
+      refreshFragment("/fragments/active-band", "active-now-band", generation),
+      refreshFragment("/fragments/projects-section", "projects-section", generation)
+    ]).then(function (successes) {
+      if (generation === reconcileGeneration && streamOpen && successes[0] && successes[1] && banner) {
+        banner.style.display = "none";
+      }
+    });
   }
   var source = new EventSource("/events");
   ["run-transition", "firing-transition", "project-poll"].forEach(function (kind) {
     source.addEventListener(kind, reconcile);
   });
   source.addEventListener("open", function () {
-    if (banner) { banner.style.display = "none"; }
+    streamOpen = true;
     reconcile();
   });
   source.addEventListener("error", function () {
+    streamOpen = false;
     if (banner) { banner.style.display = ""; }
   });
 })();`;

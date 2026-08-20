@@ -2,6 +2,9 @@
 
 Status: approved by issue #295's amended implementation brief
 
+The provider-availability and grouped-readiness portions are superseded by ADR 0084: a blocked leg
+is `held`, summary-terminal, and still claimable rather than `pending` and readiness-gating.
+
 ## Goal
 
 A service-level Routine declaration names an explicit, non-empty list of declared Projects:

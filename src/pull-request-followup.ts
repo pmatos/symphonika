@@ -345,9 +345,18 @@ async function processTrackedPullRequests(input: {
     }
 
     const state = interpretPullRequest(rawState);
+    // GraphQL normalizes an omitted headRefOid to an empty string (see
+    // pull-request-polling.ts). Fall back to the last known-good head SHA so
+    // a merge is never pinned to an empty string. tracked.lastSeenHeadSha
+    // can itself still be "" (e.g. no head SHA has ever been observed for
+    // this row) -- recordPullRequestObservation below still records that,
+    // and the merge guard further down refuses to pin an empty SHA; the row
+    // self-corrects the next tick GraphQL returns a real headRefOid.
+    const headSha =
+      state.headSha === "" ? tracked.lastSeenHeadSha : state.headSha;
     const trackingState = trackedStateFor(state);
     input.runStore.recordPullRequestObservation({
-      headSha: state.headSha,
+      headSha,
       id: tracked.id,
       prUrl: state.url,
       reviewFollowupCapReached:
@@ -362,6 +371,7 @@ async function processTrackedPullRequests(input: {
 
     if (pullRequestNeedsReviewFollowup(state)) {
       const result = await dispatchReviewFollowupIfNeeded({
+        headSha,
         policy: input.policy,
         runController: input.runController,
         runStore: input.runStore,
@@ -399,11 +409,23 @@ async function processTrackedPullRequests(input: {
     if (input.shouldPollProject?.(tracked.projectName) === false) {
       continue;
     }
+    if (headSha === "") {
+      // No known-good head SHA for this tick (GraphQL omitted headRefOid
+      // and no earlier tick ever recorded a real one for this row). Merging
+      // unpinned would let GitHub merge whatever commit is current at merge
+      // time, bypassing the check/review validation pullRequestReadyToMerge
+      // just performed against this tick's fetched state. Skip and retry.
+      input.logger?.warn(
+        { prNumber: tracked.prNumber },
+        "symphonika PR follow-up cannot merge: no known head SHA to pin"
+      );
+      continue;
+    }
     let merged: boolean;
     try {
       merged = await tryMergePullRequest(input.githubIssuesApi, {
         ...repository,
-        expectedHeadSha: state.headSha,
+        expectedHeadSha: headSha,
         method: input.policy.merge.method,
         pullNumber: tracked.prNumber
       });
@@ -423,7 +445,7 @@ async function processTrackedPullRequests(input: {
       continue;
     }
     input.runStore.recordPullRequestObservation({
-      headSha: state.headSha,
+      headSha,
       id: tracked.id,
       prUrl: state.url,
       reviewFollowupCapReached: false,
@@ -436,6 +458,7 @@ async function processTrackedPullRequests(input: {
 }
 
 async function dispatchReviewFollowupIfNeeded(input: {
+  headSha: string;
   policy: PullRequestFollowupPolicy;
   runController: RunController;
   runStore: RunStore;
@@ -457,7 +480,7 @@ async function dispatchReviewFollowupIfNeeded(input: {
     issueNumber: input.tracked.issueNumber,
     parentRunId: input.tracked.lastFollowupRunId ?? input.tracked.runId,
     projectName: input.tracked.projectName,
-    review: reviewContextFromState(input.state)
+    review: reviewContextFromState(input.state, input.headSha)
   });
   if (!result.dispatched) {
     return undefined;
@@ -465,7 +488,7 @@ async function dispatchReviewFollowupIfNeeded(input: {
 
   input.runStore.recordPullRequestReviewDispatch({
     fingerprint,
-    headSha: input.state.headSha,
+    headSha: input.headSha,
     id: input.tracked.id,
     runId: result.runId
   });
@@ -557,10 +580,11 @@ function trackedStateFor(
 }
 
 function reviewContextFromState(
-  state: PullRequestState
+  state: PullRequestState,
+  headSha: string
 ): ReviewFollowupContext {
   return {
-    headSha: state.headSha,
+    headSha,
     pullRequestNumber: state.number,
     pullRequestUrl: state.url,
     reviewDecision: state.reviewFollowup.decision,

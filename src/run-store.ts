@@ -214,10 +214,15 @@ export type RoutineFiringStateTransition = {
   state: RoutineFiringState;
 };
 
+export type RoutineFanoutHoldReason =
+  | `provider_command_missing: ${AgentProviderName}`
+  | `provider_not_registered: ${AgentProviderName}`;
+
 export type RoutineFanoutTargetStatus = {
-  disposition: "pending" | "firing" | "skipped";
+  disposition: "pending" | "held" | "firing" | "skipped";
   firing: RoutineFiringStatus | null;
   firingId: string | null;
+  holdReason: RoutineFanoutHoldReason | null;
   projectName: string;
   skipReason: RoutineSkipReason | "target_unavailable" | null;
 };
@@ -454,6 +459,7 @@ export type WatchdogCandidateRun = {
   projectName: string;
   runId: string;
   state: Extract<RunState, "running">;
+  watchdogGeneration: number;
   workspacePath: string;
 };
 
@@ -603,6 +609,7 @@ type WatchdogCandidateRunRow = {
   normalized_log_path: string | null;
   project_name: string;
   state: WatchdogCandidateRun["state"];
+  watchdog_generation: number;
   workspace_path: string | null;
 };
 
@@ -808,8 +815,9 @@ type RoutineFanoutTargetRow = {
   disposition: RoutineFanoutTargetStatus["disposition"];
   fanout_id: string;
   firing_id: string | null;
+  hold_reason: RoutineFanoutHoldReason | null;
   project_name: string;
-  skip_reason: RoutineSkipReason | null;
+  skip_reason: RoutineSkipReason | "target_unavailable" | null;
 };
 
 const PULL_REQUEST_DISCOVERY_LIMIT = 25;
@@ -1213,7 +1221,7 @@ export class RunStore {
       .prepare(
         [
           "select id, project_name, issue_number, state, evidence_ignore_json,",
-          "workspace_path, normalized_log_path",
+          "workspace_path, normalized_log_path, watchdog_generation",
           "from runs",
           // ADR 0054: only `running` Runs have a live provider that can wedge.
           // queued/preparing_workspace have no provider yet (no liveness signal
@@ -1230,6 +1238,7 @@ export class RunStore {
       projectName: row.project_name,
       runId: row.id,
       state: row.state,
+      watchdogGeneration: row.watchdog_generation,
       workspacePath: row.workspace_path ?? ""
     }));
   }
@@ -1248,7 +1257,10 @@ export class RunStore {
     return row === undefined ? undefined : mapWatchdogSampleRow(row);
   }
 
-  upsertWatchdogSample(sample: WatchdogSample): void {
+  upsertWatchdogSample(
+    sample: WatchdogSample,
+    watchdogGeneration?: number
+  ): boolean {
     const values = {
       idle_since: sample.idleSince,
       last_message_at: sample.lastMessageAt,
@@ -1297,9 +1309,16 @@ export class RunStore {
         ")"
       ].join(" ")
     );
-    this.database.transaction(() => {
+    return this.database.transaction(() => {
+      if (
+        watchdogGeneration !== undefined &&
+        !this.isCurrentWatchdogGeneration(sample.runId, watchdogGeneration)
+      ) {
+        return false;
+      }
       latest.run(values);
       history.run(values);
+      return true;
     })();
   }
 
@@ -1344,7 +1363,11 @@ export class RunStore {
     return growth;
   }
 
-  rememberWatchdogTurnIds(runId: string, turnIds: Iterable<string>): number {
+  rememberWatchdogTurnIds(
+    runId: string,
+    turnIds: Iterable<string>,
+    watchdogGeneration?: number
+  ): number | undefined {
     const insert = this.database.prepare(
       "insert or ignore into watchdog_turn_ids (run_id, turn_id) values (?, ?)"
     );
@@ -1352,15 +1375,29 @@ export class RunStore {
       "select count(*) as count from watchdog_turn_ids where run_id = ?"
     );
     const apply = this.database.transaction(() => {
+      if (
+        watchdogGeneration !== undefined &&
+        !this.isCurrentWatchdogGeneration(runId, watchdogGeneration)
+      ) {
+        return undefined;
+      }
       for (const turnId of turnIds) {
         insert.run(runId, turnId);
       }
       return count.get(runId) as { count: number };
     });
-    return apply().count;
+    return apply()?.count;
   }
 
-  markRunNoProgressStale(runId: string, updatedAt = timestamp()): boolean {
+  markRunNoProgressStale(
+    runId: string,
+    updatedAt = timestamp(),
+    watchdogGeneration?: number
+  ): boolean {
+    const generationGuard =
+      watchdogGeneration === undefined
+        ? ""
+        : "and watchdog_generation = @watchdog_generation";
     const result = this.database
       .prepare(
         [
@@ -1370,13 +1407,20 @@ export class RunStore {
           "failure_classification = 'deterministic',",
           "notification_state = 'pending',",
           "notification_error = null,",
-          "updated_at = ?",
-          "where id = ?",
+          "updated_at = @updated_at",
+          "where id = @id",
           "and state = 'running'",
-          "and cancel_requested = 0"
+          "and cancel_requested = 0",
+          generationGuard
         ].join(" ")
       )
-      .run(updatedAt, runId);
+      .run({
+        id: runId,
+        updated_at: updatedAt,
+        ...(watchdogGeneration === undefined
+          ? {}
+          : { watchdog_generation: watchdogGeneration })
+      });
     if (result.changes === 0) {
       return false;
     }
@@ -2266,7 +2310,7 @@ export class RunStore {
     const targets = this.database
       .prepare(
         [
-          "select fanout_id, project_name, disposition, firing_id, skip_reason",
+          "select fanout_id, project_name, disposition, firing_id, hold_reason, skip_reason",
           "from routine_fanout_targets where fanout_id = ?",
           "order by project_name asc"
         ].join(" ")
@@ -2279,6 +2323,7 @@ export class RunStore {
           ? null
           : (this.getRoutineFiring(target.firing_id) ?? null),
       firingId: target.firing_id,
+      holdReason: target.hold_reason,
       projectName: target.project_name,
       skipReason: target.skip_reason
     }));
@@ -2288,6 +2333,7 @@ export class RunStore {
     );
     const failureCount = mappedTargets.filter(
       (target) =>
+        target.disposition === "held" ||
         target.firing?.state === "failed" ||
         target.firing?.state === "cancelled"
     ).length;
@@ -2310,6 +2356,9 @@ export class RunStore {
   }
 
   listReadyRoutineFanouts(): RoutineFanoutStatus[] {
+    // `held` is deliberately absent from the outstanding predicate: ADR
+    // 0084 makes provider admission failures summary-terminal while leaving
+    // their clock events claimable.
     const rows = this.database
       .prepare(
         [
@@ -2425,13 +2474,34 @@ export class RunStore {
     return result.changes;
   }
 
+  holdRoutineFanoutTarget(input: {
+    fanoutId: string;
+    projectName: string;
+    reason: RoutineFanoutHoldReason;
+  }): boolean {
+    // Repeated daemon ticks refresh the durable reason without touching the
+    // Routine Target's due clock or skip evidence. A racing claim/skip wins
+    // by moving the leg out of the accepted dispositions.
+    const result = this.database
+      .prepare(
+        [
+          "update routine_fanout_targets",
+          "set disposition = 'held', hold_reason = ?, skip_reason = null, updated_at = ?",
+          "where fanout_id = ? and project_name = ?",
+          "and disposition in ('pending', 'held')"
+        ].join(" ")
+      )
+      .run(input.reason, timestamp(), input.fanoutId, input.projectName);
+    return result.changes > 0;
+  }
+
   settleUnavailableRoutineFanoutTargets(): number {
     const result = this.database
       .prepare(
         [
           "update routine_fanout_targets",
-          "set disposition = 'skipped', skip_reason = 'target_unavailable', updated_at = ?",
-          "where disposition = 'pending'",
+          "set disposition = 'skipped', hold_reason = null, skip_reason = 'target_unavailable', updated_at = ?",
+          "where disposition in ('pending', 'held')",
           "and not exists (",
           "select 1 from routine_fanouts f",
           "join routines r on r.name = f.routine_name",
@@ -2777,12 +2847,15 @@ export class RunStore {
         return false;
       }
       if (input.fanoutId !== undefined) {
+        // A repaired held leg may encounter an ordinary admission skip, so
+        // it remains consumable by the same atomic clock-advance path as a
+        // newly evaluated pending leg (ADR 0084).
         const target = this.database
           .prepare(
             [
               "update routine_fanout_targets set",
-              "disposition = 'skipped', skip_reason = ?, updated_at = ?",
-              "where fanout_id = ? and project_name = ? and disposition = 'pending'"
+              "disposition = 'skipped', hold_reason = null, skip_reason = ?, updated_at = ?",
+              "where fanout_id = ? and project_name = ? and disposition in ('pending', 'held')"
             ].join(" ")
           )
           .run(input.reason, timestamp(), input.fanoutId, input.projectName);
@@ -2927,12 +3000,15 @@ export class RunStore {
         throw new RoutineAlreadyClaimedError();
       }
       if (input.fanoutId !== undefined) {
+        // A held leg remains schedule-claimable after its one-shot summary,
+        // so provider repair uses the same atomic claim path as a newly
+        // evaluated pending leg (ADR 0084).
         const target = this.database
           .prepare(
             [
               "update routine_fanout_targets set",
-              "disposition = 'firing', firing_id = ?, skip_reason = null, updated_at = ?",
-              "where fanout_id = ? and project_name = ? and disposition = 'pending'"
+              "disposition = 'firing', firing_id = ?, hold_reason = null, skip_reason = null, updated_at = ?",
+              "where fanout_id = ? and project_name = ? and disposition in ('pending', 'held')"
             ].join(" ")
           )
           .run(input.firingId, timestamp(), input.fanoutId, input.projectName);
@@ -3349,22 +3425,42 @@ export class RunStore {
 
   updateRunState(runId: string, state: RunState): void {
     const now = timestamp();
-    this.database
-      .prepare(
-        [
-          "update runs set state = @state,",
-          "notification_state = case",
-          "when @state in ('succeeded', 'failed', 'blocked', 'cancelled', 'stale', 'input_required')",
-          "and not (@state = 'failed' and failure_classification = 'transient')",
-          "then 'pending' else notification_state end,",
-          "notification_error = case",
-          "when @state in ('succeeded', 'failed', 'blocked', 'cancelled', 'stale', 'input_required')",
-          "and not (@state = 'failed' and failure_classification = 'transient')",
-          "then null else notification_error end,",
-          "updated_at = @updated_at where id = @id"
-        ].join(" ")
-      )
-      .run({ id: runId, state, updated_at: now });
+    const update = this.database.prepare(
+      [
+        "update runs set state = @state,",
+        "notification_state = case",
+        "when @state in ('succeeded', 'failed', 'blocked', 'cancelled', 'stale', 'input_required')",
+        "and not (@state = 'failed' and failure_classification = 'transient')",
+        "then 'pending' else notification_state end,",
+        "notification_error = case",
+        "when @state in ('succeeded', 'failed', 'blocked', 'cancelled', 'stale', 'input_required')",
+        "and not (@state = 'failed' and failure_classification = 'transient')",
+        "then null else notification_error end,",
+        "watchdog_generation = watchdog_generation +",
+        "case when @state = 'preparing_workspace' then 1 else 0 end,",
+        "updated_at = @updated_at where id = @id"
+      ].join(" ")
+    );
+    if (state === "preparing_workspace") {
+      // A Run row is reused across transient retry attempts, while the
+      // latest Watchdog sample and remembered turn IDs are keyed by run_id.
+      // Advance the generation fence and clear those attempt-local values
+      // before exposing the new attempt's preparing state. A sample captured
+      // by the prior generation can then recreate neither current data nor a
+      // stale verdict after its async I/O completes. Append-only sample history
+      // remains durable evidence.
+      this.database.transaction(() => {
+        this.database
+          .prepare("delete from watchdog_samples where run_id = ?")
+          .run(runId);
+        this.database
+          .prepare("delete from watchdog_turn_ids where run_id = ?")
+          .run(runId);
+        update.run({ id: runId, state, updated_at: now });
+      })();
+    } else {
+      update.run({ id: runId, state, updated_at: now });
+    }
     this.recordRunTransition(runId, state, now);
     if (state === "waiting") {
       // ADR 0054: idle_since is a persisted wall-clock timestamp and the
@@ -4499,6 +4595,7 @@ export class RunStore {
         normalized_log_path text,
         notification_state text not null default 'skipped',
         notification_error text,
+        watchdog_generation integer not null default 0,
         created_at text not null,
         updated_at text not null
       );
@@ -4788,6 +4885,7 @@ export class RunStore {
         project_name text not null,
         disposition text not null default 'pending',
         firing_id text,
+        hold_reason text,
         skip_reason text,
         created_at text not null,
         updated_at text not null,
@@ -4813,6 +4911,7 @@ export class RunStore {
       ["runs", "state_transition_reason", "text"],
       ["runs", "notification_state", "text not null default 'skipped'"],
       ["runs", "notification_error", "text"],
+      ["runs", "watchdog_generation", "integer not null default 0"],
       [
         "tracked_pull_requests",
         "review_followup_cap_reached",
@@ -4862,6 +4961,7 @@ export class RunStore {
       ["routine_firings", "notification_error", "text"],
       ["routine_firings", "workspace_pruned_at", "text"],
       ["routine_firings", "fanout_id", "text"],
+      ["routine_fanout_targets", "hold_reason", "text"],
       ["project_issue_snapshots", "labels", "text"],
       ["project_issue_snapshots", "blocked_by", "text"],
       [
@@ -4982,6 +5082,19 @@ export class RunStore {
 
     this.database.exec(`alter table ${table} add column ${column} ${decl};`);
     return true;
+  }
+
+  private isCurrentWatchdogGeneration(
+    runId: string,
+    watchdogGeneration: number
+  ): boolean {
+    return (
+      this.database
+        .prepare(
+          "select 1 from runs where id = ? and state = 'running' and watchdog_generation = ?"
+        )
+        .get(runId, watchdogGeneration) !== undefined
+    );
   }
 
   private recordRunTransition(

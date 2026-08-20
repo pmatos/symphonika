@@ -2,6 +2,9 @@
 
 Status: Accepted
 
+Superseded in part by ADR 0084, which makes provider-blocked targets `held`, summary-terminal, and
+still claimable instead of leaving them `pending` as a readiness gate.
+
 ## Context
 
 ADR 0063 moved Routine declarations from Projects into the Service Config, but deliberately kept

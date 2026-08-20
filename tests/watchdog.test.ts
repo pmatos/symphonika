@@ -873,13 +873,19 @@ describe("reconcileWatchdog", () => {
     await mkdir(workspacePath, { recursive: true });
     const attempt1 = path.join(root, "provider.normalized.jsonl");
     const attempt2 = path.join(root, "provider.normalized.attempt-2.jsonl");
-    await writeFile(attempt1, JSON.stringify({ type: "usage_updated" }) + "\n");
+    await writeFile(
+      attempt1,
+      JSON.stringify({ turnId: "attempt-1", type: "usage_updated" }) + "\n"
+    );
     // A longer file whose early bytes carry a tool_call: reusing the previous
     // attempt's offset would start mid-line and skip this event entirely.
     await writeFile(
       attempt2,
-      JSON.stringify({ toolName: "bash", turnId: "t1", type: "tool_call" }) +
-        "\n"
+      JSON.stringify({
+        toolName: "bash",
+        turnId: "attempt-2",
+        type: "tool_call"
+      }) + "\n"
     );
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     const evidence = (normalizedLogPath: string) => ({
@@ -956,9 +962,14 @@ describe("reconcileWatchdog", () => {
       const afterFirst = store.getWatchdogSample("run-retry");
       expect(afterFirst?.lastToolCallAt).toBeNull();
       expect(afterFirst?.normalizedLogOffset).toBeGreaterThan(0);
+      expect(afterFirst?.turnIdSetSize).toBe(1);
 
-      // The retry attempt switches to a new log path for the same run.
+      // The retry begins before it switches to a new log path for the same
+      // Run. Attempt-local samples and turn IDs must not cross this boundary.
+      store.updateRunState("run-retry", "failed");
+      store.updateRunState("run-retry", "preparing_workspace");
       store.updateRunEvidence("run-retry", evidence(attempt2));
+      store.updateRunState("run-retry", "running");
 
       await reconcileWatchdog({
         activeRuns,
@@ -972,6 +983,103 @@ describe("reconcileWatchdog", () => {
       expect(afterSecond?.lastToolCallAt).toBe("2026-05-22T10:01:00.000Z");
       expect(afterSecond?.turnIdSetSize).toBe(1);
       expect(store.getRun("run-retry")?.state).toBe("running");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("discards an in-flight sample when the Run starts a new attempt", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const attempt1 = path.join(root, "provider.normalized.jsonl");
+    const attempt2 = path.join(root, "provider.normalized.attempt-2.jsonl");
+    const attempt1Event =
+      JSON.stringify({ turnId: "attempt-1", type: "usage_updated" }) + "\n";
+    await writeFile(attempt1, attempt1Event);
+    await writeFile(
+      attempt2,
+      JSON.stringify({ turnId: "attempt-2", type: "usage_updated" }) + "\n"
+    );
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    const evidence = (normalizedLogPath: string) => ({
+      branchName: "sym/symphonika/198-watchdog",
+      branchRef: "refs/heads/sym/symphonika/198-watchdog",
+      issueSnapshotPath: path.join(root, "issue.json"),
+      metadataPath: path.join(root, "metadata.json"),
+      normalizedLogPath,
+      promptPath: path.join(root, "prompt.md"),
+      rawLogPath: path.join(root, "raw.jsonl"),
+      workflowGraphPath: path.join(root, "workflow.json"),
+      workspacePath
+    });
+    const config = {
+      enabled: true,
+      graceMinutes: 30,
+      mtimeIgnore: [],
+      sampleIntervalSeconds: 60
+    };
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const activeRuns = new ActiveRunRegistry();
+    activeRuns.register({
+      cancel,
+      issueNumber: 198,
+      projectName: "symphonika",
+      runId: "run-retry-race"
+    });
+
+    try {
+      seedRun(store, "run-retry-race");
+      store.updateRunEvidence("run-retry-race", evidence(attempt1));
+      store.updateRunState("run-retry-race", "running");
+
+      await reconcileWatchdog({
+        activeRuns,
+        config,
+        logger,
+        now: () => new Date("2026-05-22T09:00:00.000Z"),
+        runStore: store
+      });
+      expect(store.getWatchdogSample("run-retry-race")).toMatchObject({
+        idleSince: "2026-05-22T09:00:00.000Z",
+        turnIdSetSize: 1
+      });
+
+      // The second tick captures attempt 1, then yields on Normalized Event
+      // Log I/O. Starting attempt 2 before awaiting the tick deterministically
+      // exercises the stale post-I/O write that used to undo the reset.
+      await writeFile(attempt1, attempt1Event + attempt1Event);
+      const inFlightAttempt1Sample = reconcileWatchdog({
+        activeRuns,
+        config,
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore: store
+      });
+      store.updateRunState("run-retry-race", "failed");
+      store.updateRunState("run-retry-race", "preparing_workspace");
+      store.updateRunEvidence("run-retry-race", evidence(attempt2));
+      store.updateRunState("run-retry-race", "running");
+
+      await expect(inFlightAttempt1Sample).resolves.toEqual({
+        sampled: 0,
+        terminated: 0
+      });
+      expect(store.getRun("run-retry-race")?.state).toBe("running");
+      expect(store.getWatchdogSample("run-retry-race")).toBeUndefined();
+      expect(cancel).not.toHaveBeenCalled();
+
+      await reconcileWatchdog({
+        activeRuns,
+        config,
+        logger,
+        now: () => new Date("2026-05-22T10:01:00.000Z"),
+        runStore: store
+      });
+      expect(store.getWatchdogSample("run-retry-race")).toMatchObject({
+        normalizedLogPath: attempt2,
+        turnIdSetSize: 1
+      });
     } finally {
       store.close();
     }

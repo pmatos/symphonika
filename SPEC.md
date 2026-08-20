@@ -248,8 +248,9 @@ control also uses `disabled` and `invalid` as defined in §8.5.
 
 A **Routine Fan-out** is the durable group for one Routine clock event. It stores a shared
 correlation id and the expected Project targets before work begins. Each target is completed by a
-Routine Firing or a Routine Skip, and the group produces one summary only after every target
-completes. Expected membership is immutable after the fan-out is created. A Routine Target
+Routine Firing or Routine Skip, or summarized as a non-gating Routine Dispatch Hold. The group
+produces one snapshot summary after every leg is terminal or held. Expected membership is immutable
+after the fan-out is created. A Routine Target
 configured only after that clock event began does not join the existing group; an already-due
 one-shot is consumed as an ungrouped `catch_up_window` skip instead of reopening a delivered
 summary, while a recurring target begins with its next future clock event.
@@ -675,8 +676,9 @@ See ADR 0067.
 For a grouped Routine Fan-out summary, no per-target report output is reachable at the group level,
 so policy is defined in terms of the group's failure and pull-request counts plus each target's own
 structured outcome action: `always` sends regardless; `failures` sends only when the group's failure
-count is nonzero (a target skipped for overlap or a concurrency cap is not a failure, matching ADR
-0069); `changes` sends when the failure or pull-request count is nonzero, or when any target's
+count is nonzero (a provider-held target and a failed or cancelled firing are failures; a target
+skipped for overlap or a concurrency cap is not); `changes` sends when the failure or pull-request
+count is nonzero, or when any target's
 outcome action is `issue_opened` or `issue_closed`. The group's issue count itself is not read for
 this check — it stays ADR 0069's permanently-zero placeholder pending the structured-outcome slice.
 A Routine's `notify: false` mutes the group summary the same way it mutes each target's own
@@ -1057,26 +1059,30 @@ fields and per-Project rolling counter evidence, completes its fan-out leg, writ
 Firing row, and emits `routine.skipped` with `reason`, `routine`, and `scheduled_at` fields. A
 skipped one-shot expires rather than remaining due.
 
-A selected Agent Provider adapter that is not registered is a Routine Dispatch Hold, not a Routine
-Skip. The target remains active with its original `next_fire_at`, its fan-out leg remains pending,
-and Symphonika writes neither Routine Firing nor latest-attempt/skip/counter evidence. Each daemon
-tick returns `provider_not_registered: <provider>` for that target and emits a structured warning
-with the Project, Routine, provider, and scheduled clock time. Once the adapter is registered, a
-later tick claims the original clock event and only then advances or expires the target normally.
-This deliberately preserves a persistent configuration failure instead of silently progressing a
-schedule whose work never ran; see ADR 0070.
+A selected Agent Provider adapter that is not registered, or that has no configured command, is a
+Routine Dispatch Hold, not a Routine Skip. The target remains active with its original
+`next_fire_at`; its fan-out leg becomes `held`, which remains claimable but no longer gates summary
+readiness. Symphonika writes neither Routine Firing nor latest-attempt/skip/counter evidence. Each
+daemon tick returns `provider_not_registered: <provider>` or
+`provider_command_missing: <provider>` for that target and emits a structured warning with the
+Project, Routine, provider, and scheduled clock time. Once the provider is available, a later tick
+claims the original clock event and only then advances or expires the target normally. An
+already-delivered one-shot group is not amended; the late firing retains its normal notification
+and operator evidence. This deliberately preserves a persistent configuration failure instead of
+silently progressing a schedule whose work never ran; see ADRs 0070 and 0084.
 
-A Routine Fan-out is summary-ready only after every expected target is skipped or has a terminal
+A Routine Fan-out is summary-ready after every expected target is skipped, held, or has a terminal
 firing. Symphonika then claims one durable grouped-notification delivery with a per-Project result
 and subject
 `[ptt] <routine> — <PR count> PR, <issue count> issue, <failure count> failed`. Skips remain visible
-but do not count as failures; failed and cancelled firings do. Delivery failures return to pending
-for retry. Startup releases interrupted delivery claims and existing orphan-firing reconciliation
-makes claimed legs lost across a daemon restart terminal. A pending leg whose Routine Target becomes
-disabled or inactive before it can be claimed is settled as `target_unavailable` without adding a
-skip counter, so configuration changes cannot strand the group. There is no separate
-partial-summary deadline: the firing timeout bounds live provider work, and the summary waits for
-every admitted firing.
+but do not count as failures; held targets and failed or cancelled firings do. Delivery failures
+return to pending for retry. Startup releases interrupted delivery claims and existing orphan-firing
+reconciliation makes claimed legs lost across a daemon restart terminal. A pending or held leg whose
+Routine Target becomes disabled or inactive before it can be claimed is settled as
+`target_unavailable` without adding a skip counter, so configuration changes cannot strand the
+group. There is no separate partial-summary deadline: the firing timeout bounds live provider work,
+and the summary waits for every admitted firing while treating a provider-held leg as an explicit,
+claimable snapshot result.
 
 `symphonika fire-now <routine>` asks the daemon to claim a manual Routine Firing even when the
 Routine is not due. The manual claim records `trigger_source = "manual"` and otherwise uses the
@@ -1368,7 +1374,11 @@ omp --mode rpc --auto-approve
 
 The OMP adapter requires RPC mode (`--mode rpc`, selected exactly once) and rejects print mode
 (`-p`/`--print`). It validates the versioned ready frame with a bounded startup probe and negotiates
-protocol v2 chunking when the installed OMP advertises it. See ADR-0066.
+protocol v2 chunking when the installed OMP advertises it. The daemon caps the effective
+`maxReassembledFrameBytes` at 64 MiB even when OMP advertises a larger logical-frame limit; an
+over-ceiling v2 chunk declaration is a malformed provider event. The physical `maxFrameBytes`
+advertisement remains the independently enforced limit for individual frames and is not capped by
+the daemon's logical-frame ceiling. See ADR-0066.
 
 Provider commands may be overridden, but the replacement command must speak the provider adapter's
 expected protocol.
@@ -1404,8 +1414,9 @@ unreferenced-field declaration-load check (§5.4): unlike `model`/`effort`, a ro
 `permission_mode` purely as documentation of intent without its resolved provider command
 referencing the tag, since no provider currently requires it to appear in the command for full
 permission to take effect (the default commands above already carry a fixed policy flag literally).
-Claude Routine Firings additionally append `--disallowedTools ScheduleWakeup Monitor CronCreate`
-(outside the template, appended by the adapter directly) and set
+Claude Routine Firings additionally ensure one `--disallowedTools` option whose variadic values
+merge any operator-authored restrictions with `ScheduleWakeup`, `Monitor`, and `CronCreate`
+(outside the template, applied by the adapter directly), and set
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child environment.
 
 Future sandboxing, if added, should be outside the provider through host, container, VM, network, or
@@ -1577,13 +1588,20 @@ sample's five-minute window by walking persisted cumulative totals (and treating
 path change as a counter reset), never by re-scanning the Normalized Event Log. `idle_since`
 survives daemon restart, so a Run that was already observed idle resumes its grace window from the
 first idle observation rather than from process boot. It is cleared on entry to `waiting` (so an
-unsampled wait excursion does not accrue idle time) and reset on attempt change (so a transient
-retry, which re-enters a running agent state, starts a fresh grace window).
+unsampled wait excursion does not accrue idle time). When a Run begins any new attempt, its
+transition to `preparing_workspace` advances a per-Run Watchdog generation and atomically clears the
+latest sample and remembered turn-id set while preserving append-only sample history. Every
+Watchdog mutation is conditional on the `running` state and generation captured before sampling,
+so an old attempt's tick that finishes asynchronous log or Workspace I/O after the transition is
+discarded instead of recreating data or terminating the new attempt. A transient retry therefore
+exposes no current Progress Signal during workspace preparation and starts every attempt-local
+baseline and idle grace window fresh when sampling resumes.
 
 Sampling reads the Normalized Event Log only forward of the stored byte offset and walks the
-Workspace tree once. A transient retry writes a new per-attempt log path, so the byte offset and the
-output-token baseline are reset whenever `normalized_log_path` changes and the new attempt's events
-are read from the start. The hard-coded v1 exclude set is `.git/`, `target/`, and `node_modules/`,
+Workspace tree once. A transient retry writes a new per-attempt log path; its first sample reads
+that file from the start with zeroed byte-offset and output-token baselines. The reconciler also
+treats any observed `normalized_log_path` change as a defensive baseline reset. The hard-coded v1
+exclude set is `.git/`, `target/`, and `node_modules/`,
 skipped at the directory-entry level and not descended. The current per-Project Workflow Contract's
 `evidence.ignore` list adds workspace-relative directory trees that are also skipped before descent;
 when an active Run's Project has been removed from the Service Config, the Watchdog uses the list
@@ -2093,17 +2111,18 @@ The server-rendered dashboard and `/runs` list surface the same idle/grace state
 the run-state summary, rendering `last tool_call age`, `workspace mtime age`, `turn_ids observed`,
 `output tokens / 5m`, and (when set) `idle_since` and `grace remaining` — the same fields `show-run`
 exposes. For any Run not in the `running` state — a terminal state (including `terminal_reason =
-"no_progress"`), `queued`, `preparing_workspace`, or `waiting` — all three Progress Signal surfaces
-— `show-run`, `GET /api/runs/:id`, and the Run-detail page — compute ages and grace remaining
-against the Run's last persisted watchdog sample rather than the live clock. A Run's watchdog sample
-only ever advances while it is `running`, so a live clock against any other state's sample is a
-misleading, ever-drifting countdown for data that no longer describes what the Run is currently
-doing — most visibly for a terminated Run revisited days later (a stable, final signal instead of an
-ever-more-negative live countdown), but equally for a retried Run sitting in `preparing_workspace`
-with the prior failed attempt's sample still on record. (`runs.updated_at` is not used for this:
-it can keep advancing after termination for unrelated reasons, e.g. pull-request-discovery polling
-for succeeded Runs.) Both HTTP surfaces read the same `watchdog` object and render nothing (badge
-absent, section hidden) when the effective Watchdog policy is disabled.
+"no_progress"`) or `waiting` — all three Progress Signal surfaces — `show-run`, `GET /api/runs/:id`,
+and the Run-detail page — compute ages and grace remaining against the Run's last persisted watchdog
+sample rather than the live clock. A Run's watchdog sample only ever advances while it is `running`,
+so a live clock against a preserved non-running sample is a misleading, ever-drifting countdown for
+data that no longer describes what the Run is currently doing — most visibly for a terminated Run
+revisited days later (a stable, final signal instead of an ever-more-negative live countdown).
+`queued` first attempts have no sample, and entering `preparing_workspace` for any attempt clears the
+latest sample, so a retry in preparation reports that no Progress Signal exists yet rather than
+showing prior-attempt data. (`runs.updated_at` is not used as the clock: it can keep advancing after
+termination for unrelated reasons, e.g. pull-request-discovery polling for succeeded Runs.) Both
+HTTP surfaces read the same `watchdog` object and render nothing (badge absent, section hidden) when
+the effective Watchdog policy is disabled.
 
 For a waiting Run whose tracked PR has unresolved review feedback after the configured dispatch
 cap, `GET /api/runs/:id` also exposes a top-level `pullRequestFollowup` object with

@@ -210,6 +210,62 @@ describe("CLI run commands", () => {
     }
   });
 
+  it("status dashboard does not show the prior attempt's watchdog idle sample while a retry prepares", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "retry-prep",
+      issue: sampleIssue({ number: 204 }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("retry-prep", "running");
+    store.upsertWatchdogSample({
+      idleSince: "2026-05-22T11:45:00.000Z",
+      lastMessageAt: null,
+      lastToolCallAt: null,
+      normalizedLogOffset: 128,
+      normalizedLogPath: "provider.normalized.jsonl",
+      outputTokensTotal: 10,
+      runId: "retry-prep",
+      sampledAt: "2026-05-22T11:59:00.000Z",
+      turnIdSetSize: 1,
+      workspaceMtimeMax: 0
+    });
+    store.recordTerminalReason(
+      "retry-prep",
+      "provider_stream_failed",
+      "transient"
+    );
+    store.updateRunState("retry-prep", "failed");
+
+    // The same Run row starts attempt 2. Its dashboard state is active, but
+    // the prior attempt's idle clock must no longer be observable.
+    store.updateRunState("retry-prep", "preparing_workspace");
+    store.close();
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-22T12:00:00.000Z"));
+    try {
+      const { output, program } = captureProgram(stateRoot);
+      await program.parseAsync([
+        "node",
+        "symphonika",
+        "status",
+        "--dashboard",
+        "--config",
+        path.join(stateRoot, "symphonika.yml")
+      ]);
+
+      expect(output.stdout).toContain("retry-prep");
+      expect(output.stdout).toContain("preparing_workspace");
+      expect(output.stdout).not.toContain("watchdog idle since");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("status prints project validation, issue counts, and last poll outcome", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -1303,7 +1359,7 @@ describe("CLI run commands", () => {
     }
   });
 
-  it("show-run's Progress Signal freezes at the stale sample while a retried Run is preparing_workspace", async () => {
+  it("show-run drops the prior Progress Signal while a retried Run is preparing_workspace", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     store.createRun({
@@ -1313,10 +1369,7 @@ describe("CLI run commands", () => {
       providerCommand: "x",
       providerName: "codex"
     });
-    store.updateRunState("progress-retrying-preparing", "preparing_workspace");
-    // Sampling only ever happens in state 'running', so this sample is the
-    // prior (failed) attempt's data: it cannot have advanced since the Run
-    // left 'running' to prepare its retry.
+    store.updateRunState("progress-retrying-preparing", "running");
     store.upsertWatchdogSample({
       idleSince: "2026-05-22T08:55:00.000Z",
       lastMessageAt: null,
@@ -1329,11 +1382,11 @@ describe("CLI run commands", () => {
       turnIdSetSize: 1,
       workspaceMtimeMax: Date.parse("2026-05-22T08:50:00.000Z")
     });
+    store.updateRunState("progress-retrying-preparing", "failed");
+    store.updateRunState("progress-retrying-preparing", "preparing_workspace");
     store.close();
 
-    // Viewed a while after the retry began preparing, the Progress Signal
-    // must stay pinned to the prior attempt's last sample, not compute a
-    // live, misleading countdown for an attempt that hasn't started yet.
+    // Attempt 2 has no Progress Signal until it enters running and is sampled.
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-22T12:00:00.000Z"));
     try {
@@ -1349,12 +1402,7 @@ describe("CLI run commands", () => {
 
       expect(progressSignalBlock(present.output.stdout)).toMatchInlineSnapshot(`
         "Progress Signal:
-          last tool_call: 10m ago
-          workspace mtime: 10m ago
-          turn_ids observed: 1
-          output tokens / 5m: 0
-          idle_since: 2026-05-22T08:55:00.000Z
-          grace remaining: 25m"
+          (no sample persisted)"
       `);
     } finally {
       vi.useRealTimers();

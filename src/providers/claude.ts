@@ -784,16 +784,42 @@ function applyRoutineArguments(
     return command;
   }
 
+  const { args, tools } = extractDisallowedTools(command.args);
+  const mergedTools = [
+    ...new Set([...tools, "ScheduleWakeup", "Monitor", "CronCreate"])
+  ];
+
   return {
-    args: [
-      ...command.args,
-      "--disallowedTools",
-      "ScheduleWakeup",
-      "Monitor",
-      "CronCreate"
-    ],
+    args: [...args, "--disallowedTools", ...mergedTools],
     executable: command.executable
   };
+}
+
+function extractDisallowedTools(args: string[]): {
+  args: string[];
+  tools: string[];
+} {
+  const remainingArgs: string[] = [];
+  const tools: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg !== "--disallowedTools" && arg !== "--disallowed-tools") {
+      remainingArgs.push(arg);
+      continue;
+    }
+
+    while (true) {
+      const tool = args[index + 1];
+      if (tool === undefined || tool.startsWith("-")) {
+        break;
+      }
+      tools.push(tool);
+      index += 1;
+    }
+  }
+
+  return { args: remainingArgs, tools };
 }
 
 function arrayField(value: unknown, key: string): unknown[] {

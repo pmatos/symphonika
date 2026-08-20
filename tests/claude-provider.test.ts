@@ -75,7 +75,7 @@ afterEach(async () => {
 });
 
 describe("Claude stream-json provider", () => {
-  it("renders routine tuning through the command template and applies anti-backgrounding guards at spawn", async () => {
+  it("renders routine tuning and merges operator tool restrictions with anti-backgrounding guards at spawn", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
     await mkdir(workspacePath, { recursive: true });
@@ -103,7 +103,7 @@ describe("Claude stream-json provider", () => {
       provider.runAttempt({
         ...providerInputFixture(),
         provider: {
-          command: `${process.execPath} ${fakeClaudePath} -p {{#model}}--model {{model}} {{/model}}{{#effort}}--effort {{effort}} {{/effort}}--dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
+          command: `${process.execPath} ${fakeClaudePath} -p {{#model}}--model {{model}} {{/model}}{{#effort}}--effort {{effort}} {{/effort}}--dangerously-skip-permissions --disallowedTools Bash ScheduleWakeup WebFetch --verbose --input-format stream-json --output-format stream-json`,
           name: "claude"
         },
         routine: {
@@ -119,19 +119,25 @@ describe("Claude stream-json provider", () => {
       args: string[];
       disableBackgroundTasks?: string;
     };
-    expect(capture.args).toEqual(
-      expect.arrayContaining([
-        "--model",
-        "claude-opus-4-8",
-        "--effort",
-        "xhigh",
-        "--dangerously-skip-permissions",
-        "--disallowedTools",
-        "ScheduleWakeup",
-        "Monitor",
-        "CronCreate"
-      ])
-    );
+    expect(capture.args).toEqual([
+      "-p",
+      "--model",
+      "claude-opus-4-8",
+      "--effort",
+      "xhigh",
+      "--dangerously-skip-permissions",
+      "--verbose",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--disallowedTools",
+      "Bash",
+      "ScheduleWakeup",
+      "WebFetch",
+      "Monitor",
+      "CronCreate"
+    ]);
     expect(capture.disableBackgroundTasks).toBe("1");
   });
 

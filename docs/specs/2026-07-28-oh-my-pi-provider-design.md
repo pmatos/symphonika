@@ -65,9 +65,13 @@ Private frame parsing and event-mapping helpers are tested only through `AgentPr
    completion, so detached descendants cannot outlive the Run.
 
 OMP protocol v2 `rpc_chunk` frames are reassembled in order from strict base64 chunks. The adapter
-enforces the ready frame's advertised physical and logical byte limits, rejects interrupted,
-out-of-order, mismatched, invalid, or oversized sequences, and parses the reconstructed JSON object
-before event mapping. Protocol v1 remains supported when the ready frame advertises only v1.
+enforces the ready frame's advertised physical limit without applying the logical ceiling to that
+advertisement. The effective logical limit is the smaller of its advertised logical limit and
+Symphonika's fixed 64 MiB daemon-local ceiling. Advertising more remains compatible, but declaring
+a logical frame above the effective limit is malformed. The adapter also rejects
+interrupted, out-of-order, mismatched, invalid, or oversized sequences and parses the reconstructed
+JSON object before event mapping. Protocol v1 remains supported when the ready frame advertises
+only v1.
 
 ## Normalized events
 

@@ -171,8 +171,8 @@ _Avoid_: Routine when referring to one Project-specific leg
 **Routine Fan-out**:
 The durable group created when one Routine clock event matches one or more Routine Targets. It has a
 shared correlation id and immutable expected Project membership captured before work begins; each
-target is completed by either a Routine Firing or a recorded Routine Skip before one grouped
-notification is delivered.
+target is summarized by a Routine Firing, a recorded Routine Skip, or a non-gating Routine Dispatch
+Hold before one grouped notification is delivered.
 _Avoid_: Routine Firing when referring to the whole clock event
 
 **Routine Firing**:
@@ -217,10 +217,10 @@ Routine Skip because no clock event was attempted.
 _Avoid_: Routine Firing when no provider execution was launched
 
 **Routine Dispatch Hold**:
-A due Routine Target that cannot be admitted because its selected Agent Provider adapter is not
-registered. The original clock event remains due, its Routine Fan-out leg remains pending, and no
-Routine Skip evidence is written; the Orchestrator warns and retries admission on later daemon
-ticks until configuration is repaired.
+A due Routine Target that cannot be admitted because its selected Agent Provider adapter or command
+is unavailable. The original clock event remains due and claimable, while its Routine Fan-out leg
+is `held`, visible as a grouped-summary failure, and excluded from readiness gating. No Routine Skip
+evidence is written; the Orchestrator warns and retries admission on later daemon ticks.
 _Avoid_: Routine Skip, schedule advance
 
 **Routine Pull Request**:
@@ -363,11 +363,11 @@ _Avoid_: chat session
 - A **Routine** targets one or more explicitly named **Projects** and materializes one **Routine
   Target** for each
 - A matched clock event creates one **Routine Fan-out** across the currently due Routine Targets
-- Each **Routine Target** completes its fan-out leg with either one **Routine Firing** or one
-  **Routine Skip**
-- A **Routine Dispatch Hold** preserves a **Routine Target**'s original due clock event and pending
-  **Routine Fan-out** leg until its selected **Agent Provider** is registered
-- A **Routine Fan-out** produces one grouped notification after all target legs complete
+- Each **Routine Target** is summarized by one **Routine Firing**, one **Routine Skip**, or one
+  non-gating **Routine Dispatch Hold**
+- A **Routine Dispatch Hold** preserves a **Routine Target**'s original due clock event as claimable
+  while making its held **Routine Fan-out** leg non-gating and visible as a summary failure
+- A **Routine Fan-out** produces one grouped notification after all target legs are terminal or held
 - A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
 - A **Routine Firing** may contain one canonical **Routine Outcome** reconciled from a **Routine
   Outcome Claim** and externally observed state

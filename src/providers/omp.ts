@@ -704,6 +704,7 @@ const FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const PROBE_STDERR_TAIL_BYTES = 8192;
 const DEFAULT_MAX_PENDING_FRAME_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_PENDING_ITEMS = 4096;
+const MAX_REASSEMBLED_FRAME_BYTES = 64 * 1024 * 1024;
 
 function boundedMalformedEvidence(line: string): string {
   if (Buffer.byteLength(line, "utf8") <= MALFORMED_EVIDENCE_MAX_BYTES) {
@@ -752,7 +753,6 @@ export function createProcessQueue(
   const pending: Array<{ byteSize: number; item: ProcessQueueItem }> = [];
   let pendingFrameBytes = 0;
   const frameDecoder = new RpcChunkDecoder();
-  let maxPhysicalFrameBytes = 1024 * 1024;
   let waiting: ((item: ProcessQueueItem) => void) | undefined;
   let stdoutBuffer = Buffer.alloc(0);
   let stdoutOverflowed = false;
@@ -778,7 +778,7 @@ export function createProcessQueue(
   };
   const pushParsedLine = (line: Buffer): void => {
     const lineBytes = line.byteLength;
-    if (lineBytes > maxPhysicalFrameBytes) {
+    if (lineBytes > frameDecoder.maxFrameBytes) {
       frameDecoder.interrupt();
       const evidence = boundedMalformedEvidence(line.toString("utf8"));
       push(
@@ -965,7 +965,7 @@ export function createProcessQueue(
     // for later draining, not measured here.
     const suffixStart = stdoutBuffer.lastIndexOf(0x0a) + 1;
     const suffix = stdoutBuffer.subarray(suffixStart);
-    if (suffix.byteLength <= maxPhysicalFrameBytes) {
+    if (suffix.byteLength <= frameDecoder.maxFrameBytes) {
       return;
     }
     stdoutOverflowed = true;
@@ -1147,7 +1147,6 @@ export function createProcessQueue(
       protocolVersion = version;
     },
     setFrameLimits: (maxFrameBytes, maxReassembledBytes) => {
-      maxPhysicalFrameBytes = maxFrameBytes;
       frameDecoder.setLimits(maxFrameBytes, maxReassembledBytes);
       frameLimitsSet = true;
       awaitingFrameLimits = false;
@@ -1168,12 +1167,16 @@ export function createProcessQueue(
 }
 
 export class RpcChunkDecoder {
-  private maxFrameBytes = 1024 * 1024;
-  private maxReassembledBytes = 64 * 1024 * 1024;
+  private maxFrameBytesValue = 1024 * 1024;
+  private maxReassembledBytes = MAX_REASSEMBLED_FRAME_BYTES;
   private pending: PendingRpcChunks | undefined = undefined;
 
   get pendingBufferBytes(): number {
     return this.pending === undefined ? 0 : this.pending.buffer.byteLength;
+  }
+
+  get maxFrameBytes(): number {
+    return this.maxFrameBytesValue;
   }
 
   setLimits(maxFrameBytes: number, maxReassembledBytes: number): void {
@@ -1185,8 +1188,11 @@ export class RpcChunkDecoder {
     ) {
       throw new Error("invalid Oh My Pi RPC frame limits");
     }
-    this.maxFrameBytes = maxFrameBytes;
-    this.maxReassembledBytes = maxReassembledBytes;
+    this.maxFrameBytesValue = maxFrameBytes;
+    this.maxReassembledBytes = Math.min(
+      maxReassembledBytes,
+      MAX_REASSEMBLED_FRAME_BYTES
+    );
   }
 
   interrupt(): boolean {
@@ -1219,7 +1225,7 @@ export class RpcChunkDecoder {
         index < 0 ||
         count < 2 ||
         index >= count ||
-        byteLength < this.maxFrameBytes ||
+        byteLength < this.maxFrameBytesValue ||
         byteLength > this.maxReassembledBytes ||
         data === undefined
       ) {
@@ -1227,7 +1233,7 @@ export class RpcChunkDecoder {
       }
 
       const bytes = decodeBase64(data);
-      if (bytes.byteLength > this.maxFrameBytes) {
+      if (bytes.byteLength > this.maxFrameBytesValue) {
         throw new Error("Oh My Pi RPC chunk exceeds the physical frame limit");
       }
 

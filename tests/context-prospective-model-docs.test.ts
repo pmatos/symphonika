@@ -28,14 +28,14 @@ describe("CONTEXT Routine fan-out domain model", () => {
     );
   });
 
-  it("documents explicit multi-project targets and grouping, per ADR 0069", async () => {
+  it("documents explicit targets and non-gating holds, per ADRs 0069 and 0084", async () => {
     const context = await readFile(path.join(repoRoot, "CONTEXT.md"), "utf8");
 
     expect(context).toContain(
       "targets an explicit,\nnon-empty list of declared Projects"
     );
     expect(context).toContain(
-      "A **Routine Fan-out** produces one grouped notification after all target legs complete"
+      "A **Routine Fan-out** produces one grouped notification after all target legs are terminal or held"
     );
   });
 });

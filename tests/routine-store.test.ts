@@ -685,6 +685,13 @@ describe("RunStore routines", () => {
         id: "fire-alpha",
         state: "succeeded"
       });
+      expect(
+        store.holdRoutineFanoutTarget({
+          fanoutId: "fanout-restart-removal",
+          projectName: "beta",
+          reason: "provider_not_registered: omp"
+        })
+      ).toBe(true);
 
       store.syncRoutines([{ ...routine, projectName: "alpha" }], {
         projects: ["alpha", "beta"]

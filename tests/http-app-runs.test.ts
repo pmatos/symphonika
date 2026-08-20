@@ -1763,13 +1763,8 @@ describe("HTTP app — runs API and pages", () => {
       });
       test.runStore.updateRunState("progressing-active", "running");
 
-      // A retry after a transient failure re-enters preparing_workspace, but
-      // the run's watchdog_samples row is keyed by run_id (not per attempt)
-      // and only gets reset once the new attempt's first running sample
-      // lands — so the prior (failed) attempt's stale idleSince is still on
-      // record here. The badge must stay absent during preparing_workspace;
-      // showing it would be a live countdown for an attempt that no longer
-      // exists.
+      // A retry after a transient failure re-enters preparing_workspace and
+      // clears the prior attempt's latest sample before the state is exposed.
       test.runStore.createRun({
         id: "retrying-preparing",
         issue: sampleIssue({ number: 204, title: "Retrying after failure" }),
@@ -1777,7 +1772,7 @@ describe("HTTP app — runs API and pages", () => {
         providerCommand: "x",
         providerName: "codex"
       });
-      test.runStore.updateRunState("retrying-preparing", "preparing_workspace");
+      test.runStore.updateRunState("retrying-preparing", "running");
       test.runStore.upsertWatchdogSample({
         idleSince: "2026-05-22T11:00:00.000Z",
         lastMessageAt: null,
@@ -1790,6 +1785,8 @@ describe("HTTP app — runs API and pages", () => {
         turnIdSetSize: 0,
         workspaceMtimeMax: 0
       });
+      test.runStore.updateRunState("retrying-preparing", "failed");
+      test.runStore.updateRunState("retrying-preparing", "preparing_workspace");
 
       const app = createHttpApp({
         getWatchdogConfig: () => ({ enabled: true, graceMinutes: 30 }),
@@ -1996,13 +1993,9 @@ describe("HTTP app — runs API and pages", () => {
       );
       expect(terminatedApiBody.watchdog.graceRemainingMs).toBe(-60_000);
 
-      // A retry re-enters preparing_workspace while the run's watchdog
-      // sample still holds the prior (failed) attempt's data — sampling
-      // only ever happens in state 'running', so this sample cannot have
-      // advanced past what it was before the retry began. Both the page and
-      // the API must freeze at that stale sample's sampledAt rather than
-      // computing ages/grace-remaining against the live app clock, which
-      // would otherwise misrepresent an attempt that hasn't even started.
+      // A retry clears the prior attempt's latest Watchdog sample as it enters
+      // preparing_workspace. Both detail surfaces report that attempt 2 has
+      // no Progress Signal yet.
       test.runStore.createRun({
         id: "retrying-preparing-detail",
         issue: sampleIssue({
@@ -2013,10 +2006,7 @@ describe("HTTP app — runs API and pages", () => {
         providerCommand: "x",
         providerName: "codex"
       });
-      test.runStore.updateRunState(
-        "retrying-preparing-detail",
-        "preparing_workspace"
-      );
+      test.runStore.updateRunState("retrying-preparing-detail", "running");
       test.runStore.upsertWatchdogSample({
         idleSince: "2026-05-22T08:55:00.000Z",
         lastMessageAt: null,
@@ -2029,30 +2019,33 @@ describe("HTTP app — runs API and pages", () => {
         turnIdSetSize: 1,
         workspaceMtimeMax: Date.parse("2026-05-22T08:50:00.000Z")
       });
+      test.runStore.updateRunState("retrying-preparing-detail", "failed");
+      test.runStore.updateRunState(
+        "retrying-preparing-detail",
+        "preparing_workspace"
+      );
 
       const preparingBody = await (
         await app.request("/runs/retrying-preparing-detail")
       ).text();
-      expect(preparingBody).toContain(
-        "<dt>Last tool_call</dt><dd>10m ago</dd>"
-      );
-      expect(preparingBody).toContain(
-        "<dt>Workspace mtime</dt><dd>10m ago</dd>"
-      );
-      expect(preparingBody).toContain(
-        "<dt>idle_since</dt><dd><code>2026-05-22T08:55:00.000Z</code></dd>"
-      );
-      expect(preparingBody).toContain("<dt>Grace remaining</dt><dd>25m</dd>");
+      expect(preparingBody).toContain("<strong>No sample yet</strong>");
+      expect(preparingBody).not.toContain("<dt>Last tool_call</dt>");
+      expect(preparingBody).not.toContain("<dt>idle_since</dt>");
 
       const preparingApiBody = (await (
         await app.request("/api/runs/retrying-preparing-detail")
       ).json()) as {
-        watchdog: { graceRemainingMs?: number; idleSince?: string };
+        watchdog: {
+          graceMs: number;
+          graceRemainingMs?: number;
+          idleSince?: string;
+          sampledAt?: string;
+        };
       };
-      expect(preparingApiBody.watchdog.idleSince).toBe(
-        "2026-05-22T08:55:00.000Z"
-      );
-      expect(preparingApiBody.watchdog.graceRemainingMs).toBe(1_500_000);
+      expect(preparingApiBody.watchdog).toEqual({
+        enabled: true,
+        graceMs: 1_800_000
+      });
 
       const disabledApp = createHttpApp({
         getWatchdogConfig: () => ({ enabled: false, graceMinutes: 30 }),

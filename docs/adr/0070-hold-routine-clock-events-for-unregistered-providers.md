@@ -2,6 +2,9 @@
 
 Status: Accepted
 
+Superseded in part by ADR 0084: the due Routine Target and schedule remain claimable, but its
+fan-out leg is now `held` and does not gate the one-shot grouped summary.
+
 ## Context
 
 `dispatchDueRoutines` can select a provider name that has an operator-authored command in the

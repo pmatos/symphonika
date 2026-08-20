@@ -98,8 +98,8 @@ exactly like `model`/`effort`. Symphonika's default provider commands still carr
 full-permission flag literally (see SPEC.md §11.3), preserving ADR 0015's posture as a default, not
 as an enforced invariant on operator-overridden commands.
 
-Every Claude Routine Firing also appends
-`--disallowedTools ScheduleWakeup Monitor CronCreate` and sets
+Every Claude Routine Firing also ensures one `--disallowedTools` option whose variadic values merge
+any operator-authored restrictions with `ScheduleWakeup`, `Monitor`, and `CronCreate`, and sets
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, unconditionally whenever `input.routine !== undefined` —
 these are not declared per-routine fields, so they bypass the template entirely rather than risk
 being baked into a `providers.claude.command` shared with an issue-driven Project. Every Routine

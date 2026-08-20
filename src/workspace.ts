@@ -456,9 +456,10 @@ async function gitInProcessGroup(
   try {
     await groupShutdown;
   } catch (cleanupError) {
-    throw new Error("failed to stop aborted Git process group", {
-      cause: cleanupError
-    });
+    throw new WorkspacePreparationCleanupError(
+      "failed to stop aborted Git process group",
+      cleanupError
+    );
   }
   if (processError !== undefined) {
     if (processError instanceof Error) {

@@ -603,9 +603,11 @@ export async function startDaemon(
 
   // A project whose token can't be resolved (e.g. an unset $VAR_NAME) is
   // always pollable here -- pollProject reports that failure itself,
-  // unrelated to rate-limit backoff.
+  // unrelated to rate-limit backoff. Structurally typed on tracker alone
+  // (rather than the full PollingProjectConfig) so the fresh-claim boundary
+  // re-check (ADR 0083) below can reuse it for a DispatchProjectConfig too.
   const isProjectPollable = (
-    project: PollingProjectConfig,
+    project: { tracker: PollingProjectConfig["tracker"] },
     env: NodeJS.ProcessEnv,
     nowMs: number
   ): boolean => {
@@ -1049,7 +1051,35 @@ export async function startDaemon(
           );
           return;
         }
-        const result = await runController.dispatchOneFresh(issuePollStatus);
+        const snapshot = runtimeConfig.getSnapshot();
+        const dispatchableProjectNames = new Set(
+          partitionProjectsForPolling(
+            snapshot?.polling.projects ?? [],
+            env,
+            Date.now()
+          ).map((project) => project.name)
+        );
+        // ADR 0083 deliberately carries backed-off Projects' candidates in
+        // issuePollStatus for status and snapshot continuity. Keep that
+        // shared evidence intact, but do not let a carried-over candidate
+        // cross the fresh-claim boundary while its credential is backing
+        // off: the claim itself is another GitHub label write.
+        const result = await runController.dispatchOneFresh(
+          {
+            ...issuePollStatus,
+            candidateIssues: issuePollStatus.candidateIssues.filter(
+              (candidate) => dispatchableProjectNames.has(candidate.project)
+            )
+          },
+          {
+            // The fire-and-forget PR poll can engage backoff after the
+            // candidate view above is formed while dispatchOneFresh is still
+            // loading config or workflow state. Re-check from inside its
+            // narrowed claim section immediately before sym:claimed.
+            isClaimAllowed: (project) =>
+              isProjectPollable(project, env, Date.now())
+          }
+        );
         if (result.dispatched === false) {
           logger.debug(
             { reason: result.reason },

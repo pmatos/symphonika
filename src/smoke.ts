@@ -1,3 +1,4 @@
+import { formatArtifactKinds } from "./artifact-format.js";
 import {
   dispatchOneEligibleIssue,
   type DispatchIssueOptions
@@ -209,13 +210,6 @@ function formatRunFailure(detail: SmokeRunDetail): string {
       ? `provider terminated in state ${detail.state}`
       : `terminalReason=${detail.terminalReason}`;
   return `run ${detail.id} terminated in state ${detail.state}; ${reason}; artifacts: ${formatArtifactKinds(detail.artifacts)}`;
-}
-
-function formatArtifactKinds(artifacts: RunArtifactDescriptor[]): string {
-  const present = artifacts
-    .filter((artifact) => artifact.present)
-    .map((artifact) => artifact.kind);
-  return present.length === 0 ? "(none)" : present.join(", ");
 }
 
 function staleClaimWarnings(

@@ -219,6 +219,10 @@ export type RunControllerOptions = {
 export type DispatchOneFreshResult =
   { dispatched: false; reason: string } | { dispatched: true; runId: string };
 
+export type DispatchOneFreshOptions = {
+  isClaimAllowed?: (project: DispatchProjectConfig) => boolean;
+};
+
 export type ReviewFollowupContext = {
   headSha: string;
   pullRequestNumber: number;
@@ -352,6 +356,10 @@ class IssueReservedError extends Error {
   readonly name = "IssueReservedError";
 }
 
+class FreshClaimDeferredError extends Error {
+  readonly name = "FreshClaimDeferredError";
+}
+
 export class RunController {
   private readonly activeRuns: ActiveRunRegistry;
   private readonly agentProviders: AgentProviderRegistry;
@@ -407,7 +415,8 @@ export class RunController {
   }
 
   async dispatchOneFresh(
-    pollStatus: IssuePollStatus
+    pollStatus: IssuePollStatus,
+    options: DispatchOneFreshOptions = {}
   ): Promise<DispatchOneFreshResult> {
     // Snapshot candidates before any await so a concurrent poll cannot wipe them.
     const candidates = pollStatus.candidateIssues.slice();
@@ -452,6 +461,12 @@ export class RunController {
       repo: target.project.tracker.repo,
       token
     };
+    const claimProject = target.project;
+    const isClaimAllowed = options.isClaimAllowed;
+    const claimGuard =
+      isClaimAllowed === undefined
+        ? undefined
+        : () => isClaimAllowed(claimProject);
 
     // Honor action.provider on the initial raw-FSM state, matching the
     // per-state routing executeStateAdvance applies to subsequent advances.
@@ -493,6 +508,7 @@ export class RunController {
         providerCommand.trim().length === 0
       ) {
         await this.failFreshDispatchBeforeProvider({
+          ...(claimGuard === undefined ? {} : { claimGuard }),
           issue: target.candidate.issue,
           project: target.project,
           providerCommand: providerCommand ?? "",
@@ -507,6 +523,7 @@ export class RunController {
       const provider = this.agentProviders[providerName];
       if (provider === undefined) {
         await this.failFreshDispatchBeforeProvider({
+          ...(claimGuard === undefined ? {} : { claimGuard }),
           issue: target.candidate.issue,
           project: target.project,
           providerCommand,
@@ -520,6 +537,7 @@ export class RunController {
 
       await this.runFreshLifecycle({
         attemptNumber: 1,
+        ...(claimGuard === undefined ? {} : { claimGuard }),
         isContinuation: false,
         issue: target.candidate.issue,
         parentRunId: null,
@@ -541,15 +559,17 @@ export class RunController {
       }
       if (
         error instanceof CapBreachedError ||
-        error instanceof IssueReservedError
+        error instanceof IssueReservedError ||
+        error instanceof FreshClaimDeferredError
       ) {
-        // A concurrent dispatch took the slot between
-        // pickTargetFromCandidates (lock-free) and claimAndPersistRun's
-        // in-mutex re-check. Next tick will pick this candidate again once
-        // the cap clears. See ADR 0053.
+        // A concurrent dispatch may have taken the slot between the
+        // lock-free picker and claimAndPersistRun's in-mutex re-check, or a
+        // caller-owned admission guard may have closed in that same window.
+        // A later tick can reconsider the candidate once the gate clears.
+        // See ADR 0053 / ADR 0083.
         this.logger?.debug(
           { reason: error.message, runId },
-          "symphonika fresh dispatch skipped: contended at claim"
+          "symphonika fresh dispatch skipped at claim boundary"
         );
         return { dispatched: false, reason: error.message };
       }
@@ -560,6 +580,7 @@ export class RunController {
   }
 
   private async failFreshDispatchBeforeProvider(input: {
+    claimGuard?: () => boolean;
     issue: IssueSnapshot;
     project: RunControllerProjectConfig;
     providerCommand: string;
@@ -571,6 +592,11 @@ export class RunController {
     if (this.activeRuns.isShuttingDown()) {
       throw new RegistryShutdownError(
         `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
+      );
+    }
+    if (input.claimGuard?.() === false) {
+      throw new FreshClaimDeferredError(
+        `fresh issue claim deferred for project ${input.project.name}`
       );
     }
     await this.bestEffort(
@@ -2219,6 +2245,7 @@ export class RunController {
 
   private async runFreshLifecycle(input: {
     attemptNumber: number;
+    claimGuard?: () => boolean;
     extraInstructions?: string;
     inheritParentState?: boolean;
     isContinuation: boolean;
@@ -2270,6 +2297,7 @@ export class RunController {
   }
 
   private async claimAndPersistRun(input: {
+    claimGuard?: () => boolean;
     inheritParentState?: boolean;
     isContinuation: boolean;
     issue: IssueSnapshot;
@@ -2329,6 +2357,12 @@ export class RunController {
     ) {
       throw new IssueReservedError(
         `issue ${input.project.name}#${input.issue.number} is already reserved`
+      );
+    }
+
+    if (input.claimGuard?.() === false) {
+      throw new FreshClaimDeferredError(
+        `fresh issue claim deferred for project ${input.project.name}`
       );
     }
 

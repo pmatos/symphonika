@@ -56,7 +56,6 @@ import type {
   RoutineFiringStatus,
   RunArtifactDescriptor,
   RunArtifactKind,
-  RunDetail,
   RunState,
   RunStatus,
   RunStore,
@@ -94,7 +93,9 @@ import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 // fields.
 export type ScheduledCallback = {
   dueAt: number;
+  issueNumber: number;
   kind: "retry" | "continuation" | "state_advance" | "wait_park";
+  projectName: string;
   runId: string;
 };
 
@@ -711,16 +712,13 @@ export function registerPages(options: RegisterPagesOptions): void {
           : undefined
     };
     const nowMs = now();
-    const projectNames = Array.from(
-      new Set(
-        options.runStore.listProjectStates().map((state) => state.projectName)
-      )
-    ).sort();
+    const projectNames = options.runStore.listActiveProjectNames();
     const rows = searchIssueSnapshots({
       filters,
       nowMs,
       projectNames,
       runStore: options.runStore,
+      scheduled: options.getScheduled?.() ?? [],
       startedAtMs: options.startedAtMs
     });
     const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
@@ -778,7 +776,12 @@ export function registerPages(options: RegisterPagesOptions): void {
   options.app.get("/issues/:project/:number", (context) => {
     const projectName = context.req.param("project");
     const issueNumber = Number.parseInt(context.req.param("number"), 10);
-    const detail = loadIssueDetail(options.runStore, projectName, issueNumber);
+    const detail = loadIssueDetail(
+      options.runStore,
+      projectName,
+      issueNumber,
+      options.getScheduled?.() ?? []
+    );
     if (detail === undefined) {
       return context.html(
         renderIssueNotFound(projectName, context.req.param("number")),
@@ -805,7 +808,12 @@ export function registerPages(options: RegisterPagesOptions): void {
     action: "add" | "remove"
   ): Promise<Response> {
     const issueNumber = Number.parseInt(issueNumberParam, 10);
-    const detail = loadIssueDetail(options.runStore, projectName, issueNumber);
+    const detail = loadIssueDetail(
+      options.runStore,
+      projectName,
+      issueNumber,
+      options.getScheduled?.() ?? []
+    );
     if (detail === undefined) {
       return context.html(
         renderIssueNotFound(projectName, issueNumberParam),
@@ -996,7 +1004,12 @@ export function registerPages(options: RegisterPagesOptions): void {
     issueNumberParam: string
   ): Promise<Response> {
     const issueNumber = Number.parseInt(issueNumberParam, 10);
-    const detail = loadIssueDetail(options.runStore, projectName, issueNumber);
+    const detail = loadIssueDetail(
+      options.runStore,
+      projectName,
+      issueNumber,
+      options.getScheduled?.() ?? []
+    );
     if (detail === undefined) {
       return context.html(
         renderIssueNotFound(projectName, issueNumberParam),
@@ -2404,19 +2417,11 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
     const transitions = options.runStore.listRoutineFiringTransitions(id);
     const evidence = routineEvidencePaths(options.stateRoot, id);
-    const rawEvents = await readRecentRoutineEvents(
-      evidence.normalizedLogPath,
-      EVENT_TAIL_LIMIT
-    );
-    // readRecentRoutineEvents keeps a ring buffer of `limit` lines and
-    // tracks total lines seen via each entry's own `sequence` — if the
-    // window is full and the last entry's sequence exceeds the window
-    // size, the buffer wrapped at least once, i.e. more lines existed than
-    // fit. Mirrors /runs/:id's own "fetch one extra to detect truncation"
-    // trick without changing readRecentRoutineEvents's return shape.
-    const lastEvent = rawEvents[rawEvents.length - 1];
-    const eventsTruncated =
-      lastEvent !== undefined && lastEvent.sequence > rawEvents.length;
+    const { events: rawEvents, truncated: eventsTruncated } =
+      await readRecentRoutineEvents(
+        evidence.normalizedLogPath,
+        EVENT_TAIL_LIMIT
+      );
     const artifacts = await buildFiringArtifactDescriptors(evidence);
     const firingCsrfToken = csrfTokenFor(
       options.csrfSecret,
@@ -2458,38 +2463,55 @@ export const DASHBOARD_PATCH_FRAGMENT_JS = `function patchFragment(id, html) {
   el.replaceChildren.apply(el, nodes);
 }`;
 
-const DASHBOARD_STREAM_BANNER = `<div id="live-stream-banner" class="alert" style="display:none" role="status">Live updates disconnected — showing the page as of its last load. <a href="/">Refresh</a></div>`;
+const DASHBOARD_STREAM_BANNER = `<div id="live-stream-banner" class="alert" style="display:none" role="status">Live updates unavailable — some dashboard data may be stale. <a href="/">Refresh</a></div>`;
 
-// EventSource reconnects on its own (fixed retry interval); this only
-// reacts to open/error to show/hide DASHBOARD_STREAM_BANNER and to
-// reconcile once per (re)connect — GET /events carries no replay, so a
-// client that was disconnected must re-fetch to catch up (ADR 0074).
+// EventSource reconnects on its own (fixed retry interval). The banner
+// remains visible across a reconnect until both fragments reconcile;
+// GET /events carries no replay, so a client that was disconnected must
+// successfully re-fetch the current state before it is current (ADR 0074).
 export const DASHBOARD_LIVE_CLIENT_JS = `(function () {
   ${DASHBOARD_PATCH_FRAGMENT_JS}
   var banner = document.getElementById("live-stream-banner");
   var reconcileGeneration = 0;
+  var streamOpen = false;
+  function showReconciliationFailure(generation) {
+    if (generation === reconcileGeneration && banner) { banner.style.display = ""; }
+  }
+  function refreshFragment(url, id, generation) {
+    return fetch(url)
+      .then(function (r) {
+        if (!r.ok) { showReconciliationFailure(generation); return false; }
+        return r.text().then(function (html) {
+          if (generation === reconcileGeneration) { patchFragment(id, html); }
+          return true;
+        });
+      })
+      .catch(function () {
+        showReconciliationFailure(generation);
+        return false;
+      });
+  }
   function reconcile() {
     var generation = ++reconcileGeneration;
-    fetch("/fragments/active-band")
-      .then(function (r) { return r.text(); })
-      .then(function (html) {
-        if (generation === reconcileGeneration) { patchFragment("active-now-band", html); }
-      });
-    fetch("/fragments/projects-section")
-      .then(function (r) { return r.text(); })
-      .then(function (html) {
-        if (generation === reconcileGeneration) { patchFragment("projects-section", html); }
-      });
+    Promise.all([
+      refreshFragment("/fragments/active-band", "active-now-band", generation),
+      refreshFragment("/fragments/projects-section", "projects-section", generation)
+    ]).then(function (successes) {
+      if (generation === reconcileGeneration && streamOpen && successes[0] && successes[1] && banner) {
+        banner.style.display = "none";
+      }
+    });
   }
   var source = new EventSource("/events");
   ["run-transition", "firing-transition", "project-poll"].forEach(function (kind) {
     source.addEventListener(kind, reconcile);
   });
   source.addEventListener("open", function () {
-    if (banner) { banner.style.display = "none"; }
+    streamOpen = true;
     reconcile();
   });
   source.addEventListener("error", function () {
+    streamOpen = false;
     if (banner) { banner.style.display = ""; }
   });
 })();`;
@@ -3641,21 +3663,61 @@ function parsePositiveIntQueryParam(
 // A claim-shaped operational-label reason (sym:claimed/sym:running) gets its
 // Run id resolved through the Run Store — a local read, not a GitHub call —
 // so describeIssueVerdict (src/issues/verdict.ts) can stay pure and DB-free.
-// The most recent Run for the issue is the one holding the claim; an issue
-// can only be claimed by one Run at a time in practice.
+// A scheduled callback keeps its Issue Reservation even when the backing Run
+// row is terminal. Its runId is scheduling correlation, not durable claimant
+// identity: wait_park can name the terminal parent while a waiting row owns
+// the reservation, and contention reschedules can name an unpersisted id.
+// Prefer the non-terminal states below, then use scheduled issue identity to
+// resolve the latest persisted Run. Terminal history alone may legitimately
+// retain sym:claimed for operator action (SPEC 9.3), but renders as
+// blocked/stale evidence.
 const CLAIM_REASON = /^has operational label sym:(claimed|running)$/;
+const CLAIM_HOLDING_RUN_STATES: RunState[] = [
+  "queued",
+  "preparing_workspace",
+  "running",
+  "waiting"
+];
+
+function resolveScheduledClaimantRunId(
+  runStore: RunStore,
+  callback: ScheduledCallback
+): string | undefined {
+  return runStore.listRuns({
+    issueNumber: callback.issueNumber,
+    limit: 1,
+    project: callback.projectName
+  })[0]?.id;
+}
 
 function resolveClaimedRunId(
   runStore: RunStore,
   projectName: string,
   issueNumber: number,
-  reasons: string[]
+  reasons: string[],
+  scheduled: ScheduledCallback[]
 ): string | undefined {
   if (!reasons.some((reason) => CLAIM_REASON.test(reason))) {
     return undefined;
   }
-  return runStore.listRuns({ issueNumber, limit: 1, project: projectName })[0]
-    ?.id;
+  const claimHoldingRun = runStore.listRuns({
+    issueNumber,
+    limit: 1,
+    project: projectName,
+    state: CLAIM_HOLDING_RUN_STATES
+  })[0];
+  if (claimHoldingRun !== undefined) {
+    return claimHoldingRun.id;
+  }
+  const scheduledClaimant = scheduled.find(
+    (callback) =>
+      callback.projectName === projectName &&
+      callback.issueNumber === issueNumber
+  );
+  if (scheduledClaimant !== undefined) {
+    return resolveScheduledClaimantRunId(runStore, scheduledClaimant);
+  }
+  return undefined;
 }
 
 // #308 part 3's clear-stale-claim liveness gate: the same three-source union
@@ -3673,6 +3735,10 @@ function resolveClaimedRunId(
 // under a merge_pr FSM state). A single shared read means both callers
 // filter one union rather than each re-deriving it.
 function collectLiveRunEntries(input: {
+  // Scoped to the issue being checked so scheduled-callback resolution below
+  // only queries the Run Store for a match, not once per in-flight callback
+  // across every project.
+  aliasNames: Set<string>;
   getActiveRuns:
     | (() => Array<{ issueNumber: number; projectName: string; runId: string }>)
     | undefined;
@@ -3680,20 +3746,34 @@ function collectLiveRunEntries(input: {
   // RunController.schedule (RegisterPagesOptions.getScheduled) has already
   // unregistered its slot and moved the Run row to a terminal state — the
   // only remaining ownership signal is this callback. Without it, an issue
-  // mid-backoff reads as unowned even though it will fire again. runStore
-  // resolves each callback's runId back to its (project, issue) pair since
-  // ScheduledCallback carries neither.
+  // mid-backoff reads as unowned even though it will fire again. Resolve its
+  // issue identity back to a persisted Run because callback.runId is not
+  // guaranteed to name one.
   getScheduled: (() => ScheduledCallback[]) | undefined;
+  issueNumber: number;
   runStore: RunStore;
 }): Array<{ issueNumber: number; projectName: string; runId: string }> {
-  const scheduledEntries = (input.getScheduled?.() ?? [])
-    .map((callback) => input.runStore.getRun(callback.runId))
-    .filter((run): run is RunDetail => run !== undefined)
-    .map((run) => ({
-      issueNumber: run.issueNumber,
-      projectName: run.project,
-      runId: run.id
-    }));
+  const scheduledEntries: Array<{
+    issueNumber: number;
+    projectName: string;
+    runId: string;
+  }> = [];
+  for (const callback of input.getScheduled?.() ?? []) {
+    if (
+      !input.aliasNames.has(callback.projectName) ||
+      callback.issueNumber !== input.issueNumber
+    ) {
+      continue;
+    }
+    const runId = resolveScheduledClaimantRunId(input.runStore, callback);
+    if (runId !== undefined) {
+      scheduledEntries.push({
+        issueNumber: callback.issueNumber,
+        projectName: callback.projectName,
+        runId
+      });
+    }
+  }
   return [
     ...(input.getActiveRuns?.() ?? []),
     ...input.runStore.listActiveRunIds(),
@@ -3734,7 +3814,7 @@ function findLiveRunIdForIssue(input: {
   const aliasNames = new Set(
     input.getProjectRepoAliases?.(input.projectName) ?? [input.projectName]
   );
-  return collectLiveRunEntries(input).find(
+  return collectLiveRunEntries({ ...input, aliasNames }).find(
     (entry) =>
       aliasNames.has(entry.projectName) &&
       entry.issueNumber === input.issueNumber
@@ -3826,6 +3906,7 @@ function searchIssueSnapshots(input: {
   nowMs: number;
   projectNames: string[];
   runStore: RunStore;
+  scheduled: ScheduledCallback[];
   startedAtMs: number | undefined;
 }): IssueSearchRow[] {
   const targetProjects =
@@ -3863,7 +3944,8 @@ function searchIssueSnapshots(input: {
         input.runStore,
         projectName,
         snapshot.issueNumber,
-        snapshot.reasons
+        snapshot.reasons,
+        input.scheduled
       );
       rows.push({
         blockedBy: snapshot.blockedBy,
@@ -4451,7 +4533,8 @@ type IssueDetail = {
 function loadIssueDetail(
   runStore: RunStore,
   projectName: string,
-  issueNumber: number
+  issueNumber: number,
+  scheduled: ScheduledCallback[]
 ): IssueDetail | undefined {
   if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
     return undefined;
@@ -4466,7 +4549,8 @@ function loadIssueDetail(
     runStore,
     projectName,
     issueNumber,
-    snapshot.reasons
+    snapshot.reasons,
+    scheduled
   );
   return {
     claimedRunId,
@@ -6448,7 +6532,7 @@ function renderTransitionsTable(
 type CoalesceableProviderEvent = {
   createdAt?: string;
   normalized: Record<string, unknown>;
-  sequence: number;
+  sequence: number | null;
   type: string;
 };
 
@@ -6464,11 +6548,11 @@ function renderEventsTable(
       if (row.kind === "message") {
         const seq =
           row.firstSequence === row.lastSequence
-            ? `${row.firstSequence}`
-            : `${row.firstSequence}–${row.lastSequence}`;
+            ? formatEventSequence(row.firstSequence)
+            : `${formatEventSequence(row.firstSequence)}–${formatEventSequence(row.lastSequence)}`;
         return `<tr><td>${seq}</td><td>message</td><td class="c-detail"><div class="msg">${escapeHtml(row.text)}</div></td><td><code>${escapeHtml(row.createdAt || "-")}</code></td></tr>`;
       }
-      return `<tr><td>${row.sequence}</td><td>${escapeHtml(row.type)}</td><td class="c-detail"><code>${escapeHtml(row.detail)}</code></td><td><code>${escapeHtml(row.createdAt || "-")}</code></td></tr>`;
+      return `<tr><td>${formatEventSequence(row.sequence)}</td><td>${escapeHtml(row.type)}</td><td class="c-detail"><code>${escapeHtml(row.detail)}</code></td><td><code>${escapeHtml(row.createdAt || "-")}</code></td></tr>`;
     })
     .join("");
   const scope = truncated
@@ -6611,18 +6695,22 @@ function formatAbnormalExit(
 type EventDisplayRow =
   | {
       kind: "message";
-      firstSequence: number;
-      lastSequence: number;
+      firstSequence: number | null;
+      lastSequence: number | null;
       text: string;
       createdAt: string;
     }
   | {
       kind: "event";
-      sequence: number;
+      sequence: number | null;
       type: string;
       detail: string;
       createdAt: string;
     };
+
+function formatEventSequence(sequence: number | null): string {
+  return sequence === null ? "?" : String(sequence);
+}
 
 // Codex streams assistant text one token per event; merge runs of adjacent
 // message events into a single readable block, breaking on any other event.

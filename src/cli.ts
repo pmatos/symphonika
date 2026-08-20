@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 
 import type { AddRoutineOptions, AddRoutineReport } from "./add-routine.js";
 import { runAddRoutine } from "./add-routine.js";
+import { formatArtifactKinds } from "./artifact-format.js";
 import type { DaemonHandle, StartDaemonOptions } from "./daemon.js";
 import { startDaemon } from "./daemon.js";
 import { resolveServiceConfigPath } from "./config-paths.js";
@@ -46,7 +47,6 @@ import type {
   OpenRunStoreOptions,
   ProjectState,
   RunDetail,
-  RunArtifactDescriptor,
   RunState,
   RunStatus,
   RunStore
@@ -1617,7 +1617,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
                   .join(", ")
           );
 
-          const events = await readRecentRoutineEvents(
+          const { events } = await readRecentRoutineEvents(
             evidence.normalizedLogPath,
             options.events
           );
@@ -1626,14 +1626,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             writeOut(program, "  (no events recorded)\n");
           }
           for (const event of events) {
+            const sequence = event.sequence ?? "?";
             const message =
               typeof event.normalized.message === "string"
                 ? event.normalized.message
                 : JSON.stringify(event.normalized);
-            writeOut(
-              program,
-              `  ${event.sequence}. ${event.type}  ${message}\n`
-            );
+            writeOut(program, `  ${sequence}. ${event.type}  ${message}\n`);
           }
         } finally {
           store.close();
@@ -2510,17 +2508,6 @@ function formatFiringDuration(
     return "-";
   }
   return formatWatchdogDuration(Math.max(0, endMs - startMs));
-}
-
-function formatArtifactKinds(artifacts: RunArtifactDescriptor[]): string {
-  const present = artifacts
-    .filter((artifact) => artifact.present)
-    .map((artifact) =>
-      artifact.sizeBytes === undefined
-        ? artifact.kind
-        : `${artifact.kind}(${artifact.sizeBytes} bytes)`
-    );
-  return present.length === 0 ? "(none)" : present.join(", ");
 }
 
 async function loadWatchdogServiceConfig(

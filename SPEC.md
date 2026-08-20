@@ -1907,6 +1907,13 @@ pages rather than forking them. A Firing's evidence is a normalized-log file on 
 the DB-backed `provider_events` table a Run's attempts use, and carries no per-event timestamp of
 its own — the shared event renderers were widened to a smaller structural type
 (`{normalized, sequence, type, createdAt?}`) that both satisfy, rather than fabricating one.
+Routine evidence writers maintain an internal fixed-width index of byte offset and global sequence
+alongside the Normalized Event Log. Tail readers validate the selected records against neighboring
+records and actual JSONL boundaries before seeking directly to the requested event window. Pre-index
+or damaged evidence uses a bounded backward suffix read instead of scanning from byte zero; when
+that bounded read cannot reach the start of the file, operator surfaces mark its global sequences
+unknown rather than fabricating tail-relative numbers. The internal index is not an operator-facing
+artifact or an additional `/logs/firings/:id/:kind` kind.
 `GET /logs/firings/:id/:kind` streams the four evidence files that apply to a Firing (prompt,
 prompt metadata, raw and normalized provider logs — a Firing has no issue snapshot and no workflow
 graph), 404ing for a kind that doesn't apply or a file that was never written. A discovered Routine
@@ -1936,7 +1943,11 @@ or Firing transition, and a reload outcome, push the instant they happen; a `pro
 fires at the daemon's existing ~30-second poll cadence (ADR-0036) and only invalidates the poll-age
 display already on the page — receiving one never means issue eligibility itself just became live.
 Each connection subscribes and unsubscribes independently, so concurrent tabs do not share a cursor
-and a disconnect (tab close, navigation, network drop) cannot leak a listener.
+and a disconnect (tab close, navigation, network drop) cannot leak a listener. A connection retains
+at most 100 pending invalidations; if another event arrives while that queue is full, the server
+disconnects the subscriber and drops the queued events rather than silently coalescing them. The
+browser's normal reconnect then performs the same full-fragment reconciliation used after any other
+stream gap.
 
 The dashboard (`/`) is the one page wired to this stream. `renderActiveNowBand` and
 `renderProjectsSection` render inside stable `#active-now-band` / `#projects-section` containers,
@@ -1948,11 +1959,12 @@ embedded script (`DASHBOARD_LIVE_CLIENT_JS`, a plain string constant matching th
 fragments via `element.replaceChildren(...)` — a full-region replace, not a diffing morph, since
 today neither fragment contains an editor or other state worth preserving across a swap (`#307`
 introduces editors; a preservation mechanism belongs there, against a real element, not built ahead
-of one). `EventSource`'s own reconnect handles drops; `error` shows a `#live-stream-banner` with a
-manual refresh link, `open` hides it and reconciles both fragments once, matching "no replay on
-reconnect." Every other page (`/runs/:id`, `/firings/:id`, `/routines/:name`, `/projects/:name`)
-still requires a manual reload to see a transition — wiring those up is follow-on work. See #305,
-ADR-0074.
+of one). `EventSource`'s own reconnect handles drops; `error` or any HTTP, network, or body-read
+failure while refreshing a fragment shows a `#live-stream-banner` with a manual refresh link.
+`open` reconciles both fragments once and hides the banner only after both refreshes succeed,
+matching "no replay on reconnect" without presenting a failed reconciliation as current. Every
+other page (`/runs/:id`, `/firings/:id`, `/routines/:name`, `/projects/:name`) still requires a
+manual reload to see a transition — wiring those up is follow-on work. See #305, ADR-0074.
 
 The v1 mutating local HTTP API actions are explicit active-run cancellation, a manual poll-now
 trigger that uses the normal daemon scheduler path, and daemon-owned manual Routine firing. The

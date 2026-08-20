@@ -285,6 +285,34 @@ describe("HTTP app — GET /events (#305, ADR 0074)", () => {
     }
   });
 
+  it("disconnects a lagging client when its pending event queue fills", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        runStore: test.runStore,
+        sseHeartbeatMs: 60_000,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/events");
+      const reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      expect(await waitForListenerCount(test.runStore, 1)).toBe(1);
+
+      // Publish synchronously so the handler cannot drain between events.
+      // The first 100 fit; the next must disconnect this subscriber.
+      for (let index = 0; index < 101; index += 1) {
+        test.runStore.publishReloadOutcome({ errors: [], ok: true });
+      }
+
+      expect(await waitForListenerCount(test.runStore, 0)).toBe(0);
+      expect(await reader!.read()).toMatchObject({ done: true });
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("gives each concurrent connection its own independent subscription", async () => {
     const test = await setup();
     try {

@@ -17,9 +17,11 @@ import type {
   ProviderRunInput
 } from "../src/provider.js";
 import type { NotificationMessage } from "../src/notifications/types.js";
+import { NotificationDeliveryTracker } from "../src/notifications/delivery-tracker.js";
 import {
   dispatchDueRoutines,
-  fireRoutineNow
+  fireRoutineNow,
+  type DispatchDueRoutinesInput
 } from "../src/routines/dispatcher.js";
 import type { TargetedRoutineDeclaration } from "../src/routines/types.js";
 import type {
@@ -49,6 +51,26 @@ afterEach(async () => {
       .map((root) => rm(root, { force: true, recursive: true }))
   );
 });
+
+async function dispatchDueRoutinesAndDrain(
+  input: Omit<DispatchDueRoutinesInput, "notification"> & {
+    notification?: Omit<
+      NonNullable<DispatchDueRoutinesInput["notification"]>,
+      "deliveries"
+    >;
+  }
+) {
+  const { notification, ...dispatchInput } = input;
+  const deliveries = new NotificationDeliveryTracker();
+  const result = await dispatchDueRoutines({
+    ...dispatchInput,
+    ...(notification === undefined
+      ? {}
+      : { notification: { ...notification, deliveries } })
+  });
+  await deliveries.settled();
+  return result;
+}
 
 describe("RoutineFiringDispatcher", () => {
   it("manually fires a not-due Routine through the normal provider lifecycle", async () => {
@@ -182,6 +204,7 @@ describe("RoutineFiringDispatcher", () => {
     };
     runStore.syncRoutines([routine]);
     const delivered: NotificationMessage[] = [];
+    const notificationDeliveries = new NotificationDeliveryTracker();
 
     try {
       const result = fireRoutineNow({
@@ -197,6 +220,7 @@ describe("RoutineFiringDispatcher", () => {
               return Promise.resolve();
             }
           }),
+          deliveries: notificationDeliveries,
           resolveConfig: () => ({
             from: "symphonika@example.com",
             on: "always",
@@ -237,6 +261,7 @@ describe("RoutineFiringDispatcher", () => {
         throw new Error("manual firing was not accepted");
       }
       await result.completion;
+      await notificationDeliveries.settled();
 
       expect(delivered).toHaveLength(1);
       expect(delivered[0]?.subject).toContain("daily-report");
@@ -571,7 +596,7 @@ describe("RoutineFiringDispatcher", () => {
     ];
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { claude: provider },
         configDir: root,
@@ -653,7 +678,7 @@ describe("RoutineFiringDispatcher", () => {
     ];
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { claude: provider },
         configDir: root,
@@ -710,7 +735,7 @@ describe("RoutineFiringDispatcher", () => {
     ];
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -777,7 +802,7 @@ describe("RoutineFiringDispatcher", () => {
     };
 
     try {
-      const result = await dispatchDueRoutines({
+      const result = await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -946,7 +971,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      const result = await dispatchDueRoutines({
+      const result = await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -1001,7 +1026,7 @@ describe("RoutineFiringDispatcher", () => {
       // On the next tick the newly configured, already-overdue one-shot is
       // consumed as an ungrouped catch-up skip rather than firing into the
       // completed event or remaining due forever.
-      const lateTick = await dispatchDueRoutines({
+      const lateTick = await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -1106,7 +1131,7 @@ describe("RoutineFiringDispatcher", () => {
     };
 
     try {
-      const result = await dispatchDueRoutines({
+      const result = await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -1269,7 +1294,7 @@ describe("RoutineFiringDispatcher", () => {
       // Tick 1: "omp" is not registered yet. Alpha succeeds; beta remains
       // due and retryable, but its durable hold no longer prevents the
       // operator from receiving the otherwise-complete grouped summary.
-      const tickOne = await dispatchDueRoutines({
+      const tickOne = await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: codexProvider },
         configDir: root,
@@ -1338,7 +1363,7 @@ describe("RoutineFiringDispatcher", () => {
       // Tick 2: the operator registers "omp". The same fan-out (matched on
       // routine name + scheduled_at) is reused and beta is finally claimed.
       // The one-shot grouped summary is not amended after delivery.
-      const tickTwo = await dispatchDueRoutines({
+      const tickTwo = await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: codexProvider, omp: ompProvider },
         configDir: root,
@@ -1455,7 +1480,7 @@ describe("RoutineFiringDispatcher", () => {
     );
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -1585,7 +1610,7 @@ describe("RoutineFiringDispatcher", () => {
     );
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -1666,6 +1691,7 @@ describe("RoutineFiringDispatcher", () => {
     const listPullRequestsForBranch = vi.fn(() => discoveryGate);
 
     const delivered: NotificationMessage[] = [];
+    const notificationDeliveries = new NotificationDeliveryTracker();
     const notification = {
       createSink: () => ({
         deliver(message: NotificationMessage) {
@@ -1673,6 +1699,7 @@ describe("RoutineFiringDispatcher", () => {
           return Promise.resolve();
         }
       }),
+      deliveries: notificationDeliveries,
       resolveConfig: () => ({
         from: "symphonika@example.com",
         on: "always" as const,
@@ -1766,6 +1793,7 @@ describe("RoutineFiringDispatcher", () => {
         { head: { ref: branchName, sha: "abc123" }, number: 42, state: "open" }
       ]);
       await dispatchPromise;
+      await notificationDeliveries.settled();
 
       expect(runStore.listRoutineFirings()).toEqual([
         expect.objectContaining({
@@ -1804,7 +1832,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -1879,7 +1907,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -1956,7 +1984,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -2054,7 +2082,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -2169,7 +2197,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -2262,7 +2290,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -2353,7 +2381,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -2447,7 +2475,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -2547,7 +2575,7 @@ describe("RoutineFiringDispatcher", () => {
       ]);
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -2657,7 +2685,7 @@ describe("RoutineFiringDispatcher", () => {
     const provider = quietProvider();
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns: new ActiveRunRegistry(),
           provider,
@@ -2731,7 +2759,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -2850,7 +2878,7 @@ describe("RoutineFiringDispatcher", () => {
         terminalReason: `provider crashed while holding ${secret}`
       });
 
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: {},
         configDir: "/tmp",
@@ -2912,7 +2940,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -3054,7 +3082,7 @@ describe("RoutineFiringDispatcher", () => {
         });
       }
 
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: {},
         configDir: "/tmp",
@@ -3101,6 +3129,113 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("returns from dispatch before a ready fan-out notification finishes", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    const notificationDeliveries = new NotificationDeliveryTracker();
+    let finishDelivery: (() => void) | undefined;
+    const delivery = new Promise<void>((resolve) => {
+      finishDelivery = resolve;
+    });
+    let markDeliveryStarted: (() => void) | undefined;
+    const deliveryStarted = new Promise<void>((resolve) => {
+      markDeliveryStarted = resolve;
+    });
+
+    try {
+      runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      runStore.ensureRoutineFanout({
+        id: "fanout-slow-email",
+        projectNames: ["alpha"],
+        routineName: "daily-report",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.claimRoutineFiring({
+        fanoutId: "fanout-slow-email",
+        firedAt: "2026-05-22T10:00:01.000Z",
+        firingId: "fire-fanout-slow-email",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+      runStore.completeRoutineFiring({
+        id: "fire-fanout-slow-email",
+        state: "succeeded"
+      });
+
+      const dispatched = dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: {},
+        configDir: "/tmp",
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            async deliver() {
+              markDeliveryStarted?.();
+              await delivery;
+            }
+          }),
+          deliveries: notificationDeliveries,
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            sources: {
+              daemonHealth: true,
+              issueRuns: true,
+              routineFanouts: true,
+              routineFirings: false
+            },
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          }),
+          timeoutMs: 5_000
+        },
+        now: new Date("2026-05-22T10:05:00.000Z"),
+        projects: new Map(),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      await deliveryStarted;
+      let dispatchSettled = false;
+      void dispatched.then(() => {
+        dispatchSettled = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const returnedBeforeDeliveryFinished = dispatchSettled;
+      finishDelivery?.();
+      await dispatched;
+      expect(returnedBeforeDeliveryFinished).toBe(true);
+      await notificationDeliveries.settled();
+      expect(runStore.getRoutineFanout("fanout-slow-email")).toMatchObject({
+        notificationError: null,
+        notificationState: "sent"
+      });
+    } finally {
+      finishDelivery?.();
+      runStore.close();
+    }
+  });
+
   it("keeps a fan-out pending for retry when the notification sink factory throws", async () => {
     // Sink construction is best-effort (SPEC.md §5.5) and must never fail a
     // daemon tick, which would otherwise also abort issue dispatch scheduled
@@ -3141,7 +3276,7 @@ describe("RoutineFiringDispatcher", () => {
 
       // If sink construction were not contained, this call itself would
       // reject and fail the test.
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: {},
         configDir: "/tmp",
@@ -3219,7 +3354,7 @@ describe("RoutineFiringDispatcher", () => {
         state: "succeeded"
       });
 
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: {},
         configDir: "/tmp",
@@ -3305,7 +3440,7 @@ describe("RoutineFiringDispatcher", () => {
 
       // If evidence-write failures were not contained, this call itself
       // would reject and fail the test.
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: {},
         configDir: "/tmp",
@@ -3364,7 +3499,7 @@ describe("RoutineFiringDispatcher", () => {
     const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -3451,7 +3586,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns: new ActiveRunRegistry(),
           provider,
@@ -3502,7 +3637,7 @@ describe("RoutineFiringDispatcher", () => {
       .mockRejectedValue(new Error("git rev-list failed"));
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns: new ActiveRunRegistry(),
           provider,
@@ -3564,7 +3699,7 @@ describe("RoutineFiringDispatcher", () => {
     });
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns,
           provider,
@@ -3625,7 +3760,7 @@ describe("RoutineFiringDispatcher", () => {
     });
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns,
           provider,
@@ -3706,7 +3841,7 @@ describe("RoutineFiringDispatcher", () => {
     );
 
     try {
-      const result = await dispatchDueRoutines({
+      const result = await dispatchDueRoutinesAndDrain({
         activeRuns,
         agentProviders: { codex: provider },
         configDir: root,
@@ -3815,7 +3950,7 @@ describe("RoutineFiringDispatcher", () => {
         state: "expired"
       });
 
-      const second = await dispatchDueRoutines({
+      const second = await dispatchDueRoutinesAndDrain({
         activeRuns,
         agentProviders: { codex: provider },
         configDir: root,
@@ -3883,7 +4018,7 @@ describe("RoutineFiringDispatcher", () => {
     const provider = quietProvider();
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns: new ActiveRunRegistry(),
           provider,
@@ -3932,7 +4067,7 @@ describe("RoutineFiringDispatcher", () => {
     const logInfo = vi.spyOn(logger, "info");
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: quietProvider() },
         configDir: root,
@@ -4059,7 +4194,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -4183,7 +4318,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -4331,7 +4466,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -4449,7 +4584,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -4572,7 +4707,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -4654,13 +4789,17 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
-  it("releases the concurrency slot before notification delivery finishes", async () => {
+  it("returns from dispatch and releases the concurrency slot before notification delivery finishes", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const workspacePath = path.join(root, "workspace");
     const runStore = openRunStore({ stateRoot });
     const activeRuns = new ActiveRunRegistry();
-    const delivery = new Promise<void>(() => undefined);
+    const notificationDeliveries = new NotificationDeliveryTracker();
+    let finishDelivery: (() => void) | undefined;
+    const delivery = new Promise<void>((resolve) => {
+      finishDelivery = resolve;
+    });
     let recordSlotCount: ((count: number) => void) | undefined;
     const slotCountAtDeliveryStart = new Promise<number>((resolve) => {
       recordSlotCount = resolve;
@@ -4691,18 +4830,26 @@ describe("RoutineFiringDispatcher", () => {
             async deliver() {
               recordSlotCount?.(activeRuns.countInFlightByProject("alpha"));
               await delivery;
+              throw new Error("relay unavailable");
             }
           }),
+          deliveries: notificationDeliveries,
           resolveConfig: () => ({
             from: "symphonika@example.com",
             on: "always",
+            sources: {
+              daemonHealth: true,
+              issueRuns: true,
+              routineFanouts: false,
+              routineFirings: true
+            },
             smtpHost: "smtp.example.com",
             smtpPasswordEnv: "SMTP_TEST_PASSWORD",
             smtpPort: 587,
             smtpSecurity: "starttls",
             to: "operator@example.com"
           }),
-          timeoutMs: 5
+          timeoutMs: 5_000
         },
         now: new Date("2026-05-22T10:00:01.000Z"),
         prepareRoutineWorkspace: () =>
@@ -4744,13 +4891,23 @@ describe("RoutineFiringDispatcher", () => {
       // starts, so a stalled SMTP relay cannot suppress further dispatch for
       // this project (docs/adr/0067-smtp-notification-sink.md).
       expect(await slotCountAtDeliveryStart).toBe(0);
+      let dispatchSettled = false;
+      void dispatched.then(() => {
+        dispatchSettled = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const returnedBeforeDeliveryFinished = dispatchSettled;
+      finishDelivery?.();
       await dispatched;
+      expect(returnedBeforeDeliveryFinished).toBe(true);
+      await notificationDeliveries.settled();
       expect(runStore.getRoutineFiring("fire-slow-email")).toMatchObject({
-        notificationError: "notification delivery timed out after 5ms",
+        notificationError: "relay unavailable",
         notificationState: "failed",
         state: "succeeded"
       });
     } finally {
+      finishDelivery?.();
       runStore.close();
     }
   });
@@ -4779,7 +4936,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -4889,7 +5046,7 @@ describe("RoutineFiringDispatcher", () => {
     );
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns,
         agentProviders: { codex: provider },
         configDir: root,
@@ -4968,7 +5125,7 @@ describe("RoutineFiringDispatcher", () => {
     );
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns,
         agentProviders: { codex: provider },
         configDir: root,
@@ -5052,7 +5209,7 @@ describe("RoutineFiringDispatcher", () => {
     );
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns,
         agentProviders: { codex: provider },
         configDir: root,
@@ -5116,7 +5273,7 @@ describe("RoutineFiringDispatcher", () => {
     });
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns,
           provider,
@@ -5194,7 +5351,7 @@ describe("RoutineFiringDispatcher", () => {
     );
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns,
         agentProviders: { codex: provider },
         configDir: root,
@@ -5291,7 +5448,7 @@ describe("RoutineFiringDispatcher", () => {
       });
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns,
           provider,
@@ -5350,7 +5507,7 @@ describe("RoutineFiringDispatcher", () => {
       .mockImplementationOnce(() => new Promise<never>(() => {}));
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns,
           provider,
@@ -5443,11 +5600,11 @@ describe("RoutineFiringDispatcher", () => {
         now: new Date("2026-05-22T09:59:30.000Z")
       });
 
-      const first = await dispatchDueRoutines({
+      const first = await dispatchDueRoutinesAndDrain({
         ...baseInput,
         now: new Date("2026-05-22T10:00:00.000Z")
       });
-      const second = await dispatchDueRoutines({
+      const second = await dispatchDueRoutinesAndDrain({
         ...baseInput,
         now: new Date("2026-05-22T10:01:00.000Z")
       });
@@ -5518,7 +5675,7 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       try {
-        const result = await dispatchDueRoutines({
+        const result = await dispatchDueRoutinesAndDrain({
           ...recurringDispatchInput({
             activeRuns: new ActiveRunRegistry(),
             provider,
@@ -5584,7 +5741,7 @@ describe("RoutineFiringDispatcher", () => {
       };
 
       const first = await dispatchDueRoutines(input);
-      const second = await dispatchDueRoutines({
+      const second = await dispatchDueRoutinesAndDrain({
         ...input,
         createFiringId: () => "unexpected-fire",
         recomputeSchedulesFromNow: false
@@ -5635,7 +5792,7 @@ describe("RoutineFiringDispatcher", () => {
     });
 
     try {
-      const result = await dispatchDueRoutines({
+      const result = await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns: new ActiveRunRegistry(),
           provider,
@@ -5709,7 +5866,7 @@ describe("RoutineFiringDispatcher", () => {
     });
 
     try {
-      const held = await dispatchDueRoutines({
+      const held = await dispatchDueRoutinesAndDrain({
         ...dispatchInput,
         logger
       });
@@ -5742,7 +5899,7 @@ describe("RoutineFiringDispatcher", () => {
         "routine dispatch held: provider adapter not registered"
       );
 
-      const resumed = await dispatchDueRoutines({
+      const resumed = await dispatchDueRoutinesAndDrain({
         ...dispatchInput,
         agentProviders: {
           claude: claudeProvider,
@@ -5785,7 +5942,7 @@ describe("RoutineFiringDispatcher", () => {
     });
 
     try {
-      const result = await dispatchDueRoutines({
+      const result = await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns,
           provider,
@@ -5850,7 +6007,7 @@ describe("RoutineFiringDispatcher", () => {
     });
 
     try {
-      const result = await dispatchDueRoutines({
+      const result = await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns: new ActiveRunRegistry(),
           provider,
@@ -5896,7 +6053,7 @@ describe("RoutineFiringDispatcher", () => {
         id: "previous-fire",
         state: "succeeded"
       });
-      const beforeNextClock = await dispatchDueRoutines({
+      const beforeNextClock = await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns: new ActiveRunRegistry(),
           provider,
@@ -5906,7 +6063,7 @@ describe("RoutineFiringDispatcher", () => {
         }),
         now: new Date("2026-05-22T10:00:30.000Z")
       });
-      const nextClock = await dispatchDueRoutines({
+      const nextClock = await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns: new ActiveRunRegistry(),
           provider,
@@ -5992,7 +6149,7 @@ describe("RoutineFiringDispatcher", () => {
     } satisfies AgentProvider;
 
     try {
-      await dispatchDueRoutines({
+      await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -6075,7 +6232,7 @@ describe("RoutineFiringDispatcher", () => {
             };
 
       try {
-        const result = await dispatchDueRoutines({
+        const result = await dispatchDueRoutinesAndDrain({
           activeRuns: new ActiveRunRegistry(),
           agentProviders:
             missingFrom === "agent provider registry"
@@ -6160,7 +6317,7 @@ describe("RoutineFiringDispatcher", () => {
     );
 
     try {
-      const result = await dispatchDueRoutines({
+      const result = await dispatchDueRoutinesAndDrain({
         activeRuns,
         agentProviders: { codex: provider },
         configDir: root,

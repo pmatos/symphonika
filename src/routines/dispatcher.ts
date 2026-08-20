@@ -27,6 +27,7 @@ import type {
   RunControllerProvidersConfig
 } from "../lifecycle/run-controller.js";
 import type { EmailNotificationConfig } from "../notifications/config.js";
+import type { NotificationDeliveryTracker } from "../notifications/delivery-tracker.js";
 import { deliverRoutineFanoutNotification } from "../notifications/routine-fanout.js";
 import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
 import type { NotificationSink } from "../notifications/types.js";
@@ -77,11 +78,7 @@ export type DispatchDueRoutinesInput = {
   githubIssuesApi?: GitHubIssuesApi;
   inspectWorkspaceCommitsAhead?: typeof inspectWorkspaceCommitsAhead;
   logger?: Logger;
-  notification?: {
-    createSink: (config: EmailNotificationConfig) => NotificationSink;
-    resolveConfig: () => EmailNotificationConfig | undefined;
-    timeoutMs?: number;
-  };
+  notification?: RoutineNotificationDelivery;
   now?: Date;
   prepareRoutineWorkspace?: (
     input: PrepareRoutineWorkspaceInput
@@ -91,6 +88,13 @@ export type DispatchDueRoutinesInput = {
   recomputeSchedulesFromNow?: boolean;
   runStore: RunStore;
   stateRoot: string;
+};
+
+type RoutineNotificationDelivery = {
+  createSink: (config: EmailNotificationConfig) => NotificationSink;
+  deliveries: NotificationDeliveryTracker;
+  resolveConfig: () => EmailNotificationConfig | undefined;
+  timeoutMs?: number;
 };
 
 export type DispatchDueRoutinesResult = {
@@ -327,24 +331,27 @@ export function fireRoutineNow(
     .finally(() => {
       input.activeRuns.unregister(firingId);
     })
-    .then((firingResult) =>
-      // Same ordering as dispatchDueRoutines's per-firing task chain: the
-      // concurrency slot above is released before notification delivery
-      // starts, so a stalled relay does not suppress further dispatch.
-      recordRoutineFiringNotification(
-        {
-          env: input.env ?? process.env,
-          firingId,
-          logger: input.logger,
-          notification: input.notification,
-          project,
-          routine: detail,
-          runStore: input.runStore
-        },
-        firingResult.events,
-        firingResult.prepared
-      )
-    );
+    .then((firingResult) => {
+      // The concurrency slot above is released before background
+      // notification delivery starts. The daemon-owned tracker drains it
+      // during graceful shutdown without keeping manual firing completion
+      // open on SMTP I/O (ADR 0085).
+      input.notification?.deliveries.enqueue(() =>
+        recordRoutineFiringNotification(
+          {
+            env: input.env ?? process.env,
+            firingId,
+            logger: input.logger,
+            notification: input.notification,
+            project,
+            routine: detail,
+            runStore: input.runStore
+          },
+          firingResult.events,
+          firingResult.prepared
+        )
+      );
+    });
   return {
     completion,
     firingId,
@@ -780,31 +787,35 @@ export async function dispatchDueRoutines(
         .finally(() => {
           input.activeRuns.unregister(firingId);
         })
-        .then((firingResult) =>
+        .then((firingResult) => {
           // Notification delivery is best-effort and can be as slow as the
-          // SMTP server allows (see ADR 0067); it runs after the slot above
-          // is released so a stalled relay does not suppress further
-          // dispatch for this project.
-          recordRoutineFiringNotification(
-            {
-              env: input.env ?? process.env,
-              firingId,
-              logger: input.logger,
-              notification: input.notification,
-              project,
-              routine: routineDetail,
-              runStore: input.runStore
-            },
-            firingResult.events,
-            firingResult.prepared
-          )
-        );
+          // SMTP server allows (see ADR 0067); enqueue it after the slot is
+          // released so a stalled relay holds neither project capacity nor
+          // this routine dispatch open (ADR 0085).
+          input.notification?.deliveries.enqueue(() =>
+            recordRoutineFiringNotification(
+              {
+                env: input.env ?? process.env,
+                firingId,
+                logger: input.logger,
+                notification: input.notification,
+                project,
+                routine: routineDetail,
+                runStore: input.runStore
+              },
+              firingResult.events,
+              firingResult.prepared
+            )
+          );
+        });
       firingTasks.push(firingTask);
     }
   }
 
   await Promise.all(firingTasks);
-  await deliverReadyRoutineFanouts(input);
+  input.notification?.deliveries.enqueue(() =>
+    deliverReadyRoutineFanouts(input)
+  );
   return { fired, skipped };
 }
 
@@ -1429,13 +1440,7 @@ async function recordRoutineFiringNotification(
     env: NodeJS.ProcessEnv;
     firingId: string;
     logger: Logger | undefined;
-    notification:
-      | {
-          createSink: (config: EmailNotificationConfig) => NotificationSink;
-          resolveConfig: () => EmailNotificationConfig | undefined;
-          timeoutMs?: number;
-        }
-      | undefined;
+    notification: RoutineNotificationDelivery | undefined;
     project: RunControllerProjectConfig;
     routine: RoutineStatus & { prompt: string };
     runStore: RunStore;

@@ -70,6 +70,7 @@ import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { createSmtpNotificationSink } from "./notifications/smtp.js";
 import { DaemonHealthNotifier } from "./notifications/daemon-health.js";
+import { NotificationDeliveryTracker } from "./notifications/delivery-tracker.js";
 import { IssueRunNotificationCoordinator } from "./notifications/issue-run.js";
 import type { NotificationSink } from "./notifications/types.js";
 import {
@@ -362,6 +363,7 @@ export async function startDaemon(
     logger,
     resolveConfig: () => runtimeConfig.emailConfig()
   });
+  const routineNotificationDeliveries = new NotificationDeliveryTracker(logger);
   const activeRuns = new ActiveRunRegistry();
   // Drain gate read by launchWork and the fireRoutine HTTP handler (ADR
   // 0079): blocks NEW dispatch admission only, never cancels in-flight
@@ -1031,6 +1033,7 @@ export async function startDaemon(
             createSink: (config) =>
               options.notificationSink ??
               createSmtpNotificationSink(config, { env }),
+            deliveries: routineNotificationDeliveries,
             // Resolved at delivery time so a reload mid-firing is honored
             // for that firing's own notification (ADR 0067).
             resolveConfig: () => runtimeConfig.emailConfig()
@@ -1276,6 +1279,7 @@ export async function startDaemon(
           createSink: (config) =>
             options.notificationSink ??
             createSmtpNotificationSink(config, { env }),
+          deliveries: routineNotificationDeliveries,
           // Resolved at delivery time so a reload mid-firing is honored
           // for that firing's own notification (ADR 0067).
           resolveConfig: () => runtimeConfig.emailConfig()
@@ -1755,6 +1759,7 @@ export async function startDaemon(
       await activeRuns.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
       await scheduledWork;
       await Promise.allSettled(Array.from(inflightDispatches));
+      await routineNotificationDeliveries.settled();
       await daemonHealthNotifications.settled();
       try {
         shutdownController.abort();

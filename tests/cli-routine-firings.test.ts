@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { buildCli } from "../src/cli.js";
+import { encodeRoutineEventIndexRecord } from "../src/routines/evidence.js";
 import { databasePath, openRunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
@@ -200,16 +201,20 @@ describe("CLI routine firing commands", () => {
         type: "message"
       })
     );
-    await writeFile(
-      path.join(evidenceDirectory, "provider.normalized.jsonl"),
-      [
-        ...oldEvents,
-        "",
-        "{malformed",
-        JSON.stringify({ exitCode: 0, type: "process_exit" })
-      ].join("\r\n"),
-      "utf8"
+    const logLines = [
+      ...oldEvents,
+      "",
+      "{malformed",
+      JSON.stringify({ exitCode: 0, type: "process_exit" })
+    ];
+    const normalizedLogPath = path.join(
+      evidenceDirectory,
+      "provider.normalized.jsonl"
     );
+    await Promise.all([
+      writeFile(normalizedLogPath, logLines.join("\r\n"), "utf8"),
+      writeFile(`${normalizedLogPath}.idx`, encodeEventIndex(logLines, "\r\n"))
+    ]);
 
     const { output, program } = captureProgram(stateRoot);
     await program.parseAsync([
@@ -227,6 +232,52 @@ describe("CLI routine firing commands", () => {
     expect(output.stdout).toContain("1025. malformed_event");
     expect(output.stdout).toContain("1026. process_exit");
     expect(output.stdout).not.toContain("old event");
+  });
+
+  it("show-firing marks sequences unknown when a bounded legacy tail cannot count earlier events", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = seedRoutine(stateRoot);
+    store.createRoutineFiring({
+      id: "legacy-large-log",
+      projectName: "alpha",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      routineName: "dependency-update"
+    });
+    store.close();
+
+    const evidenceDirectory = path.join(
+      stateRoot,
+      "logs",
+      "routines",
+      "legacy-large-log"
+    );
+    await mkdir(evidenceDirectory, { recursive: true });
+    await writeFile(
+      path.join(evidenceDirectory, "provider.normalized.jsonl"),
+      [
+        JSON.stringify({ message: "x".repeat(256 * 1_024), type: "message" }),
+        JSON.stringify({ message: "recent", type: "message" }),
+        JSON.stringify({ exitCode: 0, type: "process_exit" })
+      ].join("\n") + "\n",
+      "utf8"
+    );
+
+    const { output, program } = captureProgram(stateRoot);
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "show-firing",
+      "legacy-large-log",
+      "--events",
+      "2",
+      "--config",
+      path.join(stateRoot, "symphonika.yml")
+    ]);
+
+    expect(output.stdout).toContain("?. message  recent");
+    expect(output.stdout).toContain("?. process_exit");
+    expect(output.stdout).not.toContain("null.");
   });
 
   it("show-firing exits non-zero with a clear error for an unknown id", async () => {
@@ -568,3 +619,17 @@ describe("CLI routine firing commands", () => {
     expect(row?.trim().endsWith("-")).toBe(false);
   });
 });
+
+function encodeEventIndex(lines: string[], separator: string): Buffer {
+  const records: Buffer[] = [];
+  let offset = 0;
+  let sequence = 1;
+  for (const line of lines) {
+    if (line.length > 0) {
+      records.push(encodeRoutineEventIndexRecord(offset, sequence));
+      sequence += 1;
+    }
+    offset += Buffer.byteLength(`${line}${separator}`, "utf8");
+  }
+  return Buffer.concat(records);
+}

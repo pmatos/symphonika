@@ -1907,6 +1907,13 @@ pages rather than forking them. A Firing's evidence is a normalized-log file on 
 the DB-backed `provider_events` table a Run's attempts use, and carries no per-event timestamp of
 its own — the shared event renderers were widened to a smaller structural type
 (`{normalized, sequence, type, createdAt?}`) that both satisfy, rather than fabricating one.
+Routine evidence writers maintain an internal fixed-width index of byte offset and global sequence
+alongside the Normalized Event Log. Tail readers validate the selected records against neighboring
+records and actual JSONL boundaries before seeking directly to the requested event window. Pre-index
+or damaged evidence uses a bounded backward suffix read instead of scanning from byte zero; when
+that bounded read cannot reach the start of the file, operator surfaces mark its global sequences
+unknown rather than fabricating tail-relative numbers. The internal index is not an operator-facing
+artifact or an additional `/logs/firings/:id/:kind` kind.
 `GET /logs/firings/:id/:kind` streams the four evidence files that apply to a Firing (prompt,
 prompt metadata, raw and normalized provider logs — a Firing has no issue snapshot and no workflow
 graph), 404ing for a kind that doesn't apply or a file that was never written. A discovered Routine

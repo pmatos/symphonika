@@ -1617,7 +1617,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
                   .join(", ")
           );
 
-          const events = await readRecentRoutineEvents(
+          const { events } = await readRecentRoutineEvents(
             evidence.normalizedLogPath,
             options.events
           );
@@ -1626,14 +1626,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             writeOut(program, "  (no events recorded)\n");
           }
           for (const event of events) {
+            const sequence = event.sequence ?? "?";
             const message =
               typeof event.normalized.message === "string"
                 ? event.normalized.message
                 : JSON.stringify(event.normalized);
-            writeOut(
-              program,
-              `  ${event.sequence}. ${event.type}  ${message}\n`
-            );
+            writeOut(program, `  ${sequence}. ${event.type}  ${message}\n`);
           }
         } finally {
           store.close();

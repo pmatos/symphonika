@@ -48,7 +48,10 @@ import {
   renderRoutinePrompt,
   RoutinePromptRenderError
 } from "./prompt-renderer.js";
-import { routineEvidencePaths } from "./evidence.js";
+import {
+  encodeRoutineEventIndexRecord,
+  routineEvidencePaths
+} from "./evidence.js";
 import type {
   RoutineSchedule,
   RoutineState,
@@ -979,7 +982,10 @@ async function runRoutineFiring(input: {
   let prepared: PreparedRoutineWorkspace | undefined;
   let providerAttempt: Promise<void> | undefined;
   let rawLogPath: string | undefined;
+  let normalizedIndexPath: string | undefined;
   let normalizedLogPath: string | undefined;
+  let normalizedLogOffset = 0;
+  let normalizedLogSequence = 1;
   let githubBefore: CapturedRoutineGithubSnapshot | null = null;
   // Bounds `state: "all"` issue pagination to records that could plausibly
   // have changed during this firing, instead of the repository's entire
@@ -1020,6 +1026,7 @@ async function runRoutineFiring(input: {
       })
     );
     rawLogPath = evidence.rawLogPath;
+    normalizedIndexPath = evidence.normalizedIndexPath;
     normalizedLogPath = evidence.normalizedLogPath;
     input.runStore.updateRoutineFiringWorkspace({
       id: input.firingId,
@@ -1103,12 +1110,17 @@ async function runRoutineFiring(input: {
         },
         workspacePath: prepared.workspacePath
       })) {
-        await appendRoutineEvent({
+        const normalizedLogCursor = await appendRoutineEvent({
           event,
+          normalizedIndexPath,
           normalizedLogPath,
+          normalizedLogOffset,
+          normalizedLogSequence,
           rawLogPath,
           redactSecrets: input.redactSecrets
         });
+        normalizedLogOffset = normalizedLogCursor.offset;
+        normalizedLogSequence = normalizedLogCursor.sequence;
         if (event.normalized !== undefined) {
           events.push(event.normalized);
         }
@@ -1749,6 +1761,7 @@ async function prepareRoutineEvidence(input: {
   routine: RoutineStatus & { prompt: string };
   stateRoot: string;
 }): Promise<{
+  normalizedIndexPath: string;
   normalizedLogPath: string;
   prompt: string;
   promptPath: string;
@@ -1785,6 +1798,7 @@ async function prepareRoutineEvidence(input: {
   const evidencePaths = routineEvidencePaths(input.stateRoot, input.firingId);
   await mkdir(evidencePaths.directory, { recursive: true });
   const {
+    normalizedIndexPath,
     normalizedLogPath,
     promptMetadataPath: metadataPath,
     promptPath,
@@ -1831,9 +1845,11 @@ async function prepareRoutineEvidence(input: {
       "utf8"
     ),
     writeFile(rawLogPath, "", "utf8"),
+    writeFile(normalizedIndexPath, ""),
     writeFile(normalizedLogPath, "", "utf8")
   ]);
   return {
+    normalizedIndexPath,
     normalizedLogPath,
     prompt: rendered.prompt,
     promptPath,
@@ -1843,23 +1859,36 @@ async function prepareRoutineEvidence(input: {
 
 async function appendRoutineEvent(input: {
   event: ProviderEvent;
+  normalizedIndexPath: string;
   normalizedLogPath: string;
+  normalizedLogOffset: number;
+  normalizedLogSequence: number;
   rawLogPath: string;
   redactSecrets: () => string[];
-}): Promise<void> {
+}): Promise<{ offset: number; sequence: number }> {
   const redactSecrets = input.redactSecrets();
-  await Promise.all([
+  if (input.event.normalized === undefined) {
+    await appendJsonl(input.rawLogPath, input.event.raw, redactSecrets);
+    return {
+      offset: input.normalizedLogOffset,
+      sequence: input.normalizedLogSequence
+    };
+  }
+  const [, offset] = await Promise.all([
     appendJsonl(input.rawLogPath, input.event.raw, redactSecrets),
-    ...(input.event.normalized === undefined
-      ? []
-      : [
-          appendJsonl(
-            input.normalizedLogPath,
-            input.event.normalized,
-            redactSecrets
-          )
-        ])
+    appendIndexedJsonl({
+      filePath: input.normalizedLogPath,
+      indexPath: input.normalizedIndexPath,
+      offset: input.normalizedLogOffset,
+      redactSecrets,
+      sequence: input.normalizedLogSequence,
+      value: input.event.normalized
+    })
   ]);
+  return {
+    offset,
+    sequence: input.normalizedLogSequence + 1
+  };
 }
 
 async function classifyRoutineOutcome(
@@ -2143,13 +2172,34 @@ async function appendJsonl(
   value: unknown,
   redactSecrets: string[]
 ): Promise<void> {
+  await appendFile(filePath, serializeJsonl(value, redactSecrets));
+}
+
+async function appendIndexedJsonl(input: {
+  filePath: string;
+  indexPath: string;
+  offset: number;
+  redactSecrets: string[];
+  sequence: number;
+  value: unknown;
+}): Promise<number> {
+  const line = serializeJsonl(input.value, input.redactSecrets);
+  const record = encodeRoutineEventIndexRecord(input.offset, input.sequence);
+  await Promise.all([
+    appendFile(input.filePath, line),
+    appendFile(input.indexPath, record)
+  ]);
+  return input.offset + line.length;
+}
+
+function serializeJsonl(value: unknown, redactSecrets: string[]): Buffer {
   // Redact string values BEFORE serializing, not after: JSON.stringify
   // escapes quotes, backslashes, and control characters, so a secret
   // containing any of them no longer appears as a contiguous substring of
   // the serialized text and a post-serialization redact silently misses it.
   const redacted =
     redactSecrets.length === 0 ? value : redactValueDeep(value, redactSecrets);
-  await appendFile(filePath, `${JSON.stringify(redacted)}\n`, "utf8");
+  return Buffer.from(`${JSON.stringify(redacted)}\n`, "utf8");
 }
 
 // A provider's own output can echo back environment values it inherited

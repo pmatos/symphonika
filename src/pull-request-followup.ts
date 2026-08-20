@@ -406,11 +406,23 @@ async function processTrackedPullRequests(input: {
     if (input.shouldPollProject?.(tracked.projectName) === false) {
       continue;
     }
+    if (headSha === "") {
+      // No known-good head SHA for this tick (GraphQL omitted headRefOid
+      // and no earlier tick ever recorded a real one for this row). Merging
+      // unpinned would let GitHub merge whatever commit is current at merge
+      // time, bypassing the check/review validation pullRequestReadyToMerge
+      // just performed against this tick's fetched state. Skip and retry.
+      input.logger?.warn(
+        { prNumber: tracked.prNumber },
+        "symphonika PR follow-up cannot merge: no known head SHA to pin"
+      );
+      continue;
+    }
     let merged: boolean;
     try {
       merged = await tryMergePullRequest(input.githubIssuesApi, {
         ...repository,
-        ...(headSha === "" ? {} : { expectedHeadSha: headSha }),
+        expectedHeadSha: headSha,
         method: input.policy.merge.method,
         pullNumber: tracked.prNumber
       });

@@ -1260,6 +1260,76 @@ describe("pull request follow-up", () => {
     }
   });
 
+  it("skips auto-merge without pinning a SHA when both GraphQL and the tracked row lack a head SHA", async () => {
+    // A tracked row can already have last_seen_head_sha = "" on disk from
+    // before this fix landed (the pre-fix code unconditionally persisted
+    // whatever GraphQL returned, empty string included). If GraphQL omits
+    // headRefOid again on a later tick, falling back to that also-empty
+    // lastSeenHeadSha must not merge unpinned -- an unpinned merge could
+    // land a commit pushed after this tick's checks/review state was
+    // fetched. Regression for the P1 follow-up on #530.
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-corrupted-head-sha";
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath: path.join(root, "workspace")
+      });
+      const project = projectConfig();
+      // Simulates a row corrupted by the pre-fix code: last_seen_head_sha
+      // already "" before this tick runs.
+      store.trackPullRequest({
+        branchName,
+        headSha: "",
+        issueNumber: 54,
+        prNumber: 82,
+        prUrl: "https://github.com/pmatos/symphonika/pull/82",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+      const githubIssuesApi: GitHubIssuesApi = {
+        getPullRequestFollowupState: vi
+          .fn()
+          .mockResolvedValue(prState({ headSha: "" })),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+        mergePullRequest: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider: fakeProvider([]),
+        root,
+        runStore: store,
+        workspacePath: path.join(root, "workspace")
+      });
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      expect(result).toEqual({
+        action: "none",
+        reason: "no pull request follow-up action"
+      });
+      expect(githubIssuesApi.mergePullRequest).not.toHaveBeenCalled();
+      expect(store.listOpenTrackedPullRequests()[0]).toMatchObject({
+        lastSeenHeadSha: ""
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("skips the review-followup dispatch when a state_advance is already scheduled for the same issue", async () => {
     // Regression for the wait→agent race: reconcileWaitingRuns advances a
     // wait state into an agent state and schedules a state_advance, but the

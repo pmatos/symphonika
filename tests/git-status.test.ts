@@ -327,6 +327,26 @@ describe("commitFile (#306 part 3/3, ADR 0075)", () => {
     expect(result).toEqual({ kind: "nothing_to_commit" });
   });
 
+  it("returns nothing_to_commit for a clean target when another file is dirty", async () => {
+    const root = await makeTempRoot();
+    await initRepo(root);
+    const filePath = path.join(root, "workflow.md");
+    const otherPath = path.join(root, "other.txt");
+    await writeFile(filePath, "content\n", "utf8");
+    await writeFile(otherPath, "other\n", "utf8");
+    await git(root, ["add", "workflow.md", "other.txt"]);
+    await git(root, ["commit", "-m", "base"]);
+    await writeFile(otherPath, "changed elsewhere\n", "utf8");
+
+    const result = await commitFile({
+      filePath,
+      message: "No-op save",
+      repoRoot: root
+    });
+
+    expect(result).toEqual({ kind: "nothing_to_commit" });
+  });
+
   it("refuses, preserving the staged edit, when the saved content matches HEAD", async () => {
     const root = await makeTempRoot();
     await initRepo(root);

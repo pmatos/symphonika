@@ -208,6 +208,27 @@ than re-read from the snapshot when the `POST` lands: a poll landing between pag
 click would otherwise let a fresh DB read validate a commit the operator never actually saw,
 silently defeating the guarantee this field exists for.
 
+### Manual merge binds the rendered repository through the durable snapshot to the current tracker
+
+The dashboard's Merge form carries the persisted PR snapshot's repository owner and name alongside
+the reviewed head SHA. `MergePullRequestFn` accepts that rendered repository identity as optional
+input so an old, incomplete, or hand-crafted request can reach the daemon mutation boundary and be
+refused there rather than accidentally falling back to live configuration.
+
+Immediately before resolving the tracker token or calling GitHub, the daemon verifies two links:
+the rendered repository must equal the current durable PR snapshot repository for the same
+`(projectName, prNumber)`, and that durable repository must equal the Project tracker repository in
+the current Service Config. Comparison is case-insensitive because GitHub owner and repository
+names are case-insensitive. A missing identity or a mismatch at either link fails closed. This
+three-source chain is the same binding used by dashboard label writes (ADR 0077): a successful poll
+after repository replacement cannot redirect a stale same-numbered Merge form, while a failed poll
+after hot reload cannot make the old durable snapshot authorize a write to the new tracker.
+
+The head-SHA pin remains an independent commit-identity check, not a substitute for repository
+identity. In particular, a PR snapshot with no head SHA still carries owner/repository and is
+protected from a same-numbered replacement PR. Repository-identity refusals happen before GitHub,
+so they create neither a merge call nor a `pull_request_merge_attempts` row.
+
 ### Evidence is one row per attempt, written once after the attempt completes
 
 `recordPullRequestMergeAttempt` (AC9) is called exactly once, after both the merge call and the
@@ -222,11 +243,11 @@ missing," never "the PR's true state goes unnoticed." A durable two-phase design
 rejected as disproportionate machinery for a gap whose only cost is a missing audit row, not a
 missing fact about PR state.
 
-A guard refusal (a live Run owns the PR) is not recorded as an attempt — `options.mergePullRequest`
-is never invoked in that path, mirroring `#308`'s clear-stale-claim: `writeIssueLabels` is likewise
-never called on that guard's own refusal. "The merge action is recorded" (AC9) is read as covering
-an attempt that actually reached GitHub (successful or GitHub-refused), not a request the local
-guard stopped before it left the process.
+A local guard refusal (a live Run owns the PR or repository identity cannot be proven) is not
+recorded as an attempt. The live-Run guard never invokes `options.mergePullRequest`; the repository
+guard returns before the daemon calls GitHub or writes evidence. "The merge action is recorded"
+(AC9) is read as covering an attempt that actually reached GitHub (successful or GitHub-refused),
+not a request a local guard stopped before it left the process.
 
 ### Re-derivation renders the fresh fetch, never persists it
 
@@ -265,5 +286,6 @@ other write on this page never mutating what's displayed outside its own banner.
 - Part 3 adds the ownership-guarded merge action (`POST /prs/:project/:number/merge`), reusing
   `#308`'s three-source liveness pattern refactored into `collectLiveRunEntries`/`isRunIdLive`,
   keyed by the tracked PR's `runId` rather than by issue number, plus durable evidence
-  (`pull_request_merge_attempts`) and honest post-attempt state re-derivation
-  (`renderPullRequestFreshStateNote`, never persisted). This closes AC6–AC9 and epic `#301`.
+  (`pull_request_merge_attempts`), honest post-attempt state re-derivation
+  (`renderPullRequestFreshStateNote`, never persisted), and a rendered snapshot → durable snapshot
+  → current tracker repository-identity guard before GitHub. This closes AC6–AC9 and epic `#301`.

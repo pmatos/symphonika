@@ -171,6 +171,8 @@ async function fetchPrsCsrfToken(
   cookie: string;
   csrfToken: string;
   expectedHeadSha: string;
+  snapshotOwner: string;
+  snapshotRepo: string;
 }> {
   const response = await fetch(`${url}${prPath}`);
   const html = await response.text();
@@ -179,10 +181,14 @@ async function fetchPrsCsrfToken(
   // actually shows -- the merge POST is expected to submit this back
   // rather than trust a fresh DB read (ADR 0078).
   const headShaMatch = /name="expected_head_sha" value="([^"]*)"/.exec(html);
+  const ownerMatch = /name="snapshot_owner" value="([^"]*)"/.exec(html);
+  const repoMatch = /name="snapshot_repo" value="([^"]*)"/.exec(html);
   const setCookie = response.headers.get("set-cookie");
   if (
     match?.[1] === undefined ||
     headShaMatch?.[1] === undefined ||
+    ownerMatch?.[1] === undefined ||
+    repoMatch?.[1] === undefined ||
     setCookie === null
   ) {
     throw new Error(
@@ -192,7 +198,9 @@ async function fetchPrsCsrfToken(
   return {
     cookie: setCookie.split(";")[0] ?? "",
     csrfToken: match[1],
-    expectedHeadSha: headShaMatch[1]
+    expectedHeadSha: headShaMatch[1],
+    snapshotOwner: ownerMatch[1],
+    snapshotRepo: repoMatch[1]
   };
 }
 
@@ -215,14 +223,19 @@ describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)"
     });
 
     try {
-      const { cookie, csrfToken, expectedHeadSha } = await fetchPrsCsrfToken(
-        daemon.url,
-        "/prs/symphonika/246"
-      );
+      const {
+        cookie,
+        csrfToken,
+        expectedHeadSha,
+        snapshotOwner,
+        snapshotRepo
+      } = await fetchPrsCsrfToken(daemon.url, "/prs/symphonika/246");
       const response = await fetch(`${daemon.url}/prs/symphonika/246/merge`, {
         body: new URLSearchParams({
           csrf_token: csrfToken,
-          expected_head_sha: expectedHeadSha
+          expected_head_sha: expectedHeadSha,
+          snapshot_owner: snapshotOwner,
+          snapshot_repo: snapshotRepo
         }).toString(),
         headers: {
           cookie,
@@ -271,6 +284,225 @@ describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)"
     }
   });
 
+  it("refuses a merge when the rendered snapshot repository identity is missing", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      listPullRequests: vi.fn().mockResolvedValue([orphanPullRequestFixture()]),
+      mergePullRequest: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const { cookie, csrfToken, expectedHeadSha } = await fetchPrsCsrfToken(
+        daemon.url,
+        "/prs/symphonika/246"
+      );
+      const response = await fetch(`${daemon.url}/prs/symphonika/246/merge`, {
+        body: new URLSearchParams({
+          csrf_token: csrfToken,
+          expected_head_sha: expectedHeadSha
+        }).toString(),
+        headers: {
+          cookie,
+          "content-type": "application/x-www-form-urlencoded",
+          origin: daemon.url
+        },
+        method: "POST"
+      });
+      const html = await response.text();
+
+      expect(html).toContain(
+        "pull request #246 rendered snapshot repository identity is unavailable"
+      );
+      expect(githubIssuesApi.mergePullRequest).not.toHaveBeenCalled();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("refuses a merge when the durable snapshot repository identity is missing", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      listPullRequests: vi.fn().mockResolvedValue([orphanPullRequestFixture()]),
+      mergePullRequest: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const form = await fetchPrsCsrfToken(daemon.url, "/prs/symphonika/246");
+      const snapshotStore = openRunStore({ stateRoot: daemon.stateRoot });
+      try {
+        snapshotStore.replaceProjectPullRequestSnapshots({
+          polledAt: "2026-08-19T15:00:00.000Z",
+          projectName: "symphonika",
+          rows: snapshotStore.listProjectPullRequestSnapshots("symphonika")
+        });
+      } finally {
+        snapshotStore.close();
+      }
+
+      const response = await fetch(`${daemon.url}/prs/symphonika/246/merge`, {
+        body: new URLSearchParams({
+          csrf_token: form.csrfToken,
+          expected_head_sha: form.expectedHeadSha,
+          snapshot_owner: form.snapshotOwner,
+          snapshot_repo: form.snapshotRepo
+        }).toString(),
+        headers: {
+          cookie: form.cookie,
+          "content-type": "application/x-www-form-urlencoded",
+          origin: daemon.url
+        },
+        method: "POST"
+      });
+      const html = await response.text();
+
+      expect(html).toContain(
+        "pull request #246 snapshot repository identity is unavailable"
+      );
+      expect(githubIssuesApi.mergePullRequest).not.toHaveBeenCalled();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("refuses a stale rendered merge after a successful repository swap replaces the same null-SHA PR number", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      listPullRequests: vi.fn((input: { repo: string }) =>
+        Promise.resolve([
+          orphanPullRequestFixture({
+            head: { ref: "sym/symphonika/246-orphan" },
+            html_url: `https://github.com/pmatos/${input.repo}/pull/246`
+          })
+        ])
+      ),
+      mergePullRequest: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const form = await fetchBoundPrLabelForm(
+        daemon.url,
+        "/prs/symphonika/246"
+      );
+      await writeValidProject(root, {
+        owner: "pmatos",
+        repo: "different-repository"
+      });
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
+
+      const response = await fetch(`${daemon.url}/prs/symphonika/246/merge`, {
+        body: new URLSearchParams({
+          csrf_token: form.csrfToken,
+          snapshot_owner: form.snapshotOwner,
+          snapshot_repo: form.snapshotRepo
+        }).toString(),
+        headers: {
+          cookie: form.cookie,
+          "content-type": "application/x-www-form-urlencoded",
+          origin: daemon.url
+        },
+        method: "POST"
+      });
+      const html = await response.text();
+
+      expect(html).toContain(
+        "rendered snapshot repository pmatos/symphonika does not match current snapshot repository pmatos/different-repository"
+      );
+      expect(githubIssuesApi.mergePullRequest).not.toHaveBeenCalled();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("refuses a merge when the durable snapshot repository does not match the current tracker", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      listPullRequests: vi.fn((input: { repo: string }) =>
+        input.repo === "symphonika"
+          ? Promise.resolve([orphanPullRequestFixture()])
+          : Promise.reject(new Error("replacement repository poll failed"))
+      ),
+      mergePullRequest: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const form = await fetchPrsCsrfToken(daemon.url, "/prs/symphonika/246");
+      await writeValidProject(root, {
+        owner: "pmatos",
+        repo: "different-repository"
+      });
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
+
+      const response = await fetch(`${daemon.url}/prs/symphonika/246/merge`, {
+        body: new URLSearchParams({
+          csrf_token: form.csrfToken,
+          expected_head_sha: form.expectedHeadSha,
+          snapshot_owner: form.snapshotOwner,
+          snapshot_repo: form.snapshotRepo
+        }).toString(),
+        headers: {
+          cookie: form.cookie,
+          "content-type": "application/x-www-form-urlencoded",
+          origin: daemon.url
+        },
+        method: "POST"
+      });
+      const html = await response.text();
+
+      expect(html).toContain(
+        "snapshot repository pmatos/symphonika does not match current tracker repository pmatos/different-repository"
+      );
+      expect(githubIssuesApi.mergePullRequest).not.toHaveBeenCalled();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("uses the project's configured merge method instead of the policy default", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);
@@ -293,14 +525,19 @@ describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)"
     });
 
     try {
-      const { cookie, csrfToken, expectedHeadSha } = await fetchPrsCsrfToken(
-        daemon.url,
-        "/prs/symphonika/246"
-      );
+      const {
+        cookie,
+        csrfToken,
+        expectedHeadSha,
+        snapshotOwner,
+        snapshotRepo
+      } = await fetchPrsCsrfToken(daemon.url, "/prs/symphonika/246");
       await fetch(`${daemon.url}/prs/symphonika/246/merge`, {
         body: new URLSearchParams({
           csrf_token: csrfToken,
-          expected_head_sha: expectedHeadSha
+          expected_head_sha: expectedHeadSha,
+          snapshot_owner: snapshotOwner,
+          snapshot_repo: snapshotRepo
         }).toString(),
         headers: {
           cookie,
@@ -338,14 +575,19 @@ describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)"
     });
 
     try {
-      const { cookie, csrfToken, expectedHeadSha } = await fetchPrsCsrfToken(
-        daemon.url,
-        "/prs/symphonika/246"
-      );
+      const {
+        cookie,
+        csrfToken,
+        expectedHeadSha,
+        snapshotOwner,
+        snapshotRepo
+      } = await fetchPrsCsrfToken(daemon.url, "/prs/symphonika/246");
       const response = await fetch(`${daemon.url}/prs/symphonika/246/merge`, {
         body: new URLSearchParams({
           csrf_token: csrfToken,
-          expected_head_sha: expectedHeadSha
+          expected_head_sha: expectedHeadSha,
+          snapshot_owner: snapshotOwner,
+          snapshot_repo: snapshotRepo
         }).toString(),
         headers: {
           cookie,
@@ -401,14 +643,19 @@ describe("daemon-wired POST /prs/:project/:number/merge (#309 part 3, ADR 0078)"
     });
 
     try {
-      const { cookie, csrfToken, expectedHeadSha } = await fetchPrsCsrfToken(
-        daemon.url,
-        "/prs/symphonika/246"
-      );
+      const {
+        cookie,
+        csrfToken,
+        expectedHeadSha,
+        snapshotOwner,
+        snapshotRepo
+      } = await fetchPrsCsrfToken(daemon.url, "/prs/symphonika/246");
       const response = await fetch(`${daemon.url}/prs/symphonika/246/merge`, {
         body: new URLSearchParams({
           csrf_token: csrfToken,
-          expected_head_sha: expectedHeadSha
+          expected_head_sha: expectedHeadSha,
+          snapshot_owner: snapshotOwner,
+          snapshot_repo: snapshotRepo
         }).toString(),
         headers: {
           cookie,

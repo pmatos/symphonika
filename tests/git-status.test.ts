@@ -65,6 +65,22 @@ describe("detectGitFileState (#306 part 3/3, ADR 0075)", () => {
     }
   });
 
+  it("reports the branch name for an unborn HEAD with a same-named tag", async () => {
+    const root = await makeTempRoot();
+    await initRepo(root);
+    const filePath = path.join(root, "workflow.md");
+    await writeFile(filePath, "content\n", "utf8");
+    const tagTarget = await git(root, ["hash-object", "-w", "workflow.md"]);
+    await git(root, ["tag", "main", tagTarget]);
+
+    const state = await detectGitFileState(filePath);
+    expect(state.inRepo).toBe(true);
+    if (state.inRepo) {
+      expect(state.branch).toBe("main");
+      expect(state.detachedHeadSha).toBeNull();
+    }
+  });
+
   it("reports untracked for a new, never-added file", async () => {
     const root = await makeTempRoot();
     await initRepo(root);
@@ -301,6 +317,26 @@ describe("commitFile (#306 part 3/3, ADR 0075)", () => {
     await writeFile(filePath, "content\n", "utf8");
     await git(root, ["add", "workflow.md"]);
     await git(root, ["commit", "-m", "base"]);
+
+    const result = await commitFile({
+      filePath,
+      message: "No-op save",
+      repoRoot: root
+    });
+
+    expect(result).toEqual({ kind: "nothing_to_commit" });
+  });
+
+  it("returns nothing_to_commit for a clean target when another file is dirty", async () => {
+    const root = await makeTempRoot();
+    await initRepo(root);
+    const filePath = path.join(root, "workflow.md");
+    const otherPath = path.join(root, "other.txt");
+    await writeFile(filePath, "content\n", "utf8");
+    await writeFile(otherPath, "other\n", "utf8");
+    await git(root, ["add", "workflow.md", "other.txt"]);
+    await git(root, ["commit", "-m", "base"]);
+    await writeFile(otherPath, "changed elsewhere\n", "utf8");
 
     const result = await commitFile({
       filePath,

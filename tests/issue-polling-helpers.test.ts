@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  backoffUntil,
+  emptyIssuePollStatus,
   fetchIssueDependencies,
   fetchPullRequestFollowupState,
+  GITHUB_RATE_LIMIT_BACKOFF_MS,
+  isRateLimitError,
+  mergeIssuePollStatus,
   parseParentIssueNumber,
   pollConfiguredGitHubIssuesFromConfig,
+  rateLimitedTokens,
   swallowLabelNotFound,
   tryAddLabelsToIssue,
   tryGetIssue,
@@ -932,5 +938,316 @@ describe("tryListPullRequests", () => {
       listOpenIssues: () => Promise.resolve([])
     };
     expect(await tryListPullRequests(api, repoInput)).toBeUndefined();
+  });
+});
+
+describe("isRateLimitError", () => {
+  it("recognizes pollProject's own wrapped primary-rate-limit message shape -- a reformat here silently disables backoff", () => {
+    expect(
+      isRateLimitError(
+        "projects.symphonika.tracker.repository pmatos/symphonika issue dependencies could not be checked: Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+      )
+    ).toBe(true);
+  });
+
+  it("recognizes GitHub's secondary/abuse-detection rate limit message", () => {
+    expect(
+      isRateLimitError(
+        "You have exceeded a secondary rate limit and have been temporarily blocked from content creation. Please retry your request again later."
+      )
+    ).toBe(true);
+  });
+
+  it("is case-insensitive", () => {
+    expect(isRateLimitError("API RATE LIMIT EXCEEDED")).toBe(true);
+  });
+
+  it("returns false for an unrelated failure", () => {
+    expect(
+      isRateLimitError(
+        "projects.symphonika.tracker.repository pmatos/symphonika issues could not be listed: getaddrinfo ENOTFOUND api.github.com"
+      )
+    ).toBe(false);
+  });
+});
+
+describe("backoffUntil", () => {
+  it("returns a fixed window from the given time, not exponential", () => {
+    const nowMs = 1_000_000;
+    expect(backoffUntil(nowMs)).toBe(nowMs + GITHUB_RATE_LIMIT_BACKOFF_MS);
+    expect(backoffUntil(nowMs)).toBe(backoffUntil(nowMs));
+  });
+});
+
+const alphaProject: PollingProjectConfig = {
+  ...dependencyGateProject,
+  name: "alpha",
+  tracker: {
+    kind: "github",
+    owner: "pmatos",
+    repo: "alpha",
+    token: "$GITHUB_TOKEN_ALPHA"
+  }
+};
+
+const betaProject: PollingProjectConfig = {
+  ...dependencyGateProject,
+  name: "beta",
+  tracker: {
+    kind: "github",
+    owner: "pmatos",
+    repo: "beta",
+    token: "$GITHUB_TOKEN_BETA"
+  }
+};
+
+describe("rateLimitedTokens", () => {
+  const env = {
+    GITHUB_TOKEN_ALPHA: "secret-alpha",
+    GITHUB_TOKEN_BETA: "secret-beta"
+  };
+
+  it("resolves only the rate-limited project's token, not an unaffected project's", () => {
+    const tokens = rateLimitedTokens(
+      [
+        {
+          error:
+            "projects.alpha.tracker.repository pmatos/alpha issues could not be listed: API rate limit exceeded",
+          name: "alpha",
+          ok: false
+        },
+        { name: "beta", ok: true }
+      ],
+      [alphaProject, betaProject],
+      env
+    );
+    expect(tokens).toEqual(new Set(["secret-alpha"]));
+  });
+
+  it("ignores a failed project whose error isn't rate-limit shaped", () => {
+    const tokens = rateLimitedTokens(
+      [
+        {
+          error:
+            "projects.alpha.tracker.repository pmatos/alpha issues could not be listed: getaddrinfo ENOTFOUND",
+          name: "alpha",
+          ok: false
+        }
+      ],
+      [alphaProject, betaProject],
+      env
+    );
+    expect(tokens).toEqual(new Set());
+  });
+
+  it("collapses two projects sharing the same resolved token into one entry", () => {
+    const betaOnAlphaToken: PollingProjectConfig = {
+      ...betaProject,
+      tracker: { ...betaProject.tracker, token: "$GITHUB_TOKEN_ALPHA" }
+    };
+    const tokens = rateLimitedTokens(
+      [
+        { error: "API rate limit exceeded", name: "alpha", ok: false },
+        { error: "API rate limit exceeded", name: "beta", ok: false }
+      ],
+      [alphaProject, betaOnAlphaToken],
+      env
+    );
+    expect(tokens).toEqual(new Set(["secret-alpha"]));
+  });
+});
+
+describe("mergeIssuePollStatus", () => {
+  it("keeps a skipped project's prior entries and replaces only the polled project's", () => {
+    const prior = {
+      ...emptyIssuePollStatus(),
+      candidateIssues: [
+        {
+          issue: {
+            body: "",
+            created_at: "",
+            id: 1,
+            labels: [],
+            number: 1,
+            priority: 0,
+            state: "open",
+            title: "alpha issue",
+            updated_at: "",
+            url: ""
+          },
+          project: "alpha",
+          repository: { owner: "pmatos", repo: "alpha" }
+        }
+      ],
+      projects: [
+        {
+          fetchedIssues: 1,
+          name: "alpha",
+          ok: true,
+          repository: { owner: "pmatos", repo: "alpha" }
+        }
+      ]
+    };
+    const fresh = {
+      ...emptyIssuePollStatus(),
+      candidateIssues: [
+        {
+          issue: {
+            body: "",
+            created_at: "",
+            id: 2,
+            labels: [],
+            number: 2,
+            priority: 0,
+            state: "open",
+            title: "beta issue",
+            updated_at: "",
+            url: ""
+          },
+          project: "beta",
+          repository: { owner: "pmatos", repo: "beta" }
+        }
+      ],
+      projects: [
+        {
+          fetchedIssues: 1,
+          name: "beta",
+          ok: true,
+          repository: { owner: "pmatos", repo: "beta" }
+        }
+      ]
+    };
+
+    const merged = mergeIssuePollStatus(
+      prior,
+      fresh,
+      new Set(["beta"]),
+      new Set(["alpha", "beta"])
+    );
+
+    expect(merged.candidateIssues.map((entry) => entry.project)).toEqual([
+      "alpha",
+      "beta"
+    ]);
+    expect(merged.projects.map((project) => project.name)).toEqual([
+      "alpha",
+      "beta"
+    ]);
+  });
+
+  it("drops a project's prior entries once it's actually polled again", () => {
+    const repository = { owner: "pmatos", repo: "alpha" };
+    const prior = {
+      ...emptyIssuePollStatus(),
+      projects: [{ fetchedIssues: 1, name: "alpha", ok: false, repository }]
+    };
+    const fresh = {
+      ...emptyIssuePollStatus(),
+      projects: [{ fetchedIssues: 3, name: "alpha", ok: true, repository }]
+    };
+
+    const merged = mergeIssuePollStatus(
+      prior,
+      fresh,
+      new Set(["alpha"]),
+      new Set(["alpha"])
+    );
+
+    expect(merged.projects).toEqual([
+      { fetchedIssues: 3, name: "alpha", ok: true, repository }
+    ]);
+  });
+
+  it("drops a prior project's entries once it's no longer in the configured set", () => {
+    const prior = {
+      ...emptyIssuePollStatus(),
+      candidateIssues: [
+        {
+          issue: {
+            body: "",
+            created_at: "",
+            id: 1,
+            labels: [],
+            number: 1,
+            priority: 0,
+            state: "open",
+            title: "gamma issue",
+            updated_at: "",
+            url: ""
+          },
+          project: "gamma",
+          repository: { owner: "pmatos", repo: "gamma" }
+        }
+      ],
+      projects: [
+        {
+          fetchedIssues: 1,
+          name: "gamma",
+          ok: true,
+          repository: { owner: "pmatos", repo: "gamma" }
+        }
+      ]
+    };
+    const fresh = {
+      ...emptyIssuePollStatus(),
+      projects: [
+        {
+          fetchedIssues: 1,
+          name: "beta",
+          ok: true,
+          repository: { owner: "pmatos", repo: "beta" }
+        }
+      ]
+    };
+
+    // gamma was neither polled this tick nor is it configured any more
+    // (removed/renamed on reload) -- it must not be carried over.
+    const merged = mergeIssuePollStatus(
+      prior,
+      fresh,
+      new Set(["beta"]),
+      new Set(["beta"])
+    );
+
+    expect(merged.candidateIssues).toEqual([]);
+    expect(merged.projects.map((project) => project.name)).toEqual(["beta"]);
+  });
+
+  it("preserves a skipped project's rate-limit error in the merged errors array", () => {
+    const prior = {
+      ...emptyIssuePollStatus(),
+      errors: ["projects.alpha rate limit exceeded"],
+      projects: [
+        {
+          error: "projects.alpha rate limit exceeded",
+          fetchedIssues: 0,
+          name: "alpha",
+          ok: false,
+          repository: { owner: "pmatos", repo: "alpha" }
+        }
+      ]
+    };
+    const fresh = {
+      ...emptyIssuePollStatus(),
+      projects: [
+        {
+          fetchedIssues: 2,
+          name: "beta",
+          ok: true,
+          repository: { owner: "pmatos", repo: "beta" }
+        }
+      ]
+    };
+
+    // alpha is still configured but was skipped this tick (backed off);
+    // beta polled clean. A clean poll of beta must not clear alpha's error.
+    const merged = mergeIssuePollStatus(
+      prior,
+      fresh,
+      new Set(["beta"]),
+      new Set(["alpha", "beta"])
+    );
+
+    expect(merged.errors).toEqual(["projects.alpha rate limit exceeded"]);
   });
 });

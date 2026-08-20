@@ -317,6 +317,35 @@ describe("Oh My Pi RPC provider", () => {
     });
   });
 
+  it("rejects a ready frame whose physical byte limit exceeds the daemon-local ceiling", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const fakeOmpPath = path.join(root, "fake-over-ceiling-ready-omp.mjs");
+    await writeFakeOverCeilingReadyFrameOmp(fakeOmpPath);
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+    );
+
+    expect(
+      events
+        .map((event) => event.normalized)
+        .find((event) => event?.type === "turn_failed")
+    ).toMatchObject({
+      message: "Oh My Pi provider emitted an incompatible ready frame",
+      type: "turn_failed"
+    });
+  });
+
   it("rejects physical frames above the ready-frame byte limit", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -2258,6 +2287,20 @@ async function writeFakeOverCeilingChunkOmp(filePath: string): Promise<void> {
       "    send({ type: 'agent_end', isTerminal: true, messages: [] });",
       "  }",
       "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakeOverCeilingReadyFrameOmp(
+  filePath: string
+): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "process.stdout.write(`${JSON.stringify({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1, 2], maxFrameBytes: 134217728, maxReassembledFrameBytes: 134217728 })}\\n`);",
+      "setTimeout(() => process.exit(0), 10);",
       ""
     ].join("\n"),
     "utf8"

@@ -1148,8 +1148,11 @@ export function createProcessQueue(
       protocolVersion = version;
     },
     setFrameLimits: (maxFrameBytes, maxReassembledBytes) => {
-      maxPhysicalFrameBytes = maxFrameBytes;
+      // Validate before adopting: setLimits can now reject an over-ceiling
+      // maxFrameBytes, and this closure's own physical-limit copy must not
+      // diverge from the decoder's by holding a value it never accepted.
       frameDecoder.setLimits(maxFrameBytes, maxReassembledBytes);
+      maxPhysicalFrameBytes = maxFrameBytes;
       frameLimitsSet = true;
       awaitingFrameLimits = false;
       drainStdoutLines();

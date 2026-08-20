@@ -3102,7 +3102,7 @@ td code { color: var(--ink-2); }
   .fields dt { margin-top: var(--sp-2); }
 }`;
 
-export const LOCAL_TIME_CLIENT_JS = `(function () {
+const LOCAL_TIME_CLIENT_JS = `(function () {
   var selector = "time[data-local-time]";
   function localizeTimestamp(element) {
     var value = element.getAttribute("datetime");

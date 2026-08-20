@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
   chmod,
   mkdir,
@@ -17,6 +17,8 @@ import {
 } from "./workspace-paths.js";
 
 const execFileAsync = promisify(execFile);
+const GIT_ABORT_GRACE_MS = 1_000;
+const GIT_GROUP_POLL_MS = 10;
 
 export type WorkspaceProject = {
   name: string;
@@ -266,11 +268,9 @@ async function createRepositoryCache(
     path.join(cacheParent, `.${path.basename(cachePath)}.clone-`)
   );
   // mkdtemp always creates its directory 0700, unlike a direct `git clone
-  // --bare` into a not-yet-existing path, which follows the process umask
-  // (0755 under the common default). Restore that parity before publishing
-  // so readers that previously could traverse/read the shared cache still
-  // can.
-  await chmod(stagingPath, 0o755);
+  // --bare` into a not-yet-existing path, which follows the process umask.
+  // Restore that parity before publishing, including group-sharing umasks.
+  await chmod(stagingPath, 0o777 & ~process.umask());
   try {
     await git(
       ["clone", "--bare", project.workspace.git.remote, stagingPath],
@@ -365,11 +365,143 @@ export async function git(
   args: string[],
   signal?: AbortSignal
 ): Promise<string> {
+  if (signal !== undefined && process.platform !== "win32") {
+    return await gitInProcessGroup(args, signal);
+  }
   const { stdout } =
     signal === undefined
       ? await execFileAsync("git", args)
       : await execFileAsync("git", args, { signal });
   return stdout.trim();
+}
+
+async function gitInProcessGroup(
+  args: string[],
+  signal: AbortSignal
+): Promise<string> {
+  const child = spawn("git", args, {
+    detached: true,
+    signal,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+
+  let settled = false;
+  let groupShutdown: Promise<void> | undefined;
+  const stopGroup = (): void => {
+    if (!settled) {
+      groupShutdown ??= terminateGitProcessGroup(child.pid);
+    }
+  };
+  signal.addEventListener("abort", stopGroup, { once: true });
+  if (signal.aborted) {
+    stopGroup();
+  }
+
+  let processError: unknown;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, exitSignal) => {
+        settled = true;
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(
+          Object.assign(
+            new Error(
+              `Command failed: git ${args.join(" ")}\n${Buffer.concat(stderr).toString("utf8")}`
+            ),
+            { code, killed: child.killed, signal: exitSignal }
+          )
+        );
+      });
+    });
+  } catch (error) {
+    processError = error;
+  } finally {
+    settled = true;
+    signal.removeEventListener("abort", stopGroup);
+  }
+
+  try {
+    await groupShutdown;
+  } catch (cleanupError) {
+    throw new Error("failed to stop aborted Git process group", {
+      cause: cleanupError
+    });
+  }
+  if (processError !== undefined) {
+    if (processError instanceof Error) {
+      throw processError;
+    }
+    throw new Error("Git process failed with a non-error value", {
+      cause: processError
+    });
+  }
+  return Buffer.concat(stdout).toString("utf8").trim();
+}
+
+async function terminateGitProcessGroup(
+  pid: number | undefined
+): Promise<void> {
+  if (pid === undefined || !Number.isSafeInteger(pid) || pid <= 0) {
+    return;
+  }
+  if (!signalProcessGroup(pid, "SIGTERM")) {
+    return;
+  }
+  if (await waitForProcessGroupExit(pid, GIT_ABORT_GRACE_MS)) {
+    return;
+  }
+  signalProcessGroup(pid, "SIGKILL");
+  if (!(await waitForProcessGroupExit(pid, GIT_ABORT_GRACE_MS))) {
+    throw new Error(`Git process group ${pid} survived SIGKILL`);
+  }
+}
+
+function signalProcessGroup(pid: number, signal: NodeJS.Signals): boolean {
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ESRCH") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function waitForProcessGroupExit(
+  pid: number,
+  timeoutMs: number
+): Promise<boolean> {
+  const expiresAt = Date.now() + timeoutMs;
+  while (processGroupExists(pid)) {
+    if (Date.now() >= expiresAt) {
+      return false;
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, GIT_GROUP_POLL_MS);
+    });
+  }
+  return true;
+}
+
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ESRCH") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function gitSucceeds(args: string[]): Promise<boolean> {

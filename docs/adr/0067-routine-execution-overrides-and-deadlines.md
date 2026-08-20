@@ -31,8 +31,11 @@ this ADR is unchanged.
 preparation as well as provider execution. The deadline's `AbortSignal` reaches the shared cache
 clone/fetch and firing-specific branch/worktree Git commands, and the dispatcher awaits preparation
 settlement before recording the timeout. First-cache clones publish atomically from an owned staging
-directory so abort cleanup cannot leave a partial bare repository at the shared cache path. This
-resolves the temporary limitation tracked in #353.
+directory so abort cleanup cannot leave a partial bare repository at the shared cache path. On
+POSIX, cancellable Git commands run as separate process groups with bounded `SIGTERM` to `SIGKILL`
+escalation, so transports, hooks, and helpers cannot outlive preparation settlement. Staging modes
+follow the process umask, and incomplete owned-path cleanup is surfaced without replacing the
+deadline's terminal classification. This resolves the temporary limitation tracked in #353.
 
 ## Context
 
@@ -109,10 +112,14 @@ also inside the deadline; post-terminal pull-request discovery is not. The proce
 implementation from #341 and ADR 0064 makes that cancellation a whole-tree termination once a
 provider process exists. During workspace preparation, expiry aborts the stage's Git subprocesses
 and awaits preparation settlement before the firing becomes terminal or releases its concurrency
-slot. Cache creation clones to an invocation-owned sibling staging directory and atomically
-publishes a complete bare repository; abort removes the staging directory, while an interrupted
-fetch preserves the already-validated shared cache. Cleanup likewise removes only a newly-owned
-firing worktree, never a reused one.
+slot. POSIX Git commands use their own process groups and bounded escalation so abort covers Git's
+transports, hooks, and helpers; non-POSIX hosts retain direct-child abort behavior. Cache creation
+clones to an invocation-owned sibling staging directory, applies the direct-clone mode derived from
+the process umask, and atomically publishes a complete bare repository; abort removes the staging
+directory, while an interrupted fetch preserves the already-validated shared cache. Cleanup likewise
+removes only a newly-owned firing branch/worktree, never a reused one, verifies no owned directory or
+worktree registration remains, and surfaces any incomplete cleanup in logs while preserving
+`firing_timeout` as the terminal reason.
 
 ## Consequences
 

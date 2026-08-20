@@ -62,6 +62,7 @@ import { createUlid } from "./ulid.js";
 import {
   planRoutineWorkspacePaths,
   prepareRoutineWorkspace as defaultPrepareRoutineWorkspace,
+  RoutineWorkspaceCleanupError,
   type PreparedRoutineWorkspace,
   type PrepareRoutineWorkspaceInput
 } from "./workspace.js";
@@ -1262,7 +1263,23 @@ async function runRoutineFiring(input: {
       // A deadline can win its race before AbortSignal-driven Git cleanup
       // settles. Keep the firing's slot until preparation has actually
       // stopped so later callers never serialize behind abandoned work.
-      await preparationAttempt?.catch(() => undefined);
+      const preparationError = await preparationAttempt?.then(
+        () => undefined,
+        (preparationError: unknown) => preparationError
+      );
+      if (
+        preparationError instanceof RoutineWorkspaceCleanupError ||
+        (preparationError instanceof Error &&
+          preparationError.name === "RoutineWorkspaceCleanupError")
+      ) {
+        input.logger?.warn(
+          {
+            err: errorMessage(preparationError),
+            firing: input.firingId
+          },
+          "symphonika timed-out routine workspace cleanup failed"
+        );
+      }
       await providerAttempt?.catch(() => undefined);
     }
     const cancelEntry = input.activeRuns.get(input.firingId);

@@ -694,6 +694,8 @@ describe("RoutineFiringDispatcher", () => {
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
     const provider = quietProvider();
+    const logger = pino({ enabled: false });
+    const logWarn = vi.spyOn(logger, "warn");
     const project = dueRoutineProjectFixture(root, "codex");
     project.routines = [
       {
@@ -712,9 +714,10 @@ describe("RoutineFiringDispatcher", () => {
               setTimeout(() => {
                 preparationSettled = true;
                 reject(
-                  signal.reason instanceof Error
-                    ? signal.reason
-                    : new Error("workspace preparation aborted")
+                  Object.assign(
+                    new Error("failed to clean aborted routine worktree"),
+                    { name: "RoutineWorkspaceCleanupError" }
+                  )
                 );
               }, 10);
             },
@@ -730,6 +733,7 @@ describe("RoutineFiringDispatcher", () => {
         configDir: root,
         createFiringId: () => "fire-workspace-timeout",
         globalConcurrency: { maxInFlight: undefined },
+        logger,
         now: new Date("2026-05-22T10:00:01.000Z"),
         prepareRoutineWorkspace,
         projects: new Map([["alpha", project]]),
@@ -744,6 +748,13 @@ describe("RoutineFiringDispatcher", () => {
       expect(prepareRoutineWorkspace).toHaveBeenCalledOnce();
       expect(preparationSettled).toBe(true);
       expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(logWarn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          err: "failed to clean aborted routine worktree",
+          firing: "fire-workspace-timeout"
+        }),
+        "symphonika timed-out routine workspace cleanup failed"
+      );
       expect(runStore.getRoutineFiring("fire-workspace-timeout")).toMatchObject(
         {
           state: "failed",

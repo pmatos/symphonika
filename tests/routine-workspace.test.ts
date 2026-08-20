@@ -1,5 +1,13 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -27,7 +35,7 @@ afterEach(async () => {
 });
 
 describe("Routine workspace preparation", () => {
-  it("cancels in-flight clone and fetch work without poisoning the shared cache", async () => {
+  it("cancels clone and fetch helper process trees without poisoning the shared cache", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);
     const workspaceRoot = path.join(root, "workspaces", "alpha");
@@ -40,18 +48,23 @@ describe("Routine workspace preparation", () => {
     );
     const sshPath = path.join(root, "delayed-ssh");
     const startedPath = path.join(root, "ssh-started");
-    const releasePath = path.join(root, "ssh-release");
+    const helperPidPath = path.join(root, "ssh-pid");
+    const passthroughPath = path.join(root, "ssh-passthrough");
     await writeFile(
       sshPath,
       `#!/bin/sh
+if [ -f "${passthroughPath}" ]; then
+  for candidate in "$@"; do
+    command="$candidate"
+  done
+  exec /bin/sh -c "$command"
+fi
+echo $$ > "${helperPidPath}"
 touch "${startedPath}"
-while [ ! -f "${releasePath}" ]; do
-  sleep 0.01
+trap '' TERM
+while true; do
+  sleep 1
 done
-for candidate in "$@"; do
-  command="$candidate"
-done
-exec /bin/sh -c "$command"
 `
     );
     await chmod(sshPath, 0o755);
@@ -83,14 +96,16 @@ exec /bin/sh -c "$command"
         })
       );
       await waitForPath(startedPath);
+      const cloneHelperPid = await readPid(helperPidPath);
       controller.abort();
-      await writeFile(releasePath, "release\n");
 
-      const error = await preparation;
+      const error = await settleWithin(preparation, 2_000);
       expect(error).toMatchObject({ code: "ABORT_ERR", name: "AbortError" });
+      await waitForProcessExit(cloneHelperPid);
       await expect(pathExists(cachePath)).resolves.toBe(false);
       await expect(pathExists(workspacePath)).resolves.toBe(false);
 
+      await writeFile(passthroughPath, "enabled\n");
       const prepared = await prepareRoutineWorkspace(input);
       expect(prepared.reused).toBe(false);
       await expect(
@@ -98,7 +113,8 @@ exec /bin/sh -c "$command"
       ).resolves.toBe(prepared.branchName);
 
       await rm(startedPath, { force: true });
-      await rm(releasePath, { force: true });
+      await rm(helperPidPath, { force: true });
+      await rm(passthroughPath, { force: true });
       const fetchController = new AbortController();
       const fetchInput = {
         ...input,
@@ -111,14 +127,15 @@ exec /bin/sh -c "$command"
         })
       );
       await waitForPath(startedPath);
+      const fetchHelperPid = await readPid(helperPidPath);
       fetchController.abort();
-      await writeFile(releasePath, "release\n");
 
-      const fetchError = await interruptedFetch;
+      const fetchError = await settleWithin(interruptedFetch, 2_000);
       expect(fetchError).toMatchObject({
         code: "ABORT_ERR",
         name: "AbortError"
       });
+      await waitForProcessExit(fetchHelperPid);
       await expect(pathExists(cachePath)).resolves.toBe(true);
       await expect(
         pathExists(
@@ -131,13 +148,14 @@ exec /bin/sh -c "$command"
         )
       ).resolves.toBe(false);
 
+      await writeFile(passthroughPath, "enabled\n");
       const recovered = await prepareRoutineWorkspace({
         ...fetchInput,
         firingId: "01LABCDEFGHJKMNPQRSTVWXYZ12"
       });
       expect(recovered.reused).toBe(false);
     } finally {
-      await writeFile(releasePath, "release\n");
+      await killRecordedProcess(helperPidPath);
       if (previousGitSshCommand === undefined) {
         delete process.env.GIT_SSH_COMMAND;
       } else {
@@ -146,7 +164,102 @@ exec /bin/sh -c "$command"
     }
   });
 
-  it("removes only the firing-owned worktree path when worktree creation is aborted", async () => {
+  it("preserves the process umask on an atomically published cache", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const previousUmask = process.umask(0o002);
+
+    try {
+      const prepared = await prepareRoutineWorkspace({
+        configDir: root,
+        firingId: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+        kind: "git",
+        project: {
+          name: "alpha",
+          workspace: {
+            git: { base_branch: "main", remote: remotePath },
+            root: workspaceRoot
+          }
+        },
+        routineName: "dependency-update"
+      });
+
+      const cache = await stat(prepared.cachePath);
+      expect(cache.mode & 0o777).toBe(0o775);
+    } finally {
+      process.umask(previousUmask);
+    }
+  });
+
+  it("removes a firing-owned branch when branch creation is aborted after the ref is written", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const cachePath = path.join(workspaceRoot, ".cache", "repo.git");
+    const branchRef =
+      "refs/heads/sym/alpha/routine/dependency-update/01JABCDEFG";
+    const wrapperRoot = path.join(root, "git-wrapper");
+    const wrapperPath = path.join(wrapperRoot, "git");
+    const startedPath = path.join(root, "branch-started");
+    const helperPidPath = path.join(root, "branch-pid");
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    await mkdir(wrapperRoot, { recursive: true });
+    await writeFile(
+      wrapperPath,
+      `#!/bin/sh
+if [ "$3" = "branch" ]; then
+  "${realGitOutput.trim()}" "$@"
+  echo $$ > "${helperPidPath}"
+  touch "${startedPath}"
+  while true; do
+    sleep 1
+  done
+fi
+exec "${realGitOutput.trim()}" "$@"
+`
+    );
+    await chmod(wrapperPath, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+    const controller = new AbortController();
+
+    try {
+      const preparation = rejectionOf(
+        prepareRoutineWorkspace({
+          configDir: root,
+          firingId: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+          kind: "git",
+          project: {
+            name: "alpha",
+            workspace: {
+              git: { base_branch: "main", remote: remotePath },
+              root: workspaceRoot
+            }
+          },
+          routineName: "dependency-update",
+          signal: controller.signal
+        })
+      );
+      await waitForPath(startedPath);
+      controller.abort();
+
+      const error = await settleWithin(preparation, 2_000);
+      expect(error).toMatchObject({ code: "ABORT_ERR", name: "AbortError" });
+      await expect(
+        git(["-C", cachePath, "show-ref", "--verify", branchRef])
+      ).rejects.toThrow();
+    } finally {
+      await killRecordedProcess(helperPidPath);
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
+  });
+
+  it("removes only the firing-owned worktree and branch when creation is aborted", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);
     const workspaceRoot = path.join(root, "workspaces", "alpha");
@@ -174,7 +287,7 @@ exec /bin/sh -c "$command"
     const wrapperRoot = path.join(root, "git-wrapper");
     const wrapperPath = path.join(wrapperRoot, "git");
     const startedPath = path.join(root, "worktree-started");
-    const releasePath = path.join(root, "worktree-release");
+    const helperPidPath = path.join(root, "worktree-pid");
     const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
     await mkdir(wrapperRoot, { recursive: true });
     await writeFile(
@@ -182,9 +295,10 @@ exec /bin/sh -c "$command"
       `#!/bin/sh
 if [ "$5" = "${workspacePath}" ]; then
   mkdir -p "${workspacePath}"
+  echo $$ > "${helperPidPath}"
   touch "${startedPath}"
-  while [ ! -f "${releasePath}" ]; do
-    sleep 0.01
+  while true; do
+    sleep 1
   done
 fi
 exec "${realGitOutput.trim()}" "$@"
@@ -207,13 +321,26 @@ exec "${realGitOutput.trim()}" "$@"
         })
       );
       await waitForPath(startedPath);
-      controller.abort();
-      await writeFile(releasePath, "release\n");
+      const helperPid = await readPid(helperPidPath);
+      const timeoutReason = Object.assign(new Error("firing timed out"), {
+        name: "RoutineFiringTimeoutError"
+      });
+      controller.abort(timeoutReason);
 
-      const error = await preparation;
+      const error = await settleWithin(preparation, 2_000);
       expect(error).toMatchObject({ code: "ABORT_ERR", name: "AbortError" });
+      await waitForProcessExit(helperPid);
       await expect(pathExists(workspacePath)).resolves.toBe(false);
       await expect(pathExists(existing.workspacePath)).resolves.toBe(true);
+      await expect(
+        git([
+          "-C",
+          existing.cachePath,
+          "show-ref",
+          "--verify",
+          "refs/heads/sym/alpha/routine/dependency-update/01KABCDEFG"
+        ])
+      ).rejects.toThrow();
 
       const recovered = await prepareRoutineWorkspace({
         configDir: root,
@@ -224,7 +351,84 @@ exec "${realGitOutput.trim()}" "$@"
       });
       expect(recovered.reused).toBe(false);
     } finally {
-      await writeFile(releasePath, "release\n");
+      await killRecordedProcess(helperPidPath);
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
+  });
+
+  it("surfaces incomplete cleanup of an aborted firing-owned worktree", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const firingId = "01JABCDEFGHJKMNPQRSTVWXYZ12";
+    const workspacePath = path.join(
+      workspaceRoot,
+      "routines",
+      "dependency-update",
+      firingId
+    );
+    const workspaceParent = path.dirname(workspacePath);
+    const wrapperRoot = path.join(root, "git-wrapper");
+    const wrapperPath = path.join(wrapperRoot, "git");
+    const startedPath = path.join(root, "worktree-started");
+    const helperPidPath = path.join(root, "worktree-pid");
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    await mkdir(wrapperRoot, { recursive: true });
+    await writeFile(
+      wrapperPath,
+      `#!/bin/sh
+if [ "$5" = "${workspacePath}" ]; then
+  mkdir -p "${workspacePath}"
+  echo $$ > "${helperPidPath}"
+  touch "${startedPath}"
+  while true; do
+    sleep 1
+  done
+fi
+exec "${realGitOutput.trim()}" "$@"
+`
+    );
+    await chmod(wrapperPath, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+    const controller = new AbortController();
+
+    try {
+      const preparation = rejectionOf(
+        prepareRoutineWorkspace({
+          configDir: root,
+          firingId,
+          kind: "git",
+          project: {
+            name: "alpha",
+            workspace: {
+              git: { base_branch: "main", remote: remotePath },
+              root: workspaceRoot
+            }
+          },
+          routineName: "dependency-update",
+          signal: controller.signal
+        })
+      );
+      await waitForPath(startedPath);
+      await chmod(workspaceParent, 0o500);
+      controller.abort();
+
+      const error = await settleWithin(preparation, 2_000);
+      expect(error).toBeInstanceOf(Error);
+      if (!(error instanceof Error)) {
+        throw new Error("expected workspace cleanup to reject with an Error");
+      }
+      expect(error.message).toContain(
+        "failed to clean aborted routine worktree"
+      );
+    } finally {
+      await chmod(workspaceParent, 0o700).catch(() => undefined);
+      await killRecordedProcess(helperPidPath);
       if (previousPath === undefined) {
         delete process.env.PATH;
       } else {
@@ -385,6 +589,75 @@ async function waitForPath(filePath: string): Promise<void> {
       setTimeout(resolve, 5);
     });
   }
+}
+
+async function readPid(filePath: string): Promise<number> {
+  const pid = Number.parseInt(await readFile(filePath, "utf8"), 10);
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new Error(`invalid process id in ${filePath}`);
+  }
+  return pid;
+}
+
+async function killRecordedProcess(filePath: string): Promise<void> {
+  if (!(await pathExists(filePath))) {
+    return;
+  }
+  const pid = await readPid(filePath);
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ESRCH")) {
+      return;
+    }
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new Error(`failed to kill test process ${pid}`, { cause: error });
+  }
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+  const expiresAt = Date.now() + 2_000;
+  while (true) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (isNodeErrorWithCode(error, "ESRCH")) {
+        return;
+      }
+      throw error;
+    }
+    if (Date.now() >= expiresAt) {
+      throw new Error(`timed out waiting for process ${pid} to exit`);
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 5);
+    });
+  }
+}
+
+async function settleWithin<T>(
+  promise: Promise<T>,
+  timeoutMs: number
+): Promise<T> {
+  return await Promise.race([
+    promise,
+    new Promise<T>((_resolve, reject) => {
+      setTimeout(() => {
+        reject(new Error(`promise did not settle within ${timeoutMs}ms`));
+      }, timeoutMs);
+    })
+  ]);
+}
+
+function isNodeErrorWithCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code
+  );
 }
 
 async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {

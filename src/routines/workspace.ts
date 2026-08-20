@@ -29,6 +29,15 @@ export type PreparedRoutineWorkspace = {
 
 export type RoutineWorkspacePathPlan = Omit<PreparedRoutineWorkspace, "reused">;
 
+export class RoutineWorkspaceCleanupError extends Error {
+  constructor(workspacePath: string, cause: unknown) {
+    super(`failed to clean aborted routine worktree ${workspacePath}`, {
+      cause
+    });
+    this.name = "RoutineWorkspaceCleanupError";
+  }
+}
+
 export function planRoutineWorkspacePaths(
   input: PrepareRoutineWorkspaceInput
 ): RoutineWorkspacePathPlan {
@@ -78,6 +87,7 @@ export async function prepareRoutineWorkspace(
       workspacePath
     };
   }
+  let createdBranch = false;
   if (
     input.kind === "git" &&
     !(await gitSucceeds(
@@ -85,22 +95,44 @@ export async function prepareRoutineWorkspace(
       input.signal
     ))
   ) {
-    await git(
-      [
-        "-C",
-        cachePath,
-        "branch",
-        branchName,
-        `origin/${input.project.workspace.git.base_branch}`
-      ],
-      input.signal
-    );
+    try {
+      await git(
+        [
+          "-C",
+          cachePath,
+          "branch",
+          branchName,
+          `origin/${input.project.workspace.git.base_branch}`
+        ],
+        input.signal
+      );
+    } catch (error) {
+      if (isAbortError(error) || input.signal?.aborted === true) {
+        try {
+          await cleanupAbortedRoutineBranch(cachePath, branchRef);
+        } catch (cleanupError) {
+          throw new RoutineWorkspaceCleanupError(
+            workspacePath,
+            new AggregateError([error, cleanupError])
+          );
+        }
+      }
+      throw error;
+    }
+    createdBranch = true;
     if (input.signal?.aborted === true) {
       // The branch above was just created by this call; an abort landing
       // here would otherwise leak it in the shared cache with nothing left
       // to claim it (no worktree was created yet to trigger the cleanup
       // below).
-      await cleanupAbortedRoutineBranch(cachePath, branchRef);
+      try {
+        await cleanupAbortedRoutineBranch(cachePath, branchRef);
+      } catch (cleanupError) {
+        throw new RoutineWorkspaceCleanupError(
+          workspacePath,
+          new AggregateError([input.signal.reason, cleanupError])
+        );
+      }
     }
   }
   input.signal?.throwIfAborted();
@@ -122,8 +154,26 @@ export async function prepareRoutineWorkspace(
     );
     input.signal?.throwIfAborted();
   } catch (error) {
-    if (isAbortError(error)) {
-      await cleanupAbortedRoutineWorktree(cachePath, workspacePath);
+    if (isAbortError(error) || input.signal?.aborted === true) {
+      const cleanupErrors: unknown[] = [];
+      try {
+        await cleanupAbortedRoutineWorktree(cachePath, workspacePath);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      if (createdBranch) {
+        try {
+          await cleanupAbortedRoutineBranch(cachePath, branchRef);
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
+      }
+      if (cleanupErrors.length > 0) {
+        throw new RoutineWorkspaceCleanupError(
+          workspacePath,
+          new AggregateError([error, ...cleanupErrors])
+        );
+      }
     }
     throw error;
   }
@@ -166,28 +216,77 @@ async function cleanupAbortedRoutineWorktree(
   cachePath: string,
   workspacePath: string
 ): Promise<void> {
-  await git([
-    "-C",
-    cachePath,
-    "worktree",
-    "remove",
-    "--force",
-    workspacePath
-  ]).catch(() => undefined);
-  // Best-effort like the removal above: a failure here must not replace the
-  // original abort error the caller is about to (re)throw.
-  await rm(workspacePath, { force: true, recursive: true }).catch(
-    () => undefined
-  );
+  const cleanupErrors: unknown[] = [];
+  try {
+    await git([
+      "-C",
+      cachePath,
+      "worktree",
+      "remove",
+      "--force",
+      workspacePath
+    ]);
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  try {
+    await rm(workspacePath, { force: true, recursive: true });
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  try {
+    await git(["-C", cachePath, "worktree", "prune"]);
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+
+  let workspaceRemains = true;
+  let registrationRemains = true;
+  try {
+    workspaceRemains = await exists(workspacePath);
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  try {
+    registrationRemains = await isRoutineWorktreeRegistered(
+      cachePath,
+      workspacePath
+    );
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  if (workspaceRemains || registrationRemains) {
+    throw new Error(`routine worktree cleanup remained incomplete`, {
+      cause: new AggregateError(cleanupErrors)
+    });
+  }
 }
 
 async function cleanupAbortedRoutineBranch(
   cachePath: string,
   branchRef: string
 ): Promise<void> {
-  await git(["-C", cachePath, "update-ref", "-d", branchRef]).catch(
-    () => undefined
-  );
+  await git(["-C", cachePath, "update-ref", "-d", branchRef]);
+}
+
+async function isRoutineWorktreeRegistered(
+  cachePath: string,
+  workspacePath: string
+): Promise<boolean> {
+  const output = await git([
+    "-C",
+    cachePath,
+    "worktree",
+    "list",
+    "--porcelain"
+  ]);
+  const expectedPath = path.resolve(workspacePath);
+  return output.split(/\r?\n/).some((line) => {
+    return (
+      line.startsWith("worktree ") &&
+      path.resolve(line.slice("worktree ".length)) === expectedPath
+    );
+  });
 }
 
 async function gitSucceeds(

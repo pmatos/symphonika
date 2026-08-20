@@ -855,6 +855,18 @@ type RunTransitionChangeEvent = Extract<
   { kind: "run-transition" }
 >;
 
+type InsertRunRowInput = {
+  evidenceIgnore?: readonly string[];
+  id: string;
+  isContinuation: boolean;
+  issue: IssueSnapshot;
+  parentRunId: string | null;
+  projectName: string;
+  providerCommand: string | null;
+  providerName: AgentProviderName | null;
+  state: RunState;
+};
+
 type CreateRoutineFiringInput = {
   branchName?: string;
   branchRef?: string;
@@ -892,6 +904,16 @@ export class RunStore {
     }
   }
 
+  // Publishes events collected from inside a transaction, after the
+  // transaction has committed — see docs/adr/0074 and #433. Publishing
+  // per-entry inside the transaction loop would leak an event for a row
+  // whose write gets rolled back by a later entry's failure.
+  private publishAll(events: readonly ChangeEvent[]): void {
+    for (const event of events) {
+      this.publishChange(event);
+    }
+  }
+
   publishReloadOutcome(input: { errors: string[]; ok: boolean }): void {
     this.publishChange({
       errors: input.errors,
@@ -918,16 +940,14 @@ export class RunStore {
   }
 
   createRun(input: CreateRunInput): void {
-    this.publishChange(
-      this.insertRunRow({
-        ...input,
-        isContinuation: false,
-        parentRunId: null,
-        providerCommand: input.providerCommand,
-        providerName: input.providerName,
-        state: "queued"
-      })
-    );
+    this.recordRunRow({
+      ...input,
+      isContinuation: false,
+      parentRunId: null,
+      providerCommand: input.providerCommand,
+      providerName: input.providerName,
+      state: "queued"
+    });
   }
 
   createWaitingRun(input: {
@@ -1007,21 +1027,19 @@ export class RunStore {
       parentRunId: string;
     }
   ): void {
-    this.publishChange(
-      this.insertRunRow({
-        ...(input.evidenceIgnore === undefined
-          ? {}
-          : { evidenceIgnore: input.evidenceIgnore }),
-        id: input.id,
-        isContinuation: true,
-        issue: input.issue,
-        parentRunId: input.parentRunId,
-        projectName: input.projectName,
-        providerCommand: input.providerCommand,
-        providerName: input.providerName,
-        state: "queued"
-      })
-    );
+    this.recordRunRow({
+      ...(input.evidenceIgnore === undefined
+        ? {}
+        : { evidenceIgnore: input.evidenceIgnore }),
+      id: input.id,
+      isContinuation: true,
+      issue: input.issue,
+      parentRunId: input.parentRunId,
+      projectName: input.projectName,
+      providerCommand: input.providerCommand,
+      providerName: input.providerName,
+      state: "queued"
+    });
     if (input.inheritParentState === false) {
       return;
     }
@@ -1041,18 +1059,16 @@ export class RunStore {
     projectName: string;
     reason: string;
   }): void {
-    this.publishChange(
-      this.insertRunRow({
-        id: input.id,
-        isContinuation: true,
-        issue: input.issue,
-        parentRunId: input.parentRunId,
-        projectName: input.projectName,
-        providerCommand: null,
-        providerName: null,
-        state: "failed"
-      })
-    );
+    this.recordRunRow({
+      id: input.id,
+      isContinuation: true,
+      issue: input.issue,
+      parentRunId: input.parentRunId,
+      projectName: input.projectName,
+      providerCommand: null,
+      providerName: null,
+      state: "failed"
+    });
     this.database
       .prepare(
         "update runs set terminal_reason = ?, failure_classification = 'deterministic', updated_at = ? where id = ?"
@@ -1391,17 +1407,11 @@ export class RunStore {
     }));
   }
 
-  private insertRunRow(input: {
-    evidenceIgnore?: readonly string[];
-    id: string;
-    isContinuation: boolean;
-    issue: IssueSnapshot;
-    parentRunId: string | null;
-    projectName: string;
-    providerCommand: string | null;
-    providerName: AgentProviderName | null;
-    state: RunState;
-  }): RunTransitionChangeEvent {
+  private recordRunRow(input: InsertRunRowInput): void {
+    this.publishChange(this.insertRunRow(input));
+  }
+
+  private insertRunRow(input: InsertRunRowInput): RunTransitionChangeEvent {
     const now = timestamp();
     this.database
       .prepare(
@@ -4319,12 +4329,7 @@ export class RunStore {
       }
       return events;
     });
-    // Publish only after the transaction commits (see claimRoutineFiring):
-    // publishing per-entry inside the loop would leak an event for a row
-    // whose write gets rolled back by a later entry's failure.
-    for (const event of apply()) {
-      this.publishChange(event);
-    }
+    this.publishAll(apply());
   }
 
   findLeakedRoutineFirings(): {
@@ -4408,12 +4413,7 @@ export class RunStore {
       }
       return events;
     });
-    // Publish only after the transaction commits (see claimRoutineFiring):
-    // publishing per-entry inside the loop would leak an event for a row
-    // whose write gets rolled back by a later entry's failure.
-    for (const event of apply()) {
-      this.publishChange(event);
-    }
+    this.publishAll(apply());
   }
 
   failLegacyInputRequiredRuns(
@@ -4467,9 +4467,7 @@ export class RunStore {
       }
       return events;
     });
-    for (const event of apply()) {
-      this.publishChange(event);
-    }
+    this.publishAll(apply());
     return migrated;
   }
 

@@ -708,14 +708,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           : undefined
     };
     const nowMs = now();
-    const projectNames = Array.from(
-      new Set(
-        options.runStore
-          .listProjectStates()
-          .filter((state) => state.active)
-          .map((state) => state.projectName)
-      )
-    ).sort();
+    const projectNames = options.runStore.listActiveProjectNames();
     const rows = searchIssueSnapshots({
       filters,
       nowMs,

@@ -252,6 +252,51 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("rejects a skip paired with a fan-out that excludes the Routine Target", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "refactor-audit",
+          prompt: "Audit.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/refactor-audit.md",
+          projectName: "beta"
+        }
+      ]);
+      store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+
+      expect(() =>
+        store.skipRoutineFiring({
+          attemptedAt: "2026-05-22T10:00:01.000Z",
+          fanoutId: "fanout-1",
+          name: "refactor-audit",
+          projectName: "beta",
+          reason: "concurrency_cap"
+        })
+      ).toThrowError(
+        'routine fan-out "fanout-1" has no claimable target for Project "beta"'
+      );
+      expect(
+        store.getRoutine({ name: "refactor-audit", projectName: "beta" })
+      ).toMatchObject({
+        lastAttemptedAt: null,
+        nextFireAt: "2026-05-22T10:00:00.000Z",
+        state: "active"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("does not reopen an already-sent fan-out when a late target is configured", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

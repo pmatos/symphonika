@@ -11,6 +11,7 @@ import type {
   RawGitHubPullRequestFollowupState
 } from "./issue-polling.js";
 import {
+  isRateLimitError,
   resolveEnvBackedValue,
   tryGetPullRequestFollowupState,
   tryListPullRequestsForBranch,
@@ -50,10 +51,15 @@ export type RunPullRequestFollowupOptions = {
   env?: NodeJS.ProcessEnv;
   githubIssuesApi: GitHubIssuesApi;
   logger?: Logger;
+  onProjectRateLimited?: (input: {
+    error: unknown;
+    projectName: string;
+  }) => void;
   policy?: PullRequestFollowupPolicy;
   projectsLoader: () => Promise<Map<string, RunControllerProjectConfig>>;
   runController: RunController;
   runStore: RunStore;
+  shouldPollProject?: (projectName: string) => boolean;
 };
 
 export const DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY: PullRequestFollowupPolicy = {
@@ -112,17 +118,29 @@ export async function runPullRequestFollowup(
     env,
     githubIssuesApi: options.githubIssuesApi,
     ...(options.logger === undefined ? {} : { logger: options.logger }),
+    ...(options.onProjectRateLimited === undefined
+      ? {}
+      : { onProjectRateLimited: options.onProjectRateLimited }),
     projects,
-    runStore: options.runStore
+    runStore: options.runStore,
+    ...(options.shouldPollProject === undefined
+      ? {}
+      : { shouldPollProject: options.shouldPollProject })
   });
   const action = await processTrackedPullRequests({
     env,
     githubIssuesApi: options.githubIssuesApi,
     ...(options.logger === undefined ? {} : { logger: options.logger }),
+    ...(options.onProjectRateLimited === undefined
+      ? {}
+      : { onProjectRateLimited: options.onProjectRateLimited }),
     policy,
     projects,
     runController: options.runController,
-    runStore: options.runStore
+    runStore: options.runStore,
+    ...(options.shouldPollProject === undefined
+      ? {}
+      : { shouldPollProject: options.shouldPollProject })
   });
   if (action.action !== "none") {
     return action;
@@ -225,11 +243,16 @@ async function discoverPullRequests(input: {
   env: NodeJS.ProcessEnv;
   githubIssuesApi: GitHubIssuesApi;
   logger?: Logger;
+  onProjectRateLimited?: RunPullRequestFollowupOptions["onProjectRateLimited"];
   projects: Map<string, RunControllerProjectConfig>;
   runStore: RunStore;
+  shouldPollProject?: RunPullRequestFollowupOptions["shouldPollProject"];
 }): Promise<number> {
   let discovered = 0;
   for (const run of input.runStore.listRunsAwaitingPullRequestDiscovery()) {
+    if (input.shouldPollProject?.(run.projectName) === false) {
+      continue;
+    }
     const project = input.projects.get(run.projectName);
     const repository = repositoryForProject(project, input.env);
     if (project === undefined || repository === undefined) {
@@ -242,6 +265,7 @@ async function discoverPullRequests(input: {
         branch: run.branchName
       });
     } catch (error) {
+      reportRateLimit(input.onProjectRateLimited, run.projectName, error);
       input.logger?.warn(
         { branch: run.branchName, err: error },
         "symphonika PR follow-up discovery failed"
@@ -280,12 +304,17 @@ async function processTrackedPullRequests(input: {
   env: NodeJS.ProcessEnv;
   githubIssuesApi: GitHubIssuesApi;
   logger?: Logger;
+  onProjectRateLimited?: RunPullRequestFollowupOptions["onProjectRateLimited"];
   policy: PullRequestFollowupPolicy;
   projects: Map<string, RunControllerProjectConfig>;
   runController: RunController;
   runStore: RunStore;
+  shouldPollProject?: RunPullRequestFollowupOptions["shouldPollProject"];
 }): Promise<PullRequestFollowupResult> {
   for (const tracked of input.runStore.listOpenTrackedPullRequests()) {
+    if (input.shouldPollProject?.(tracked.projectName) === false) {
+      continue;
+    }
     const project = input.projects.get(tracked.projectName);
     const repository = repositoryForProject(project, input.env);
     if (project === undefined || repository === undefined) {
@@ -294,6 +323,10 @@ async function processTrackedPullRequests(input: {
     const rawState = await loadRawPullRequestState({
       api: input.githubIssuesApi,
       ...(input.logger === undefined ? {} : { logger: input.logger }),
+      ...(input.onProjectRateLimited === undefined
+        ? {}
+        : { onProjectRateLimited: input.onProjectRateLimited }),
+      projectName: tracked.projectName,
       repository,
       tracked
     });
@@ -360,12 +393,28 @@ async function processTrackedPullRequests(input: {
       );
       continue;
     }
-    const merged = await tryMergePullRequest(input.githubIssuesApi, {
-      ...repository,
-      expectedHeadSha: state.headSha,
-      method: input.policy.merge.method,
-      pullNumber: tracked.prNumber
-    });
+    // Another GitHub subsystem can engage this project's credential
+    // backoff while the follow-up-state request above is in flight. Check
+    // again before the second GitHub call in this tracked-PR sequence.
+    if (input.shouldPollProject?.(tracked.projectName) === false) {
+      continue;
+    }
+    let merged: boolean;
+    try {
+      merged = await tryMergePullRequest(input.githubIssuesApi, {
+        ...repository,
+        expectedHeadSha: state.headSha,
+        method: input.policy.merge.method,
+        pullNumber: tracked.prNumber
+      });
+    } catch (error) {
+      if (
+        !reportRateLimit(input.onProjectRateLimited, tracked.projectName, error)
+      ) {
+        throw error;
+      }
+      continue;
+    }
     if (!merged) {
       input.logger?.warn(
         { prNumber: tracked.prNumber },
@@ -430,6 +479,8 @@ async function dispatchReviewFollowupIfNeeded(input: {
 async function loadRawPullRequestState(input: {
   api: GitHubIssuesApi;
   logger?: Logger;
+  onProjectRateLimited?: RunPullRequestFollowupOptions["onProjectRateLimited"];
+  projectName: string;
   repository: GitHubIssueRepositoryInput;
   tracked: TrackedPullRequest;
 }): Promise<RawGitHubPullRequestFollowupState | null | undefined> {
@@ -439,12 +490,26 @@ async function loadRawPullRequestState(input: {
       pullNumber: input.tracked.prNumber
     });
   } catch (error) {
+    reportRateLimit(input.onProjectRateLimited, input.projectName, error);
     input.logger?.warn(
       { err: error, prNumber: input.tracked.prNumber },
       "symphonika PR follow-up poll failed"
     );
     return undefined;
   }
+}
+
+function reportRateLimit(
+  onProjectRateLimited: RunPullRequestFollowupOptions["onProjectRateLimited"],
+  projectName: string,
+  error: unknown
+): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!isRateLimitError(message) || onProjectRateLimited === undefined) {
+    return false;
+  }
+  onProjectRateLimited({ error, projectName });
+  return true;
 }
 
 function repositoryForProject(

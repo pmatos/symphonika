@@ -3136,7 +3136,7 @@ function renderTimestamp(
   value: string | null | undefined,
   fallback = "-"
 ): string {
-  if (value === undefined || value === null || value === "") {
+  if (!value) {
     return escapeHtml(fallback);
   }
   const escaped = escapeHtml(value);

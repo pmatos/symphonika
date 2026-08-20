@@ -3,12 +3,24 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { Window } from "happy-dom";
+import type { Document as HappyDomDocument } from "happy-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { createHttpApp } from "../src/http/app.js";
 import { openRunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
+
+function unwrappedIsoTimestamps(root: HappyDomDocument): (string | null)[] {
+  return Array.from(root.querySelectorAll("code"))
+    .filter(
+      (element) =>
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(
+          element.textContent ?? ""
+        ) && element.querySelector("time[data-local-time]") === null
+    )
+    .map((element) => element.textContent);
+}
 
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -99,15 +111,7 @@ it("renders Run timestamps in the viewer's local time with the UTC value as a fa
       parsed.querySelectorAll("time[data-local-time]")
     ).find((element) => element.getAttribute("datetime") === detail?.createdAt);
     expect(started?.textContent).toBe(detail?.createdAt);
-    const unwrappedIsoValues = Array.from(parsed.querySelectorAll("code"))
-      .filter(
-        (element) =>
-          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(
-            element.textContent ?? ""
-          ) && element.querySelector("time[data-local-time]") === null
-      )
-      .map((element) => element.textContent);
-    expect(unwrappedIsoValues).toEqual([]);
+    expect(unwrappedIsoTimestamps(parsed)).toEqual([]);
 
     const script = parsed.querySelector(
       "script[data-local-time-client]"
@@ -133,17 +137,7 @@ it("renders Run timestamps in the viewer's local time with the UTC value as a fa
       runsHtml,
       "text/html"
     );
-    const unwrappedRunListIsoValues = Array.from(
-      runsPage.querySelectorAll("code")
-    )
-      .filter(
-        (element) =>
-          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(
-            element.textContent ?? ""
-          ) && element.querySelector("time[data-local-time]") === null
-      )
-      .map((element) => element.textContent);
-    expect(unwrappedRunListIsoValues).toEqual([]);
+    expect(unwrappedIsoTimestamps(runsPage)).toEqual([]);
 
     const liveFragment = parsed.createElement("div");
     parsed.body.append(liveFragment);
@@ -208,15 +202,7 @@ it("renders Routine and Firing timestamps through the same local-time enhancemen
         await response.text(),
         "text/html"
       );
-      const unwrappedIsoValues = Array.from(page.querySelectorAll("code"))
-        .filter(
-          (element) =>
-            /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(
-              element.textContent ?? ""
-            ) && element.querySelector("time[data-local-time]") === null
-        )
-        .map((element) => element.textContent);
-      expect(unwrappedIsoValues, route).toEqual([]);
+      expect(unwrappedIsoTimestamps(page), route).toEqual([]);
     }
   } finally {
     runStore.close();

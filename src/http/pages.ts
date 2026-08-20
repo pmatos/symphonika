@@ -3704,6 +3704,10 @@ function resolveClaimedRunId(
 // under a merge_pr FSM state). A single shared read means both callers
 // filter one union rather than each re-deriving it.
 function collectLiveRunEntries(input: {
+  // Scoped to the issue being checked so scheduled-callback resolution below
+  // only queries the Run Store for a match, not once per in-flight callback
+  // across every project.
+  aliasNames: Set<string>;
   getActiveRuns:
     | (() => Array<{ issueNumber: number; projectName: string; runId: string }>)
     | undefined;
@@ -3715,22 +3719,30 @@ function collectLiveRunEntries(input: {
   // issue identity back to a persisted Run because callback.runId is not
   // guaranteed to name one.
   getScheduled: (() => ScheduledCallback[]) | undefined;
+  issueNumber: number;
   runStore: RunStore;
 }): Array<{ issueNumber: number; projectName: string; runId: string }> {
-  const scheduledEntries = (input.getScheduled?.() ?? []).flatMap(
-    (callback) => {
-      const runId = resolveScheduledClaimantRunId(input.runStore, callback);
-      return runId === undefined
-        ? []
-        : [
-            {
-              issueNumber: callback.issueNumber,
-              projectName: callback.projectName,
-              runId
-            }
-          ];
+  const scheduledEntries: Array<{
+    issueNumber: number;
+    projectName: string;
+    runId: string;
+  }> = [];
+  for (const callback of input.getScheduled?.() ?? []) {
+    if (
+      !input.aliasNames.has(callback.projectName) ||
+      callback.issueNumber !== input.issueNumber
+    ) {
+      continue;
     }
-  );
+    const runId = resolveScheduledClaimantRunId(input.runStore, callback);
+    if (runId !== undefined) {
+      scheduledEntries.push({
+        issueNumber: callback.issueNumber,
+        projectName: callback.projectName,
+        runId
+      });
+    }
+  }
   return [
     ...(input.getActiveRuns?.() ?? []),
     ...input.runStore.listActiveRunIds(),
@@ -3771,7 +3783,7 @@ function findLiveRunIdForIssue(input: {
   const aliasNames = new Set(
     input.getProjectRepoAliases?.(input.projectName) ?? [input.projectName]
   );
-  return collectLiveRunEntries(input).find(
+  return collectLiveRunEntries({ ...input, aliasNames }).find(
     (entry) =>
       aliasNames.has(entry.projectName) &&
       entry.issueNumber === input.issueNumber

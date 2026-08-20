@@ -2118,9 +2118,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         resolved.kind === "ambiguous" ? 200 : 404
       );
     }
-    const includeInactive =
-      resolvedWithInactive ||
-      routineSelectionRequiresInactive(resolved.group, projectParam);
+    const includeInactive = resolvedWithInactive;
     const disclosureGroup = resolvedWithInactive
       ? resolved.group
       : includeInactiveRoutineTargets(options.runStore, resolved.group);
@@ -5571,20 +5569,6 @@ function resolveNamedRoutineGroup(
     return { group: groups[0]!, kind: "ok" };
   }
   return { groups, kind: "ambiguous" };
-}
-
-function routineSelectionRequiresInactive(
-  group: RoutineGroup,
-  projectParam: string | undefined
-): boolean {
-  const selectedTargets =
-    projectParam === undefined
-      ? group.targets
-      : group.targets.filter((target) => target.projectName === projectParam);
-  return (
-    selectedTargets.length > 0 &&
-    selectedTargets.every((target) => target.state === "inactive")
-  );
 }
 
 function includeInactiveRoutineTargets(

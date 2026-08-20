@@ -95,6 +95,13 @@ ordinary competing firing and skip claims, which lose at the clock update and ca
 branch; reaching it instead means the caller paired the Routine Target with the wrong immutable
 fan-out membership or the persisted state is inconsistent.
 
+This decision covers `skipRoutineFiring` only: `claimRoutineFiring`'s structurally identical
+fan-out branch is unchanged and still swallows the same mismatch as an ordinary lost claim. Nothing
+catches the new error between the Run Store and the daemon's per-tick error boundary, so today
+reaching this invariant aborts the rest of that dispatch tick's Routine and Issue dispatch rather
+than isolating the affected Routine; that containment gap, and whether `claimRoutineFiring` should
+be brought in line, are open follow-ups, not settled by this ADR.
+
 The existing workspace and branch identities already contain the Project and firing id, so sibling
 firings receive separate workspaces, branches, logs, and prompt evidence.
 

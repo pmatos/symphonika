@@ -1040,11 +1040,15 @@ fields and per-Project rolling counter evidence, completes its fan-out leg, writ
 Firing row, and emits `routine.skipped` with `reason`, `routine`, and `scheduled_at` fields. A
 skipped one-shot expires rather than remaining due.
 
-A skip claim returns `false` when the Routine Target's clock event is no longer due. Once that
-clock update succeeds, failure to transition the supplied fan-out's matching `pending` or `held`
-Project leg is an invariant violation: the Run Store throws and rolls back the transaction rather
-than translating it to `false`. SQLite serializes the clock and fan-out writes in one transaction,
-so an ordinary competing claim cannot reach this invariant branch.
+A skip claim returns `false` when the Routine Target's clock event is no longer due, or — for a
+recurring Target — when the caller omits the recomputed `next_fire_at`. Once that clock update
+succeeds, failure to transition the supplied fan-out's matching `pending` or `held` Project leg is
+an invariant violation: the Run Store throws and rolls back the transaction rather than translating
+it to `false`. SQLite serializes the clock and fan-out writes in one transaction, so an ordinary
+competing claim cannot reach this invariant branch. The Run Store does not catch this throw itself;
+today's only caller that supplies a `fanoutId` is the daemon's dispatch tick, which has no
+per-Target isolation around this call, so reaching the invariant aborts that tick's remaining
+Routine and Issue dispatch rather than skipping only the affected Routine.
 
 A selected Agent Provider adapter that is not registered, or that has no configured command, is a
 Routine Dispatch Hold, not a Routine Skip. The target remains active with its original

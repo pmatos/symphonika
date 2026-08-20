@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { databasePath, openRunStore } from "../src/run-store.js";
+import {
+  databasePath,
+  openRunStore,
+  RoutineFanoutInvariantError
+} from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -274,21 +278,110 @@ describe("RunStore routines", () => {
         scheduledAt: "2026-05-22T10:00:00.000Z"
       });
 
-      expect(() =>
+      let caught: unknown;
+      try {
         store.skipRoutineFiring({
           attemptedAt: "2026-05-22T10:00:01.000Z",
           fanoutId: "fanout-1",
           name: "refactor-audit",
           projectName: "beta",
           reason: "concurrency_cap"
-        })
-      ).toThrowError(
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(RoutineFanoutInvariantError);
+      expect((caught as Error).message).toBe(
+        'routine fan-out "fanout-1" has no claimable target for Project "beta"'
+      );
+      // The clock-column update inside the same transaction must roll back
+      // too, not just the fan-out update: this is what makes the failure an
+      // atomic no-op rather than a partially-applied skip attempt.
+      expect(
+        store.getRoutine({ name: "refactor-audit", projectName: "beta" })
+      ).toMatchObject({
+        lastAttemptedAt: null,
+        lastSkipAt: null,
+        lastSkipReason: null,
+        nextFireAt: "2026-05-22T10:00:00.000Z",
+        state: "active"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects a skip when the paired fan-out leg already left pending/held", async () => {
+    const stateRoot = await makeTempRoot();
+    let store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "refactor-audit",
+          prompt: "Audit.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/refactor-audit.md",
+          projectName: "beta"
+        }
+      ]);
+      store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["beta"],
+        routineName: "refactor-audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+    } finally {
+      store.close();
+    }
+
+    // Simulate a fan-out leg that already settled away from pending/held
+    // (e.g. an earlier skip or claim, or an operator/migration edit) while
+    // the Routine Target itself is still active and due at the same
+    // scheduled_at. This is the production-shaped trigger for the
+    // invariant: the leg row exists (hasRoutineFanoutTarget is true) but is
+    // no longer claimable, as opposed to the fan-out never having included
+    // this Project at all.
+    const rawDatabase = new Database(databasePath(stateRoot));
+    try {
+      rawDatabase
+        .prepare(
+          "update routine_fanout_targets set disposition = 'skipped' where fanout_id = ? and project_name = ?"
+        )
+        .run("fanout-1", "beta");
+    } finally {
+      rawDatabase.close();
+    }
+
+    store = openRunStore({ stateRoot });
+    try {
+      expect(
+        store.hasRoutineFanoutTarget({ id: "fanout-1", projectName: "beta" })
+      ).toBe(true);
+
+      let caught: unknown;
+      try {
+        store.skipRoutineFiring({
+          attemptedAt: "2026-05-22T10:00:01.000Z",
+          fanoutId: "fanout-1",
+          name: "refactor-audit",
+          projectName: "beta",
+          reason: "concurrency_cap"
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(RoutineFanoutInvariantError);
+      expect((caught as Error).message).toBe(
         'routine fan-out "fanout-1" has no claimable target for Project "beta"'
       );
       expect(
         store.getRoutine({ name: "refactor-audit", projectName: "beta" })
       ).toMatchObject({
         lastAttemptedAt: null,
+        lastSkipAt: null,
+        lastSkipReason: null,
         nextFireAt: "2026-05-22T10:00:00.000Z",
         state: "active"
       });

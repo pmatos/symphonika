@@ -833,7 +833,7 @@ class RoutineAlreadyClaimedError extends Error {
   }
 }
 
-class RoutineFanoutInvariantError extends Error {
+export class RoutineFanoutInvariantError extends Error {
   constructor(fanoutId: string, projectName: string) {
     super(
       `routine fan-out "${fanoutId}" has no claimable target for Project "${projectName}"`

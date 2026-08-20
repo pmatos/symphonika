@@ -30,7 +30,7 @@ import type { EmailNotificationConfig } from "../notifications/config.js";
 import { deliverRoutineFanoutNotification } from "../notifications/routine-fanout.js";
 import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
 import type { NotificationSink } from "../notifications/types.js";
-import type { RunStore } from "../run-store.js";
+import type { RoutineFanoutHoldReason, RunStore } from "../run-store.js";
 import {
   evaluateRoutineSchedule,
   nextRecurringFireAt,
@@ -601,6 +601,12 @@ export async function dispatchDueRoutines(
         input.providersConfig as Partial<RunControllerProvidersConfig>
       )[providerName]?.command;
       if (provider === undefined) {
+        const holdReason: RoutineFanoutHoldReason = `provider_not_registered: ${providerName}`;
+        input.runStore.holdRoutineFanoutTarget({
+          fanoutId,
+          projectName: project.name,
+          reason: holdReason
+        });
         input.logger?.warn(
           {
             project: project.name,
@@ -612,15 +618,30 @@ export async function dispatchDueRoutines(
         );
         skipped.push({
           projectName: project.name,
-          reason: `provider_not_registered: ${providerName}`,
+          reason: holdReason,
           routineName: routine.name
         });
         continue;
       }
       if (providerCommand === undefined) {
+        const holdReason: RoutineFanoutHoldReason = `provider_command_missing: ${providerName}`;
+        input.runStore.holdRoutineFanoutTarget({
+          fanoutId,
+          projectName: project.name,
+          reason: holdReason
+        });
+        input.logger?.warn(
+          {
+            project: project.name,
+            provider: providerName,
+            routine: routine.name,
+            scheduled_at: scheduledAt
+          },
+          "routine dispatch held: provider command missing"
+        );
         skipped.push({
           projectName: project.name,
-          reason: `provider_command_missing: ${providerName}`,
+          reason: holdReason,
           routineName: routine.name
         });
         continue;

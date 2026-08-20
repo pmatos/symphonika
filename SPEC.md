@@ -248,8 +248,9 @@ control also uses `disabled` and `invalid` as defined in §8.5.
 
 A **Routine Fan-out** is the durable group for one Routine clock event. It stores a shared
 correlation id and the expected Project targets before work begins. Each target is completed by a
-Routine Firing or a Routine Skip, and the group produces one summary only after every target
-completes. Expected membership is immutable after the fan-out is created. A Routine Target
+Routine Firing or Routine Skip, or summarized as a non-gating Routine Dispatch Hold. The group
+produces one snapshot summary after every leg is terminal or held. Expected membership is immutable
+after the fan-out is created. A Routine Target
 configured only after that clock event began does not join the existing group; an already-due
 one-shot is consumed as an ungrouped `catch_up_window` skip instead of reopening a delivered
 summary, while a recurring target begins with its next future clock event.
@@ -674,8 +675,9 @@ See ADR 0067.
 For a grouped Routine Fan-out summary, no per-target report output is reachable at the group level,
 so policy is defined in terms of the group's failure and pull-request counts plus each target's own
 structured outcome action: `always` sends regardless; `failures` sends only when the group's failure
-count is nonzero (a target skipped for overlap or a concurrency cap is not a failure, matching ADR
-0069); `changes` sends when the failure or pull-request count is nonzero, or when any target's
+count is nonzero (a provider-held target and a failed or cancelled firing are failures; a target
+skipped for overlap or a concurrency cap is not); `changes` sends when the failure or pull-request
+count is nonzero, or when any target's
 outcome action is `issue_opened` or `issue_closed`. The group's issue count itself is not read for
 this check — it stays ADR 0069's permanently-zero placeholder pending the structured-outcome slice.
 A Routine's `notify: false` mutes the group summary the same way it mutes each target's own
@@ -1038,26 +1040,30 @@ fields and per-Project rolling counter evidence, completes its fan-out leg, writ
 Firing row, and emits `routine.skipped` with `reason`, `routine`, and `scheduled_at` fields. A
 skipped one-shot expires rather than remaining due.
 
-A selected Agent Provider adapter that is not registered is a Routine Dispatch Hold, not a Routine
-Skip. The target remains active with its original `next_fire_at`, its fan-out leg remains pending,
-and Symphonika writes neither Routine Firing nor latest-attempt/skip/counter evidence. Each daemon
-tick returns `provider_not_registered: <provider>` for that target and emits a structured warning
-with the Project, Routine, provider, and scheduled clock time. Once the adapter is registered, a
-later tick claims the original clock event and only then advances or expires the target normally.
-This deliberately preserves a persistent configuration failure instead of silently progressing a
-schedule whose work never ran; see ADR 0070.
+A selected Agent Provider adapter that is not registered, or that has no configured command, is a
+Routine Dispatch Hold, not a Routine Skip. The target remains active with its original
+`next_fire_at`; its fan-out leg becomes `held`, which remains claimable but no longer gates summary
+readiness. Symphonika writes neither Routine Firing nor latest-attempt/skip/counter evidence. Each
+daemon tick returns `provider_not_registered: <provider>` or
+`provider_command_missing: <provider>` for that target and emits a structured warning with the
+Project, Routine, provider, and scheduled clock time. Once the provider is available, a later tick
+claims the original clock event and only then advances or expires the target normally. An
+already-delivered one-shot group is not amended; the late firing retains its normal notification
+and operator evidence. This deliberately preserves a persistent configuration failure instead of
+silently progressing a schedule whose work never ran; see ADRs 0070 and 0084.
 
-A Routine Fan-out is summary-ready only after every expected target is skipped or has a terminal
+A Routine Fan-out is summary-ready after every expected target is skipped, held, or has a terminal
 firing. Symphonika then claims one durable grouped-notification delivery with a per-Project result
 and subject
 `[ptt] <routine> — <PR count> PR, <issue count> issue, <failure count> failed`. Skips remain visible
-but do not count as failures; failed and cancelled firings do. Delivery failures return to pending
-for retry. Startup releases interrupted delivery claims and existing orphan-firing reconciliation
-makes claimed legs lost across a daemon restart terminal. A pending leg whose Routine Target becomes
-disabled or inactive before it can be claimed is settled as `target_unavailable` without adding a
-skip counter, so configuration changes cannot strand the group. There is no separate
-partial-summary deadline: the firing timeout bounds live provider work, and the summary waits for
-every admitted firing.
+but do not count as failures; held targets and failed or cancelled firings do. Delivery failures
+return to pending for retry. Startup releases interrupted delivery claims and existing orphan-firing
+reconciliation makes claimed legs lost across a daemon restart terminal. A pending or held leg whose
+Routine Target becomes disabled or inactive before it can be claimed is settled as
+`target_unavailable` without adding a skip counter, so configuration changes cannot strand the
+group. There is no separate partial-summary deadline: the firing timeout bounds live provider work,
+and the summary waits for every admitted firing while treating a provider-held leg as an explicit,
+claimable snapshot result.
 
 `symphonika fire-now <routine>` asks the daemon to claim a manual Routine Firing even when the
 Routine is not due. The manual claim records `trigger_source = "manual"` and otherwise uses the

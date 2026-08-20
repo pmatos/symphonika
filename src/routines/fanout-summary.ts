@@ -49,6 +49,9 @@ function targetSummary(target: RoutineFanoutTargetStatus): string {
   if (target.disposition === "skipped") {
     return `skipped (${target.skipReason ?? "unspecified"})`;
   }
+  if (target.disposition === "held") {
+    return `held (${target.holdReason ?? "provider unavailable"})`;
+  }
   if (target.firing === null) {
     return target.disposition;
   }

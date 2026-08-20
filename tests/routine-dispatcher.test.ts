@@ -1189,10 +1189,10 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
-  it("leaves a provider-admission-blocked fan-out target pending across ticks, then claims it once the provider is registered", async () => {
+  it("summarizes a provider-held target without losing its later retry", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
-    const runStore = openRunStore({ stateRoot });
+    let runStore = openRunStore({ stateRoot });
     const delivered: NotificationMessage[] = [];
     const notification = {
       createSink: () => ({
@@ -1266,12 +1266,9 @@ describe("RoutineFiringDispatcher", () => {
     ]);
 
     try {
-      // Tick 1: "omp" is not registered yet. alpha succeeds; beta's fan-out
-      // target must stay pending rather than being durably skipped, so the
-      // clock event is not lost -- matching the design doc's "provider/
-      // config availability failures leave the target pending and due for
-      // a later daemon tick" and SPEC's one-shot-summary contract (no
-      // partial notification while a target is still legitimately due).
+      // Tick 1: "omp" is not registered yet. Alpha succeeds; beta remains
+      // due and retryable, but its durable hold no longer prevents the
+      // operator from receiving the otherwise-complete grouped summary.
       const tickOne = await dispatchDueRoutines({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: codexProvider },
@@ -1304,9 +1301,17 @@ describe("RoutineFiringDispatcher", () => {
         reason: "provider_not_registered: omp",
         routineName: "refactor-audit"
       });
-      expect(
-        delivered.filter((message) => message.subject.startsWith("[ptt]"))
-      ).toHaveLength(0);
+      const firstFanoutMessages = delivered.filter((message) =>
+        message.subject.startsWith("[ptt]")
+      );
+      expect(firstFanoutMessages).toHaveLength(1);
+      expect(firstFanoutMessages[0]?.subject).toBe(
+        "[ptt] refactor-audit — 0 PR, 0 issue, 1 failed"
+      );
+      expect(firstFanoutMessages[0]?.text).toContain("- alpha: succeeded");
+      expect(firstFanoutMessages[0]?.text).toContain(
+        "- beta: held (provider_not_registered: omp)"
+      );
       expect(runStore.getRoutineFanout("fanout-provider-gap")?.targets).toEqual(
         [
           expect.objectContaining({
@@ -1314,7 +1319,8 @@ describe("RoutineFiringDispatcher", () => {
             projectName: "alpha"
           }),
           expect.objectContaining({
-            disposition: "pending",
+            disposition: "held",
+            holdReason: "provider_not_registered: omp",
             projectName: "beta"
           })
         ]
@@ -1325,9 +1331,13 @@ describe("RoutineFiringDispatcher", () => {
         state: "active"
       });
 
+      // The hold and its claimability are durable daemon-restart state.
+      runStore.close();
+      runStore = openRunStore({ stateRoot });
+
       // Tick 2: the operator registers "omp". The same fan-out (matched on
-      // routine name + scheduled_at) is reused, beta is finally claimed and
-      // succeeds, and only now does the grouped summary fire once.
+      // routine name + scheduled_at) is reused and beta is finally claimed.
+      // The one-shot grouped summary is not amended after delivery.
       const tickTwo = await dispatchDueRoutines({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: codexProvider, omp: ompProvider },
@@ -1356,6 +1366,10 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       expect(tickTwo.fired).toEqual(["fire-beta"]);
+      expect(runStore.getRoutineFiring("fire-beta")).toMatchObject({
+        scheduledAt: "2026-05-22T10:00:00.000Z",
+        state: "succeeded"
+      });
       const fanoutMessages = delivered.filter((message) =>
         message.subject.startsWith("[ptt]")
       );
@@ -1372,7 +1386,9 @@ describe("RoutineFiringDispatcher", () => {
         { disposition: "firing", projectName: "beta" }
       ]);
       expect(fanoutMessages[0]?.text).toContain("- alpha: succeeded");
-      expect(fanoutMessages[0]?.text).toContain("- beta: succeeded");
+      expect(fanoutMessages[0]?.text).toContain(
+        "- beta: held (provider_not_registered: omp)"
+      );
     } finally {
       runStore.close();
     }
@@ -6033,7 +6049,7 @@ describe("RoutineFiringDispatcher", () => {
   });
 
   it.each(["providers config", "agent provider registry"] as const)(
-    "skips a due routine when its provider is missing from the %s",
+    "holds a due routine when its provider is missing from the %s",
     async (missingFrom) => {
       const root = await makeTempRoot();
       const stateRoot = path.join(root, ".symphonika");
@@ -6088,6 +6104,19 @@ describe("RoutineFiringDispatcher", () => {
                   : "provider_not_registered: claude",
               routineName: "daily-report"
             }
+          ]
+        });
+        expect(runStore.listReadyRoutineFanouts()[0]).toMatchObject({
+          failureCount: 1,
+          targets: [
+            expect.objectContaining({
+              disposition: "held",
+              holdReason:
+                missingFrom === "providers config"
+                  ? "provider_command_missing: claude"
+                  : "provider_not_registered: claude",
+              projectName: "alpha"
+            })
           ]
         });
       } finally {

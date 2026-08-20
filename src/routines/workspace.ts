@@ -1,17 +1,14 @@
-import { execFile } from "node:child_process";
 import { mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 
 import {
   ensureRepositoryCache,
+  git,
   isAbortError,
   type WorkspaceProject
 } from "../workspace.js";
 import { slugifyWorkspaceSegment } from "../workspace-paths.js";
 import type { RoutineKind } from "./types.js";
-
-const execFileAsync = promisify(execFile);
 
 export type PrepareRoutineWorkspaceInput = {
   configDir: string;
@@ -71,7 +68,6 @@ export async function prepareRoutineWorkspace(
     planRoutineWorkspacePaths(input);
   input.signal?.throwIfAborted();
   await ensureRepositoryCache(input.project, cachePath, input.signal);
-  input.signal?.throwIfAborted();
   if (await exists(workspacePath)) {
     input.signal?.throwIfAborted();
     return {
@@ -82,7 +78,6 @@ export async function prepareRoutineWorkspace(
       workspacePath
     };
   }
-  let createdBranch = false;
   if (
     input.kind === "git" &&
     !(await gitSucceeds(
@@ -100,19 +95,15 @@ export async function prepareRoutineWorkspace(
       ],
       input.signal
     );
-    createdBranch = true;
-  }
-  try {
-    input.signal?.throwIfAborted();
-  } catch (error) {
-    // The branch above was just created by this call; an abort landing here
-    // would otherwise leak it in the shared cache with nothing left to claim
-    // it (no worktree was created yet to trigger the cleanup below).
-    if (createdBranch) {
+    if (input.signal?.aborted === true) {
+      // The branch above was just created by this call; an abort landing
+      // here would otherwise leak it in the shared cache with nothing left
+      // to claim it (no worktree was created yet to trigger the cleanup
+      // below).
       await cleanupAbortedRoutineBranch(cachePath, branchRef);
     }
-    throw error;
   }
+  input.signal?.throwIfAborted();
   await mkdir(path.dirname(workspacePath), { recursive: true });
   try {
     await git(
@@ -197,14 +188,6 @@ async function cleanupAbortedRoutineBranch(
   await git(["-C", cachePath, "update-ref", "-d", branchRef]).catch(
     () => undefined
   );
-}
-
-async function git(args: string[], signal?: AbortSignal): Promise<string> {
-  const { stdout } =
-    signal === undefined
-      ? await execFileAsync("git", args)
-      : await execFileAsync("git", args, { signal });
-  return stdout.trim();
 }
 
 async function gitSucceeds(

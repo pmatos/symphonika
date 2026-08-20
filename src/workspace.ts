@@ -271,7 +271,6 @@ async function createRepositoryCache(
   // so readers that previously could traverse/read the shared cache still
   // can.
   await chmod(stagingPath, 0o755);
-  let published = false;
   try {
     await git(
       ["clone", "--bare", project.workspace.git.remote, stagingPath],
@@ -280,7 +279,6 @@ async function createRepositoryCache(
     signal?.throwIfAborted();
     try {
       await rename(stagingPath, cachePath);
-      published = true;
     } catch (error) {
       if (!(await exists(cachePath))) {
         throw error;
@@ -288,9 +286,9 @@ async function createRepositoryCache(
       await ensureRepositoryCacheRemote(project, cachePath, signal);
     }
   } finally {
-    if (!published) {
-      await rm(stagingPath, { force: true, recursive: true });
-    }
+    // A no-op after a successful rename: the staging path is already gone
+    // and `force` swallows the resulting ENOENT.
+    await rm(stagingPath, { force: true, recursive: true });
   }
 }
 
@@ -363,7 +361,10 @@ async function exists(filePath: string): Promise<boolean> {
   }
 }
 
-async function git(args: string[], signal?: AbortSignal): Promise<string> {
+export async function git(
+  args: string[],
+  signal?: AbortSignal
+): Promise<string> {
   const { stdout } =
     signal === undefined
       ? await execFileAsync("git", args)

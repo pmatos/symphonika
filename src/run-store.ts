@@ -1498,18 +1498,15 @@ export class RunStore {
           });
       }
 
-      const rows = this.database
-        .prepare("select project_name from project_states where active = 1")
-        .all() as { project_name: string }[];
-      for (const row of rows) {
-        if (activeNames.has(row.project_name)) {
+      for (const projectName of this.listActiveProjectNames()) {
+        if (activeNames.has(projectName)) {
           continue;
         }
         this.database
           .prepare(
             "update project_states set active = 0, validation_state = 'inactive', validation_message = null, updated_at = ? where project_name = ?"
           )
-          .run(now, row.project_name);
+          .run(now, projectName);
       }
     });
     apply();
@@ -1623,6 +1620,15 @@ export class RunStore {
       )
       .all() as ProjectStateRow[];
     return rows.map((row) => mapProjectStateRow(row));
+  }
+
+  listActiveProjectNames(): string[] {
+    const rows = this.database
+      .prepare(
+        "select project_name from project_states where active = 1 order by project_name asc"
+      )
+      .all() as { project_name: string }[];
+    return rows.map((row) => row.project_name);
   }
 
   replaceProjectIssueSnapshots(input: ReplaceProjectIssueSnapshotsInput): void {

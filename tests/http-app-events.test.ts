@@ -287,7 +287,6 @@ describe("HTTP app — GET /events (#305, ADR 0074)", () => {
 
   it("disconnects a lagging client when its pending event queue fills", async () => {
     const test = await setup();
-    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
       const app = createHttpApp({
         runStore: test.runStore,
@@ -297,7 +296,7 @@ describe("HTTP app — GET /events (#305, ADR 0074)", () => {
       });
 
       const response = await app.request("/events");
-      reader = response.body?.getReader();
+      const reader = response.body?.getReader();
       expect(reader).toBeDefined();
       expect(await waitForListenerCount(test.runStore, 1)).toBe(1);
 
@@ -310,7 +309,6 @@ describe("HTTP app — GET /events (#305, ADR 0074)", () => {
       expect(await waitForListenerCount(test.runStore, 0)).toBe(0);
       expect(await reader!.read()).toMatchObject({ done: true });
     } finally {
-      await reader?.cancel().catch(() => undefined);
       test.cleanup();
     }
   });

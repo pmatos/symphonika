@@ -1330,6 +1330,106 @@ describe("pull request follow-up", () => {
     }
   });
 
+  it("dispatches review follow-up with the discovered head SHA when GraphQL follow-up omits headRefOid", async () => {
+    // Regression for the P1 follow-up on #530: the resolved fallback head
+    // SHA was threaded into recordPullRequestReviewDispatch (the DB write)
+    // but not into reviewContextFromState, so the dispatched agent's
+    // rendered instructions still got a blank "Head SHA:" line.
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-review-followup-empty-sha";
+      const workspacePath = path.join(
+        root,
+        ".symphonika",
+        "workspaces",
+        "symphonika",
+        "issues",
+        "54-review-followup-empty-sha"
+      );
+      await createGitWorkspaceAhead({ branchName, workspacePath });
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath
+      });
+
+      const providerInputs: ProviderRunInput[] = [];
+      const provider = fakeProvider(providerInputs);
+      const project = projectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue(issueFixture()),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(
+          prState({
+            headSha: "",
+            reviewDecision: "CHANGES_REQUESTED",
+            unresolvedReviewThreads: [
+              {
+                comments: [
+                  {
+                    author: "reviewer",
+                    body: "Please wire this into the daemon poll loop.",
+                    createdAt: "2026-05-04T10:00:00Z",
+                    line: 24,
+                    path: "src/daemon.ts",
+                    url: "https://github.com/pmatos/symphonika/pull/81#discussion_r1"
+                  }
+                ],
+                id: "PRRT_kwDO",
+                isResolved: false,
+                line: 24,
+                path: "src/daemon.ts"
+              }
+            ]
+          })
+        ),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([
+          {
+            draft: false,
+            head: { ref: branchName, sha: "abc123" },
+            html_url: "https://github.com/pmatos/symphonika/pull/81",
+            number: 81,
+            state: "open"
+          }
+        ]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider,
+        root,
+        runStore: store,
+        workspacePath
+      });
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        logger: pino({ enabled: false }),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      expect(result).toEqual({
+        action: "review_dispatch",
+        prNumber: 81,
+        runId: "review-run-1"
+      });
+      expect(providerInputs).toHaveLength(1);
+      expect(providerInputs[0]!.prompt).toContain("Head SHA: abc123");
+      expect(providerInputs[0]!.prompt).not.toContain("Head SHA: \n");
+    } finally {
+      store.close();
+    }
+  });
+
   it("skips the review-followup dispatch when a state_advance is already scheduled for the same issue", async () => {
     // Regression for the wait→agent race: reconcileWaitingRuns advances a
     // wait state into an agent state and schedules a state_advance, but the

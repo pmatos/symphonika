@@ -477,7 +477,7 @@ async function dispatchReviewFollowupIfNeeded(input: {
     issueNumber: input.tracked.issueNumber,
     parentRunId: input.tracked.lastFollowupRunId ?? input.tracked.runId,
     projectName: input.tracked.projectName,
-    review: reviewContextFromState(input.state)
+    review: reviewContextFromState(input.state, input.headSha)
   });
   if (!result.dispatched) {
     return undefined;
@@ -577,10 +577,11 @@ function trackedStateFor(
 }
 
 function reviewContextFromState(
-  state: PullRequestState
+  state: PullRequestState,
+  headSha: string
 ): ReviewFollowupContext {
   return {
-    headSha: state.headSha,
+    headSha,
     pullRequestNumber: state.number,
     pullRequestUrl: state.url,
     reviewDecision: state.reviewFollowup.decision,

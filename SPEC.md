@@ -1027,8 +1027,11 @@ or `notify: false` suppression records `notification_state = skipped`; success r
 On daemon startup, a recurring Routine with `catch_up: fire_once_if_missed` preserves a due
 `next_fire_at` and fires at most once even when the outage spans several clock events. The claim
 then advances `next_fire_at` strictly beyond the current clock. Without the opt-in, startup advances
-past the missed window without firing and records a `catch_up_window` skip. Timezone and DST
-behavior comes from `cron-parser`; the Orchestrator does not implement separate DST rules.
+past the missed window without firing and records a `catch_up_window` skip. Before advancing any
+target, Symphonika groups every active persisted target sharing the Routine name and missed
+`next_fire_at` into one Routine Fan-out, so the outage occurrence has the same durable membership
+and completion evidence as every other matched clock event. Timezone and DST behavior comes from
+`cron-parser`; the Orchestrator does not implement separate DST rules.
 
 Routine Firings consume the same per-Project and global `max_in_flight` slots as issue Runs.
 Fan-out admission is per target rather than atomic: admitted siblings start concurrently, while a
@@ -1057,13 +1060,15 @@ firing. Symphonika then claims one durable grouped-notification delivery with a 
 and subject
 `[ptt] <routine> — <PR count> PR, <issue count> issue, <failure count> failed`. Skips remain visible
 but do not count as failures; held targets and failed or cancelled firings do. Delivery failures
-return to pending for retry. Startup releases interrupted delivery claims and existing orphan-firing
-reconciliation makes claimed legs lost across a daemon restart terminal. A pending or held leg whose
-Routine Target becomes disabled or inactive before it can be claimed is settled as
-`target_unavailable` without adding a skip counter, so configuration changes cannot strand the
-group. There is no separate partial-summary deadline: the firing timeout bounds live provider work,
-and the summary waits for every admitted firing while treating a provider-held leg as an explicit,
-claimable snapshot result.
+return to pending for retry. An all-`catch_up_window` group uses that same subject and renders each
+Project as `skipped (catch_up_window)`; `email.on: always` sends it, while `changes` and `failures`
+record it as policy-skipped because those dispositions are neither changes nor failures. Startup
+releases interrupted delivery claims and existing orphan-firing reconciliation makes claimed legs
+lost across a daemon restart terminal. A pending or held leg whose Routine Target becomes disabled
+or inactive before it can be claimed is settled as `target_unavailable` without adding a skip
+counter, so configuration changes cannot strand the group. There is no separate partial-summary
+deadline: the firing timeout bounds live provider work, and the summary waits for every admitted
+firing while treating a provider-held leg as an explicit, claimable snapshot result.
 
 `symphonika fire-now <routine>` asks the daemon to claim a manual Routine Firing even when the
 Routine is not due. The manual claim records `trigger_source = "manual"` and otherwise uses the

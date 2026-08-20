@@ -376,6 +376,14 @@ export async function dispatchDueRoutines(
   const createFanoutId = input.createFanoutId ?? (() => createUlid());
   const projects = [...input.projects.values()];
   const fanoutIds = new Map<string, string>();
+  const recomputedCatchUpGroups = new Map<
+    string,
+    {
+      routineName: string;
+      scheduledAt: string;
+      targets: Array<{ nextFireAt: string; projectName: string }>;
+    }
+  >();
   const firingTasks: Promise<void>[] = [];
   const redactSecrets = (): string[] =>
     resolveRedactSecrets(input.notification, input.env ?? process.env);
@@ -409,27 +417,53 @@ export async function dispatchDueRoutines(
         ) {
           continue;
         }
-        const nextFireAt = nextRecurringFireAt(declaration.schedule, now);
-        if (
-          input.runStore.skipRoutineFiring({
-            attemptedAt: now.toISOString(),
-            name: persisted.name,
-            nextFireAt,
-            projectName: project.name,
-            reason: "catch_up_window"
-          })
-        ) {
-          logRoutineSkip(input.logger, {
-            reason: "catch_up_window",
-            routine: persisted.name,
-            scheduledAt: persisted.nextFireAt
-          });
-          skipped.push({
-            projectName: project.name,
-            reason: "catch_up_window",
-            routineName: persisted.name
-          });
-        }
+        const scheduledAt = persisted.nextFireAt;
+        const fanoutKey = `${persisted.name}\0${scheduledAt}`;
+        const group = recomputedCatchUpGroups.get(fanoutKey) ?? {
+          routineName: persisted.name,
+          scheduledAt,
+          targets: []
+        };
+        group.targets.push({
+          nextFireAt: nextRecurringFireAt(declaration.schedule, now),
+          projectName: project.name
+        });
+        recomputedCatchUpGroups.set(fanoutKey, group);
+      }
+    }
+  }
+
+  // Capture every Project sharing the missed clock event before the first
+  // skip advances its target's schedule and destroys that grouping key.
+  for (const [fanoutKey, group] of recomputedCatchUpGroups) {
+    const fanoutId = input.runStore.ensureRoutineFanout({
+      id: createFanoutId(),
+      projectNames: group.targets.map((target) => target.projectName),
+      routineName: group.routineName,
+      scheduledAt: group.scheduledAt
+    }).id;
+    fanoutIds.set(fanoutKey, fanoutId);
+    for (const target of group.targets) {
+      if (
+        input.runStore.skipRoutineFiring({
+          attemptedAt: now.toISOString(),
+          fanoutId,
+          name: group.routineName,
+          nextFireAt: target.nextFireAt,
+          projectName: target.projectName,
+          reason: "catch_up_window"
+        })
+      ) {
+        logRoutineSkip(input.logger, {
+          reason: "catch_up_window",
+          routine: group.routineName,
+          scheduledAt: group.scheduledAt
+        });
+        skipped.push({
+          projectName: target.projectName,
+          reason: "catch_up_window",
+          routineName: group.routineName
+        });
       }
     }
   }

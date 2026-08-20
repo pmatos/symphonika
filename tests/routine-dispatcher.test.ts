@@ -5606,6 +5606,112 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("groups catch-up window skips from one missed clock event after restart", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const provider = quietProvider();
+    const routine = minuteRoutine(root);
+    const delivered: NotificationMessage[] = [];
+    const declarations = ["alpha", "beta"].map((projectName) => ({
+      ...routine,
+      projectName
+    }));
+    runStore.syncRoutines(declarations, {
+      now: new Date("2026-05-22T10:00:30.000Z")
+    });
+
+    try {
+      const result = await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFanoutId: () => "fanout-restart-skip",
+        globalConcurrency: { maxInFlight: undefined },
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:01:30.000Z"),
+        prepareRoutineWorkspace: vi.fn(),
+        projects: new Map(
+          declarations.map((declaration) => [
+            declaration.projectName,
+            {
+              ...runStoreProjectFixture(),
+              name: declaration.projectName,
+              routines: [declaration]
+            }
+          ])
+        ),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        recomputeSchedulesFromNow: true,
+        runStore,
+        stateRoot
+      });
+
+      expect(result).toEqual({
+        fired: [],
+        skipped: [
+          {
+            projectName: "alpha",
+            reason: "catch_up_window",
+            routineName: "minute-report"
+          },
+          {
+            projectName: "beta",
+            reason: "catch_up_window",
+            routineName: "minute-report"
+          }
+        ]
+      });
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]).toMatchObject({
+        subject: "[ptt] minute-report — 0 PR, 0 issue, 0 failed"
+      });
+      expect(delivered[0]?.text).toContain(
+        "- alpha: skipped (catch_up_window)"
+      );
+      expect(delivered[0]?.text).toContain("- beta: skipped (catch_up_window)");
+      expect(runStore.getRoutineFanout("fanout-restart-skip")).toMatchObject({
+        notificationState: "sent",
+        routineName: "minute-report",
+        scheduledAt: "2026-05-22T10:01:00.000Z",
+        targets: [
+          {
+            disposition: "skipped",
+            projectName: "alpha",
+            skipReason: "catch_up_window"
+          },
+          {
+            disposition: "skipped",
+            projectName: "beta",
+            skipReason: "catch_up_window"
+          }
+        ]
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("records a catch-up window skip on restart when catch-up is omitted", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

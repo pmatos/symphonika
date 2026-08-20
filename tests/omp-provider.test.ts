@@ -288,6 +288,35 @@ describe("Oh My Pi RPC provider", () => {
     });
   });
 
+  it("rejects logical frame declarations above the daemon-local ceiling", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const fakeOmpPath = path.join(root, "fake-over-ceiling-chunk-omp.mjs");
+    await writeFakeOverCeilingChunkOmp(fakeOmpPath);
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+    );
+
+    expect(
+      events
+        .map((event) => event.normalized)
+        .find((event) => event?.type === "malformed_event")
+    ).toMatchObject({
+      message: "invalid Oh My Pi RPC chunk metadata",
+      type: "malformed_event"
+    });
+  });
+
   it("rejects physical frames above the ready-frame byte limit", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -2203,6 +2232,30 @@ async function writeFakeMalformedChunkOmp(filePath: string): Promise<void> {
       "  if (command.type === 'prompt') {",
       "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
       "    send({ type: 'rpc_chunk', chunkId: 'bad-1', index: 0, count: 2, byteLength: 2048, data: '**not-base64**' });",
+      "  }",
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakeOverCeilingChunkOmp(filePath: string): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1, 2], maxFrameBytes: 1024, maxReassembledFrameBytes: 134217728 });",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      "  if (command.type === 'negotiate_protocol') send({ id: command.id, type: 'response', command: 'negotiate_protocol', success: true, data: { protocolVersion: 2 } });",
+      "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-335', model: { provider: 'openai', id: 'gpt-5.4' } } });",
+      "  if (command.type === 'prompt') {",
+      "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
+      "    send({ type: 'rpc_chunk', chunkId: 'over-ceiling', index: 0, count: 2, byteLength: 67108865, data: Buffer.from('{}').toString('base64') });",
+      "    send({ type: 'agent_end', isTerminal: true, messages: [] });",
       "  }",
       "}",
       ""

@@ -36,10 +36,12 @@ The adapter:
 5. streams raw frames and normalized events until a terminal `agent_end`;
 6. closes stdin, records the child exit, and unconditionally stops the provider process scope.
 
-Protocol v2 chunks are decoded as strict base64, checked against advertised physical and logical
-byte limits, reassembled in order, and retained as raw evidence alongside the reconstructed logical
-frame. Missing, mismatched, out-of-order, invalid, or oversized chunks are malformed provider
-events.
+Protocol v2 chunks are decoded as strict base64, checked against the advertised physical limit and
+the effective logical limit, reassembled in order, and retained as raw evidence alongside the
+reconstructed logical frame. The effective logical limit is the smaller of OMP's advertised
+`maxReassembledFrameBytes` and a fixed daemon-local 64 MiB ceiling. A larger advertisement remains
+compatible, but a chunk declaring a logical frame above the effective limit is malformed. Missing,
+mismatched, out-of-order, invalid, or oversized chunks are malformed provider events.
 
 The initial normalized mapping is:
 
@@ -110,6 +112,8 @@ provider process scope.
 
 - Dispatch Projects, Workflow agent states, Routine Hosts, and individual Routines can select OMP.
 - Raw logs preserve physical RPC frames; normalized logs expose provider-neutral lifecycle events.
+- OMP may advertise a larger logical-frame limit, but one Run can never negotiate more than the
+  daemon-local 64 MiB reassembly ceiling.
 - OMP input requests fail unattended runs rather than waiting forever for an operator.
 - Existing configs without an OMP block continue to load.
 - The service environment must expose `omp`, including `~/.bun/bin` for common Bun installations.

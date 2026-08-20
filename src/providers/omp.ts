@@ -704,6 +704,7 @@ const FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const PROBE_STDERR_TAIL_BYTES = 8192;
 const DEFAULT_MAX_PENDING_FRAME_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_PENDING_ITEMS = 4096;
+const MAX_REASSEMBLED_FRAME_BYTES = 64 * 1024 * 1024;
 
 function boundedMalformedEvidence(line: string): string {
   if (Buffer.byteLength(line, "utf8") <= MALFORMED_EVIDENCE_MAX_BYTES) {
@@ -1169,7 +1170,7 @@ export function createProcessQueue(
 
 export class RpcChunkDecoder {
   private maxFrameBytes = 1024 * 1024;
-  private maxReassembledBytes = 64 * 1024 * 1024;
+  private maxReassembledBytes = MAX_REASSEMBLED_FRAME_BYTES;
   private pending: PendingRpcChunks | undefined = undefined;
 
   get pendingBufferBytes(): number {
@@ -1181,12 +1182,16 @@ export class RpcChunkDecoder {
       !Number.isSafeInteger(maxFrameBytes) ||
       !Number.isSafeInteger(maxReassembledBytes) ||
       maxFrameBytes < 1 ||
-      maxReassembledBytes < maxFrameBytes
+      maxReassembledBytes < maxFrameBytes ||
+      maxFrameBytes > MAX_REASSEMBLED_FRAME_BYTES
     ) {
       throw new Error("invalid Oh My Pi RPC frame limits");
     }
     this.maxFrameBytes = maxFrameBytes;
-    this.maxReassembledBytes = maxReassembledBytes;
+    this.maxReassembledBytes = Math.min(
+      maxReassembledBytes,
+      MAX_REASSEMBLED_FRAME_BYTES
+    );
   }
 
   interrupt(): boolean {

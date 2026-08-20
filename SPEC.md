@@ -1568,13 +1568,20 @@ sample's five-minute window by walking persisted cumulative totals (and treating
 path change as a counter reset), never by re-scanning the Normalized Event Log. `idle_since`
 survives daemon restart, so a Run that was already observed idle resumes its grace window from the
 first idle observation rather than from process boot. It is cleared on entry to `waiting` (so an
-unsampled wait excursion does not accrue idle time) and reset on attempt change (so a transient
-retry, which re-enters a running agent state, starts a fresh grace window).
+unsampled wait excursion does not accrue idle time). When a Run begins any new attempt, its
+transition to `preparing_workspace` advances a per-Run Watchdog generation and atomically clears the
+latest sample and remembered turn-id set while preserving append-only sample history. Every
+Watchdog mutation is conditional on the `running` state and generation captured before sampling,
+so an old attempt's tick that finishes asynchronous log or Workspace I/O after the transition is
+discarded instead of recreating data or terminating the new attempt. A transient retry therefore
+exposes no current Progress Signal during workspace preparation and starts every attempt-local
+baseline and idle grace window fresh when sampling resumes.
 
 Sampling reads the Normalized Event Log only forward of the stored byte offset and walks the
-Workspace tree once. A transient retry writes a new per-attempt log path, so the byte offset and the
-output-token baseline are reset whenever `normalized_log_path` changes and the new attempt's events
-are read from the start. The hard-coded v1 exclude set is `.git/`, `target/`, and `node_modules/`,
+Workspace tree once. A transient retry writes a new per-attempt log path; its first sample reads
+that file from the start with zeroed byte-offset and output-token baselines. The reconciler also
+treats any observed `normalized_log_path` change as a defensive baseline reset. The hard-coded v1
+exclude set is `.git/`, `target/`, and `node_modules/`,
 skipped at the directory-entry level and not descended. The current per-Project Workflow Contract's
 `evidence.ignore` list adds workspace-relative directory trees that are also skipped before descent;
 when an active Run's Project has been removed from the Service Config, the Watchdog uses the list
@@ -2084,17 +2091,18 @@ The server-rendered dashboard and `/runs` list surface the same idle/grace state
 the run-state summary, rendering `last tool_call age`, `workspace mtime age`, `turn_ids observed`,
 `output tokens / 5m`, and (when set) `idle_since` and `grace remaining` — the same fields `show-run`
 exposes. For any Run not in the `running` state — a terminal state (including `terminal_reason =
-"no_progress"`), `queued`, `preparing_workspace`, or `waiting` — all three Progress Signal surfaces
-— `show-run`, `GET /api/runs/:id`, and the Run-detail page — compute ages and grace remaining
-against the Run's last persisted watchdog sample rather than the live clock. A Run's watchdog sample
-only ever advances while it is `running`, so a live clock against any other state's sample is a
-misleading, ever-drifting countdown for data that no longer describes what the Run is currently
-doing — most visibly for a terminated Run revisited days later (a stable, final signal instead of an
-ever-more-negative live countdown), but equally for a retried Run sitting in `preparing_workspace`
-with the prior failed attempt's sample still on record. (`runs.updated_at` is not used for this:
-it can keep advancing after termination for unrelated reasons, e.g. pull-request-discovery polling
-for succeeded Runs.) Both HTTP surfaces read the same `watchdog` object and render nothing (badge
-absent, section hidden) when the effective Watchdog policy is disabled.
+"no_progress"`) or `waiting` — all three Progress Signal surfaces — `show-run`, `GET /api/runs/:id`,
+and the Run-detail page — compute ages and grace remaining against the Run's last persisted watchdog
+sample rather than the live clock. A Run's watchdog sample only ever advances while it is `running`,
+so a live clock against a preserved non-running sample is a misleading, ever-drifting countdown for
+data that no longer describes what the Run is currently doing — most visibly for a terminated Run
+revisited days later (a stable, final signal instead of an ever-more-negative live countdown).
+`queued` first attempts have no sample, and entering `preparing_workspace` for any attempt clears the
+latest sample, so a retry in preparation reports that no Progress Signal exists yet rather than
+showing prior-attempt data. (`runs.updated_at` is not used as the clock: it can keep advancing after
+termination for unrelated reasons, e.g. pull-request-discovery polling for succeeded Runs.) Both
+HTTP surfaces read the same `watchdog` object and render nothing (badge absent, section hidden) when
+the effective Watchdog policy is disabled.
 
 For a waiting Run whose tracked PR has unresolved review feedback after the configured dispatch
 cap, `GET /api/runs/:id` also exposes a top-level `pullRequestFollowup` object with

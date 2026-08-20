@@ -459,6 +459,7 @@ export type WatchdogCandidateRun = {
   projectName: string;
   runId: string;
   state: Extract<RunState, "running">;
+  watchdogGeneration: number;
   workspacePath: string;
 };
 
@@ -608,6 +609,7 @@ type WatchdogCandidateRunRow = {
   normalized_log_path: string | null;
   project_name: string;
   state: WatchdogCandidateRun["state"];
+  watchdog_generation: number;
   workspace_path: string | null;
 };
 
@@ -1219,7 +1221,7 @@ export class RunStore {
       .prepare(
         [
           "select id, project_name, issue_number, state, evidence_ignore_json,",
-          "workspace_path, normalized_log_path",
+          "workspace_path, normalized_log_path, watchdog_generation",
           "from runs",
           // ADR 0054: only `running` Runs have a live provider that can wedge.
           // queued/preparing_workspace have no provider yet (no liveness signal
@@ -1236,6 +1238,7 @@ export class RunStore {
       projectName: row.project_name,
       runId: row.id,
       state: row.state,
+      watchdogGeneration: row.watchdog_generation,
       workspacePath: row.workspace_path ?? ""
     }));
   }
@@ -1254,7 +1257,10 @@ export class RunStore {
     return row === undefined ? undefined : mapWatchdogSampleRow(row);
   }
 
-  upsertWatchdogSample(sample: WatchdogSample): void {
+  upsertWatchdogSample(
+    sample: WatchdogSample,
+    watchdogGeneration?: number
+  ): boolean {
     const values = {
       idle_since: sample.idleSince,
       last_message_at: sample.lastMessageAt,
@@ -1303,9 +1309,16 @@ export class RunStore {
         ")"
       ].join(" ")
     );
-    this.database.transaction(() => {
+    return this.database.transaction(() => {
+      if (
+        watchdogGeneration !== undefined &&
+        !this.isCurrentWatchdogGeneration(sample.runId, watchdogGeneration)
+      ) {
+        return false;
+      }
       latest.run(values);
       history.run(values);
+      return true;
     })();
   }
 
@@ -1350,7 +1363,11 @@ export class RunStore {
     return growth;
   }
 
-  rememberWatchdogTurnIds(runId: string, turnIds: Iterable<string>): number {
+  rememberWatchdogTurnIds(
+    runId: string,
+    turnIds: Iterable<string>,
+    watchdogGeneration?: number
+  ): number | undefined {
     const insert = this.database.prepare(
       "insert or ignore into watchdog_turn_ids (run_id, turn_id) values (?, ?)"
     );
@@ -1358,15 +1375,29 @@ export class RunStore {
       "select count(*) as count from watchdog_turn_ids where run_id = ?"
     );
     const apply = this.database.transaction(() => {
+      if (
+        watchdogGeneration !== undefined &&
+        !this.isCurrentWatchdogGeneration(runId, watchdogGeneration)
+      ) {
+        return undefined;
+      }
       for (const turnId of turnIds) {
         insert.run(runId, turnId);
       }
       return count.get(runId) as { count: number };
     });
-    return apply().count;
+    return apply()?.count;
   }
 
-  markRunNoProgressStale(runId: string, updatedAt = timestamp()): boolean {
+  markRunNoProgressStale(
+    runId: string,
+    updatedAt = timestamp(),
+    watchdogGeneration?: number
+  ): boolean {
+    const generationGuard =
+      watchdogGeneration === undefined
+        ? ""
+        : "and watchdog_generation = @watchdog_generation";
     const result = this.database
       .prepare(
         [
@@ -1376,13 +1407,20 @@ export class RunStore {
           "failure_classification = 'deterministic',",
           "notification_state = 'pending',",
           "notification_error = null,",
-          "updated_at = ?",
-          "where id = ?",
+          "updated_at = @updated_at",
+          "where id = @id",
           "and state = 'running'",
-          "and cancel_requested = 0"
+          "and cancel_requested = 0",
+          generationGuard
         ].join(" ")
       )
-      .run(updatedAt, runId);
+      .run({
+        id: runId,
+        updated_at: updatedAt,
+        ...(watchdogGeneration === undefined
+          ? {}
+          : { watchdog_generation: watchdogGeneration })
+      });
     if (result.changes === 0) {
       return false;
     }
@@ -3387,22 +3425,42 @@ export class RunStore {
 
   updateRunState(runId: string, state: RunState): void {
     const now = timestamp();
-    this.database
-      .prepare(
-        [
-          "update runs set state = @state,",
-          "notification_state = case",
-          "when @state in ('succeeded', 'failed', 'blocked', 'cancelled', 'stale', 'input_required')",
-          "and not (@state = 'failed' and failure_classification = 'transient')",
-          "then 'pending' else notification_state end,",
-          "notification_error = case",
-          "when @state in ('succeeded', 'failed', 'blocked', 'cancelled', 'stale', 'input_required')",
-          "and not (@state = 'failed' and failure_classification = 'transient')",
-          "then null else notification_error end,",
-          "updated_at = @updated_at where id = @id"
-        ].join(" ")
-      )
-      .run({ id: runId, state, updated_at: now });
+    const update = this.database.prepare(
+      [
+        "update runs set state = @state,",
+        "notification_state = case",
+        "when @state in ('succeeded', 'failed', 'blocked', 'cancelled', 'stale', 'input_required')",
+        "and not (@state = 'failed' and failure_classification = 'transient')",
+        "then 'pending' else notification_state end,",
+        "notification_error = case",
+        "when @state in ('succeeded', 'failed', 'blocked', 'cancelled', 'stale', 'input_required')",
+        "and not (@state = 'failed' and failure_classification = 'transient')",
+        "then null else notification_error end,",
+        "watchdog_generation = watchdog_generation +",
+        "case when @state = 'preparing_workspace' then 1 else 0 end,",
+        "updated_at = @updated_at where id = @id"
+      ].join(" ")
+    );
+    if (state === "preparing_workspace") {
+      // A Run row is reused across transient retry attempts, while the
+      // latest Watchdog sample and remembered turn IDs are keyed by run_id.
+      // Advance the generation fence and clear those attempt-local values
+      // before exposing the new attempt's preparing state. A sample captured
+      // by the prior generation can then recreate neither current data nor a
+      // stale verdict after its async I/O completes. Append-only sample history
+      // remains durable evidence.
+      this.database.transaction(() => {
+        this.database
+          .prepare("delete from watchdog_samples where run_id = ?")
+          .run(runId);
+        this.database
+          .prepare("delete from watchdog_turn_ids where run_id = ?")
+          .run(runId);
+        update.run({ id: runId, state, updated_at: now });
+      })();
+    } else {
+      update.run({ id: runId, state, updated_at: now });
+    }
     this.recordRunTransition(runId, state, now);
     if (state === "waiting") {
       // ADR 0054: idle_since is a persisted wall-clock timestamp and the
@@ -4537,6 +4595,7 @@ export class RunStore {
         normalized_log_path text,
         notification_state text not null default 'skipped',
         notification_error text,
+        watchdog_generation integer not null default 0,
         created_at text not null,
         updated_at text not null
       );
@@ -4852,6 +4911,7 @@ export class RunStore {
       ["runs", "state_transition_reason", "text"],
       ["runs", "notification_state", "text not null default 'skipped'"],
       ["runs", "notification_error", "text"],
+      ["runs", "watchdog_generation", "integer not null default 0"],
       [
         "tracked_pull_requests",
         "review_followup_cap_reached",
@@ -5022,6 +5082,19 @@ export class RunStore {
 
     this.database.exec(`alter table ${table} add column ${column} ${decl};`);
     return true;
+  }
+
+  private isCurrentWatchdogGeneration(
+    runId: string,
+    watchdogGeneration: number
+  ): boolean {
+    return (
+      this.database
+        .prepare(
+          "select 1 from runs where id = ? and state = 'running' and watchdog_generation = ?"
+        )
+        .get(runId, watchdogGeneration) !== undefined
+    );
   }
 
   private recordRunTransition(

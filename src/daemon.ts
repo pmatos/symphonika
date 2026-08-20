@@ -1759,8 +1759,10 @@ export async function startDaemon(
       await activeRuns.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
       await scheduledWork;
       await Promise.allSettled(Array.from(inflightDispatches));
-      await routineNotificationDeliveries.settled();
-      await daemonHealthNotifications.settled();
+      await Promise.all([
+        routineNotificationDeliveries.settled(),
+        daemonHealthNotifications.settled()
+      ]);
       try {
         shutdownController.abort();
         await stopServer(server, logger);

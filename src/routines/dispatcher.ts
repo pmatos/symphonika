@@ -337,15 +337,10 @@ export function fireRoutineNow(
       // during graceful shutdown without keeping manual firing completion
       // open on SMTP I/O (ADR 0085).
       enqueueRoutineFiringNotification(
-        {
-          env: input.env ?? process.env,
-          firingId,
-          logger: input.logger,
-          notification: input.notification,
-          project,
-          routine: detail,
-          runStore: input.runStore
-        },
+        input,
+        firingId,
+        project,
+        detail,
         firingResult
       );
     });
@@ -790,15 +785,10 @@ export async function dispatchDueRoutines(
           // released so a stalled relay holds neither project capacity nor
           // this routine dispatch open (ADR 0085).
           enqueueRoutineFiringNotification(
-            {
-              env: input.env ?? process.env,
-              firingId,
-              logger: input.logger,
-              notification: input.notification,
-              project,
-              routine: routineDetail,
-              runStore: input.runStore
-            },
+            input,
+            firingId,
+            project,
+            routineDetail,
             firingResult
           );
         });
@@ -1434,17 +1424,31 @@ async function inspectRoutineCommitsAhead(input: {
 // both enqueue notification delivery identically instead of each hand-rolling
 // the same `.deliveries.enqueue(...)` call.
 function enqueueRoutineFiringNotification(
-  input: Parameters<typeof recordRoutineFiringNotification>[0],
+  input: Pick<
+    DispatchDueRoutinesInput,
+    "env" | "logger" | "notification" | "runStore"
+  >,
+  firingId: string,
+  project: RunControllerProjectConfig,
+  routine: RoutineStatus & { prompt: string },
   firingResult: RoutineFiringResult
 ): void {
   input.notification?.deliveries.enqueue(
     () =>
       recordRoutineFiringNotification(
-        input,
+        {
+          env: input.env ?? process.env,
+          firingId,
+          logger: input.logger,
+          notification: input.notification,
+          project,
+          routine,
+          runStore: input.runStore
+        },
         firingResult.events,
         firingResult.prepared
       ),
-    { firingId: input.firingId }
+    { firingId }
   );
 }
 

@@ -1976,7 +1976,10 @@ outcome. It validates routine declarations and workflow contracts today; service
 validation-reuse is deferred to whichever editor route first needs it (ADR-0075 records why). A
 save target must resolve — through symlinks — to one of the specific paths the current valid
 config actually references (`resolveConfinedWritePath`/`computeReferencedRealPaths`,
-`src/path-safety.ts`), not merely a path inside the config directory.
+`src/path-safety.ts`), not merely a path inside the config directory. For a symlinked Workflow
+Contract, confinement, stale checks, and the atomic write use the resolved target, while validation
+keeps the configured logical Workflow Contract path as the base for relative prompt references —
+the same base the real reload uses.
 
 `GET /routines/:name/edit` is the first caller (`#307`, ADR-0076): raw text editing of the
 Routine's declaration file, no generated form — the file is Markdown-with-YAML-front-matter, and a

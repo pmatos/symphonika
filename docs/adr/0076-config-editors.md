@@ -177,6 +177,14 @@ already looked up against the run store, so there is no arbitrary-file-read surf
 Confining a read that can only ever target a legitimately-tracked declaration would add a check
 with nothing to check against.
 
+For a symlinked Workflow Contract, confirm deliberately keeps two paths: `resolveWritePath`'s real
+target is used for the stale check and atomic rename so the save updates the target without
+replacing the symlink, while the configured logical Workflow Contract path is passed separately as
+`runSavePipeline.validationPath`. Reload calls `readWorkflowSnapshot` with that same logical path,
+so relative raw-FSM prompt references must be validated from its directory. Validating from the
+resolved target's directory would let preview and reload agree while confirm alone rejects (or
+accepts) the same submitted contract against a different filesystem base.
+
 ### Ambiguous name resolution reuses the existing disambiguation page
 
 A routine name can resolve to more than one declaration (`groupRoutinesByName`'s documented "stale

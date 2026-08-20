@@ -1661,6 +1661,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         reload:
           options.triggerReload ??
           (() => Promise.resolve({ errors: [], ok: true })),
+        validationPath: workflow.path,
         workflowFormat: workflow.format
       });
 

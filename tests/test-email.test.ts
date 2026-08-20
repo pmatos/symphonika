@@ -75,7 +75,9 @@ describe("test-email", () => {
 
   it("redacts the SMTP password from the reported delivery failure", async () => {
     const root = await makeTempRoot();
-    const configPath = await writeEmailConfig(root, "always", true, true);
+    const configPath = await writeEmailConfig(root, "always", {
+      authenticated: true
+    });
     const secret = "smtp-password-that-must-not-reach-the-cli";
     const deliver = vi
       .fn()
@@ -97,7 +99,9 @@ describe("test-email", () => {
 
   it("forces delivery when Routine Firing notifications are muted", async () => {
     const root = await makeTempRoot();
-    const configPath = await writeEmailConfig(root, "always", false);
+    const configPath = await writeEmailConfig(root, "always", {
+      routineFirings: false
+    });
     const deliver = vi.fn().mockResolvedValue(undefined);
 
     const report = await runTestEmail({
@@ -114,9 +118,9 @@ describe("test-email", () => {
 async function writeEmailConfig(
   root: string,
   on: "always" | "changes" | "failures",
-  routineFirings = true,
-  authenticated = false
+  options: { authenticated?: boolean; routineFirings?: boolean } = {}
 ): Promise<string> {
+  const { authenticated = false, routineFirings = true } = options;
   const configPath = path.join(root, "symphonika.yml");
   await writeFile(
     configPath,

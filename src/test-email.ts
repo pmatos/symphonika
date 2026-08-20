@@ -149,5 +149,5 @@ function redactSmtpPassword(
   if (secret === undefined || secret.length === 0) {
     return message;
   }
-  return message.split(secret).join("[REDACTED]");
+  return message.replaceAll(secret, "[REDACTED]");
 }

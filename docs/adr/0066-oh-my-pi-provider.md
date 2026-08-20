@@ -42,10 +42,9 @@ reconstructed logical frame. The effective logical limit is the smaller of OMP's
 `maxReassembledFrameBytes` and a fixed daemon-local 64 MiB ceiling. A larger advertisement remains
 compatible, but a chunk declaring a logical frame above the effective limit is malformed. Missing,
 mismatched, out-of-order, invalid, or oversized chunks are malformed provider events. The advertised
-physical `maxFrameBytes` is checked against the same 64 MiB ceiling at negotiation time, but is not
-clamped the way the logical limit is: a ready frame advertising a larger physical limit fails the
-handshake outright as an incompatible ready frame, even for a v1-only OMP that never negotiates
-chunking.
+physical `maxFrameBytes` remains the independently enforced limit for individual frames and is not
+subject to the daemon-local logical-frame ceiling; a larger physical advertisement remains
+compatible, including for a v1-only OMP that never negotiates chunking.
 
 The initial normalized mapping is:
 

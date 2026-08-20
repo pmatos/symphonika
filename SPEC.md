@@ -1349,10 +1349,9 @@ The OMP adapter requires RPC mode (`--mode rpc`, selected exactly once) and reje
 (`-p`/`--print`). It validates the versioned ready frame with a bounded startup probe and negotiates
 protocol v2 chunking when the installed OMP advertises it. The daemon caps the effective
 `maxReassembledFrameBytes` at 64 MiB even when OMP advertises a larger logical-frame limit; an
-over-ceiling v2 chunk declaration is a malformed provider event. The physical `maxFrameBytes` the
-ready frame advertises is held to the same 64 MiB ceiling, but is not clamped: a ready frame
-advertising a larger physical limit is rejected outright as an incompatible ready frame, regardless
-of whether protocol v2 is ever negotiated. See ADR-0066.
+over-ceiling v2 chunk declaration is a malformed provider event. The physical `maxFrameBytes`
+advertisement remains the independently enforced limit for individual frames and is not capped by
+the daemon's logical-frame ceiling. See ADR-0066.
 
 Provider commands may be overridden, but the replacement command must speak the provider adapter's
 expected protocol.

@@ -1184,8 +1184,7 @@ export class RpcChunkDecoder {
       !Number.isSafeInteger(maxFrameBytes) ||
       !Number.isSafeInteger(maxReassembledBytes) ||
       maxFrameBytes < 1 ||
-      maxReassembledBytes < maxFrameBytes ||
-      maxFrameBytes > MAX_REASSEMBLED_FRAME_BYTES
+      maxReassembledBytes < maxFrameBytes
     ) {
       throw new Error("invalid Oh My Pi RPC frame limits");
     }

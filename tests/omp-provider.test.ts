@@ -317,7 +317,7 @@ describe("Oh My Pi RPC provider", () => {
     });
   });
 
-  it("rejects a ready frame whose physical byte limit exceeds the daemon-local ceiling", async () => {
+  it("accepts a protocol v1 ready frame whose physical byte limit exceeds the logical ceiling", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
     await mkdir(workspacePath, { recursive: true });
@@ -337,13 +337,23 @@ describe("Oh My Pi RPC provider", () => {
     );
 
     expect(
-      events
-        .map((event) => event.normalized)
-        .find((event) => event?.type === "turn_failed")
-    ).toMatchObject({
-      message: "Oh My Pi provider emitted an incompatible ready frame",
-      type: "turn_failed"
-    });
+      events.map((event) => event.normalized).filter(Boolean)
+    ).toMatchObject([
+      {
+        sessionId: "omp-session-large-physical-limit",
+        type: "session_started"
+      },
+      {
+        sessionId: "omp-session-large-physical-limit",
+        type: "turn_completed"
+      },
+      {
+        cancelled: false,
+        exitCode: 0,
+        signal: null,
+        type: "process_exit"
+      }
+    ]);
   });
 
   it("rejects physical frames above the ready-frame byte limit", async () => {
@@ -2299,8 +2309,19 @@ async function writeFakeOverCeilingReadyFrameOmp(
   await writeFile(
     filePath,
     [
-      "process.stdout.write(`${JSON.stringify({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1, 2], maxFrameBytes: 134217728, maxReassembledFrameBytes: 134217728 })}\\n`);",
-      "setTimeout(() => process.exit(0), 10);",
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 134217728, maxReassembledFrameBytes: 134217728 });",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-large-physical-limit', model: { provider: 'openai', id: 'gpt-5.4' } } });",
+      "  if (command.type === 'prompt') {",
+      "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } });",
+      "    send({ type: 'turn_end', message: { role: 'assistant' }, toolResults: [] });",
+      "    send({ type: 'agent_end', isTerminal: true, messages: [] });",
+      "  }",
+      "}",
       ""
     ].join("\n"),
     "utf8"

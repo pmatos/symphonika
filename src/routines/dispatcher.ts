@@ -48,7 +48,10 @@ import {
   renderRoutinePrompt,
   RoutinePromptRenderError
 } from "./prompt-renderer.js";
-import { routineEvidencePaths } from "./evidence.js";
+import {
+  encodeRoutineEventIndexRecord,
+  routineEvidencePaths
+} from "./evidence.js";
 import type {
   RoutineSchedule,
   RoutineState,
@@ -1864,25 +1867,27 @@ async function appendRoutineEvent(input: {
   redactSecrets: () => string[];
 }): Promise<{ offset: number; sequence: number }> {
   const redactSecrets = input.redactSecrets();
-  const [, normalizedLogOffset] = await Promise.all([
+  if (input.event.normalized === undefined) {
+    await appendJsonl(input.rawLogPath, input.event.raw, redactSecrets);
+    return {
+      offset: input.normalizedLogOffset,
+      sequence: input.normalizedLogSequence
+    };
+  }
+  const [, offset] = await Promise.all([
     appendJsonl(input.rawLogPath, input.event.raw, redactSecrets),
-    input.event.normalized === undefined
-      ? Promise.resolve(input.normalizedLogOffset)
-      : appendIndexedJsonl({
-          filePath: input.normalizedLogPath,
-          indexPath: input.normalizedIndexPath,
-          offset: input.normalizedLogOffset,
-          redactSecrets,
-          sequence: input.normalizedLogSequence,
-          value: input.event.normalized
-        })
+    appendIndexedJsonl({
+      filePath: input.normalizedLogPath,
+      indexPath: input.normalizedIndexPath,
+      offset: input.normalizedLogOffset,
+      redactSecrets,
+      sequence: input.normalizedLogSequence,
+      value: input.event.normalized
+    })
   ]);
   return {
-    offset: normalizedLogOffset,
-    sequence:
-      input.event.normalized === undefined
-        ? input.normalizedLogSequence
-        : input.normalizedLogSequence + 1
+    offset,
+    sequence: input.normalizedLogSequence + 1
   };
 }
 
@@ -2179,11 +2184,11 @@ async function appendIndexedJsonl(input: {
   value: unknown;
 }): Promise<number> {
   const line = serializeJsonl(input.value, input.redactSecrets);
-  const record = Buffer.alloc(16);
-  record.writeBigUInt64BE(BigInt(input.offset));
-  record.writeBigUInt64BE(BigInt(input.sequence), 8);
-  await appendFile(input.filePath, line);
-  await appendFile(input.indexPath, record);
+  const record = encodeRoutineEventIndexRecord(input.offset, input.sequence);
+  await Promise.all([
+    appendFile(input.filePath, line),
+    appendFile(input.indexPath, record)
+  ]);
   return input.offset + line.length;
 }
 

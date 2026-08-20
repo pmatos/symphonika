@@ -42,11 +42,9 @@ vi.mock("node:fs", async (importOriginal) => {
           ? options.end + 1
           : virtualLog.indexContents.length;
       const contents = virtualLog.indexContents.subarray(start, end);
-      return Readable.from([
-        typeof options === "object" && options.encoding === "latin1"
-          ? contents.toString("latin1")
-          : contents
-      ]) as ReturnType<typeof actual.createReadStream>;
+      return Readable.from([contents]) as ReturnType<
+        typeof actual.createReadStream
+      >;
     }
   };
 });
@@ -117,7 +115,10 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
 });
 
-import { readRecentRoutineEvents } from "../src/routines/evidence.js";
+import {
+  encodeRoutineEventIndexRecord,
+  readRecentRoutineEvents
+} from "../src/routines/evidence.js";
 
 afterEach(() => {
   virtualLog.contents = Buffer.alloc(0);
@@ -130,10 +131,7 @@ function indexedLog(lines: string[]): { contents: Buffer; index: Buffer } {
   const records: Buffer[] = [];
   let offset = 0;
   for (const [index, line] of lines.entries()) {
-    const record = Buffer.alloc(16);
-    record.writeBigUInt64BE(BigInt(offset));
-    record.writeBigUInt64BE(BigInt(index + 1), 8);
-    records.push(record);
+    records.push(encodeRoutineEventIndexRecord(offset, index + 1));
     offset += Buffer.byteLength(`${line}\n`, "utf8");
   }
   return {

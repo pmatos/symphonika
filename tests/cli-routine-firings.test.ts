@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { buildCli } from "../src/cli.js";
+import { encodeRoutineEventIndexRecord } from "../src/routines/evidence.js";
 import { databasePath, openRunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
@@ -625,10 +626,7 @@ function encodeEventIndex(lines: string[], separator: string): Buffer {
   let sequence = 1;
   for (const line of lines) {
     if (line.length > 0) {
-      const record = Buffer.alloc(16);
-      record.writeBigUInt64BE(BigInt(offset));
-      record.writeBigUInt64BE(BigInt(sequence), 8);
-      records.push(record);
+      records.push(encodeRoutineEventIndexRecord(offset, sequence));
       sequence += 1;
     }
     offset += Buffer.byteLength(`${line}${separator}`, "utf8");

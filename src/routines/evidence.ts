@@ -14,12 +14,35 @@ export type RecentRoutineEventTail = {
 };
 
 const EVENT_TAIL_CHUNK_BYTES = 64 * 1_024;
-const EVENT_INDEX_RECORD_BYTES = 16;
+export const EVENT_INDEX_RECORD_BYTES = 16;
 
 type RoutineEventIndexRecord = {
   offset: number;
   sequence: number;
 };
+
+// Single source of truth for the on-disk offset+sequence record layout, so
+// the dispatcher's writer and this module's reader (and their tests) can't
+// drift apart on byte layout.
+export function encodeRoutineEventIndexRecord(
+  offset: number,
+  sequence: number
+): Buffer {
+  const record = Buffer.alloc(EVENT_INDEX_RECORD_BYTES);
+  record.writeBigUInt64BE(BigInt(offset));
+  record.writeBigUInt64BE(BigInt(sequence), 8);
+  return record;
+}
+
+function decodeRoutineEventIndexRecord(
+  contents: Buffer,
+  position: number
+): { offset: bigint; sequence: bigint } {
+  return {
+    offset: contents.readBigUInt64BE(position),
+    sequence: contents.readBigUInt64BE(position + 8)
+  };
+}
 
 // Firing evidence is a normalized-log file on disk, not a DB-backed
 // provider_events table (a Run's own model) — this bounded suffix read is
@@ -35,11 +58,10 @@ export async function readRecentRoutineEvents(
   let handle: FileHandle | undefined;
   try {
     handle = await open(normalizedLogPath, "r");
-    const { size } = await handle.stat();
-    const indexedRecords = await readIndexedTailRecords(
-      normalizedLogPath,
-      limit
-    );
+    const [{ size }, indexedRecords] = await Promise.all([
+      handle.stat(),
+      readIndexedTailRecords(normalizedLogPath, limit)
+    ]);
     if (indexedRecords !== undefined) {
       const lines = await readValidatedIndexedEventTail(
         handle,
@@ -94,8 +116,10 @@ async function readIndexedTailRecords(
     const records: RoutineEventIndexRecord[] = [];
     for (let index = 0; index < selectedCount; index += 1) {
       const position = index * EVENT_INDEX_RECORD_BYTES;
-      const offset = contents.readBigUInt64BE(position);
-      const sequence = contents.readBigUInt64BE(position + 8);
+      const { offset, sequence } = decodeRoutineEventIndexRecord(
+        contents,
+        position
+      );
       if (
         offset > BigInt(Number.MAX_SAFE_INTEGER) ||
         sequence < 1n ||
@@ -108,12 +132,11 @@ async function readIndexedTailRecords(
         offset: Number(offset),
         sequence: Number(sequence)
       };
+      // The anchor check above already forces every record's sequence to
+      // equal firstSequence + index, so two adjacent records can only ever
+      // differ by exactly 1 — only offset monotonicity is left to verify.
       const previous = records.at(-1);
-      if (
-        previous !== undefined &&
-        (record.offset <= previous.offset ||
-          record.sequence !== previous.sequence + 1)
-      ) {
+      if (previous !== undefined && record.offset <= previous.offset) {
         return undefined;
       }
       records.push(record);
@@ -129,15 +152,11 @@ async function readStreamRange(
   start: number,
   end: number
 ): Promise<Buffer> {
-  let contents = "";
-  for await (const chunk of createReadStream(filePath, {
-    encoding: "latin1",
-    end,
-    start
-  })) {
-    contents += chunk;
+  const chunks: Buffer[] = [];
+  for await (const chunk of createReadStream(filePath, { end, start })) {
+    chunks.push(chunk as Buffer);
   }
-  return Buffer.from(contents, "latin1");
+  return Buffer.concat(chunks);
 }
 
 async function readValidatedIndexedEventTail(
@@ -149,6 +168,11 @@ async function readValidatedIndexedEventTail(
   if (firstRecord === undefined) {
     return undefined;
   }
+  // Probe every record's newline boundary up front (cheap: one byte each)
+  // rather than relying solely on the forward scan below to catch a bad
+  // offset — a corrupt record deep past a large first line would otherwise
+  // only be caught once the scan reaches it, defeating the bounded-read
+  // reason this index exists in the first place.
   for (const record of records) {
     if (record.offset >= fileSize) {
       return undefined;

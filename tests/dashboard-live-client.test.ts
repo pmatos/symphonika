@@ -16,6 +16,19 @@ function loadPatchFragment(): (id: string, html: string) => void {
   )() as (id: string, html: string) => void;
 }
 
+function installFakeEventSource(): Map<string, Array<() => void>> {
+  const listeners = new Map<string, Array<() => void>>();
+  class FakeEventSource {
+    addEventListener(type: string, listener: () => void): void {
+      const existing = listeners.get(type) ?? [];
+      existing.push(listener);
+      listeners.set(type, existing);
+    }
+  }
+  (globalThis as Record<string, unknown>).EventSource = FakeEventSource;
+  return listeners;
+}
+
 describe("dashboard live-update client script (#305 part 2, ADR 0074)", () => {
   it("patchFragment replaces only the named container's content, leaving sibling DOM untouched", () => {
     document.body.innerHTML = `
@@ -55,15 +68,7 @@ describe("dashboard live-update client script (#305 part 2, ADR 0074)", () => {
       <div id="projects-section"></div>
     `;
 
-    const listeners = new Map<string, Array<() => void>>();
-    class FakeEventSource {
-      addEventListener(type: string, listener: () => void): void {
-        const existing = listeners.get(type) ?? [];
-        existing.push(listener);
-        listeners.set(type, existing);
-      }
-    }
-    (globalThis as Record<string, unknown>).EventSource = FakeEventSource;
+    const listeners = installFakeEventSource();
 
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -97,15 +102,7 @@ describe("dashboard live-update client script (#305 part 2, ADR 0074)", () => {
       <div id="projects-section"><p>last good projects</p></div>
     `;
 
-    const listeners = new Map<string, Array<() => void>>();
-    class FakeEventSource {
-      addEventListener(type: string, listener: () => void): void {
-        const existing = listeners.get(type) ?? [];
-        existing.push(listener);
-        listeners.set(type, existing);
-      }
-    }
-    (globalThis as Record<string, unknown>).EventSource = FakeEventSource;
+    const listeners = installFakeEventSource();
 
     const fetchMock = vi.fn().mockImplementation((url: string) =>
       Promise.resolve({

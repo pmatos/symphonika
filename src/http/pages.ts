@@ -2444,11 +2444,8 @@ export const DASHBOARD_LIVE_CLIENT_JS = `(function () {
   function refreshFragment(url, id) {
     fetch(url)
       .then(function (r) {
-        if (!r.ok) { return null; }
-        return r.text();
-      })
-      .then(function (html) {
-        if (html !== null) { patchFragment(id, html); }
+        if (!r.ok) { return; }
+        return r.text().then(function (html) { patchFragment(id, html); });
       })
       .catch(function () {
         // Keep the last-good render. A later invalidation will retry.

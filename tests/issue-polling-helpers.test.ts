@@ -10,6 +10,7 @@ import {
   mergeIssuePollStatus,
   parseParentIssueNumber,
   pollConfiguredGitHubIssuesFromConfig,
+  projectPollIdentityKey,
   rateLimitedTokens,
   swallowLabelNotFound,
   tryAddLabelsToIssue,
@@ -1001,6 +1002,45 @@ const betaProject: PollingProjectConfig = {
   }
 };
 
+describe("pollConfiguredGitHubIssuesFromConfig same-tick rate limits", () => {
+  it("skips later projects on the rate-limited token while polling a different token", async () => {
+    const gammaProject: PollingProjectConfig = {
+      ...betaProject,
+      name: "gamma",
+      tracker: {
+        ...betaProject.tracker,
+        repo: "gamma",
+        token: "$GITHUB_TOKEN_GAMMA"
+      }
+    };
+    const polledRepositories: string[] = [];
+    const githubIssuesApi: GitHubIssuesApi = {
+      listOpenIssues: (input) => {
+        polledRepositories.push(input.repo);
+        return input.repo === "alpha"
+          ? Promise.reject(new Error("API rate limit exceeded"))
+          : Promise.resolve([]);
+      }
+    };
+
+    const status = await pollConfiguredGitHubIssuesFromConfig({
+      config: { projects: [alphaProject, betaProject, gammaProject] },
+      env: {
+        GITHUB_TOKEN_ALPHA: "shared-secret",
+        GITHUB_TOKEN_BETA: "shared-secret",
+        GITHUB_TOKEN_GAMMA: "independent-secret"
+      },
+      githubIssuesApi
+    });
+
+    expect(polledRepositories).toEqual(["alpha", "gamma"]);
+    expect(status.projects.map((project) => project.name)).toEqual([
+      "alpha",
+      "gamma"
+    ]);
+  });
+});
+
 describe("rateLimitedTokens", () => {
   const env = {
     GITHUB_TOKEN_ALPHA: "secret-alpha",
@@ -1058,6 +1098,76 @@ describe("rateLimitedTokens", () => {
 });
 
 describe("mergeIssuePollStatus", () => {
+  it("exposes candidates only from the selected duplicate-name declaration", () => {
+    const candidateIssue = (number: number, repo: string) => ({
+      issue: {
+        body: "",
+        created_at: "",
+        id: number,
+        labels: [],
+        number,
+        priority: 0,
+        state: "open" as const,
+        title: `${repo} issue`,
+        updated_at: "",
+        url: ""
+      },
+      project: "shared",
+      repository: { owner: "pmatos", repo }
+    });
+    const prior = {
+      ...emptyIssuePollStatus(),
+      candidateIssues: [candidateIssue(1, "alpha")],
+      projects: [
+        {
+          fetchedIssues: 1,
+          name: "shared",
+          ok: true,
+          repository: { owner: "pmatos", repo: "alpha" }
+        }
+      ]
+    };
+    const fresh = {
+      ...emptyIssuePollStatus(),
+      candidateIssues: [candidateIssue(2, "beta")],
+      projects: [
+        {
+          fetchedIssues: 1,
+          name: "shared",
+          ok: true,
+          repository: { owner: "pmatos", repo: "beta" }
+        }
+      ]
+    };
+    const selectedProjectKeysByName = new Map([
+      [
+        "shared",
+        projectPollIdentityKey("shared", { owner: "pmatos", repo: "beta" })
+      ]
+    ]);
+
+    const merged = mergeIssuePollStatus(
+      prior,
+      fresh,
+      new Set([
+        projectPollIdentityKey("shared", { owner: "pmatos", repo: "beta" })
+      ]),
+      new Set([
+        projectPollIdentityKey("shared", { owner: "pmatos", repo: "alpha" }),
+        projectPollIdentityKey("shared", { owner: "pmatos", repo: "beta" })
+      ]),
+      selectedProjectKeysByName
+    );
+
+    expect(
+      merged.candidateIssues.map((candidate) => candidate.repository.repo)
+    ).toEqual(["beta"]);
+    expect(merged.projects.map((project) => project.repository.repo)).toEqual([
+      "alpha",
+      "beta"
+    ]);
+  });
+
   it("keeps a skipped project's prior entries and replaces only the polled project's", () => {
     const prior = {
       ...emptyIssuePollStatus(),
@@ -1121,8 +1231,23 @@ describe("mergeIssuePollStatus", () => {
     const merged = mergeIssuePollStatus(
       prior,
       fresh,
-      new Set(["beta"]),
-      new Set(["alpha", "beta"])
+      new Set([
+        projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ]),
+      new Set([
+        projectPollIdentityKey("alpha", { owner: "pmatos", repo: "alpha" }),
+        projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ]),
+      new Map([
+        [
+          "alpha",
+          projectPollIdentityKey("alpha", { owner: "pmatos", repo: "alpha" })
+        ],
+        [
+          "beta",
+          projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+        ]
+      ])
     );
 
     expect(merged.candidateIssues.map((entry) => entry.project)).toEqual([
@@ -1149,8 +1274,9 @@ describe("mergeIssuePollStatus", () => {
     const merged = mergeIssuePollStatus(
       prior,
       fresh,
-      new Set(["alpha"]),
-      new Set(["alpha"])
+      new Set([projectPollIdentityKey("alpha", repository)]),
+      new Set([projectPollIdentityKey("alpha", repository)]),
+      new Map([["alpha", projectPollIdentityKey("alpha", repository)]])
     );
 
     expect(merged.projects).toEqual([
@@ -1205,8 +1331,18 @@ describe("mergeIssuePollStatus", () => {
     const merged = mergeIssuePollStatus(
       prior,
       fresh,
-      new Set(["beta"]),
-      new Set(["beta"])
+      new Set([
+        projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ]),
+      new Set([
+        projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ]),
+      new Map([
+        [
+          "beta",
+          projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+        ]
+      ])
     );
 
     expect(merged.candidateIssues).toEqual([]);
@@ -1244,8 +1380,23 @@ describe("mergeIssuePollStatus", () => {
     const merged = mergeIssuePollStatus(
       prior,
       fresh,
-      new Set(["beta"]),
-      new Set(["alpha", "beta"])
+      new Set([
+        projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ]),
+      new Set([
+        projectPollIdentityKey("alpha", { owner: "pmatos", repo: "alpha" }),
+        projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+      ]),
+      new Map([
+        [
+          "alpha",
+          projectPollIdentityKey("alpha", { owner: "pmatos", repo: "alpha" })
+        ],
+        [
+          "beta",
+          projectPollIdentityKey("beta", { owner: "pmatos", repo: "beta" })
+        ]
+      ])
     );
 
     expect(merged.errors).toEqual(["projects.alpha rate limit exceeded"]);

@@ -78,6 +78,38 @@ another call. This only stops *new* calls from starting; a call already in fligh
 still completes (there's no way to abort a request already sent), and every PR still gets a row per the
 existing "must not drop the row" contract -- only some of them go unenriched for that tick.
 
+### Sequential issue-project polling stops on a shared token within the same tick
+
+The daemon's window-scoped `githubBackoffUntilByToken` map cannot stop a later Project in the issue
+poll's sequential loop: the map is engaged only after `pollConfiguredGitHubIssuesFromConfig`
+returns its whole batch of reports. The poll function therefore owns a second, tick-local
+`Set<string>` of resolved tokens. After one Project reports a rate-limit-shaped error, later
+Projects resolving to that token are skipped for the remainder of that call; Projects on other
+tokens continue normally. The set is discarded when the call returns, while the daemon still uses
+the first Project's report to engage the longer-lived backoff window for future ticks.
+
+An intra-tick skipped Project produces no fresh report. `refreshIssuePollStatus` consequently
+derives the set of actually polled Project identities from `nextStatus.projects`, not from the
+larger tick-start-pollable input list. Identity is the Project name plus its case-insensitive GitHub
+owner/repository, matching ADR 0077's snapshot provenance boundary; name alone would conflate two
+declarations with the same name and drop the later, skipped repository's prior status.
+Persisted project state and issue snapshots remain name-keyed, so fresh reports replace them only
+when their repository is the last declaration selected by the runtime name lookup. A shadowed first
+declaration that rate-limits therefore cannot invalidate the selected declaration's carried-over
+state while the selected declaration is skipped.
+`mergeIssuePollStatus` uses those identities to carry the skipped Project's prior in-memory status
+forward. Before exposing the merged candidates to dispatch, it also filters both carried-over and
+fresh candidates against the same last-declaration-wins identity map. Repository-specific reports
+and filtered diagnostics remain available, but an Issue from a shadowed repository cannot be
+dispatched through the selected declaration's token and Workspace.
+
+Poll-outcome and issue-snapshot persistence already iterate only fresh reports. The raw-config
+`syncProjectStates` pass still has to run for every tick so removal, mode, and weight changes remain
+visible, but a schema-valid Project with no report is not automatically proof of recovery:
+`readProjectStateInputs` preserves its prior validation result when that exact identity was skipped
+by backoff. Config-validation errors continue to take precedence, and disabled/removed declarations
+are not classified as backoff skips.
+
 ### Backoff is keyed by resolved GitHub token, not global
 
 `daemon.ts` holds `githubBackoffUntilByToken: Map<string, number>`, keyed by the token
@@ -111,17 +143,18 @@ tick regardless of how many projects were actually polled, since it also derives
 Routine Host dashboard state) from the full config file, independent of GitHub polling. The PR poll,
 which has no such side effect, is skipped outright when nothing is pollable.
 
-A project excluded from a tick's pollable subset keeps its `issuePollStatus` entries and persisted
-snapshot exactly as the last successful poll produced them, mirroring `pollProject`'s own "leave prior
-snapshot untouched" contract for a single failed project -- `mergeIssuePollStatus`
-(`src/issue-polling.ts`) carries a skipped project's entries forward into the in-memory status instead
-of a bare replace, while `persistProjectPollState`/`persistProjectPullRequestPollState` naturally
-leave a skipped project's DB rows untouched since both already write per-project rather than doing a
-destructive full-project-list sync. Config reload (`reloadConfigAndRecordOutcome`) runs unconditionally
-before partitioning, so an `interval_ms` edit or a corrected token takes effect promptly rather than
-waiting out any project's window. `issueRunNotifications.schedulePending()` at the function's tail
-also always runs, independent of partitioning, so a run that completes while some (or all) projects
-are backing off doesn't wait out the window before its notification is scheduled.
+A project excluded from a tick's pollable subset keeps its `issuePollStatus` entries, persisted poll
+outcome, issue snapshot, and validation result exactly as the last attempted poll produced them,
+mirroring `pollProject`'s own "leave prior snapshot untouched" contract for a single failed project.
+`mergeIssuePollStatus` (`src/issue-polling.ts`) carries a skipped project's entries forward into the
+in-memory status instead of a bare replace. `persistProjectPollState` reconciles raw config metadata
+but retains skipped validation evidence; its poll-outcome and issue-snapshot loops, and
+`persistProjectPullRequestPollState`, remain per-project writes that never receive a skipped report.
+Config reload (`reloadConfigAndRecordOutcome`) runs unconditionally before partitioning, so an
+`interval_ms` edit or a corrected token takes effect promptly rather than waiting out any project's
+window. `issueRunNotifications.schedulePending()` at the function's tail also always runs,
+independent of partitioning, so a run that completes while some (or all) projects are backing off
+doesn't wait out the window before its notification is scheduled.
 
 ### Fresh dispatch filters carried-over candidates by active token backoff
 
@@ -146,15 +179,20 @@ limits, which apply across both API surfaces for the credential; the daemon inte
 the established per-token window as the admission rule rather than trying to infer which budget
 produced a message-shaped rate-limit error.
 
-### Carry-over is limited to still-configured projects, and preserves their own errors
+### Carry-over is limited to still-enabled configured projects, and preserves their own errors
 
-`mergeIssuePollStatus` takes both `polledProjectNames` (this tick's pollable subset) and
-`configuredProjectNames` (every project in the just-reloaded config, pollable or not) and only carries
-a prior project's entries forward when that project is in `configuredProjectNames` but not in
-`polledProjectNames` -- i.e. it still exists in config and was specifically skipped for backoff. A
-project a config reload removes or renames satisfies neither set once its old name is
-gone, so its stale candidates/filtered-issues/report are dropped on the very next tick instead of
-persisting in `/api/status`, poll-now summaries, and CLI/smoke output indefinitely.
+`mergeIssuePollStatus` takes both `polledProjectKeys` (this tick's attempted Project identities) and
+`configuredProjectKeys` (every enabled Project identity in the just-reloaded config, pollable or
+not) and only carries a prior project's entries forward when that identity is in
+`configuredProjectKeys` but not in `polledProjectKeys` -- i.e. it remains enabled and was
+specifically skipped for backoff. Repository identity is part of each key, so one attempted
+declaration cannot mark a same-name declaration for another repository as polled. A Project a
+config reload disables, removes, renames, or retargets satisfies neither set once the new snapshot
+is active, so its stale candidates/filtered-issues/report are dropped on the very next tick instead
+of persisting in `/api/status`, poll-now summaries, and CLI/smoke output indefinitely. Disabled
+Projects still retain their last persisted per-Project issue snapshot as historical operator
+evidence; this rule only prevents that evidence from masquerading as current in-memory polling
+status.
 
 The merge also no longer does a bare `errors: fresh.errors` replace. `fresh.errors` only ever reflects
 the projects actually polled this tick, so a carried-over (backed-off) project's own rate-limit
@@ -188,8 +226,10 @@ existing best-effort behavior and do not engage the window.
 ## Consequences
 
 - `src/issue-polling.ts` exports `isRateLimitError`, `backoffUntil`, `GITHUB_RATE_LIMIT_BACKOFF_MS`,
-  `rateLimitedTokens`, and `mergeIssuePollStatus` (now taking a `configuredProjectNames` parameter in
-  addition to `polledProjectNames`).
+  `rateLimitedTokens`, `projectPollIdentityKey`, and `mergeIssuePollStatus` (taking configured and
+  attempted Project-identity sets).
+- Same-tick issue polling also keys its short-lived suppression set by the resolved token, so two
+  different `$VAR_NAME` references resolving to the same credential share one limit.
 - PR Follow-up discovery, tracked-state, and merge calls are gated by the same per-token window and
   report their own rate-limit failures back to the daemon without persisting credentials.
 - A `PullRequestPollStatus.projects` entry can now be `ok: true` with a populated `error` -- "polled

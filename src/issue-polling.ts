@@ -949,26 +949,34 @@ export function replaceIssuePollStatus(
 // Like replaceIssuePollStatus, but for a tick that only polled a subset of
 // configured projects (credential-scoped backoff excludes any project whose
 // resolved token is currently backing off, see daemon.ts). Entries for a
-// polled project come from `fresh`; entries for every other *currently
-// configured* project are carried over from `prior` untouched, mirroring
-// pollProject's own "leave prior snapshot untouched" contract for a single
-// failed project, just applied per-project across a partial poll instead of
-// an all-or-nothing one. `configuredProjectNames` is deliberately the full
-// configured set, not just the pollable/backed-off ones -- a project a
-// config reload removed or renamed is absent from both `polledProjectNames`
-// and `configuredProjectNames`, so it's dropped here too instead of being
-// carried over indefinitely.
+// polled project come from `fresh`; entries for every other Project that is
+// *currently enabled and configured* are carried over from `prior` untouched,
+// mirroring pollProject's own "leave prior snapshot untouched" contract for a
+// single failed project, just applied per-project across a partial poll
+// instead of an all-or-nothing one. `configuredProjectKeys` is deliberately
+// the full enabled configured set, not just the pollable/backed-off ones -- a
+// project a config reload disabled, removed, or renamed is absent from both
+// `polledProjectKeys` and `configuredProjectKeys`, so it's dropped here too
+// instead of being carried over indefinitely. Candidate issues are narrower:
+// only the last declaration selected for a Project name may reach dispatch,
+// while repository-specific reports and filtered diagnostics remain visible.
 export function mergeIssuePollStatus(
   prior: IssuePollStatus,
   fresh: IssuePollStatus,
-  polledProjectNames: ReadonlySet<string>,
-  configuredProjectNames: ReadonlySet<string>
+  polledProjectKeys: ReadonlySet<string>,
+  configuredProjectKeys: ReadonlySet<string>,
+  selectedProjectKeysByName: ReadonlyMap<string, string>
 ): IssuePollStatus {
-  const carryOver = (name: string): boolean =>
-    !polledProjectNames.has(name) && configuredProjectNames.has(name);
+  const carryOver = (
+    name: string,
+    repository: GitHubRepositoryIdentity
+  ): boolean => {
+    const key = projectPollIdentityKey(name, repository);
+    return !polledProjectKeys.has(key) && configuredProjectKeys.has(key);
+  };
 
   const carriedOverProjects = prior.projects.filter((project) =>
-    carryOver(project.name)
+    carryOver(project.name, project.repository)
   );
   // A carried-over project's own rate-limit error must survive the merge --
   // otherwise the first clean poll of any OTHER project on the same tick
@@ -978,21 +986,37 @@ export function mergeIssuePollStatus(
   const carriedOverErrors = carriedOverProjects
     .map((project) => project.error)
     .filter((error): error is string => error !== undefined);
+  const selectedCandidate = (candidate: ProjectIssueSnapshot): boolean =>
+    selectedProjectKeysByName.get(candidate.project) ===
+    projectPollIdentityKey(candidate.project, candidate.repository);
 
   return {
     candidateIssues: [
       ...prior.candidateIssues.filter((candidate) =>
-        carryOver(candidate.project)
+        carryOver(candidate.project, candidate.repository)
       ),
       ...fresh.candidateIssues
-    ],
+    ].filter(selectedCandidate),
     errors: [...carriedOverErrors, ...fresh.errors],
     filteredIssues: [
-      ...prior.filteredIssues.filter((filtered) => carryOver(filtered.project)),
+      ...prior.filteredIssues.filter((filtered) =>
+        carryOver(filtered.project, filtered.repository)
+      ),
       ...fresh.filteredIssues
     ],
     projects: [...carriedOverProjects, ...fresh.projects]
   };
+}
+
+export function projectPollIdentityKey(
+  name: string,
+  repository: GitHubRepositoryIdentity
+): string {
+  return JSON.stringify([
+    name,
+    repository.owner.toLowerCase(),
+    repository.repo.toLowerCase()
+  ]);
 }
 
 export async function readConfiguredPollingIntervalMs(
@@ -1032,13 +1056,27 @@ export async function pollConfiguredGitHubIssuesFromConfig(options: {
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const status = emptyIssuePollStatus();
   status.errors.push(...(options.initialErrors ?? []));
+  const tickRateLimitedTokens = new Set<string>();
 
   for (const project of options.config.projects) {
     if (project.disabled === true) {
       continue;
     }
 
-    await pollProject(project, env, githubIssuesApi, status);
+    const token = resolveEnvBackedValue(project.tracker.token, env);
+    if (token !== undefined && tickRateLimitedTokens.has(token)) {
+      continue;
+    }
+
+    await pollProject(project, token, githubIssuesApi, status);
+    const report = status.projects.at(-1);
+    if (
+      token !== undefined &&
+      report?.error !== undefined &&
+      isRateLimitError(report.error)
+    ) {
+      tickRateLimitedTokens.add(token);
+    }
   }
 
   status.candidateIssues.sort(compareProjectIssues);
@@ -1049,7 +1087,7 @@ export async function pollConfiguredGitHubIssuesFromConfig(options: {
 
 async function pollProject(
   project: PollingProjectConfig,
-  env: NodeJS.ProcessEnv,
+  token: string | undefined,
   githubIssuesApi: GitHubIssuesApi,
   status: IssuePollStatus
 ): Promise<void> {
@@ -1059,7 +1097,6 @@ async function pollProject(
     repo: project.tracker.repo
   };
   const weight = project.weight ?? 1;
-  const token = resolveEnvBackedValue(project.tracker.token, env);
   if (token === undefined) {
     const variableName = envReferenceName(project.tracker.token);
     const error =

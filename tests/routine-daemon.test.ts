@@ -639,7 +639,10 @@ describe("daemon routine firing", () => {
 
   it("keeps a last-known-good Routine live when its declaration reload becomes invalid", async () => {
     const root = await makeTempRoot();
-    const fireAt = new Date(Date.now() + 1_000).toISOString();
+    // Leave enough headroom for the daemon to publish the initial active row
+    // before the one-shot fires; under whole-suite contention a shorter
+    // window can expire before the first status observation.
+    const fireAt = new Date(Date.now() + 3_000).toISOString();
     const routinePath = path.join(root, "daily-report.md");
     await writeRoutineProject(root, fireAt);
     const provider = quietProvider();

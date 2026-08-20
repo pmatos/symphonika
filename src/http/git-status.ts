@@ -74,26 +74,21 @@ export async function detectGitFileState(
     ])
   ]);
 
-  const branch = branchRef?.startsWith("refs/heads/")
-    ? branchRef.slice("refs/heads/".length)
-    : branchRef;
-  const detachedHeadSha =
-    branch === undefined
-      ? ((await tryGit(["-C", repoRoot, "rev-parse", "HEAD"])) ?? null)
-      : null;
+  const branch = branchRef?.replace(/^refs\/heads\//, "");
   const absoluteGitDir =
     gitDir === undefined
       ? path.join(repoRoot, ".git")
       : path.resolve(repoRoot, gitDir);
-  const midRebase =
-    (await pathExists(path.join(absoluteGitDir, "rebase-merge"))) ||
-    (await pathExists(path.join(absoluteGitDir, "rebase-apply")));
 
-  const wholeTreeStatus = await tryGit([
-    "-C",
-    repoRoot,
-    "status",
-    "--porcelain=v1"
+  const [detachedHeadSha, midRebase, wholeTreeStatus] = await Promise.all([
+    branch === undefined
+      ? tryGit(["-C", repoRoot, "rev-parse", "HEAD"]).then((sha) => sha ?? null)
+      : Promise.resolve(null),
+    Promise.all([
+      pathExists(path.join(absoluteGitDir, "rebase-merge")),
+      pathExists(path.join(absoluteGitDir, "rebase-apply"))
+    ]).then(([rebaseMerge, rebaseApply]) => rebaseMerge || rebaseApply),
+    tryGit(["-C", repoRoot, "status", "--porcelain=v1"])
   ]);
 
   return {

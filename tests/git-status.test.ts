@@ -76,10 +76,8 @@ describe("detectGitFileState (#306 part 3/3, ADR 0075)", () => {
     const state = await detectGitFileState(filePath);
     expect(state.inRepo).toBe(true);
     if (state.inRepo) {
-      expect(state).toMatchObject({
-        branch: "main",
-        detachedHeadSha: null
-      });
+      expect(state.branch).toBe("main");
+      expect(state.detachedHeadSha).toBeNull();
     }
   });
 

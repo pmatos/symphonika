@@ -541,22 +541,21 @@ describe("daemon GitHub issue polling", () => {
     });
 
     try {
+      type StatusBody = {
+        filteredIssues: Array<{ issue: { number: number }; project: string }>;
+        issuePolling: { errors: string[] };
+      };
+      let body: StatusBody | undefined;
       await waitFor(async () => {
         const response = await fetch(`${daemon.url}/api/status`);
-        const body = (await response.json()) as {
-          issuePolling: { errors: string[] };
-        };
+        body = (await response.json()) as StatusBody;
         return body.issuePolling.errors.some((error) =>
           error.includes("rate limit")
         );
       });
 
-      const response = await fetch(`${daemon.url}/api/status`);
-      const body = (await response.json()) as {
-        filteredIssues: Array<{ issue: { number: number }; project: string }>;
-      };
       expect(
-        body.filteredIssues.map(({ issue, project }) => ({
+        body?.filteredIssues.map(({ issue, project }) => ({
           number: issue.number,
           project
         }))

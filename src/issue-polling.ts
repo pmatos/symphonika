@@ -1044,9 +1044,8 @@ export async function pollConfiguredGitHubIssuesFromConfig(options: {
       continue;
     }
 
-    const reportIndex = status.projects.length;
-    await pollProject(project, env, githubIssuesApi, status);
-    const report = status.projects[reportIndex];
+    await pollProject(project, token, githubIssuesApi, status);
+    const report = status.projects.at(-1);
     if (
       token !== undefined &&
       report?.error !== undefined &&
@@ -1064,7 +1063,7 @@ export async function pollConfiguredGitHubIssuesFromConfig(options: {
 
 async function pollProject(
   project: PollingProjectConfig,
-  env: NodeJS.ProcessEnv,
+  token: string | undefined,
   githubIssuesApi: GitHubIssuesApi,
   status: IssuePollStatus
 ): Promise<void> {
@@ -1074,7 +1073,6 @@ async function pollProject(
     repo: project.tracker.repo
   };
   const weight = project.weight ?? 1;
-  const token = resolveEnvBackedValue(project.tracker.token, env);
   if (token === undefined) {
     const variableName = envReferenceName(project.tracker.token);
     const error =

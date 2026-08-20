@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 
 import type { AddRoutineOptions, AddRoutineReport } from "./add-routine.js";
 import { runAddRoutine } from "./add-routine.js";
+import { formatArtifactKinds } from "./artifact-format.js";
 import type { DaemonHandle, StartDaemonOptions } from "./daemon.js";
 import { startDaemon } from "./daemon.js";
 import { resolveServiceConfigPath } from "./config-paths.js";
@@ -46,7 +47,6 @@ import type {
   OpenRunStoreOptions,
   ProjectState,
   RunDetail,
-  RunArtifactDescriptor,
   RunState,
   RunStatus,
   RunStore
@@ -2510,17 +2510,6 @@ function formatFiringDuration(
     return "-";
   }
   return formatWatchdogDuration(Math.max(0, endMs - startMs));
-}
-
-function formatArtifactKinds(artifacts: RunArtifactDescriptor[]): string {
-  const present = artifacts
-    .filter((artifact) => artifact.present)
-    .map((artifact) =>
-      artifact.sizeBytes === undefined
-        ? artifact.kind
-        : `${artifact.kind}(${artifact.sizeBytes} bytes)`
-    );
-  return present.length === 0 ? "(none)" : present.join(", ");
 }
 
 async function loadWatchdogServiceConfig(

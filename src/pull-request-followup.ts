@@ -345,9 +345,15 @@ async function processTrackedPullRequests(input: {
     }
 
     const state = interpretPullRequest(rawState);
+    // GraphQL normalizes an omitted headRefOid to an empty string (see
+    // pull-request-polling.ts). Fall back to the last known-good head SHA so
+    // neither the tracked row nor a merge/review-dispatch call ever records
+    // or pins an empty string.
+    const headSha =
+      state.headSha === "" ? tracked.lastSeenHeadSha : state.headSha;
     const trackingState = trackedStateFor(state);
     input.runStore.recordPullRequestObservation({
-      headSha: state.headSha,
+      headSha,
       id: tracked.id,
       prUrl: state.url,
       reviewFollowupCapReached:
@@ -362,6 +368,7 @@ async function processTrackedPullRequests(input: {
 
     if (pullRequestNeedsReviewFollowup(state)) {
       const result = await dispatchReviewFollowupIfNeeded({
+        headSha,
         policy: input.policy,
         runController: input.runController,
         runStore: input.runStore,
@@ -403,7 +410,7 @@ async function processTrackedPullRequests(input: {
     try {
       merged = await tryMergePullRequest(input.githubIssuesApi, {
         ...repository,
-        expectedHeadSha: state.headSha,
+        ...(headSha === "" ? {} : { expectedHeadSha: headSha }),
         method: input.policy.merge.method,
         pullNumber: tracked.prNumber
       });
@@ -423,7 +430,7 @@ async function processTrackedPullRequests(input: {
       continue;
     }
     input.runStore.recordPullRequestObservation({
-      headSha: state.headSha,
+      headSha,
       id: tracked.id,
       prUrl: state.url,
       reviewFollowupCapReached: false,
@@ -436,6 +443,7 @@ async function processTrackedPullRequests(input: {
 }
 
 async function dispatchReviewFollowupIfNeeded(input: {
+  headSha: string;
   policy: PullRequestFollowupPolicy;
   runController: RunController;
   runStore: RunStore;
@@ -465,7 +473,7 @@ async function dispatchReviewFollowupIfNeeded(input: {
 
   input.runStore.recordPullRequestReviewDispatch({
     fingerprint,
-    headSha: input.state.headSha,
+    headSha: input.headSha,
     id: input.tracked.id,
     runId: result.runId
   });

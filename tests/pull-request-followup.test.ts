@@ -1194,6 +1194,72 @@ describe("pull request follow-up", () => {
     }
   });
 
+  it("auto-merges using the discovered head SHA when GraphQL follow-up omits headRefOid", async () => {
+    // GraphQL normalizes an omitted headRefOid to an empty string. Sending
+    // that empty string as the merge API's `sha` pin (instead of falling
+    // back to a known-good head SHA, or omitting the pin) makes GitHub
+    // reject a legitimate merge. Regression for #499.
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-clean-pr";
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath: path.join(root, "workspace")
+      });
+      const project = projectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        getPullRequestFollowupState: vi
+          .fn()
+          .mockResolvedValue(prState({ headSha: "" })),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([
+          {
+            draft: false,
+            head: { ref: branchName, sha: "abc123" },
+            html_url: "https://github.com/pmatos/symphonika/pull/82",
+            number: 82,
+            state: "open"
+          }
+        ]),
+        mergePullRequest: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider: fakeProvider([]),
+        root,
+        runStore: store,
+        workspacePath: path.join(root, "workspace")
+      });
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      expect(result).toEqual({ action: "merged", prNumber: 82 });
+      expect(githubIssuesApi.mergePullRequest).toHaveBeenCalledWith({
+        expectedHeadSha: "abc123",
+        method: "squash",
+        owner: "pmatos",
+        pullNumber: 82,
+        repo: "symphonika",
+        token: "secret-token"
+      });
+      expect(store.listOpenTrackedPullRequests()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("skips the review-followup dispatch when a state_advance is already scheduled for the same issue", async () => {
     // Regression for the wait→agent race: reconcileWaitingRuns advances a
     // wait state into an agent state and schedules a state_advance, but the

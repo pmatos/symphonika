@@ -600,20 +600,26 @@ export async function startDaemon(
     }
   };
 
+  // A project whose token can't be resolved (e.g. an unset $VAR_NAME) is
+  // always pollable here -- pollProject reports that failure itself,
+  // unrelated to rate-limit backoff.
+  const isProjectPollable = (
+    project: PollingProjectConfig,
+    env: NodeJS.ProcessEnv,
+    nowMs: number
+  ): boolean => {
+    const token = resolveEnvBackedValue(project.tracker.token, env);
+    return token === undefined || !isGithubBackoffActive(nowMs, token);
+  };
+
   // Splits `projects` into those whose resolved token isn't currently
-  // backing off (pollable now) and the rest (currently skipped). A project
-  // whose token can't be resolved (e.g. an unset $VAR_NAME) is always
-  // pollable here -- pollProject reports that failure itself, unrelated to
-  // rate-limit backoff.
+  // backing off (pollable now) and the rest (currently skipped).
   const partitionProjectsForPolling = (
     projects: readonly PollingProjectConfig[],
     env: NodeJS.ProcessEnv,
     nowMs: number
   ): PollingProjectConfig[] => {
-    return projects.filter((project) => {
-      const token = resolveEnvBackedValue(project.tracker.token, env);
-      return token === undefined || !isGithubBackoffActive(nowMs, token);
-    });
+    return projects.filter((project) => isProjectPollable(project, env, nowMs));
   };
 
   const refreshIssuePollStatus = async (): Promise<void> => {
@@ -920,14 +926,45 @@ export async function startDaemon(
         ) {
           lastPullRequestFollowupAt = now;
           const snapshot = runtimeConfig.getSnapshot();
+          const projectsByName =
+            snapshot === undefined
+              ? undefined
+              : new Map(
+                  snapshot.polling.projects.map((project) => [
+                    project.name,
+                    project
+                  ])
+                );
           prResult = await runPullRequestFollowup({
             configPath: state.configPath,
             env,
             githubIssuesApi,
             logger,
-            ...(snapshot === undefined
+            ...(snapshot === undefined || projectsByName === undefined
               ? {}
-              : { policy: snapshot.pullRequestPolicy }),
+              : {
+                  onProjectRateLimited: ({ error, projectName }) => {
+                    engageGithubBackoff(
+                      [
+                        {
+                          error: errorMessage(error),
+                          name: projectName,
+                          ok: false
+                        }
+                      ],
+                      snapshot.polling.projects,
+                      env
+                    );
+                  },
+                  policy: snapshot.pullRequestPolicy,
+                  shouldPollProject: (projectName: string) => {
+                    const project = projectsByName.get(projectName);
+                    return (
+                      project !== undefined &&
+                      isProjectPollable(project, env, Date.now())
+                    );
+                  }
+                }),
             projectsLoader,
             runController,
             runStore
@@ -1286,6 +1323,23 @@ export async function startDaemon(
           ok: false
         };
       }
+      const repositoryError = verifySnapshotRepositoryBinding({
+        action: "merging",
+        currentRepository: {
+          owner: project.tracker.owner,
+          repo: project.tracker.repo
+        },
+        renderedRepository: input.snapshotRepository,
+        resolveSnapshotRepository: () =>
+          runStore.getProjectPullRequestSnapshotRepository(
+            input.projectName,
+            input.prNumber
+          ),
+        subjectLabel: `pull request #${input.prNumber}`
+      });
+      if (repositoryError !== undefined) {
+        return { error: repositoryError, freshState: undefined, ok: false };
+      }
       const token = resolveToken(project.tracker.token, env);
       if (token === undefined) {
         return {
@@ -1372,43 +1426,27 @@ export async function startDaemon(
         };
       }
       const subjectLabel = input.kind === "issue" ? "issue" : "pull request";
-      if (input.snapshotRepository === undefined) {
-        return {
-          error: `${subjectLabel} #${input.subjectNumber} rendered snapshot repository identity is unavailable; reload the page after a successful poll before writing labels`,
-          ok: false
-        };
-      }
-      const snapshotRepository =
-        input.kind === "issue"
-          ? runStore.getProjectIssueSnapshotRepository(
-              input.projectName,
-              input.subjectNumber
-            )
-          : runStore.getProjectPullRequestSnapshotRepository(
-              input.projectName,
-              input.subjectNumber
-            );
-      if (snapshotRepository === undefined) {
-        return {
-          error: `${subjectLabel} #${input.subjectNumber} snapshot repository identity is unavailable; poll the Project successfully before writing labels`,
-          ok: false
-        };
-      }
-      if (!sameGitHubRepository(input.snapshotRepository, snapshotRepository)) {
-        return {
-          error: `rendered snapshot repository ${input.snapshotRepository.owner}/${input.snapshotRepository.repo} does not match current snapshot repository ${snapshotRepository.owner}/${snapshotRepository.repo}; reload the page before writing labels`,
-          ok: false
-        };
-      }
-      const currentRepository: ProjectSnapshotRepository = {
-        owner: project.tracker.owner,
-        repo: project.tracker.repo
-      };
-      if (!sameGitHubRepository(snapshotRepository, currentRepository)) {
-        return {
-          error: `snapshot repository ${snapshotRepository.owner}/${snapshotRepository.repo} does not match current tracker repository ${currentRepository.owner}/${currentRepository.repo}; poll the Project successfully before writing labels`,
-          ok: false
-        };
+      const repositoryError = verifySnapshotRepositoryBinding({
+        action: "writing labels",
+        currentRepository: {
+          owner: project.tracker.owner,
+          repo: project.tracker.repo
+        },
+        renderedRepository: input.snapshotRepository,
+        resolveSnapshotRepository: () =>
+          input.kind === "issue"
+            ? runStore.getProjectIssueSnapshotRepository(
+                input.projectName,
+                input.subjectNumber
+              )
+            : runStore.getProjectPullRequestSnapshotRepository(
+                input.projectName,
+                input.subjectNumber
+              ),
+        subjectLabel: `${subjectLabel} #${input.subjectNumber}`
+      });
+      if (repositoryError !== undefined) {
+        return { error: repositoryError, ok: false };
       }
       const token = resolveToken(project.tracker.token, env);
       if (token === undefined) {
@@ -1481,8 +1519,11 @@ export async function startDaemon(
     resolveWritePath: async (candidatePath: string) => {
       const referenced = await computeReferencedRealPaths({
         configPath: state.configPath,
+        // listRoutines()'s default already excludes state = 'inactive'; disabled_reason
+        // only means anything on state = 'disabled', so this filter alone also excludes
+        // routines dropped from config via the whole-project inactive cascade.
         routineSourcePaths: runStore
-          .listRoutines({ includeInactive: true })
+          .listRoutines()
           .filter((routine) => routine.disabledReason !== "removed_from_config")
           .map((routine) => routine.sourcePath),
         workflowPaths: [...runtimeConfig.projectsByName().values()]
@@ -1815,6 +1856,33 @@ function sameGitHubRepository(
     left.owner.toLowerCase() === right.owner.toLowerCase() &&
     left.repo.toLowerCase() === right.repo.toLowerCase()
   );
+}
+
+// Shared by mergePullRequest and writeIssueLabels (ADR 0078/0077): both bind
+// a rendered form value through the durable snapshot to the current tracker
+// before mutating anything. `resolveSnapshotRepository` stays a callback so a
+// missing rendered value fails closed without an unnecessary store lookup.
+function verifySnapshotRepositoryBinding(input: {
+  action: string;
+  currentRepository: ProjectSnapshotRepository;
+  renderedRepository: ProjectSnapshotRepository | undefined;
+  resolveSnapshotRepository: () => ProjectSnapshotRepository | undefined;
+  subjectLabel: string;
+}): string | undefined {
+  if (input.renderedRepository === undefined) {
+    return `${input.subjectLabel} rendered snapshot repository identity is unavailable; reload the page after a successful poll before ${input.action}`;
+  }
+  const snapshotRepository = input.resolveSnapshotRepository();
+  if (snapshotRepository === undefined) {
+    return `${input.subjectLabel} snapshot repository identity is unavailable; poll the Project successfully before ${input.action}`;
+  }
+  if (!sameGitHubRepository(input.renderedRepository, snapshotRepository)) {
+    return `rendered snapshot repository ${input.renderedRepository.owner}/${input.renderedRepository.repo} does not match current snapshot repository ${snapshotRepository.owner}/${snapshotRepository.repo}; reload the page before ${input.action}`;
+  }
+  if (!sameGitHubRepository(snapshotRepository, input.currentRepository)) {
+    return `snapshot repository ${snapshotRepository.owner}/${snapshotRepository.repo} does not match current tracker repository ${input.currentRepository.owner}/${input.currentRepository.repo}; poll the Project successfully before ${input.action}`;
+  }
+  return undefined;
 }
 
 function timestamp(): string {

@@ -1612,6 +1612,12 @@ failure preserves the prior value. Resolved feedback, a raised cap, PR closure, 
 the value on the next successful observation. Cap exhaustion does not fail or cancel a parked
 workflow Run: the Run stays `waiting` for human action or a later observation.
 
+PR Follow-up shares the daemon's per-GitHub-token rate-limit backoff with issue polling and the
+repository-wide PR snapshot poll. A project whose resolved token is inside the backoff window makes
+no new PR Follow-up discovery, state, or merge calls. A rate-limit-shaped failure from any of those
+calls engages or extends the same five-minute token window immediately; projects using a different
+token remain eligible for follow-up work.
+
 Default PR follow-up policy: poll enabled, at most `3` review dispatches per PR, squash merge,
 require successful status checks, and do not require an explicit approval unless repository rules
 surface `REVIEW_REQUIRED`.
@@ -1970,24 +1976,27 @@ outcome. It validates routine declarations and workflow contracts today; service
 validation-reuse is deferred to whichever editor route first needs it (ADR-0075 records why). A
 save target must resolve — through symlinks — to one of the specific paths the current valid
 config actually references (`resolveConfinedWritePath`/`computeReferencedRealPaths`,
-`src/path-safety.ts`), not merely a path inside the config directory.
+`src/path-safety.ts`), not merely a path inside the config directory. For a symlinked Workflow
+Contract, confinement, stale checks, and the atomic write use the resolved target, while validation
+keeps the configured logical Workflow Contract path as the base for relative prompt references —
+the same base the real reload uses.
 
 `GET /routines/:name/edit` is the first caller (`#307`, ADR-0076): raw text editing of the
 Routine's declaration file, no generated form — the file is Markdown-with-YAML-front-matter, and a
 form round-trip would reformat it. Saving is two steps, never one: `POST .../edit/preview`
 re-validates the submitted content with `parseRoutineDeclaration` and, when valid, renders a diff
-against the current on-disk content (a small in-process LCS line diff — the two texts are always
-in memory already, never large enough to warrant a dependency); nothing is written until the
-operator submits the resulting confirm form to `POST .../edit/confirm`, which resolves the write
-target through `resolveWritePath` and calls `runSavePipeline` with the daemon's real reload as the
-`reload` callback. A stale write (content changed on disk since the editor opened) is refused with
-the current content shown, never silently overwritten. A YAML syntax error surfaces the parser's
-own line/column (`locatedYamlErrorMessage`, `src/yaml-errors.ts`); a semantic validation error (a
-missing or malformed field) has no parser position to report and is shown as plain text. The
-schedule and next-fire-time effect of a saved edit lands on the next dispatch tick, same as any
-other config reload — the page shows whatever the store's current row holds on next visit, not a
-synthetic post-save preview. The editor states which Routine Targets a save affects and their
-current next-fire time before the operator commits.
+against the current on-disk content (a small in-process line diff: exact LCS is limited to
+1,000,000 table cells, with an operator-labelled, linear-space prefix/suffix fallback for larger
+inputs); nothing is written until the operator submits the resulting confirm form to `POST
+.../edit/confirm`, which resolves the write target through `resolveWritePath` and calls
+`runSavePipeline` with the daemon's real reload as the `reload` callback. A stale write (content
+changed on disk since the editor opened) is refused with the current content shown, never silently
+overwritten. A YAML syntax error surfaces the parser's own line/column (`locatedYamlErrorMessage`,
+`src/yaml-errors.ts`); a semantic validation error (a missing or malformed field) has no parser
+position to report and is shown as plain text. The schedule and next-fire-time effect of a saved
+edit lands on the next dispatch tick, same as any other config reload — the page shows whatever
+the store's current row holds on next visit, not a synthetic post-save preview. The editor states
+which Routine Targets a save affects and their current next-fire time before the operator commits.
 
 `GET /projects/:name/workflow/edit` follows the identical two-step shape for a Dispatch Project's
 workflow contract (a Routine Host has no workflow and gets no edit link). Validation
@@ -2071,9 +2080,14 @@ do not call GitHub while serving a request.
 
 The Routine-detail page (`/routines/:name`) surfaces ADR-0060's disable/enable as a first-class
 action (`#307`): a "Disable routine" / "Enable routine" button (whichever the routine's current
-`disabledReason` calls for; neither renders for a `removed_from_config` routine, since that state
-is controlled by config file inclusion, not this action) posts to `/routines/:name/disable` or
-`/enable`, which computes the toggled `disabled:` value via a targeted structured edit
+`disabledReason` calls for). The action derives that state from a target still backed by the current
+declaration, so a historical `removed_from_config` target cannot hide the control for a live
+sibling. An `operator` reason takes precedence over other current targets because a Project-cascade
+`inactive` target deliberately carries no routine-level reason. When every current target is
+`inactive`, valid front matter supplies the declaration's `disabled` state as a fallback; neither
+button renders when every target is `removed_from_config`, since that state is controlled by config
+file inclusion, not this action. The form posts to `/routines/:name/disable` or `/enable`, which
+computes the toggled `disabled:` value via a targeted structured edit
 (`setRoutineDisabled`, `src/routines/declaration-editor.ts` — the `yaml` document API, preserving
 every other comment and key in the front matter) and renders the same diff-before-write
 confirmation the raw-text editor uses; the confirm button posts to the same
@@ -2195,14 +2209,19 @@ claim uses — the in-process registry, active `runs` rows, and parked `waiting`
 a PR under a `merge_pr` FSM state), the section instead shows "owned by run `<id>`, cannot be merged
 until that Run is cancelled" and renders no button at all — refused both in the UI and, independently,
 server-side on the `POST` route, so a replayed or hand-crafted request gets the identical refusal a
-test covers directly. Merging goes through `mergePullRequest` (`src/daemon.ts`), which resolves the
-Project's tracker token, calls `GitHubIssuesApi.mergePullRequest` with the persisted snapshot's
-`headSha` as `expectedHeadSha` (so GitHub refuses a merge of commits the operator never saw), and —
-regardless of whether that call succeeds or GitHub refuses it — immediately re-fetches the PR's Pull
-Request State and renders that fresh result in the outcome banner, never assuming success or failure
-implies a particular state. Every attempt that reaches GitHub (successful or refused) is recorded as
-a durable evidence row, independent of any Run — the `#259` orphan case that motivates this feature
-has no Run to key evidence off of.
+test covers directly. The Merge form carries both the persisted snapshot's repository identity and
+its `headSha`. Merging goes through `mergePullRequest` (`src/daemon.ts`), which fails closed unless
+the rendered owner/repository matches the current durable PR snapshot and that durable identity
+matches the Project's current tracker; a missing identity or mismatch reaches neither GitHub nor
+merge-attempt evidence. After that guard it resolves the tracker token and calls
+`GitHubIssuesApi.mergePullRequest` with the rendered `headSha` as `expectedHeadSha` (so GitHub
+refuses a merge of commits the operator never saw). Repository binding remains required when the
+rendered snapshot has no head SHA because commit identity is not repository identity. Regardless of
+whether the GitHub call succeeds or GitHub refuses it, Symphonika immediately re-fetches the PR's
+Pull Request State and renders that fresh result in the outcome banner, never assuming success or
+failure implies a particular state. Every attempt that reaches GitHub (successful or refused) is
+recorded as a durable evidence row, independent of any Run — the `#259` orphan case that motivates
+this feature has no Run to key evidence off of.
 
 ## 15. Bootstrap Acceptance Bar
 

@@ -565,6 +565,87 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("backs off PR follow-up after its GitHub call hits a rate limit", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root, { pollingIntervalMs: 10 });
+    const { stateRoot } = resolveStateRoot({ cwd: root });
+    const seedStore = openRunStore({ stateRoot });
+    try {
+      seedStore.createRun({
+        id: "run-with-tracked-pr",
+        issue: {
+          body: "Body",
+          created_at: "2026-08-19T10:00:00.000Z",
+          id: 500,
+          labels: [],
+          number: 500,
+          priority: 1,
+          state: "open",
+          title: "Tracked pull request",
+          updated_at: "2026-08-19T10:00:00.000Z",
+          url: "https://github.com/pmatos/symphonika/issues/500"
+        },
+        projectName: "symphonika",
+        providerCommand: "codex app-server",
+        providerName: "codex"
+      });
+      seedStore.updateRunState("run-with-tracked-pr", "succeeded");
+      seedStore.trackPullRequest({
+        branchName: "sym/symphonika/500-tracked-pr",
+        headSha: "abc123",
+        issueNumber: 500,
+        prNumber: 501,
+        prUrl: "https://github.com/pmatos/symphonika/pull/501",
+        projectName: "symphonika",
+        runId: "run-with-tracked-pr"
+      });
+    } finally {
+      seedStore.close();
+    }
+
+    const githubIssuesApi = {
+      getPullRequestFollowupState: vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            "Request failed due to following response errors: - API rate limit already exceeded for user ID 7911."
+          )
+        ),
+      listOpenIssues: vi.fn().mockResolvedValue([])
+    };
+    const wallNow = Date.now();
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(wallNow);
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      // Advance only the wall clock used by the follow-up throttle. The
+      // interval timer stays real, so the next 10ms tick runs follow-up.
+      dateNow.mockReturnValue(wallNow + 1_001);
+      await waitFor(() =>
+        Promise.resolve(
+          githubIssuesApi.getPullRequestFollowupState.mock.calls.length >= 1
+        )
+      );
+
+      // Another follow-up interval elapses, but the rate-limit failure above
+      // should have engaged the shared five-minute credential backoff.
+      dateNow.mockReturnValue(wallNow + 2_002);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(githubIssuesApi.getPullRequestFollowupState).toHaveBeenCalledTimes(
+        1
+      );
+    } finally {
+      await daemon.stop();
+      dateNow.mockRestore();
+    }
+  });
+
   it("does not let a stale in-flight PR poll's clean result clear a backoff a later tick engaged", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root, { pollingIntervalMs: 10 });

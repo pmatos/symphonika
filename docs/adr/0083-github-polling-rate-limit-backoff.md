@@ -161,6 +161,22 @@ though that project never got a chance to recover.
 tell the two apart. A rate-limited token has nothing to gain from an extra manual attempt during the
 window, so this ADR accepts gating both identically rather than adding plumbing to distinguish them.
 
+### PR Follow-up uses the same token window
+
+The daemon's separate PR Follow-up loop also draws from the configured tracker token through branch
+discovery, tracked-PR state, and merge calls. `runPullRequestFollowup` therefore receives two narrow
+hooks from the daemon: a project-level call gate and a rate-limit reporter. The gate is checked before
+each project's discovery or tracked-PR sequence and again before a merge call, because another
+GitHub subsystem can engage backoff while the preceding state request is in flight. A
+rate-limit-shaped failure at any GitHub catch boundary reports the owning Project immediately; the
+daemon resolves that Project back to its token and engages or extends the same
+`githubBackoffUntilByToken` entry used by issue and repository-wide PR polling.
+
+The gate remains dynamic within one follow-up pass. If one Project hits a limit, later work sharing
+its token is skipped immediately instead of waiting for the next daemon tick, while Projects using a
+different token can continue. Ordinary non-rate-limit observation failures retain PR Follow-up's
+existing best-effort behavior and do not engage the window.
+
 ## Consequences
 
 - `src/issue-polling.ts` exports `isRateLimitError`, `backoffUntil`, `GITHUB_RATE_LIMIT_BACKOFF_MS`,
@@ -168,6 +184,8 @@ window, so this ADR accepts gating both identically rather than adding plumbing 
   addition to `polledProjectNames`).
 - Same-tick issue polling also keys its short-lived suppression set by the resolved token, so two
   different `$VAR_NAME` references resolving to the same credential share one limit.
+- PR Follow-up discovery, tracked-state, and merge calls are gated by the same per-token window and
+  report their own rate-limit failures back to the daemon without persisting credentials.
 - A `PullRequestPollStatus.projects` entry can now be `ok: true` with a populated `error` -- "polled
   successfully, but enrichment hit a rate limit" -- distinct from the pre-existing `ok: false` shape
   for a project the poll couldn't process at all. Any future reader of that field must not assume

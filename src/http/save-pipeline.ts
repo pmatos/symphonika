@@ -28,6 +28,12 @@ export type SavePipelineInput = {
   // directly so this module stays independent of daemon/reload wiring
   // until a caller (#307) actually has one to provide.
   reload: () => Promise<ReloadOutcome>;
+  // The logical path validators should use for resolving relative
+  // references. filePath can be a symlink-resolved target so atomic rename
+  // updates the referenced file without replacing the symlink; reload still
+  // resolves workflow-relative paths from the configured, logical path.
+  // Defaults to filePath for non-symlinked saves and other content kinds.
+  validationPath?: string;
   // kind: "workflow_contract" only -- the project's own resolved format
   // (HttpAppOptions.getProjectWorkflowPath), so validation uses the same
   // grammar reload would rather than always inferring from the file
@@ -75,7 +81,7 @@ export async function runSavePipeline(
 ): Promise<SavePipelineResult> {
   const validation = await VALIDATORS[input.kind](
     input.content,
-    input.filePath,
+    input.validationPath ?? input.filePath,
     input.workflowFormat
   );
   if (validation.errors.length > 0) {

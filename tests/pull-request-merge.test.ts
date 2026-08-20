@@ -130,6 +130,7 @@ async function setup(): Promise<TestSetup> {
   runStore.replaceProjectPullRequestSnapshots({
     polledAt: "2026-05-22T10:00:00.000Z",
     projectName: "alpha",
+    repository: { owner: "pmatos", repo: "alpha" },
     rows: [samplePrRow()]
   });
   return {
@@ -158,6 +159,16 @@ describe("Merge section visibility (#309 part 3, ADR 0078)", () => {
       // POST to pin against rather than re-reading the snapshot fresh.
       expect(html).toContain(
         '<input type="hidden" name="expected_head_sha" value="abc123">'
+      );
+      const mergeForm =
+        /<form method="post" action="\/prs\/alpha\/246\/merge">([\s\S]*?)<\/form>/.exec(
+          html
+        )?.[1];
+      expect(mergeForm).toContain(
+        '<input type="hidden" name="snapshot_owner" value="pmatos">'
+      );
+      expect(mergeForm).toContain(
+        '<input type="hidden" name="snapshot_repo" value="alpha">'
       );
     } finally {
       test.cleanup();
@@ -326,7 +337,9 @@ describe("POST /prs/:project/:number/merge (#309 part 3)", () => {
       const response = await app.request("/prs/alpha/246/merge", {
         body: formBody({
           csrf_token: VALID_TOKEN,
-          expected_head_sha: "abc123"
+          expected_head_sha: "abc123",
+          snapshot_owner: "pmatos",
+          snapshot_repo: "alpha"
         }),
         headers: {
           ...browserHeaders(),
@@ -342,7 +355,8 @@ describe("POST /prs/:project/:number/merge (#309 part 3)", () => {
       expect(received).toEqual({
         expectedHeadSha: "abc123",
         prNumber: 246,
-        projectName: "alpha"
+        projectName: "alpha",
+        snapshotRepository: { owner: "pmatos", repo: "alpha" }
       });
       // A confirmed merge (freshState.merged === true) suppresses the Merge
       // section entirely — otherwise the page would show a live Merge

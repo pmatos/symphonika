@@ -131,6 +131,51 @@ describe("routine declaration editor (#307 part 1, ADR 0075/0076)", () => {
     }
   });
 
+  it("discloses inactive sibling targets of the selected declaration", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit the codebase.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: test.routinePath
+        },
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit the codebase.",
+          provider: null,
+          projectName: "beta",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: test.routinePath
+        }
+      ]);
+      test.runStore.markRoutinesInactiveForProject("beta");
+
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const editor = await (
+        await app.request("/routines/audit/edit", {
+          headers: browserHeaders()
+        })
+      ).text();
+
+      expect(editor).toContain("This save affects");
+      expect(editor).toContain("alpha");
+      expect(editor).toContain("beta");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("returns 404 for a routine name with no declaration", async () => {
     const test = await setup();
     try {
@@ -306,6 +351,232 @@ Unsaved draft content.
       expect(response.headers.get("location")).toBe("/routines/audit?saved=1");
       expect(await readFile(test.routinePath, "utf8")).toBe(editedContent);
       expect(reloadCalls).toBe(1);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("keeps an inactive Routine reachable through a declaration save", async () => {
+    const test = await setup();
+    try {
+      test.runStore.markRoutinesInactiveForProject("alpha");
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        triggerReload: () => Promise.resolve({ errors: [], ok: true }),
+        version: "0.1.0"
+      });
+      const detail = await (
+        await app.request("/routines/audit?include_inactive=true", {
+          headers: browserHeaders()
+        })
+      ).text();
+      expect(detail).toContain(
+        'href="/routines/audit/edit?include_inactive=true"'
+      );
+
+      const editor = await (
+        await app.request("/routines/audit/edit?include_inactive=true", {
+          headers: browserHeaders()
+        })
+      ).text();
+      expect(extractHidden(editor, "include_inactive")).toBe("true");
+
+      const editedContent = VALID_DECLARATION.replace(
+        "Audit the codebase.",
+        "Audit the inactive target."
+      );
+      const preview = await app.request("/routines/audit/edit/preview", {
+        body: formBody({
+          content: editedContent,
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: contentHash(VALID_DECLARATION),
+          include_inactive: "true"
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+      const previewHtml = await preview.text();
+      expect(extractHidden(previewHtml, "include_inactive")).toBe("true");
+
+      const confirm = await app.request("/routines/audit/edit/confirm", {
+        body: formBody({
+          content: editedContent,
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: contentHash(VALID_DECLARATION),
+          include_inactive: "true"
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        redirect: "manual"
+      });
+      expect(confirm.status).toBe(303);
+      expect(confirm.headers.get("location")).toBe(
+        "/routines/audit?include_inactive=true&saved=1"
+      );
+      expect(
+        (
+          await app.request(confirm.headers.get("location") ?? "", {
+            headers: browserHeaders()
+          })
+        ).status
+      ).toBe(200);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("keeps a directly opened inactive editor reachable after save", async () => {
+    const test = await setup();
+    try {
+      test.runStore.markRoutinesInactiveForProject("alpha");
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        triggerReload: () => Promise.resolve({ errors: [], ok: true }),
+        version: "0.1.0"
+      });
+
+      const editor = await (
+        await app.request("/routines/audit/edit", {
+          headers: browserHeaders()
+        })
+      ).text();
+      const includeInactive = extractHidden(editor, "include_inactive");
+
+      const editedContent = VALID_DECLARATION.replace(
+        "Audit the codebase.",
+        "Audit the directly opened inactive target."
+      );
+      const preview = await app.request("/routines/audit/edit/preview", {
+        body: formBody({
+          content: editedContent,
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: contentHash(VALID_DECLARATION),
+          include_inactive: includeInactive
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+      const previewHtml = await preview.text();
+      const confirmedIncludeInactive = extractHidden(
+        previewHtml,
+        "include_inactive"
+      );
+
+      const confirm = await app.request("/routines/audit/edit/confirm", {
+        body: formBody({
+          content: editedContent,
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: contentHash(VALID_DECLARATION),
+          include_inactive: confirmedIncludeInactive
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        redirect: "manual"
+      });
+      expect(confirm.status).toBe(303);
+      expect(confirm.headers.get("location")).toBe(
+        "/routines/audit?include_inactive=true&saved=1"
+      );
+      expect(
+        (
+          await app.request(confirm.headers.get("location") ?? "", {
+            headers: browserHeaders()
+          })
+        ).status
+      ).toBe(200);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("refuses confirmation after the selected declaration is replaced", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        triggerReload: () => Promise.resolve({ errors: [], ok: true }),
+        version: "0.1.0"
+      });
+      const editor = await (
+        await app.request("/routines/audit/edit", {
+          headers: browserHeaders()
+        })
+      ).text();
+      const expectedSourcePath = extractHidden(editor, "expected_source_path");
+      const editedContent = VALID_DECLARATION.replace(
+        "Audit the codebase.",
+        "Edit the originally selected declaration."
+      );
+      const preview = await app.request("/routines/audit/edit/preview", {
+        body: formBody({
+          content: editedContent,
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: contentHash(VALID_DECLARATION),
+          expected_source_path: expectedSourcePath
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+      const previewHtml = await preview.text();
+
+      test.runStore.markRoutinesInactiveForProject("alpha");
+      const replacementPath = path.join(test.stateRoot, "replacement.md");
+      await writeFile(replacementPath, VALID_DECLARATION, "utf8");
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit the codebase.",
+          provider: null,
+          projectName: "beta",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: replacementPath
+        }
+      ]);
+
+      const confirm = await app.request("/routines/audit/edit/confirm", {
+        body: formBody({
+          content: extractHidden(previewHtml, "content"),
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: extractHidden(
+            previewHtml,
+            "expected_content_hash"
+          ),
+          expected_source_path: extractHidden(
+            previewHtml,
+            "expected_source_path"
+          )
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        redirect: "manual"
+      });
+      expect(confirm.status).toBe(409);
+      expect(await readFile(replacementPath, "utf8")).toBe(VALID_DECLARATION);
     } finally {
       test.cleanup();
     }

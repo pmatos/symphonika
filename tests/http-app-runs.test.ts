@@ -2837,6 +2837,44 @@ describe("HTTP app — routine detail page (#304)", () => {
     }
   });
 
+  it("shows an inactive Routine only when include_inactive is requested", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        }
+      ]);
+      test.runStore.markRoutinesInactiveForProject("alpha");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const hiddenResponse = await app.request("/routines/audit");
+      const includedResponse = await app.request(
+        "/routines/audit?include_inactive=true"
+      );
+      const includedBody = await includedResponse.text();
+
+      expect(hiddenResponse.status).toBe(404);
+      expect(includedResponse.status).toBe(200);
+      expect(includedBody).toContain(
+        'aria-hidden="true"></span>inactive</span>'
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("shows the declaration, prompt, per-target row, skip counters, and firing history for a single-target Routine", async () => {
     const test = await setup();
     try {
@@ -3072,6 +3110,57 @@ describe("HTTP app — routine detail page (#304)", () => {
         await app.request("/routines/audit?project=alpha")
       ).text();
       expect(alphaBody).toContain("removed_from_config");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("keeps the inactive opt-in in disambiguation links", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Old declaration.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/old-audit.md"
+        }
+      ]);
+      test.runStore.syncRoutines(
+        [
+          {
+            kind: "report",
+            name: "audit",
+            prompt: "New declaration.",
+            provider: null,
+            projectName: "gamma",
+            schedule: { at: "2026-05-22T11:00:00.000Z" },
+            sourcePath: "/tmp/new-audit.md"
+          }
+        ],
+        { projects: ["alpha", "gamma"] }
+      );
+      test.runStore.markRoutinesInactiveForProject("alpha");
+      test.runStore.markRoutinesInactiveForProject("gamma");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (
+        await app.request("/routines/audit?include_inactive=true")
+      ).text();
+
+      expect(body).toContain(
+        "/routines/audit?project=alpha&amp;include_inactive=true"
+      );
+      expect(body).toContain(
+        "/routines/audit?project=gamma&amp;include_inactive=true"
+      );
     } finally {
       test.cleanup();
     }

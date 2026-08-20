@@ -900,7 +900,8 @@ describe("daemon routine firing", () => {
               "Routine {{routine.name}} for {{project.name}}.",
               "Changed while inactive."
             ),
-            expected_content_hash: contentHash(originalContent)
+            expected_content_hash: contentHash(originalContent),
+            include_inactive: "true"
           }),
           headers: { "content-type": "application/x-www-form-urlencoded" },
           method: "POST",

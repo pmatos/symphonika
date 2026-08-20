@@ -275,7 +275,9 @@ describe("routine disable/enable (#307 part 4, ADR 0076)", () => {
         version: "0.1.0"
       });
       const html = await (
-        await app.request("/routines/audit", { headers: browserHeaders() })
+        await app.request("/routines/audit?include_inactive=true", {
+          headers: browserHeaders()
+        })
       ).text();
       expect(html).toContain('action="/routines/audit/enable"');
       expect(html).toContain("Enable routine");
@@ -311,6 +313,68 @@ describe("routine disable/enable (#307 part 4, ADR 0076)", () => {
       expect(extractHidden(html, "expected_content_hash")).toBe(
         contentHash(VALID_DECLARATION)
       );
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("keeps a default lifecycle toggle scoped to the active declaration", async () => {
+    const test = await setup();
+    try {
+      test.runStore.markRoutinesInactiveForProject("alpha");
+      const currentPath = path.join(test.stateRoot, "current-audit.md");
+      await writeFile(currentPath, VALID_DECLARATION, "utf8");
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Audit the current project.",
+          provider: null,
+          projectName: "beta",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: currentPath
+        }
+      ]);
+
+      const app = createHttpApp({
+        csrfSecret: TEST_SECRET,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const detail = await (
+        await app.request("/routines/audit", { headers: browserHeaders() })
+      ).text();
+      expect(detail).toContain('action="/routines/audit/disable"');
+
+      const response = await app.request("/routines/audit/disable", {
+        body: formBody({ csrf_token: VALID_TOKEN }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain("Confirm disabling audit");
+      expect(html).not.toContain("Multiple declarations share this name");
+
+      const confirm = await app.request("/routines/audit/edit/confirm", {
+        body: formBody({
+          content: extractHidden(html, "content"),
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: extractHidden(html, "expected_content_hash")
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        redirect: "manual"
+      });
+      expect(confirm.status).toBe(303);
+      expect(confirm.headers.get("location")).toBe("/routines/audit?saved=1");
     } finally {
       test.cleanup();
     }

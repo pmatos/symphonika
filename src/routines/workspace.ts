@@ -3,7 +3,11 @@ import { mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { ensureRepositoryCache, type WorkspaceProject } from "../workspace.js";
+import {
+  ensureRepositoryCache,
+  isAbortError,
+  type WorkspaceProject
+} from "../workspace.js";
 import { slugifyWorkspaceSegment } from "../workspace-paths.js";
 import type { RoutineKind } from "./types.js";
 
@@ -78,6 +82,7 @@ export async function prepareRoutineWorkspace(
       workspacePath
     };
   }
+  let createdBranch = false;
   if (
     input.kind === "git" &&
     !(await gitSucceeds(
@@ -95,8 +100,19 @@ export async function prepareRoutineWorkspace(
       ],
       input.signal
     );
+    createdBranch = true;
   }
-  input.signal?.throwIfAborted();
+  try {
+    input.signal?.throwIfAborted();
+  } catch (error) {
+    // The branch above was just created by this call; an abort landing here
+    // would otherwise leak it in the shared cache with nothing left to claim
+    // it (no worktree was created yet to trigger the cleanup below).
+    if (createdBranch) {
+      await cleanupAbortedRoutineBranch(cachePath, branchRef);
+    }
+    throw error;
+  }
   await mkdir(path.dirname(workspacePath), { recursive: true });
   try {
     await git(
@@ -115,7 +131,7 @@ export async function prepareRoutineWorkspace(
     );
     input.signal?.throwIfAborted();
   } catch (error) {
-    if (input.signal?.aborted === true) {
+    if (isAbortError(error)) {
       await cleanupAbortedRoutineWorktree(cachePath, workspacePath);
     }
     throw error;
@@ -167,7 +183,20 @@ async function cleanupAbortedRoutineWorktree(
     "--force",
     workspacePath
   ]).catch(() => undefined);
-  await rm(workspacePath, { force: true, recursive: true });
+  // Best-effort like the removal above: a failure here must not replace the
+  // original abort error the caller is about to (re)throw.
+  await rm(workspacePath, { force: true, recursive: true }).catch(
+    () => undefined
+  );
+}
+
+async function cleanupAbortedRoutineBranch(
+  cachePath: string,
+  branchRef: string
+): Promise<void> {
+  await git(["-C", cachePath, "update-ref", "-d", branchRef]).catch(
+    () => undefined
+  );
 }
 
 async function git(args: string[], signal?: AbortSignal): Promise<string> {
@@ -186,7 +215,7 @@ async function gitSucceeds(
     await git(args, signal);
     return true;
   } catch (error) {
-    if (signal?.aborted === true) {
+    if (isAbortError(error)) {
       throw error;
     }
     return false;

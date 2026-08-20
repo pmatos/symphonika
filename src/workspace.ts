@@ -1,5 +1,13 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rename, rm, stat } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rename,
+  rm,
+  stat
+} from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -257,6 +265,12 @@ async function createRepositoryCache(
   const stagingPath = await mkdtemp(
     path.join(cacheParent, `.${path.basename(cachePath)}.clone-`)
   );
+  // mkdtemp always creates its directory 0700, unlike a direct `git clone
+  // --bare` into a not-yet-existing path, which follows the process umask
+  // (0755 under the common default). Restore that parity before publishing
+  // so readers that previously could traverse/read the shared cache still
+  // can.
+  await chmod(stagingPath, 0o755);
   let published = false;
   try {
     await git(
@@ -292,7 +306,7 @@ async function ensureRepositoryCacheRemote(
       signal
     );
   } catch (error) {
-    if (signal?.aborted === true) {
+    if (isAbortError(error)) {
       throw error;
     }
     throw new WorkspacePreparationError(
@@ -368,4 +382,12 @@ async function gitSucceeds(args: string[]): Promise<boolean> {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+// Distinguishes an execFile rejection actually caused by `signal` firing from
+// an unrelated failure that happens to land after the signal was aborted for
+// some other reason (e.g. a real Git error racing the deadline). Node's
+// execFile rejects with this shape specifically for signal-driven aborts.
+export function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }

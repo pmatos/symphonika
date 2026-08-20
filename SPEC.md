@@ -1355,7 +1355,11 @@ omp --mode rpc --auto-approve
 
 The OMP adapter requires RPC mode (`--mode rpc`, selected exactly once) and rejects print mode
 (`-p`/`--print`). It validates the versioned ready frame with a bounded startup probe and negotiates
-protocol v2 chunking when the installed OMP advertises it. See ADR-0066.
+protocol v2 chunking when the installed OMP advertises it. The daemon caps the effective
+`maxReassembledFrameBytes` at 64 MiB even when OMP advertises a larger logical-frame limit; an
+over-ceiling v2 chunk declaration is a malformed provider event. The physical `maxFrameBytes`
+advertisement remains the independently enforced limit for individual frames and is not capped by
+the daemon's logical-frame ceiling. See ADR-0066.
 
 Provider commands may be overridden, but the replacement command must speak the provider adapter's
 expected protocol.

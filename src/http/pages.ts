@@ -23,7 +23,10 @@ import type { AsyncMutex } from "../lifecycle/async-mutex.js";
 import type { PullRequestState } from "../pull-request-state.js";
 import { describeIssueVerdict } from "../issues/verdict.js";
 import { setRoutineDisabled } from "../routines/declaration-editor.js";
-import { parseRoutineDeclaration } from "../routines/declaration-loader.js";
+import {
+  loadRoutineDeclaration,
+  parseRoutineDeclaration
+} from "../routines/declaration-loader.js";
 import { validateWorkflowContractContent } from "../workflow/fsm-expansion.js";
 import { runSavePipeline, type ReloadOutcome } from "./save-pipeline.js";
 import {
@@ -1969,7 +1972,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
   );
 
-  options.app.get("/routines/:name", (context) => {
+  options.app.get("/routines/:name", async (context) => {
     const name = context.req.param("name");
     const projectParam = context.req.query("project");
     const fireNotice = renderFireResultNotice(context);
@@ -2003,6 +2006,11 @@ export function registerPages(options: RegisterPagesOptions): void {
     const { group } = resolved;
 
     const declaration = resolveRoutineDeclaration(options.runStore, group);
+    const currentTargets = currentRoutineTargets(group);
+    const declarationDisabledPromise = readRoutineDisabledFallback(
+      currentTargets,
+      declaration.sourcePath
+    );
     const groupProjectNames = new Set(
       group.targets.map((target) => target.projectName)
     );
@@ -2025,6 +2033,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       options.csrfSecret,
       ensureSession(context)
     );
+    const declarationDisabled = await declarationDisabledPromise;
     const html = layout(
       name,
       [
@@ -2036,11 +2045,17 @@ export function registerPages(options: RegisterPagesOptions): void {
         `<p class="note"><a href="/routines/${encodeURIComponent(name)}/edit${projectParam === undefined ? "" : `?project=${encodeURIComponent(projectParam)}`}">Edit declaration →</a></p>`,
         renderRoutineLifecycleControls(
           name,
-          group,
+          currentTargets,
+          projectParam,
+          lifecycleCsrfToken,
+          declarationDisabled
+        ),
+        renderRoutineFireControls(
+          name,
+          currentTargets,
           projectParam,
           lifecycleCsrfToken
-        ),
-        renderRoutineFireControls(name, group, projectParam, lifecycleCsrfToken)
+        )
       ].join("")
     );
     return context.html(html);
@@ -5734,29 +5749,60 @@ function renderRoutineDeclarationCard(
 </dl></section><section>${sectionHead("Prompt")}${promptSection}</section>`;
 }
 
+// A target removed from its declaration can remain as a durable
+// removed_from_config row beside current siblings (ADR 0069), so it must
+// not represent the declaration's lifecycle state -- unlike
+// resolveRoutineDeclaration, which picks a target to carry the
+// declaration's *content* and so orders by validity instead.
+function currentRoutineTargets(group: RoutineGroup): RoutineStatus[] {
+  return group.targets.filter(
+    (target) => target.disabledReason !== "removed_from_config"
+  );
+}
+
 // #307 AC: "Disable/enable a Routine from its page affects every target; a
-// live firing is unaffected until it terminates (ADR 0060)." Every target
-// in a group shares one declaration file (ADR 0069's fan-out), so their
-// disabledReason is expected to agree; the representative target decides
-// which action (or none, for removed_from_config -- re-enabling that isn't
-// this action's job, it's controlled by config file inclusion) to offer.
+// live firing is unaffected until it terminates (ADR 0060)." An inactive
+// Project target clears its disabledReason, so an operator-disabled
+// current target takes precedence over other current targets. When every
+// current target is inactive, this recovers that state from valid front
+// matter instead.
+async function readRoutineDisabledFallback(
+  currentTargets: RoutineStatus[],
+  sourcePath: string
+): Promise<boolean | undefined> {
+  if (
+    currentTargets.length === 0 ||
+    currentTargets.some(
+      (target) =>
+        target.disabledReason === "operator" || target.state !== "inactive"
+    )
+  ) {
+    return undefined;
+  }
+  const declaration = await loadRoutineDeclaration(sourcePath);
+  return declaration.routine?.disabled;
+}
+
 function renderRoutineLifecycleControls(
   name: string,
-  group: RoutineGroup,
+  currentTargets: RoutineStatus[],
   projectParam: string | undefined,
-  csrfToken: string
+  csrfToken: string,
+  declarationDisabled: boolean | undefined
 ): string {
-  const [representative] = group.targets;
+  if (currentTargets.length === 0) {
+    return "";
+  }
+  const operatorDisabled =
+    declarationDisabled === true ||
+    currentTargets.some((target) => target.disabledReason === "operator");
   const projectField =
     projectParam === undefined
       ? ""
       : `<input type="hidden" name="project_param" value="${escapeHtml(projectParam)}">`;
   const csrfField = `<input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}">`;
-  if (representative?.disabledReason === "operator") {
+  if (operatorDisabled) {
     return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/enable">${csrfField}${projectField}<button class="btn" type="submit">Enable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
-  }
-  if (representative?.disabledReason === "removed_from_config") {
-    return "";
   }
   return `<section><form method="post" action="/routines/${encodeURIComponent(name)}/disable">${csrfField}${projectField}<button class="btn" type="submit">Disable routine</button></form><p class="note">A live firing in progress is unaffected until it terminates (ADR 0060).</p></section>`;
 }
@@ -5769,14 +5815,11 @@ function renderRoutineLifecycleControls(
 // once a Routine fans out to more than one Project (ADR 0069).
 function renderRoutineFireControls(
   name: string,
-  group: RoutineGroup,
+  currentTargets: RoutineStatus[],
   projectParam: string | undefined,
   csrfToken: string
 ): string {
-  const targets = group.targets.filter(
-    (target) => target.disabledReason !== "removed_from_config"
-  );
-  if (targets.length === 0) {
+  if (currentTargets.length === 0) {
     return "";
   }
   const projectField =
@@ -5784,10 +5827,10 @@ function renderRoutineFireControls(
       ? ""
       : `<input type="hidden" name="project_param" value="${escapeHtml(projectParam)}">`;
   const csrfField = `<input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}">`;
-  const buttons = targets
+  const buttons = currentTargets
     .map((target) => {
       const label =
-        targets.length > 1
+        currentTargets.length > 1
           ? `Fire now — ${escapeHtml(target.projectName)}`
           : "Fire now";
       return `<form method="post" action="/api/routines/${encodeURIComponent(name)}/fire?project=${encodeURIComponent(target.projectName)}">${csrfField}${projectField}<button class="btn" type="submit">${label}</button></form>`;

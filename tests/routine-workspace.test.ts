@@ -649,7 +649,6 @@ exec "${realGitOutput.trim()}" "$@"
       "dependency-update",
       firingId
     );
-    const workspaceParent = path.dirname(workspacePath);
     const wrapperRoot = path.join(root, "git-wrapper");
     const wrapperPath = path.join(wrapperRoot, "git");
     const startedPath = path.join(root, "worktree-started");
@@ -674,6 +673,7 @@ exec "${realGitOutput.trim()}" "$@"
     const previousPath = process.env.PATH;
     process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
     const controller = new AbortController();
+    const originalRm = fsPromises.rm;
 
     try {
       const preparation = rejectionOf(
@@ -693,7 +693,15 @@ exec "${realGitOutput.trim()}" "$@"
         })
       );
       await waitForPath(startedPath);
-      await chmod(workspaceParent, 0o500);
+      fsPromises.rm = async (filePath, options) => {
+        if (path.resolve(String(filePath)) === path.resolve(workspacePath)) {
+          throw Object.assign(new Error("worktree removal denied"), {
+            code: "EACCES"
+          });
+        }
+        await originalRm(filePath, options);
+      };
+      syncBuiltinESMExports();
       controller.abort();
 
       const error = await settleWithin(preparation, 2_000);
@@ -705,7 +713,8 @@ exec "${realGitOutput.trim()}" "$@"
         "failed to clean aborted routine worktree"
       );
     } finally {
-      await chmod(workspaceParent, 0o700).catch(() => undefined);
+      fsPromises.rm = originalRm;
+      syncBuiltinESMExports();
       await killRecordedProcess(helperPidPath);
       if (previousPath === undefined) {
         delete process.env.PATH;

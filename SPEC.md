@@ -1790,6 +1790,13 @@ config path and points the operator to `symphonika init`.
 - workspace root
 - SMTP password environment-variable availability when authenticated email is configured
 
+When an authenticated-email password variable is missing, `doctor` names the exact conventional
+env file to load for a manual run: the explicit Service Config's sibling `env` file when
+`--config` is present, otherwise the absolute-XDG-aware user path used by `service install`. It also
+warns when an installed service unit predates the `EnvironmentFile=` directive. Unit-regeneration
+guidance must remind operators to repeat any original `--config <path>` option and to restart the
+running service after reinstalling the unit.
+
 `init` writes only the user Service Config and never inspects or mutates a repository or GitHub.
 
 `init-project` registers the current repository. In `dispatch` mode it creates a missing starter

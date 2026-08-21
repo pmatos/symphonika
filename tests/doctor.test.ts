@@ -909,6 +909,43 @@ describe("doctor", () => {
       ).toBe(true);
     });
 
+    it("warns when the installed unit predates the conventional service env file", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nSlice=symphonika-daemon.slice\n",
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-daemon.slice"),
+        renderSliceUnit(),
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-providers.slice"),
+        renderProvidersSliceUnit(),
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      expect(
+        report.warnings.some(
+          (warning) =>
+            warning.includes("service env file") &&
+            warning.includes("service install") &&
+            warning.includes("repeat the original `--config <path>`")
+        )
+      ).toBe(true);
+    });
+
     // Regression: the generated unit explains Type=notify in comments. If an
     // operator changes the active directive to Type=simple, matching a bare
     // substring must not mistake the explanatory comment for the directive.
@@ -1135,7 +1172,7 @@ describe("doctor", () => {
       await mkdir(unitDir, { recursive: true });
       await writeFile(
         path.join(unitDir, "symphonika.service"),
-        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nSlice=symphonika-daemon.slice\n",
+        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nEnvironmentFile=-%h/.config/symphonika/env\nSlice=symphonika-daemon.slice\n",
         "utf8"
       );
       await writeFile(
@@ -1170,7 +1207,7 @@ describe("doctor", () => {
       await mkdir(unitDir, { recursive: true });
       await writeFile(
         path.join(unitDir, "symphonika.service"),
-        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nSlice=symphonika-daemon.slice\n",
+        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nEnvironmentFile=-%h/.config/symphonika/env\nSlice=symphonika-daemon.slice\n",
         "utf8"
       );
       await writeFile(

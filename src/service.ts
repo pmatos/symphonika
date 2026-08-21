@@ -353,7 +353,7 @@ export async function runServiceInstall(
 // ignored rather than resolved. Returns undefined when the caller should fall
 // back to its own notion of `~/.config`. Shared so that where the unit files
 // are written and where the unit points for its env file cannot drift apart.
-function systemdConfigHome(env: NodeJS.ProcessEnv): string | undefined {
+export function systemdConfigHome(env: NodeJS.ProcessEnv): string | undefined {
   const configured = env.XDG_CONFIG_HOME?.trim() ?? "";
   return configured.length > 0 && path.isAbsolute(configured)
     ? configured

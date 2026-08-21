@@ -289,6 +289,30 @@ describe("checkUnitRegenerationNeeded", () => {
     expect(result.needed).toBe(true);
   });
 
+  it("tells operators to repeat an explicit config when regenerating a legacy unit", async () => {
+    const homeDir = await makeTempRoot();
+    await writeInstalledUnit(
+      homeDir,
+      "[Service]\nSlice=symphonika-daemon.slice\nType=notify\nNotifyAccess=all\nWatchdogSec=90\nTimeoutStartSec=300\nExecStart=/bin/symphonika daemon --config /srv/symphonika/symphonika.yml\n"
+    );
+
+    const result = await checkUnitRegenerationNeeded({
+      stagingPath: "/irrelevant",
+      homeDir,
+      env: {},
+      runStagedServiceInstallPrint: () =>
+        Promise.resolve(
+          "# /home/x/.config/systemd/user/symphonika.service\n" +
+            "[Service]\nSlice=symphonika-daemon.slice\nType=notify\nNotifyAccess=all\nWatchdogSec=90\nTimeoutStartSec=300\nEnvironmentFile=-%h/.config/symphonika/env\n\n"
+        )
+    });
+
+    expect(result.needed).toBe(true);
+    expect(result.needed && result.reason).toContain(
+      "repeat the original `--config <path>`"
+    );
+  });
+
   // The env-file path is install-time-dependent (--config / XDG_CONFIG_HOME),
   // so a differing path must not be mistaken for a changed unit template.
   it("ignores a differing env-file path when both units carry EnvironmentFile=", async () => {

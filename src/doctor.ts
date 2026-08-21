@@ -38,7 +38,7 @@ import { probeProviderCommand } from "./provider-probe.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import type { RoutineExecutionOverrides } from "./routines/types.js";
-import { userUnitDir } from "./service.js";
+import { systemdConfigHome, userUnitDir } from "./service.js";
 import { resolveStateRoot } from "./state.js";
 import type { ExpandedWorkflow } from "./workflow/types.js";
 import {
@@ -451,6 +451,7 @@ export async function runDoctor(
 ): Promise<DoctorReport> {
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
+  const homeDir = options.homeDir ?? homedir();
   const resolvedConfig = resolveServiceConfigPath({
     ...withConfigPath(options.configPath),
     cwd,
@@ -462,10 +463,7 @@ export async function runDoctor(
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const errors: string[] = [];
   const projects: DoctorProjectReport[] = [];
-  const warnings = await checkInstalledUnitDrift(
-    options.homeDir ?? homedir(),
-    env
-  );
+  const warnings = await checkInstalledUnitDrift(homeDir, env);
   const rawConfig = await readConfig(configPath, errors);
 
   if (rawConfig === undefined) {
@@ -485,12 +483,16 @@ export async function runDoctor(
     email?.smtpUsername !== undefined &&
     (env[email.smtpPasswordEnv]?.trim().length ?? 0) === 0
   ) {
-    // Names the convention, not a resolved path: the unit's env file follows
-    // the config directory `service install` was run with (renderServiceUnit
-    // in src/service.ts), which need not be the config this doctor run
-    // discovered.
+    const configDir =
+      options.configPath === undefined
+        ? path.join(
+            systemdConfigHome(env) ?? path.join(homeDir, ".config"),
+            "symphonika"
+          )
+        : path.dirname(configPath);
+    const envFilePath = path.join(configDir, "env");
     errors.push(
-      `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; the service unit loads it from the \`env\` file in the config directory it was installed with (~/.config/symphonika/env by default, or <config-dir>/env when installed with --config), so for a manual run load that file first (for example: set -a; . ~/.config/symphonika/env; set +a)`
+      `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; the service unit loads it from ${envFilePath}, so for a manual run load that file first (for example: set -a; . ${shellSingleQuote(envFilePath)}; set +a)`
     );
   }
 
@@ -607,8 +609,9 @@ async function runLiveCheck(
 }
 
 // Detects an installed unit that predates a systemd-unit-shape change (the
-// daemon/provider cgroup split, docs/adr/0064; or the watchdog heartbeat,
-// docs/adr/0065) so operators learn to re-run `service install --force`
+// daemon/provider cgroup split, docs/adr/0064; the watchdog heartbeat,
+// docs/adr/0065; or conventional service env-file loading, ADR 0067) so
+// operators learn to re-run `service install --force`
 // instead of silently running on stale units indefinitely. Skips entirely
 // when no unit is installed at all (`service install` was never run) —
 // that's not a doctor concern. `ExecStart`/`Environment=PATH` are baked in
@@ -635,7 +638,8 @@ async function checkInstalledUnitDrift(
   // (and lacks whatever protection this drift check is warning about) until
   // an operator separately restarts it.
   const reinstallHint =
-    "re-run `symphonika service install --force` to refresh it; a running " +
+    "re-run `symphonika service install --force` (repeat the original " +
+    "`--config <path>` option if one was used) to refresh it; a running " +
     "daemon only picks up the change after `systemctl --user restart " +
     "symphonika.service`";
   if (!serviceContent.includes("Slice=symphonika-daemon.slice")) {
@@ -651,6 +655,11 @@ async function checkInstalledUnitDrift(
   ) {
     warnings.push(
       `${servicePath} predates the systemd watchdog heartbeat (docs/adr/0065) — ${reinstallHint}`
+    );
+  }
+  if (!/^[ \t]*EnvironmentFile[ \t]*=/m.test(serviceContent)) {
+    warnings.push(
+      `${servicePath} predates the conventional service env file (docs/adr/0067-smtp-notification-sink) — ${reinstallHint}`
     );
   }
 
@@ -2389,6 +2398,10 @@ function githubErrorMessage(error: unknown): string {
   }
 
   return errorMessage(error);
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function errorMessage(error: unknown): string {

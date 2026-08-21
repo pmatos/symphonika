@@ -251,7 +251,8 @@ export async function checkUnitRegenerationNeeded(input: {
         needed: true,
         reason:
           "the new release's systemd unit template differs from the " +
-          "installed unit; run `symphonika service install --force` and " +
+          "installed unit; run `symphonika service install --force` " +
+          "(repeat the original `--config <path>` option if one was used) and " +
           "`systemctl --user restart symphonika.service` after this update"
       }
     : { needed: false };

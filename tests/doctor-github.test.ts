@@ -32,10 +32,13 @@ afterEach(async () => {
 });
 
 describe("GitHub Project validation", () => {
-  it("explains how to load a daemon env file when the SMTP password is absent from a manual doctor run", async () => {
+  it("points XDG users to the daemon env file when a manual doctor run lacks the SMTP password", async () => {
     const root = await makeTempRoot();
-    await writeValidProject(root);
-    const configPath = path.join(root, "symphonika.yml");
+    const configHome = path.join(root, "xdg config");
+    const configDir = path.join(configHome, "symphonika");
+    await mkdir(configDir, { recursive: true });
+    await writeValidProject(configDir);
+    const configPath = path.join(configDir, "symphonika.yml");
     const config = await readFile(configPath, "utf8");
     await writeFile(
       configPath,
@@ -70,15 +73,17 @@ describe("GitHub Project validation", () => {
 
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
-      configPath,
       cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
+      env: {
+        GITHUB_TOKEN: "secret-token",
+        XDG_CONFIG_HOME: configHome
+      },
       githubApi
     });
 
     expect(report.ok).toBe(false);
     expect(report.errors).toContain(
-      "email.smtp_password_env references $SMTP_TEST_PASSWORD, but it is not set; the service unit loads it from the `env` file in the config directory it was installed with (~/.config/symphonika/env by default, or <config-dir>/env when installed with --config), so for a manual run load that file first (for example: set -a; . ~/.config/symphonika/env; set +a)"
+      `email.smtp_password_env references $SMTP_TEST_PASSWORD, but it is not set; the service unit loads it from ${path.join(configDir, "env")}, so for a manual run load that file first (for example: set -a; . '${path.join(configDir, "env")}'; set +a)`
     );
   });
 

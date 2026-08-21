@@ -265,6 +265,53 @@ describe("checkUnitRegenerationNeeded", () => {
     );
   });
 
+  // A unit installed before the conventional <config-dir>/env file existed
+  // has no EnvironmentFile= line, so the operator must be told to re-install
+  // or the new release's env-file support is silently inert for them.
+  it("reports needed when the installed unit predates EnvironmentFile=", async () => {
+    const homeDir = await makeTempRoot();
+    await writeInstalledUnit(
+      homeDir,
+      "[Service]\nSlice=symphonika-daemon.slice\nType=notify\nNotifyAccess=all\nWatchdogSec=90\nTimeoutStartSec=300\n"
+    );
+
+    const result = await checkUnitRegenerationNeeded({
+      stagingPath: "/irrelevant",
+      homeDir,
+      env: {},
+      runStagedServiceInstallPrint: () =>
+        Promise.resolve(
+          "# /home/x/.config/systemd/user/symphonika.service\n" +
+            "[Service]\nSlice=symphonika-daemon.slice\nType=notify\nNotifyAccess=all\nWatchdogSec=90\nTimeoutStartSec=300\nEnvironmentFile=-%h/.config/symphonika/env\n\n"
+        )
+    });
+
+    expect(result.needed).toBe(true);
+  });
+
+  // The env-file path is install-time-dependent (--config / XDG_CONFIG_HOME),
+  // so a differing path must not be mistaken for a changed unit template.
+  it("ignores a differing env-file path when both units carry EnvironmentFile=", async () => {
+    const homeDir = await makeTempRoot();
+    await writeInstalledUnit(
+      homeDir,
+      "[Service]\nSlice=symphonika-daemon.slice\nType=notify\nNotifyAccess=all\nWatchdogSec=90\nTimeoutStartSec=300\nEnvironmentFile=-/opt/symphonika/config/env\n"
+    );
+
+    const result = await checkUnitRegenerationNeeded({
+      stagingPath: "/irrelevant",
+      homeDir,
+      env: {},
+      runStagedServiceInstallPrint: () =>
+        Promise.resolve(
+          "# /home/x/.config/systemd/user/symphonika.service\n" +
+            "[Service]\nSlice=symphonika-daemon.slice\nType=notify\nNotifyAccess=all\nWatchdogSec=90\nTimeoutStartSec=300\nEnvironmentFile=-%h/.config/symphonika/env\n\n"
+        )
+    });
+
+    expect(result).toEqual({ needed: false });
+  });
+
   it("fails safe (not needed) when the staged print spawn fails", async () => {
     const homeDir = await makeTempRoot();
     await writeInstalledUnit(homeDir, "[Service]\n");

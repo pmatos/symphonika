@@ -141,9 +141,12 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
     `Environment=${systemdEnvAssignment("PATH", input.path)}`,
     "",
     "# Load environment-backed service secrets (such as the variable named by",
-    "# email.smtp_password_env; see docs/adr/0067) from the conventional",
-    "# <config-dir>/env file beside symphonika.yml. The leading `-` keeps the",
-    "# file optional for operators who do not configure authenticated email.",
+    "# email.smtp_password_env; see docs/adr/0067-smtp-notification-sink) from",
+    "# the conventional <config-dir>/env file beside symphonika.yml. The",
+    "# leading `-` keeps the file optional for operators who do not configure",
+    "# authenticated email. Note that systemd lets these assignments override",
+    "# Environment= above, so an env file that sets PATH replaces the one",
+    "# baked in here.",
     `EnvironmentFile=${systemdEnvironmentFileArg(path.join(configDir, "env"))}`,
     "",
     "# Resolve GITHUB_TOKEN from `gh auth token` at each (re)start so this",
@@ -221,13 +224,16 @@ export async function runServiceInstall(
   const homeDir = options.homeDir ?? homedir();
   const unitDir = userUnitDir(homeDir, env);
   const daemonPath = buildDaemonPath(execPath, env);
-  const configuredConfigHome = env.XDG_CONFIG_HOME?.trim();
+  // Mirrors userUnitDir: systemd only honors an absolute XDG_CONFIG_HOME, and
+  // defaultUserConfigPath would otherwise resolve a relative one against the
+  // install-time cwd and bake that into the unit.
+  const configuredConfigHome = env.XDG_CONFIG_HOME?.trim() ?? "";
   const configDir =
     options.configPath !== undefined
       ? path.dirname(options.configPath)
-      : configuredConfigHome === undefined || configuredConfigHome.length === 0
-        ? "%h/.config/symphonika"
-        : path.dirname(defaultUserConfigPath({ env, homeDir }));
+      : configuredConfigHome.length > 0 && path.isAbsolute(configuredConfigHome)
+        ? path.dirname(defaultUserConfigPath({ env, homeDir }))
+        : "%h/.config/symphonika";
 
   const files: ServiceUnitFile[] = [
     {
@@ -383,14 +389,19 @@ function systemdEnvAssignment(name: string, value: string): string {
   return `"${escaped}"`;
 }
 
+// `EnvironmentFile=` takes the whole (whitespace-trimmed) remainder of the
+// line as one path, so a spaced path needs no quoting -- and must not get
+// any: systemd only expands `%` specifiers here, never unquotes or
+// unescapes, so `EnvironmentFile="-/opt/My Config/env"` is read as a path
+// starting with `"`, fails the absolute-path check, and is dropped with
+// `EnvironmentFile= path is not absolute, ignoring` (verified against
+// `systemd-analyze verify --user`). Backslashes and quotes are likewise
+// left verbatim. Only `%` is escaped -- except for a leading `%h`, which
+// must survive as the home-directory specifier, since an escaped `%%h`
+// expands back to a literal `%h` and would then be rejected as relative.
 function systemdEnvironmentFileArg(filePath: string): string {
-  const escaped = filePath
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/%/g, "%%")
-    .replace(/^%%h(?=\/)/, "%h");
-  const optionalPath = `-${escaped}`;
-  return /[\s"\\]/.test(filePath) ? `"${optionalPath}"` : optionalPath;
+  const escaped = filePath.replace(/%/g, "%%").replace(/^%%h(?=\/)/, "%h");
+  return `-${escaped}`;
 }
 
 export function defaultScriptPath(): string {

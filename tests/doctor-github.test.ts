@@ -78,7 +78,7 @@ describe("GitHub Project validation", () => {
 
     expect(report.ok).toBe(false);
     expect(report.errors).toContain(
-      "email.smtp_password_env references $SMTP_TEST_PASSWORD, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . /path/to/symphonika.env; set +a)"
+      "email.smtp_password_env references $SMTP_TEST_PASSWORD, but it is not set; the service unit loads it from the `env` file in the config directory it was installed with (~/.config/symphonika/env by default, or <config-dir>/env when installed with --config), so for a manual run load that file first (for example: set -a; . ~/.config/symphonika/env; set +a)"
     );
   });
 

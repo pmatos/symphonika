@@ -510,10 +510,17 @@ describe("runServiceInstall", () => {
       "EnvironmentFile=-/opt/symphonika/config/env"
     );
     expect(report.files[0]?.content).toContain("smtp_password_env");
-    expect(report.files[0]?.content).toContain("docs/adr/0067");
+    expect(report.files[0]?.content).toContain(
+      "docs/adr/0067-smtp-notification-sink"
+    );
   });
 
-  it("quotes the optional env file when the config directory contains spaces", async () => {
+  // Regression: EnvironmentFile= consumes the whole remainder of the line as
+  // one path and never unquotes it, so wrapping a spaced path in double
+  // quotes makes systemd reject it ("EnvironmentFile= path is not absolute,
+  // ignoring") and silently drop the env file. Verified against
+  // `systemd-analyze verify --user`.
+  it("emits the optional env file unquoted so a spaced config directory survives", async () => {
     const report = await runServiceInstall({
       ...baseOptions,
       configPath: "/opt/Symphonika Config/symphonika.yml",
@@ -521,8 +528,9 @@ describe("runServiceInstall", () => {
     });
 
     expect(report.files[0]?.content).toContain(
-      'EnvironmentFile="-/opt/Symphonika Config/env"'
+      "EnvironmentFile=-/opt/Symphonika Config/env"
     );
+    expect(report.files[0]?.content).not.toContain('EnvironmentFile="');
   });
 
   it("loads the optional env file from XDG_CONFIG_HOME without fixing daemon config discovery", async () => {
@@ -540,6 +548,25 @@ describe("runServiceInstall", () => {
     );
     expect(report.files[0]?.content).toContain(`exec "$1" "$2" daemon'`);
     expect(report.files[0]?.content).not.toContain("daemon --config");
+  });
+
+  // systemd only honors an absolute XDG_CONFIG_HOME (see userUnitDir), so a
+  // relative one must not be resolved against the install-time cwd and baked
+  // into the unit -- the unit files themselves would land in ~/.config
+  // meanwhile.
+  it("ignores a relative XDG_CONFIG_HOME when locating the optional env file", async () => {
+    const report = await runServiceInstall({
+      ...baseOptions,
+      env: {
+        PATH: "/opt/node/bin:/usr/bin",
+        XDG_CONFIG_HOME: "relative-config"
+      },
+      print: true
+    });
+
+    expect(report.files[0]?.content).toContain(
+      "EnvironmentFile=-%h/.config/symphonika/env"
+    );
   });
 
   it("skips daemon-reload when reload is false but still writes units", async () => {

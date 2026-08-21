@@ -93,7 +93,7 @@ journalctl --user -u symphonika -f
 
 The generated unit uses the daemon's normal config discovery by default. To run the service with a non-default config, install it with `symphonika service install --config <path>`; relative paths are resolved when the unit is generated and the absolute path is baked into `ExecStart`.
 
-The unit also loads an optional env file beside the selected user config: `$XDG_CONFIG_HOME/symphonika/env` (or `~/.config/symphonika/env`) by default, and `<config-dir>/env` with `--config`. Put environment-backed service secrets such as the variable named by `email.smtp_password_env` there, protect the file with user-only permissions, and restart `symphonika.service` after creating or changing it. The file is optional, so operators without authenticated email do not need to create it.
+The unit also loads an optional env file from `<config-dir>/env`: `$XDG_CONFIG_HOME/symphonika/env` (or `~/.config/symphonika/env`) by default, and the explicit config's own directory with `--config`. Note that without `--config` the daemon still discovers its config normally, so if it picks up a project-local `~/symphonika.yml` the env file is *not* beside it — pass `--config` when you want the two to stay together. Put environment-backed service secrets such as the variable named by `email.smtp_password_env` there, protect the file with user-only permissions, and restart `symphonika.service` after creating or changing it. The file is optional, so operators without authenticated email do not need to create it. Assignments in the env file override the unit's own `Environment=` (notably `PATH`); the GitHub token is the exception, since the unit re-resolves it from `gh auth token` at every start.
 
 What the generated units give you:
 

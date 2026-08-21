@@ -1819,7 +1819,9 @@ With `--config`, `<config-dir>` is the explicit Service Config's directory. With
 uses the initialized user-config directory (`$XDG_CONFIG_HOME/symphonika/env`, falling back to
 `%h/.config/symphonika/env`) without fixing the daemon's own config discovery path. The systemd
 directive carries a leading `-`, so a missing env file does not prevent startup and creating the
-file later only requires restarting the service.
+file later only requires restarting the service. The path is emitted unquoted (systemd reads the
+whole directive value as one path and never unquotes it), so a config directory containing spaces
+still resolves.
 
 `status --dashboard` renders a compact terminal status dashboard from the run store and daemon
 `/api/status` endpoint. `status --watch` refreshes that read-only dashboard in place; it must not

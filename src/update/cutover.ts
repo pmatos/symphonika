@@ -192,7 +192,13 @@ const STRUCTURAL_MARKERS: readonly RegExp[] = [
   /^Type=.*$/m,
   /^NotifyAccess=.*$/m,
   /^WatchdogSec=.*$/m,
-  /^TimeoutStartSec=.*$/m
+  /^TimeoutStartSec=.*$/m,
+  // Name only, no value: the env-file path is baked from the install-time
+  // config selection (`--config` / XDG_CONFIG_HOME), so comparing values
+  // would flag every `--config` install as template drift. Presence is the
+  // structural signal -- a unit installed before the env file existed has
+  // no EnvironmentFile= line at all.
+  /^EnvironmentFile=/m
 ];
 
 export type UnitRegenerationCheck =

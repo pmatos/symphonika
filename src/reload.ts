@@ -87,7 +87,13 @@ export type RuntimeReloadStatus = {
   lastAttemptedAt: string | null;
   lastLoadedAt: string | null;
   ok: boolean;
+  routineErrors: RoutineReloadError[];
   usingLastKnownGood: boolean;
+};
+
+export type RoutineReloadError = {
+  message: string;
+  sourcePaths: string[];
 };
 
 export type RuntimeConfigReloaderOptions = {
@@ -387,6 +393,7 @@ export class RuntimeConfigReloader {
     lastAttemptedAt: null,
     lastLoadedAt: null,
     ok: false,
+    routineErrors: [],
     usingLastKnownGood: false
   };
 
@@ -405,7 +412,11 @@ export class RuntimeConfigReloader {
   getStatus(): RuntimeReloadStatus {
     return {
       ...this.status,
-      errors: this.status.errors.slice()
+      errors: this.status.errors.slice(),
+      routineErrors: this.status.routineErrors.map((error) => ({
+        ...error,
+        sourcePaths: error.sourcePaths.slice()
+      }))
     };
   }
 
@@ -467,6 +478,7 @@ export class RuntimeConfigReloader {
       }
       this.status.errors = result.errors;
       this.status.ok = result.errors.length === 0;
+      this.status.routineErrors = result.routineErrors;
       this.status.usingLastKnownGood = result.usingLastKnownGood;
 
       if (result.errors.length > 0) {
@@ -547,10 +559,12 @@ async function loadRuntimeConfigSnapshot(input: {
   previous?: RuntimeConfigSnapshot;
 }): Promise<{
   errors: string[];
+  routineErrors: RoutineReloadError[];
   snapshot?: RuntimeConfigSnapshot;
   usingLastKnownGood: boolean;
 }> {
   const errors: string[] = [];
+  const routineErrors: RoutineReloadError[] = [];
   const raw = await readRawServiceConfig(input.configPath, errors);
   if (raw === undefined) {
     return lastKnownGoodOrNothing(input.previous, errors);
@@ -682,7 +696,8 @@ async function loadRuntimeConfigSnapshot(input: {
         sourcePath: path.resolve(input.configDir, entry.path)
       })),
       previousRoutines,
-      errors
+      errors,
+      routineErrors
     );
     for (const invalid of routineResult.invalidNew) {
       invalidRoutines.push({
@@ -743,8 +758,11 @@ async function loadRuntimeConfigSnapshot(input: {
       const routines = routinesByProject.get(projectName) ?? [];
       if ((projectNameCounts.get(projectName) ?? 0) > 1) {
         for (const routine of routines) {
-          errors.push(
-            `routines entry targets project "${projectName}" (routine "${routine.name}" at ${routine.sourcePath}), but "${projectName}" is declared more than once; routine targets require a unique project name`
+          addRoutineReloadError(
+            errors,
+            routineErrors,
+            `routines entry targets project "${projectName}" (routine "${routine.name}" at ${routine.sourcePath}), but "${projectName}" is declared more than once; routine targets require a unique project name`,
+            routine.sourcePath
           );
         }
         continue;
@@ -752,8 +770,11 @@ async function loadRuntimeConfigSnapshot(input: {
       const project = dispatchProjects.find((p) => p.name === projectName);
       if (project === undefined) {
         for (const routine of routines) {
-          errors.push(
-            `routines entry targets project "${projectName}" (routine "${routine.name}" at ${routine.sourcePath}), but no project with that name is declared`
+          addRoutineReloadError(
+            errors,
+            routineErrors,
+            `routines entry targets project "${projectName}" (routine "${routine.name}" at ${routine.sourcePath}), but no project with that name is declared`,
+            routine.sourcePath
           );
         }
         continue;
@@ -775,8 +796,11 @@ async function loadRuntimeConfigSnapshot(input: {
             projectIndex === undefined
               ? ""
               : `projects.${projectIndex}.routines: `;
-          errors.push(
-            `${projectPrefix}routine "${routine.name}" (kind: git) targets routine host "${projectName}" which declares no tracker; a kind: git routine requires a tracker for PR discovery`
+          addRoutineReloadError(
+            errors,
+            routineErrors,
+            `${projectPrefix}routine "${routine.name}" (kind: git) targets routine host "${projectName}" which declares no tracker; a kind: git routine requires a tracker for PR discovery`,
+            routine.sourcePath
           );
           trackerlessGitRoutines.push(routine);
           continue;
@@ -803,16 +827,22 @@ async function loadRuntimeConfigSnapshot(input: {
             );
             if (unreferencedFields.length > 0) {
               for (const field of unreferencedFields) {
-                errors.push(
-                  `routine "${routine.name}" at ${routine.sourcePath} declares ${field}, but providers.${routineProviderName}.command never references it`
+                addRoutineReloadError(
+                  errors,
+                  routineErrors,
+                  `routine "${routine.name}" at ${routine.sourcePath} declares ${field}, but providers.${routineProviderName}.command never references it`,
+                  routine.sourcePath
                 );
               }
               templateRejectedRoutines.push(routine);
               continue;
             }
           } catch (error) {
-            errors.push(
-              `routine "${routine.name}" at ${routine.sourcePath} providers.${routineProviderName}.command is invalid: ${errorMessage(error)}`
+            addRoutineReloadError(
+              errors,
+              routineErrors,
+              `routine "${routine.name}" at ${routine.sourcePath} providers.${routineProviderName}.command is invalid: ${errorMessage(error)}`,
+              routine.sourcePath
             );
             templateRejectedRoutines.push(routine);
             continue;
@@ -838,7 +868,7 @@ async function loadRuntimeConfigSnapshot(input: {
   // runtime projects at all — a genuinely empty/broken config. A host-only
   // config (zero polling projects by design) must still go live. See ADR 0062.
   if (dispatchProjects.length === 0 && input.previous !== undefined) {
-    return lastKnownGoodOrNothing(input.previous, errors);
+    return lastKnownGoodOrNothing(input.previous, errors, routineErrors);
   }
 
   const polling: PollingServiceConfig = {
@@ -850,6 +880,7 @@ async function loadRuntimeConfigSnapshot(input: {
 
   return {
     errors,
+    routineErrors,
     snapshot: {
       configPath: input.configPath,
       email: parsed.data.email,
@@ -1288,7 +1319,8 @@ async function readWorkflowSnapshot(
 async function readRoutineDeclarations(
   entries: Array<{ projectNames: string[]; sourcePath: string }>,
   previousRoutines: TargetedRoutineDeclaration[],
-  errors: string[]
+  errors: string[],
+  routineErrors: RoutineReloadError[]
 ): Promise<{
   invalidNew: Array<{ name?: string; path: string; projectName: string }>;
   routines: TargetedRoutineDeclaration[];
@@ -1307,6 +1339,12 @@ async function readRoutineDeclarations(
     const result = await loadRoutineDeclaration(entry.sourcePath);
     if (result.routine === null) {
       errors.push(...result.errors);
+      routineErrors.push(
+        ...result.errors.map((message) => ({
+          message,
+          sourcePaths: [entry.sourcePath]
+        }))
+      );
       // Carry-forward is keyed on the file's own path, not on the freshly
       // parsed name — a broken edit can corrupt the name field itself while
       // the path symphonika.yml references stays the same. Falling back to
@@ -1321,8 +1359,12 @@ async function readRoutineDeclarations(
         // of it ever being declared.
         const existingForCarryForward = seenNames.get(previous.name);
         if (existingForCarryForward !== undefined) {
-          errors.push(
-            `duplicate routine name "${previous.name}" declared by ${existingForCarryForward} and ${previous.sourcePath}`
+          addRoutineReloadError(
+            errors,
+            routineErrors,
+            `duplicate routine name "${previous.name}" declared by ${existingForCarryForward} and ${previous.sourcePath}`,
+            existingForCarryForward,
+            previous.sourcePath
           );
         } else {
           seenNames.set(previous.name, previous.sourcePath);
@@ -1342,8 +1384,12 @@ async function readRoutineDeclarations(
         if (result.partialName !== undefined) {
           const existingForPartialName = seenNames.get(result.partialName);
           if (existingForPartialName !== undefined) {
-            errors.push(
-              `duplicate routine name "${result.partialName}" declared by ${existingForPartialName} and ${entry.sourcePath}`
+            addRoutineReloadError(
+              errors,
+              routineErrors,
+              `duplicate routine name "${result.partialName}" declared by ${existingForPartialName} and ${entry.sourcePath}`,
+              existingForPartialName,
+              entry.sourcePath
             );
           } else {
             seenNames.set(result.partialName, entry.sourcePath);
@@ -1364,8 +1410,12 @@ async function readRoutineDeclarations(
     const routine = result.routine;
     const existing = seenNames.get(routine.name);
     if (existing !== undefined) {
-      errors.push(
-        `duplicate routine name "${routine.name}" declared by ${existing} and ${routine.sourcePath}`
+      addRoutineReloadError(
+        errors,
+        routineErrors,
+        `duplicate routine name "${routine.name}" declared by ${existing} and ${routine.sourcePath}`,
+        existing,
+        routine.sourcePath
       );
       continue;
     }
@@ -1380,16 +1430,32 @@ async function readRoutineDeclarations(
   return { invalidNew, routines };
 }
 
+function addRoutineReloadError(
+  errors: string[],
+  routineErrors: RoutineReloadError[],
+  message: string,
+  ...sourcePaths: string[]
+): void {
+  errors.push(message);
+  routineErrors.push({
+    message,
+    sourcePaths: [...new Set(sourcePaths)]
+  });
+}
+
 function lastKnownGoodOrNothing(
   previous: RuntimeConfigSnapshot | undefined,
-  errors: string[]
+  errors: string[],
+  routineErrors: RoutineReloadError[] = []
 ): {
   errors: string[];
+  routineErrors: RoutineReloadError[];
   snapshot?: RuntimeConfigSnapshot;
   usingLastKnownGood: boolean;
 } {
   return {
     errors,
+    routineErrors,
     ...(previous === undefined ? {} : { snapshot: previous }),
     usingLastKnownGood: previous !== undefined
   };

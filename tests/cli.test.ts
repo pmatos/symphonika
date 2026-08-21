@@ -19,11 +19,27 @@ import type { StartDaemonOptions } from "../src/daemon.js";
 import type {
   ClearStaleOptions,
   ClearStaleReport,
+  DoctorReport,
   InitProjectOptions
 } from "../src/doctor.js";
 import type { SmokeOptions, SmokeReport } from "../src/smoke.js";
 
 const tempRoots: string[] = [];
+const TEST_DOCTOR_ENVIRONMENT: DoctorReport["environment"] = {
+  codexProfile: {
+    checks: [],
+    path: "/home/operator/.codex/config.toml",
+    status: "not_required"
+  },
+  gh: { executablePath: "/usr/bin/gh", status: "authenticated" },
+  installedUnit: {
+    binaries: [],
+    environmentPath: null,
+    servicePath: "/home/operator/.config/systemd/user/symphonika.service",
+    status: "not_installed"
+  },
+  providerBinaries: []
+};
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   ".."
@@ -768,6 +784,7 @@ describe("CLI", () => {
       runDoctor: () =>
         Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -817,6 +834,7 @@ describe("CLI", () => {
           .liveCheckProvider;
         return Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           liveCheck: { detail: "Hi there!", ok: true, provider: "claude" },
           ok: true,
@@ -845,6 +863,63 @@ describe("CLI", () => {
     expect(receivedLiveCheckProvider).toBe("claude");
     expect(output.stdout).toContain("live check (claude): ok — Hi there!");
     expect(output.stdout).toContain("doctor ok");
+  });
+
+  it("doctor --json emits only the typed report and forwards --offline", async () => {
+    const output = { stderr: "", stdout: "" };
+    let receivedOffline = false;
+    const report = {
+      configPath: "/tmp/symphonika.yml",
+      environment: {
+        codexProfile: {
+          checks: [],
+          path: "/home/operator/.codex/config.toml",
+          status: "not_required" as const
+        },
+        gh: {
+          executablePath: "/usr/bin/gh",
+          status: "skipped_offline" as const
+        },
+        installedUnit: {
+          binaries: [],
+          environmentPath: null,
+          servicePath: "/home/operator/.config/systemd/user/symphonika.service",
+          status: "not_installed" as const
+        },
+        providerBinaries: []
+      },
+      errors: [],
+      ok: true,
+      projects: [],
+      warnings: []
+    };
+    const program = buildCli({
+      registerSignalHandlers: false,
+      runDoctor: (options) => {
+        receivedOffline = options.offline === true;
+        return Promise.resolve(report);
+      }
+    });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    await program.parseAsync([
+      "node",
+      "symphonika",
+      "doctor",
+      "--json",
+      "--offline"
+    ]);
+
+    expect(receivedOffline).toBe(true);
+    expect(output.stderr).toBe("");
+    expect(output.stdout).toBe(`${JSON.stringify(report)}\n`);
   });
 
   it("doctor rejects an unknown --live-check provider", async () => {

@@ -19,6 +19,11 @@ import {
   resolveServiceConfigPath
 } from "./config-paths.js";
 import {
+  inspectConfiguredDoctorEnvironment,
+  inspectDoctorHostEnvironment,
+  type DoctorExecutionEnvironmentReport
+} from "./doctor-execution-environment.js";
+import {
   defaultWorkflowContract,
   inspectCurrentGitHubProject,
   inspectCurrentGitProject,
@@ -48,6 +53,13 @@ import {
 } from "./workflow/fsm-expansion.js";
 
 export { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
+export type {
+  DoctorCodexProfileReport,
+  DoctorExecutionEnvironmentReport,
+  DoctorGhAuthReport,
+  DoctorInstalledUnitReport,
+  DoctorProviderBinaryReport
+} from "./doctor-execution-environment.js";
 
 export type DoctorOptions = {
   agentProviders?: AgentProviderRegistry;
@@ -63,6 +75,9 @@ export type DoctorOptions = {
   // that can take tens of seconds. See probeProviderCommand.
   liveCheckProvider?: AgentProviderName;
   liveCheckTimeoutMs?: number;
+  // Skip network-backed checks while retaining local executable, profile,
+  // and installed-unit checks. Intended for CI and scripted JSON snapshots.
+  offline?: boolean;
 };
 
 type DoctorLiveCheckReport = {
@@ -95,6 +110,7 @@ export type DoctorProjectReport = {
 
 export type DoctorReport = {
   configPath: string;
+  environment: DoctorExecutionEnvironmentReport;
   errors: string[];
   liveCheck?: DoctorLiveCheckReport;
   ok: boolean;
@@ -460,25 +476,46 @@ export async function runDoctor(
   const githubApi = options.githubApi ?? DEFAULT_GITHUB_API;
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
+  const homeDir = options.homeDir ?? homedir();
   const errors: string[] = [];
   const projects: DoctorProjectReport[] = [];
-  const warnings = await checkInstalledUnitDrift(
-    options.homeDir ?? homedir(),
-    env
-  );
+  const [warnings, hostEnvironment] = await Promise.all([
+    checkInstalledUnitDrift(homeDir, env),
+    inspectDoctorHostEnvironment({
+      cwd,
+      env,
+      homeDir,
+      offline: options.offline === true
+    })
+  ]);
+  let environment = hostEnvironment.environment;
+  errors.push(...hostEnvironment.errors);
+  warnings.push(...hostEnvironment.warnings);
   const rawConfig = await readConfig(configPath, errors);
 
   if (rawConfig === undefined) {
     if (resolvedConfig.source === "user" && !resolvedConfig.configExists) {
       errors.push(missingUserConfigHint(configPath));
     }
-    return report(configPath, errors, projects, warnings);
+    return report(configPath, environment, errors, projects, warnings);
   }
 
   const parsedConfig = parseServiceConfig(rawConfig, errors);
   if (parsedConfig === undefined) {
-    return report(configPath, errors, projects, warnings);
+    return report(configPath, environment, errors, projects, warnings);
   }
+
+  const configuredEnvironment = await inspectConfiguredDoctorEnvironment({
+    cwd,
+    env,
+    environment,
+    homeDir,
+    projects: parsedConfig.projects,
+    providers: parsedConfig.providers
+  });
+  environment = configuredEnvironment.environment;
+  errors.push(...configuredEnvironment.errors);
+  warnings.push(...configuredEnvironment.warnings);
 
   const email = parsedConfig.email;
   if (
@@ -560,7 +597,7 @@ export async function runDoctor(
     errors
   );
 
-  return report(configPath, errors, projects, warnings, liveCheck);
+  return report(configPath, environment, errors, projects, warnings, liveCheck);
 }
 
 async function runLiveCheck(
@@ -2323,6 +2360,7 @@ function envReferenceName(input: string): string | undefined {
 
 function report(
   configPath: string,
+  environment: DoctorExecutionEnvironmentReport,
   errors: string[],
   projects: DoctorProjectReport[],
   warnings: string[] = [],
@@ -2330,6 +2368,7 @@ function report(
 ): DoctorReport {
   return {
     configPath,
+    environment,
     errors,
     ...(liveCheck === undefined ? {} : { liveCheck }),
     ok: errors.length === 0,

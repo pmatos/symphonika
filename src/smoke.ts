@@ -30,8 +30,10 @@ export type SmokeOptions = {
   configPath?: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  homeDir?: string;
   githubApi?: GitHubApi;
   githubIssuesApi?: GitHubIssuesApi;
+  offline?: boolean;
   prepareIssueWorkspace?: (
     input: PrepareIssueWorkspaceInput
   ) => Promise<PreparedIssueWorkspace>;
@@ -87,6 +89,12 @@ export async function runSmoke(
     env,
     githubIssuesApi
   };
+  if (options.homeDir !== undefined) {
+    doctorOptions.homeDir = options.homeDir;
+  }
+  if (options.offline !== undefined) {
+    doctorOptions.offline = options.offline;
+  }
   if (options.githubApi !== undefined) {
     doctorOptions.githubApi = options.githubApi;
   }

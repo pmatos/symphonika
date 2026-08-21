@@ -14,6 +14,7 @@ import { daemonEndpointPath, readDaemonEndpoint } from "./daemon-endpoint.js";
 import type {
   ClearStaleOptions,
   ClearStaleReport,
+  DoctorExecutionEnvironmentReport,
   DoctorProjectReport,
   DoctorOptions,
   DoctorReport,
@@ -211,39 +212,60 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       "also spawn providers.<provider>.command for real with a trivial prompt and wait for a reply (billed, can take tens of seconds; not run by default)",
       parseProvider
     )
-    .action(async (options: { config?: string; liveCheck?: InitProvider }) => {
-      const report = await doctor({
-        ...withConfigPath(options.config),
-        ...(options.liveCheck === undefined
-          ? {}
-          : { liveCheckProvider: options.liveCheck })
-      });
+    .option("--json", "emit the typed DoctorReport as JSON on stdout")
+    .option(
+      "--offline",
+      "skip the network-backed gh authentication check while retaining local environment checks"
+    )
+    .action(
+      async (options: {
+        config?: string;
+        json?: boolean;
+        liveCheck?: InitProvider;
+        offline?: boolean;
+      }) => {
+        const report = await doctor({
+          ...withConfigPath(options.config),
+          ...(options.liveCheck === undefined
+            ? {}
+            : { liveCheckProvider: options.liveCheck }),
+          ...(options.offline === true ? { offline: true } : {})
+        });
 
-      if (report.liveCheck !== undefined) {
-        writeOut(
-          program,
-          `live check (${report.liveCheck.provider}): ${report.liveCheck.ok ? "ok" : "failed"} — ${report.liveCheck.detail}\n`
-        );
-      }
+        if (options.json === true) {
+          writeOut(program, `${JSON.stringify(report)}\n`);
+          if (!report.ok) {
+            process.exitCode = 1;
+          }
+          return;
+        }
 
-      if (report.ok) {
-        writeOut(
-          program,
-          `doctor ok: ${report.projects.length} ${pluralize("project", report.projects.length)} valid\n`
-        );
+        if (report.liveCheck !== undefined) {
+          writeOut(
+            program,
+            `live check (${report.liveCheck.provider}): ${report.liveCheck.ok ? "ok" : "failed"} — ${report.liveCheck.detail}\n`
+          );
+        }
+        printExecutionEnvironment(program, report.environment);
+        if (report.ok) {
+          writeOut(
+            program,
+            `doctor ok: ${report.projects.length} ${pluralize("project", report.projects.length)} valid\n`
+          );
+          printStaleSection(program, report.projects);
+          printWarningsSection(program, report.warnings);
+          return;
+        }
+
+        writeErr(program, "doctor failed:\n");
+        for (const error of report.errors) {
+          writeErr(program, `- ${error}\n`);
+        }
         printStaleSection(program, report.projects);
         printWarningsSection(program, report.warnings);
-        return;
+        process.exitCode = 1;
       }
-
-      writeErr(program, "doctor failed:\n");
-      for (const error of report.errors) {
-        writeErr(program, `- ${error}\n`);
-      }
-      printStaleSection(program, report.projects);
-      printWarningsSection(program, report.warnings);
-      process.exitCode = 1;
-    });
+    );
 
   program
     .command("test-email")
@@ -2731,6 +2753,31 @@ function parseProjectMode(value: string): "dispatch" | "routine_host" {
     return "routine_host";
   }
   throw new InvalidArgumentError("mode must be one of dispatch, routine-host");
+}
+
+function printExecutionEnvironment(
+  program: Command,
+  environment: DoctorExecutionEnvironmentReport
+): void {
+  writeOut(program, "execution environment:\n");
+  for (const binary of environment.providerBinaries) {
+    writeOut(
+      program,
+      `- provider ${binary.provider}: ${binary.status}${binary.resolvedPath === null ? "" : ` (${binary.resolvedPath})`}\n`
+    );
+  }
+  writeOut(
+    program,
+    `- Codex profile: ${environment.codexProfile.status} (${environment.codexProfile.path})\n`
+  );
+  writeOut(
+    program,
+    `- gh: ${environment.gh.status}${environment.gh.executablePath === null ? "" : ` (${environment.gh.executablePath})`}\n`
+  );
+  writeOut(
+    program,
+    `- installed unit PATH: ${environment.installedUnit.status} (${environment.installedUnit.servicePath})\n`
+  );
 }
 
 function printWarningsSection(program: Command, warnings: string[]): void {

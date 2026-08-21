@@ -35,6 +35,12 @@ use `init --force` only to replace the global config, and `init-project --force`
 Project with the same name. Export the GitHub credential referenced by the generated Project before
 running `init-project` or `doctor`.
 
+`doctor` also reports execution-environment drift: selected provider executables, the required
+Codex `profiles.symphonika` keys, independent `gh` authentication, and provider/`gh` resolution
+under an installed systemd unit's frozen PATH. Use `doctor --json` for the same typed report as JSON.
+Use `doctor --offline` in CI or other network-constrained scripts to skip only `gh auth status`;
+local executable, profile, unit-PATH, config, and workflow checks still run.
+
 Run the local quality gate:
 
 ```sh

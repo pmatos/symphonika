@@ -9,6 +9,21 @@ import type { IssueSnapshot } from "../src/issue-polling.js";
 import { openRunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
+const TEST_DOCTOR_ENVIRONMENT: DoctorReport["environment"] = {
+  codexProfile: {
+    checks: [],
+    path: "/home/operator/.codex/config.toml",
+    status: "not_required"
+  },
+  gh: { executablePath: "/usr/bin/gh", status: "authenticated" },
+  installedUnit: {
+    binaries: [],
+    environmentPath: null,
+    servicePath: "/home/operator/.config/systemd/user/symphonika.service",
+    status: "not_installed"
+  },
+  providerBinaries: []
+};
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-cli-runs-test-"));
@@ -325,6 +340,7 @@ describe("CLI run commands", () => {
       runDoctor: () =>
         Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -452,6 +468,7 @@ describe("CLI run commands", () => {
       runDoctor: () =>
         Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -561,6 +578,7 @@ describe("CLI run commands", () => {
       runDoctor: () =>
         Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -627,6 +645,7 @@ describe("CLI run commands", () => {
         doctorCalls += 1;
         return Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -697,6 +716,7 @@ describe("CLI run commands", () => {
         doctorCalls += 1;
         return Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -770,6 +790,7 @@ describe("CLI run commands", () => {
       runDoctor: () =>
         Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -800,6 +821,7 @@ describe("CLI run commands", () => {
       runDoctor: () =>
         Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -837,6 +859,7 @@ describe("CLI run commands", () => {
       runDoctor: () =>
         Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],

@@ -3464,39 +3464,42 @@ export class RunStore {
         "updated_at = @updated_at where id = @id"
       ].join(" ")
     );
-    if (state === "preparing_workspace") {
-      // A Run row is reused across transient retry attempts, while the
-      // latest Watchdog sample and remembered turn IDs are keyed by run_id.
-      // Advance the generation fence and clear those attempt-local values
-      // before exposing the new attempt's preparing state. A sample captured
-      // by the prior generation can then recreate neither current data nor a
-      // stale verdict after its async I/O completes. Append-only sample history
-      // remains durable evidence.
-      this.database.transaction(() => {
+    // The Run row and transition are one durable state change. If they commit
+    // separately, later bookkeeping can overwrite updated_at and erase the
+    // only recoverable timestamp for an interrupted terminal transition.
+    const apply = this.database.transaction(() => {
+      if (state === "preparing_workspace") {
+        // A Run row is reused across transient retry attempts, while the
+        // latest Watchdog sample and remembered turn IDs are keyed by run_id.
+        // Advance the generation fence and clear those attempt-local values
+        // before exposing the new attempt's preparing state. A sample captured
+        // by the prior generation can then recreate neither current data nor a
+        // stale verdict after its async I/O completes. Append-only sample history
+        // remains durable evidence.
         this.database
           .prepare("delete from watchdog_samples where run_id = ?")
           .run(runId);
         this.database
           .prepare("delete from watchdog_turn_ids where run_id = ?")
           .run(runId);
-        update.run({ id: runId, state, updated_at: now });
-      })();
-    } else {
+      }
       update.run({ id: runId, state, updated_at: now });
-    }
-    this.recordRunTransition(runId, state, now);
-    if (state === "waiting") {
-      // ADR 0054: idle_since is a persisted wall-clock timestamp and the
-      // watchdog never samples waiting Runs, so clear it on entry to waiting so
-      // the grace window cannot absorb an unsampled wait excursion as idle time.
-      // A Run returning to running starts its idle clock fresh on its next idle
-      // tick rather than inheriting pre-wait idle time (see ADR 0047).
-      this.database
-        .prepare(
-          "update watchdog_samples set idle_since = null where run_id = ?"
-        )
-        .run(runId);
-    }
+      const event = this.insertRunTransition(runId, state, now);
+      if (state === "waiting") {
+        // ADR 0054: idle_since is a persisted wall-clock timestamp and the
+        // watchdog never samples waiting Runs, so clear it on entry to waiting so
+        // the grace window cannot absorb an unsampled wait excursion as idle time.
+        // A Run returning to running starts its idle clock fresh on its next idle
+        // tick rather than inheriting pre-wait idle time (see ADR 0047).
+        this.database
+          .prepare(
+            "update watchdog_samples set idle_since = null where run_id = ?"
+          )
+          .run(runId);
+      }
+      return event;
+    });
+    this.publishChange(apply());
   }
 
   listPendingRunNotifications(): RunStatus[] {
@@ -3753,8 +3756,8 @@ export class RunStore {
   // newest state transition, not `updated_at`, so post-terminal bookkeeping
   // (PR-discovery retries) cannot reset a Run's age.
   // insertRunRow always writes a first transition, so the coalesce fallback
-  // covers imported rows without transition history and a process exit between
-  // a state update and its matching transition insert.
+  // covers imported rows without transition history and legacy process-exit
+  // artifacts from before Run state and transition writes became atomic.
   listLatestRunsByProject(input: {
     projectNames: string[];
     states: RunState[];

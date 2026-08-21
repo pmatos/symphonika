@@ -1027,6 +1027,53 @@ describe("RunStore detail queries", () => {
     }
   });
 
+  it("updateRunState does not expose a terminal run when its transition write fails", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      vi.useFakeTimers();
+      vi.setSystemTime("2026-05-22T09:00:00.000Z");
+      store.createRun({
+        id: "interrupted-state-update",
+        issue: sampleIssue({ number: 1 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+
+      const faultDatabase = new Database(databasePath(stateRoot));
+      faultDatabase.exec(`
+        create trigger fail_terminal_transition
+        before insert on run_state_transitions
+        when new.state = 'succeeded'
+        begin
+          select raise(abort, 'simulated terminal transition failure');
+        end;
+      `);
+      faultDatabase.close();
+
+      expect(() =>
+        store.updateRunState("interrupted-state-update", "succeeded")
+      ).toThrow("simulated terminal transition failure");
+
+      vi.setSystemTime("2026-05-22T11:00:00.000Z");
+      store.recordPullRequestDiscoveryAttempt("interrupted-state-update");
+
+      expect(store.getRun("interrupted-state-update")?.state).toBe("queued");
+      expect(
+        store
+          .listLatestRunsByProject({
+            projectNames: ["alpha"],
+            states: ["succeeded", "failed", "cancelled"]
+          })
+          .has("alpha")
+      ).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      store.close();
+    }
+  });
+
   it("replaceProjectIssueSnapshots ages out a row that no longer appears in a successful poll (ADR 0073)", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

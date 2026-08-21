@@ -1,0 +1,14 @@
+workflow:
+  name: characterization_gated_refactor
+  initial: refactor
+  use:
+    refactor:
+      template: builtin:refactor-swarm
+      exits:
+        success: done
+        blocked: blocked
+  states:
+    done:
+      terminal: success
+    blocked:
+      terminal: blocked

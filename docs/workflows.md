@@ -236,6 +236,7 @@ An agent result currently projects only:
 
 - `provider_success`
 - `branch_ahead_of_base`
+- `branch_advanced_since_attempt_start`
 
 Do not put PR predicates such as `checks` in an agent state's `complete_when`; those signals are
 produced when a `wait` or `merge_pr` state polls GitHub.
@@ -299,6 +300,7 @@ The parser recognizes the following keys:
 | --- | --- | --- | --- | --- |
 | `provider_success` | `true`, `false` | yes | always `true` | supported |
 | `branch_ahead_of_base` | `true`, `false` | yes | no | supported |
+| `branch_advanced_since_attempt_start` | `true`, `false` | yes | no | supported |
 | `pr_open` | `true`, `false` | no | always | supported |
 | `pr_merged` | `true` | no | only when merged | supported |
 | `mergeable` | `true`, `false` | no | omitted while unknown | supported |
@@ -312,8 +314,13 @@ The parser recognizes the following keys:
 
 `branch_ahead_of_base` counts commits ahead of `origin/<base_branch>`, not ahead of the commit the
 attempt started from. It is a property of the branch, not of the attempt: in a multi-state walk it
-stays `true` for every later state once any earlier state has committed. A state cannot use it to
-prove that its own agent committed something.
+stays `true` for every later state once any earlier state has committed.
+
+`branch_advanced_since_attempt_start` is attempt-local. Symphonika snapshots `HEAD` after Workspace
+preparation and before the provider runs. The signal is true only when completion `HEAD` differs
+from that snapshot and the snapshot remains its ancestor, so a no-op or amended/rewritten earlier
+commit does not satisfy it. Combine it with `branch_ahead_of_base` when a state must create and
+retain its own commit without changing the cumulative predicate's compatibility semantics.
 
 Because missing and `false` are different, `pr_merged: false` does not match an ordinary open PR:
 the signal is omitted until the PR is merged. Likewise, `mergeable: false` means GitHub explicitly
@@ -507,11 +514,10 @@ Their exact expanded behavior is:
   The implementer takes `success` only with provider success and commits ahead of base. Either
   state's fallback takes `blocked`.
 - **`refactor-swarm`:** the red-team agent must succeed and commit characterization tests before
-  the refactorer runs. The refactorer takes its transition on `provider_success: true` and
-  `branch_ahead_of_base: true`, but that predicate is not attempt-local (see "Predicates and signal
-  availability" above), so the red-team commit alone keeps it true — the required distinct refactor
-  commit is enforced by `prompts/refactor.md` and re-checked by the verifier, not by the predicate.
-  The verifier takes `success` on `provider_success: true` alone because it is instructed not to
+  the refactorer runs. Both mutating states require `provider_success: true`,
+  `branch_ahead_of_base: true`, and `branch_advanced_since_attempt_start: true`, so the refactorer
+  cannot reuse the red-team commit to reach verification. The verifier independently re-checks the
+  two commits and takes `success` on `provider_success: true` alone because it is instructed not to
   modify the Workspace; rejection takes `blocked`. All three states share the
   issue Workspace, but each receives only its own rendered prompt and the fixed structured prompt
   variables—never a prior provider transcript or reasoning trail. The verifier can and should

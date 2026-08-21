@@ -18,9 +18,9 @@ characterization-test commit and the later refactor commit from repository evide
 ## What to verify
 
 1. A red-team characterization-test commit exists on `{{branch.name}}`, and a later, distinct
-   refactor commit exists after it. The orchestrator's commits-ahead signal compares the branch to
-   its base, not to the state at the start of each attempt, so it cannot detect a refactor state
-   that produced no commit of its own. Rejecting that case is your job.
+   refactor commit exists after it. The workflow gates both mutating states on branch advance since
+   Attempt start, but independently confirm the resulting history rather than trusting the signal
+   alone.
 2. Every characterization test and fixture introduced by the red-team commit is byte-for-byte
    unchanged at `HEAD`; none was deleted, renamed, skipped, narrowed, or made unreachable through a
    test-runner, helper, or configuration change.

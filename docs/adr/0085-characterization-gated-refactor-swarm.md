@@ -59,27 +59,26 @@ Its transitions are:
 
 | State | Success gate | Destination | Fallback |
 | --- | --- | --- | --- |
-| `red_team` | `provider_success: true` and `branch_ahead_of_base: true` | `refactoring` | `blocked` |
-| `refactoring` | `provider_success: true` and `branch_ahead_of_base: true` | `verifying` | `blocked` |
+| `red_team` | provider success, branch ahead of base, and branch advanced since Attempt start | `refactoring` | `blocked` |
+| `refactoring` | provider success, branch ahead of base, and branch advanced since Attempt start | `verifying` | `blocked` |
 | `verifying` | `provider_success: true` | `success` | `blocked` |
 
 The first commit is an immutable characterization-test baseline. The second state is instructed not
 to edit, delete, rename, skip, or weaken those tests and must create a separate refactor commit.
 
-`branch_ahead_of_base` is *not* attempt-local: `inspectWorkspaceCommitsAhead` counts
-`refs/remotes/origin/<base>..HEAD` in the shared Workspace, so once `red_team` commits, the
-predicate stays true for every later state in the walk. Two consequences follow. The `refactoring`
-gate therefore proves only "this branch has commits", not "this attempt committed" — the distinct
-refactor commit is a prompt obligation that the verifier re-checks from Git history, not a
-predicate the engine can enforce. And declaring `branch_ahead_of_base` on the read-only `verifying`
-state would be worse than useless: it would pass unconditionally while implying a gate that does
-not exist, so the state gates on `provider_success` alone and says so. A verifier rejection uses
-the existing provider-failure signal and blocked exit; the template does not add a comment action
-or predicate.
+`branch_ahead_of_base` remains cumulative: `inspectWorkspaceCommitsAhead` counts
+`refs/remotes/origin/<base>..HEAD` in the shared Workspace. Changing that established predicate to
+attempt-local would silently alter existing workflows, so the agent-result vocabulary adds the
+explicit `branch_advanced_since_attempt_start` signal instead. Immediately after Workspace
+preparation and before provider execution, the Orchestrator snapshots `HEAD`. On clean completion,
+the new signal is true only when the final `HEAD` differs and the snapshot is still its ancestor.
+Both mutating states require the cumulative and attempt-local signals, mechanically enforcing the
+two distinct commits while rejecting commit amendment or history replacement as proof of advance.
 
-Closing the gap mechanically would need a new attempt-local signal (for example
-`commits_ahead_of_attempt_start`). That is a workflow-language change, deliberately out of scope
-here; the shipped design states the limitation instead of implying a guarantee.
+The read-only `verifying` state deliberately omits both commit predicates and gates on
+`provider_success` alone. The verifier still re-checks Git history and characterization-test
+integrity independently. A rejection uses the existing provider-failure signal and blocked exit;
+the template does not add a comment action.
 
 ### Blindness is prompt isolation, not a security boundary
 
@@ -96,9 +95,11 @@ explicit local template path. There is no automatic name shadowing.
 
 - Allowing the red-team state to advance without a commit would leave no immutable baseline for the
   verifier to distinguish from refactor changes.
-- Requiring a verifier commit would not block a read-only approval — `branch_ahead_of_base` is
-  already true from the two earlier commits — but it would advertise a gate the predicate cannot
-  express. Stating the read-only contract in the prompt is honest; a decorative predicate is not.
+- Redefining `branch_ahead_of_base` as attempt-local would have enforced the two commits but broken
+  workflows that intentionally inspect cumulative branch state. A separate predicate preserves
+  compatibility and makes the stronger contract explicit at the states that need it.
+- Requiring a verifier commit would contradict the read-only role. The verifier instead reports
+  approval or rejection through provider success and independently audits both earlier commits.
 - Adding risk values to Workflow Predicates or the dispatch layer would couple repository analysis
   to orchestration policy even though priority labels already provide the dispatch seam.
 - Filing every high-risk issue immediately would maximize throughput but could starve unrelated
@@ -108,8 +109,8 @@ explicit local template path. There is no automatic name shadowing.
 
 ## Consequences
 
-- Refactors cannot reach verification until a characterization-test commit exists; the second,
-  distinct refactor commit is enforced at the verifier rather than by the transition predicate.
+- Refactors cannot reach verification until separate characterization-test and refactor Attempts
+  each advance `HEAD` with a retained descendant commit.
 - Read-only approval works with the existing `provider_success` predicate and state-advance rules.
 - Risk-ranked targets compete through existing eligibility, priority, and concurrency behavior.
 - “Swarm” means several independently filed Issues admitted by normal Project capacity, not

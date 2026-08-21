@@ -1371,9 +1371,8 @@ describe("built-in workflow templates", () => {
       throw new Error("expected build.planning");
     }
 
-    // signalsFromTerminal emits exactly {branch_ahead_of_base, provider_success};
-    // planning.complete_when must be satisfiable with just those, or the state
-    // parks indefinitely after a successful planner run.
+    // planning.complete_when must be satisfiable from ordinary successful
+    // agent-result signals or the state parks indefinitely after a planner run.
     const decision = decideNextStep({
       actionExecuted: true,
       signals: { branch_ahead_of_base: true, provider_success: true },
@@ -1447,21 +1446,33 @@ describe("built-in workflow templates", () => {
     expect(
       decideNextStep({
         actionExecuted: true,
-        signals: { branch_ahead_of_base: true, provider_success: true },
+        signals: {
+          branch_advanced_since_attempt_start: true,
+          branch_ahead_of_base: true,
+          provider_success: true
+        },
         state: redTeam
       })
     ).toMatchObject({ kind: "advance", to: "refactor.refactoring" });
     expect(
       decideNextStep({
         actionExecuted: true,
-        signals: { branch_ahead_of_base: true, provider_success: true },
+        signals: {
+          branch_advanced_since_attempt_start: true,
+          branch_ahead_of_base: true,
+          provider_success: true
+        },
         state: refactoring
       })
     ).toMatchObject({ kind: "advance", to: "refactor.verifying" });
     expect(
       decideNextStep({
         actionExecuted: true,
-        signals: { branch_ahead_of_base: false, provider_success: true },
+        signals: {
+          branch_advanced_since_attempt_start: false,
+          branch_ahead_of_base: false,
+          provider_success: true
+        },
         state: verifying
       })
     ).toMatchObject({ kind: "advance", to: "shipped" });
@@ -1519,14 +1530,16 @@ describe("built-in workflow templates", () => {
         state: stateById(result.workflow, id)
       });
 
-    // signalsFromTerminal emits these three shapes; assert each agent state
+    // Agent completion emits these success/failure shapes; assert each state
     // routes them through the template's mapped blocked exit (needs_human)
     // instead of stalling with kind="blocked".
     const failureSignals = {
+      branch_advanced_since_attempt_start: false,
       branch_ahead_of_base: false,
       provider_success: false
     };
     const noChangeSignals = {
+      branch_advanced_since_attempt_start: false,
       branch_ahead_of_base: false,
       provider_success: true
     };

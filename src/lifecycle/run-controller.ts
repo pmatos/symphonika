@@ -73,6 +73,7 @@ import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
 import { classifyCapReachedOutcome } from "./cap-reached-context.js";
 import {
   classifyFailure,
+  inspectWorkspaceHead,
   type ClassifiedTerminal
 } from "./classify-failure.js";
 import { decideNextStep, findWorkflowState } from "./state-machine-dispatch.js";
@@ -2488,6 +2489,8 @@ export class RunController {
     };
     let attemptCreated = false;
     let started: StartedAttempt | undefined;
+    let headShaAtAttemptStart: string | undefined;
+    let headInspectionFailed = false;
     let caughtError: unknown;
     // Hoisted so the finally can read them on any exit path (including a
     // loadWorkflow throw or a parked-state early return). The initial label
@@ -2701,6 +2704,17 @@ export class RunController {
         );
       }
 
+      try {
+        headShaAtAttemptStart = await inspectWorkspaceHead({
+          workspacePath: started.evidence.workspacePath
+        });
+      } catch {
+        // Defer this deterministic inspection failure until a clean provider
+        // exit. Cancellation, input-required, and provider failures must retain
+        // their own higher-priority classification.
+        headInspectionFailed = true;
+      }
+
       await this.iterateAttempt({
         attemptId,
         attemptNumber: input.attemptNumber,
@@ -2797,6 +2811,10 @@ export class RunController {
             : {
                 successWorkspace: {
                   baseBranch: input.project.workspace.git.base_branch,
+                  headInspectionFailed,
+                  ...(headShaAtAttemptStart === undefined
+                    ? {}
+                    : { headShaAtStart: headShaAtAttemptStart }),
                   workspacePath: started.evidence.workspacePath
                 }
               })
@@ -3001,7 +3019,6 @@ export class RunController {
       },
       project: input.project
     });
-
     const workflow = await this.loadWorkflow(input.project.workflow);
     const workflowPath = workflow.path;
     if (workflow.errors.length > 0) {
@@ -4182,15 +4199,28 @@ function signalsFromTerminal(
   terminal: ClassifiedTerminal
 ): WorkflowPredicateMap {
   if (terminal.kind === "success") {
-    return { branch_ahead_of_base: true, provider_success: true };
+    return {
+      branch_advanced_since_attempt_start:
+        terminal.branchAdvancedSinceAttemptStart ?? false,
+      branch_ahead_of_base: true,
+      provider_success: true
+    };
   }
   if (
     terminal.kind === "failed" &&
     terminal.reason === "no_workspace_changes"
   ) {
-    return { branch_ahead_of_base: false, provider_success: true };
+    return {
+      branch_advanced_since_attempt_start: false,
+      branch_ahead_of_base: false,
+      provider_success: true
+    };
   }
-  return { branch_ahead_of_base: false, provider_success: false };
+  return {
+    branch_advanced_since_attempt_start: false,
+    branch_ahead_of_base: false,
+    provider_success: false
+  };
 }
 
 function isParkedAction(kind: string | undefined): boolean {

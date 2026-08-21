@@ -136,8 +136,8 @@ export class ActiveRunRegistry {
   updateTouchedFiles(
     runId: string,
     input: { files: readonly string[]; refreshedAt: number }
-  ): ActiveRunEntry | undefined {
-    return this.inFlightRuns.updateTouchedFiles(runId, input);
+  ): void {
+    this.inFlightRuns.updateTouchedFiles(runId, input);
   }
 
   countInFlight(): number {

@@ -14,8 +14,9 @@ export type InFlightRunEntry = {
   // CLOSED_ISSUE. See ADR 0046.
   respectsIssueLabels: boolean;
   runId: string;
-  touchedFiles: readonly string[];
-  touchedFilesRefreshedAt?: number;
+  // Absent until the dispatch overlap guard has measured this Run: an
+  // unknown footprint is unknown, not empty. See ADR 0085.
+  touchedFiles?: { files: readonly string[]; refreshedAt: number };
 };
 
 export type ReserveSlotInput = {
@@ -88,8 +89,7 @@ export class InFlightRunRegistry {
       issueNumber: input.issueNumber,
       projectName: input.projectName,
       respectsIssueLabels: input.respectsIssueLabels ?? true,
-      runId: input.runId,
-      touchedFiles: []
+      runId: input.runId
     };
     this.entries.set(input.runId, entry);
     this.issueLocks.add(key);
@@ -163,14 +163,15 @@ export class InFlightRunRegistry {
   updateTouchedFiles(
     runId: string,
     input: { files: readonly string[]; refreshedAt: number }
-  ): InFlightRunEntry | undefined {
+  ): void {
     const entry = this.entries.get(runId);
     if (entry === undefined) {
-      return undefined;
+      return;
     }
-    entry.touchedFiles = [...input.files];
-    entry.touchedFilesRefreshedAt = input.refreshedAt;
-    return entry;
+    entry.touchedFiles = {
+      files: [...input.files],
+      refreshedAt: input.refreshedAt
+    };
   }
 
   isIssueInFlight(projectName: string, issueNumber: number): boolean {

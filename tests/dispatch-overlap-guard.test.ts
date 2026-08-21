@@ -18,6 +18,7 @@ import { createGitWorkspaceAtBase } from "./helpers/git-workspace.js";
 
 const execFileAsync = promisify(execFile);
 const tempRoots: string[] = [];
+const openStores: RunStore[] = [];
 
 async function git(args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args);
@@ -31,6 +32,9 @@ async function makeTempRoot(): Promise<string> {
 }
 
 afterEach(async () => {
+  for (const store of openStores.splice(0)) {
+    store.close();
+  }
   await Promise.all(
     tempRoots
       .splice(0)
@@ -41,74 +45,62 @@ afterEach(async () => {
 describe("dispatch file-overlap guard", () => {
   it("skips a known collision without advancing the Project cursor", async () => {
     const harness = await createHarness();
-    try {
-      const result = await harness.controller.dispatchOneFresh(
-        pollStatus(issue({ number: 2, title: "Candidate" }))
-      );
+    const result = await harness.controller.dispatchOneFresh(
+      pollStatus(issue({ number: 2, title: "Candidate" }))
+    );
 
-      expect(result.dispatched).toBe(false);
-      expect(harness.addLabelsToIssue).not.toHaveBeenCalled();
-      expect(
-        harness.runStore.getProjectStatesByName().get("alpha")
-          ?.lastDispatchedIssueNumber
-      ).toBeNull();
-      expect(
-        harness.runStore.getProjectStatesByName().get("alpha")
-          ?.schedulerCurrentWeight
-      ).toBe(0);
-    } finally {
-      harness.runStore.close();
-    }
+    expect(result.dispatched).toBe(false);
+    expect(harness.addLabelsToIssue).not.toHaveBeenCalled();
+    expect(
+      harness.runStore.getProjectStatesByName().get("alpha")
+        ?.lastDispatchedIssueNumber
+    ).toBeNull();
+    expect(
+      harness.runStore.getProjectStatesByName().get("alpha")
+        ?.schedulerCurrentWeight
+    ).toBe(0);
   });
 
   it("selects a later non-colliding candidate in the same Project", async () => {
     const harness = await createHarness();
-    try {
-      const result = await harness.controller.dispatchOneFresh(
-        pollStatusFor([
-          issue({ number: 2, title: "Candidate" }),
-          issue({ number: 3, title: "Independent" })
-        ])
-      );
+    const result = await harness.controller.dispatchOneFresh(
+      pollStatusFor([
+        issue({ number: 2, title: "Candidate" }),
+        issue({ number: 3, title: "Independent" })
+      ])
+    );
 
-      expect(result).toEqual({
-        dispatched: true,
-        runId: "candidate-run-1"
-      });
-      expect(harness.runStore.getRun("candidate-run-1")?.issueNumber).toBe(3);
-    } finally {
-      harness.runStore.close();
-    }
+    expect(result).toEqual({
+      dispatched: true,
+      runId: "candidate-run-1"
+    });
+    expect(harness.runStore.getRun("candidate-run-1")?.issueNumber).toBe(3);
   });
 
   it("dispatches a skipped candidate after the conflicting Run unregisters", async () => {
     const harness = await createHarness();
-    try {
-      const skipped = await harness.controller.dispatchOneFresh(
-        pollStatus(issue({ number: 2, title: "Candidate" }))
-      );
-      expect(skipped.dispatched).toBe(false);
+    const skipped = await harness.controller.dispatchOneFresh(
+      pollStatus(issue({ number: 2, title: "Candidate" }))
+    );
+    expect(skipped.dispatched).toBe(false);
 
-      harness.activeRuns.unregister("active-run");
-      const retried = await harness.controller.dispatchOneFresh(
-        pollStatus(issue({ number: 2, title: "Candidate" }))
-      );
+    harness.activeRuns.unregister("active-run");
+    const retried = await harness.controller.dispatchOneFresh(
+      pollStatus(issue({ number: 2, title: "Candidate" }))
+    );
 
-      expect(retried).toEqual({
-        dispatched: true,
-        runId: "candidate-run-1"
-      });
-      expect(harness.runStore.getRun("candidate-run-1")?.issueNumber).toBe(2);
-      expect(harness.addLabelsToIssue).toHaveBeenCalledWith({
-        issueNumber: 2,
-        labels: ["sym:claimed"],
-        owner: "acme",
-        repo: "alpha",
-        token: "secret"
-      });
-    } finally {
-      harness.runStore.close();
-    }
+    expect(retried).toEqual({
+      dispatched: true,
+      runId: "candidate-run-1"
+    });
+    expect(harness.runStore.getRun("candidate-run-1")?.issueNumber).toBe(2);
+    expect(harness.addLabelsToIssue).toHaveBeenCalledWith({
+      issueNumber: 2,
+      labels: ["sym:claimed"],
+      owner: "acme",
+      repo: "alpha",
+      token: "secret"
+    });
   });
 
   it("counts a committed branch change as in-flight footprint", async () => {
@@ -119,16 +111,12 @@ describe("dispatch file-overlap guard", () => {
         await git(["-C", workspacePath, "commit", "-m", "In-flight work"]);
       }
     });
-    try {
-      const result = await harness.controller.dispatchOneFresh(
-        pollStatus(issue({ number: 2, title: "Candidate" }))
-      );
+    const result = await harness.controller.dispatchOneFresh(
+      pollStatus(issue({ number: 2, title: "Candidate" }))
+    );
 
-      expect(result.dispatched).toBe(false);
-      expect(harness.addLabelsToIssue).not.toHaveBeenCalled();
-    } finally {
-      harness.runStore.close();
-    }
+    expect(result.dispatched).toBe(false);
+    expect(harness.addLabelsToIssue).not.toHaveBeenCalled();
   });
 
   it("ignores base-branch commits the in-flight Run never made", async () => {
@@ -175,34 +163,26 @@ describe("dispatch file-overlap guard", () => {
         ]);
       }
     });
-    try {
-      const result = await harness.controller.dispatchOneFresh(
-        pollStatus(issue({ number: 2, title: "Candidate" }))
-      );
+    const result = await harness.controller.dispatchOneFresh(
+      pollStatus(issue({ number: 2, title: "Candidate" }))
+    );
 
-      expect(result).toEqual({
-        dispatched: true,
-        runId: "candidate-run-1"
-      });
-    } finally {
-      harness.runStore.close();
-    }
+    expect(result).toEqual({
+      dispatched: true,
+      runId: "candidate-run-1"
+    });
   });
 
   it("fails open when a linked pull request footprint cannot be loaded", async () => {
     const harness = await createHarness();
-    try {
-      const result = await harness.controller.dispatchOneFresh(
-        pollStatus(issue({ number: 4, title: "Unavailable footprint" }))
-      );
+    const result = await harness.controller.dispatchOneFresh(
+      pollStatus(issue({ number: 4, title: "Unavailable footprint" }))
+    );
 
-      expect(result).toEqual({
-        dispatched: true,
-        runId: "candidate-run-1"
-      });
-    } finally {
-      harness.runStore.close();
-    }
+    expect(result).toEqual({
+      dispatched: true,
+      runId: "candidate-run-1"
+    });
   });
 });
 
@@ -235,6 +215,7 @@ async function createHarness(
   await writeFile(path.join(root, "WORKFLOW.md"), "Work on this Issue.\n");
 
   const runStore = openRunStore({ stateRoot });
+  openStores.push(runStore);
   const activeRuns = new ActiveRunRegistry();
   runStore.syncProjectStates([{ name: "alpha", weight: 1 }]);
   runStore.createRun({

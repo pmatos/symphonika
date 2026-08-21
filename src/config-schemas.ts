@@ -68,6 +68,35 @@ export const projectDispatchSchema = z
   })
   .strict();
 
+// A Routine Host has no use for dispatch-only fields — ADR 0062 says they are
+// "unused and rejected", so a stale or copy-pasted dispatch block must be a
+// declaration-time error rather than silently ignored. Shared so `reload` and
+// `doctor` cannot drift on which keys they reject.
+const DISPATCH_ONLY_KEYS = [
+  "dispatch",
+  "issue_filters",
+  "priority",
+  "workflow"
+] as const;
+
+export function rejectDispatchOnlyKeysOnRoutineHost(
+  rawProject: unknown,
+  ctx: z.RefinementCtx
+): void {
+  if (rawProject === null || typeof rawProject !== "object") {
+    return;
+  }
+  for (const key of DISPATCH_ONLY_KEYS) {
+    if (key in rawProject) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `\`${key}\` is a dispatch-only field and is unused and rejected on a Routine Host (mode: routine_host); see ADR 0062`,
+        path: [key]
+      });
+    }
+  }
+}
+
 const workflowFormatSchema = z.enum(["markdown", "raw_fsm", "auto"]);
 export type WorkflowFormat = z.infer<typeof workflowFormatSchema>;
 

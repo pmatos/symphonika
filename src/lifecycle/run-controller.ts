@@ -75,9 +75,9 @@ import {
   classifyFailure,
   type ClassifiedTerminal
 } from "./classify-failure.js";
+import { DispatchFileOverlapGuard } from "./file-overlap-guard.js";
 import { decideNextStep, findWorkflowState } from "./state-machine-dispatch.js";
 import { buildCapReachedReason } from "./terminal-reason.js";
-import { DispatchFileOverlapGuard } from "./file-overlap-guard.js";
 
 export type WorkflowSnapshot = {
   body: string;
@@ -106,7 +106,7 @@ export type RunControllerProjectConfig = {
   // Per-project concurrency cap. Omitted defaults to 1 at consume-time.
   // See ADR 0053.
   max_in_flight?: number | undefined;
-  dispatch?: { overlap_guard: boolean } | undefined;
+  dispatch?: PollingProjectConfig["dispatch"] | undefined;
   // Required for Dispatch Projects; optional for Routine Hosts (required when
   // the host targets kind: git firings — enforced at reload). The issue
   // dispatch path reads tracker only for projects that produced polling
@@ -2200,25 +2200,7 @@ export class RunController {
       if (this.activeRuns.countInFlightByProject(projectName) >= projectMax) {
         continue;
       }
-      let candidate: { issue: IssueSnapshot; project: string } | undefined;
-      for (const entry of bucket.slice().sort(compareCandidateIssues)) {
-        if (
-          this.activeRuns.isIssueReserved(entry.project, entry.issue.number)
-        ) {
-          continue;
-        }
-        if (
-          project.dispatch?.overlap_guard === true &&
-          (await this.fileOverlapGuard.hasKnownOverlap({
-            issue: entry.issue,
-            project
-          }))
-        ) {
-          continue;
-        }
-        candidate = entry;
-        break;
-      }
+      const candidate = await this.pickProjectCandidate(bucket, project);
       if (candidate === undefined) {
         continue;
       }
@@ -2264,6 +2246,30 @@ export class RunController {
       provider: selected.provider,
       schedulerWeights
     };
+  }
+
+  // Sequential on purpose: the first admissible candidate wins, so the overlap
+  // guard's GitHub round-trip is only paid until one is found.
+  private async pickProjectCandidate(
+    bucket: ReadonlyArray<{ issue: IssueSnapshot; project: string }>,
+    project: RunControllerProjectConfig
+  ): Promise<{ issue: IssueSnapshot; project: string } | undefined> {
+    const guarded = project.dispatch?.overlap_guard === true;
+    for (const entry of bucket.slice().sort(compareCandidateIssues)) {
+      if (this.activeRuns.isIssueReserved(entry.project, entry.issue.number)) {
+        continue;
+      }
+      if (
+        !guarded ||
+        !(await this.fileOverlapGuard.hasKnownOverlap({
+          issue: entry.issue,
+          project
+        }))
+      ) {
+        return entry;
+      }
+    }
+    return undefined;
   }
 
   private async runFreshLifecycle(input: {

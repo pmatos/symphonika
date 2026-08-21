@@ -4,13 +4,13 @@ import { promisify } from "node:util";
 import type { Logger } from "pino";
 
 import {
-  resolveEnvBackedValue,
   tryListPullRequestFiles,
   tryListPullRequestsForBranch,
   type GitHubIssuesApi,
   type IssueSnapshot,
   type RawGitHubPullRequest
 } from "../issue-polling.js";
+import { repositoryForProject } from "../pull-request-followup.js";
 import type { RunStore } from "../run-store.js";
 import { planWorkspacePaths } from "../workspace-paths.js";
 import type { ActiveRunEntry, ActiveRunRegistry } from "./active-runs.js";
@@ -55,7 +55,6 @@ export class DispatchFileOverlapGuard {
   private readonly githubIssuesApi: GitHubIssuesApi;
   private readonly logger?: Logger;
   private readonly now: () => number;
-  private readonly refreshIntervalMs: number;
   private readonly runStore: RunStore;
 
   constructor(input: {
@@ -65,7 +64,6 @@ export class DispatchFileOverlapGuard {
     githubIssuesApi: GitHubIssuesApi;
     logger?: Logger;
     now?: () => number;
-    refreshIntervalMs?: number;
     runStore: RunStore;
   }) {
     this.activeRuns = input.activeRuns;
@@ -76,8 +74,6 @@ export class DispatchFileOverlapGuard {
       this.logger = input.logger;
     }
     this.now = input.now ?? Date.now;
-    this.refreshIntervalMs =
-      input.refreshIntervalMs ?? DEFAULT_OVERLAP_FOOTPRINT_REFRESH_MS;
     this.runStore = input.runStore;
   }
 
@@ -110,10 +106,7 @@ export class DispatchFileOverlapGuard {
     // Cheapest possible gate first: with nothing in flight for the Project
     // there is nothing to collide with, so neither the Run Store nor GitHub
     // is touched on an otherwise idle tick.
-    const hasProjectRuns = this.activeRuns
-      .list()
-      .some((active) => active.projectName === projectName);
-    if (!hasProjectRuns) {
+    if (this.activeRuns.countInFlightByProject(projectName) === 0) {
       return false;
     }
     const candidateFiles = await this.candidateFiles(input);
@@ -158,7 +151,7 @@ export class DispatchFileOverlapGuard {
     );
 
     for (const { active } of activeIssueRuns) {
-      const collision = active.touchedFiles.find((file) =>
+      const collision = active.touchedFiles?.files.find((file) =>
         candidateFileSet.has(file)
       );
       if (collision !== undefined) {
@@ -183,20 +176,21 @@ export class DispatchFileOverlapGuard {
     now: number;
     workspacePath: string;
   }): Promise<void> {
-    const refreshedAt = input.active.touchedFilesRefreshedAt;
+    const refreshedAt = input.active.touchedFiles?.refreshedAt;
     if (
       refreshedAt !== undefined &&
-      input.now - refreshedAt < this.refreshIntervalMs
+      input.now - refreshedAt < DEFAULT_OVERLAP_FOOTPRINT_REFRESH_MS
     ) {
       return;
     }
+    // On failure keep the last good snapshot but still stamp the attempt, so a
+    // permanently broken Workspace does not respawn two `git` processes for
+    // every candidate on every tick.
+    let files = input.active.touchedFiles?.files ?? [];
     try {
-      this.activeRuns.updateTouchedFiles(input.active.runId, {
-        files: await readTouchedFiles({
-          baseBranch: input.baseBranch,
-          workspacePath: input.workspacePath
-        }),
-        refreshedAt: input.now
+      files = await readTouchedFiles({
+        baseBranch: input.baseBranch,
+        workspacePath: input.workspacePath
       });
     } catch (error) {
       this.logger?.warn(
@@ -208,14 +202,11 @@ export class DispatchFileOverlapGuard {
         },
         "symphonika dispatch overlap Workspace inspection failed"
       );
-      // Keep the last good snapshot but stamp the attempt so a permanently
-      // broken Workspace does not respawn two `git` processes for every
-      // candidate on every tick.
-      this.activeRuns.updateTouchedFiles(input.active.runId, {
-        files: input.active.touchedFiles,
-        refreshedAt: input.now
-      });
     }
+    this.activeRuns.updateTouchedFiles(input.active.runId, {
+      files,
+      refreshedAt: input.now
+    });
   }
 
   private async candidateFiles(input: {
@@ -223,7 +214,7 @@ export class DispatchFileOverlapGuard {
     project: GuardProject;
   }): Promise<readonly string[]> {
     const now = this.now();
-    const repository = repositoryFor(input.project, this.env);
+    const repository = repositoryForProject(input.project, this.env);
     if (repository === undefined) {
       return [];
     }
@@ -232,61 +223,19 @@ export class DispatchFileOverlapGuard {
     this.pruneCandidateCache(now);
     if (
       cached !== undefined &&
-      now - cached.refreshedAt < this.refreshIntervalMs
+      now - cached.refreshedAt < DEFAULT_OVERLAP_FOOTPRINT_REFRESH_MS
     ) {
       return cached.files;
     }
     try {
-      const tracked = this.runStore
-        .listOpenTrackedPullRequests()
-        .find(
-          (pullRequest) =>
-            pullRequest.projectName === input.project.name &&
-            pullRequest.issueNumber === input.issue.number
-        );
-      let pullNumber = tracked?.prNumber;
-      if (pullNumber === undefined) {
-        const branchName = planWorkspacePaths({
-          configDir: this.configDir,
-          issue: input.issue,
-          project: input.project
-        }).branchName;
-        const pullRequests = await tryListPullRequestsForBranch(
-          this.githubIssuesApi,
-          {
-            ...repository,
-            branch: branchName
-          }
-        );
-        pullNumber = selectOpenPullRequest(
-          pullRequests ?? [],
-          branchName
-        )?.number;
-      }
-      if (pullNumber === undefined) {
-        this.candidateCache.set(key, { files: [], refreshedAt: now });
-        return [];
-      }
-      const files = await tryListPullRequestFiles(this.githubIssuesApi, {
-        ...repository,
-        pullNumber
+      const files = await this.loadCandidateFiles({
+        carried: cached?.files ?? [],
+        issue: input.issue,
+        project: input.project,
+        repository
       });
-      if (files === undefined) {
-        // The adapter has no listFiles at all; cache the fail-open answer so
-        // the branch lookup above is not re-issued to GitHub every tick.
-        const carried = cached?.files ?? [];
-        this.candidateCache.set(key, { files: carried, refreshedAt: now });
-        return carried;
-      }
-      const normalized = Array.from(
-        new Set(
-          files
-            .map((file) => normalizeRepositoryPath(file.filename))
-            .filter((file): file is string => file !== undefined)
-        )
-      );
-      this.candidateCache.set(key, { files: normalized, refreshedAt: now });
-      return normalized;
+      this.candidateCache.set(key, { files, refreshedAt: now });
+      return files;
     } catch (error) {
       this.logger?.warn(
         {
@@ -300,9 +249,58 @@ export class DispatchFileOverlapGuard {
     }
   }
 
+  // Returns the candidate PR's file footprint, or `carried`/`[]` when there is
+  // nothing to read — every outcome is cached by the caller so a fail-open
+  // answer does not re-issue the branch lookup to GitHub on the next tick.
+  private async loadCandidateFiles(input: {
+    carried: readonly string[];
+    issue: IssueSnapshot;
+    project: GuardProject;
+    repository: { owner: string; repo: string; token: string };
+  }): Promise<readonly string[]> {
+    const tracked = this.runStore.findTrackedPullRequestByIssue({
+      issueNumber: input.issue.number,
+      projectName: input.project.name
+    });
+    let pullNumber = tracked?.state === "open" ? tracked.prNumber : undefined;
+    if (pullNumber === undefined) {
+      const branchName = planWorkspacePaths({
+        configDir: this.configDir,
+        issue: input.issue,
+        project: input.project
+      }).branchName;
+      const pullRequests = await tryListPullRequestsForBranch(
+        this.githubIssuesApi,
+        { ...input.repository, branch: branchName }
+      );
+      pullNumber = openPullRequestNumberForBranch(
+        pullRequests ?? [],
+        branchName
+      );
+    }
+    if (pullNumber === undefined) {
+      return [];
+    }
+    const files = await tryListPullRequestFiles(this.githubIssuesApi, {
+      ...input.repository,
+      pullNumber
+    });
+    // The adapter has no listFiles at all: fail open on the last good answer.
+    if (files === undefined) {
+      return input.carried;
+    }
+    return Array.from(
+      new Set(
+        files
+          .map((file) => normalizeRepositoryPath(file.filename))
+          .filter((file): file is string => file !== undefined)
+      )
+    );
+  }
+
   private pruneCandidateCache(now: number): void {
     for (const [key, cached] of this.candidateCache) {
-      if (now - cached.refreshedAt >= this.refreshIntervalMs) {
+      if (now - cached.refreshedAt >= DEFAULT_OVERLAP_FOOTPRINT_REFRESH_MS) {
         this.candidateCache.delete(key);
       }
     }
@@ -402,33 +400,17 @@ function normalizeRepositoryPath(file: string | undefined): string | undefined {
   return normalized.length === 0 ? undefined : normalized;
 }
 
-function repositoryFor(
-  project: GuardProject,
-  env: NodeJS.ProcessEnv
-): { owner: string; repo: string; token: string } | undefined {
-  if (project.tracker === undefined) {
-    return undefined;
-  }
-  const token = resolveEnvBackedValue(project.tracker.token, env);
-  if (token === undefined) {
-    return undefined;
-  }
-  return {
-    owner: project.tracker.owner,
-    repo: project.tracker.repo,
-    token
-  };
-}
-
-function selectOpenPullRequest(
+// Unlike the PR follow-up path's selector, drafts count here: a draft PR's
+// files are a real footprint that a concurrent Run would still collide with.
+function openPullRequestNumberForBranch(
   pullRequests: readonly RawGitHubPullRequest[],
   branchName: string
-): (RawGitHubPullRequest & { number: number }) | undefined {
+): number | undefined {
   return pullRequests.find(
-    (pullRequest): pullRequest is RawGitHubPullRequest & { number: number } =>
+    (pullRequest) =>
       pullRequest.state === "open" &&
       pullRequest.number !== undefined &&
       pullRequest.number > 0 &&
       pullRequest.head?.ref === branchName
-  );
+  )?.number;
 }

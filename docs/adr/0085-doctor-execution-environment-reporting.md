@@ -22,7 +22,11 @@ stale version-manager directory.
 - For every distinct `agent.provider` selected by a configured Project, render the configured
   command through `renderProviderCommandTemplate`, parse it with the providers' shared command
   parser, and resolve the resulting executable under the invoking environment. An unresolved
-  executable is an error because dispatch cannot start it.
+  executable is an error because dispatch cannot start it. Bare executable names mirror the
+  provider process's PATH lookup, including the platform default when PATH is unset; absolute paths
+  are checked directly. A relative path containing a separator is rejected because providers launch
+  it from a future issue or Routine Workspace, not the directory where `doctor` was invoked, and no
+  single future Workspace exists yet for `doctor` to inspect.
 - When a Project selects Codex, parse the Codex config as TOML and report independent checks for
   `sandbox_mode = "danger-full-access"` and `approval_policy = "never"` under the profile the
   configured command actually selects (`-p` / `--profile`, falling back to `symphonika` when the
@@ -33,15 +37,18 @@ stale version-manager directory.
   results rather than only a generic profile error; any other read failure additionally reports the
   underlying reason. This complements ADR 0042's provider probe: the adapter still validates the
   actual app-server behavior, while the environment report exposes the declared key values directly.
-- Resolve `gh` under the invoking PATH and run `gh auth status`. The report distinguishes
+- Resolve `gh` under the invoking PATH and run `gh auth status --active --hostname github.com`,
+  matching the GitHub.com tracker boundary without letting a stale unrelated account or enterprise
+  host fail the probe. The report distinguishes
   `not_installed`, `unauthenticated`, and `authenticated`, and a failed probe carries the reason gh
   reported so a timeout or network failure is not misread as a logged-out CLI. `doctor --offline`
   still resolves `gh` and performs every local check, but records `skipped_offline` instead of
   making the auth-status call.
-- When `symphonika.service` is installed, read its effective `Environment=PATH=...` assignment and
-  resolve every selected provider executable plus `gh` against that frozen value. Failures are
-  warnings, because an operator may intentionally pin PATH and the invoking shell is not
-  authoritative for the daemon. Each warning names the executable that is unavailable.
+- When `symphonika.service` is installed, read its effective `Environment=PATH=...` assignment from
+  the base unit plus adjacent `symphonika.service.d/*.conf` drop-ins in lexical order, then resolve
+  every selected provider executable plus `gh` against that frozen value. Failures are warnings,
+  because an operator may intentionally pin PATH and the invoking shell is not authoritative for
+  the daemon. Each warning names the executable that is unavailable.
 - `doctor --json` emits the same `DoctorReport` as one JSON value on stdout. It does not select a
   different check set; failure still produces a nonzero process exit status.
 

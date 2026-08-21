@@ -1,5 +1,12 @@
 import { constants } from "node:fs";
-import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  writeFile
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { stdin, stdout } from "node:process";
@@ -474,10 +481,11 @@ export async function runDoctor(
   const errors: string[] = [];
   const projects: DoctorProjectReport[] = [];
   // Both the structural drift check and the frozen-PATH check read the same
-  // installed unit; read it once here rather than twice concurrently.
+  // effective installed unit, including operator-authored drop-ins; read it
+  // once here rather than twice concurrently.
   const unitDir = userUnitDir(homeDir, env);
   const servicePath = path.join(unitDir, "symphonika.service");
-  const serviceContent = await readFileIfExists(servicePath);
+  const serviceContent = await readEffectiveUnitContent(servicePath);
   const [warnings, hostEnvironment] = await Promise.all([
     checkInstalledUnitDrift(unitDir, servicePath, serviceContent),
     inspectDoctorHostEnvironment({
@@ -760,6 +768,34 @@ function sliceDirectiveNames(content: string): Set<string> | undefined {
   }
 
   return sawSliceSection ? directives : undefined;
+}
+
+async function readEffectiveUnitContent(
+  servicePath: string
+): Promise<string | undefined> {
+  const baseContent = await readFileIfExists(servicePath);
+  if (baseContent === undefined) {
+    return undefined;
+  }
+
+  const dropInDir = `${servicePath}.d`;
+  let dropInNames: string[];
+  try {
+    dropInNames = (await readdir(dropInDir))
+      .filter((name) => name.endsWith(".conf"))
+      .sort();
+  } catch {
+    return baseContent;
+  }
+
+  const fragments = [baseContent];
+  for (const dropInName of dropInNames) {
+    const content = await readFileIfExists(path.join(dropInDir, dropInName));
+    if (content !== undefined) {
+      fragments.push(content);
+    }
+  }
+  return fragments.join("\n");
 }
 
 async function readFileIfExists(filePath: string): Promise<string | undefined> {

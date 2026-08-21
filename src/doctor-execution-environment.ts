@@ -178,11 +178,15 @@ async function checkGhAuth(
   }
 
   try {
-    await execFile(executablePath, ["auth", "status"], {
-      cwd,
-      env,
-      timeout: 10_000
-    });
+    await execFile(
+      executablePath,
+      ["auth", "status", "--active", "--hostname", "github.com"],
+      {
+        cwd,
+        env,
+        timeout: 10_000
+      }
+    );
     return { executablePath, status: "authenticated" };
   } catch (error) {
     errors.push(
@@ -293,6 +297,14 @@ async function withInstalledProviderBinaryChecks(
   const providerReports: DoctorInstalledUnitReport["binaries"] = [];
   for (const provider of providers) {
     if (provider.executable === null) {
+      continue;
+    }
+    if (isWorkspaceRelativeExecutable(provider.executable)) {
+      providerReports.push({
+        executable: provider.executable,
+        provider: provider.provider,
+        resolvedPath: null
+      });
       continue;
     }
     providerReports.push({
@@ -420,6 +432,19 @@ async function checkProviderBinaries(
       });
       errors.push(
         `provider ${providerName} command could not be resolved: ${errorMessage(error)}`
+      );
+      continue;
+    }
+
+    if (isWorkspaceRelativeExecutable(executable)) {
+      reports.push({
+        executable,
+        provider: providerName,
+        resolvedPath: null,
+        status: "unresolved"
+      });
+      errors.push(
+        `provider ${providerName} executable ${executable} is relative to the future Workspace; use an absolute path or a command resolvable on PATH`
       );
       continue;
     }
@@ -628,12 +653,19 @@ async function resolveExecutable(
   environmentPath: string | undefined,
   pathExt: string | undefined
 ): Promise<string | undefined> {
-  const hasPathSeparator =
-    executable.includes(path.sep) ||
-    (path.sep === "\\" && executable.includes("/"));
+  const hasPathSeparator = executableHasPathSeparator(executable);
+  if (hasPathSeparator && !path.isAbsolute(executable)) {
+    return undefined;
+  }
+  const searchPath =
+    environmentPath === undefined
+      ? process.platform === "win32"
+        ? (process.env.PATH ?? "")
+        : "/usr/bin:/bin"
+      : environmentPath;
   const candidates = hasPathSeparator
-    ? [path.isAbsolute(executable) ? executable : path.resolve(cwd, executable)]
-    : (environmentPath ?? "")
+    ? [executable]
+    : searchPath
         .split(path.delimiter)
         .map((entry) =>
           path.join(entry.length === 0 ? cwd : entry, executable)
@@ -657,6 +689,17 @@ async function resolveExecutable(
     }
   }
   return undefined;
+}
+
+function isWorkspaceRelativeExecutable(executable: string): boolean {
+  return executableHasPathSeparator(executable) && !path.isAbsolute(executable);
+}
+
+function executableHasPathSeparator(executable: string): boolean {
+  return (
+    executable.includes(path.sep) ||
+    (path.sep === "\\" && executable.includes("/"))
+  );
 }
 
 function errorMessage(error: unknown): string {

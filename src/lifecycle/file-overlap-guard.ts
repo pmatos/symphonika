@@ -155,26 +155,25 @@ export class DispatchFileOverlapGuard {
     const candidateFileSet = new Set(candidateFiles);
     const now = this.now();
 
-    // One Run Store query for the Project rather than getRun per entry:
-    // getRun also loads every attempt and stats every artifact on disk, and
-    // all this needs is the Workspace path. Routine Firings share the
-    // registry but own no `runs` row, so they drop out here and a routine
-    // Workspace is never read as issue-Run footprint. A reserved issue Run
-    // without a Workspace path contributes only when claim-time admission
-    // seeded its known candidate footprint.
-    const workspacePaths = new Map(
-      this.runStore
-        .listRuns({ project: projectName })
-        .map((run) => [run.id, run.workspacePath])
-    );
     // Deliberately re-read the registry after the GitHub round-trip above:
     // a Run can unregister during it, and a Run that is no longer in flight
     // must not keep blocking candidates.
-    const activeIssueRuns = this.activeRuns.list().flatMap((active) => {
+    const activeProjectRuns = this.activeRuns
+      .list()
+      .filter((active) => active.projectName === projectName);
+    // One primary-key Run Store query restricted to the active IDs. getRun
+    // also loads every attempt and stats every artifact on disk, while a
+    // Project-wide listRuns scan grows with unbounded historical evidence.
+    const workspacePaths = this.runStore.findRunWorkspacePaths(
+      activeProjectRuns.map((active) => active.runId)
+    );
+    // Routine Firings share the registry but own no `runs` row, so they drop
+    // out here and a routine Workspace is never read as issue-Run footprint.
+    // A reserved issue Run without a Workspace path contributes only when
+    // claim-time admission seeded its known candidate footprint.
+    const activeIssueRuns = activeProjectRuns.flatMap((active) => {
       const workspacePath = workspacePaths.get(active.runId);
-      return active.projectName !== projectName ||
-        ((workspacePath === undefined || workspacePath.length === 0) &&
-          active.touchedFiles === undefined)
+      return workspacePath === undefined && active.touchedFiles === undefined
         ? []
         : [{ active, workspacePath }];
     });

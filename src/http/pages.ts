@@ -6715,7 +6715,7 @@ function renderCancelForm(
   if (TERMINAL_STATES.has(detail.state)) {
     return "";
   }
-  return `<section><form method="post" action="/api/runs/${encodeURIComponent(detail.id)}/cancel"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}"><button class="btn" type="submit">Cancel run</button></form></section>`;
+  return `<section><form method="post" action="/api/runs/${encodeURIComponent(detail.id)}/cancel" onsubmit="return window.confirm('Cancel this run? Any active provider process will be stopped. This action cannot be undone.')"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}"><button class="btn" type="submit">Cancel run</button></form></section>`;
 }
 
 // #307's routine-lifecycle controls: cancellation already generalized

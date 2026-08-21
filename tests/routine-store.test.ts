@@ -2422,6 +2422,67 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("allows age-based retention for an orphaned report workspace", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "leaked-report-fire",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.updateRoutineFiringWorkspace({
+        id: "leaked-report-fire",
+        workspacePath: "/tmp/leaked-report-workspace"
+      });
+      store.updateRoutineFiringState("leaked-report-fire", "running");
+
+      store.markRoutineFiringsFailed([
+        {
+          firingId: "leaked-report-fire",
+          previousState: "running",
+          reason: "leaked_routine_firing"
+        }
+      ]);
+
+      expect(store.getRoutineFiring("leaked-report-fire")).toMatchObject({
+        commitsAhead: false,
+        kind: "report",
+        state: "failed",
+        terminalReason: "leaked_routine_firing"
+      });
+      const future = "9999-12-31T23:59:59.999Z";
+      expect(
+        store.listRoutineWorkspacePruneCandidates({
+          cancelledBefore: future,
+          failedBefore: future,
+          succeededBefore: future
+        })
+      ).toEqual([
+        expect.objectContaining({
+          id: "leaked-report-fire",
+          kind: "report",
+          workspacePath: "/tmp/leaked-report-workspace"
+        })
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("findLeakedRoutineFirings rediscovers a row left with the cleanup-pending reason", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

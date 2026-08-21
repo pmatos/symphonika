@@ -14,37 +14,37 @@ if its Routine declaration later changes.
 
 ## Considered approaches
 
-### Persist firing kind and atomically delete the ref
+### Persist firing kind and retain Git's worktree-aware deletion
 
 Snapshot the Routine kind onto each `routine_firings` row when the firing is
-claimed. After reclaiming the worktree, delete `refs/heads/<branch>` with
-`git update-ref -d` only when the persisted kind is `git`.
+claimed. After reclaiming the worktree, delete its local branch with
+`git branch -D` only when the persisted kind is `git`.
 
-This is the selected approach. `update-ref -d` is idempotent when the ref is
-already absent, so overlapping daemon and manual passes do not need a
-check-then-delete sequence. Persisting kind prevents later Routine declaration
-edits from changing cleanup ownership.
+This is the selected approach. Persisting kind prevents later Routine
+declaration edits from changing cleanup ownership. `git branch -D` keeps Git's
+native refusal to delete a branch checked out by another linked worktree in
+the deletion operation itself. On deletion failure, retention distinguishes a
+branch held by another worktree, an already-absent ref, and a genuine Git
+error. A live holder and a concurrent deletion both let workspace reclamation
+finish; genuine failures remain eligible for retry.
 
-`update-ref -d` also drops one refusal `git branch -D` performs: it deletes a
-ref that a registered worktree still has checked out. A firing branch name
-carries only the truncated firing id, so two firings of one Routine created in
-the same millisecond derive the same name, and reclaiming the terminal one
-could delete the branch out from under the live one. Retention restores the
-refusal by reading the branch each registered worktree holds from
-`git worktree list --porcelain` and skipping the delete while the ref is still
-checked out.
+A firing branch name carries only the truncated firing id, so two firings of
+one Routine created in the same millisecond can derive the same name. Keeping
+the worktree-aware refusal prevents reclaiming the terminal one from deleting
+the branch out from under the live one, including when preparation completes
+immediately before deletion begins.
 
 Historical rows created before kind persistence remain unclassified unless
 their stored branch identity proves they were git firings. Retention does not
 delete a branch for an unclassified row. This may leave a legacy branch behind,
 but it cannot delete unrelated work based on mutable configuration.
 
-### Recheck after `git branch -D` fails
+### Delete with `git update-ref -d` and preflight worktree ownership
 
-Keep the current existence check and force-delete command, then run a second
-existence check after failure. This can distinguish an already-absent ref from
-a real deletion error, but it retains three Git processes and requires special
-error recovery around the race.
+An atomic low-level ref deletion treats an absent ref as success, but it does
+not preserve Git's checked-out-worktree refusal. A separate
+`worktree list --porcelain` preflight still races with a firing that checks out
+the ref between the preflight process and the deletion process.
 
 ### Serialize every pruner
 
@@ -71,7 +71,8 @@ registrations first. It then:
 1. returns without touching refs unless the firing's persisted kind is `git`;
 2. uses the firing's persisted branch ref, rejecting an absent or non-local ref
    as no branch deletion; and
-3. atomically deletes that local ref, treating an already-absent ref as success.
+3. force-deletes the branch through Git's worktree-aware command, preserving a
+   ref held by another worktree and treating an already-absent ref as success.
 
 Successful cleanup still marks `workspace_pruned_at`, while a genuine Git
 failure remains in the retention failure report for retry.
@@ -84,9 +85,12 @@ repositories:
 - a report firing whose derived git-firing branch name collides with an
   unrelated branch reclaims its worktree but preserves that branch;
 - a git firing whose branch disappears concurrently is still reported and
-  marked as pruned; and
+  marked as pruned;
+- a colliding firing that checks out the branch immediately before deletion
+  keeps both its worktree and branch ref; and
 - the Run Store persists the firing kind independently of later declaration
-  changes and migrates legacy branch evidence conservatively.
+  changes, protects leaked git workspaces, permits age retention for leaked
+  report workspaces, and migrates legacy branch evidence conservatively.
 
-The cleanup tutorial will explicitly disclose that git-firing reclamation also
+The cleanup tutorial explicitly discloses that git-firing reclamation also
 force-deletes the deterministic local branch while report reclamation does not.

@@ -341,15 +341,15 @@ describe("routine firing workspace retention", () => {
     const wrapperDirectory = path.join(root, "bin");
     const racedMarkerPath = path.join(root, "raced-deletion");
     await mkdir(wrapperDirectory, { recursive: true });
-    // The wrapper matches on argv positions, so a reordered `update-ref -d`
-    // call would degrade it to a pass-through and leave the test asserting
+    // The wrapper matches on argv positions, so a reordered `branch -D` call
+    // would degrade it to a pass-through and leave the test asserting
     // nothing. The marker below turns that silent decay into a failure.
     await writeFile(
       path.join(wrapperDirectory, "git"),
       [
         "#!/bin/sh",
-        'if [ "$3" = "update-ref" ] && [ "$4" = "-d" ]; then',
-        '  "$REAL_GIT_PATH" -C "$2" update-ref -d "$5"',
+        'if [ "$3" = "branch" ] && [ "$4" = "-D" ] && [ "$5" = "--" ]; then',
+        '  "$REAL_GIT_PATH" -C "$2" update-ref -d "refs/heads/$6"',
         '  : > "$RACED_DELETION_MARKER"',
         "fi",
         'exec "$REAL_GIT_PATH" "$@"',
@@ -574,6 +574,106 @@ describe("routine firing workspace retention", () => {
         live.workspacePath
       );
     } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a colliding branch checked out while retention is deciding whether to delete it", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const stateRoot = path.join(root, "state");
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const firingId = "fire-racing-holder";
+    const prepared = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId,
+      kind: "git",
+      project: alphaProject({ remotePath, workspaceRoot }),
+      routineName: "dependency-update"
+    });
+    const racingWorkspacePath = path.join(
+      workspaceRoot,
+      "routines",
+      "dependency-update",
+      "fire-live-collision"
+    );
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    const wrapperDirectory = path.join(root, "bin");
+    const raceMarkerPath = path.join(root, "worktree-added");
+    await mkdir(wrapperDirectory, { recursive: true });
+    await writeFile(
+      path.join(wrapperDirectory, "git"),
+      [
+        "#!/bin/sh",
+        'if [ "$3" = "branch" ] && [ "$4" = "-D" ] && [ ! -e "$RACE_MARKER" ]; then',
+        '  "$REAL_GIT_PATH" -C "$2" worktree add "$RACING_WORKTREE_PATH" "$RACING_BRANCH_NAME"',
+        '  : > "$RACE_MARKER"',
+        "fi",
+        'exec "$REAL_GIT_PATH" "$@"',
+        ""
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        branchName: prepared.branchName,
+        branchRef: prepared.branchRef,
+        id: firingId,
+        kind: "git",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.completeRoutineFiring({
+        id: firingId,
+        state: "succeeded",
+        workspacePath: prepared.workspacePath
+      });
+      vi.stubEnv("RACE_MARKER", raceMarkerPath);
+      vi.stubEnv("RACING_BRANCH_NAME", prepared.branchName);
+      vi.stubEnv("RACING_WORKTREE_PATH", racingWorkspacePath);
+      vi.stubEnv("REAL_GIT_PATH", realGitOutput.trim());
+      vi.stubEnv(
+        "PATH",
+        `${wrapperDirectory}${path.delimiter}${process.env.PATH ?? ""}`
+      );
+
+      const report = await pruneRoutineWorkspaces({
+        now: new Date("2100-01-01T00:00:00.000Z"),
+        policy: {
+          cancelledDays: 0,
+          enabled: true,
+          failedDays: 0,
+          succeededDays: 0
+        },
+        runStore: store
+      });
+
+      expect(report.failures).toEqual([]);
+      expect(report.pruned.map((entry) => entry.firingId)).toEqual([firingId]);
+      await expect(access(raceMarkerPath)).resolves.toBeUndefined();
+      await expect(
+        branchExists(prepared.cachePath, prepared.branchName)
+      ).resolves.toBe(true);
+      await expect(worktreePaths(prepared.cachePath)).resolves.toContain(
+        racingWorkspacePath
+      );
+    } finally {
+      vi.unstubAllEnvs();
       store.close();
     }
   });

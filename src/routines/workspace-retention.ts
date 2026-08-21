@@ -152,18 +152,42 @@ async function deleteRoutineFiringBranch(
   ) {
     return;
   }
-  // A firing branch name carries only the truncated firing id, so two firings
-  // created in the same millisecond can derive the same one. `branch -D`
-  // refuses to delete a branch a registered worktree still has checked out;
-  // update-ref does not, so re-establish that refusal here rather than delete
-  // a live worktree's branch out from under it.
-  const worktrees = await listRegisteredWorktrees(cachePath);
-  if (worktrees.some((worktree) => worktree.branchRef === firing.branchRef)) {
-    return;
+  const branchName = firing.branchRef.slice(LOCAL_BRANCH_REF_PREFIX.length);
+  try {
+    // Keep Git's own linked-worktree ownership check in the operation that
+    // deletes the ref. A separate worktree-list/update-ref sequence can race
+    // with another firing checking out the same truncated branch name.
+    await git(["-C", cachePath, "branch", "-D", "--", branchName]);
+  } catch (deleteError) {
+    // A colliding live firing owns this ref now, so reclaiming the terminal
+    // firing's workspace is complete without deleting the shared branch.
+    const worktrees = await listRegisteredWorktrees(cachePath);
+    if (worktrees.some((worktree) => worktree.branchRef === firing.branchRef)) {
+      return;
+    }
+    // Another pruner may have deleted the ref after this process selected its
+    // candidate. Treat only the documented show-ref "not found" status as
+    // success; repository or subprocess failures remain retryable errors.
+    if (!(await localBranchRefExists(cachePath, firing.branchRef))) {
+      return;
+    }
+    throw deleteError;
   }
-  // update-ref deletes the ref atomically and exits successfully when another
-  // pruner has already deleted it, unlike a show-ref/branch -D sequence.
-  await git(["-C", cachePath, "update-ref", "-d", firing.branchRef]);
+}
+
+async function localBranchRefExists(
+  cachePath: string,
+  branchRef: string
+): Promise<boolean> {
+  try {
+    await git(["-C", cachePath, "show-ref", "--verify", "--quiet", branchRef]);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === 1) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function routineWorkspacePlan(firing: RoutineFiringStatus): {

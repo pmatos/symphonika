@@ -55,13 +55,16 @@ firing, reclamation also deletes its deterministic local branch from the shared 
 worktree is gone, since that branch otherwise has no further purpose and would otherwise grow the
 same shared cache this ADR bounds. A `kind: report` firing was never given a branch, so this step is
 a no-op for it. The firing persists its execution-time kind so a later declaration edit cannot
-change branch ownership during cleanup. Ref deletion uses an atomic, idempotent operation: if a
-concurrent daemon or manual pass has already removed the ref, cleanup still succeeds and records
-reclamation. Historical firings without trustworthy kind and local-ref evidence do not delete a
-derived branch. When workspace preparation failed before creating either the planned workspace or a
-usable bare cache, retention treats the absent workspace as already reclaimed and records that
-outcome; an existing workspace with an absent or unusable cache remains an error and is never
-removed as a plain directory.
+change branch ownership during cleanup. Ref deletion uses `git branch -D`, preserving Git's refusal
+to delete a branch checked out by another registered worktree. That refusal is part of the deletion
+operation rather than a separate preflight check, so a colliding firing that checks out the branch
+while retention is deciding does not lose its ref. If deletion fails because a concurrent daemon or
+manual pass has already removed the ref, cleanup still succeeds and records reclamation; a ref now
+held by another firing is preserved. Historical firings without trustworthy kind and local-ref
+evidence do not delete a derived branch. When workspace preparation failed before creating either
+the planned workspace or a usable bare cache, retention treats the absent workspace as already
+reclaimed and records that outcome; an existing workspace with an absent or unusable cache remains
+an error and is never removed as a plain directory.
 
 The Run Store retains `workspace_path` and records `workspace_pruned_at`. Operator surfaces can
 therefore show the historical path as `pruned` rather than interpreting a missing path as damage.
@@ -75,11 +78,10 @@ a richer canonical action, failed and cancelled Git firings were not inspected o
 terminal path, and an unclassifiable row is likewise unknown rather than verified zero. The
 one-time backfill does not run after the column exists, so it cannot overwrite later inspected-zero
 evidence. Startup orphan reconciliation applies the same conservative protection to a prepared
-workspace whose ordinary terminal inspection was interrupted by a daemon crash. The firing row
-does not retain execution-time kind, and a declaration can change kind while that firing is active,
-so every leaked firing with a recorded workspace path is protected. This can retain a
-crash-interrupted report workspace indefinitely, but avoids treating an old Git firing as verified
-zero after its declaration changes to `kind: report`.
+`kind: git` workspace whose ordinary terminal inspection was interrupted by a daemon crash. It uses
+the firing's persisted execution-time kind rather than the mutable Routine declaration: a leaked
+`kind: report` workspace records zero commits-ahead and remains eligible for its normal age window,
+while a historical firing whose kind is unknown remains conservatively protected.
 
 ## Consequences
 

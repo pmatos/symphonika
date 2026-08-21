@@ -100,9 +100,12 @@ Create the default file with restrictive permissions, then edit it without putti
 the command line:
 
 ```sh
-secrets_file="${XDG_CONFIG_HOME:-$HOME/.config}/symphonika/env"
-mkdir -p "$(dirname "$secrets_file")"
+secrets_dir="${XDG_CONFIG_HOME:-$HOME/.config}/symphonika"
+secrets_file="$secrets_dir/env"
+mkdir -p "$secrets_dir"
+chmod 700 "$secrets_dir"
 (umask 077; touch "$secrets_file")
+chmod 600 "$secrets_file"
 "${EDITOR:-vi}" "$secrets_file"
 ```
 

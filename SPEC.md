@@ -303,8 +303,9 @@ daemon-health policy and rendering remain outside the transport.
 The service config file is named `symphonika.yml`. By default the CLI uses
 `./symphonika.yml` when the current directory provides one; otherwise it uses the initialized
 user config at `$XDG_CONFIG_HOME/symphonika/symphonika.yml`, falling back to
-`~/.config/symphonika/symphonika.yml` when `XDG_CONFIG_HOME` is unset. Operators can always select
-another file with `--config`.
+`~/.config/symphonika/symphonika.yml` when `XDG_CONFIG_HOME` is unset or relative. XDG base
+directories must be absolute; a relative value is ignored rather than resolved against the current
+working directory. Operators can always select another file with `--config`.
 
 It is reloadable and owned by the orchestrator. It lists Projects and service-level runtime
 settings.
@@ -1837,6 +1838,13 @@ config path and points the operator to `symphonika init`.
 - workspace root
 - SMTP password environment-variable availability when authenticated email is configured
 
+When an authenticated-email password variable is missing, `doctor` names the exact conventional
+env file to load for a manual run: the explicit Service Config's sibling `env` file when
+`--config` is present, otherwise the absolute-XDG-aware user path used by `service install`. It also
+warns when an installed service unit predates the `EnvironmentFile=` directive. Unit-regeneration
+guidance must remind operators to repeat any original `--config <path>` option and to restart the
+running service after reinstalling the unit.
+
 `doctor --json` renders the same typed `DoctorReport` and check set as the human-readable command as
 one JSON value on stdout. `--offline` skips only the network-backed `gh auth status` call; it still
 resolves `gh`, checks provider binaries and the Codex profile, reads installed-unit PATH, and runs
@@ -1867,11 +1875,14 @@ unit on the daemon's normal project-local/user-config discovery path.
 
 The generated service always references an optional environment file named `env`, resolved at
 install time. With `--config`, the path is `<directory-containing-config>/env`; without it, the
-path is the user config directory's `env` — `$XDG_CONFIG_HOME/symphonika/env`, falling back to
-`~/.config/symphonika/env` — even when the daemon's own discovery later selects a project-local
-Service Config. The systemd directive uses the leading `-` form, so an absent file does not prevent
-installations without authenticated email from starting, and glob metacharacters in the path are
-escaped so a directory name containing `[`, `*`, or `?` still resolves. The file remains
+path is the user config directory's `env` — `$XDG_CONFIG_HOME/symphonika/env` when
+`XDG_CONFIG_HOME` is absolute, falling back to `~/.config/symphonika/env` otherwise, because systemd
+ignores a relative `XDG_CONFIG_HOME` and it must not be resolved against the install-time working
+directory — even when the daemon's own discovery later selects a project-local Service Config. The
+systemd directive uses the leading `-` form, so an absent file does not prevent installations
+without authenticated email from starting. Every component of the path is resolved at install time
+rather than deferred to a systemd specifier such as `%h`, so glob metacharacters are escaped and a
+home or config directory containing `[`, `*`, or `?` still resolves. The file remains
 operator-owned and may define the default `SYMPHONIKA_SMTP_PASSWORD` or any variable selected by
 `email.smtp_password_env`; `service install` neither creates it nor copies secret values into the
 unit. Assignments in it override the unit's `Environment=` settings, so it must carry secrets only.

@@ -32,10 +32,12 @@ units from the running process instead of shipping a fixed template:
   providers resolve under `systemd --user` regardless of version manager.
 - The service references an optional `EnvironmentFile=` named `env` beside the selected Service
   Config. An explicit `--config` uses that file's directory; the default install uses the
-  initialized user config directory. The directive's leading `-` keeps the file optional, while
-  allowing environment-backed credentials such as `SYMPHONIKA_SMTP_PASSWORD` (or a custom
-  `email.smtp_password_env` name) to survive every generated-unit refresh without storing their
-  values in the unit.
+  initialized user config directory. Both daemon discovery and service installation honor only an
+  absolute `XDG_CONFIG_HOME`, falling back to `~/.config` when it is unset or relative, so the
+  Service Config and its adjacent env file cannot diverge. The directive's leading `-` keeps the
+  file optional, while allowing environment-backed credentials such as
+  `SYMPHONIKA_SMTP_PASSWORD` (or a custom `email.smtp_password_env` name) to survive every
+  generated-unit refresh without storing their values in the unit.
 
 `service install` writes both `symphonika.service` and `symphonika.slice` into
 `~/.config/systemd/user/`, refuses to overwrite existing units without `--force`, and runs

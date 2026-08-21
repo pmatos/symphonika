@@ -61,6 +61,21 @@ describe("resolveStateRoot", () => {
     expect(resolved.configExists).toBe(true);
   });
 
+  it("ignores a relative XDG config home when discovering the user config", async () => {
+    const cwd = await makeTempRoot();
+    const homeDir = path.join(cwd, "home");
+
+    const resolved = resolveStateRoot({
+      cwd,
+      env: { XDG_CONFIG_HOME: "relative-config" },
+      homeDir
+    });
+
+    expect(resolved.configPath).toBe(
+      path.join(homeDir, ".config", "symphonika", "symphonika.yml")
+    );
+  });
+
   it("honors a relative state root from an existing service config", async () => {
     const cwd = await makeTempRoot();
     const configDir = path.join(cwd, "config");

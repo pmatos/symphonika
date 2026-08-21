@@ -65,8 +65,10 @@ cancellation contract, but the dispatcher does not wait beyond the bound and sta
 the deadline.
 
 `doctor` validates configuration and reports a missing configured password variable with a manual
-env-file loading hint. It does not inspect historical delivery outcomes. The dashboard does not yet
-list individual Routine Firings, so delivery history remains on
+env-file loading hint that names the explicit-config or absolute-XDG-aware conventional path. It
+also warns when an installed service unit predates conventional `EnvironmentFile=` loading. It does
+not inspect historical delivery outcomes. The dashboard does not yet list individual Routine
+Firings, so delivery history remains on
 `GET /api/routines/:id/firings` in this slice; adding a dashboard firing-detail view can consume the
 same fields without a schema change.
 

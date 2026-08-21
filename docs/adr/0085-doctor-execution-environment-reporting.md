@@ -23,16 +23,21 @@ stale version-manager directory.
   command through `renderProviderCommandTemplate`, parse it with the providers' shared command
   parser, and resolve the resulting executable under the invoking environment. An unresolved
   executable is an error because dispatch cannot start it.
-- When a Project selects Codex, parse `~/.codex/config.toml` as TOML and report independent checks
-  for `profiles.symphonika.sandbox_mode = "danger-full-access"` and
-  `profiles.symphonika.approval_policy = "never"`. A missing file or profile therefore yields two
-  actionable missing-key results rather than only a generic profile error. This complements ADR
-  0042's provider probe: the adapter still validates the actual app-server behavior, while the
-  environment report exposes the declared key values directly.
+- When a Project selects Codex, parse the Codex config as TOML and report independent checks for
+  `sandbox_mode = "danger-full-access"` and `approval_policy = "never"` under the profile the
+  configured command actually selects (`-p` / `--profile`, falling back to `symphonika` when the
+  command names none), in `$CODEX_HOME/config.toml` when that names an absolute directory and
+  `~/.codex/config.toml` otherwise. Both follow the same resolution Codex itself uses, so an
+  operator running a custom profile or a Symphonika-specific `CODEX_HOME` (ADR 0042) is not failed
+  for a profile they never selected. A missing file or profile yields two actionable missing-key
+  results rather than only a generic profile error; any other read failure additionally reports the
+  underlying reason. This complements ADR 0042's provider probe: the adapter still validates the
+  actual app-server behavior, while the environment report exposes the declared key values directly.
 - Resolve `gh` under the invoking PATH and run `gh auth status`. The report distinguishes
-  `not_installed`, `unauthenticated`, and `authenticated`. `doctor --offline` still resolves `gh`
-  and performs every local check, but records `skipped_offline` instead of making the auth-status
-  call.
+  `not_installed`, `unauthenticated`, and `authenticated`, and a failed probe carries the reason gh
+  reported so a timeout or network failure is not misread as a logged-out CLI. `doctor --offline`
+  still resolves `gh` and performs every local check, but records `skipped_offline` instead of
+  making the auth-status call.
 - When `symphonika.service` is installed, read its effective `Environment=PATH=...` assignment and
   resolve every selected provider executable plus `gh` against that frozen value. Failures are
   warnings, because an operator may intentionally pin PATH and the invoking shell is not

@@ -1124,7 +1124,9 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function extractProfileName(args: string[]): string | undefined {
+// Exported so doctor's execution-environment report checks the profile the
+// operator's command actually selects instead of assuming the default name.
+export function extractProfileName(args: string[]): string | undefined {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === undefined) {

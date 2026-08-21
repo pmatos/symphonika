@@ -1767,8 +1767,9 @@ config path and points the operator to `symphonika init`.
   checks); `validForHosting` rather than `validForDispatch`
 - provider commands for Codex, Claude, and OMP when selected by a Project or Routine
 - the Doctor Execution Environment: selected Project provider executables under the invoking PATH,
-  the required `profiles.symphonika` Codex profile keys when Codex is selected, and independent
-  `gh` executable/authentication status
+  the required Codex profile keys when Codex is selected — checked under the profile the configured
+  command selects, in `$CODEX_HOME` when set — and independent `gh` executable/authentication
+  status
 - installed `symphonika.service` PATH liveness for selected Project provider executables and `gh`;
   failures here are warnings because the unit's frozen PATH may be intentional
 - Dispatch Projects: workflow contract path and parse

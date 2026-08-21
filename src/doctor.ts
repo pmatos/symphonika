@@ -473,13 +473,20 @@ export async function runDoctor(
   const homeDir = options.homeDir ?? homedir();
   const errors: string[] = [];
   const projects: DoctorProjectReport[] = [];
+  // Both the structural drift check and the frozen-PATH check read the same
+  // installed unit; read it once here rather than twice concurrently.
+  const unitDir = userUnitDir(homeDir, env);
+  const servicePath = path.join(unitDir, "symphonika.service");
+  const serviceContent = await readFileIfExists(servicePath);
   const [warnings, hostEnvironment] = await Promise.all([
-    checkInstalledUnitDrift(homeDir, env),
+    checkInstalledUnitDrift(unitDir, servicePath, serviceContent),
     inspectDoctorHostEnvironment({
       cwd,
       env,
       homeDir,
-      offline: options.offline === true
+      offline: options.offline === true,
+      serviceContent,
+      servicePath
     })
   ]);
   let environment = hostEnvironment.environment;
@@ -645,12 +652,10 @@ async function runLiveCheck(
 // also checked structurally because their resource-limit values are
 // operator-customizable (README.md).
 async function checkInstalledUnitDrift(
-  homeDir: string,
-  env: NodeJS.ProcessEnv
+  unitDir: string,
+  servicePath: string,
+  serviceContent: string | undefined
 ): Promise<string[]> {
-  const unitDir = userUnitDir(homeDir, env);
-  const servicePath = path.join(unitDir, "symphonika.service");
-  const serviceContent = await readFileIfExists(servicePath);
   if (serviceContent === undefined) {
     return [];
   }

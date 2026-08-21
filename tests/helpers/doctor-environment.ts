@@ -28,12 +28,19 @@ export function doctorTestEnv(
   root: string,
   additions: NodeJS.ProcessEnv = {}
 ): NodeJS.ProcessEnv {
-  return {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...additions,
     HOME: root,
     PATH: path.join(root, "bin")
   };
+  // Overriding HOME is not enough to keep these runs off the host: doctor
+  // resolves the installed unit through XDG_CONFIG_HOME first and the Codex
+  // profile through CODEX_HOME first, so both must be cleared or the suite
+  // reads whatever is installed on the machine running it.
+  delete env.XDG_CONFIG_HOME;
+  delete env.CODEX_HOME;
+  return env;
 }
 
 async function writeExecutable(filePath: string): Promise<void> {

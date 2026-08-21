@@ -7,11 +7,11 @@ import { parse as parseToml } from "smol-toml";
 
 import type { AgentProviderName } from "./provider.js";
 import { renderProviderCommandTemplate } from "./provider-command-template.js";
+import { extractProfileName } from "./providers/codex.js";
 import {
   parseProviderCommand,
   type ProviderLabel
 } from "./providers/command-parse.js";
-import { userUnitDir } from "./service.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -77,17 +77,18 @@ export async function inspectDoctorHostEnvironment(input: {
   env: NodeJS.ProcessEnv;
   homeDir: string;
   offline: boolean;
+  // The installed unit is read once by the caller and shared with the
+  // structural drift check, which inspects the same file.
+  serviceContent: string | undefined;
+  servicePath: string;
 }): Promise<EnvironmentCheckResult> {
   const errors: string[] = [];
   const warnings: string[] = [];
-  const servicePath = path.join(
-    userUnitDir(input.homeDir, input.env),
-    "symphonika.service"
-  );
   const [gh, installedUnit] = await Promise.all([
     checkGhAuth(input.cwd, input.env, input.offline, errors),
     inspectInstalledUnitPath(
-      servicePath,
+      input.servicePath,
+      input.serviceContent,
       input.homeDir,
       input.env.PATHEXT,
       warnings
@@ -98,7 +99,7 @@ export async function inspectDoctorHostEnvironment(input: {
     environment: {
       codexProfile: {
         checks: [],
-        path: path.join(input.homeDir, ".codex", "config.toml"),
+        path: codexConfigPath(input.homeDir, input.env),
         status: "not_required"
       },
       gh,
@@ -137,7 +138,11 @@ export async function inspectConfiguredDoctorEnvironment(input: {
   const codexProfile = input.projects.some(
     (project) => project.agent.provider === "codex"
   )
-    ? await checkCodexProfile(input.environment.codexProfile.path, errors)
+    ? await checkCodexProfile(
+        input.environment.codexProfile.path,
+        codexProfileName(input.providers.codex?.command),
+        errors
+      )
     : input.environment.codexProfile;
 
   return {
@@ -179,19 +184,37 @@ async function checkGhAuth(
       timeout: 10_000
     });
     return { executablePath, status: "authenticated" };
-  } catch {
-    errors.push("gh is installed but not authenticated; run `gh auth login`");
+  } catch (error) {
+    errors.push(
+      `gh is installed but not authenticated; run \`gh auth login\` (gh auth status failed: ${probeFailureDetail(error)})`
+    );
     return { executablePath, status: "unauthenticated" };
   }
 }
 
+// A failed probe is not necessarily a logged-out CLI: it is also how a
+// timeout, a network failure, or a crashed gh surfaces. Keep the first line
+// of whatever gh (or the spawn) reported so the operator can tell which.
+function probeFailureDetail(error: unknown): string {
+  const stderr =
+    typeof error === "object" &&
+    error !== null &&
+    typeof (error as { stderr?: unknown }).stderr === "string"
+      ? (error as { stderr: string }).stderr
+      : "";
+  const lines = [stderr, errorMessage(error)].flatMap((text) =>
+    text.split(/\r?\n/).map((line) => line.trim())
+  );
+  return lines.find((line) => line.length > 0) ?? "no output";
+}
+
 async function inspectInstalledUnitPath(
   servicePath: string,
+  serviceContent: string | undefined,
   homeDir: string,
   pathExt: string | undefined,
   warnings: string[]
 ): Promise<DoctorInstalledUnitReport> {
-  const serviceContent = await readFileIfExists(servicePath);
   if (serviceContent === undefined) {
     return {
       binaries: [],
@@ -407,6 +430,8 @@ async function checkProviderBinaries(
   return reports;
 }
 
+const DEFAULT_CODEX_PROFILE = "symphonika";
+
 const CODEX_PROFILE_REQUIREMENTS = [
   ["sandbox_mode", "danger-full-access"],
   ["approval_policy", "never"]
@@ -414,16 +439,24 @@ const CODEX_PROFILE_REQUIREMENTS = [
 
 async function checkCodexProfile(
   configPath: string,
+  profileName: string,
   errors: string[]
 ): Promise<DoctorCodexProfileReport> {
   let content: string;
   try {
     content = await readFile(configPath, "utf8");
   } catch (error) {
-    const checks = missingCodexProfileChecks(errors);
+    const detail = `could not read ${configPath}: ${errorMessage(error)}`;
+    const checks = missingCodexProfileChecks(profileName, errors);
+    // An absent file already reads as "both keys missing". Any other read
+    // failure (permissions, a directory, an I/O error) would otherwise be
+    // reported as missing keys in a file the operator cannot even open.
+    if (!isNotFoundError(error)) {
+      errors.push(detail);
+    }
     return {
       checks,
-      error: `could not read ${configPath}: ${errorMessage(error)}`,
+      error: detail,
       path: configPath,
       status: "invalid"
     };
@@ -443,7 +476,7 @@ async function checkCodexProfile(
     };
   }
 
-  const profile = nestedRecord(document, ["profiles", "symphonika"]);
+  const profile = nestedRecord(document, ["profiles", profileName]);
   const checks: DoctorCodexProfileReport["checks"] = [];
   for (const [key, expected] of CODEX_PROFILE_REQUIREMENTS) {
     const rawActual = profile?.[key];
@@ -457,11 +490,11 @@ async function checkCodexProfile(
     checks.push({ actual, expected, key, status });
     if (status === "missing") {
       errors.push(
-        `Codex profile profiles.symphonika.${key} is missing; expected "${expected}"`
+        `Codex profile profiles.${profileName}.${key} is missing; expected "${expected}"`
       );
     } else if (status === "mismatch") {
       errors.push(
-        `Codex profile profiles.symphonika.${key} is ${JSON.stringify(actual)}; expected "${expected}"`
+        `Codex profile profiles.${profileName}.${key} is ${JSON.stringify(actual)}; expected "${expected}"`
       );
     }
   }
@@ -486,14 +519,57 @@ function codexProfileValue(value: unknown): string | null {
 }
 
 function missingCodexProfileChecks(
+  profileName: string,
   errors: string[]
 ): DoctorCodexProfileReport["checks"] {
   return CODEX_PROFILE_REQUIREMENTS.map(([key, expected]) => {
     errors.push(
-      `Codex profile profiles.symphonika.${key} is missing; expected "${expected}"`
+      `Codex profile profiles.${profileName}.${key} is missing; expected "${expected}"`
     );
     return { actual: null, expected, key, status: "missing" as const };
   });
+}
+
+// Codex reads its config from $CODEX_HOME when that names an absolute
+// directory, falling back to ~/.codex. ADR 0042 documents CODEX_HOME as the
+// supported way to fence Symphonika off from an operator's own Codex state,
+// so a fixed ~/.codex path would report the shipped profile as missing on
+// exactly the installs that follow that advice.
+function codexConfigPath(homeDir: string, env: NodeJS.ProcessEnv): string {
+  const codexHome =
+    typeof env.CODEX_HOME === "string" ? env.CODEX_HOME.trim() : "";
+  const codexDir =
+    codexHome.length > 0 && path.isAbsolute(codexHome)
+      ? codexHome
+      : path.join(homeDir, ".codex");
+  return path.join(codexDir, "config.toml");
+}
+
+// The profile the configured command actually selects (`-p` / `--profile`),
+// not a fixed name: `codex -p acme app-server` must be checked against
+// profiles.acme, and checking profiles.symphonika instead fails a working
+// install with two bogus missing-key errors. Falls back to the profile the
+// shipped default command names when the operator's command names none.
+function codexProfileName(command: string | undefined): string {
+  if (command === undefined) {
+    return DEFAULT_CODEX_PROFILE;
+  }
+  try {
+    const rendered = renderProviderCommandTemplate(command, {}).rendered;
+    const args = parseProviderCommand(rendered, "Codex").args;
+    return extractProfileName(args) ?? DEFAULT_CODEX_PROFILE;
+  } catch {
+    // An unparseable command is already reported by checkProviderBinaries.
+    return DEFAULT_CODEX_PROFILE;
+  }
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "ENOENT"
+  );
 }
 
 function nestedRecord(
@@ -558,14 +634,6 @@ async function resolveExecutable(
     }
   }
   return undefined;
-}
-
-async function readFileIfExists(filePath: string): Promise<string | undefined> {
-  try {
-    return await readFile(filePath, "utf8");
-  } catch {
-    return undefined;
-  }
 }
 
 function errorMessage(error: unknown): string {

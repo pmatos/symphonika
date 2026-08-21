@@ -441,6 +441,92 @@ describe("doctor", () => {
     );
   });
 
+  it("checks the Codex profile the configured command actually selects", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const binDir = path.join(root, "bin");
+    await writeValidConfig(configPath, {
+      codexCommand: "codex --profile acme app-server"
+    });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    await mkdir(path.join(root, ".codex"), { recursive: true });
+    await writeFile(
+      path.join(root, ".codex", "config.toml"),
+      [
+        "[profiles.acme]",
+        'sandbox_mode = "danger-full-access"',
+        'approval_policy = "never"',
+        "",
+        "[profiles.symphonika]",
+        'sandbox_mode = "workspace-write"',
+        ""
+      ].join("\n")
+    );
+    await mkdir(binDir);
+    for (const executable of ["codex", "gh"]) {
+      const executablePath = path.join(binDir, executable);
+      await writeFile(executablePath, "#!/bin/sh\nexit 0\n");
+      await chmod(executablePath, 0o755);
+    }
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      env: { GITHUB_TOKEN: "test-secret-token", PATH: binDir },
+      githubApi: successfulGitHubApi(),
+      homeDir: root,
+      offline: true
+    });
+
+    expect(report.environment.codexProfile.status).toBe("valid");
+    expect(report.errors).toEqual([]);
+  });
+
+  it("reads the Codex config from an absolute CODEX_HOME", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const binDir = path.join(root, "bin");
+    const codexHome = path.join(root, "codex-home");
+    await writeValidConfig(configPath, { codexCommand: "codex app-server" });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(
+      path.join(codexHome, "config.toml"),
+      '[profiles.symphonika]\nsandbox_mode = "danger-full-access"\napproval_policy = "never"\n'
+    );
+    await mkdir(binDir);
+    for (const executable of ["codex", "gh"]) {
+      const executablePath = path.join(binDir, executable);
+      await writeFile(executablePath, "#!/bin/sh\nexit 0\n");
+      await chmod(executablePath, 0o755);
+    }
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      env: {
+        CODEX_HOME: codexHome,
+        GITHUB_TOKEN: "test-secret-token",
+        PATH: binDir
+      },
+      githubApi: successfulGitHubApi(),
+      homeDir: root,
+      offline: true
+    });
+
+    expect(report.environment.codexProfile).toMatchObject({
+      path: path.join(codexHome, "config.toml"),
+      status: "valid"
+    });
+    expect(report.errors).toEqual([]);
+  });
+
   it("distinguishes an installed but logged-out gh CLI", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");
@@ -478,8 +564,10 @@ describe("doctor", () => {
       executablePath: ghPath,
       status: "unauthenticated"
     });
-    expect(report.errors).toContain(
-      "gh is installed but not authenticated; run `gh auth login`"
+    expect(report.errors).toContainEqual(
+      expect.stringContaining(
+        "gh is installed but not authenticated; run `gh auth login`"
+      )
     );
   });
 

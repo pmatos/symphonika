@@ -2702,6 +2702,45 @@ describe("HTTP app — project detail page (#303)", () => {
     }
   });
 
+  it("shows an eligible issue as capped when the global concurrency cap is full", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedByTruncated: false,
+            blockedBy: [],
+            issueNumber: 301,
+            kind: "candidate",
+            labels: [],
+            priority: 1,
+            reasons: [],
+            title: "Blocked behind global cap"
+          }
+        ]
+      });
+      const app = createHttpApp({
+        getConcurrency: () => ({
+          global: { inFlight: 2, maxInFlight: 2 },
+          perProject: [{ inFlight: 0, maxInFlight: 2, projectName: "alpha" }]
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/projects/alpha")).text();
+
+      expect(body).toContain("queued behind global cap (2/2)");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("shows a blocked Run's terminalReason as its detail, not a blank cell", async () => {
     const test = await setup();
     try {

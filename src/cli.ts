@@ -832,9 +832,18 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         let watchDoctorCache:
           { expiresAtMs: number; report: DoctorReport } | undefined;
 
+        // The dashboard renders report.projects only, so the network-backed gh
+        // probe would cost a subprocess per refresh for a result it discards.
+        const doctorOptions = {
+          ...withConfigPath(options.config),
+          ...(options.dashboard === true || options.watch === true
+            ? { offline: true }
+            : {})
+        };
+
         const refreshDoctorReport = async (): Promise<DoctorReport> => {
           if (options.watch !== true) {
-            return doctor(withConfigPath(options.config));
+            return doctor(doctorOptions);
           }
           const now = Date.now();
           if (
@@ -844,7 +853,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           ) {
             return watchDoctorCache.report;
           }
-          const report = await doctor(withConfigPath(options.config));
+          const report = await doctor(doctorOptions);
           watchDoctorCache = {
             expiresAtMs: Date.now() + options.doctorTtlMs,
             report
@@ -2759,24 +2768,20 @@ function printExecutionEnvironment(
   program: Command,
   environment: DoctorExecutionEnvironmentReport
 ): void {
-  writeOut(program, "execution environment:\n");
-  for (const binary of environment.providerBinaries) {
-    writeOut(
-      program,
-      `- provider ${binary.provider}: ${binary.status}${binary.resolvedPath === null ? "" : ` (${binary.resolvedPath})`}\n`
-    );
-  }
+  const detail = (value: string | null): string =>
+    value === null ? "" : ` (${value})`;
+  const rows = [
+    ...environment.providerBinaries.map(
+      (binary) =>
+        `provider ${binary.provider}: ${binary.status}${detail(binary.resolvedPath)}`
+    ),
+    `Codex profile: ${environment.codexProfile.status}${detail(environment.codexProfile.path)}`,
+    `gh: ${environment.gh.status}${detail(environment.gh.executablePath)}`,
+    `installed unit PATH: ${environment.installedUnit.status}${detail(environment.installedUnit.servicePath)}`
+  ];
   writeOut(
     program,
-    `- Codex profile: ${environment.codexProfile.status} (${environment.codexProfile.path})\n`
-  );
-  writeOut(
-    program,
-    `- gh: ${environment.gh.status}${environment.gh.executablePath === null ? "" : ` (${environment.gh.executablePath})`}\n`
-  );
-  writeOut(
-    program,
-    `- installed unit PATH: ${environment.installedUnit.status} (${environment.installedUnit.servicePath})\n`
+    `execution environment:\n${rows.map((row) => `- ${row}\n`).join("")}`
   );
 }
 

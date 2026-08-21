@@ -1,15 +1,35 @@
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import type { DoctorReport } from "../../src/doctor.js";
+
+// Stub environment for suites that mock runDoctor outright: they assert CLI
+// rendering, not the probes, so every field is a fixed placeholder.
+export function doctorEnvironmentFixture(
+  overrides: Partial<DoctorReport["environment"]> = {}
+): DoctorReport["environment"] {
+  return {
+    codexProfile: {
+      checks: [],
+      path: "/home/operator/.codex/config.toml",
+      status: "not_required"
+    },
+    gh: { executablePath: "/usr/bin/gh", status: "authenticated" },
+    installedUnit: {
+      binaries: [],
+      environmentPath: null,
+      servicePath: "/home/operator/.config/systemd/user/symphonika.service",
+      status: "not_installed"
+    },
+    providerBinaries: [],
+    ...overrides
+  };
+}
+
 export async function prepareDoctorTestEnvironment(
   root: string
 ): Promise<void> {
-  const binDir = path.join(root, "bin");
-  await mkdir(binDir, { recursive: true });
-  await Promise.all([
-    writeExecutable(path.join(binDir, "codex")),
-    writeExecutable(path.join(binDir, "gh"))
-  ]);
+  await writeStubExecutables(path.join(root, "bin"), ["codex", "gh"]);
 
   const codexDir = path.join(root, ".codex");
   await mkdir(codexDir, { recursive: true });
@@ -43,7 +63,19 @@ export function doctorTestEnv(
   return env;
 }
 
-async function writeExecutable(filePath: string): Promise<void> {
-  await writeFile(filePath, "#!/bin/sh\nexit 0\n");
-  await chmod(filePath, 0o755);
+const SUCCESSFUL_STUB = "#!/bin/sh\nexit 0\n";
+
+export async function writeStubExecutables(
+  dir: string,
+  names: string[],
+  body: string = SUCCESSFUL_STUB
+): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  await Promise.all(
+    names.map(async (name) => {
+      const filePath = path.join(dir, name);
+      await writeFile(filePath, body);
+      await chmod(filePath, 0o755);
+    })
+  );
 }

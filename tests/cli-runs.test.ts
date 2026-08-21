@@ -8,22 +8,10 @@ import type { DoctorReport } from "../src/doctor.js";
 import type { IssueSnapshot } from "../src/issue-polling.js";
 import { openRunStore } from "../src/run-store.js";
 
+import { doctorEnvironmentFixture } from "./helpers/doctor-environment.js";
+
 const tempRoots: string[] = [];
-const TEST_DOCTOR_ENVIRONMENT: DoctorReport["environment"] = {
-  codexProfile: {
-    checks: [],
-    path: "/home/operator/.codex/config.toml",
-    status: "not_required"
-  },
-  gh: { executablePath: "/usr/bin/gh", status: "authenticated" },
-  installedUnit: {
-    binaries: [],
-    environmentPath: null,
-    servicePath: "/home/operator/.config/systemd/user/symphonika.service",
-    status: "not_installed"
-  },
-  providerBinaries: []
-};
+const TEST_DOCTOR_ENVIRONMENT = doctorEnvironmentFixture();
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-cli-runs-test-"));

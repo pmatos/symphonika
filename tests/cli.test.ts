@@ -19,27 +19,13 @@ import type { StartDaemonOptions } from "../src/daemon.js";
 import type {
   ClearStaleOptions,
   ClearStaleReport,
-  DoctorReport,
   InitProjectOptions
 } from "../src/doctor.js";
 import type { SmokeOptions, SmokeReport } from "../src/smoke.js";
+import { doctorEnvironmentFixture } from "./helpers/doctor-environment.js";
 
 const tempRoots: string[] = [];
-const TEST_DOCTOR_ENVIRONMENT: DoctorReport["environment"] = {
-  codexProfile: {
-    checks: [],
-    path: "/home/operator/.codex/config.toml",
-    status: "not_required"
-  },
-  gh: { executablePath: "/usr/bin/gh", status: "authenticated" },
-  installedUnit: {
-    binaries: [],
-    environmentPath: null,
-    servicePath: "/home/operator/.config/systemd/user/symphonika.service",
-    status: "not_installed"
-  },
-  providerBinaries: []
-};
+const TEST_DOCTOR_ENVIRONMENT = doctorEnvironmentFixture();
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   ".."
@@ -870,24 +856,9 @@ describe("CLI", () => {
     let receivedOffline = false;
     const report = {
       configPath: "/tmp/symphonika.yml",
-      environment: {
-        codexProfile: {
-          checks: [],
-          path: "/home/operator/.codex/config.toml",
-          status: "not_required" as const
-        },
-        gh: {
-          executablePath: "/usr/bin/gh",
-          status: "skipped_offline" as const
-        },
-        installedUnit: {
-          binaries: [],
-          environmentPath: null,
-          servicePath: "/home/operator/.config/systemd/user/symphonika.service",
-          status: "not_installed" as const
-        },
-        providerBinaries: []
-      },
+      environment: doctorEnvironmentFixture({
+        gh: { executablePath: "/usr/bin/gh", status: "skipped_offline" }
+      }),
       errors: [],
       ok: true,
       projects: [],

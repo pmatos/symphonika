@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,33 +7,22 @@ import { buildCli } from "../src/cli.js";
 import {
   REQUIRED_OPERATIONAL_LABELS,
   runDoctor,
-  type DoctorReport,
   type GitHubApi
 } from "../src/doctor.js";
 import type { AgentProviderRegistry } from "../src/provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "../src/providers/index.js";
 import { renderProvidersSliceUnit, renderSliceUnit } from "../src/service.js";
+import {
+  doctorEnvironmentFixture,
+  writeStubExecutables
+} from "./helpers/doctor-environment.js";
 
 const tempRoots: string[] = [];
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
 const originalGithubToken = process.env.GITHUB_TOKEN;
 const originalExitCode = process.exitCode;
 const originalPath = process.env.PATH;
-const TEST_DOCTOR_ENVIRONMENT: DoctorReport["environment"] = {
-  codexProfile: {
-    checks: [],
-    path: "/home/operator/.codex/config.toml",
-    status: "not_required"
-  },
-  gh: { executablePath: "/usr/bin/gh", status: "authenticated" },
-  installedUnit: {
-    binaries: [],
-    environmentPath: null,
-    servicePath: "/home/operator/.config/systemd/user/symphonika.service",
-    status: "not_installed"
-  },
-  providerBinaries: []
-};
+const TEST_DOCTOR_ENVIRONMENT = doctorEnvironmentFixture();
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-doctor-test-"));
@@ -251,15 +240,9 @@ describe("doctor", () => {
       path.join(root, "WORKFLOW.md"),
       "Work on {{issue.title}} for {{project.name}}.\n"
     );
-    await mkdir(path.join(root, ".codex"), { recursive: true });
-    await writeFile(
-      path.join(root, ".codex", "config.toml"),
-      '[profiles.symphonika]\nsandbox_mode = "danger-full-access"\napproval_policy = "never"\n'
-    );
     await mkdir(binDir);
     const ghPath = path.join(binDir, "gh");
-    await writeFile(ghPath, "#!/bin/sh\nexit 0\n");
-    await chmod(ghPath, 0o755);
+    await writeStubExecutables(binDir, ["gh"]);
 
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
@@ -354,9 +337,7 @@ describe("doctor", () => {
       path.join(root, "WORKFLOW.md"),
       "Work on {{issue.title}} for {{project.name}}.\n"
     );
-    const claudePath = path.join(root, "test-bin", "claude");
-    await writeFile(claudePath, "#!/bin/sh\nexit 0\n");
-    await chmod(claudePath, 0o755);
+    await writeStubExecutables(path.join(root, "test-bin"), ["claude"]);
     const provider = (name: "claude" | "codex") => ({
       cancel: () => Promise.resolve(),
       name,
@@ -399,12 +380,7 @@ describe("doctor", () => {
       path.join(root, ".codex", "config.toml"),
       '[profiles.symphonika]\nsandbox_mode = "workspace-write"\n'
     );
-    await mkdir(binDir);
-    for (const executable of ["codex", "gh"]) {
-      const executablePath = path.join(binDir, executable);
-      await writeFile(executablePath, "#!/bin/sh\nexit 0\n");
-      await chmod(executablePath, 0o755);
-    }
+    await writeStubExecutables(binDir, ["codex", "gh"]);
 
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
@@ -465,12 +441,7 @@ describe("doctor", () => {
         ""
       ].join("\n")
     );
-    await mkdir(binDir);
-    for (const executable of ["codex", "gh"]) {
-      const executablePath = path.join(binDir, executable);
-      await writeFile(executablePath, "#!/bin/sh\nexit 0\n");
-      await chmod(executablePath, 0o755);
-    }
+    await writeStubExecutables(binDir, ["codex", "gh"]);
 
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
@@ -500,12 +471,7 @@ describe("doctor", () => {
       path.join(codexHome, "config.toml"),
       '[profiles.symphonika]\nsandbox_mode = "danger-full-access"\napproval_policy = "never"\n'
     );
-    await mkdir(binDir);
-    for (const executable of ["codex", "gh"]) {
-      const executablePath = path.join(binDir, executable);
-      await writeFile(executablePath, "#!/bin/sh\nexit 0\n");
-      await chmod(executablePath, 0o755);
-    }
+    await writeStubExecutables(binDir, ["codex", "gh"]);
 
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
@@ -536,21 +502,14 @@ describe("doctor", () => {
       path.join(root, "WORKFLOW.md"),
       "Work on {{issue.title}} for {{project.name}}.\n"
     );
-    await mkdir(path.join(root, ".codex"), { recursive: true });
-    await writeFile(
-      path.join(root, ".codex", "config.toml"),
-      '[profiles.symphonika]\nsandbox_mode = "danger-full-access"\napproval_policy = "never"\n'
-    );
     await mkdir(binDir);
-    const codexPath = path.join(binDir, "codex");
-    await writeFile(codexPath, "#!/bin/sh\nexit 0\n");
-    await chmod(codexPath, 0o755);
+    await writeStubExecutables(binDir, ["codex"]);
     const ghPath = path.join(binDir, "gh");
-    await writeFile(
-      ghPath,
+    await writeStubExecutables(
+      binDir,
+      ["gh"],
       '#!/bin/sh\n[ "$1" = auth ] && [ "$2" = status ] && exit 1\nexit 2\n'
     );
-    await chmod(ghPath, 0o755);
 
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
@@ -1183,21 +1142,11 @@ describe("doctor", () => {
         path.join(root, "WORKFLOW.md"),
         "Work on {{issue.title}} for {{project.name}}.\n"
       );
-      await mkdir(path.join(root, ".codex"), { recursive: true });
-      await writeFile(
-        path.join(root, ".codex", "config.toml"),
-        '[profiles.symphonika]\nsandbox_mode = "danger-full-access"\napproval_policy = "never"\n'
-      );
       await mkdir(shellBin);
       await mkdir(unitBin);
-      for (const executable of ["codex", "gh"]) {
-        const executablePath = path.join(shellBin, executable);
-        await writeFile(executablePath, "#!/bin/sh\nexit 0\n");
-        await chmod(executablePath, 0o755);
-      }
+      await writeStubExecutables(shellBin, ["codex", "gh"]);
       const unitGhPath = path.join(unitBin, "gh");
-      await writeFile(unitGhPath, "#!/bin/sh\nexit 0\n");
-      await chmod(unitGhPath, 0o755);
+      await writeStubExecutables(unitBin, ["gh"]);
       await mkdir(unitDir, { recursive: true });
       await writeFile(
         path.join(unitDir, "symphonika.service"),
@@ -1254,11 +1203,7 @@ describe("doctor", () => {
         path.join(root, "WORKFLOW.md"),
         "Work on {{issue.title}} for {{project.name}}.\n"
       );
-      for (const executable of ["codex", "gh"]) {
-        const executablePath = path.join(root, executable);
-        await writeFile(executablePath, "#!/bin/sh\nexit 0\n");
-        await chmod(executablePath, 0o755);
-      }
+      await writeStubExecutables(root, ["codex", "gh"]);
       await mkdir(unitDir, { recursive: true });
       await writeFile(
         path.join(unitDir, "symphonika.service"),
@@ -1621,9 +1566,7 @@ describe("doctor", () => {
       const unitDir = path.join(homeDir, ".config", "systemd", "user");
       const unitBin = path.join(homeDir, "bin");
       await mkdir(unitDir, { recursive: true });
-      await mkdir(unitBin);
-      await writeFile(path.join(unitBin, "gh"), "#!/bin/sh\nexit 0\n");
-      await chmod(path.join(unitBin, "gh"), 0o755);
+      await writeStubExecutables(unitBin, ["gh"]);
       await writeFile(
         path.join(unitDir, "symphonika.service"),
         `[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nEnvironment="PATH=${unitBin}"\nSlice=symphonika-daemon.slice\n`,
@@ -1660,9 +1603,7 @@ describe("doctor", () => {
       const unitDir = path.join(homeDir, ".config", "systemd", "user");
       const unitBin = path.join(homeDir, "bin");
       await mkdir(unitDir, { recursive: true });
-      await mkdir(unitBin);
-      await writeFile(path.join(unitBin, "gh"), "#!/bin/sh\nexit 0\n");
-      await chmod(path.join(unitBin, "gh"), 0o755);
+      await writeStubExecutables(unitBin, ["gh"]);
       await writeFile(
         path.join(unitDir, "symphonika.service"),
         `[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nEnvironment="PATH=${unitBin}"\nSlice=symphonika-daemon.slice\n`,
@@ -1847,11 +1788,7 @@ async function writeValidConfig(
   );
   const binDir = path.join(configDir, "test-bin");
   await mkdir(binDir, { recursive: true });
-  for (const executable of ["claude", "codex", "gh", "omp"]) {
-    const executablePath = path.join(binDir, executable);
-    await writeFile(executablePath, "#!/bin/sh\nexit 0\n");
-    await chmod(executablePath, 0o755);
-  }
+  await writeStubExecutables(binDir, ["claude", "codex", "gh", "omp"]);
   process.env.PATH = [binDir, originalPath ?? ""]
     .filter(Boolean)
     .join(path.delimiter);

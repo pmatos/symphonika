@@ -236,24 +236,47 @@ async function inspectInstalledUnitPath(
       status: "path_missing"
     };
   }
-  const ghPath = await resolveExecutable(
-    "gh",
-    homeDir,
-    environmentPath,
-    pathExt
-  );
-  if (ghPath === undefined) {
-    warnings.push(`${servicePath} PATH does not resolve gh executable gh`);
-  }
-
   return {
     binaries: [
-      { executable: "gh", resolvedPath: ghPath === undefined ? null : ghPath }
+      await resolveUnitBinary({
+        environmentPath,
+        executable: "gh",
+        homeDir,
+        label: "gh",
+        pathExt,
+        servicePath,
+        warnings
+      })
     ],
     environmentPath,
     servicePath,
     status: "checked"
   };
+}
+
+// The unit's Environment=PATH is frozen at install time, so a binary the
+// operator can run today may still be unreachable from the installed service.
+async function resolveUnitBinary(input: {
+  environmentPath: string;
+  executable: string;
+  homeDir: string;
+  label: string;
+  pathExt: string | undefined;
+  servicePath: string;
+  warnings: string[];
+}): Promise<{ executable: string; resolvedPath: string | null }> {
+  const resolvedPath = await resolveExecutable(
+    input.executable,
+    input.homeDir,
+    input.environmentPath,
+    input.pathExt
+  );
+  if (resolvedPath === undefined) {
+    input.warnings.push(
+      `${input.servicePath} PATH does not resolve ${input.label} executable ${input.executable}`
+    );
+  }
+  return { executable: input.executable, resolvedPath: resolvedPath ?? null };
 }
 
 async function withInstalledProviderBinaryChecks(
@@ -263,7 +286,8 @@ async function withInstalledProviderBinaryChecks(
   pathExt: string | undefined,
   warnings: string[]
 ): Promise<DoctorInstalledUnitReport> {
-  if (installedUnit.status !== "checked") {
+  const { environmentPath } = installedUnit;
+  if (installedUnit.status !== "checked" || environmentPath === null) {
     return installedUnit;
   }
   const providerReports: DoctorInstalledUnitReport["binaries"] = [];
@@ -271,22 +295,18 @@ async function withInstalledProviderBinaryChecks(
     if (provider.executable === null) {
       continue;
     }
-    const resolvedPath = await resolveExecutable(
-      provider.executable,
-      homeDir,
-      installedUnit.environmentPath ?? "",
-      pathExt
-    );
     providerReports.push({
-      executable: provider.executable,
-      provider: provider.provider,
-      resolvedPath: resolvedPath ?? null
+      ...(await resolveUnitBinary({
+        environmentPath,
+        executable: provider.executable,
+        homeDir,
+        label: `provider ${provider.provider}`,
+        pathExt,
+        servicePath: installedUnit.servicePath,
+        warnings
+      })),
+      provider: provider.provider
     });
-    if (resolvedPath === undefined) {
-      warnings.push(
-        `${installedUnit.servicePath} PATH does not resolve provider ${provider.provider} executable ${provider.executable}`
-      );
-    }
   }
   return {
     ...installedUnit,
@@ -387,13 +407,9 @@ async function checkProviderBinaries(
     }
     let executable: string;
     try {
-      const rendered = renderProviderCommandTemplate(
+      executable = parseConfiguredCommand(
         provider.command,
-        {}
-      ).rendered;
-      executable = parseProviderCommand(
-        rendered,
-        providerLabel(providerName)
+        providerName
       ).executable;
     } catch (error) {
       reports.push({
@@ -447,7 +463,7 @@ async function checkCodexProfile(
     content = await readFile(configPath, "utf8");
   } catch (error) {
     const detail = `could not read ${configPath}: ${errorMessage(error)}`;
-    const checks = missingCodexProfileChecks(profileName, errors);
+    const checks = codexProfileChecks(undefined, profileName, errors);
     // An absent file already reads as "both keys missing". Any other read
     // failure (permissions, a directory, an I/O error) would otherwise be
     // reported as missing keys in a file the operator cannot even open.
@@ -476,28 +492,11 @@ async function checkCodexProfile(
     };
   }
 
-  const profile = nestedRecord(document, ["profiles", profileName]);
-  const checks: DoctorCodexProfileReport["checks"] = [];
-  for (const [key, expected] of CODEX_PROFILE_REQUIREMENTS) {
-    const rawActual = profile?.[key];
-    const actual = codexProfileValue(rawActual);
-    const status =
-      rawActual === undefined
-        ? "missing"
-        : rawActual === expected
-          ? "match"
-          : "mismatch";
-    checks.push({ actual, expected, key, status });
-    if (status === "missing") {
-      errors.push(
-        `Codex profile profiles.${profileName}.${key} is missing; expected "${expected}"`
-      );
-    } else if (status === "mismatch") {
-      errors.push(
-        `Codex profile profiles.${profileName}.${key} is ${JSON.stringify(actual)}; expected "${expected}"`
-      );
-    }
-  }
+  const checks = codexProfileChecks(
+    nestedRecord(document, ["profiles", profileName]),
+    profileName,
+    errors
+  );
 
   return {
     checks,
@@ -508,26 +507,41 @@ async function checkCodexProfile(
   };
 }
 
-function codexProfileValue(value: unknown): string | null {
-  if (value === undefined) {
-    return null;
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  return JSON.stringify(value) ?? `<${typeof value}>`;
-}
-
-function missingCodexProfileChecks(
+// An unreadable config is reported the same way as a config whose profile
+// stanza is absent, so an undefined profile must produce the same checks and
+// the same messages as one missing both keys.
+function codexProfileChecks(
+  profile: Record<string, unknown> | undefined,
   profileName: string,
   errors: string[]
 ): DoctorCodexProfileReport["checks"] {
   return CODEX_PROFILE_REQUIREMENTS.map(([key, expected]) => {
-    errors.push(
-      `Codex profile profiles.${profileName}.${key} is missing; expected "${expected}"`
-    );
-    return { actual: null, expected, key, status: "missing" as const };
+    const rawActual = profile?.[key];
+    const actual = codexProfileValue(rawActual);
+    const status =
+      rawActual === undefined
+        ? "missing"
+        : rawActual === expected
+          ? "match"
+          : "mismatch";
+    if (status === "missing") {
+      errors.push(
+        `Codex profile profiles.${profileName}.${key} is missing; expected "${expected}"`
+      );
+    } else if (status === "mismatch") {
+      errors.push(
+        `Codex profile profiles.${profileName}.${key} is ${JSON.stringify(actual)}; expected "${expected}"`
+      );
+    }
+    return { actual, expected, key, status };
   });
+}
+
+function codexProfileValue(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value;
+  }
+  return value === undefined ? null : (JSON.stringify(value) ?? null);
 }
 
 // Codex reads its config from $CODEX_HOME when that names an absolute
@@ -555,13 +569,22 @@ function codexProfileName(command: string | undefined): string {
     return DEFAULT_CODEX_PROFILE;
   }
   try {
-    const rendered = renderProviderCommandTemplate(command, {}).rendered;
-    const args = parseProviderCommand(rendered, "Codex").args;
+    const { args } = parseConfiguredCommand(command, "codex");
     return extractProfileName(args) ?? DEFAULT_CODEX_PROFILE;
   } catch {
     // An unparseable command is already reported by checkProviderBinaries.
     return DEFAULT_CODEX_PROFILE;
   }
+}
+
+// Doctor must read the configured command exactly the way the adapters do
+// before spawning it, so render and parse stay paired in one place.
+function parseConfiguredCommand(
+  command: string,
+  providerName: AgentProviderName
+): { args: string[]; executable: string } {
+  const rendered = renderProviderCommandTemplate(command, {}).rendered;
+  return parseProviderCommand(rendered, providerLabel(providerName));
 }
 
 function isNotFoundError(error: unknown): boolean {

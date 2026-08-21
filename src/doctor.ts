@@ -498,12 +498,12 @@ export async function runDoctor(
     if (resolvedConfig.source === "user" && !resolvedConfig.configExists) {
       errors.push(missingUserConfigHint(configPath));
     }
-    return report(configPath, environment, errors, projects, warnings);
+    return report({ configPath, environment, errors, projects, warnings });
   }
 
   const parsedConfig = parseServiceConfig(rawConfig, errors);
   if (parsedConfig === undefined) {
-    return report(configPath, environment, errors, projects, warnings);
+    return report({ configPath, environment, errors, projects, warnings });
   }
 
   const configuredEnvironment = await inspectConfiguredDoctorEnvironment({
@@ -598,7 +598,14 @@ export async function runDoctor(
     errors
   );
 
-  return report(configPath, environment, errors, projects, warnings, liveCheck);
+  return report({
+    configPath,
+    environment,
+    errors,
+    ...(liveCheck === undefined ? {} : { liveCheck }),
+    projects,
+    warnings
+  });
 }
 
 async function runLiveCheck(
@@ -2357,22 +2364,22 @@ function envReferenceName(input: string): string | undefined {
   return match?.[1];
 }
 
-function report(
-  configPath: string,
-  environment: DoctorExecutionEnvironmentReport,
-  errors: string[],
-  projects: DoctorProjectReport[],
-  warnings: string[] = [],
-  liveCheck?: DoctorLiveCheckReport
-): DoctorReport {
+function report(input: {
+  configPath: string;
+  environment: DoctorExecutionEnvironmentReport;
+  errors: string[];
+  liveCheck?: DoctorLiveCheckReport;
+  projects: DoctorProjectReport[];
+  warnings: string[];
+}): DoctorReport {
   return {
-    configPath,
-    environment,
-    errors,
-    ...(liveCheck === undefined ? {} : { liveCheck }),
-    ok: errors.length === 0,
-    projects,
-    warnings
+    configPath: input.configPath,
+    environment: input.environment,
+    errors: input.errors,
+    ...(input.liveCheck === undefined ? {} : { liveCheck: input.liveCheck }),
+    ok: input.errors.length === 0,
+    projects: input.projects,
+    warnings: input.warnings
   };
 }
 

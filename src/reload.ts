@@ -91,7 +91,7 @@ export type RuntimeReloadStatus = {
   usingLastKnownGood: boolean;
 };
 
-export type RoutineReloadError = {
+type RoutineReloadError = {
   message: string;
   sourcePaths: string[];
 };

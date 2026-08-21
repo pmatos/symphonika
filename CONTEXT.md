@@ -239,7 +239,9 @@ _Avoid_: provider output when referring to the operator-facing rendered payload
 
 **Routine Notification Delivery**:
 The best-effort delivery outcome for one terminal **Routine Firing**, recorded as `sent`, `skipped`,
-or `failed` without changing the firing's terminal state.
+or `failed` without changing the firing's terminal state. Delivery is tracked background work after
+terminal persistence; it holds neither firing capacity nor Routine dispatch open, and graceful
+daemon shutdown drains it before closing the Run Store.
 _Avoid_: Routine Firing when referring only to delivery state
 
 **Issue Run Notification Delivery**:
@@ -377,6 +379,8 @@ _Avoid_: chat session
   **Watchdog**'s progress-liveness decision
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
 - A terminal **Routine Firing** may produce one best-effort **Routine Notification Delivery**
+- A **Routine Fan-out** notification and a **Routine Notification Delivery** run outside Routine
+  dispatch and are drained during graceful daemon shutdown
 - A terminal issue **Run** may produce one durable **Issue Run Notification Delivery**
 - A daemon start, health transition, or Watchdog pass may produce one **Daemon Health Notification**
 - A **Notification Sink** delivers a rendered message without owning event-specific policy

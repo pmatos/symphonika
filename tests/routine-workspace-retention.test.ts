@@ -48,13 +48,7 @@ describe("routine firing workspace retention", () => {
       configDir: root,
       firingId: "fire-retention",
       kind: "report",
-      project: {
-        name: "alpha",
-        workspace: {
-          git: { base_branch: "main", remote: remotePath },
-          root: workspaceRoot
-        }
-      },
+      project: alphaProject({ remotePath, workspaceRoot }),
       routineName: "daily-report"
     });
     await writeFile(path.join(prepared.workspacePath, "agent-output.txt"), "x");
@@ -175,13 +169,7 @@ describe("routine firing workspace retention", () => {
       configDir: root,
       firingId,
       kind: "report",
-      project: {
-        name: "alpha",
-        workspace: {
-          git: { base_branch: "main", remote: remotePath },
-          root: workspaceRoot
-        }
-      },
+      project: alphaProject({ remotePath, workspaceRoot }),
       routineName
     });
     const unrelatedBranch = routineFiringBranchName({
@@ -271,13 +259,7 @@ describe("routine firing workspace retention", () => {
       configDir: root,
       firingId: "fire-git-branch",
       kind: "git",
-      project: {
-        name: "alpha",
-        workspace: {
-          git: { base_branch: "main", remote: remotePath },
-          root: workspaceRoot
-        }
-      },
+      project: alphaProject({ remotePath, workspaceRoot }),
       routineName: "dependency-update"
     });
 
@@ -351,24 +333,23 @@ describe("routine firing workspace retention", () => {
       configDir: root,
       firingId,
       kind: "git",
-      project: {
-        name: "alpha",
-        workspace: {
-          git: { base_branch: "main", remote: remotePath },
-          root: workspaceRoot
-        }
-      },
+      project: alphaProject({ remotePath, workspaceRoot }),
       routineName: "dependency-update"
     });
     const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
     const wrapperDirectory = path.join(root, "bin");
+    const racedMarkerPath = path.join(root, "raced-deletion");
     await mkdir(wrapperDirectory, { recursive: true });
+    // The wrapper matches on argv positions, so a reordered `update-ref -d`
+    // call would degrade it to a pass-through and leave the test asserting
+    // nothing. The marker below turns that silent decay into a failure.
     await writeFile(
       path.join(wrapperDirectory, "git"),
       [
         "#!/bin/sh",
         'if [ "$3" = "update-ref" ] && [ "$4" = "-d" ]; then',
         '  "$REAL_GIT_PATH" -C "$2" update-ref -d "$5"',
+        '  : > "$RACED_DELETION_MARKER"',
         "fi",
         'exec "$REAL_GIT_PATH" "$@"',
         ""
@@ -405,6 +386,7 @@ describe("routine firing workspace retention", () => {
         workspacePath: prepared.workspacePath
       });
       vi.stubEnv("REAL_GIT_PATH", realGitOutput.trim());
+      vi.stubEnv("RACED_DELETION_MARKER", racedMarkerPath);
       vi.stubEnv(
         "PATH",
         `${wrapperDirectory}${path.delimiter}${process.env.PATH ?? ""}`
@@ -422,6 +404,7 @@ describe("routine firing workspace retention", () => {
       });
 
       expect(report.failures).toEqual([]);
+      await expect(access(racedMarkerPath)).resolves.toBeUndefined();
       expect(report.pruned.map((entry) => entry.firingId)).toContain(firingId);
       expect(store.getRoutineFiring(firingId)?.workspacePrunedAt).toBe(
         "2100-01-01T00:00:00.000Z"
@@ -528,13 +511,7 @@ describe("routine firing workspace retention", () => {
       configDir: root,
       firingId: "fire-live-holder",
       kind: "git",
-      project: {
-        name: "alpha",
-        workspace: {
-          git: { base_branch: "main", remote: remotePath },
-          root: workspaceRoot
-        }
-      },
+      project: alphaProject({ remotePath, workspaceRoot }),
       routineName: "dependency-update"
     });
 
@@ -673,13 +650,7 @@ describe("routine firing workspace retention", () => {
       configDir: root,
       firingId: "fire-race",
       kind: "report",
-      project: {
-        name: "alpha",
-        workspace: {
-          git: { base_branch: "main", remote: remotePath },
-          root: workspaceRoot
-        }
-      },
+      project: alphaProject({ remotePath, workspaceRoot }),
       routineName: "daily-report"
     });
 
@@ -749,13 +720,7 @@ describe("routine firing workspace retention", () => {
       configDir: root,
       firingId: "fire-commit-only",
       kind: "git",
-      project: {
-        name: "alpha",
-        workspace: {
-          git: { base_branch: "main", remote: remotePath },
-          root: workspaceRoot
-        }
-      },
+      project: alphaProject({ remotePath, workspaceRoot }),
       routineName: "nightly-cleanup"
     });
 
@@ -830,13 +795,7 @@ describe("routine firing workspace retention", () => {
       configDir: root,
       firingId: "fire-commit-and-issue",
       kind: "git",
-      project: {
-        name: "alpha",
-        workspace: {
-          git: { base_branch: "main", remote: remotePath },
-          root: workspaceRoot
-        }
-      },
+      project: alphaProject({ remotePath, workspaceRoot }),
       routineName: "nightly-cleanup"
     });
 
@@ -901,6 +860,16 @@ describe("routine firing workspace retention", () => {
     }
   });
 });
+
+function alphaProject(input: { remotePath: string; workspaceRoot: string }) {
+  return {
+    name: "alpha",
+    workspace: {
+      git: { base_branch: "main", remote: input.remotePath },
+      root: input.workspaceRoot
+    }
+  };
+}
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(

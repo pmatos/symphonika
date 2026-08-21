@@ -146,10 +146,10 @@ async function deleteRoutineFiringBranch(
   if (firing.kind !== "git") {
     return;
   }
-  const branchName = firing.branchRef.startsWith(LOCAL_BRANCH_REF_PREFIX)
-    ? firing.branchRef.slice(LOCAL_BRANCH_REF_PREFIX.length)
-    : "";
-  if (branchName.length === 0) {
+  if (
+    !firing.branchRef.startsWith(LOCAL_BRANCH_REF_PREFIX) ||
+    firing.branchRef === LOCAL_BRANCH_REF_PREFIX
+  ) {
     return;
   }
   // A firing branch name carries only the truncated firing id, so two firings
@@ -201,7 +201,7 @@ async function listRegisteredWorktrees(
     "--porcelain"
   ]);
   const worktrees: RegisteredWorktree[] = [];
-  for (const line of output.split("\n")) {
+  for (const line of output.split(/\r?\n/)) {
     if (line.startsWith("worktree ")) {
       worktrees.push({
         branchRef: null,

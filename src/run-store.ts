@@ -2914,15 +2914,7 @@ export class RunStore {
   ): FiringTransitionChangeEvent {
     const now = timestamp();
     const kind =
-      input.kind ??
-      (
-        this.database
-          .prepare(
-            "select kind from routines where project_name = ? and name = ?"
-          )
-          .get(input.projectName, input.routineName) as
-          { kind: RoutineKind } | undefined
-      )?.kind;
+      input.kind ?? this.routineKind(input.projectName, input.routineName);
     if (kind === undefined) {
       throw new Error(
         `cannot create firing ${input.id}: routine kind is unavailable`
@@ -5214,6 +5206,19 @@ export class RunStore {
       : this.listRoutinePullRequests({ firingId: latest.id }).map(
           (pullRequest) => pullRequest.prNumber
         );
+  }
+
+  private routineKind(
+    projectName: string,
+    routineName: string
+  ): RoutineKind | undefined {
+    return (
+      this.database
+        .prepare(
+          "select kind from routines where project_name = ? and name = ?"
+        )
+        .get(projectName, routineName) as { kind: RoutineKind } | undefined
+    )?.kind;
   }
 
   private getRunArtifactRow(runId: string): RunArtifactRow | undefined {

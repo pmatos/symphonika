@@ -30,6 +30,9 @@ const repoRoot = path.resolve(
 const NODE = "/home/dev/.nvm/versions/node/v22.23.1/bin/node";
 const CLI = "/home/dev/symphonika/dist/cli.js";
 const DAEMON_PATH = "/home/dev/.nvm/versions/node/v22.23.1/bin:/usr/bin:/bin";
+// The default the install path derives; renderServiceUnit itself takes the
+// config directory as given (see runServiceInstall for how it is chosen).
+const CONFIG_DIR = "%h/.config/symphonika";
 
 const tempRoots: string[] = [];
 
@@ -54,6 +57,7 @@ afterEach(async () => {
 describe("renderServiceUnit", () => {
   it("binds ExecStart and PATH to the running node runtime and cli.js", () => {
     const unit = renderServiceUnit({
+      configDir: CONFIG_DIR,
       execPath: NODE,
       path: DAEMON_PATH,
       scriptPath: CLI
@@ -71,6 +75,7 @@ describe("renderServiceUnit", () => {
 
   it("uses Type=notify with a watchdog timeout so a hung-but-alive daemon is restarted", () => {
     const unit = renderServiceUnit({
+      configDir: CONFIG_DIR,
       execPath: NODE,
       path: DAEMON_PATH,
       scriptPath: CLI
@@ -93,6 +98,7 @@ describe("renderServiceUnit", () => {
   // accepts it.
   it("sets NotifyAccess=all so a child-process notifier is accepted", () => {
     const unit = renderServiceUnit({
+      configDir: CONFIG_DIR,
       execPath: NODE,
       path: DAEMON_PATH,
       scriptPath: CLI
@@ -113,6 +119,7 @@ describe("renderServiceUnit", () => {
   // detection this feature provides.
   it("sets a generous TimeoutStartSec so slow initial polling isn't mistaken for a hung startup", () => {
     const unit = renderServiceUnit({
+      configDir: CONFIG_DIR,
       execPath: NODE,
       path: DAEMON_PATH,
       scriptPath: CLI
@@ -123,6 +130,7 @@ describe("renderServiceUnit", () => {
 
   it("never hardcodes the ~/.npm-global bin path", () => {
     const unit = renderServiceUnit({
+      configDir: CONFIG_DIR,
       execPath: NODE,
       path: DAEMON_PATH,
       scriptPath: CLI
@@ -133,6 +141,7 @@ describe("renderServiceUnit", () => {
 
   it("quotes ExecStart paths so spaces in the runtime or checkout survive", () => {
     const unit = renderServiceUnit({
+      configDir: CONFIG_DIR,
       execPath: "/home/John Doe/.nvm/node",
       path: DAEMON_PATH,
       scriptPath: "/opt/my app/dist/cli.js"
@@ -145,6 +154,7 @@ describe("renderServiceUnit", () => {
 
   it("quotes the Environment=PATH assignment so a spaced PATH entry survives", () => {
     const unit = renderServiceUnit({
+      configDir: CONFIG_DIR,
       execPath: NODE,
       path: "/home/John Doe/.nvm/bin:/usr/bin",
       scriptPath: CLI

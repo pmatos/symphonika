@@ -39,7 +39,7 @@ export type ServiceInstallReport = {
 };
 
 export type ServiceUnitInput = {
-  configDir?: string;
+  configDir: string;
   configPath?: string;
   execPath: string;
   path: string;
@@ -88,11 +88,6 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
     input.configPath === undefined ? "" : ` --config "$3"`;
   const configArgument =
     input.configPath === undefined ? "" : ` ${systemdArg(input.configPath)}`;
-  const configDir =
-    input.configDir ??
-    (input.configPath === undefined
-      ? "%h/.config/symphonika"
-      : path.dirname(input.configPath));
 
   return [
     "[Unit]",
@@ -147,7 +142,7 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
     "# authenticated email. Note that systemd lets these assignments override",
     "# Environment= above, so an env file that sets PATH replaces the one",
     "# baked in here.",
-    `EnvironmentFile=${systemdEnvironmentFileArg(path.join(configDir, "env"))}`,
+    `EnvironmentFile=${systemdOptionalEnvironmentFilePath(path.join(input.configDir, "env"))}`,
     "",
     "# Resolve GITHUB_TOKEN from `gh auth token` at each (re)start so this",
     "# survives token rotation. Fails closed if gh returns empty so the",
@@ -224,16 +219,17 @@ export async function runServiceInstall(
   const homeDir = options.homeDir ?? homedir();
   const unitDir = userUnitDir(homeDir, env);
   const daemonPath = buildDaemonPath(execPath, env);
-  // Mirrors userUnitDir: systemd only honors an absolute XDG_CONFIG_HOME, and
-  // defaultUserConfigPath would otherwise resolve a relative one against the
-  // install-time cwd and bake that into the unit.
-  const configuredConfigHome = env.XDG_CONFIG_HOME?.trim() ?? "";
+  // Only consult defaultUserConfigPath under an absolute XDG_CONFIG_HOME: it
+  // resolves a relative one against the install-time cwd, which must not get
+  // baked into the unit.
+  const defaultConfigDir =
+    systemdConfigHome(env) === undefined
+      ? "%h/.config/symphonika"
+      : path.dirname(defaultUserConfigPath({ env, homeDir }));
   const configDir =
-    options.configPath !== undefined
-      ? path.dirname(options.configPath)
-      : configuredConfigHome.length > 0 && path.isAbsolute(configuredConfigHome)
-        ? path.dirname(defaultUserConfigPath({ env, homeDir }))
-        : "%h/.config/symphonika";
+    options.configPath === undefined
+      ? defaultConfigDir
+      : path.dirname(options.configPath);
 
   const files: ServiceUnitFile[] = [
     {
@@ -353,16 +349,21 @@ export async function runServiceInstall(
   }
 }
 
+// systemd only honors an absolute XDG_CONFIG_HOME, so a relative value is
+// ignored rather than resolved. Returns undefined when the caller should fall
+// back to its own notion of `~/.config`. Shared so that where the unit files
+// are written and where the unit points for its env file cannot drift apart.
+function systemdConfigHome(env: NodeJS.ProcessEnv): string | undefined {
+  const configured = env.XDG_CONFIG_HOME?.trim() ?? "";
+  return configured.length > 0 && path.isAbsolute(configured)
+    ? configured
+    : undefined;
+}
+
 // systemd --user reads units from $XDG_CONFIG_HOME/systemd/user, falling back
-// to ~/.config/systemd/user when XDG_CONFIG_HOME is unset. systemd only honors
-// an absolute XDG_CONFIG_HOME, so a relative value is ignored here too.
+// to ~/.config/systemd/user when XDG_CONFIG_HOME is unset.
 export function userUnitDir(homeDir: string, env: NodeJS.ProcessEnv): string {
-  const xdg =
-    typeof env.XDG_CONFIG_HOME === "string" ? env.XDG_CONFIG_HOME.trim() : "";
-  const configHome =
-    xdg.length > 0 && path.isAbsolute(xdg)
-      ? xdg
-      : path.join(homeDir, ".config");
+  const configHome = systemdConfigHome(env) ?? path.join(homeDir, ".config");
   return path.join(configHome, "systemd", "user");
 }
 
@@ -399,7 +400,7 @@ function systemdEnvAssignment(name: string, value: string): string {
 // left verbatim. Only `%` is escaped -- except for a leading `%h`, which
 // must survive as the home-directory specifier, since an escaped `%%h`
 // expands back to a literal `%h` and would then be rejected as relative.
-function systemdEnvironmentFileArg(filePath: string): string {
+function systemdOptionalEnvironmentFilePath(filePath: string): string {
   const escaped = filePath.replace(/%/g, "%%").replace(/^%%h(?=\/)/, "%h");
   return `-${escaped}`;
 }

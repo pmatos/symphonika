@@ -4,10 +4,14 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createHttpApp } from "../src/http/app.js";
-import type { IssueSnapshot } from "../src/issue-polling.js";
+import {
+  emptyIssuePollStatus,
+  type IssueSnapshot
+} from "../src/issue-polling.js";
 import { routineEvidencePaths } from "../src/routines/evidence.js";
 import type { RunState } from "../src/run-store.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
+import { buildStatusSnapshot } from "../src/status.js";
 
 const tempRoots: string[] = [];
 
@@ -2309,6 +2313,50 @@ describe("HTTP app — dashboard IA shell (#302)", () => {
         /<tr><td><a href="\/projects\/s11-host">s11-host<\/a><\/td><td>.*?<\/td><td>1<\/td><\/tr>/
       );
     } finally {
+      test.cleanup();
+    }
+  });
+
+  it("keeps the last-run age anchored to terminal completion across PR-discovery retries", async () => {
+    const test = await setup();
+    try {
+      vi.useFakeTimers();
+      vi.setSystemTime("2026-05-22T10:00:00.000Z");
+      test.runStore.syncProjectStates([{ name: "alpha", weight: 1 }]);
+      test.runStore.createRun({
+        id: "run-terminal-age",
+        issue: sampleIssue({ number: 23, title: "Completed earlier" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-terminal-age", "succeeded");
+
+      vi.setSystemTime("2026-05-22T11:00:00.000Z");
+      test.runStore.recordPullRequestDiscoveryAttempt("run-terminal-age");
+
+      const app = createHttpApp({
+        getStatusSnapshot: () =>
+          buildStatusSnapshot({
+            configPath: "/tmp/symphonika.yml",
+            issuePollStatus: emptyIssuePollStatus(),
+            runStore: test.runStore,
+            stateRoot: test.stateRoot
+          }),
+        now: () => Date.parse("2026-05-22T12:00:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/")).text();
+
+      // Anchored on alpha's own row so the age cell is matched directly,
+      // rather than asserting over a hand-bounded slice of the page.
+      expect(body).toMatch(
+        /<a href="\/projects\/alpha">alpha<\/a>.*?<code>2h ago<\/code>/
+      );
+    } finally {
+      vi.useRealTimers();
       test.cleanup();
     }
   });

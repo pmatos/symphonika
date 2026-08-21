@@ -117,6 +117,10 @@ export type RunStatus = {
   workspacePath: string;
 };
 
+export type ProjectLastRunStatus = RunStatus & {
+  lastTransitionAt: string;
+};
+
 export type AttemptStatus = {
   artifacts: RunArtifactDescriptor[];
   attemptNumber: number;
@@ -541,6 +545,10 @@ type RunRow = {
   terminal_state_id: string | null;
   updated_at: string;
   workspace_path: string | null;
+};
+
+type ProjectLastRunRow = RunRow & {
+  last_transition_at: string;
 };
 
 type AttemptRow = {
@@ -3460,39 +3468,42 @@ export class RunStore {
         "updated_at = @updated_at where id = @id"
       ].join(" ")
     );
-    if (state === "preparing_workspace") {
-      // A Run row is reused across transient retry attempts, while the
-      // latest Watchdog sample and remembered turn IDs are keyed by run_id.
-      // Advance the generation fence and clear those attempt-local values
-      // before exposing the new attempt's preparing state. A sample captured
-      // by the prior generation can then recreate neither current data nor a
-      // stale verdict after its async I/O completes. Append-only sample history
-      // remains durable evidence.
-      this.database.transaction(() => {
+    // The Run row and transition are one durable state change. If they commit
+    // separately, later bookkeeping can overwrite updated_at and erase the
+    // only recoverable timestamp for an interrupted terminal transition.
+    const apply = this.database.transaction(() => {
+      if (state === "preparing_workspace") {
+        // A Run row is reused across transient retry attempts, while the
+        // latest Watchdog sample and remembered turn IDs are keyed by run_id.
+        // Advance the generation fence and clear those attempt-local values
+        // before exposing the new attempt's preparing state. A sample captured
+        // by the prior generation can then recreate neither current data nor a
+        // stale verdict after its async I/O completes. Append-only sample history
+        // remains durable evidence.
         this.database
           .prepare("delete from watchdog_samples where run_id = ?")
           .run(runId);
         this.database
           .prepare("delete from watchdog_turn_ids where run_id = ?")
           .run(runId);
-        update.run({ id: runId, state, updated_at: now });
-      })();
-    } else {
+      }
       update.run({ id: runId, state, updated_at: now });
-    }
-    this.recordRunTransition(runId, state, now);
-    if (state === "waiting") {
-      // ADR 0054: idle_since is a persisted wall-clock timestamp and the
-      // watchdog never samples waiting Runs, so clear it on entry to waiting so
-      // the grace window cannot absorb an unsampled wait excursion as idle time.
-      // A Run returning to running starts its idle clock fresh on its next idle
-      // tick rather than inheriting pre-wait idle time (see ADR 0047).
-      this.database
-        .prepare(
-          "update watchdog_samples set idle_since = null where run_id = ?"
-        )
-        .run(runId);
-    }
+      const event = this.insertRunTransition(runId, state, now);
+      if (state === "waiting") {
+        // ADR 0054: idle_since is a persisted wall-clock timestamp and the
+        // watchdog never samples waiting Runs, so clear it on entry to waiting so
+        // the grace window cannot absorb an unsampled wait excursion as idle time.
+        // A Run returning to running starts its idle clock fresh on its next idle
+        // tick rather than inheriting pre-wait idle time (see ADR 0047).
+        this.database
+          .prepare(
+            "update watchdog_samples set idle_since = null where run_id = ?"
+          )
+          .run(runId);
+      }
+      return event;
+    });
+    this.publishChange(apply());
   }
 
   listPendingRunNotifications(): RunStatus[] {
@@ -3745,12 +3756,17 @@ export class RunStore {
   // One query for "each project's most recent run in one of `states`",
   // keyed by project name — the dashboard's Projects section wants this per
   // row, and a per-project listRuns(limit:1) call would be an N+1 query
-  // against the number of configured Projects.
+  // against the number of configured Projects. lastTransitionAt comes from the
+  // newest state transition, not `updated_at`, so post-terminal bookkeeping
+  // (PR-discovery retries) cannot reset a Run's age.
+  // insertRunRow always writes a first transition, so the coalesce fallback
+  // covers imported rows without transition history and legacy process-exit
+  // artifacts from before Run state and transition writes became atomic.
   listLatestRunsByProject(input: {
     projectNames: string[];
     states: RunState[];
-  }): Map<string, RunStatus> {
-    const result = new Map<string, RunStatus>();
+  }): Map<string, ProjectLastRunStatus> {
+    const result = new Map<string, ProjectLastRunStatus>();
     if (input.projectNames.length === 0 || input.states.length === 0) {
       return result;
     }
@@ -3773,18 +3789,26 @@ export class RunStore {
           "current_state_id, terminal_state_id, state_transition_reason,",
           "is_continuation, continuation_parent_run_id, retry_count,",
           "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
-          "created_at, updated_at from (",
+          "created_at, updated_at,",
+          "coalesce((select case when transition.state = ranked_runs.state",
+          "  then transition.created_at end from run_state_transitions transition",
+          "  where transition.run_id = ranked_runs.id",
+          "  order by transition.sequence desc limit 1), updated_at) as last_transition_at",
+          "from (",
           "select *, row_number() over (",
           "partition by project_name order by created_at desc, id desc",
           ") as rn from runs",
           `where project_name in (${projectPlaceholders.join(", ")})`,
           `and state in (${statePlaceholders.join(", ")})`,
-          ") where rn = 1"
+          ") as ranked_runs where rn = 1"
         ].join(" ")
       )
-      .all(params) as RunRow[];
+      .all(params) as ProjectLastRunRow[];
     for (const row of rows) {
-      result.set(row.project_name, mapRunRow(row));
+      result.set(row.project_name, {
+        ...mapRunRow(row),
+        lastTransitionAt: row.last_transition_at
+      });
     }
     return result;
   }
@@ -5098,6 +5122,16 @@ export class RunStore {
     this.database.exec(`
       create index if not exists routine_firing_workspace_retention_idx
       on routine_firings(workspace_pruned_at, state, updated_at);
+    `);
+
+    // run_state_transitions is append-only with no retention sweep and has no
+    // other index. nextTransitionSequence's max(sequence) lookup runs on every
+    // transition write, and both listRunStateTransitions and
+    // listLatestRunsByProject's newest-transition subquery otherwise degrade
+    // to a full scan plus a temp b-tree sort of the whole table.
+    this.database.exec(`
+      create index if not exists run_state_transitions_run_seq_idx
+      on run_state_transitions(run_id, sequence);
     `);
 
     // Runs after the ensureColumn additions above so databases created before

@@ -486,8 +486,11 @@ export async function runDoctor(
     email?.smtpUsername !== undefined &&
     (env[email.smtpPasswordEnv]?.trim().length ?? 0) === 0
   ) {
+    const environmentFile = shellQuote(
+      serviceEnvironmentFilePath(resolvedConfig.configPath)
+    );
     errors.push(
-      `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . ${serviceEnvironmentFilePath(resolvedConfig.configPath)}; set +a)`
+      `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . ${environmentFile}; set +a)`
     );
   }
 
@@ -562,6 +565,10 @@ export async function runDoctor(
   );
 
   return report(configPath, errors, projects, warnings, liveCheck);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 async function runLiveCheck(

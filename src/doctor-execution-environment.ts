@@ -36,8 +36,13 @@ type DoctorCodexProfileReport = {
 
 type DoctorGhAuthReport = {
   executablePath: string | null;
+  reason?: string;
   status:
-    "authenticated" | "not_installed" | "skipped_offline" | "unauthenticated";
+    | "authenticated"
+    | "not_installed"
+    | "probe_failed"
+    | "skipped_offline"
+    | "unauthenticated";
 };
 
 type DoctorInstalledUnitReport = {
@@ -189,11 +194,27 @@ async function checkGhAuth(
     );
     return { executablePath, status: "authenticated" };
   } catch (error) {
+    const reason = probeFailureDetail(error);
+    if (!isGhAuthenticationFailure(error)) {
+      errors.push(`gh authentication probe failed: ${reason}`);
+      return { executablePath, reason, status: "probe_failed" };
+    }
     errors.push(
-      `gh is installed but not authenticated; run \`gh auth login\` (gh auth status failed: ${probeFailureDetail(error)})`
+      `gh is installed but not authenticated; run \`gh auth login\` (gh auth status failed: ${reason})`
     );
     return { executablePath, status: "unauthenticated" };
   }
+}
+
+function isGhAuthenticationFailure(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === 1 &&
+    (error as { killed?: unknown }).killed !== true &&
+    ((error as { signal?: unknown }).signal === null ||
+      (error as { signal?: unknown }).signal === undefined)
+  );
 }
 
 // A failed probe is not necessarily a logged-out CLI: it is also how a

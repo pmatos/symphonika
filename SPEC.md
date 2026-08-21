@@ -1823,8 +1823,9 @@ config path and points the operator to `symphonika init`.
 - the Doctor Execution Environment: selected Project provider executables under the invoking PATH,
   the required Codex profile keys when Codex is selected — checked under the profile the configured
   command selects, in `$CODEX_HOME` when set — and independent `gh` executable/authentication
-  status; Workspace-relative executable paths are rejected because no future issue or Routine
-  Workspace exists yet for `doctor` to resolve them against
+  status, with fatal auth-probe failures distinct from logged-out credentials; Workspace-relative
+  executable paths are rejected because no future issue or Routine Workspace exists yet for
+  `doctor` to resolve them against
 - installed `symphonika.service` PATH liveness for selected Project provider executables and `gh`;
   the effective assignment includes adjacent `.service.d/*.conf` drop-ins, and failures here are
   warnings because the unit's frozen PATH may be intentional

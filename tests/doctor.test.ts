@@ -655,6 +655,44 @@ describe("doctor", () => {
     );
   });
 
+  it("reports a fatal gh auth probe failure separately from logged-out credentials", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const binDir = path.join(root, "bin");
+    await writeValidConfig(configPath, { codexCommand: "codex app-server" });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    await writeStubExecutables(binDir, ["codex"]);
+    const ghPath = path.join(binDir, "gh");
+    await writeStubExecutables(
+      binDir,
+      ["gh"],
+      '#!/bin/sh\necho "gh backend unavailable" >&2\nexit 2\n'
+    );
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      env: { GITHUB_TOKEN: "test-secret-token", PATH: binDir },
+      githubApi: successfulGitHubApi(),
+      homeDir: root
+    });
+
+    expect(report.environment.gh).toEqual({
+      executablePath: ghPath,
+      reason: "gh backend unavailable",
+      status: "probe_failed"
+    });
+    expect(report.errors).toContain(
+      "gh authentication probe failed: gh backend unavailable"
+    );
+    expect(report.errors).not.toContainEqual(
+      expect.stringContaining("run `gh auth login`")
+    );
+  });
+
   it("checks only the active GitHub.com gh account", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");

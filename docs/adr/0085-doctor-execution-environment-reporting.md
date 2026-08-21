@@ -40,8 +40,9 @@ stale version-manager directory.
 - Resolve `gh` under the invoking PATH and run `gh auth status --active --hostname github.com`,
   matching the GitHub.com tracker boundary without letting a stale unrelated account or enterprise
   host fail the probe. The report distinguishes
-  `not_installed`, `unauthenticated`, and `authenticated`, and a failed probe carries the reason gh
-  reported so a timeout or network failure is not misread as a logged-out CLI. `doctor --offline`
+  `not_installed`, `unauthenticated`, `probe_failed`, and `authenticated`; fatal probe failures carry
+  the reason gh reported so a timeout or network failure is not misread as a logged-out CLI.
+  `doctor --offline`
   still resolves `gh` and performs every local check, but records `skipped_offline` instead of
   making the auth-status call.
 - When `symphonika.service` is installed, read its effective `Environment=PATH=...` assignment from

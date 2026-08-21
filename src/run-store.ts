@@ -8,6 +8,7 @@ import type {
   IssueSnapshot,
   RawGitHubIssueDependencyRef
 } from "./issue-polling.js";
+import { normalizeProjectWeight } from "./issue-priority.js";
 import { isPathInside } from "./path-safety.js";
 import type { AgentProviderName, NormalizedProviderEvent } from "./provider.js";
 import type {
@@ -5615,13 +5616,6 @@ function mapRoutinePullRequestRow(
     projectName: row.project_name,
     routineName: row.routine_name
   };
-}
-
-function normalizeProjectWeight(weight: number | undefined): number {
-  if (weight === undefined || !Number.isInteger(weight) || weight <= 0) {
-    return 1;
-  }
-  return weight;
 }
 
 function mapTrackedPullRequestRow(

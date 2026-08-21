@@ -24,6 +24,12 @@ import {
   pullRequestReadyToMerge,
   type PullRequestFollowupPolicy
 } from "../pull-request-followup.js";
+import {
+  compareCandidateIssues,
+  normalizeLabels,
+  normalizeProjectWeight,
+  priorityForLabels
+} from "../issue-priority.js";
 import { interpretPullRequest } from "../pull-request-state.js";
 import { evaluateRunContinuationEligibility } from "./issue-eligibility.js";
 import { projectPullRequestSignals } from "./pr-signal-projection.js";
@@ -4120,62 +4126,12 @@ function normalizeRawIssue(
     id: raw.id ?? 0,
     labels,
     number: raw.number ?? 0,
-    priority: priorityForLabels(labels, project),
+    priority: priorityForLabels(labels, project.priority),
     state: raw.state ?? "open",
     title: raw.title ?? "",
     updated_at: raw.updated_at ?? "",
     url: raw.html_url ?? raw.url ?? ""
   };
-}
-
-function normalizeLabels(labels: unknown[]): string[] {
-  const normalized: string[] = [];
-  for (const label of labels) {
-    if (typeof label === "string") {
-      normalized.push(label);
-      continue;
-    }
-    if (
-      typeof label === "object" &&
-      label !== null &&
-      "name" in label &&
-      typeof (label as { name?: unknown }).name === "string"
-    ) {
-      normalized.push((label as { name: string }).name);
-    }
-  }
-  return normalized;
-}
-
-function priorityForLabels(
-  labels: string[],
-  project: DispatchProjectConfig
-): number {
-  const priorities = labels.flatMap((label) => {
-    const priority = project.priority.labels[label];
-    return priority === undefined ? [] : [priority];
-  });
-  return priorities.length === 0
-    ? project.priority.default
-    : Math.min(...priorities);
-}
-
-function compareCandidateIssues(
-  left: { issue: IssueSnapshot },
-  right: { issue: IssueSnapshot }
-): number {
-  return (
-    left.issue.priority - right.issue.priority ||
-    left.issue.created_at.localeCompare(right.issue.created_at) ||
-    left.issue.number - right.issue.number
-  );
-}
-
-function normalizeProjectWeight(weight: number | undefined): number {
-  if (weight === undefined || !Number.isInteger(weight) || weight <= 0) {
-    return 1;
-  }
-  return weight;
 }
 
 function signalsFromTerminal(

@@ -6,6 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { defaultUserConfigPath } from "./config-paths.js";
+
 const execFile = promisify(execFileCallback);
 
 export type ServiceInstallOptions = {
@@ -37,6 +39,7 @@ export type ServiceInstallReport = {
 };
 
 export type ServiceUnitInput = {
+  configDir?: string;
   configPath?: string;
   execPath: string;
   path: string;
@@ -85,6 +88,11 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
     input.configPath === undefined ? "" : ` --config "$3"`;
   const configArgument =
     input.configPath === undefined ? "" : ` ${systemdArg(input.configPath)}`;
+  const configDir =
+    input.configDir ??
+    (input.configPath === undefined
+      ? "%h/.config/symphonika"
+      : path.dirname(input.configPath));
 
   return [
     "[Unit]",
@@ -131,6 +139,12 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
     "# node upgrade to refresh a version-pinned path. The whole assignment is",
     "# quoted so a PATH entry containing a space is not split off and dropped.",
     `Environment=${systemdEnvAssignment("PATH", input.path)}`,
+    "",
+    "# Load environment-backed service secrets (such as the variable named by",
+    "# email.smtp_password_env; see docs/adr/0067) from the conventional",
+    "# <config-dir>/env file beside symphonika.yml. The leading `-` keeps the",
+    "# file optional for operators who do not configure authenticated email.",
+    `EnvironmentFile=${systemdEnvironmentFileArg(path.join(configDir, "env"))}`,
     "",
     "# Resolve GITHUB_TOKEN from `gh auth token` at each (re)start so this",
     "# survives token rotation. Fails closed if gh returns empty so the",
@@ -207,10 +221,18 @@ export async function runServiceInstall(
   const homeDir = options.homeDir ?? homedir();
   const unitDir = userUnitDir(homeDir, env);
   const daemonPath = buildDaemonPath(execPath, env);
+  const configuredConfigHome = env.XDG_CONFIG_HOME?.trim();
+  const configDir =
+    options.configPath !== undefined
+      ? path.dirname(options.configPath)
+      : configuredConfigHome === undefined || configuredConfigHome.length === 0
+        ? "%h/.config/symphonika"
+        : path.dirname(defaultUserConfigPath({ env, homeDir }));
 
   const files: ServiceUnitFile[] = [
     {
       content: renderServiceUnit({
+        configDir,
         ...(options.configPath === undefined
           ? {}
           : { configPath: options.configPath }),
@@ -359,6 +381,16 @@ function systemdEnvAssignment(name: string, value: string): string {
     .replace(/"/g, '\\"')
     .replace(/%/g, "%%");
   return `"${escaped}"`;
+}
+
+function systemdEnvironmentFileArg(filePath: string): string {
+  const escaped = filePath
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/%/g, "%%")
+    .replace(/^%%h(?=\/)/, "%h");
+  const optionalPath = `-${escaped}`;
+  return /[\s"\\]/.test(filePath) ? `"${optionalPath}"` : optionalPath;
 }
 
 export function defaultScriptPath(): string {

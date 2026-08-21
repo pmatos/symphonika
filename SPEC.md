@@ -1813,6 +1813,14 @@ path; otherwise it uses a `./`-prefixed path relative to the Service Config.
 bakes it into the generated unit as `daemon --config <absolute-path>`. Omitting `--config` keeps the
 unit on the daemon's normal project-local/user-config discovery path.
 
+The generated service unit always references an optional `EnvironmentFile=` at `<config-dir>/env`
+for environment-backed service secrets such as the variable named by `email.smtp_password_env`.
+With `--config`, `<config-dir>` is the explicit Service Config's directory. Without it, the env file
+uses the initialized user-config directory (`$XDG_CONFIG_HOME/symphonika/env`, falling back to
+`%h/.config/symphonika/env`) without fixing the daemon's own config discovery path. The systemd
+directive carries a leading `-`, so a missing env file does not prevent startup and creating the
+file later only requires restarting the service.
+
 `status --dashboard` renders a compact terminal status dashboard from the run store and daemon
 `/api/status` endpoint. `status --watch` refreshes that read-only dashboard in place; it must not
 dispatch work or mutate GitHub state. Watch mode refreshes daemon status and run-store data every

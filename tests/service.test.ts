@@ -63,6 +63,7 @@ describe("renderServiceUnit", () => {
     expect(unit).toContain(`"${NODE}"`);
     expect(unit).toContain(`"${CLI}"`);
     expect(unit).toContain(`Environment="PATH=${DAEMON_PATH}"`);
+    expect(unit).toContain("EnvironmentFile=-%h/.config/symphonika/env");
     expect(unit).toContain("t=$(gh auth token)");
     expect(unit).toContain("Slice=symphonika-daemon.slice");
     expect(unit).toContain("WantedBy=default.target");
@@ -496,6 +497,49 @@ describe("runServiceInstall", () => {
       `exec "$1" "$2" daemon --config "$3"`
     );
     expect(report.files[0]?.content).toContain(`"${configPath}"`);
+  });
+
+  it("loads an optional env file beside an explicit service config", async () => {
+    const report = await runServiceInstall({
+      ...baseOptions,
+      configPath: "/opt/symphonika/config/symphonika.yml",
+      print: true
+    });
+
+    expect(report.files[0]?.content).toContain(
+      "EnvironmentFile=-/opt/symphonika/config/env"
+    );
+    expect(report.files[0]?.content).toContain("smtp_password_env");
+    expect(report.files[0]?.content).toContain("docs/adr/0067");
+  });
+
+  it("quotes the optional env file when the config directory contains spaces", async () => {
+    const report = await runServiceInstall({
+      ...baseOptions,
+      configPath: "/opt/Symphonika Config/symphonika.yml",
+      print: true
+    });
+
+    expect(report.files[0]?.content).toContain(
+      'EnvironmentFile="-/opt/Symphonika Config/env"'
+    );
+  });
+
+  it("loads the optional env file from XDG_CONFIG_HOME without fixing daemon config discovery", async () => {
+    const report = await runServiceInstall({
+      ...baseOptions,
+      env: {
+        PATH: "/opt/node/bin:/usr/bin",
+        XDG_CONFIG_HOME: "/srv/operator-config"
+      },
+      print: true
+    });
+
+    expect(report.files[0]?.content).toContain(
+      "EnvironmentFile=-/srv/operator-config/symphonika/env"
+    );
+    expect(report.files[0]?.content).toContain(`exec "$1" "$2" daemon'`);
+    expect(report.files[0]?.content).not.toContain("daemon --config");
   });
 
   it("skips daemon-reload when reload is false but still writes units", async () => {

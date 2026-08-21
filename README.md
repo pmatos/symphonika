@@ -93,6 +93,8 @@ journalctl --user -u symphonika -f
 
 The generated unit uses the daemon's normal config discovery by default. To run the service with a non-default config, install it with `symphonika service install --config <path>`; relative paths are resolved when the unit is generated and the absolute path is baked into `ExecStart`.
 
+The unit also loads an optional env file beside the selected user config: `$XDG_CONFIG_HOME/symphonika/env` (or `~/.config/symphonika/env`) by default, and `<config-dir>/env` with `--config`. Put environment-backed service secrets such as the variable named by `email.smtp_password_env` there, protect the file with user-only permissions, and restart `symphonika.service` after creating or changing it. The file is optional, so operators without authenticated email do not need to create it.
+
 What the generated units give you:
 
 - **`symphonika-daemon.slice`** owns the daemon process and its dashboard only — a small, protected budget (see [`systemd/symphonika-daemon.slice`](systemd/symphonika-daemon.slice)). **`symphonika-providers.slice`** owns every spawned provider (and the build tools they in turn spawn) with the larger budget the two used to share (see [`systemd/symphonika-providers.slice`](systemd/symphonika-providers.slice)). Splitting them means a runaway tool spawned by a provider is killed *inside the providers slice* instead of throttling the daemon's own event loop and dashboard along with it (see `docs/adr/0064`). `MemoryHigh=` / `MemoryMax=` on each slice cap its tree independently. The generated caps assume a large workstation; edit the installed `~/.config/systemd/user/symphonika-*.slice` files to match your host (re-running `service install --force` overwrites them).

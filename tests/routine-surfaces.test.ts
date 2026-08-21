@@ -505,6 +505,53 @@ describe("routine operator surfaces", () => {
     }
   });
 
+  it("hides removed targets when every current target is inactive", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/daily-report.md"
+    };
+    try {
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      store.syncRoutines([{ ...declaration, projectName: "alpha" }], {
+        projects: ["alpha", "beta"]
+      });
+      store.markRoutinesInactiveForProject("alpha");
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const defaultBody = await (await app.request("/")).text();
+      const inactiveBody = await (
+        await app.request("/?include_inactive=true")
+      ).text();
+
+      expect(defaultBody).not.toContain(
+        '<a href="/routines/daily-report">daily-report</a>'
+      );
+      expect(inactiveBody).toContain(
+        '<a href="/routines/daily-report?include_inactive=true">daily-report</a>'
+      );
+      expect(inactiveBody).toContain(
+        '<td><a href="/routines/daily-report?include_inactive=true">1</a></td>'
+      );
+      expect(inactiveBody).toContain("inactive");
+      expect(inactiveBody).not.toContain("removed_from_config");
+    } finally {
+      store.close();
+    }
+  });
+
   it("renders a disabled routine's disable reason on the local dashboard page", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

@@ -520,16 +520,23 @@ export function registerPages(options: RegisterPagesOptions): void {
         : options.monotonicNow() - bannerReferenceAt;
     const pollingIntervalMs =
       options.getPollingIntervalMs?.() ?? DEFAULT_POLLING_INTERVAL_MS;
-    // removed_from_config rows are durable, never deleted. Exclude them from
-    // the target count when their declaration still has current targets, but
-    // keep an entirely removed declaration visible with its disabled reason.
+    // Classify declarations from every durable target before applying the
+    // inactive-target visibility policy. Otherwise an inactive current target
+    // can disappear first and make its removed sibling look like an entirely
+    // removed declaration.
     const routineGroups = groupRoutinesByName(
-      options.runStore.listRoutines({ includeInactive })
-    ).map((group) => {
+      options.runStore.listRoutines({ includeInactive: true })
+    ).flatMap((group) => {
       const currentTargets = currentRoutineTargets(group);
-      return currentTargets.length === 0
-        ? group
-        : { ...group, targets: currentTargets };
+      if (currentTargets.length === 0) {
+        return [group];
+      }
+      const visibleTargets = includeInactive
+        ? currentTargets
+        : currentTargets.filter((target) => target.state !== "inactive");
+      return visibleTargets.length === 0
+        ? []
+        : [{ ...group, targets: visibleTargets }];
     });
     const html = layout(
       "Symphonika",

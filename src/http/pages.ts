@@ -1504,6 +1504,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       .sort((a, b) => b - a)
       .map((issueNumber) =>
         buildProjectIssueRow({
+          globalCapacity: concurrency?.global,
           inFlight,
           issueNumber,
           maxInFlight: projectCapacity?.maxInFlight,
@@ -3608,6 +3609,7 @@ type ProjectIssueRow = {
 };
 
 function buildProjectIssueRow(input: {
+  globalCapacity: { inFlight: number; maxInFlight: number | null } | undefined;
   inFlight: number;
   issueNumber: number;
   maxInFlight: number | undefined;
@@ -3704,12 +3706,17 @@ function buildProjectIssueRow(input: {
       title: snapshot.title
     };
   }
-  const atCap =
-    input.maxInFlight !== undefined && input.inFlight >= input.maxInFlight;
+  const globalCapacity = input.globalCapacity;
+  const capDetail =
+    globalCapacity !== undefined &&
+    globalCapacity.maxInFlight !== null &&
+    globalCapacity.inFlight >= globalCapacity.maxInFlight
+      ? `queued behind global cap (${globalCapacity.inFlight}/${globalCapacity.maxInFlight})`
+      : input.maxInFlight !== undefined && input.inFlight >= input.maxInFlight
+        ? `queued behind cap (${input.inFlight}/${input.maxInFlight})`
+        : undefined;
   return {
-    detail: atCap
-      ? `queued behind cap (${input.inFlight}/${input.maxInFlight})`
-      : "within cap, next by priority",
+    detail: capDetail ?? "within cap, next by priority",
     hasSnapshot,
     issueNumber: input.issueNumber,
     pillHtml: labelPill("eligible", "neutral"),

@@ -18,7 +18,11 @@ import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
 } from "./daemon-endpoint.js";
-import type { GitHubIssuesApi, PollingProjectConfig } from "./issue-polling.js";
+import type {
+  GitHubIssuesApi,
+  GitHubRepositoryIdentity,
+  PollingProjectConfig
+} from "./issue-polling.js";
 import {
   backoffUntil,
   DEFAULT_GITHUB_ISSUES_API,
@@ -584,7 +588,12 @@ export async function startDaemon(
   // on a given token's transition, not on every tick, so a sustained
   // outage doesn't spam the log.
   const engageGithubBackoff = (
-    reports: ReadonlyArray<{ error?: string; name: string; ok: boolean }>,
+    reports: ReadonlyArray<{
+      error?: string;
+      name: string;
+      ok: boolean;
+      repository: GitHubRepositoryIdentity;
+    }>,
     projects: readonly PollingProjectConfig[],
     env: NodeJS.ProcessEnv
   ): void => {
@@ -973,12 +982,20 @@ export async function startDaemon(
               ? {}
               : {
                   onProjectRateLimited: ({ error, projectName }) => {
+                    const project = projectsByName.get(projectName);
+                    if (project === undefined) {
+                      return;
+                    }
                     engageGithubBackoff(
                       [
                         {
                           error: errorMessage(error),
                           name: projectName,
-                          ok: false
+                          ok: false,
+                          repository: {
+                            owner: project.tracker.owner,
+                            repo: project.tracker.repo
+                          }
                         }
                       ],
                       snapshot.polling.projects,

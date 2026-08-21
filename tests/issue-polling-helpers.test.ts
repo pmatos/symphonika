@@ -1054,14 +1054,41 @@ describe("rateLimitedTokens", () => {
           error:
             "projects.alpha.tracker.repository pmatos/alpha issues could not be listed: API rate limit exceeded",
           name: "alpha",
-          ok: false
+          ok: false,
+          repository: { owner: "pmatos", repo: "alpha" }
         },
-        { name: "beta", ok: true }
+        {
+          name: "beta",
+          ok: true,
+          repository: { owner: "pmatos", repo: "beta" }
+        }
       ],
       [alphaProject, betaProject],
       env
     );
     expect(tokens).toEqual(new Set(["secret-alpha"]));
+  });
+
+  it("resolves a duplicate-named project by repository identity", () => {
+    const duplicateNamedBetaProject: PollingProjectConfig = {
+      ...betaProject,
+      name: "alpha"
+    };
+
+    const tokens = rateLimitedTokens(
+      [
+        {
+          error: "API rate limit exceeded",
+          name: "alpha",
+          ok: false,
+          repository: { owner: "pmatos", repo: "beta" }
+        }
+      ],
+      [alphaProject, duplicateNamedBetaProject],
+      env
+    );
+
+    expect(tokens).toEqual(new Set(["secret-beta"]));
   });
 
   it("ignores a failed project whose error isn't rate-limit shaped", () => {
@@ -1071,7 +1098,8 @@ describe("rateLimitedTokens", () => {
           error:
             "projects.alpha.tracker.repository pmatos/alpha issues could not be listed: getaddrinfo ENOTFOUND",
           name: "alpha",
-          ok: false
+          ok: false,
+          repository: { owner: "pmatos", repo: "alpha" }
         }
       ],
       [alphaProject, betaProject],
@@ -1087,8 +1115,18 @@ describe("rateLimitedTokens", () => {
     };
     const tokens = rateLimitedTokens(
       [
-        { error: "API rate limit exceeded", name: "alpha", ok: false },
-        { error: "API rate limit exceeded", name: "beta", ok: false }
+        {
+          error: "API rate limit exceeded",
+          name: "alpha",
+          ok: false,
+          repository: { owner: "pmatos", repo: "alpha" }
+        },
+        {
+          error: "API rate limit exceeded",
+          name: "beta",
+          ok: false,
+          repository: { owner: "pmatos", repo: "beta" }
+        }
       ],
       [alphaProject, betaOnAlphaToken],
       env

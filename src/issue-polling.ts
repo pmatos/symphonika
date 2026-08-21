@@ -1640,7 +1640,8 @@ export function backoffUntil(nowMs: number): number {
 }
 
 // Maps each rate-limited project's poll report back to the resolved GitHub
-// token its tracker used, so a caller (daemon.ts) can back off polling
+// token its tracker used by Project name and repository identity, so a
+// caller (daemon.ts) can back off polling
 // scoped to that credential instead of every configured project -- SPEC.md
 // §6 permits each tracker to reference an independent $VAR_NAME, and GitHub
 // tracks rate-limit budgets per token, not per Symphonika deployment.
@@ -1651,10 +1652,21 @@ export function backoffUntil(nowMs: number): number {
 // a single PR's enrichment call (see pull-request-polling.ts's buildSnapshot
 // / ADR 0083) -- that case must still engage backoff.
 export function rateLimitedTokens(
-  reports: ReadonlyArray<{ error?: string; name: string; ok: boolean }>,
+  reports: ReadonlyArray<{
+    error?: string;
+    name: string;
+    ok: boolean;
+    repository: GitHubRepositoryIdentity;
+  }>,
   projects: readonly PollingProjectConfig[],
   env: NodeJS.ProcessEnv
 ): Set<string> {
+  const projectsByIdentity = new Map(
+    projects.map((project) => [
+      projectPollIdentityKey(project.name, project.tracker),
+      project
+    ])
+  );
   const tokens = new Set<string>();
   for (const report of reports) {
     if (report.error === undefined) {
@@ -1663,8 +1675,8 @@ export function rateLimitedTokens(
     if (!isRateLimitError(report.error)) {
       continue;
     }
-    const project = projects.find(
-      (candidate) => candidate.name === report.name
+    const project = projectsByIdentity.get(
+      projectPollIdentityKey(report.name, report.repository)
     );
     if (project === undefined) {
       continue;

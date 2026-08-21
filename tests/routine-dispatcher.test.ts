@@ -543,6 +543,8 @@ describe("RoutineFiringDispatcher", () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
+    const commandTemplate =
+      "claude fake{{#model}} --model {{model}}{{/model}}{{#effort}} --effort {{effort}}{{/effort}}{{#permission_mode}} --permission-mode {{permission_mode}}{{/permission_mode}}";
     const providerInputs: ProviderRunInput[] = [];
     const provider = {
       cancel: vi.fn().mockResolvedValue(undefined),
@@ -588,7 +590,7 @@ describe("RoutineFiringDispatcher", () => {
           }),
         projects: new Map([["alpha", project]]),
         providersConfig: {
-          claude: { command: "claude fake" },
+          claude: { command: commandTemplate },
           codex: { command: "codex fake" }
         },
         runStore,
@@ -607,6 +609,13 @@ describe("RoutineFiringDispatcher", () => {
         model: "claude-opus-4-8",
         permissionMode: "bypass"
       });
+      // The adapter renders the template itself from the routine field above,
+      // so runAttempt must keep receiving the unrendered command; only the
+      // pre-flight validate() probe is handed the resolved string.
+      expect(providerInputs[0]!.provider.command).toBe(commandTemplate);
+      expect(provider.validate).toHaveBeenCalledWith(
+        "claude fake --model claude-opus-4-8 --effort xhigh --permission-mode bypass"
+      );
     } finally {
       runStore.close();
     }

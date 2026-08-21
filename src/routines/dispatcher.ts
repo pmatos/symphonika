@@ -1057,19 +1057,24 @@ async function runRoutineFiring(input: {
       rawLogPath,
       workspacePath: prepared.workspacePath
     });
+    // One object feeds both the pre-flight render below and the adapter's own
+    // render inside runAttempt (via ProviderRunInput.routine): validate() only
+    // probes the command that will actually be spawned while these agree, so
+    // they must not drift apart into two separately maintained literals.
+    const routineOverrides = {
+      ...(input.routine.effort === undefined
+        ? {}
+        : { effort: input.routine.effort }),
+      ...(input.routine.model === undefined
+        ? {}
+        : { model: input.routine.model }),
+      ...(input.routine.permissionMode === undefined
+        ? {}
+        : { permissionMode: input.routine.permissionMode })
+    };
     const renderedProviderCommand = renderProviderCommandTemplate(
       input.providerCommand,
-      {
-        ...(input.routine.effort === undefined
-          ? {}
-          : { effort: input.routine.effort }),
-        ...(input.routine.model === undefined
-          ? {}
-          : { model: input.routine.model }),
-        ...(input.routine.permissionMode === undefined
-          ? {}
-          : { permissionMode: input.routine.permissionMode })
-      }
+      routineOverrides
     ).rendered;
     await deadline.race(input.provider.validate(renderedProviderCommand));
     input.runStore.updateRoutineFiringState(input.firingId, "running");
@@ -1133,17 +1138,7 @@ async function runRoutineFiring(input: {
           attempt: 1,
           id: input.firingId
         },
-        routine: {
-          ...(input.routine.effort === undefined
-            ? {}
-            : { effort: input.routine.effort }),
-          ...(input.routine.model === undefined
-            ? {}
-            : { model: input.routine.model }),
-          ...(input.routine.permissionMode === undefined
-            ? {}
-            : { permissionMode: input.routine.permissionMode })
-        },
+        routine: routineOverrides,
         workspacePath: prepared.workspacePath
       })) {
         const normalizedLogCursor = await appendRoutineEvent({

@@ -1396,9 +1396,9 @@ that knowledge, exactly as it already does today for Codex's `-c sandbox_mode=..
 or malformed template tag throws rather than being passed through as literal text.
 `permission_mode` is exempt from the unreferenced-field declaration-load check (§5.4): unlike
 `model`/`effort`, a routine may declare `permission_mode` purely as documentation of intent without
-its resolved provider command referencing the tag, since no provider currently requires it to
-appear in the command for full
-permission to take effect (the default commands above already carry a fixed policy flag literally).
+its resolved provider command referencing the tag, since no provider currently requires it to appear
+in the command for full permission to take effect (the default commands above already carry a fixed
+policy flag literally).
 Claude Routine Firings additionally ensure one `--disallowedTools` option whose variadic values
 merge any operator-authored restrictions with `ScheduleWakeup`, `Monitor`, and `CronCreate`
 (outside the template, applied by the adapter directly), and set

@@ -13,6 +13,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildCli } from "../src/cli.js";
+import type { WorkspaceProject } from "../src/workspace.js";
 import { openRunStore } from "../src/run-store.js";
 import {
   prepareRoutineWorkspace,
@@ -861,7 +862,10 @@ describe("routine firing workspace retention", () => {
   });
 });
 
-function alphaProject(input: { remotePath: string; workspaceRoot: string }) {
+function alphaProject(input: {
+  remotePath: string;
+  workspaceRoot: string;
+}): WorkspaceProject {
   return {
     name: "alpha",
     workspace: {

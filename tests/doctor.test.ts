@@ -1664,7 +1664,7 @@ async function writeValidConfig(
   );
   const binDir = path.join(configDir, "test-bin");
   await mkdir(binDir, { recursive: true });
-  for (const executable of ["codex", "gh"]) {
+  for (const executable of ["claude", "codex", "gh", "omp"]) {
     const executablePath = path.join(binDir, executable);
     await writeFile(executablePath, "#!/bin/sh\nexit 0\n");
     await chmod(executablePath, 0o755);

@@ -51,11 +51,15 @@ Reclamation uses
 cache. Force is required because report firings and failed Coding Agents can legitimately leave
 dirty or untracked files. A locked worktree remains an error and is retried on a later daemon tick;
 the Orchestrator does not bypass the lock or fall back to plain directory deletion. For a `kind: git`
-firing, reclamation also deletes its deterministic local branch (`git branch -D`) from the shared
+firing, reclamation also deletes its deterministic local branch from the shared
 bare cache once the worktree is gone, since that branch otherwise has no further purpose and would
 otherwise grow the same shared cache this ADR bounds. A `kind: report` firing was never given a
-branch, so this step is a no-op for it. When workspace preparation failed before creating either the
-planned workspace or a usable bare cache, retention treats the absent workspace as already
+branch, so this step is a no-op for it. The firing persists its execution-time kind so a later
+declaration edit cannot change branch ownership during cleanup. Ref deletion uses an atomic,
+idempotent operation: if a concurrent daemon or manual pass has already removed the ref, cleanup
+still succeeds and records reclamation. Historical firings without trustworthy kind and local-ref
+evidence do not delete a derived branch. When workspace preparation failed before creating either
+the planned workspace or a usable bare cache, retention treats the absent workspace as already
 reclaimed and records that outcome; an existing workspace with an absent or unusable cache remains
 an error and is never removed as a plain directory.
 

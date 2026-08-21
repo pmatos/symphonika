@@ -4,7 +4,6 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import type { RoutineFiringStatus, RunStore } from "../run-store.js";
-import { routineFiringBranchName } from "./workspace.js";
 
 const execFileAsync = promisify(execFile);
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -135,37 +134,18 @@ async function deleteRoutineFiringBranch(
   cachePath: string,
   firing: RoutineFiringStatus
 ): Promise<void> {
-  const branchName = routineFiringBranchName({
-    firingId: firing.id,
-    projectName: firing.projectName,
-    routineName: firing.routineName
-  });
-  if (!(await branchExists(cachePath, branchName))) {
+  if (firing.kind !== "git") {
     return;
   }
-  await git(["-C", cachePath, "branch", "-D", branchName]);
-}
-
-async function branchExists(
-  cachePath: string,
-  branchName: string
-): Promise<boolean> {
-  try {
-    await git([
-      "-C",
-      cachePath,
-      "show-ref",
-      "--verify",
-      "--quiet",
-      `refs/heads/${branchName}`
-    ]);
-    return true;
-  } catch (error) {
-    if (isGitExitCode(error, 1)) {
-      return false;
-    }
-    throw error;
+  if (
+    !firing.branchRef.startsWith("refs/heads/") ||
+    firing.branchRef === "refs/heads/"
+  ) {
+    return;
   }
+  // update-ref deletes the ref atomically and exits successfully when another
+  // pruner has already deleted it, unlike a show-ref/branch -D sequence.
+  await git(["-C", cachePath, "update-ref", "-d", firing.branchRef]);
 }
 
 function routineWorkspacePlan(firing: RoutineFiringStatus): {
@@ -240,12 +220,4 @@ function pruneEntry(firing: RoutineFiringStatus): RoutineWorkspacePruneEntry {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
-}
-
-function isGitExitCode(error: unknown, code: number): boolean {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    (error as { code?: unknown }).code === code
-  );
 }

@@ -1080,8 +1080,10 @@ symphonika prune-workspaces --dry-run
 symphonika prune-workspaces
 ```
 
-Reclamation removes only the registered Git worktree. The firing row keeps the historical workspace
-path and records it as pruned. Provider logs, normalized events, and prompt evidence under
+Reclamation removes the registered Git worktree. For a `kind: git` firing it also force-deletes the
+firing's deterministic local branch from the shared repository cache; a `kind: report` firing owns
+no branch, so report cleanup does not delete one. The firing row keeps the historical workspace path
+and records it as pruned. Provider logs, normalized events, and prompt evidence under
 `<state.root>/logs/routines/<firing-id>/` are untouched; their retention is a separate concern.
 Set `enabled: false` to disable automatic reclamation while keeping the manual command available.
 

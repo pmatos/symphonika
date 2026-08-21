@@ -1901,6 +1901,73 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("persists firing kind and migrates only trustworthy legacy git branch evidence", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md"
+        },
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        branchName: "sym/alpha/routine/dependency-update/fire-git",
+        branchRef: "refs/heads/sym/alpha/routine/dependency-update/fire-git",
+        id: "fire-git",
+        kind: "git",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.createRoutineFiring({
+        branchName: "main",
+        branchRef: "refs/remotes/origin/main",
+        id: "fire-report",
+        kind: "report",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+
+      expect(store.getRoutineFiring("fire-git")?.kind).toBe("git");
+      expect(store.getRoutineFiring("fire-report")?.kind).toBe("report");
+    } finally {
+      store.close();
+    }
+
+    const legacyDatabase = new Database(databasePath(stateRoot));
+    try {
+      legacyDatabase.exec("alter table routine_firings drop column kind");
+    } finally {
+      legacyDatabase.close();
+    }
+
+    const migrated = openRunStore({ stateRoot });
+    try {
+      expect(migrated.getRoutineFiring("fire-git")?.kind).toBe("git");
+      expect(migrated.getRoutineFiring("fire-report")?.kind).toBeNull();
+    } finally {
+      migrated.close();
+    }
+  });
+
   it("records workspace reclamation only for an eligible terminal firing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

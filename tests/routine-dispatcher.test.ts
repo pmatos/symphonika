@@ -50,6 +50,18 @@ afterEach(async () => {
   );
 });
 
+const ROUTINE_OVERRIDE_COMMAND_TEMPLATE =
+  "claude fake{{#model}} --model {{model}}{{/model}}{{#effort}} --effort {{effort}}{{/effort}}{{#permission_mode}} --permission-mode {{permission_mode}}{{/permission_mode}}";
+
+const RESOLVED_ROUTINE_OVERRIDE_COMMAND =
+  "claude fake --model claude-opus-4-8 --effort xhigh --permission-mode bypass";
+
+const ROUTINE_EXECUTION_OVERRIDES = {
+  effort: "xhigh",
+  model: "claude-opus-4-8",
+  permissionMode: "bypass"
+} as const;
+
 describe("RoutineFiringDispatcher", () => {
   it("manually fires a not-due Routine through the normal provider lifecycle", async () => {
     const root = await makeTempRoot();
@@ -543,8 +555,6 @@ describe("RoutineFiringDispatcher", () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
-    const commandTemplate =
-      "claude fake{{#model}} --model {{model}}{{/model}}{{#effort}} --effort {{effort}}{{/effort}}{{#permission_mode}} --permission-mode {{permission_mode}}{{/permission_mode}}";
     const providerInputs: ProviderRunInput[] = [];
     const provider = {
       cancel: vi.fn().mockResolvedValue(undefined),
@@ -565,9 +575,7 @@ describe("RoutineFiringDispatcher", () => {
     project.routines = [
       {
         ...project.routines![0]!,
-        effort: "xhigh",
-        model: "claude-opus-4-8",
-        permissionMode: "bypass",
+        ...ROUTINE_EXECUTION_OVERRIDES,
         timeoutMinutes: 60
       }
     ];
@@ -590,7 +598,7 @@ describe("RoutineFiringDispatcher", () => {
           }),
         projects: new Map([["alpha", project]]),
         providersConfig: {
-          claude: { command: commandTemplate },
+          claude: { command: ROUTINE_OVERRIDE_COMMAND_TEMPLATE },
           codex: { command: "codex fake" }
         },
         runStore,
@@ -604,17 +612,15 @@ describe("RoutineFiringDispatcher", () => {
             routine?: Record<string, unknown>;
           }
         ).routine
-      ).toEqual({
-        effort: "xhigh",
-        model: "claude-opus-4-8",
-        permissionMode: "bypass"
-      });
+      ).toEqual(ROUTINE_EXECUTION_OVERRIDES);
       // The adapter renders the template itself from the routine field above,
       // so runAttempt must keep receiving the unrendered command; only the
       // pre-flight validate() probe is handed the resolved string.
-      expect(providerInputs[0]!.provider.command).toBe(commandTemplate);
+      expect(providerInputs[0]!.provider.command).toBe(
+        ROUTINE_OVERRIDE_COMMAND_TEMPLATE
+      );
       expect(provider.validate).toHaveBeenCalledWith(
-        "claude fake --model claude-opus-4-8 --effort xhigh --permission-mode bypass"
+        RESOLVED_ROUTINE_OVERRIDE_COMMAND
       );
     } finally {
       runStore.close();
@@ -625,32 +631,23 @@ describe("RoutineFiringDispatcher", () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
-    const resolvedCommand =
-      "claude fake --model claude-opus-4-8 --effort xhigh --permission-mode bypass";
     const provider = {
-      cancel: vi.fn().mockResolvedValue(undefined),
+      ...quietProvider(),
       name: "claude",
-      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
-        await Promise.resolve();
-        yield {
-          normalized: { exitCode: 0, type: "process_exit" },
-          raw: { code: 0, kind: "exit" }
-        };
-      }),
-      validate: vi.fn((command: string) => {
-        if (command === resolvedCommand) {
-          return Promise.reject(new Error("unsupported routine command"));
-        }
-        return Promise.resolve();
-      })
+      // Rejecting only the resolved string is what makes this a regression
+      // test: before the pre-flight render, validate() saw the raw template
+      // and resolved, so an unconditional rejection would pass on main too.
+      validate: vi.fn((command: string) =>
+        command === RESOLVED_ROUTINE_OVERRIDE_COMMAND
+          ? Promise.reject(new Error("unsupported routine command"))
+          : Promise.resolve()
+      )
     } satisfies AgentProvider;
     const project = dueRoutineProjectFixture(root, "claude");
     project.routines = [
       {
         ...project.routines![0]!,
-        effort: "xhigh",
-        model: "claude-opus-4-8",
-        permissionMode: "bypass"
+        ...ROUTINE_EXECUTION_OVERRIDES
       }
     ];
 
@@ -672,10 +669,7 @@ describe("RoutineFiringDispatcher", () => {
           }),
         projects: new Map([["alpha", project]]),
         providersConfig: {
-          claude: {
-            command:
-              "claude fake{{#model}} --model {{model}}{{/model}}{{#effort}} --effort {{effort}}{{/effort}}{{#permission_mode}} --permission-mode {{permission_mode}}{{/permission_mode}}"
-          },
+          claude: { command: ROUTINE_OVERRIDE_COMMAND_TEMPLATE },
           codex: { command: "codex fake" }
         },
         runStore,

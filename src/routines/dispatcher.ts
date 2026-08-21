@@ -1058,9 +1058,11 @@ async function runRoutineFiring(input: {
       workspacePath: prepared.workspacePath
     });
     // One object feeds both the pre-flight render below and the adapter's own
-    // render inside runAttempt (via ProviderRunInput.routine): validate() only
-    // probes the command that will actually be spawned while these agree, so
-    // they must not drift apart into two separately maintained literals.
+    // render inside runAttempt (via ProviderRunInput.routine), so validate()
+    // probes the same rendered template the adapter will derive. It is not the
+    // final argv — the adapter still layers applyRoutineArguments and the
+    // process scope on top — but these two renders must not drift apart into
+    // two separately maintained literals.
     const routineOverrides = {
       ...(input.routine.effort === undefined
         ? {}

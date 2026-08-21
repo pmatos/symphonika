@@ -80,14 +80,17 @@ never produces `candidateIssues`/`filteredIssues` for that tick either, so it fa
 `project_states`' "keep a row for an invalid Project" precedent (that one small table of counters
 carries no per-issue data to preserve or lose).
 
-### Staleness display: reuse `project_states`, not a new field
+### Staleness display: use a dedicated `project_states` field, not snapshot rows
 
 The capacity strip's "poll 28s ago" / "as of 3m ago, pre-restart" reads `project_states`'
-`last_poll_finished_at` / `last_poll_ok` / `last_poll_error` (already persisted by `#302`) rather
-than adding an age field to every snapshot row. "Pre-restart" is derived by comparing
-`last_poll_finished_at` against the current process's `startedAtMs`: if the last successful poll
-predates process start, the page has never actually polled since it came up and is showing
-carried-over state.
+`last_successful_poll_at` for snapshot freshness and `last_poll_ok` / `last_poll_error` for the
+latest attempt's outcome, rather than adding an age field to every snapshot row. "Pre-restart" is
+derived by comparing `last_successful_poll_at` against the current process's `startedAtMs`: if the
+last successful poll predates process start, the page has not refreshed its preserved snapshot
+since startup and is showing carried-over state. `last_poll_finished_at` still advances on every
+attempt so a failed attempt retains its own completion evidence; it must not be used as a proxy for
+snapshot freshness. This separation was added by `#426` after the original implementation exposed
+the ambiguity.
 
 ### Row source: a join, not a query that requires both sides present
 

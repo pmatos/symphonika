@@ -3532,7 +3532,7 @@ function renderProjectCapacityStrip(
       )
     );
   }
-  const lastPollAt = projectState.lastPollFinishedAt;
+  const lastPollAt = projectState.lastSuccessfulPollAt;
   const pollAge = lastPollAt === null ? "never" : formatAge(lastPollAt, nowMs);
   const preRestart =
     lastPollAt !== null &&

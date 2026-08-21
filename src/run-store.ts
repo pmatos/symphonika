@@ -3753,7 +3753,8 @@ export class RunStore {
   // newest state transition, not `updated_at`, so post-terminal bookkeeping
   // (PR-discovery retries) cannot reset a Run's age.
   // insertRunRow always writes a first transition, so the coalesce fallback
-  // only covers a row imported without transition history.
+  // covers imported rows without transition history and a process exit between
+  // a state update and its matching transition insert.
   listLatestRunsByProject(input: {
     projectNames: string[];
     states: RunState[];
@@ -3782,7 +3783,8 @@ export class RunStore {
           "is_continuation, continuation_parent_run_id, retry_count,",
           "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
           "created_at, updated_at,",
-          "coalesce((select transition.created_at from run_state_transitions transition",
+          "coalesce((select case when transition.state = ranked_runs.state",
+          "  then transition.created_at end from run_state_transitions transition",
           "  where transition.run_id = ranked_runs.id",
           "  order by transition.sequence desc limit 1), updated_at) as last_transition_at",
           "from (",

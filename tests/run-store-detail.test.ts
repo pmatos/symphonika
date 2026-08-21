@@ -2,10 +2,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { IssueSnapshot } from "../src/issue-polling.js";
-import { openRunStore } from "../src/run-store.js";
+import { databasePath, openRunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -981,6 +982,48 @@ describe("RunStore detail queries", () => {
     } finally {
       vi.useRealTimers();
       store.close();
+    }
+  });
+
+  it("listLatestRunsByProject falls back to the run update when the latest transition does not match its state", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    let restartedStore: ReturnType<typeof openRunStore> | undefined;
+    try {
+      vi.useFakeTimers();
+      vi.setSystemTime("2026-05-22T09:00:00.000Z");
+      store.createRun({
+        id: "interrupted-terminal-transition",
+        issue: sampleIssue({ number: 1 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      store.close();
+
+      // Simulate a process exit after the runs row commits its terminal state
+      // but before the separate transition insert. The restarted store must
+      // not mistake the preceding queued transition for terminal completion.
+      const interruptedDatabase = new Database(databasePath(stateRoot));
+      interruptedDatabase
+        .prepare(
+          "update runs set state = 'succeeded', updated_at = ? where id = ?"
+        )
+        .run("2026-05-22T10:00:00.000Z", "interrupted-terminal-transition");
+      interruptedDatabase.close();
+
+      restartedStore = openRunStore({ stateRoot });
+      const latest = restartedStore.listLatestRunsByProject({
+        projectNames: ["alpha"],
+        states: ["succeeded", "failed", "cancelled"]
+      });
+
+      expect(latest.get("alpha")?.lastTransitionAt).toBe(
+        "2026-05-22T10:00:00.000Z"
+      );
+    } finally {
+      vi.useRealTimers();
+      restartedStore?.close();
     }
   });
 

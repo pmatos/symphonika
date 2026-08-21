@@ -32,7 +32,59 @@ afterEach(async () => {
 });
 
 describe("GitHub Project validation", () => {
-  it("points XDG users to the daemon env file when a manual doctor run lacks the SMTP password", async () => {
+  it("explains how to load a daemon env file when the SMTP password is absent from a manual doctor run", async () => {
+    const root = await makeTempRoot();
+    const configRoot = path.join(root, "config with spaces");
+    await mkdir(configRoot);
+    await writeValidProject(configRoot);
+    const configPath = path.join(configRoot, "symphonika.yml");
+    const config = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      config.replace(
+        "providers:\n",
+        [
+          "email:",
+          '  from: "symphonika@example.com"',
+          '  to: "operator@example.com"',
+          '  smtp_host: "smtp.example.com"',
+          '  smtp_username: "server-token"',
+          '  smtp_password_env: "SMTP_TEST_PASSWORD"',
+          "providers:",
+          ""
+        ].join("\n")
+      )
+    );
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi
+        .fn()
+        .mockResolvedValue([
+          "agent-ready",
+          "sym:claimed",
+          "sym:running",
+          "sym:failed",
+          "sym:blocked",
+          "sym:stale"
+        ]),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      cwd: configRoot,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContain(
+      `email.smtp_password_env references $SMTP_TEST_PASSWORD, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . '${path.join(configRoot, "env")}'; set +a)`
+    );
+  });
+
+  it("points XDG users to the default daemon env file", async () => {
     const root = await makeTempRoot();
     const configHome = path.join(root, "xdg config");
     const configDir = path.join(configHome, "symphonika");
@@ -81,9 +133,8 @@ describe("GitHub Project validation", () => {
       githubApi
     });
 
-    expect(report.ok).toBe(false);
     expect(report.errors).toContain(
-      `email.smtp_password_env references $SMTP_TEST_PASSWORD, but it is not set; the service unit loads it from ${path.join(configDir, "env")}, so for a manual run load that file first (for example: set -a; . '${path.join(configDir, "env")}'; set +a)`
+      `email.smtp_password_env references $SMTP_TEST_PASSWORD, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . '${path.join(configDir, "env")}'; set +a)`
     );
   });
 

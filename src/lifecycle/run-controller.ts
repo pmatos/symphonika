@@ -72,8 +72,10 @@ import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
 import { classifyCapReachedOutcome } from "./cap-reached-context.js";
 import {
   classifyFailure,
+  inspectWorkspaceHead,
   type ClassifiedTerminal
 } from "./classify-failure.js";
+import { DispatchFileOverlapGuard } from "./file-overlap-guard.js";
 import { decideNextStep, findWorkflowState } from "./state-machine-dispatch.js";
 import { buildCapReachedReason } from "./terminal-reason.js";
 
@@ -104,6 +106,7 @@ export type RunControllerProjectConfig = {
   // Per-project concurrency cap. Omitted defaults to 1 at consume-time.
   // See ADR 0053.
   max_in_flight?: number | undefined;
+  dispatch?: PollingProjectConfig["dispatch"] | undefined;
   // Required for Dispatch Projects; optional for Routine Hosts (required when
   // the host targets kind: git firings — enforced at reload). The issue
   // dispatch path reads tracker only for projects that produced polling
@@ -341,18 +344,22 @@ type WaitParkPayload = {
 };
 
 // Thrown by claimAndPersistRun's in-mutex re-check when a concurrent
-// dispatch already filled the last available slot, or when the same
-// (project, issue) was reserved by a concurrent tick that beat us into
-// claimAndPersistRun. Callers handle these as "skip this fire": fresh
-// dispatch silently no-ops (next tick will pick again); scheduled paths
-// (continuation / state advance / retry / review followup) reschedule the
-// callback. See ADR 0053.
+// dispatch already filled the last available slot, when the same (project,
+// issue) was reserved, or when a newly reserved Run created known file
+// overlap before this claim reached claimAndPersistRun. Callers handle these
+// as "skip this fire": fresh dispatch silently no-ops (next tick will pick
+// again); scheduled paths (continuation / state advance / retry / review
+// followup) reschedule the callback. See ADR 0053 / ADR 0085.
 class CapBreachedError extends Error {
   readonly name = "CapBreachedError";
 }
 
 class IssueReservedError extends Error {
   readonly name = "IssueReservedError";
+}
+
+class FileOverlapDetectedError extends Error {
+  readonly name = "FileOverlapDetectedError";
 }
 
 class FreshClaimDeferredError extends Error {
@@ -366,6 +373,7 @@ export class RunController {
   private readonly createRunId: () => string;
   private readonly dispatchMutex: AsyncMutex;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly fileOverlapGuard: DispatchFileOverlapGuard;
   private readonly githubIssuesApi: GitHubIssuesApi;
   private readonly globalConcurrencyLoader: () => Promise<{
     maxInFlight: number | undefined;
@@ -391,6 +399,14 @@ export class RunController {
     this.createRunId = options.createRunId ?? randomUUID;
     this.dispatchMutex = options.dispatchMutex ?? createAsyncMutex();
     this.env = options.env ?? process.env;
+    this.fileOverlapGuard = new DispatchFileOverlapGuard({
+      activeRuns: options.activeRuns,
+      configDir: options.configDir,
+      env: this.env,
+      githubIssuesApi: options.githubIssuesApi,
+      ...(options.logger === undefined ? {} : { logger: options.logger }),
+      runStore: options.runStore
+    });
     this.githubIssuesApi = options.githubIssuesApi;
     this.globalConcurrencyLoader =
       options.globalConcurrencyLoader ??
@@ -546,7 +562,8 @@ export class RunController {
         providerName,
         repository,
         runId,
-        schedulerWeights: target.schedulerWeights
+        schedulerWeights: target.schedulerWeights,
+        verifyFileOverlap: target.project.dispatch?.overlap_guard === true
       });
     } catch (error) {
       if (error instanceof RegistryShutdownError) {
@@ -558,14 +575,15 @@ export class RunController {
       }
       if (
         error instanceof CapBreachedError ||
+        error instanceof FileOverlapDetectedError ||
         error instanceof IssueReservedError ||
         error instanceof FreshClaimDeferredError
       ) {
-        // A concurrent dispatch may have taken the slot between the
-        // lock-free picker and claimAndPersistRun's in-mutex re-check, or a
-        // caller-owned admission guard may have closed in that same window.
-        // A later tick can reconsider the candidate once the gate clears.
-        // See ADR 0053 / ADR 0083.
+        // A concurrent dispatch may have taken the slot or introduced known
+        // overlap between the lock-free picker and claimAndPersistRun's
+        // in-mutex re-check, or a caller-owned admission guard may have closed
+        // in that same window. A later tick can reconsider the candidate once
+        // the gate clears. See ADR 0053 / ADR 0083 / ADR 0085.
         this.logger?.debug(
           { reason: error.message, runId },
           "symphonika fresh dispatch skipped at claim boundary"
@@ -2188,13 +2206,7 @@ export class RunController {
       if (this.activeRuns.countInFlightByProject(projectName) >= projectMax) {
         continue;
       }
-      const candidate = bucket
-        .slice()
-        .sort(compareCandidateIssues)
-        .find(
-          (entry) =>
-            !this.activeRuns.isIssueReserved(entry.project, entry.issue.number)
-        );
+      const candidate = await this.pickProjectCandidate(bucket, project);
       if (candidate === undefined) {
         continue;
       }
@@ -2242,6 +2254,30 @@ export class RunController {
     };
   }
 
+  // Sequential on purpose: the first admissible candidate wins, so the overlap
+  // guard's GitHub round-trip is only paid until one is found.
+  private async pickProjectCandidate(
+    bucket: ReadonlyArray<{ issue: IssueSnapshot; project: string }>,
+    project: RunControllerProjectConfig
+  ): Promise<{ issue: IssueSnapshot; project: string } | undefined> {
+    const guarded = project.dispatch?.overlap_guard === true;
+    for (const entry of bucket.slice().sort(compareCandidateIssues)) {
+      if (this.activeRuns.isIssueReserved(entry.project, entry.issue.number)) {
+        continue;
+      }
+      if (
+        !guarded ||
+        !(await this.fileOverlapGuard.hasKnownOverlap({
+          issue: entry.issue,
+          project
+        }))
+      ) {
+        return entry;
+      }
+    }
+    return undefined;
+  }
+
   private async runFreshLifecycle(input: {
     attemptNumber: number;
     claimGuard?: () => boolean;
@@ -2262,6 +2298,7 @@ export class RunController {
       projectName: string;
       weight: number;
     }>;
+    verifyFileOverlap?: boolean;
   }): Promise<void> {
     // Narrowed critical section: claim label + scheduler cursor + createRun
     // + reserveSlot all happen while the mutex is held. Provider event
@@ -2312,6 +2349,7 @@ export class RunController {
       projectName: string;
       weight: number;
     }>;
+    verifyFileOverlap?: boolean;
   }): Promise<void> {
     // Shutdown gate, fast path: throwing before any side effect needs no
     // rollback. The gate can still land during the addLabelsToIssue await
@@ -2356,6 +2394,19 @@ export class RunController {
     ) {
       throw new IssueReservedError(
         `issue ${input.project.name}#${input.issue.number} is already reserved`
+      );
+    }
+
+    const overlapInspection =
+      input.verifyFileOverlap === true
+        ? await this.fileOverlapGuard.inspectCandidate({
+            issue: input.issue,
+            project: input.project
+          })
+        : undefined;
+    if (overlapInspection?.hasKnownOverlap === true) {
+      throw new FileOverlapDetectedError(
+        `issue ${input.project.name}#${input.issue.number} has known file overlap`
       );
     }
 
@@ -2430,6 +2481,15 @@ export class RunController {
           : { respectsIssueLabels: input.respectsIssueLabels }),
         runId: input.runId
       });
+      if (
+        overlapInspection !== undefined &&
+        overlapInspection.candidateFiles.length > 0
+      ) {
+        this.activeRuns.updateTouchedFiles(input.runId, {
+          files: overlapInspection.candidateFiles,
+          refreshedAt: overlapInspection.refreshedAt
+        });
+      }
     } catch (error) {
       if (error instanceof RegistryShutdownError && runCreated) {
         // The shutdown snapshot in stop() predates this row, so record the
@@ -2487,6 +2547,8 @@ export class RunController {
     };
     let attemptCreated = false;
     let started: StartedAttempt | undefined;
+    let headShaAtAttemptStart: string | undefined;
+    let headInspectionFailed = false;
     let caughtError: unknown;
     // Hoisted so the finally can read them on any exit path (including a
     // loadWorkflow throw or a parked-state early return). The initial label
@@ -2696,6 +2758,17 @@ export class RunController {
         );
       }
 
+      try {
+        headShaAtAttemptStart = await inspectWorkspaceHead({
+          workspacePath: started.evidence.workspacePath
+        });
+      } catch {
+        // Defer this deterministic inspection failure until a clean provider
+        // exit. Cancellation, input-required, and provider failures must retain
+        // their own higher-priority classification.
+        headInspectionFailed = true;
+      }
+
       await this.iterateAttempt({
         attemptId,
         attemptNumber: input.attemptNumber,
@@ -2792,6 +2865,10 @@ export class RunController {
             : {
                 successWorkspace: {
                   baseBranch: input.project.workspace.git.base_branch,
+                  headInspectionFailed,
+                  ...(headShaAtAttemptStart === undefined
+                    ? {}
+                    : { headShaAtStart: headShaAtAttemptStart }),
                   workspacePath: started.evidence.workspacePath
                 }
               })
@@ -2996,7 +3073,6 @@ export class RunController {
       },
       project: input.project
     });
-
     const workflow = await this.loadWorkflow(input.project.workflow);
     const workflowPath = workflow.path;
     if (workflow.errors.length > 0) {
@@ -4177,15 +4253,28 @@ function signalsFromTerminal(
   terminal: ClassifiedTerminal
 ): WorkflowPredicateMap {
   if (terminal.kind === "success") {
-    return { branch_ahead_of_base: true, provider_success: true };
+    return {
+      branch_advanced_since_attempt_start:
+        terminal.branchAdvancedSinceAttemptStart ?? false,
+      branch_ahead_of_base: true,
+      provider_success: true
+    };
   }
   if (
     terminal.kind === "failed" &&
     terminal.reason === "no_workspace_changes"
   ) {
-    return { branch_ahead_of_base: false, provider_success: true };
+    return {
+      branch_advanced_since_attempt_start: false,
+      branch_ahead_of_base: false,
+      provider_success: true
+    };
   }
-  return { branch_ahead_of_base: false, provider_success: false };
+  return {
+    branch_advanced_since_attempt_start: false,
+    branch_ahead_of_base: false,
+    provider_success: false
+  };
 }
 
 function isParkedAction(kind: string | undefined): boolean {

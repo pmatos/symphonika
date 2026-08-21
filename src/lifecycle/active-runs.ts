@@ -133,6 +133,13 @@ export class ActiveRunRegistry {
     return this.inFlightRuns.list();
   }
 
+  updateTouchedFiles(
+    runId: string,
+    input: { files: readonly string[]; refreshedAt: number }
+  ): void {
+    this.inFlightRuns.updateTouchedFiles(runId, input);
+  }
+
   countInFlight(): number {
     return this.inFlightRuns.count();
   }

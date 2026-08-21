@@ -187,17 +187,20 @@ export async function rollbackToPreviousRelease(
 // installed" -- the signal that a release changed the unit template itself,
 // distinct from an ordinary content-only release that needs no unit change
 // at all (ADR 0079 decision #3).
+// Each marker is compared by its own matched text, so how much of the line a
+// pattern captures decides how strictly it is compared. The `.*$` markers
+// compare the whole directive; `EnvironmentFile=` deliberately stops at the
+// directive name because its value is install-specific (an explicit Service
+// Config points at its own adjacent env file), leaving a presence-only check.
+// Do not "normalize" that entry by appending `.*$` -- the "reports not needed
+// when structural markers match" test pins the two sides to different env
+// paths and would fail.
 const STRUCTURAL_MARKERS: readonly RegExp[] = [
   /^Slice=.*$/m,
   /^Type=.*$/m,
   /^NotifyAccess=.*$/m,
   /^WatchdogSec=.*$/m,
   /^TimeoutStartSec=.*$/m,
-  // Name only, no value: the env-file path is baked from the install-time
-  // config selection (`--config` / XDG_CONFIG_HOME), so comparing values
-  // would flag every `--config` install as template drift. Presence is the
-  // structural signal -- a unit installed before the env file existed has
-  // no EnvironmentFile= line at all.
   /^EnvironmentFile=/m
 ];
 

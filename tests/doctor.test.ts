@@ -11,9 +11,22 @@ import {
 } from "../src/doctor.js";
 import type { AgentProviderRegistry } from "../src/provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "../src/providers/index.js";
-import { renderProvidersSliceUnit, renderSliceUnit } from "../src/service.js";
+import {
+  renderProvidersSliceUnit,
+  renderServiceUnit,
+  renderSliceUnit
+} from "../src/service.js";
 
 const tempRoots: string[] = [];
+// Built by the real generator rather than hand-written, so a new structural
+// directive in the unit template can never silently leave these fixtures
+// behind while the drift checks they exercise still claim to pass.
+const currentServiceUnit = renderServiceUnit({
+  environmentFilePath: "/home/op/.config/symphonika/env",
+  execPath: "/usr/bin/node",
+  path: "/usr/bin:/bin",
+  scriptPath: "/opt/symphonika/dist/cli.js"
+});
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
 const originalGithubToken = process.env.GITHUB_TOKEN;
 const originalExitCode = process.exitCode;
@@ -96,6 +109,22 @@ describe("doctor", () => {
     expect(process.exitCode).toBe(1);
     expect(output.stderr).toContain("doctor failed");
     expect(output.stderr).toContain("projects.0");
+  });
+
+  it("reports a non-boolean project dispatch.overlap_guard", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, {
+      projectLines: ["    dispatch:", '      overlap_guard: "sometimes"']
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work on this Issue.\n");
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const output = await runDoctorCommand(configPath);
+
+    expect(process.exitCode).toBe(1);
+    expect(output.stderr).toContain("projects.0");
+    expect(output.stderr).toContain("Invalid input");
   });
 
   it("reports unknown workspace hook lifecycle keys", async () => {
@@ -909,7 +938,7 @@ describe("doctor", () => {
       ).toBe(true);
     });
 
-    it("warns when the installed unit predates the conventional service env file", async () => {
+    it("warns when the installed unit predates environment-file secret injection", async () => {
       const root = await makeTempRoot();
       const homeDir = await makeTempRoot();
       const unitDir = path.join(homeDir, ".config", "systemd", "user");
@@ -917,16 +946,6 @@ describe("doctor", () => {
       await writeFile(
         path.join(unitDir, "symphonika.service"),
         "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nSlice=symphonika-daemon.slice\n",
-        "utf8"
-      );
-      await writeFile(
-        path.join(unitDir, "symphonika-daemon.slice"),
-        renderSliceUnit(),
-        "utf8"
-      );
-      await writeFile(
-        path.join(unitDir, "symphonika-providers.slice"),
-        renderProvidersSliceUnit(),
         "utf8"
       );
 
@@ -939,7 +958,7 @@ describe("doctor", () => {
       expect(
         report.warnings.some(
           (warning) =>
-            warning.includes("service env file") &&
+            warning.includes("environment-backed secrets") &&
             warning.includes("service install") &&
             warning.includes("repeat the original `--config <path>`")
         )
@@ -1172,7 +1191,7 @@ describe("doctor", () => {
       await mkdir(unitDir, { recursive: true });
       await writeFile(
         path.join(unitDir, "symphonika.service"),
-        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nEnvironmentFile=-%h/.config/symphonika/env\nSlice=symphonika-daemon.slice\n",
+        currentServiceUnit,
         "utf8"
       );
       await writeFile(
@@ -1207,7 +1226,7 @@ describe("doctor", () => {
       await mkdir(unitDir, { recursive: true });
       await writeFile(
         path.join(unitDir, "symphonika.service"),
-        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nEnvironmentFile=-%h/.config/symphonika/env\nSlice=symphonika-daemon.slice\n",
+        currentServiceUnit,
         "utf8"
       );
       await writeFile(
@@ -1363,6 +1382,7 @@ async function writeValidConfig(
     claudeCommand?: string;
     codexCommand?: string;
     ompCommand?: string;
+    projectLines?: string[];
     routineDefaultLines?: string[];
     routinePaths?: string[];
     token?: string;
@@ -1393,6 +1413,7 @@ async function writeValidConfig(
       "  - name: symphonika",
       "    disabled: false",
       "    weight: 1",
+      ...(overrides.projectLines ?? []),
       "    tracker:",
       `      kind: ${overrides.trackerKind ?? "github"}`,
       "      owner: pmatos",

@@ -416,6 +416,8 @@ projects:
         base_branch: main
     agent:
       provider: codex
+    dispatch:
+      overlap_guard: false
     workflow: ./WORKFLOW.md
   - name: new-composer-host
     mode: routine_host
@@ -512,6 +514,21 @@ in `symphonika.yml`, not in `WORKFLOW.md`.
 Raw FSM agent states may declare `action.provider` to route that state to a specific configured
 Agent Provider. If an agent state omits `action.provider`, Symphonika uses the Project's
 `agent.provider` from `symphonika.yml`.
+
+Raw FSM workflows may reference five built-in Workflow Templates through the `builtin:` namespace:
+`single-agent-pr`, `plan-tdd-pr`, `refactor-swarm`, `autofix-until-clean`, and
+`merge-when-green`. Built-ins expand through the same validation, state-prefixing, exit-mapping,
+and evidence path as repository-local templates. `refactor-swarm` runs three serial agent states:
+`red_team` and `refactoring` each require provider success, `branch_ahead_of_base`, and
+`branch_advanced_since_attempt_start`, then `verifying` requires provider success alone because
+verification is read-only. `branch_ahead_of_base` remains the cumulative branch-vs-base signal.
+For each agent Attempt, Symphonika also snapshots `HEAD` immediately before provider execution;
+`branch_advanced_since_attempt_start` is true only when completion `HEAD` is a different descendant
+of that snapshot. The second transition therefore requires a distinct refactor commit rather than
+reusing the red-team commit. Any fallback uses the template's `blocked` exit. Repositories may
+explicitly replace a built-in reference with a local
+`.symphonika/workflow-templates/<name>.yml`; local files never auto-shadow the reserved namespace.
+See ADRs 0049 and 0085.
 
 The daemon must not dispatch a Dispatch Project when its workflow contract is missing or invalid. A
 Routine Host is never dispatched, so this gate does not apply to it.
@@ -897,6 +914,27 @@ Dispatch uses weighted round-robin across Projects. Within each Project, issues 
 1. configured priority label mapping
 2. oldest creation time
 3. issue number
+
+A Dispatch Project may opt into `dispatch.overlap_guard: true` (default `false`). After the global
+and per-Project concurrency caps and per-Issue reservation checks, the picker compares a
+candidate's known open-pull-request files with periodically refreshed committed and live Workspace
+changes from in-flight issue Runs in the same Project. An exact repository-relative path overlap
+skips that candidate for the tick. If every candidate for the Project overlaps, the Project does
+not enter weighted round-robin and its scheduler cursor does not advance. Other Projects remain
+dispatchable, and unregistering the terminal Run makes the skipped candidate reconsiderable on the
+next tick. Rename footprints include both the previous and current repository paths.
+
+Fresh dispatch rechecks overlap inside the serialized claim boundary. When a candidate with a known
+pull-request footprint is admitted, that footprint seeds its in-flight slot before the claim mutex
+is released; this makes overlap admission atomic even before the new Run's Workspace is prepared.
+
+The overlap guard creates no timer: in-flight footprints refresh at most once every 30 seconds as
+part of existing dispatch ticks. Missing candidate PRs, unavailable adapter methods, absent
+Workspaces, and Git/GitHub read failures do not block dispatch. The guard therefore reduces known
+collisions but cannot predict a genuinely fresh Issue's footprint; operators requiring strict
+serialization use `max_in_flight: 1`. An expired footprint that fails to refresh becomes empty for
+that interval rather than retaining stale collision evidence; the failed refresh is still
+timestamped to rate-limit retries. See ADR 0085.
 
 Invalid Projects are disabled. Valid Projects may continue running.
 
@@ -1820,15 +1858,18 @@ path; otherwise it uses a `./`-prefixed path relative to the Service Config.
 bakes it into the generated unit as `daemon --config <absolute-path>`. Omitting `--config` keeps the
 unit on the daemon's normal project-local/user-config discovery path.
 
-The generated service unit always references an optional `EnvironmentFile=` at `<config-dir>/env`
-for environment-backed service secrets such as the variable named by `email.smtp_password_env`.
-With `--config`, `<config-dir>` is the explicit Service Config's directory. Without it, the env file
-uses the initialized user-config directory (`$XDG_CONFIG_HOME/symphonika/env`, falling back to
-`%h/.config/symphonika/env`) without fixing the daemon's own config discovery path. The systemd
-directive carries a leading `-`, so a missing env file does not prevent startup and creating the
-file later only requires restarting the service. The path is emitted unquoted (systemd reads the
-whole directive value as one path and never unquotes it), so a config directory containing spaces
-still resolves.
+The generated service always references an optional environment file named `env`, resolved at
+install time. With `--config`, the path is `<directory-containing-config>/env`; without it, the
+path is the user config directory's `env` — `$XDG_CONFIG_HOME/symphonika/env`, falling back to
+`~/.config/symphonika/env` — even when the daemon's own discovery later selects a project-local
+Service Config. The systemd directive uses the leading `-` form, so an absent file does not prevent
+installations without authenticated email from starting, and glob metacharacters in the path are
+escaped so a directory name containing `[`, `*`, or `?` still resolves. The file remains
+operator-owned and may define the default `SYMPHONIKA_SMTP_PASSWORD` or any variable selected by
+`email.smtp_password_env`; `service install` neither creates it nor copies secret values into the
+unit. Assignments in it override the unit's `Environment=` settings, so it must carry secrets only.
+Re-running `service install --force` preserves the reference, while creating or changing the file
+takes effect after the service is restarted.
 
 `status --dashboard` renders a compact terminal status dashboard from the run store and daemon
 `/api/status` endpoint. `status --watch` refreshes that read-only dashboard in place; it must not

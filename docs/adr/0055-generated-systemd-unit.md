@@ -30,6 +30,12 @@ units from the running process instead of shipping a fixed template:
 - `Environment=PATH` is captured from the environment that ran `service install`, with the `node`
   runtime's directory prepended and empty/relative entries dropped, so `node` and the spawned
   providers resolve under `systemd --user` regardless of version manager.
+- The service references an optional `EnvironmentFile=` named `env` beside the selected Service
+  Config. An explicit `--config` uses that file's directory; the default install uses the
+  initialized user config directory. The directive's leading `-` keeps the file optional, while
+  allowing environment-backed credentials such as `SYMPHONIKA_SMTP_PASSWORD` (or a custom
+  `email.smtp_password_env` name) to survive every generated-unit refresh without storing their
+  values in the unit.
 
 `service install` writes both `symphonika.service` and `symphonika.slice` into
 `~/.config/systemd/user/`, refuses to overwrite existing units without `--force`, and runs
@@ -46,9 +52,10 @@ path.
 
 ## Interaction with existing decisions
 
-- **ADR 0014 (environment-backed credentials):** unchanged. The generated `ExecStart` keeps the
-  `gh auth token` preamble that resolves the GitHub token at each (re)start and fails closed when `gh`
-  is logged out.
+- **ADR 0014 (environment-backed credentials):** the generated `ExecStart` keeps the `gh auth token`
+  preamble that resolves the GitHub token at each (re)start and fails closed when `gh` is logged
+  out. Other operator-owned secrets enter through the optional adjacent environment file; the
+  installer never reads or persists their values.
 - **ADR 0026 (bootstrap CLI surface):** `service` joins the operator command surface as a small,
   self-contained subcommand group alongside `init` and `doctor`.
 

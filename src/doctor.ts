@@ -11,12 +11,15 @@ import { z } from "zod";
 import type { WorkflowFormat } from "./config-schemas.js";
 import {
   pathStringSchema,
+  projectDispatchSchema,
   projectWorkspaceSchema,
+  rejectDispatchOnlyKeysOnRoutineHost,
   workflowReferenceSchema
 } from "./config-schemas.js";
 import {
   missingUserConfigHint,
-  resolveServiceConfigPath
+  resolveServiceConfigPath,
+  serviceEnvironmentFilePath
 } from "./config-paths.js";
 import {
   defaultWorkflowContract,
@@ -317,6 +320,7 @@ const dispatchProjectSchema = z
     mode: z.literal("dispatch").default("dispatch"),
     disabled: z.boolean().optional(),
     weight: z.number().int().positive().optional(),
+    dispatch: projectDispatchSchema.optional(),
     tracker: trackerSchema,
     issue_filters: issueFiltersSchema,
     priority: prioritySchema,
@@ -326,29 +330,6 @@ const dispatchProjectSchema = z
   })
   .passthrough()
   .superRefine(rejectPerProjectRoutines);
-
-// A Routine Host has no use for dispatch-only fields — ADR 0062 says they are
-// "unused and rejected", so a stale or copy-pasted dispatch block must be a
-// declaration-time error rather than silently ignored.
-const DISPATCH_ONLY_KEYS = ["issue_filters", "priority", "workflow"] as const;
-
-function rejectDispatchOnlyKeysOnRoutineHost(
-  rawProject: unknown,
-  ctx: z.RefinementCtx
-): void {
-  if (rawProject === null || typeof rawProject !== "object") {
-    return;
-  }
-  for (const key of DISPATCH_ONLY_KEYS) {
-    if (key in rawProject) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `\`${key}\` is a dispatch-only field and is unused and rejected on a Routine Host (mode: routine_host); see ADR 0062`,
-        path: [key]
-      });
-    }
-  }
-}
 
 const routineHostProjectSchema = z
   .object({
@@ -483,16 +464,18 @@ export async function runDoctor(
     email?.smtpUsername !== undefined &&
     (env[email.smtpPasswordEnv]?.trim().length ?? 0) === 0
   ) {
-    const configDir =
+    const environmentFilePath = serviceEnvironmentFilePath(
       options.configPath === undefined
         ? path.join(
             systemdConfigHome(env) ?? path.join(homeDir, ".config"),
-            "symphonika"
+            "symphonika",
+            "symphonika.yml"
           )
-        : path.dirname(configPath);
-    const envFilePath = path.join(configDir, "env");
+        : configPath
+    );
+    const environmentFile = shellQuote(environmentFilePath);
     errors.push(
-      `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; the service unit loads it from ${envFilePath}, so for a manual run load that file first (for example: set -a; . ${shellSingleQuote(envFilePath)}; set +a)`
+      `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . ${environmentFile}; set +a)`
     );
   }
 
@@ -569,6 +552,10 @@ export async function runDoctor(
   return report(configPath, errors, projects, warnings, liveCheck);
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 async function runLiveCheck(
   providerName: AgentProviderName | undefined,
   timeoutMs: number | undefined,
@@ -610,7 +597,7 @@ async function runLiveCheck(
 
 // Detects an installed unit that predates a systemd-unit-shape change (the
 // daemon/provider cgroup split, docs/adr/0064; the watchdog heartbeat,
-// docs/adr/0065; or conventional service env-file loading, ADR 0067) so
+// docs/adr/0065; or EnvironmentFile secret injection, docs/adr/0055) so
 // operators learn to re-run `service install --force`
 // instead of silently running on stale units indefinitely. Skips entirely
 // when no unit is installed at all (`service install` was never run) —
@@ -659,7 +646,7 @@ async function checkInstalledUnitDrift(
   }
   if (!/^[ \t]*EnvironmentFile[ \t]*=/m.test(serviceContent)) {
     warnings.push(
-      `${servicePath} predates the conventional service env file (docs/adr/0067-smtp-notification-sink) — ${reinstallHint}`
+      `${servicePath} predates environment-backed secrets support (docs/adr/0014, docs/adr/0055) — ${reinstallHint}`
     );
   }
 
@@ -2398,10 +2385,6 @@ function githubErrorMessage(error: unknown): string {
   }
 
   return errorMessage(error);
-}
-
-function shellSingleQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function errorMessage(error: unknown): string {

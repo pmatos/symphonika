@@ -376,6 +376,14 @@ export async function dispatchDueRoutines(
   const createFanoutId = input.createFanoutId ?? (() => createUlid());
   const projects = [...input.projects.values()];
   const fanoutIds = new Map<string, string>();
+  const recomputedCatchUpGroups = new Map<
+    string,
+    {
+      routineName: string;
+      scheduledAt: string;
+      targets: Array<{ nextFireAt: string; projectName: string }>;
+    }
+  >();
   const firingTasks: Promise<void>[] = [];
   const redactSecrets = (): string[] =>
     resolveRedactSecrets(input.notification, input.env ?? process.env);
@@ -399,6 +407,7 @@ export async function dispatchDueRoutines(
         const declaration = declarations.get(persisted.name);
         if (
           declaration === undefined ||
+          declaration.disabled === true ||
           !("cron" in declaration.schedule) ||
           (declaration.catchUp ?? "skip") !== "skip" ||
           persisted.state !== "active" ||
@@ -409,27 +418,71 @@ export async function dispatchDueRoutines(
         ) {
           continue;
         }
-        const nextFireAt = nextRecurringFireAt(declaration.schedule, now);
-        if (
-          input.runStore.skipRoutineFiring({
-            attemptedAt: now.toISOString(),
-            name: persisted.name,
-            nextFireAt,
-            projectName: project.name,
-            reason: "catch_up_window"
-          })
-        ) {
-          logRoutineSkip(input.logger, {
-            reason: "catch_up_window",
-            routine: persisted.name,
-            scheduledAt: persisted.nextFireAt
-          });
-          skipped.push({
-            projectName: project.name,
-            reason: "catch_up_window",
-            routineName: persisted.name
-          });
-        }
+        const scheduledAt = persisted.nextFireAt;
+        const fanoutKey = routineFanoutKey(persisted.name, scheduledAt);
+        const group = recomputedCatchUpGroups.get(fanoutKey) ?? {
+          routineName: persisted.name,
+          scheduledAt,
+          targets: []
+        };
+        group.targets.push({
+          nextFireAt: nextRecurringFireAt(declaration.schedule, now),
+          projectName: project.name
+        });
+        recomputedCatchUpGroups.set(fanoutKey, group);
+      }
+    }
+  }
+
+  // Capture every Project sharing the missed clock event before the first
+  // skip advances its target's schedule and destroys that grouping key.
+  for (const [fanoutKey, group] of recomputedCatchUpGroups) {
+    const projectNames = group.targets.map((target) => target.projectName);
+    const ensured = input.runStore.ensureRoutineFanout({
+      id: createFanoutId(),
+      projectNames,
+      routineName: group.routineName,
+      scheduledAt: group.scheduledAt
+    });
+    const fanoutId = ensured.id;
+    fanoutIds.set(fanoutKey, fanoutId);
+    // A freshly created row's membership is exactly this group, all still
+    // pending, so no extra read is needed. An existing row may already be
+    // notified, or may cover a narrower membership snapshot from an earlier
+    // restart (ensureRoutineFanout never extends membership on an existing
+    // row — see its own comment in src/run-store.ts) — only then do we need
+    // to read it back to learn what's actually pending. A sent or
+    // policy-skipped fan-out is also an immutable one-shot snapshot (ADR
+    // 0084): only settle a target that belongs to a notification-pending
+    // group; otherwise record the schedule advance as an ungrouped
+    // catch_up_window skip without rewriting that snapshot.
+    const pendingTargetProjectNames = ensured.created
+      ? undefined
+      : input.runStore.getPendingRoutineFanoutTargetProjectNames(fanoutId);
+    for (const target of group.targets) {
+      const shouldSettleFanout =
+        pendingTargetProjectNames === undefined ||
+        pendingTargetProjectNames.has(target.projectName);
+      if (
+        input.runStore.skipRoutineFiring({
+          attemptedAt: now.toISOString(),
+          ...(shouldSettleFanout ? { fanoutId } : {}),
+          name: group.routineName,
+          nextFireAt: target.nextFireAt,
+          projectName: target.projectName,
+          reason: "catch_up_window"
+        })
+      ) {
+        logRoutineSkip(input.logger, {
+          reason: "catch_up_window",
+          routine: group.routineName,
+          scheduledAt: group.scheduledAt
+        });
+        skipped.push({
+          projectName: target.projectName,
+          reason: "catch_up_window",
+          routineName: group.routineName
+        });
       }
     }
   }
@@ -513,7 +566,7 @@ export async function dispatchDueRoutines(
         continue;
       }
       const scheduledAt = routine.nextFireAt ?? now.toISOString();
-      const fanoutKey = `${routine.name}\0${scheduledAt}`;
+      const fanoutKey = routineFanoutKey(routine.name, scheduledAt);
       let fanoutId = fanoutIds.get(fanoutKey);
       if (fanoutId === undefined) {
         const targetProjectNames = input.runStore
@@ -2145,6 +2198,14 @@ function routineSchedule(routine: RoutineStatus): RoutineSchedule {
     );
   }
   return { at: routine.scheduleAt };
+}
+
+// Shared by both places dispatchDueRoutines groups Routine Targets by clock
+// event: the restart catch-up recompute pass and the normal due-event loop.
+// A NUL separator can't appear in either a routine name or an ISO timestamp,
+// so this stays collision-free without escaping.
+function routineFanoutKey(routineName: string, scheduledAt: string): string {
+  return `${routineName}\0${scheduledAt}`;
 }
 
 function recordDueRoutineSkip(

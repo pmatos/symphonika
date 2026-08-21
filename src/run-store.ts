@@ -2294,6 +2294,25 @@ export class RunStore {
     );
   }
 
+  // A cheaper alternative to getRoutineFanout() for callers that only need
+  // to know which targets are still reconcilable — it skips the per-target
+  // getRoutineFiring() lookups that getRoutineFanout() needs to build firing
+  // details and pull-request counts.
+  getPendingRoutineFanoutTargetProjectNames(id: string): Set<string> {
+    const fanout = this.database
+      .prepare("select notification_state from routine_fanouts where id = ?")
+      .get(id) as { notification_state: string } | undefined;
+    if (fanout?.notification_state !== "pending") {
+      return new Set();
+    }
+    const targets = this.database
+      .prepare(
+        "select project_name from routine_fanout_targets where fanout_id = ?"
+      )
+      .all(id) as Array<{ project_name: string }>;
+    return new Set(targets.map((target) => target.project_name));
+  }
+
   getRoutineFanout(id: string): RoutineFanoutStatus | undefined {
     const row = this.database
       .prepare(
@@ -2496,12 +2515,19 @@ export class RunStore {
   }
 
   settleUnavailableRoutineFanoutTargets(): number {
+    // Terminal or in-flight notifications already represent immutable
+    // one-shot snapshots; only a still-pending group may be reconciled.
     const result = this.database
       .prepare(
         [
           "update routine_fanout_targets",
           "set disposition = 'skipped', hold_reason = null, skip_reason = 'target_unavailable', updated_at = ?",
           "where disposition in ('pending', 'held')",
+          "and exists (",
+          "select 1 from routine_fanouts writable_fanout",
+          "where writable_fanout.id = routine_fanout_targets.fanout_id",
+          "and writable_fanout.notification_state = 'pending'",
+          ")",
           "and not exists (",
           "select 1 from routine_fanouts f",
           "join routines r on r.name = f.routine_name",
@@ -2811,6 +2837,22 @@ export class RunStore {
     return mapRoutineOutcomeRow(row);
   }
 
+  // A fanoutId whose target row already left pending/held (e.g. a racing
+  // claim or skip from another writer) is a benign miss, not a crash —
+  // shared by skipRoutineFiring, claimRoutineFiring, and
+  // claimManualRoutineFiring, which all report it the same way a 0-row
+  // update would.
+  private runIfClaimable<T>(fn: () => T): T | undefined {
+    try {
+      return fn();
+    } catch (error) {
+      if (error instanceof RoutineAlreadyClaimedError) {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
   skipRoutineFiring(input: {
     attemptedAt: string;
     fanoutId?: string;
@@ -2880,7 +2922,7 @@ export class RunStore {
         });
       return true;
     });
-    return apply();
+    return this.runIfClaimable(apply) ?? false;
   }
 
   markRoutineExpired(input: {
@@ -3018,16 +3060,12 @@ export class RunStore {
       }
       return event;
     });
-    try {
-      const event = claim();
-      this.publishChange(event);
-      return true;
-    } catch (error) {
-      if (error instanceof RoutineAlreadyClaimedError) {
-        return false;
-      }
-      throw error;
+    const event = this.runIfClaimable(claim);
+    if (event === undefined) {
+      return false;
     }
+    this.publishChange(event);
+    return true;
   }
 
   claimManualRoutineFiring(input: {
@@ -3078,16 +3116,12 @@ export class RunStore {
           : { workspacePath: input.workspacePath })
       });
     });
-    try {
-      const event = claim();
-      this.publishChange(event);
-      return true;
-    } catch (error) {
-      if (error instanceof RoutineAlreadyClaimedError) {
-        return false;
-      }
-      throw error;
+    const event = this.runIfClaimable(claim);
+    if (event === undefined) {
+      return false;
     }
+    this.publishChange(event);
+    return true;
   }
 
   updateRoutineFiringState(id: string, state: RoutineFiringState): void {

@@ -74,6 +74,14 @@ Each matched clock event creates one durable **Routine Fan-out**, uniquely ident
 stored before any provider starts. Every admitted Routine Firing carries that id; a skipped target
 is recorded directly on the fan-out without creating a firing row.
 
+Restart schedule recomputation is also a matched clock event for this purpose. Before advancing any
+missed schedule, the dispatcher groups active persisted Routine Targets by Routine name and missed
+`next_fire_at`, creates or resolves one fan-out for that immutable membership snapshot, and records
+each `catch_up_window` skip against its target leg — unless the resolved fan-out's notification has
+already left `pending` (its one-shot summary already delivered while a target stayed `held`, per
+ADR 0084), in which case the advance is recorded as an ungrouped `catch_up_window` skip instead of
+rewriting that delivered snapshot.
+
 Expected membership is immutable after creation. A re-entrant reload can configure a new one-shot
 Routine Target whose elapsed `at` value matches an existing fan-out, but that target does not join
 the clock event after work has begun. Its elapsed occurrence records an ungrouped
@@ -94,8 +102,9 @@ firings receive separate workspaces, branches, logs, and prompt evidence.
 
 A fan-out becomes summary-ready only after every expected target is either:
 
-- skipped for overlap or a concurrency cap, or settled as `target_unavailable` when a pending leg's
-  declaration or Project is disabled or removed during restart reconciliation; or
+- skipped for a catch-up window, overlap, or a concurrency cap, or settled as
+  `target_unavailable` when a pending leg's declaration or Project is disabled or removed during
+  restart reconciliation; or
 - associated with a terminal (`succeeded`, `failed`, or `cancelled`) firing.
 
 The grouped subject is shaped as
@@ -103,6 +112,11 @@ The grouped subject is shaped as
 the per-Project disposition and firing result. Skips are visible per Project but do not count as
 failures. Failed and cancelled firings do. Verified issue actions can increase the issue count when
 the structured-outcome slice supplies them; until then it is zero.
+
+An outage group whose targets are all skipped for `catch_up_window` uses the same subject and
+per-Project payload instead of a special notification type. `email.on: always` sends that grouped
+"nothing ran" result; `changes` and `failures` record it as policy-skipped because Routine Skips do
+not count as either condition.
 
 Delivery uses a durable `pending -> sending -> sent` claim around a service-provided notification
 sink. A failed send returns to `pending` with its error for retry. Startup releases an interrupted

@@ -2276,6 +2276,7 @@ describe("HTTP app — dashboard IA shell (#302)", () => {
             lastAttemptedAt: null,
             lastLoadedAt: null,
             ok: true,
+            routineErrors: [],
             usingLastKnownGood: false
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
@@ -2588,6 +2589,7 @@ describe("HTTP app — project detail page (#303)", () => {
             lastAttemptedAt: null,
             lastLoadedAt: null,
             ok: true,
+            routineErrors: [],
             usingLastKnownGood: false
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
@@ -2685,6 +2687,7 @@ describe("HTTP app — project detail page (#303)", () => {
             lastAttemptedAt: null,
             lastLoadedAt: null,
             ok: true,
+            routineErrors: [],
             usingLastKnownGood: false
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
@@ -2814,6 +2817,7 @@ describe("HTTP app — project detail page (#303)", () => {
             lastAttemptedAt: null,
             lastLoadedAt: null,
             ok: true,
+            routineErrors: [],
             usingLastKnownGood: false
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
@@ -2881,6 +2885,7 @@ describe("HTTP app — project detail page (#303)", () => {
             lastAttemptedAt: null,
             lastLoadedAt: null,
             ok: true,
+            routineErrors: [],
             usingLastKnownGood: false
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
@@ -3002,6 +3007,241 @@ describe("HTTP app — routine detail page (#304)", () => {
       expect(body).toContain("single");
       expect(body).toContain('href="/routines/audit/edit"');
       expect(body).toContain('action="/api/routines/audit/fire?project=alpha"');
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows a reload error while keeping the last-known-good Routine declaration active", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Last-known-good prompt.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        }
+      ]);
+
+      const app = createHttpApp({
+        getStatusSnapshot: () => ({
+          configPath: "/tmp/symphonika.yml",
+          doctorErrors: [],
+          issuePolling: {
+            candidateIssues: [],
+            errors: [],
+            filteredIssues: [],
+            projects: []
+          },
+          projectModes: new Map([["alpha", "dispatch"]]),
+          projectStates: [],
+          projects: [],
+          reload: {
+            errors: [
+              'routine "audit" at /tmp/audit.md declares model, but providers.claude.command never references it'
+            ],
+            lastAttemptedAt: "2026-05-22T09:00:00.000Z",
+            lastLoadedAt: "2026-05-22T08:00:00.000Z",
+            ok: false,
+            routineErrors: [
+              {
+                message:
+                  'routine "audit" at /tmp/audit.md declares model, but providers.claude.command never references it',
+                sourcePaths: ["/tmp/audit.md"]
+              }
+            ],
+            usingLastKnownGood: true
+          },
+          runs: { active: [], failed: [], recent: [], stale: [] },
+          stateRoot: test.stateRoot
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/routines/audit")).text();
+
+      expect(body).toContain(
+        '<div class="alert" role="alert"><strong>Reload error</strong><ul><li>routine &quot;audit&quot; at /tmp/audit.md declares model, but providers.claude.command never references it</li></ul></div>'
+      );
+      expect(body).toContain("Last-known-good prompt.");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows a reload error keyed by source path, not by routine name", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "weekly-audit",
+          prompt: "Last-known-good prompt.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/r1.md"
+        }
+      ]);
+
+      const app = createHttpApp({
+        getStatusSnapshot: () => ({
+          configPath: "/tmp/symphonika.yml",
+          doctorErrors: [],
+          issuePolling: {
+            candidateIssues: [],
+            errors: [],
+            filteredIssues: [],
+            projects: []
+          },
+          projectModes: new Map([["alpha", "dispatch"]]),
+          projectStates: [],
+          projects: [],
+          reload: {
+            errors: ["routine at /tmp/r1.md prompt body must not be empty"],
+            lastAttemptedAt: "2026-05-22T09:00:00.000Z",
+            lastLoadedAt: "2026-05-22T08:00:00.000Z",
+            ok: false,
+            routineErrors: [
+              {
+                message: "routine at /tmp/r1.md prompt body must not be empty",
+                sourcePaths: ["/tmp/r1.md"]
+              }
+            ],
+            usingLastKnownGood: true
+          },
+          runs: { active: [], failed: [], recent: [], stale: [] },
+          stateRoot: test.stateRoot
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/routines/weekly-audit")).text();
+
+      expect(body).toContain(
+        '<div class="alert" role="alert"><strong>Reload error</strong><ul><li>routine at /tmp/r1.md prompt body must not be empty</li></ul></div>'
+      );
+      expect(body).toContain("Last-known-good prompt.");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("does not show another declaration's reload error on this Routine's page", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "git",
+          prompt: "Last-known-good prompt.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/git.md"
+        }
+      ]);
+
+      const app = createHttpApp({
+        getStatusSnapshot: () => ({
+          configPath: "/tmp/symphonika.yml",
+          doctorErrors: [],
+          issuePolling: {
+            candidateIssues: [],
+            errors: [],
+            filteredIssues: [],
+            projects: []
+          },
+          projectModes: new Map([["alpha", "dispatch"]]),
+          projectStates: [],
+          projects: [],
+          reload: {
+            errors: ["routine at /tmp/other.md kind must be git or report"],
+            lastAttemptedAt: "2026-05-22T09:00:00.000Z",
+            lastLoadedAt: "2026-05-22T08:00:00.000Z",
+            ok: false,
+            routineErrors: [
+              {
+                message: "routine at /tmp/other.md kind must be git or report",
+                sourcePaths: ["/tmp/other.md"]
+              }
+            ],
+            usingLastKnownGood: true
+          },
+          runs: { active: [], failed: [], recent: [], stale: [] },
+          stateRoot: test.stateRoot
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/routines/git")).text();
+
+      expect(body).toContain("Last-known-good prompt.");
+      expect(body).not.toContain("Reload error");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("does not match a reload error from a declaration whose path extends this Routine's path", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Last-known-good prompt.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/r1"
+        }
+      ]);
+
+      const app = createHttpApp({
+        getStatusSnapshot: () => ({
+          configPath: "/tmp/symphonika.yml",
+          doctorErrors: [],
+          issuePolling: {
+            candidateIssues: [],
+            errors: [],
+            filteredIssues: [],
+            projects: []
+          },
+          projectModes: new Map([["alpha", "dispatch"]]),
+          projectStates: [],
+          projects: [],
+          reload: {
+            errors: ["routine at /tmp/r10 prompt body must not be empty"],
+            lastAttemptedAt: "2026-05-22T09:00:00.000Z",
+            lastLoadedAt: "2026-05-22T08:00:00.000Z",
+            ok: false,
+            routineErrors: [
+              {
+                message: "routine at /tmp/r10 prompt body must not be empty",
+                sourcePaths: ["/tmp/r10"]
+              }
+            ],
+            usingLastKnownGood: true
+          },
+          runs: { active: [], failed: [], recent: [], stale: [] },
+          stateRoot: test.stateRoot
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/routines/audit")).text();
+
+      expect(body).toContain("Last-known-good prompt.");
+      expect(body).not.toContain("Reload error");
     } finally {
       test.cleanup();
     }

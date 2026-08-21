@@ -1306,6 +1306,16 @@ describe("RuntimeConfigReloader concurrency caps", () => {
     expect(reloader.getStatus().errors.join("\n")).toContain(
       'name "../bad" is not path-safe'
     );
+    expect(reloader.getStatus().routineErrors).toEqual([
+      {
+        message: `routine at ${routinePath} name "../bad" is not path-safe`,
+        sourcePaths: [routinePath]
+      },
+      {
+        message: `routine at ${routinePath} schedule must define exactly one of schedule.at or schedule.cron`,
+        sourcePaths: [routinePath]
+      }
+    ]);
   });
 
   it("does not block reload of a sibling project when another project's routine declaration is invalid", async () => {

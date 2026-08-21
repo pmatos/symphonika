@@ -520,6 +520,14 @@ export function registerPages(options: RegisterPagesOptions): void {
         : options.monotonicNow() - bannerReferenceAt;
     const pollingIntervalMs =
       options.getPollingIntervalMs?.() ?? DEFAULT_POLLING_INTERVAL_MS;
+    // removed_from_config rows are durable, never deleted, so they must not
+    // inflate a live Routine's target count here; /routines/:name still needs
+    // them, and so takes the unfiltered list.
+    const routineGroups = groupRoutinesByName(
+      options.runStore
+        .listRoutines({ includeInactive })
+        .filter(isCurrentRoutineTarget)
+    );
     const html = layout(
       "Symphonika",
       [
@@ -528,16 +536,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         renderHeader(options.version, snapshot),
         DASHBOARD_STREAM_BANNER,
         `<div id="active-now-band">${renderActiveNowBand(activeRuns, activeFirings, watchdogByRun, nowMs)}</div>`,
-        renderRoutinesSection(
-          groupRoutinesByName(
-            options.runStore
-              .listRoutines({
-                includeInactive
-              })
-              .filter((routine) => !isRemovedRoutineTarget(routine))
-          ),
-          includeInactive
-        ),
+        renderRoutinesSection(routineGroups, includeInactive),
         `<div id="projects-section">${renderProjectsSection(snapshot, options.issuePollStatus, activeRuns, activeFirings, lastRunByProject, nowMs)}</div>`,
         renderStaleIssuesCard(options.issuePollStatus?.filteredIssues ?? []),
         `<script>${DASHBOARD_LIVE_CLIENT_JS}</script>`
@@ -5436,12 +5435,8 @@ function renderPullRequestDetailPage(input: {
 // path is stable per declaration and shared by every target one `routines:`
 // entry materializes, so grouping on (name, sourcePath) keeps distinct
 // declarations apart while still collapsing an N-target Routine into one
-// row. Grouping itself keeps every row it is handed: the dashboard drops
-// removed targets from its own input (isRemovedRoutineTarget) so they cannot
-// inflate a live Routine's target count, while the detail and editor routes
-// pass the full list because they need historical rows to disambiguate
-// declarations by sourcePath.
-// Full per-target detail
+// row. Grouping itself keeps every row it is handed; excluding removed
+// targets is each caller's own decision. Full per-target detail
 // (skip counters, firing history, latest outcome) moves to /routines/:name
 // (#304); this row only needs enough to answer "is it scheduled, and when
 // does it next run."
@@ -6165,8 +6160,8 @@ function renderRoutineDeclarationCard(
 </dl></section><section>${sectionHead("Prompt")}${promptSection}</section>`;
 }
 
-function isRemovedRoutineTarget(target: RoutineStatus): boolean {
-  return target.disabledReason === "removed_from_config";
+function isCurrentRoutineTarget(target: RoutineStatus): boolean {
+  return target.disabledReason !== "removed_from_config";
 }
 
 // A target removed from its declaration can remain as a durable
@@ -6175,7 +6170,7 @@ function isRemovedRoutineTarget(target: RoutineStatus): boolean {
 // resolveRoutineDeclaration, which picks a target to carry the
 // declaration's *content* and so orders by validity instead.
 function currentRoutineTargets(group: RoutineGroup): RoutineStatus[] {
-  return group.targets.filter((target) => !isRemovedRoutineTarget(target));
+  return group.targets.filter(isCurrentRoutineTarget);
 }
 
 // #307 AC: "Disable/enable a Routine from its page affects every target; a

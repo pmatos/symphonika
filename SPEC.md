@@ -1942,11 +1942,10 @@ running and is not active right now, though both still appear on `/runs`. Below 
 are grouped by their globally unique name into one row per Routine with a target-Project count
 linking to its own page (`/routines/:name`, detailed below). A target soft-disabled with
 `disabled_reason = "removed_from_config"` is excluded from these rows and from that count, so a
-historical target can never inflate a live Routine's target count; a Routine whose every target is
-removed is therefore absent from this section, while `/routines/:name` still lists every target,
-including the removed ones. Projects split into Dispatch
-Projects (eligible/in-flight counts, last terminal-run outcome) and a visually subordinate Routine
-Hosts group, since a Routine Host is never polled and never dispatches (ADR-0062). The flat
+Routine whose every target is removed is absent from this section entirely, while `/routines/:name`
+still lists every target, including the removed ones. Projects split into Dispatch Projects
+(eligible/in-flight counts, last terminal-run outcome) and a visually subordinate Routine Hosts
+group, since a Routine Host is never polled and never dispatches (ADR-0062). The flat
 "recent runs" list this superseded now lives only at `/runs`. See #302.
 
 Each Project name links to its own drill-in page, `GET /projects/:name`. For a Dispatch Project

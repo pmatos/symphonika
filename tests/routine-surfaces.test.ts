@@ -461,8 +461,41 @@ describe("routine operator surfaces", () => {
 
       expect(response.status).toBe(200);
       expect(body).toContain('<td><a href="/routines/daily-report">1</a></td>');
-      expect(body).not.toMatch(/\d+\/\d+ active/);
-      expect(body).not.toContain("removed_from_config");
+      expect(body).not.toContain("1/2 active");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("omits a Routine whose every target was removed from config", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/daily-report.md"
+    };
+    try {
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      store.syncRoutines([], { projects: ["alpha", "beta"] });
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain("No Routines configured");
+      expect(body).not.toContain('<a href="/routines/daily-report">');
     } finally {
       store.close();
     }

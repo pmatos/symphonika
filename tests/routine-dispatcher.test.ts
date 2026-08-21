@@ -612,6 +612,79 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("rejects a routine command whose resolved overrides fail provider validation", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const resolvedCommand =
+      "claude fake --model claude-opus-4-8 --effort xhigh --permission-mode bypass";
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "claude",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn((command: string) => {
+        if (command === resolvedCommand) {
+          return Promise.reject(new Error("unsupported routine command"));
+        }
+        return Promise.resolve();
+      })
+    } satisfies AgentProvider;
+    const project = dueRoutineProjectFixture(root, "claude");
+    project.routines = [
+      {
+        ...project.routines![0]!,
+        effort: "xhigh",
+        model: "claude-opus-4-8",
+        permissionMode: "bypass"
+      }
+    ];
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { claude: provider },
+        configDir: root,
+        createFiringId: () => "fire-invalid-overrides",
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", project]]),
+        providersConfig: {
+          claude: {
+            command:
+              "claude fake{{#model}} --model {{model}}{{/model}}{{#effort}} --effort {{effort}}{{/effort}}{{#permission_mode}} --permission-mode {{permission_mode}}{{/permission_mode}}"
+          },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.getRoutineFiring("fire-invalid-overrides")).toMatchObject(
+        {
+          state: "failed",
+          terminalReason: "unsupported routine command"
+        }
+      );
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("terminates a firing at its wall-clock deadline and records firing_timeout", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

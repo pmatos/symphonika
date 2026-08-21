@@ -27,6 +27,13 @@ actually work" moved to an opt-in functional probe, `doctor --live-check <provid
 the real command with a trivial prompt and waits for a reply — see SPEC.md §11.3. Everything else in
 this ADR is unchanged.
 
+**Third amendment note:** a Routine Firing now renders the provider command with its resolved
+`model`, `effort`, and `permission_mode` before passing it to the adapter's `validate()` pre-flight
+probe. The earlier contract passed the raw template, whose adapter-level empty-value render removed
+every routine-only section; an unsupported routine-specific flag or value could therefore bypass
+validation and reach `runAttempt`. The provider interface remains unchanged, and issue-driven or
+provider-level validation still renders with empty values.
+
 ## Context
 
 The live ptt routines require different model, effort, permission, and 60-minute execution
@@ -51,9 +58,12 @@ plain tags (`{{model}}`, `{{effort}}`, `{{permission_mode}}`) substitute the res
 resolves to a value — the section form is what lets an operator omit a whole `--model X` segment
 when `X` is absent, without a dangling incomplete flag. Each provider adapter renders
 `input.provider.command` through this template using `input.routine` (or `{}` for issue-driven Runs
-and for `validate()`, which never resolves per-routine values) before parsing it into argv — the
-operator's own authored command carries all provider-specific flag knowledge; Symphonika's
-TypeScript never hardcodes Codex's `-c` keys or OMP's flag names.
+and the adapter's own `validate()` implementation) before parsing it into argv. A Routine Firing
+first renders the command with the same resolved values and passes that rendered string to
+`validate()`, making the adapter's subsequent empty-value render a no-op and ensuring its pre-flight
+probe sees the command that `runAttempt` will spawn. The operator's own authored command carries all
+provider-specific flag knowledge; Symphonika's TypeScript never hardcodes Codex's `-c` keys or OMP's
+flag names.
 
 An unrecognized or malformed template tag throws rather than passing through as literal text — the
 string is about to be spawned as a real child-process argv. Section validity is checked structurally
@@ -108,6 +118,8 @@ in the background (tracked in #353).
 
 - Operator commands remain reusable for issue Runs and are unchanged when Routine overrides are
   omitted (rendering with `{}` is a no-op for a command with no template tags).
+- Routine-specific flags and values are rejected during pre-flight validation instead of first
+  failing after `runAttempt` starts.
 - Provider-specific argv vocabulary lives entirely in the operator's own `providers.<name>.command`,
   not in Symphonika's TypeScript — real Codex/OMP tuning works without either adapter hardcoding a
   flag name.

@@ -22,6 +22,7 @@ import type {
   NormalizedProviderEvent,
   ProviderEvent
 } from "../provider.js";
+import { renderProviderCommandTemplate } from "../provider-command-template.js";
 import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig
@@ -1056,7 +1057,21 @@ async function runRoutineFiring(input: {
       rawLogPath,
       workspacePath: prepared.workspacePath
     });
-    await deadline.race(input.provider.validate(input.providerCommand));
+    const renderedProviderCommand = renderProviderCommandTemplate(
+      input.providerCommand,
+      {
+        ...(input.routine.effort === undefined
+          ? {}
+          : { effort: input.routine.effort }),
+        ...(input.routine.model === undefined
+          ? {}
+          : { model: input.routine.model }),
+        ...(input.routine.permissionMode === undefined
+          ? {}
+          : { permissionMode: input.routine.permissionMode })
+      }
+    ).rendered;
+    await deadline.race(input.provider.validate(renderedProviderCommand));
     input.runStore.updateRoutineFiringState(input.firingId, "running");
     input.activeRuns.attachProvider(input.firingId, {
       cancel: () => input.provider.cancel(input.firingId),

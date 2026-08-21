@@ -1386,14 +1386,18 @@ leaving a dangling incomplete flag, and likewise lets an operator template
 `{{#permission_mode}}--permission-mode {{permission_mode}}{{/permission_mode}}` so a routine that
 doesn't declare `permission_mode` doesn't emit a dangling flag either. Each provider adapter renders
 `input.provider.command` through this template — using the firing's resolved values for
-`runAttempt`, and empty values (so every section collapses) for `validate()` and for issue-driven
-Runs — before parsing the rendered string into argv. Symphonika's TypeScript never hardcodes a
-provider's flag vocabulary; the operator's own authored command carries that knowledge, exactly as it
-already does today for Codex's `-c sandbox_mode=...`. An unrecognized or malformed template tag
-throws rather than being passed through as literal text. `permission_mode` is exempt from the
-unreferenced-field declaration-load check (§5.4): unlike `model`/`effort`, a routine may declare
-`permission_mode` purely as documentation of intent without its resolved provider command
-referencing the tag, since no provider currently requires it to appear in the command for full
+`runAttempt`, and empty values (so every section collapses) for its own `validate()` implementation
+and for issue-driven Runs — before parsing the rendered string into argv. Before a Routine Firing
+calls `validate()`, the dispatcher renders the command with the same resolved values and passes that
+rendered string to the adapter, so routine-only flags and values are covered by the pre-flight probe;
+the adapter's empty-value render is then a no-op because no template tags remain. Symphonika's
+TypeScript never hardcodes a provider's flag vocabulary; the operator's own authored command carries
+that knowledge, exactly as it already does today for Codex's `-c sandbox_mode=...`. An unrecognized
+or malformed template tag throws rather than being passed through as literal text.
+`permission_mode` is exempt from the unreferenced-field declaration-load check (§5.4): unlike
+`model`/`effort`, a routine may declare `permission_mode` purely as documentation of intent without
+its resolved provider command referencing the tag, since no provider currently requires it to
+appear in the command for full
 permission to take effect (the default commands above already carry a fixed policy flag literally).
 Claude Routine Firings additionally ensure one `--disallowedTools` option whose variadic values
 merge any operator-authored restrictions with `ScheduleWakeup`, `Monitor`, and `CronCreate`

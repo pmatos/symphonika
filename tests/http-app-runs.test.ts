@@ -2339,7 +2339,6 @@ describe("HTTP app — dashboard IA shell (#302)", () => {
           buildStatusSnapshot({
             configPath: "/tmp/symphonika.yml",
             issuePollStatus: emptyIssuePollStatus(),
-            projectModes: new Map([["alpha", "dispatch"]]),
             runStore: test.runStore,
             stateRoot: test.stateRoot
           }),
@@ -2349,18 +2348,12 @@ describe("HTTP app — dashboard IA shell (#302)", () => {
         version: "0.1.0"
       });
       const body = await (await app.request("/")).text();
-      // Bound the slice to the Projects section's own <section>; an
-      // open-ended slice would run the negative assertion below over every
-      // later section too.
-      const projectsStart = body.indexOf(">Projects<");
-      expect(projectsStart).toBeGreaterThan(-1);
-      const projectsSection = body.slice(
-        projectsStart,
-        body.indexOf("</section>", projectsStart)
-      );
 
-      expect(projectsSection).toContain("2h ago");
-      expect(projectsSection).not.toContain("1h ago");
+      // Anchored on alpha's own row so the age cell is matched directly,
+      // rather than asserting over a hand-bounded slice of the page.
+      expect(body).toMatch(
+        /<a href="\/projects\/alpha">alpha<\/a>.*?<code>2h ago<\/code>/
+      );
     } finally {
       vi.useRealTimers();
       test.cleanup();

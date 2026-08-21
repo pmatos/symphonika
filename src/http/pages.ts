@@ -458,18 +458,19 @@ export function registerPages(options: RegisterPagesOptions): void {
     // assembly but never reads lastRunByProject, and the query behind it
     // scans every Run and its state transitions on a fragment refetched on
     // every SSE event.
-    let lastRunByProject: ReadonlyMap<string, ProjectLastRunStatus> | undefined;
+    let memoizedLastRunByProject:
+      ReadonlyMap<string, ProjectLastRunStatus> | undefined;
     return {
       activeFirings,
       activeRuns,
-      get lastRunByProject(): ReadonlyMap<string, ProjectLastRunStatus> {
-        lastRunByProject ??= options.runStore.listLatestRunsByProject({
+      get lastRunByProject() {
+        memoizedLastRunByProject ??= options.runStore.listLatestRunsByProject({
           projectNames: (snapshot?.projectStates ?? []).map(
             (project) => project.projectName
           ),
           states: PROJECT_LAST_RUN_STATES
         });
-        return lastRunByProject;
+        return memoizedLastRunByProject;
       },
       nowMs,
       snapshot,

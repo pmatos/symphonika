@@ -3751,7 +3751,9 @@ export class RunStore {
   // row, and a per-project listRuns(limit:1) call would be an N+1 query
   // against the number of configured Projects. lastTransitionAt comes from the
   // newest state transition, not `updated_at`, so post-terminal bookkeeping
-  // (PR-discovery retries, notification delivery) cannot reset a Run's age.
+  // (PR-discovery retries, late cancel requests) cannot reset a Run's age.
+  // insertRunRow always writes a first transition, so the coalesce fallback
+  // only covers a row imported without transition history.
   listLatestRunsByProject(input: {
     projectNames: string[];
     states: RunState[];
@@ -3780,11 +3782,10 @@ export class RunStore {
           "is_continuation, continuation_parent_run_id, retry_count,",
           "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
           "created_at, updated_at,",
-          "coalesce((",
-          "select transition.created_at from run_state_transitions transition",
-          "where transition.run_id = ranked_runs.id",
-          "order by transition.sequence desc limit 1",
-          "), updated_at) as last_transition_at from (",
+          "coalesce((select transition.created_at from run_state_transitions transition",
+          "  where transition.run_id = ranked_runs.id",
+          "  order by transition.sequence desc limit 1), updated_at) as last_transition_at",
+          "from (",
           "select *, row_number() over (",
           "partition by project_name order by created_at desc, id desc",
           ") as rn from runs",
@@ -5093,11 +5094,11 @@ export class RunStore {
       on routine_firings(workspace_pruned_at, state, updated_at);
     `);
 
-    // listLatestRunsByProject resolves each row's newest transition through a
-    // correlated subquery, and run_state_transitions is append-only with no
-    // retention sweep. Without this index that subquery is a full scan plus a
-    // temp b-tree sort of the whole table, once per Project, on a dashboard
-    // fragment refetched on every run-transition event.
+    // run_state_transitions is append-only with no retention sweep, and until
+    // now carried no index at all. nextTransitionSequence's max(sequence)
+    // lookup runs on every transition write, and both listRunStateTransitions
+    // and listLatestRunsByProject's newest-transition subquery otherwise
+    // degrade to a full scan plus a temp b-tree sort of the whole table.
     this.database.exec(`
       create index if not exists run_state_transitions_run_seq_idx
       on run_state_transitions(run_id, sequence);

@@ -18,6 +18,7 @@ import {
 } from "../src/reload.js";
 
 const tempRoots: string[] = [];
+const repoRoot = path.resolve(import.meta.dirname, "..");
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-reload-test-"));
@@ -2359,6 +2360,26 @@ describe("self_update config (ADR 0079)", () => {
 });
 
 describe("validateServiceConfigContent (#307 editor save-preview validation)", () => {
+  it("loads the shipped refactor-audit example when its advertised blocks are enabled", async () => {
+    const configPath = path.join(repoRoot, "symphonika.example.yml");
+    const example = await readFile(configPath, "utf8");
+    const withRefactorProject = example.replace(
+      /^ {2}# - name: symphonika-refactors$[\s\S]*?^ {2}# {3}workflow: \.\/refactor-workflow\.yml$/m,
+      (block) => block.replace(/^ {2}# ?/gm, "  ")
+    );
+    const enabled = withRefactorProject.replace(
+      /^# routines:$[\s\S]*?^# {5}projects: \[symphonika-refactors\]$/m,
+      (block) => block.replace(/^# ?/gm, "")
+    );
+
+    expect(withRefactorProject).not.toBe(example);
+    expect(enabled).not.toBe(withRefactorProject);
+
+    const result = await validateServiceConfigContent(enabled, configPath);
+
+    expect(result.errors).toEqual([]);
+  });
+
   it("reports the same state.root error the live reload would report", async () => {
     const root = await makeTempRoot();
     await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");

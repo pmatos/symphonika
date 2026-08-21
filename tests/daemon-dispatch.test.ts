@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import Database from "better-sqlite3";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -30,6 +32,7 @@ import {
 } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
+const execFileAsync = promisify(execFile);
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
 
 async function makeTempRoot(): Promise<string> {
@@ -1639,6 +1642,111 @@ describe("daemon dispatch", () => {
       );
       expect(implementingPrompt).toContain("Implement the plan");
       expect(implementingPrompt).not.toContain("Draft a plan");
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("blocks refactor-swarm when only the red-team state advanced the branch", async () => {
+    const root = await makeTempRoot();
+    await writeTwoCommitRawFsmProject(root);
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Refactor with a characterization baseline"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAtBase(preparedWorkspace);
+
+    let providerCalls = 0;
+    const codexProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          await writeFile(
+            path.join(input.workspacePath, "characterization.test.ts"),
+            "// pinned behavior\n"
+          );
+          await execFileAsync("git", [
+            "-C",
+            input.workspacePath,
+            "add",
+            "characterization.test.ts"
+          ]);
+          await execFileAsync("git", [
+            "-C",
+            input.workspacePath,
+            "commit",
+            "-m",
+            "test: characterize behavior"
+          ]);
+        }
+        yield {
+          normalized: {
+            exitCode: providerCalls === 3 ? 1 : 0,
+            type: "process_exit"
+          },
+          raw: {
+            code: providerCalls === 3 ? 1 : 0,
+            kind: "exit"
+          }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => `run-two-commit-gate-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForRun(daemon.url, "blocked");
+
+      expect(codexProvider.runAttempt).toHaveBeenCalledTimes(2);
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const rows = database
+          .prepare(
+            "select current_state_id, terminal_state_id from runs order by created_at"
+          )
+          .all();
+        expect(rows).toHaveLength(2);
+        expect(rows[1]).toMatchObject({
+          current_state_id: null,
+          terminal_state_id: "failed"
+        });
+      } finally {
+        database.close();
+      }
     } finally {
       await daemon.stop();
     }
@@ -4009,6 +4117,42 @@ async function writeMultiStateRawFsmProject(root: string): Promise<void> {
     path.join(root, "implement-prompt.md"),
     "Implement the plan for #{{issue.number}}: {{issue.title}}.\n"
   );
+}
+
+async function writeTwoCommitRawFsmProject(root: string): Promise<void> {
+  await writeRawFsmProjectConfig(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: two_commit_gate",
+      "  initial: refactor",
+      "  use:",
+      "    refactor:",
+      "      template: builtin:refactor-swarm",
+      "      exits:",
+      "        success: done",
+      "        blocked: failed",
+      "  states:",
+      "    done:",
+      "      terminal: success",
+      "    failed:",
+      "      terminal: blocked",
+      ""
+    ].join("\n")
+  );
+  await mkdir(path.join(root, "prompts"), { recursive: true });
+  await Promise.all([
+    writeFile(
+      path.join(root, "prompts", "red-team.md"),
+      "Characterize behavior.\n"
+    ),
+    writeFile(
+      path.join(root, "prompts", "refactor.md"),
+      "Refactor behavior.\n"
+    ),
+    writeFile(path.join(root, "prompts", "verify.md"), "Verify behavior.\n")
+  ]);
 }
 
 // Mirrors the shape of `builtin:plan-tdd-pr`: planning advances on

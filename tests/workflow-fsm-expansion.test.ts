@@ -20,6 +20,17 @@ async function makeTempRoot(): Promise<string> {
   return root;
 }
 
+function stateById(
+  workflow: ExpandedWorkflow,
+  id: string
+): ExpandedWorkflow["states"][number] {
+  const state = workflow.states.find((candidate) => candidate.id === id);
+  if (state === undefined) {
+    throw new Error(`expected state ${id}`);
+  }
+  return state;
+}
+
 afterEach(async () => {
   await Promise.all(
     tempRoots
@@ -1360,9 +1371,8 @@ describe("built-in workflow templates", () => {
       throw new Error("expected build.planning");
     }
 
-    // signalsFromTerminal emits exactly {branch_ahead_of_base, provider_success};
-    // planning.complete_when must be satisfiable with just those, or the state
-    // parks indefinitely after a successful planner run.
+    // planning.complete_when must be satisfiable from ordinary successful
+    // agent-result signals or the state parks indefinitely after a planner run.
     const decision = decideNextStep({
       actionExecuted: true,
       signals: { branch_ahead_of_base: true, provider_success: true },
@@ -1372,6 +1382,100 @@ describe("built-in workflow templates", () => {
       kind: "advance",
       to: "build.implementing"
     });
+  });
+
+  it("expands builtin:refactor-swarm into a characterization-gated refactor with read-only verification", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: refactor_with_proof",
+        "  initial: refactor",
+        "  use:",
+        "    refactor:",
+        "      template: builtin:refactor-swarm",
+        "      with:",
+        "        red_teamer: codex",
+        "        refactorer: claude",
+        "        verifier: omp",
+        "        red_team_prompt: prompts/characterize.md",
+        "        refactor_prompt: prompts/restructure.md",
+        "        verify_prompt: prompts/audit.md",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "  states:",
+        "    shipped:",
+        "      terminal: success",
+        "    needs_human:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.workflow.initial).toBe("refactor.red_team");
+    expect(result.workflow.templateFiles).toEqual(["builtin:refactor-swarm"]);
+
+    const redTeam = stateById(result.workflow, "refactor.red_team");
+    const refactoring = stateById(result.workflow, "refactor.refactoring");
+    const verifying = stateById(result.workflow, "refactor.verifying");
+
+    expect(redTeam.action).toEqual({
+      kind: "agent",
+      prompt: "prompts/characterize.md",
+      provider: "codex"
+    });
+    expect(refactoring.action).toEqual({
+      kind: "agent",
+      prompt: "prompts/restructure.md",
+      provider: "claude"
+    });
+    expect(verifying.action).toEqual({
+      kind: "agent",
+      prompt: "prompts/audit.md",
+      provider: "omp"
+    });
+
+    // Blocked routing is covered once for every built-in by the sibling
+    // "routes failed agent outcomes" test; assert the happy chain here.
+    expect(
+      decideNextStep({
+        actionExecuted: true,
+        signals: {
+          branch_advanced_since_attempt_start: true,
+          branch_ahead_of_base: true,
+          provider_success: true
+        },
+        state: redTeam
+      })
+    ).toMatchObject({ kind: "advance", to: "refactor.refactoring" });
+    expect(
+      decideNextStep({
+        actionExecuted: true,
+        signals: {
+          branch_advanced_since_attempt_start: true,
+          branch_ahead_of_base: true,
+          provider_success: true
+        },
+        state: refactoring
+      })
+    ).toMatchObject({ kind: "advance", to: "refactor.verifying" });
+    expect(
+      decideNextStep({
+        actionExecuted: true,
+        signals: {
+          branch_advanced_since_attempt_start: false,
+          branch_ahead_of_base: false,
+          provider_success: true
+        },
+        state: verifying
+      })
+    ).toMatchObject({ kind: "advance", to: "shipped" });
   });
 
   it("routes failed agent outcomes through every built-in's blocked exit", async () => {
@@ -1394,6 +1498,11 @@ describe("built-in workflow templates", () => {
         "      exits:",
         "        success: shipped",
         "        blocked: needs_human",
+        "    refactor:",
+        "      template: builtin:refactor-swarm",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
         "    review:",
         "      template: builtin:autofix-until-clean",
         "      exits:",
@@ -1411,27 +1520,26 @@ describe("built-in workflow templates", () => {
     const result = await loadExpandedWorkflow(workflowPath);
     expect(result.errors).toEqual([]);
 
-    const stateById = (id: string) => {
-      const state = result.workflow.states.find((s) => s.id === id);
-      if (state === undefined) {
-        throw new Error(`expected state ${id}`);
-      }
-      return state;
-    };
     const decide = (
       id: string,
       signals: Record<string, string | number | boolean>
     ) =>
-      decideNextStep({ actionExecuted: true, signals, state: stateById(id) });
+      decideNextStep({
+        actionExecuted: true,
+        signals,
+        state: stateById(result.workflow, id)
+      });
 
-    // signalsFromTerminal emits these three shapes; assert each agent state
+    // Agent completion emits these success/failure shapes; assert each state
     // routes them through the template's mapped blocked exit (needs_human)
     // instead of stalling with kind="blocked".
     const failureSignals = {
+      branch_advanced_since_attempt_start: false,
       branch_ahead_of_base: false,
       provider_success: false
     };
     const noChangeSignals = {
+      branch_advanced_since_attempt_start: false,
       branch_ahead_of_base: false,
       provider_success: true
     };
@@ -1463,6 +1571,32 @@ describe("built-in workflow templates", () => {
     expect(decide("build.implementing", noChangeSignals)).toMatchObject({
       kind: "advance",
       to: "needs_human"
+    });
+
+    expect(decide("refactor.red_team", failureSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    expect(decide("refactor.red_team", noChangeSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    expect(decide("refactor.refactoring", failureSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    expect(decide("refactor.refactoring", noChangeSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    expect(decide("refactor.verifying", failureSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    // Verification is deliberately read-only, so provider success is enough.
+    expect(decide("refactor.verifying", noChangeSignals)).toMatchObject({
+      kind: "advance",
+      to: "shipped"
     });
 
     expect(decide("review.autofix", failureSignals)).toMatchObject({

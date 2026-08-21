@@ -513,6 +513,21 @@ Raw FSM agent states may declare `action.provider` to route that state to a spec
 Agent Provider. If an agent state omits `action.provider`, Symphonika uses the Project's
 `agent.provider` from `symphonika.yml`.
 
+Raw FSM workflows may reference five built-in Workflow Templates through the `builtin:` namespace:
+`single-agent-pr`, `plan-tdd-pr`, `refactor-swarm`, `autofix-until-clean`, and
+`merge-when-green`. Built-ins expand through the same validation, state-prefixing, exit-mapping,
+and evidence path as repository-local templates. `refactor-swarm` runs three serial agent states:
+`red_team` and `refactoring` each require provider success, `branch_ahead_of_base`, and
+`branch_advanced_since_attempt_start`, then `verifying` requires provider success alone because
+verification is read-only. `branch_ahead_of_base` remains the cumulative branch-vs-base signal.
+For each agent Attempt, Symphonika also snapshots `HEAD` immediately before provider execution;
+`branch_advanced_since_attempt_start` is true only when completion `HEAD` is a different descendant
+of that snapshot. The second transition therefore requires a distinct refactor commit rather than
+reusing the red-team commit. Any fallback uses the template's `blocked` exit. Repositories may
+explicitly replace a built-in reference with a local
+`.symphonika/workflow-templates/<name>.yml`; local files never auto-shadow the reserved namespace.
+See ADRs 0049 and 0085.
+
 The daemon must not dispatch a Dispatch Project when its workflow contract is missing or invalid. A
 Routine Host is never dispatched, so this gate does not apply to it.
 

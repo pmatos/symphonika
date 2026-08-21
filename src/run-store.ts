@@ -2522,6 +2522,7 @@ export class RunStore {
   markRoutinesInactiveForProject(
     projectName: string,
     options: {
+      currentRoutineNames?: string[];
       now?: Date;
       trackerlessGitRoutines?: TargetedRoutineDeclaration[];
       templateRejectedRoutines?: TargetedRoutineDeclaration[];
@@ -2529,6 +2530,11 @@ export class RunStore {
   ): void {
     const now = timestamp();
     const scheduleNow = options.now ?? new Date();
+    const currentRoutineNames = [...new Set(options.currentRoutineNames ?? [])];
+    const preserveRemovedTargets =
+      currentRoutineNames.length === 0
+        ? "and not (state = 'disabled' and disabled_reason = 'removed_from_config')"
+        : `and not (state = 'disabled' and disabled_reason = 'removed_from_config' and name not in (${currentRoutineNames.map(() => "?").join(", ")}))`;
     const insertInactive = this.database.prepare(
       [
         "insert into routines (",
@@ -2613,10 +2619,12 @@ export class RunStore {
           // 0069 cascades "a targeted Project"'s own rows), and laundering it
           // to a reasonless inactive row makes it indistinguishable from a
           // current target whose Project went away — which then hides its
-          // still-removed siblings in enabled Projects from the dashboard.
-          "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name = ? and (state != 'inactive' or disabled_reason is not null) and not (state = 'disabled' and disabled_reason = 'removed_from_config')"
+          // still-removed siblings in enabled Projects from the dashboard. A
+          // name restored while this Project remains disabled is current
+          // again, so it must pass through the cascade to inactive/null.
+          `update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name = ? and (state != 'inactive' or disabled_reason is not null) ${preserveRemovedTargets}`
         )
-        .run(now, projectName);
+        .run(now, projectName, ...currentRoutineNames);
     });
     apply();
   }

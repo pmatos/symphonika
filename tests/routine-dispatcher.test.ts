@@ -548,6 +548,61 @@ describe("RoutineFiringDispatcher", () => {
       runStore.close();
     }
   });
+
+  it("reclassifies a restored target while its Project remains disabled", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const routine = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-23T10:00:00.000Z" },
+      sourcePath: path.join(root, "daily-report.md"),
+      projectName: "alpha"
+    };
+    runStore.syncRoutines([routine], { projects: ["alpha"] });
+    runStore.syncRoutines([], { projects: ["alpha"] });
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: quietProvider() },
+        configDir: root,
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              disabled: true,
+              routines: [routine]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.listRoutines()).toEqual([]);
+      expect(runStore.listRoutines({ includeInactive: true })).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          name: "daily-report",
+          state: "inactive"
+        })
+      );
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("passes effective execution overrides without re-rendering resolved values", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

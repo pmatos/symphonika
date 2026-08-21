@@ -383,10 +383,17 @@ export async function dispatchDueRoutines(
 
   for (const project of projects) {
     if (project.disabled === true) {
+      const trackerlessGitRoutines = project.trackerlessGitRoutines ?? [];
+      const templateRejectedRoutines = project.templateRejectedRoutines ?? [];
       input.runStore.markRoutinesInactiveForProject(project.name, {
+        currentRoutineNames: [
+          ...(project.routines ?? []),
+          ...trackerlessGitRoutines,
+          ...templateRejectedRoutines
+        ].map((routine) => routine.name),
         now,
-        trackerlessGitRoutines: project.trackerlessGitRoutines ?? [],
-        templateRejectedRoutines: project.templateRejectedRoutines ?? []
+        trackerlessGitRoutines,
+        templateRejectedRoutines
       });
       continue;
     }

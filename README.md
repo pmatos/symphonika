@@ -107,7 +107,11 @@ Create the default file with restrictive permissions, then edit it without putti
 the command line:
 
 ```sh
-secrets_dir="${XDG_CONFIG_HOME:-$HOME/.config}/symphonika"
+case "${XDG_CONFIG_HOME:-}" in
+  /*) config_home="$XDG_CONFIG_HOME" ;;
+  *) config_home="$HOME/.config" ;;
+esac
+secrets_dir="$config_home/symphonika"
 secrets_file="$secrets_dir/env"
 mkdir -p "$secrets_dir"
 chmod 700 "$secrets_dir"

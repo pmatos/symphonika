@@ -1,9 +1,13 @@
-import { access, readFile } from "node:fs/promises";
+import { execFile as execFileCallback } from "node:child_process";
+import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const readmePath = path.join(repoRoot, "README.md");
+const execFile = promisify(execFileCallback);
 
 describe("README", () => {
   it("orients visitors with valid relative documentation links", async () => {
@@ -54,6 +58,38 @@ describe("README", () => {
     expect(readme).not.toMatch(
       /\/home\/|\/Users\/|GITHUB_TOKEN|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+/
     );
+  });
+
+  it("creates the documented env file under the home fallback for a relative XDG config home", async () => {
+    const readme = await readFile(readmePath, "utf8");
+    const recipe = readme.match(
+      /Create the default file[\s\S]*?```sh\n([\s\S]*?)\n```/
+    )?.[1];
+    const root = await mkdtemp(path.join(tmpdir(), "symphonika-readme-test-"));
+    const homeDir = path.join(root, "home");
+
+    expect(recipe).toBeDefined();
+    await mkdir(homeDir);
+    try {
+      await execFile("/bin/sh", ["-c", recipe ?? ""], {
+        cwd: root,
+        env: {
+          ...process.env,
+          EDITOR: "true",
+          HOME: homeDir,
+          XDG_CONFIG_HOME: "relative-config"
+        }
+      });
+
+      await expect(
+        access(path.join(homeDir, ".config", "symphonika", "env"))
+      ).resolves.toBeUndefined();
+      await expect(
+        access(path.join(root, "relative-config", "symphonika", "env"))
+      ).rejects.toThrow();
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
   });
 });
 

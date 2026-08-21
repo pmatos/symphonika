@@ -1056,7 +1056,24 @@ async function runRoutineFiring(input: {
       rawLogPath,
       workspacePath: prepared.workspacePath
     });
-    await deadline.race(input.provider.validate(input.providerCommand));
+    // One object feeds the adapter's single command-template render in both
+    // validate() and runAttempt(), so the two paths cannot drift. The result
+    // is not the final argv — the adapter still layers routine arguments and
+    // the process scope on top.
+    const routineOverrides = {
+      ...(input.routine.effort === undefined
+        ? {}
+        : { effort: input.routine.effort }),
+      ...(input.routine.model === undefined
+        ? {}
+        : { model: input.routine.model }),
+      ...(input.routine.permissionMode === undefined
+        ? {}
+        : { permissionMode: input.routine.permissionMode })
+    };
+    await deadline.race(
+      input.provider.validate(input.providerCommand, routineOverrides)
+    );
     input.runStore.updateRoutineFiringState(input.firingId, "running");
     input.activeRuns.attachProvider(input.firingId, {
       cancel: () => input.provider.cancel(input.firingId),
@@ -1118,17 +1135,7 @@ async function runRoutineFiring(input: {
           attempt: 1,
           id: input.firingId
         },
-        routine: {
-          ...(input.routine.effort === undefined
-            ? {}
-            : { effort: input.routine.effort }),
-          ...(input.routine.model === undefined
-            ? {}
-            : { model: input.routine.model }),
-          ...(input.routine.permissionMode === undefined
-            ? {}
-            : { permissionMode: input.routine.permissionMode })
-        },
+        routine: routineOverrides,
         workspacePath: prepared.workspacePath
       })) {
         const normalizedLogCursor = await appendRoutineEvent({

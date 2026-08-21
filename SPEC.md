@@ -1297,7 +1297,14 @@ Provider adapters expose a normalized interface conceptually equivalent to:
 ```ts
 type AgentProvider = {
   name: "codex" | "claude" | "omp";
-  validate(command: string): Promise<void>;
+  validate(
+    command: string,
+    values?: {
+      effort?: string;
+      model?: string;
+      permissionMode?: string;
+    },
+  ): Promise<void>;
   runAttempt(input: ProviderRunInput): AsyncIterable<ProviderEvent>;
   cancel(runId: string): Promise<void>;
 };
@@ -1385,16 +1392,20 @@ the section form is what lets an operator omit a whole `--model X` segment when 
 leaving a dangling incomplete flag, and likewise lets an operator template
 `{{#permission_mode}}--permission-mode {{permission_mode}}{{/permission_mode}}` so a routine that
 doesn't declare `permission_mode` doesn't emit a dangling flag either. Each provider adapter renders
-`input.provider.command` through this template — using the firing's resolved values for
-`runAttempt`, and empty values (so every section collapses) for `validate()` and for issue-driven
-Runs — before parsing the rendered string into argv. Symphonika's TypeScript never hardcodes a
-provider's flag vocabulary; the operator's own authored command carries that knowledge, exactly as it
-already does today for Codex's `-c sandbox_mode=...`. An unrecognized or malformed template tag
-throws rather than being passed through as literal text. `permission_mode` is exempt from the
-unreferenced-field declaration-load check (§5.4): unlike `model`/`effort`, a routine may declare
-`permission_mode` purely as documentation of intent without its resolved provider command
-referencing the tag, since no provider currently requires it to appear in the command for full
-permission to take effect (the default commands above already carry a fixed policy flag literally).
+the authored command exactly once before parsing it into argv: `runAttempt` uses
+`input.provider.command` with the firing's resolved values, while `validate()` uses its optional
+values argument and defaults to empty values (so every section collapses) for issue-driven or
+provider-level validation. A Routine Firing passes the authored command and the same resolved values
+to both adapter entrypoints, so routine-only flags and values are covered by the pre-flight probe
+without re-parsing substituted bytes as another template. Symphonika's TypeScript never hardcodes a
+provider's flag vocabulary; the operator's own authored command carries that knowledge, exactly as
+it already does today for Codex's `-c sandbox_mode=...`. An unrecognized or malformed template tag
+throws rather than being passed through as literal text.
+`permission_mode` is exempt from the unreferenced-field declaration-load check (§5.4): unlike
+`model`/`effort`, a routine may declare `permission_mode` purely as documentation of intent without
+its resolved provider command referencing the tag, since no provider currently requires it to appear
+in the command for full permission to take effect (the default commands above already carry a fixed
+policy flag literally).
 Claude Routine Firings additionally ensure one `--disallowedTools` option whose variadic values
 merge any operator-authored restrictions with `ScheduleWakeup`, `Monitor`, and `CronCreate`
 (outside the template, applied by the adapter directly), and set

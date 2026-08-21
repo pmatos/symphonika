@@ -852,14 +852,16 @@ async function validateServiceRoutines(
             : { timeoutMinutes: routine.timeoutMinutes })
         };
         try {
-          const { rendered, unreferencedFields } =
-            renderProviderCommandTemplate(providerConfig.command, resolved);
+          const { unreferencedFields } = renderProviderCommandTemplate(
+            providerConfig.command,
+            resolved
+          );
           for (const field of unreferencedFields) {
             errors.push(
               `routine "${routine.name}" declares ${field}, but providers.${routine.provider}.command never references it`
             );
           }
-          await providerAdapter.validate(rendered);
+          await providerAdapter.validate(providerConfig.command, resolved);
         } catch (error) {
           errors.push(
             `routine "${routine.name}" providers.${routine.provider}.command is invalid: ${errorMessage(error)}`
@@ -961,9 +963,7 @@ async function validateWorkflowProviderReferences(
       continue;
     }
     try {
-      await adapter.validate(
-        renderProviderCommandTemplate(provider.command, {}).rendered
-      );
+      await adapter.validate(provider.command);
     } catch (error) {
       errors.push(
         `projects.${project.name} providers.${providerName}.command is invalid: ${errorMessage(error)}`
@@ -2174,9 +2174,7 @@ async function validateProject(
     providerOk = false;
   } else if (provider !== undefined) {
     try {
-      await providerAdapter.validate(
-        renderProviderCommandTemplate(provider.command, {}).rendered
-      );
+      await providerAdapter.validate(provider.command);
     } catch (error) {
       errors.push(
         `projects.${project.name}.providers.${project.agent.provider}.command is invalid: ${errorMessage(error)}`

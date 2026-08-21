@@ -3003,7 +3003,7 @@ describe("HTTP app — routine detail page (#304)", () => {
             lastAttemptedAt: "2026-05-22T09:00:00.000Z",
             lastLoadedAt: "2026-05-22T08:00:00.000Z",
             ok: false,
-            usingLastKnownGood: false
+            usingLastKnownGood: true
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
           stateRoot: test.stateRoot
@@ -3056,7 +3056,7 @@ describe("HTTP app — routine detail page (#304)", () => {
             lastAttemptedAt: "2026-05-22T09:00:00.000Z",
             lastLoadedAt: "2026-05-22T08:00:00.000Z",
             ok: false,
-            usingLastKnownGood: false
+            usingLastKnownGood: true
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
           stateRoot: test.stateRoot
@@ -3076,6 +3076,9 @@ describe("HTTP app — routine detail page (#304)", () => {
     }
   });
 
+  // Covers only a non-overlapping error. The known substring leak -- an
+  // error naming "audit-weekly" matching a routine called "audit" -- is
+  // still live; see the filter comment in pages.ts.
   it("does not show another declaration's reload error on this Routine's page", async () => {
     const test = await setup();
     try {
@@ -3111,7 +3114,7 @@ describe("HTTP app — routine detail page (#304)", () => {
             lastAttemptedAt: "2026-05-22T09:00:00.000Z",
             lastLoadedAt: "2026-05-22T08:00:00.000Z",
             ok: false,
-            usingLastKnownGood: false
+            usingLastKnownGood: true
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
           stateRoot: test.stateRoot

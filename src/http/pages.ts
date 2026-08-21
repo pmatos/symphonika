@@ -2045,6 +2045,10 @@ export function registerPages(options: RegisterPagesOptions): void {
     // reload error lives only in the flat reload.errors list, so this is a
     // best-effort match. The source path is the discriminating key: a broken
     // declaration is reported as `routine at <sourcePath> ...`, never by name.
+    // Both arms are substring matches, so a name that prefixes a sibling's
+    // ("audit" vs "audit-weekly") can still surface the sibling's error.
+    // Anchoring is not safe while the error formats stay free-form: a missed
+    // error is worse here than an over-shown one.
     const declarationSourcePath = declaration.sourcePath;
     const reloadErrors = (
       options.getStatusSnapshot?.()?.reload.errors ?? []

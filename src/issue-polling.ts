@@ -1640,11 +1640,14 @@ export function backoffUntil(nowMs: number): number {
 }
 
 // Maps each rate-limited project's poll report back to the resolved GitHub
-// token its tracker used by Project name and repository identity, so a
-// caller (daemon.ts) can back off polling
+// tokens declared for its Project name and repository identity, so a caller
+// (daemon.ts) can back off polling
 // scoped to that credential instead of every configured project -- SPEC.md
 // §6 permits each tracker to reference an independent $VAR_NAME, and GitHub
 // tracks rate-limit budgets per token, not per Symphonika deployment.
+// Defensive reload can retain indistinguishable duplicate declarations that
+// reference different tokens. Reports carry no declaration provenance, so
+// every matching resolved token is conservatively included.
 // Structurally typed over `reports` so the same function serves both
 // IssuePollStatus.projects and PullRequestPollStatus.projects. Deliberately
 // does not gate on `report.ok`: a PR-poll report can be `ok: true` (the PR
@@ -1661,12 +1664,13 @@ export function rateLimitedTokens(
   projects: readonly PollingProjectConfig[],
   env: NodeJS.ProcessEnv
 ): Set<string> {
-  const projectsByIdentity = new Map(
-    projects.map((project) => [
-      projectPollIdentityKey(project.name, project.tracker),
-      project
-    ])
-  );
+  const projectsByIdentity = new Map<string, PollingProjectConfig[]>();
+  for (const project of projects) {
+    const key = projectPollIdentityKey(project.name, project.tracker);
+    const declarations = projectsByIdentity.get(key) ?? [];
+    declarations.push(project);
+    projectsByIdentity.set(key, declarations);
+  }
   const tokens = new Set<string>();
   for (const report of reports) {
     if (report.error === undefined) {
@@ -1675,15 +1679,17 @@ export function rateLimitedTokens(
     if (!isRateLimitError(report.error)) {
       continue;
     }
-    const project = projectsByIdentity.get(
+    const matchingProjects = projectsByIdentity.get(
       projectPollIdentityKey(report.name, report.repository)
     );
-    if (project === undefined) {
+    if (matchingProjects === undefined) {
       continue;
     }
-    const token = resolveEnvBackedValue(project.tracker.token, env);
-    if (token !== undefined) {
-      tokens.add(token);
+    for (const project of matchingProjects) {
+      const token = resolveEnvBackedValue(project.tracker.token, env);
+      if (token !== undefined) {
+        tokens.add(token);
+      }
     }
   }
   return tokens;

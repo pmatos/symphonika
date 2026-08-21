@@ -1091,6 +1091,31 @@ describe("rateLimitedTokens", () => {
     expect(tokens).toEqual(new Set(["secret-beta"]));
   });
 
+  it("backs off every token for indistinguishable duplicate declarations", () => {
+    const duplicateIdentityOnBetaToken: PollingProjectConfig = {
+      ...alphaProject,
+      tracker: {
+        ...alphaProject.tracker,
+        token: "$GITHUB_TOKEN_BETA"
+      }
+    };
+
+    const tokens = rateLimitedTokens(
+      [
+        {
+          error: "API rate limit exceeded",
+          name: "alpha",
+          ok: false,
+          repository: { owner: "pmatos", repo: "alpha" }
+        }
+      ],
+      [alphaProject, duplicateIdentityOnBetaToken],
+      env
+    );
+
+    expect(tokens).toEqual(new Set(["secret-alpha", "secret-beta"]));
+  });
+
   it("ignores a failed project whose error isn't rate-limit shaped", () => {
     const tokens = rateLimitedTokens(
       [

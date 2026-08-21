@@ -117,12 +117,14 @@ are not classified as backoff skips.
 SPEC.md §6 lets each project's tracker reference an independent `$VAR_NAME`, and GitHub tracks
 rate-limit budgets per token, so a rate limit on one project's credential must not suppress polling
 for a project on a different one. `rateLimitedTokens` (`src/issue-polling.ts`) maps each rate-limited
-project's poll report back to its resolved token using the report's case-insensitive `(name, owner,
+project's poll report back to resolved tokens using the report's case-insensitive `(name, owner,
 repository)` identity, not its bare Project name. This matches ADR 0077's snapshot provenance
 boundary and prevents a duplicate-named declaration for a different repository from backing off the
-wrong credential. `engageGithubBackoff` (`daemon.ts`) engages the window for every token that
-function returns. The map's values are only ever used as opaque keys and never logged -- the
-resolved token is a secret (SPEC.md §6's redaction requirement).
+wrong credential. Defensive reload can also retain declarations with the same name and repository
+but different tokens; because a report cannot distinguish those declarations, all of their resolved
+tokens are conservatively backed off. `engageGithubBackoff` (`daemon.ts`) engages the window for
+every token that function returns. The map's values are only ever used as opaque keys and never
+logged -- the resolved token is a secret (SPEC.md §6's redaction requirement).
 
 ### A clean poll result only ever lets a token's window lapse, never clears it early
 

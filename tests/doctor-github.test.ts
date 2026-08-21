@@ -78,7 +78,7 @@ describe("GitHub Project validation", () => {
 
     expect(report.ok).toBe(false);
     expect(report.errors).toContain(
-      "email.smtp_password_env references $SMTP_TEST_PASSWORD, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . /path/to/symphonika.env; set +a)"
+      `email.smtp_password_env references $SMTP_TEST_PASSWORD, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . ${path.join(root, "env")}; set +a)`
     );
   });
 

@@ -101,16 +101,17 @@ the command line:
 
 ```sh
 secrets_file="${XDG_CONFIG_HOME:-$HOME/.config}/symphonika/env"
-umask 077
-touch "$secrets_file"
-chmod 600 "$secrets_file"
+mkdir -p "$(dirname "$secrets_file")"
+(umask 077; touch "$secrets_file")
 "${EDITOR:-vi}" "$secrets_file"
 ```
 
 Use systemd environment-file syntax, for example `SYMPHONIKA_SMTP_PASSWORD=...`, or the variable
-name selected by `email.smtp_password_env`. The leading `-` in the generated `EnvironmentFile=`
-directive makes a missing file non-fatal, and the installer never creates or reads the file. After
-creating or changing it, run `systemctl --user restart symphonika.service`. Re-running
+name selected by `email.smtp_password_env`. Keep the file to secrets only: assignments in it
+override the unit's own `Environment=` settings, so a `PATH=` line there would replace the `PATH`
+baked in at install time. The leading `-` in the generated `EnvironmentFile=` directive makes a
+missing file non-fatal, and the installer never creates or reads the file. After creating or
+changing it, run `systemctl --user restart symphonika.service`. Re-running
 `service install --force` preserves this reference.
 
 What the generated units give you:

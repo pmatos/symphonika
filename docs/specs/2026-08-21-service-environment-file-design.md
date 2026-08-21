@@ -21,7 +21,9 @@ not configured. Operators can create it later and restart the service without re
 unit. The file may define the default `SYMPHONIKA_SMTP_PASSWORD` or any name selected through
 `email.smtp_password_env`; the installer does not parse the Service Config or read secret values.
 
-The generated unit preserves the absolute filename and escapes systemd `%` specifiers.
+The generated unit preserves the absolute filename, escapes systemd `%` specifiers, and
+backslash-escapes glob metacharacters — systemd glob-expands this path, and the leading `-` would
+otherwise turn a directory named `config [old]` into a silently unloaded secrets file.
 `service install --force` always regenerates the same directive, making the injection durable
 across documented redeploys. Installed-unit drift checks treat the directive as a structural
 requirement while allowing an operator-authored path to satisfy it.

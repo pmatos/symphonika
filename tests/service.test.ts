@@ -510,7 +510,7 @@ describe("runServiceInstall", () => {
     );
   });
 
-  it("references an optional env file beside the default user config", async () => {
+  it("references an optional env file beside the default user config without creating it", async () => {
     const home = await makeTempHome();
     const xdg = path.join(home, "custom-config");
 
@@ -518,14 +518,34 @@ describe("runServiceInstall", () => {
       ...baseOptions,
       env: { PATH: "/opt/node/bin:/usr/bin", XDG_CONFIG_HOME: xdg },
       homeDir: home,
-      print: true
+      reload: false
     });
 
     const environmentFilePath = path.join(xdg, "symphonika", "env");
-    expect(report.files[0]?.content).toContain(
-      `EnvironmentFile=-${environmentFilePath}`
+    expect(report.ok).toBe(true);
+    const installedUnit = await readFile(
+      path.join(xdg, "systemd", "user", "symphonika.service"),
+      "utf8"
     );
+    expect(installedUnit).toContain(`EnvironmentFile=-${environmentFilePath}`);
+    // The env file stays operator-owned: a real install must never create it
+    // (and so never hand it a default-umask, world-readable mode).
     await expect(access(environmentFilePath)).rejects.toThrow();
+  });
+
+  // systemd glob-expands EnvironmentFile= and the leading `-` swallows a
+  // non-matching pattern, so an unescaped `[` would silently drop the
+  // operator's secrets instead of failing the unit.
+  it("escapes glob metacharacters in the env file path", async () => {
+    const report = await runServiceInstall({
+      ...baseOptions,
+      configPath: "/opt/config [old]/daemon.yml",
+      print: true
+    });
+
+    expect(report.files[0]?.content).toContain(
+      "EnvironmentFile=-/opt/config \\[old\\]/env"
+    );
   });
 
   it("skips daemon-reload when reload is false but still writes units", async () => {

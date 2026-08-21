@@ -486,7 +486,7 @@ export async function runDoctor(
     (env[email.smtpPasswordEnv]?.trim().length ?? 0) === 0
   ) {
     errors.push(
-      `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . /path/to/symphonika.env; set +a)`
+      `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . ${path.join(resolvedConfig.configDir, "env")}; set +a)`
     );
   }
 

@@ -508,11 +508,11 @@ Their exact expanded behavior is:
   state's fallback takes `blocked`.
 - **`refactor-swarm`:** the red-team agent must succeed and commit characterization tests before
   the refactorer runs. The refactorer takes its transition on `provider_success: true` and
-  `branch_ahead_of_base: true`, but that predicate is not attempt-local (see the note under the
-  signal table), so the red-team commit alone keeps it true — the required distinct refactor commit
-  is enforced by `prompts/refactor.md` and re-checked by the verifier, not by the predicate. The
-  verifier takes `success` on `provider_success: true` alone because it is instructed not to modify
-  the Workspace; rejection takes `blocked`. All three states share the
+  `branch_ahead_of_base: true`, but that predicate is not attempt-local (see "Predicates and signal
+  availability" above), so the red-team commit alone keeps it true — the required distinct refactor
+  commit is enforced by `prompts/refactor.md` and re-checked by the verifier, not by the predicate.
+  The verifier takes `success` on `provider_success: true` alone because it is instructed not to
+  modify the Workspace; rejection takes `blocked`. All three states share the
   issue Workspace, but each receives only its own rendered prompt and the fixed structured prompt
   variables—never a prior provider transcript or reasoning trail. The verifier can and should
   inspect files, commits, diffs, and tests. This is prompt isolation, not sandboxing.

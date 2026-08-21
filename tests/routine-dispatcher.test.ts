@@ -1472,6 +1472,73 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("persists a dispatched firing's execution-time kind across a later declaration edit", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/dependency-update/01JABCDEFG";
+    await createGitWorkspaceAtBase({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "git" as const,
+      name: "dependency-update",
+      projectName: "alpha",
+      prompt: "Update dependencies.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: path.join(root, "dependency-update.md")
+    };
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: quietProvider() },
+        configDir: root,
+        createFiringId: () => "fire-kind-snapshot",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch: vi.fn().mockResolvedValue([])
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          ["alpha", { ...runStoreProjectFixture(), routines: [declaration] }]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.getRoutineFiring("fire-kind-snapshot")).toEqual(
+        expect.objectContaining({
+          branchRef: `refs/heads/${branchName}`,
+          kind: "git"
+        })
+      );
+
+      runStore.syncRoutines([
+        { ...declaration, kind: "report", provider: "codex" }
+      ]);
+
+      expect(runStore.getRoutineFiring("fire-kind-snapshot")?.kind).toBe("git");
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("succeeds a kind: git firing with commits ahead and discovers every open PR", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

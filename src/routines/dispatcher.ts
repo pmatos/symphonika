@@ -278,6 +278,7 @@ export function fireRoutineNow(
     branchRef: workspacePlan.branchRef,
     firingId,
     forceOperatorDisabled,
+    kind: detail.kind,
     projectName: routine.projectName,
     providerCommand,
     providerName,
@@ -731,6 +732,7 @@ export async function dispatchDueRoutines(
         fanoutId,
         firedAt: now.toISOString(),
         firingId,
+        kind: routineDetail.kind,
         ...(reEvaluation.nextAt === undefined
           ? {}
           : { nextFireAt: reEvaluation.nextAt }),

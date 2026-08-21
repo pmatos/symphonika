@@ -191,6 +191,7 @@ export type RoutineFiringStatus = {
   createdAt: string;
   fanoutId: string | null;
   id: string;
+  kind: RoutineKind | null;
   notificationError?: string | null;
   notificationState?: RoutineNotificationState;
   outcome: RoutineOutcome | null;
@@ -759,6 +760,7 @@ type RoutineFiringRow = {
   created_at: string;
   fanout_id: string | null;
   id: string;
+  kind: RoutineKind | null;
   notification_error: string | null;
   notification_state: RoutineNotificationState | null;
   outcome_action: RoutineOutcomeAction | null;
@@ -880,6 +882,7 @@ type CreateRoutineFiringInput = {
   branchRef?: string;
   fanoutId?: string;
   id: string;
+  kind?: RoutineKind;
   projectName: string;
   providerCommand: string;
   providerName: AgentProviderName;
@@ -2910,13 +2913,20 @@ export class RunStore {
     input: CreateRoutineFiringInput
   ): FiringTransitionChangeEvent {
     const now = timestamp();
+    const kind =
+      input.kind ?? this.routineKind(input.projectName, input.routineName);
+    if (kind === undefined) {
+      throw new Error(
+        `cannot create firing ${input.id}: routine kind is unavailable`
+      );
+    }
     this.database
       .prepare(
         [
           "insert into routine_firings (",
-          "id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, branch_name, branch_ref, created_at, updated_at",
+          "id, fanout_id, project_name, routine_name, kind, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, branch_name, branch_ref, created_at, updated_at",
           ") values (",
-          "@id, @fanout_id, @project_name, @routine_name, 'queued', @provider_name, @provider_command, @trigger_source, @scheduled_at, @workspace_path, @branch_name, @branch_ref, @created_at, @updated_at",
+          "@id, @fanout_id, @project_name, @routine_name, @kind, 'queued', @provider_name, @provider_command, @trigger_source, @scheduled_at, @workspace_path, @branch_name, @branch_ref, @created_at, @updated_at",
           ")"
         ].join(" ")
       )
@@ -2926,6 +2936,7 @@ export class RunStore {
         created_at: now,
         fanout_id: input.fanoutId ?? null,
         id: input.id,
+        kind,
         project_name: input.projectName,
         provider_command: input.providerCommand,
         provider_name: input.providerName,
@@ -2944,6 +2955,7 @@ export class RunStore {
     fanoutId?: string;
     firedAt: string;
     firingId: string;
+    kind?: RoutineKind;
     nextFireAt?: string;
     projectName: string;
     providerCommand: string;
@@ -2963,6 +2975,7 @@ export class RunStore {
           : { branchRef: input.branchRef }),
         ...(input.fanoutId === undefined ? {} : { fanoutId: input.fanoutId }),
         id: input.firingId,
+        ...(input.kind === undefined ? {} : { kind: input.kind }),
         projectName: input.projectName,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
@@ -3035,6 +3048,7 @@ export class RunStore {
     branchRef?: string;
     firingId: string;
     forceOperatorDisabled?: boolean;
+    kind?: RoutineKind;
     projectName: string;
     providerCommand: string;
     providerName: AgentProviderName;
@@ -3067,6 +3081,7 @@ export class RunStore {
           ? {}
           : { branchRef: input.branchRef }),
         id: input.firingId,
+        ...(input.kind === undefined ? {} : { kind: input.kind }),
         projectName: input.projectName,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
@@ -3159,7 +3174,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, kind, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings where id = ?"
         ].join(" ")
       )
@@ -3259,7 +3274,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, kind, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           where,
           "order by created_at desc, id desc",
@@ -3297,7 +3312,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, fanout_id, project_name, routine_name, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, kind, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           "where workspace_path is not null and workspace_path <> ''",
           "and workspace_pruned_at is null",
@@ -4489,6 +4504,7 @@ export class RunStore {
         "state = 'failed',",
         "terminal_reason = ?,",
         "commits_ahead = case",
+        "when kind = 'report' then 0",
         "when workspace_path is not null and workspace_path <> '' then 1",
         "else commits_ahead end,",
         "updated_at = ?",
@@ -4815,6 +4831,10 @@ export class RunStore {
         id text primary key,
         project_name text not null,
         routine_name text not null,
+        -- Nullable so a database created here matches one migrated from a
+        -- release without this column, where historical rows stay unknown.
+        -- createRoutineFiring rejects a firing whose kind cannot be resolved.
+        kind text,
         state text not null,
         provider_name text not null,
         provider_command text not null,
@@ -4939,6 +4959,7 @@ export class RunStore {
       ["routine_firings", "prompt_path", "text"],
       ["routine_firings", "raw_log_path", "text"],
       ["routine_firings", "normalized_log_path", "text"],
+      ["routine_firings", "kind", "text"],
       ["routine_firings", "commits_ahead", "integer not null default 0"],
       ["routine_firings", "outcome_status", "text"],
       ["routine_firings", "outcome_action", "text"],
@@ -4979,6 +5000,7 @@ export class RunStore {
 
     const apply = this.database.transaction(() => {
       let addedCommitsAhead = false;
+      let addedFiringKind = false;
       for (const [table, column, decl] of additions) {
         const added = this.ensureColumn(table, column, decl);
         if (
@@ -4988,6 +5010,22 @@ export class RunStore {
         ) {
           addedCommitsAhead = true;
         }
+        if (added && table === "routine_firings" && column === "kind") {
+          addedFiringKind = true;
+        }
+      }
+
+      if (addedFiringKind) {
+        // Branch identity is immutable firing evidence. It can prove a
+        // historical firing was kind: git, while a missing/local-remote ref
+        // cannot safely distinguish a report firing from older git rows that
+        // predate branch persistence. Leave those rows unknown so retention
+        // never derives and deletes a branch from mutable Routine state.
+        this.database.exec(`
+          update routine_firings
+          set kind = 'git'
+          where branch_ref like 'refs/heads/%';
+        `);
       }
 
       if (addedCommitsAhead) {
@@ -5169,6 +5207,19 @@ export class RunStore {
       : this.listRoutinePullRequests({ firingId: latest.id }).map(
           (pullRequest) => pullRequest.prNumber
         );
+  }
+
+  private routineKind(
+    projectName: string,
+    routineName: string
+  ): RoutineKind | undefined {
+    return (
+      this.database
+        .prepare(
+          "select kind from routines where project_name = ? and name = ?"
+        )
+        .get(projectName, routineName) as { kind: RoutineKind } | undefined
+    )?.kind;
   }
 
   private getRunArtifactRow(runId: string): RunArtifactRow | undefined {
@@ -5558,6 +5609,7 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
     createdAt: row.created_at,
     fanoutId: row.fanout_id ?? null,
     id: row.id,
+    kind: row.kind ?? null,
     ...(row.notification_state === null
       ? {}
       : {

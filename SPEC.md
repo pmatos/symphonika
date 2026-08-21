@@ -256,14 +256,14 @@ one-shot is consumed as an ungrouped `catch_up_window` skip instead of reopening
 summary, while a recurring target begins with its next future clock event.
 
 A Routine Firing is one durable execution of a Routine Target. It records the Routine, its target
-Project, fan-out id, provider, nominal scheduled clock time, workspace path, branch name and ref,
-prompt evidence, provider logs, terminal reason, lifecycle state, its canonical Routine Outcome,
-whether its prepared `kind: git` workspace held commits ahead of the configured base branch at
-completion, and any pull requests discovered from a `kind: git` firing branch. The commits-ahead
-signal is independent of the canonical action: a verified GitHub issue or pull-request action may
-legitimately be the Routine Outcome while the workspace still has local commits to protect. The
-Routine Outcome records `status`, `action`, `url`, `title`, `summary`, `verified`, and `source`
-without replacing lifecycle state or terminal reason; see ADR 0068. Its trigger source is
+Project, fan-out id, execution-time kind, provider, nominal scheduled clock time, workspace path,
+branch name and ref, prompt evidence, provider logs, terminal reason, lifecycle state, its canonical
+Routine Outcome, whether its prepared `kind: git` workspace held commits ahead of the configured
+base branch at completion, and any pull requests discovered from a `kind: git` firing branch. The
+commits-ahead signal is independent of the canonical action: a verified GitHub issue or pull-request
+action may legitimately be the Routine Outcome while the workspace still has local commits to
+protect. The Routine Outcome records `status`, `action`, `url`, `title`, `summary`, `verified`, and
+`source` without replacing lifecycle state or terminal reason; see ADR 0068. Its trigger source is
 `scheduled` or `manual`; a scheduled firing carries the fan-out id of the Routine Fan-out it belongs
 to, while a manual firing targets one Routine Target directly and has no fan-out id. A one-shot
 `schedule.at` target becomes `expired` after its firing is claimed and must not fire again on daemon
@@ -1008,10 +1008,11 @@ release that protection; age alone must never delete the only copy.
 When a pre-signal database first gains commits-ahead evidence, the column addition and backfill are
 atomic. Every historical firing not known to be a `kind: report` firing is conservatively protected;
 subsequent startups do not repeat the backfill and therefore cannot overwrite a newly inspected
-zero. Startup reconciliation similarly protects a prepared `kind: git` workspace when a daemon
-crash prevents the ordinary terminal inspection from running. Because a Routine declaration can
-change kind while its firing is active and the firing row does not retain execution-time kind,
-reconciliation treats every leaked firing with a recorded workspace path as unknown and protected.
+zero. Startup reconciliation uses the firing's persisted execution-time kind rather than the
+mutable Routine declaration. It protects a leaked `kind: git` firing with a recorded workspace path
+when a daemon crash prevents ordinary terminal inspection, while a leaked `kind: report` firing
+records verified zero commits-ahead and remains eligible for its normal age window. A historical
+firing whose kind is unknown remains conservatively protected.
 
 After a Routine Firing reaches a terminal state, Symphonika evaluates its Routine notification
 policy. Delivery occurs after `kind: git` PR discovery, uses both plain text and an escaped HTML
@@ -1137,12 +1138,16 @@ terminal update time has crossed the configured outcome window and whose persist
 signal is false. Canonical Routine Outcome does not substitute for this predicate. Reclamation runs
 `git worktree remove --force` followed by `git worktree prune` against the Project cache, so both
 the checkout and its registration are removed; for a `kind: git` firing, reclamation also deletes
-its deterministic local branch (`git branch -D`) from the Project cache, since that branch has no
-other purpose once the worktree is gone. A failed removal remains unmarked and is retried on
-a later tick. The Run Store preserves `workspace_path` and writes `workspace_pruned_at`; no
-state-root provider log, normalized event, or prompt artifact is removed. The manual
-`symphonika prune-workspaces [--dry-run]` command evaluates the same policy even when automatic
-retention is disabled. See ADR 0067.
+its deterministic local branch ref from the Project cache, since that branch has no other purpose
+once the worktree is gone. Branch ownership follows the firing's persisted execution-time kind
+rather than the mutable Routine declaration. Local branch deletion preserves Git's refusal to
+delete a branch checked out by another registered worktree; this matters when colliding firing ids
+share a truncated branch name. A branch already deleted by a concurrent retention pass counts as
+success, while a branch now held by another firing is preserved. A failed removal remains unmarked
+and is retried on a later tick. The Run Store preserves `workspace_path` and writes
+`workspace_pruned_at`; no state-root provider log, normalized event, or prompt artifact is removed.
+The manual `symphonika prune-workspaces [--dry-run]` command evaluates the same policy even when
+automatic retention is disabled. See ADR 0067.
 
 ## 9. GitHub Tracker Behavior
 

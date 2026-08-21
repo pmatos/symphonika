@@ -13,8 +13,12 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildCli } from "../src/cli.js";
+import type { WorkspaceProject } from "../src/workspace.js";
 import { openRunStore } from "../src/run-store.js";
-import { prepareRoutineWorkspace } from "../src/routines/workspace.js";
+import {
+  prepareRoutineWorkspace,
+  routineFiringBranchName
+} from "../src/routines/workspace.js";
 import { pruneRoutineWorkspaces } from "../src/routines/workspace-retention.js";
 
 const execFileAsync = promisify(execFile);
@@ -45,13 +49,7 @@ describe("routine firing workspace retention", () => {
       configDir: root,
       firingId: "fire-retention",
       kind: "report",
-      project: {
-        name: "alpha",
-        workspace: {
-          git: { base_branch: "main", remote: remotePath },
-          root: workspaceRoot
-        }
-      },
+      project: alphaProject({ remotePath, workspaceRoot }),
       routineName: "daily-report"
     });
     await writeFile(path.join(prepared.workspacePath, "agent-output.txt"), "x");
@@ -161,6 +159,91 @@ describe("routine firing workspace retention", () => {
     }
   });
 
+  it("preserves an unrelated branch whose name collides with a report firing", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const stateRoot = path.join(root, "state");
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const firingId = "fire-report-collision";
+    const routineName = "daily-report";
+    const prepared = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId,
+      kind: "report",
+      project: alphaProject({ remotePath, workspaceRoot }),
+      routineName
+    });
+    const unrelatedBranch = routineFiringBranchName({
+      firingId,
+      projectName: "alpha",
+      routineName
+    });
+    await git([
+      "-C",
+      prepared.cachePath,
+      "branch",
+      unrelatedBranch,
+      "origin/main"
+    ]);
+
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: routineName,
+          prompt: "Report.",
+          projectName: "alpha",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: firingId,
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName
+      });
+      store.completeRoutineFiring({
+        id: firingId,
+        state: "succeeded",
+        workspacePath: prepared.workspacePath
+      });
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: routineName,
+          prompt: "Report, then update the declaration.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      expect(store.getRoutineFiring(firingId)?.kind).toBe("report");
+
+      const report = await pruneRoutineWorkspaces({
+        policy: {
+          cancelledDays: 14,
+          enabled: true,
+          failedDays: 14,
+          succeededDays: 0
+        },
+        runStore: store
+      });
+
+      expect(report.failures).toEqual([]);
+      expect(report.pruned.map((entry) => entry.firingId)).toContain(firingId);
+      await expect(
+        branchExists(prepared.cachePath, unrelatedBranch)
+      ).resolves.toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
   it("deletes the deterministic kind: git branch after reclaiming its worktree, tolerating firings without one", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);
@@ -177,13 +260,7 @@ describe("routine firing workspace retention", () => {
       configDir: root,
       firingId: "fire-git-branch",
       kind: "git",
-      project: {
-        name: "alpha",
-        workspace: {
-          git: { base_branch: "main", remote: remotePath },
-          root: workspaceRoot
-        }
-      },
+      project: alphaProject({ remotePath, workspaceRoot }),
       routineName: "dependency-update"
     });
 
@@ -200,7 +277,10 @@ describe("routine firing workspace retention", () => {
       }
     ]);
     store.createRoutineFiring({
+      branchName: prepared.branchName,
+      branchRef: prepared.branchRef,
       id: "fire-git-branch",
+      kind: "git",
       projectName: "alpha",
       providerCommand: "codex fake",
       providerName: "codex",
@@ -242,6 +322,101 @@ describe("routine firing workspace retention", () => {
     await expect(
       branchExists(prepared.cachePath, prepared.branchName)
     ).resolves.toBe(false);
+  });
+
+  it("treats a concurrently deleted kind: git branch as reclaimed", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const stateRoot = path.join(root, "state");
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const firingId = "fire-branch-race";
+    const prepared = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId,
+      kind: "git",
+      project: alphaProject({ remotePath, workspaceRoot }),
+      routineName: "dependency-update"
+    });
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    const wrapperDirectory = path.join(root, "bin");
+    const racedMarkerPath = path.join(root, "raced-deletion");
+    await mkdir(wrapperDirectory, { recursive: true });
+    // The wrapper matches on argv positions, so a reordered `branch -D` call
+    // would degrade it to a pass-through and leave the test asserting
+    // nothing. The marker below turns that silent decay into a failure.
+    await writeFile(
+      path.join(wrapperDirectory, "git"),
+      [
+        "#!/bin/sh",
+        'if [ "$3" = "branch" ] && [ "$4" = "-D" ] && [ "$5" = "--" ]; then',
+        '  "$REAL_GIT_PATH" -C "$2" update-ref -d "refs/heads/$6"',
+        '  : > "$RACED_DELETION_MARKER"',
+        "fi",
+        'exec "$REAL_GIT_PATH" "$@"',
+        ""
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        branchName: prepared.branchName,
+        branchRef: prepared.branchRef,
+        id: firingId,
+        kind: "git",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.completeRoutineFiring({
+        id: firingId,
+        state: "succeeded",
+        workspacePath: prepared.workspacePath
+      });
+      vi.stubEnv("REAL_GIT_PATH", realGitOutput.trim());
+      vi.stubEnv("RACED_DELETION_MARKER", racedMarkerPath);
+      vi.stubEnv(
+        "PATH",
+        `${wrapperDirectory}${path.delimiter}${process.env.PATH ?? ""}`
+      );
+
+      const report = await pruneRoutineWorkspaces({
+        now: new Date("2100-01-01T00:00:00.000Z"),
+        policy: {
+          cancelledDays: 0,
+          enabled: true,
+          failedDays: 0,
+          succeededDays: 0
+        },
+        runStore: store
+      });
+
+      expect(report.failures).toEqual([]);
+      await expect(access(racedMarkerPath)).resolves.toBeUndefined();
+      expect(report.pruned.map((entry) => entry.firingId)).toContain(firingId);
+      expect(store.getRoutineFiring(firingId)?.workspacePrunedAt).toBe(
+        "2100-01-01T00:00:00.000Z"
+      );
+      await expect(
+        branchExists(prepared.cachePath, prepared.branchName)
+      ).resolves.toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+      store.close();
+    }
   });
 
   it.each(["missing", "invalid"] as const)(
@@ -328,6 +503,181 @@ describe("routine firing workspace retention", () => {
     }
   );
 
+  it("keeps a colliding branch a live firing's worktree still has checked out", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const stateRoot = path.join(root, "state");
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const live = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId: "fire-live-holder",
+      kind: "git",
+      project: alphaProject({ remotePath, workspaceRoot }),
+      routineName: "dependency-update"
+    });
+
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md"
+        }
+      ]);
+      // A branch name carries only the firing id's timestamp prefix, so a
+      // terminal firing can share one with a firing that is still running.
+      store.createRoutineFiring({
+        branchName: live.branchName,
+        branchRef: live.branchRef,
+        id: "fire-collided",
+        kind: "git",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.completeRoutineFiring({
+        id: "fire-collided",
+        state: "succeeded",
+        workspacePath: path.join(
+          workspaceRoot,
+          "routines",
+          "dependency-update",
+          "fire-collided"
+        )
+      });
+
+      const report = await pruneRoutineWorkspaces({
+        now: new Date("2100-01-01T00:00:00.000Z"),
+        policy: {
+          cancelledDays: 0,
+          enabled: true,
+          failedDays: 0,
+          succeededDays: 0
+        },
+        runStore: store
+      });
+
+      expect(report.failures).toEqual([]);
+      expect(report.pruned.map((entry) => entry.firingId)).toEqual([
+        "fire-collided"
+      ]);
+      await expect(branchExists(live.cachePath, live.branchName)).resolves.toBe(
+        true
+      );
+      await expect(worktreePaths(live.cachePath)).resolves.toContain(
+        live.workspacePath
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a colliding branch checked out while retention is deciding whether to delete it", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const stateRoot = path.join(root, "state");
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const firingId = "fire-racing-holder";
+    const prepared = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId,
+      kind: "git",
+      project: alphaProject({ remotePath, workspaceRoot }),
+      routineName: "dependency-update"
+    });
+    const racingWorkspacePath = path.join(
+      workspaceRoot,
+      "routines",
+      "dependency-update",
+      "fire-live-collision"
+    );
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    const wrapperDirectory = path.join(root, "bin");
+    const raceMarkerPath = path.join(root, "worktree-added");
+    await mkdir(wrapperDirectory, { recursive: true });
+    await writeFile(
+      path.join(wrapperDirectory, "git"),
+      [
+        "#!/bin/sh",
+        'if [ "$3" = "branch" ] && [ "$4" = "-D" ] && [ ! -e "$RACE_MARKER" ]; then',
+        '  "$REAL_GIT_PATH" -C "$2" worktree add "$RACING_WORKTREE_PATH" "$RACING_BRANCH_NAME"',
+        '  : > "$RACE_MARKER"',
+        "fi",
+        'exec "$REAL_GIT_PATH" "$@"',
+        ""
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        branchName: prepared.branchName,
+        branchRef: prepared.branchRef,
+        id: firingId,
+        kind: "git",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.completeRoutineFiring({
+        id: firingId,
+        state: "succeeded",
+        workspacePath: prepared.workspacePath
+      });
+      vi.stubEnv("RACE_MARKER", raceMarkerPath);
+      vi.stubEnv("RACING_BRANCH_NAME", prepared.branchName);
+      vi.stubEnv("RACING_WORKTREE_PATH", racingWorkspacePath);
+      vi.stubEnv("REAL_GIT_PATH", realGitOutput.trim());
+      vi.stubEnv(
+        "PATH",
+        `${wrapperDirectory}${path.delimiter}${process.env.PATH ?? ""}`
+      );
+
+      const report = await pruneRoutineWorkspaces({
+        now: new Date("2100-01-01T00:00:00.000Z"),
+        policy: {
+          cancelledDays: 0,
+          enabled: true,
+          failedDays: 0,
+          succeededDays: 0
+        },
+        runStore: store
+      });
+
+      expect(report.failures).toEqual([]);
+      expect(report.pruned.map((entry) => entry.firingId)).toEqual([firingId]);
+      await expect(access(raceMarkerPath)).resolves.toBeUndefined();
+      await expect(
+        branchExists(prepared.cachePath, prepared.branchName)
+      ).resolves.toBe(true);
+      await expect(worktreePaths(prepared.cachePath)).resolves.toContain(
+        racingWorkspacePath
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      store.close();
+    }
+  });
+
   it("does not mark an existing planned workspace reclaimed when its cache is invalid", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, "state");
@@ -401,13 +751,7 @@ describe("routine firing workspace retention", () => {
       configDir: root,
       firingId: "fire-race",
       kind: "report",
-      project: {
-        name: "alpha",
-        workspace: {
-          git: { base_branch: "main", remote: remotePath },
-          root: workspaceRoot
-        }
-      },
+      project: alphaProject({ remotePath, workspaceRoot }),
       routineName: "daily-report"
     });
 
@@ -477,13 +821,7 @@ describe("routine firing workspace retention", () => {
       configDir: root,
       firingId: "fire-commit-only",
       kind: "git",
-      project: {
-        name: "alpha",
-        workspace: {
-          git: { base_branch: "main", remote: remotePath },
-          root: workspaceRoot
-        }
-      },
+      project: alphaProject({ remotePath, workspaceRoot }),
       routineName: "nightly-cleanup"
     });
 
@@ -558,13 +896,7 @@ describe("routine firing workspace retention", () => {
       configDir: root,
       firingId: "fire-commit-and-issue",
       kind: "git",
-      project: {
-        name: "alpha",
-        workspace: {
-          git: { base_branch: "main", remote: remotePath },
-          root: workspaceRoot
-        }
-      },
+      project: alphaProject({ remotePath, workspaceRoot }),
       routineName: "nightly-cleanup"
     });
 
@@ -629,6 +961,19 @@ describe("routine firing workspace retention", () => {
     }
   });
 });
+
+function alphaProject(input: {
+  remotePath: string;
+  workspaceRoot: string;
+}): WorkspaceProject {
+  return {
+    name: "alpha",
+    workspace: {
+      git: { base_branch: "main", remote: input.remotePath },
+      root: input.workspaceRoot
+    }
+  };
+}
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(

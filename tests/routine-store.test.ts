@@ -1901,6 +1901,145 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("persists firing kind and migrates only trustworthy legacy git branch evidence", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md"
+        },
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        branchName: "sym/alpha/routine/dependency-update/fire-git",
+        branchRef: "refs/heads/sym/alpha/routine/dependency-update/fire-git",
+        id: "fire-git",
+        kind: "git",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.createRoutineFiring({
+        branchName: "main",
+        branchRef: "refs/remotes/origin/main",
+        id: "fire-report",
+        kind: "report",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+
+      expect(store.getRoutineFiring("fire-git")?.kind).toBe("git");
+      expect(store.getRoutineFiring("fire-report")?.kind).toBe("report");
+    } finally {
+      store.close();
+    }
+
+    const legacyDatabase = new Database(databasePath(stateRoot));
+    try {
+      legacyDatabase.exec("alter table routine_firings drop column kind");
+    } finally {
+      legacyDatabase.close();
+    }
+
+    const migrated = openRunStore({ stateRoot });
+    try {
+      expect(migrated.getRoutineFiring("fire-git")?.kind).toBe("git");
+      expect(migrated.getRoutineFiring("fire-report")?.kind).toBeNull();
+    } finally {
+      migrated.close();
+    }
+  });
+
+  it("protects an orphaned workspace whose historical firing kind is unknown", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        branchName: "main",
+        branchRef: "refs/remotes/origin/main",
+        id: "legacy-unknown-fire",
+        kind: "report",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report",
+        workspacePath: "/tmp/legacy-unknown-workspace"
+      });
+      store.updateRoutineFiringState("legacy-unknown-fire", "running");
+      expect(store.getRoutineFiring("legacy-unknown-fire")).toMatchObject({
+        commitsAhead: false,
+        kind: "report"
+      });
+    } finally {
+      store.close();
+    }
+
+    const legacyDatabase = new Database(databasePath(stateRoot));
+    try {
+      legacyDatabase.exec("alter table routine_firings drop column kind");
+    } finally {
+      legacyDatabase.close();
+    }
+
+    const migrated = openRunStore({ stateRoot });
+    try {
+      expect(migrated.getRoutineFiring("legacy-unknown-fire")?.kind).toBeNull();
+
+      migrated.markRoutineFiringsFailed([
+        {
+          firingId: "legacy-unknown-fire",
+          previousState: "running",
+          reason: "leaked_routine_firing"
+        }
+      ]);
+
+      expect(migrated.getRoutineFiring("legacy-unknown-fire")).toMatchObject({
+        commitsAhead: true,
+        kind: null,
+        state: "failed"
+      });
+      const future = "9999-12-31T23:59:59.999Z";
+      expect(
+        migrated.listRoutineWorkspacePruneCandidates({
+          cancelledBefore: future,
+          failedBefore: future,
+          succeededBefore: future
+        })
+      ).toEqual([]);
+    } finally {
+      migrated.close();
+    }
+  });
+
   it("records workspace reclamation only for an eligible terminal firing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -2350,6 +2489,67 @@ describe("RunStore routines", () => {
           succeededBefore: future
         })
       ).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("allows age-based retention for an orphaned report workspace", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "leaked-report-fire",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.updateRoutineFiringWorkspace({
+        id: "leaked-report-fire",
+        workspacePath: "/tmp/leaked-report-workspace"
+      });
+      store.updateRoutineFiringState("leaked-report-fire", "running");
+
+      store.markRoutineFiringsFailed([
+        {
+          firingId: "leaked-report-fire",
+          previousState: "running",
+          reason: "leaked_routine_firing"
+        }
+      ]);
+
+      expect(store.getRoutineFiring("leaked-report-fire")).toMatchObject({
+        commitsAhead: false,
+        kind: "report",
+        state: "failed",
+        terminalReason: "leaked_routine_firing"
+      });
+      const future = "9999-12-31T23:59:59.999Z";
+      expect(
+        store.listRoutineWorkspacePruneCandidates({
+          cancelledBefore: future,
+          failedBefore: future,
+          succeededBefore: future
+        })
+      ).toEqual([
+        expect.objectContaining({
+          id: "leaked-report-fire",
+          kind: "report",
+          workspacePath: "/tmp/leaked-report-workspace"
+        })
+      ]);
     } finally {
       store.close();
     }

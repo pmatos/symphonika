@@ -6,7 +6,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { defaultUserConfigPath } from "./config-paths.js";
+import {
+  defaultUserConfigPath,
+  serviceEnvironmentFilePath
+} from "./config-paths.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -218,11 +221,8 @@ export async function runServiceInstall(
   const homeDir = options.homeDir ?? homedir();
   const unitDir = userUnitDir(homeDir, env);
   const daemonPath = buildDaemonPath(execPath, env);
-  const selectedConfigPath =
-    options.configPath ?? defaultUserConfigPath({ env, homeDir });
-  const environmentFilePath = path.join(
-    path.dirname(selectedConfigPath),
-    "env"
+  const environmentFilePath = serviceEnvironmentFilePath(
+    options.configPath ?? defaultUserConfigPath({ env, homeDir })
   );
 
   const files: ServiceUnitFile[] = [

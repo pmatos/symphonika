@@ -461,7 +461,8 @@ describe("routine operator surfaces", () => {
 
       expect(response.status).toBe(200);
       expect(body).toContain('<td><a href="/routines/daily-report">1</a></td>');
-      expect(body).not.toContain("1/2 active");
+      expect(body).not.toMatch(/\d+\/\d+ active/);
+      expect(body).not.toContain("removed_from_config");
     } finally {
       store.close();
     }

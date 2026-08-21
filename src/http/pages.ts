@@ -530,9 +530,11 @@ export function registerPages(options: RegisterPagesOptions): void {
         `<div id="active-now-band">${renderActiveNowBand(activeRuns, activeFirings, watchdogByRun, nowMs)}</div>`,
         renderRoutinesSection(
           groupRoutinesByName(
-            options.runStore.listRoutines({
-              includeInactive
-            })
+            options.runStore
+              .listRoutines({
+                includeInactive
+              })
+              .filter((routine) => !isRemovedRoutineTarget(routine))
           ),
           includeInactive
         ),
@@ -5430,14 +5432,15 @@ function renderPullRequestDetailPage(input: {
 
 // A Routine name is globally unique across the *current* declared config
 // (ADR 0069), but removed target rows are soft-disabled, never deleted, and
-// still pass listRoutines()'s default `state != 'inactive'` filter. Dashboard
-// groups exclude those historical rows by default so they cannot inflate the
-// current target count. Routine detail/editor callers opt in to removed rows
-// because they use sourcePath to disambiguate durable historical declarations.
-// Source path is stable per declaration and shared by every target one
-// `routines:` entry materializes, so grouping on (name, sourcePath) keeps
-// distinct declarations apart while still collapsing an N-target Routine
-// into one row.
+// still pass listRoutines()'s default `state != 'inactive'` filter. Source
+// path is stable per declaration and shared by every target one `routines:`
+// entry materializes, so grouping on (name, sourcePath) keeps distinct
+// declarations apart while still collapsing an N-target Routine into one
+// row. Grouping itself keeps every row it is handed: the dashboard drops
+// removed targets from its own input (isRemovedRoutineTarget) so they cannot
+// inflate a live Routine's target count, while the detail and editor routes
+// pass the full list because they need historical rows to disambiguate
+// declarations by sourcePath.
 // Full per-target detail
 // (skip counters, firing history, latest outcome) moves to /routines/:name
 // (#304); this row only needs enough to answer "is it scheduled, and when
@@ -5451,18 +5454,9 @@ type RoutineGroup = {
   targets: RoutineStatus[];
 };
 
-function groupRoutinesByName(
-  routines: RoutineStatus[],
-  includeRemovedTargets = false
-): RoutineGroup[] {
+function groupRoutinesByName(routines: RoutineStatus[]): RoutineGroup[] {
   const byKey = new Map<string, RoutineGroup>();
   for (const routine of routines) {
-    if (
-      !includeRemovedTargets &&
-      routine.disabledReason === "removed_from_config"
-    ) {
-      continue;
-    }
     const key = `${routine.name} ${routine.sourcePath}`;
     let group = byKey.get(key);
     if (group === undefined) {
@@ -5592,8 +5586,7 @@ function resolveNamedRoutineGroup(
   | { groups: RoutineGroup[]; kind: "ambiguous" }
   | { group: RoutineGroup; kind: "ok" } {
   const groups = groupRoutinesByName(
-    runStore.listRoutines({ includeInactive }),
-    true
+    runStore.listRoutines({ includeInactive })
   ).filter((group) => group.name === name);
 
   if (groups.length === 0) {
@@ -5636,10 +5629,7 @@ function includeInactiveRoutineTargets(
     return selectedGroup;
   }
   return (
-    groupRoutinesByName(
-      runStore.listRoutines({ includeInactive: true }),
-      true
-    ).find(
+    groupRoutinesByName(runStore.listRoutines({ includeInactive: true })).find(
       (candidate) =>
         candidate.name === selectedGroup.name &&
         candidate.targets[0]?.sourcePath === sourcePath
@@ -6175,15 +6165,17 @@ function renderRoutineDeclarationCard(
 </dl></section><section>${sectionHead("Prompt")}${promptSection}</section>`;
 }
 
+function isRemovedRoutineTarget(target: RoutineStatus): boolean {
+  return target.disabledReason === "removed_from_config";
+}
+
 // A target removed from its declaration can remain as a durable
 // removed_from_config row beside current siblings (ADR 0069), so it must
 // not represent the declaration's lifecycle state -- unlike
 // resolveRoutineDeclaration, which picks a target to carry the
 // declaration's *content* and so orders by validity instead.
 function currentRoutineTargets(group: RoutineGroup): RoutineStatus[] {
-  return group.targets.filter(
-    (target) => target.disabledReason !== "removed_from_config"
-  );
+  return group.targets.filter((target) => !isRemovedRoutineTarget(target));
 }
 
 // #307 AC: "Disable/enable a Routine from its page affects every target; a

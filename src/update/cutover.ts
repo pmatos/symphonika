@@ -195,6 +195,12 @@ const STRUCTURAL_MARKERS: readonly RegExp[] = [
   /^TimeoutStartSec=.*$/m
 ];
 
+// Install-specific values may legitimately differ (an explicit Service Config
+// uses its adjacent env file), so compare only directive presence for these.
+const STRUCTURAL_PRESENCE_MARKERS: readonly RegExp[] = [
+  /^EnvironmentFile=.*$/m
+];
+
 export type UnitRegenerationCheck =
   { needed: true; reason: string } | { needed: false };
 
@@ -234,11 +240,16 @@ export async function checkUnitRegenerationNeeded(input: {
     return { needed: false };
   }
 
-  const differs = STRUCTURAL_MARKERS.some(
-    (pattern) =>
-      pattern.exec(stagedUnitContent)?.[0] !==
-      pattern.exec(installedUnitContent)?.[0]
-  );
+  const differs =
+    STRUCTURAL_MARKERS.some(
+      (pattern) =>
+        pattern.exec(stagedUnitContent)?.[0] !==
+        pattern.exec(installedUnitContent)?.[0]
+    ) ||
+    STRUCTURAL_PRESENCE_MARKERS.some(
+      (pattern) =>
+        pattern.test(stagedUnitContent) !== pattern.test(installedUnitContent)
+    );
 
   return differs
     ? {

@@ -6,6 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { defaultUserConfigPath } from "./config-paths.js";
+
 const execFile = promisify(execFileCallback);
 
 export type ServiceInstallOptions = {
@@ -38,6 +40,7 @@ export type ServiceInstallReport = {
 
 export type ServiceUnitInput = {
   configPath?: string;
+  environmentFilePath: string;
   execPath: string;
   path: string;
   scriptPath: string;
@@ -132,6 +135,11 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
     "# quoted so a PATH entry containing a space is not split off and dropped.",
     `Environment=${systemdEnvAssignment("PATH", input.path)}`,
     "",
+    "# Load environment-backed secrets from beside the selected Service",
+    "# Config. The leading `-` keeps the file optional for installations",
+    "# that do not configure authenticated email.",
+    `EnvironmentFile=${systemdEnvironmentFile(input.environmentFilePath)}`,
+    "",
     "# Resolve GITHUB_TOKEN from `gh auth token` at each (re)start so this",
     "# survives token rotation. Fails closed if gh returns empty so the",
     "# daemon never starts without a token. `exec` replaces the shell so",
@@ -207,6 +215,12 @@ export async function runServiceInstall(
   const homeDir = options.homeDir ?? homedir();
   const unitDir = userUnitDir(homeDir, env);
   const daemonPath = buildDaemonPath(execPath, env);
+  const selectedConfigPath =
+    options.configPath ?? defaultUserConfigPath({ env, homeDir });
+  const environmentFilePath = path.join(
+    path.dirname(selectedConfigPath),
+    "env"
+  );
 
   const files: ServiceUnitFile[] = [
     {
@@ -214,6 +228,7 @@ export async function runServiceInstall(
         ...(options.configPath === undefined
           ? {}
           : { configPath: options.configPath }),
+        environmentFilePath,
         execPath,
         path: daemonPath,
         scriptPath
@@ -359,6 +374,13 @@ function systemdEnvAssignment(name: string, value: string): string {
     .replace(/"/g, '\\"')
     .replace(/%/g, "%%");
   return `"${escaped}"`;
+}
+
+// EnvironmentFile accepts one path per directive and a leading `-` makes a
+// missing file non-fatal. Unlike ExecStart, quotes would be filename bytes;
+// leave spaces intact and escape `%` so it is not interpreted as a specifier.
+function systemdEnvironmentFile(value: string): string {
+  return `-${value.replace(/%/g, "%%")}`;
 }
 
 export function defaultScriptPath(): string {

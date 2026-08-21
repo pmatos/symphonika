@@ -93,11 +93,33 @@ journalctl --user -u symphonika -f
 
 The generated unit uses the daemon's normal config discovery by default. To run the service with a non-default config, install it with `symphonika service install --config <path>`; relative paths are resolved when the unit is generated and the absolute path is baked into `ExecStart`.
 
+The unit also references an optional `env` file beside the selected Service Config. For the default
+user config this is `$XDG_CONFIG_HOME/symphonika/env`, or `~/.config/symphonika/env` when
+`XDG_CONFIG_HOME` is unset. An explicit `--config /path/to/symphonika.yml` uses `/path/to/env`.
+Create the default file with restrictive permissions, then edit it without putting the password on
+the command line:
+
+```sh
+secrets_file="${XDG_CONFIG_HOME:-$HOME/.config}/symphonika/env"
+umask 077
+touch "$secrets_file"
+chmod 600 "$secrets_file"
+"${EDITOR:-vi}" "$secrets_file"
+```
+
+Use systemd environment-file syntax, for example `SYMPHONIKA_SMTP_PASSWORD=...`, or the variable
+name selected by `email.smtp_password_env`. The leading `-` in the generated `EnvironmentFile=`
+directive makes a missing file non-fatal, and the installer never creates or reads the file. After
+creating or changing it, run `systemctl --user restart symphonika.service`. Re-running
+`service install --force` preserves this reference.
+
 What the generated units give you:
 
 - **`symphonika-daemon.slice`** owns the daemon process and its dashboard only — a small, protected budget (see [`systemd/symphonika-daemon.slice`](systemd/symphonika-daemon.slice)). **`symphonika-providers.slice`** owns every spawned provider (and the build tools they in turn spawn) with the larger budget the two used to share (see [`systemd/symphonika-providers.slice`](systemd/symphonika-providers.slice)). Splitting them means a runaway tool spawned by a provider is killed *inside the providers slice* instead of throttling the daemon's own event loop and dashboard along with it (see `docs/adr/0064`). `MemoryHigh=` / `MemoryMax=` on each slice cap its tree independently. The generated caps assume a large workstation; edit the installed `~/.config/systemd/user/symphonika-*.slice` files to match your host (re-running `service install --force` overwrites them).
 - The daemon's `PATH` is captured from the shell that ran `service install`, with the `node` runtime's directory prepended, so `gh` and the spawned providers (`claude`, `codex`, `omp`) resolve under `systemd --user` — which does not inherit your interactive `PATH`. Run `service install` from a clean login shell so only real bin directories are baked in. For a Bun-installed OMP, verify `command -v omp` resolves from `~/.bun/bin` in that shell before installing the service.
 - The daemon's **GitHub auth token** is populated from `gh auth token` at each (re)start, so it picks up rotated tokens automatically. The service fails closed (won't start) if `gh` is logged out.
+- Other environment-backed credentials are loaded from the optional adjacent `env` file before the
+  daemon starts; secret values remain outside the Service Config, generated unit, SQLite, and logs.
 - `Restart=on-failure` brings the daemon back, and `After=graphical-session.target` keeps the ordering right so `gh` can read your keyring.
 
 If you need the daemon to keep running after logout, `loginctl enable-linger $USER`.

@@ -1808,6 +1808,16 @@ path; otherwise it uses a `./`-prefixed path relative to the Service Config.
 bakes it into the generated unit as `daemon --config <absolute-path>`. Omitting `--config` keeps the
 unit on the daemon's normal project-local/user-config discovery path.
 
+The generated service always references an optional environment file named `env` beside that
+selected Service Config. With `--config`, the path is `<directory-containing-config>/env`; without
+it, the path is `$XDG_CONFIG_HOME/symphonika/env`, falling back to
+`~/.config/symphonika/env`. The systemd directive uses the leading `-` form, so an absent file does
+not prevent installations without authenticated email from starting. The file remains
+operator-owned and may define the default `SYMPHONIKA_SMTP_PASSWORD` or any variable selected by
+`email.smtp_password_env`; `service install` neither creates it nor copies secret values into the
+unit. Re-running `service install --force` preserves the reference, while creating or changing the
+file takes effect after the service is restarted.
+
 `status --dashboard` renders a compact terminal status dashboard from the run store and daemon
 `/api/status` endpoint. `status --watch` refreshes that read-only dashboard in place; it must not
 dispatch work or mutate GitHub state. Watch mode refreshes daemon status and run-store data every

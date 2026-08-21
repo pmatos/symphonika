@@ -30,6 +30,7 @@ const repoRoot = path.resolve(
 const NODE = "/home/dev/.nvm/versions/node/v22.23.1/bin/node";
 const CLI = "/home/dev/symphonika/dist/cli.js";
 const DAEMON_PATH = "/home/dev/.nvm/versions/node/v22.23.1/bin:/usr/bin:/bin";
+const ENV_FILE = "/home/dev/.config/symphonika/env";
 
 const tempRoots: string[] = [];
 
@@ -54,6 +55,7 @@ afterEach(async () => {
 describe("renderServiceUnit", () => {
   it("binds ExecStart and PATH to the running node runtime and cli.js", () => {
     const unit = renderServiceUnit({
+      environmentFilePath: ENV_FILE,
       execPath: NODE,
       path: DAEMON_PATH,
       scriptPath: CLI
@@ -63,6 +65,7 @@ describe("renderServiceUnit", () => {
     expect(unit).toContain(`"${NODE}"`);
     expect(unit).toContain(`"${CLI}"`);
     expect(unit).toContain(`Environment="PATH=${DAEMON_PATH}"`);
+    expect(unit).toContain(`EnvironmentFile=-${ENV_FILE}`);
     expect(unit).toContain("t=$(gh auth token)");
     expect(unit).toContain("Slice=symphonika-daemon.slice");
     expect(unit).toContain("WantedBy=default.target");
@@ -70,6 +73,7 @@ describe("renderServiceUnit", () => {
 
   it("uses Type=notify with a watchdog timeout so a hung-but-alive daemon is restarted", () => {
     const unit = renderServiceUnit({
+      environmentFilePath: ENV_FILE,
       execPath: NODE,
       path: DAEMON_PATH,
       scriptPath: CLI
@@ -92,6 +96,7 @@ describe("renderServiceUnit", () => {
   // accepts it.
   it("sets NotifyAccess=all so a child-process notifier is accepted", () => {
     const unit = renderServiceUnit({
+      environmentFilePath: ENV_FILE,
       execPath: NODE,
       path: DAEMON_PATH,
       scriptPath: CLI
@@ -112,6 +117,7 @@ describe("renderServiceUnit", () => {
   // detection this feature provides.
   it("sets a generous TimeoutStartSec so slow initial polling isn't mistaken for a hung startup", () => {
     const unit = renderServiceUnit({
+      environmentFilePath: ENV_FILE,
       execPath: NODE,
       path: DAEMON_PATH,
       scriptPath: CLI
@@ -122,6 +128,7 @@ describe("renderServiceUnit", () => {
 
   it("never hardcodes the ~/.npm-global bin path", () => {
     const unit = renderServiceUnit({
+      environmentFilePath: ENV_FILE,
       execPath: NODE,
       path: DAEMON_PATH,
       scriptPath: CLI
@@ -132,6 +139,7 @@ describe("renderServiceUnit", () => {
 
   it("quotes ExecStart paths so spaces in the runtime or checkout survive", () => {
     const unit = renderServiceUnit({
+      environmentFilePath: ENV_FILE,
       execPath: "/home/John Doe/.nvm/node",
       path: DAEMON_PATH,
       scriptPath: "/opt/my app/dist/cli.js"
@@ -144,6 +152,7 @@ describe("renderServiceUnit", () => {
 
   it("quotes the Environment=PATH assignment so a spaced PATH entry survives", () => {
     const unit = renderServiceUnit({
+      environmentFilePath: ENV_FILE,
       execPath: NODE,
       path: "/home/John Doe/.nvm/bin:/usr/bin",
       scriptPath: CLI
@@ -496,6 +505,27 @@ describe("runServiceInstall", () => {
       `exec "$1" "$2" daemon --config "$3"`
     );
     expect(report.files[0]?.content).toContain(`"${configPath}"`);
+    expect(report.files[0]?.content).toContain(
+      "EnvironmentFile=-/opt/Symphonika Config/env"
+    );
+  });
+
+  it("references an optional env file beside the default user config", async () => {
+    const home = await makeTempHome();
+    const xdg = path.join(home, "custom-config");
+
+    const report = await runServiceInstall({
+      ...baseOptions,
+      env: { PATH: "/opt/node/bin:/usr/bin", XDG_CONFIG_HOME: xdg },
+      homeDir: home,
+      print: true
+    });
+
+    const environmentFilePath = path.join(xdg, "symphonika", "env");
+    expect(report.files[0]?.content).toContain(
+      `EnvironmentFile=-${environmentFilePath}`
+    );
+    await expect(access(environmentFilePath)).rejects.toThrow();
   });
 
   it("skips daemon-reload when reload is false but still writes units", async () => {
@@ -678,6 +708,9 @@ describe("CLI service install", () => {
     expect(output.stdout).toContain(`exec "$1" "$2" daemon --config "$3"`);
     expect(output.stdout).toContain(
       `"${path.resolve("configs", "daemon.yml")}"`
+    );
+    expect(output.stdout).toContain(
+      `EnvironmentFile=-${path.resolve("configs", "env")}`
     );
   });
 

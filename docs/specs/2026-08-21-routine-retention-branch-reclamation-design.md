@@ -25,6 +25,15 @@ already absent, so overlapping daemon and manual passes do not need a
 check-then-delete sequence. Persisting kind prevents later Routine declaration
 edits from changing cleanup ownership.
 
+`update-ref -d` also drops one refusal `git branch -D` performs: it deletes a
+ref that a registered worktree still has checked out. A firing branch name
+carries only the truncated firing id, so two firings of one Routine created in
+the same millisecond derive the same name, and reclaiming the terminal one
+could delete the branch out from under the live one. Retention restores the
+refusal by reading the branch each registered worktree holds from
+`git worktree list --porcelain` and skipping the delete while the ref is still
+checked out.
+
 Historical rows created before kind persistence remain unclassified unless
 their stored branch identity proves they were git firings. Retention does not
 delete a branch for an unclassified row. This may leave a legacy branch behind,

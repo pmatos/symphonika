@@ -519,6 +519,87 @@ describe("routine firing workspace retention", () => {
     }
   );
 
+  it("keeps a colliding branch a live firing's worktree still has checked out", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const stateRoot = path.join(root, "state");
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const live = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId: "fire-live-holder",
+      kind: "git",
+      project: {
+        name: "alpha",
+        workspace: {
+          git: { base_branch: "main", remote: remotePath },
+          root: workspaceRoot
+        }
+      },
+      routineName: "dependency-update"
+    });
+
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md"
+        }
+      ]);
+      // A branch name carries only the firing id's timestamp prefix, so a
+      // terminal firing can share one with a firing that is still running.
+      store.createRoutineFiring({
+        branchName: live.branchName,
+        branchRef: live.branchRef,
+        id: "fire-collided",
+        kind: "git",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.completeRoutineFiring({
+        id: "fire-collided",
+        state: "succeeded",
+        workspacePath: path.join(
+          workspaceRoot,
+          "routines",
+          "dependency-update",
+          "fire-collided"
+        )
+      });
+
+      const report = await pruneRoutineWorkspaces({
+        now: new Date("2100-01-01T00:00:00.000Z"),
+        policy: {
+          cancelledDays: 0,
+          enabled: true,
+          failedDays: 0,
+          succeededDays: 0
+        },
+        runStore: store
+      });
+
+      expect(report.failures).toEqual([]);
+      expect(report.pruned.map((entry) => entry.firingId)).toEqual([
+        "fire-collided"
+      ]);
+      await expect(branchExists(live.cachePath, live.branchName)).resolves.toBe(
+        true
+      );
+      await expect(worktreePaths(live.cachePath)).resolves.toContain(
+        live.workspacePath
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("does not mark an existing planned workspace reclaimed when its cache is invalid", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, "state");

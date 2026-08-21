@@ -28,6 +28,11 @@ export const DEFAULT_ROUTINE_WORKSPACE_RETENTION: RoutineWorkspaceRetentionPolic
     succeededDays: 1
   };
 
+type RegisteredWorktree = {
+  branchRef: string | null;
+  path: string;
+};
+
 type RoutineWorkspacePruneEntry = {
   firingId: string;
   workspacePath: string;
@@ -109,8 +114,11 @@ async function reclaimRegisteredWorktree(
       return;
     }
     await git(["-C", cachePath, "worktree", "prune"]);
-    const registeredPaths = await listRegisteredWorktrees(cachePath);
-    if (workspaceExists || registeredPaths.has(workspacePath)) {
+    const registered = await listRegisteredWorktrees(cachePath);
+    if (
+      workspaceExists ||
+      registered.some((worktree) => worktree.path === workspacePath)
+    ) {
       throw removeError;
     }
     await deleteRoutineFiringBranch(cachePath, firing);
@@ -144,6 +152,15 @@ async function deleteRoutineFiringBranch(
   if (branchName.length === 0) {
     return;
   }
+  // A firing branch name carries only the truncated firing id, so two firings
+  // created in the same millisecond can derive the same one. `branch -D`
+  // refuses to delete a branch a registered worktree still has checked out;
+  // update-ref does not, so re-establish that refusal here rather than delete
+  // a live worktree's branch out from under it.
+  const worktrees = await listRegisteredWorktrees(cachePath);
+  if (worktrees.some((worktree) => worktree.branchRef === firing.branchRef)) {
+    return;
+  }
   // update-ref deletes the ref atomically and exits successfully when another
   // pruner has already deleted it, unlike a show-ref/branch -D sequence.
   await git(["-C", cachePath, "update-ref", "-d", firing.branchRef]);
@@ -175,7 +192,7 @@ function routineWorkspacePlan(firing: RoutineFiringStatus): {
 
 async function listRegisteredWorktrees(
   cachePath: string
-): Promise<Set<string>> {
+): Promise<RegisteredWorktree[]> {
   const output = await git([
     "-C",
     cachePath,
@@ -183,12 +200,23 @@ async function listRegisteredWorktrees(
     "list",
     "--porcelain"
   ]);
-  return new Set(
-    output
-      .split("\n")
-      .filter((line) => line.startsWith("worktree "))
-      .map((line) => path.resolve(line.slice("worktree ".length)))
-  );
+  const worktrees: RegisteredWorktree[] = [];
+  for (const line of output.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      worktrees.push({
+        branchRef: null,
+        path: path.resolve(line.slice("worktree ".length))
+      });
+      continue;
+    }
+    // A porcelain record lists its branch after the worktree path it belongs
+    // to, and omits the line entirely when that worktree is detached.
+    const current = worktrees.at(-1);
+    if (current !== undefined && line.startsWith("branch ")) {
+      current.branchRef = line.slice("branch ".length);
+    }
+  }
+  return worktrees;
 }
 
 async function exists(filePath: string): Promise<boolean> {

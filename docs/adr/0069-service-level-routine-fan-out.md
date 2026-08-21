@@ -87,6 +87,21 @@ produce a normal partial group: admitted targets run, while capped or overlappin
 marked skipped and advance only their own schedule and ADR 0058 counters. Skipping a one-shot target
 consumes that target's matched clock event and expires it.
 
+`skipRoutineFiring` returns `false` when its Routine Target clock update loses because the event is
+no longer due. If that update wins but the supplied fan-out has no matching Project leg in
+`pending` or `held`, the Run Store throws an explicit invariant error and rolls back the transaction
+instead of swallowing the mismatch as another lost claim. The single SQLite transaction serializes
+ordinary competing firing and skip claims, which lose at the clock update and cannot reach this
+branch; reaching it instead means the caller paired the Routine Target with the wrong immutable
+fan-out membership or the persisted state is inconsistent.
+
+This decision covers `skipRoutineFiring` only: `claimRoutineFiring`'s structurally identical
+fan-out branch is unchanged and still swallows the same mismatch as an ordinary lost claim. Nothing
+catches the new error between the Run Store and the daemon's per-tick error boundary, so today
+reaching this invariant aborts the rest of that dispatch tick's Routine and Issue dispatch rather
+than isolating the affected Routine; that containment gap, and whether `claimRoutineFiring` should
+be brought in line, are open follow-ups, not settled by this ADR.
+
 The existing workspace and branch identities already contain the Project and firing id, so sibling
 firings receive separate workspaces, branches, logs, and prompt evidence.
 

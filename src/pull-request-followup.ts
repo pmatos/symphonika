@@ -345,13 +345,12 @@ async function processTrackedPullRequests(input: {
     }
 
     const state = interpretPullRequest(rawState);
-    // GraphQL normalizes an omitted headRefOid to an empty string (see
-    // pull-request-polling.ts). Fall back to the last known-good head SHA so
-    // a merge is never pinned to an empty string. tracked.lastSeenHeadSha
-    // can itself still be "" (e.g. no head SHA has ever been observed for
-    // this row) -- recordPullRequestObservation below still records that,
-    // and the merge guard further down refuses to pin an empty SHA; the row
-    // self-corrects the next tick GraphQL returns a real headRefOid.
+    // The default GraphQL adapter rejects a response without its schema-
+    // required headRefOid. A custom GitHubIssuesApi can still surface an
+    // empty headSha, so retain the last known-good value as a defensive
+    // fallback. tracked.lastSeenHeadSha can itself still be "" (e.g. no head
+    // SHA has ever been observed for this row) -- the merge guard further
+    // down refuses to merge without a pin.
     const headSha =
       state.headSha === "" ? tracked.lastSeenHeadSha : state.headSha;
     const trackingState = trackedStateFor(state);
@@ -410,11 +409,11 @@ async function processTrackedPullRequests(input: {
       continue;
     }
     if (headSha === "") {
-      // No known-good head SHA for this tick (GraphQL omitted headRefOid
-      // and no earlier tick ever recorded a real one for this row). Merging
-      // unpinned would let GitHub merge whatever commit is current at merge
-      // time, bypassing the check/review validation pullRequestReadyToMerge
-      // just performed against this tick's fetched state. Skip and retry.
+      // No known-good head SHA for this tick (a custom adapter returned an
+      // empty headSha and no earlier tick ever recorded a real one for this
+      // row). Merging unpinned would let GitHub merge whatever commit is
+      // current at merge time, bypassing the check/review validation
+      // pullRequestReadyToMerge just performed. Skip and retry.
       input.logger?.warn(
         { prNumber: tracked.prNumber },
         "symphonika PR follow-up cannot merge: no known head SHA to pin"

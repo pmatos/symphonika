@@ -417,7 +417,7 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
     });
   });
 
-  it("preserves the REST head SHA when GraphQL enrichment omits headRefOid", async () => {
+  it("preserves the REST head SHA when a custom enrichment adapter lacks one", async () => {
     const followup: RawGitHubPullRequestFollowupState = {
       draft: false,
       headSha: "",

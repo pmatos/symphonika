@@ -1580,6 +1580,74 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("preserves removed_from_config across a Project disable and a Project prune", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/daily-report.md"
+    };
+    try {
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      store.syncRoutines([], { projects: ["alpha", "beta"] });
+
+      store.markRoutinesInactiveForProject("alpha");
+      store.pruneRoutinesForUnknownProjects(["alpha"]);
+
+      const targets = store
+        .listRoutines({ includeInactive: true })
+        .filter((routine) => routine.name === "daily-report");
+      expect(targets).toHaveLength(2);
+      for (const target of targets) {
+        expect(target).toMatchObject({
+          disabledReason: "removed_from_config",
+          state: "disabled"
+        });
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reactivates a preserved removed target when its Project and declaration return", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { cron: "0 9 * * *", tz: "UTC" },
+      sourcePath: "/tmp/daily-report.md"
+    };
+    try {
+      store.syncRoutines([{ ...declaration, projectName: "alpha" }]);
+      store.syncRoutines([], { projects: ["alpha"] });
+      store.markRoutinesInactiveForProject("alpha");
+
+      store.syncRoutines([{ ...declaration, projectName: "alpha" }], {
+        projects: ["alpha"]
+      });
+
+      expect(store.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          name: "daily-report",
+          state: "active"
+        })
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("clears a stale disabled_reason when pruneRoutinesForUnknownProjects cascades a Project removal", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

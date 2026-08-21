@@ -2607,8 +2607,14 @@ export class RunStore {
         .prepare(
           // disabled_reason only means anything on state = 'disabled' — clear
           // it here so an inactive row never surfaces a stale routine-level
-          // reason left over from before the Project-cascade (ADR-0060).
-          "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name = ? and (state != 'inactive' or disabled_reason is not null)"
+          // reason left over from before the Project-cascade (ADR-0060). The
+          // one exception is a target already removed from its declaration:
+          // that row is history, not a target this Project still has (ADR
+          // 0069 cascades "a targeted Project"'s own rows), and laundering it
+          // to a reasonless inactive row makes it indistinguishable from a
+          // current target whose Project went away — which then hides its
+          // still-removed siblings in enabled Projects from the dashboard.
+          "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name = ? and (state != 'inactive' or disabled_reason is not null) and not (state = 'disabled' and disabled_reason = 'removed_from_config')"
         )
         .run(now, projectName);
     });
@@ -2662,11 +2668,15 @@ export class RunStore {
     const names = [...new Set(projectNames)];
     // disabled_reason only means anything on state = 'disabled' — clear it
     // here so an inactive row never surfaces a stale routine-level reason
-    // left over from before the Project-cascade (ADR-0060).
+    // left over from before the Project-cascade (ADR-0060). A target already
+    // removed from its declaration is the exception, for the same reason as
+    // in markRoutinesInactiveForProject: it is durable history rather than a
+    // row this Project still targets, and clearing its reason would strip the
+    // only evidence that separates it from a current target.
     if (names.length === 0) {
       this.database
         .prepare(
-          "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where state != 'inactive'"
+          "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where state != 'inactive' and not (state = 'disabled' and disabled_reason = 'removed_from_config')"
         )
         .run(now);
       return;
@@ -2674,7 +2684,7 @@ export class RunStore {
     const placeholders = names.map(() => "?").join(", ");
     this.database
       .prepare(
-        `update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name not in (${placeholders}) and state != 'inactive'`
+        `update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name not in (${placeholders}) and state != 'inactive' and not (state = 'disabled' and disabled_reason = 'removed_from_config')`
       )
       .run(now, ...names);
   }

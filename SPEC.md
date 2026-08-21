@@ -1136,10 +1136,13 @@ in-flight firings continue under the snapshot they started with — the daemon n
 a side effect of the Routine becoming disabled. Removing the declaration from the top-level
 `routines:` block likewise soft-disables every target with `disabled_reason =
 "removed_from_config"`. Removing one Project from its `projects:` list soft-disables only that
-target with the same reason, leaving siblings active. Restoring a Routine or target — removing
-`disabled: true`, re-adding the entry, or restoring the target name — un-disables it on the next
-reload and recomputes `next_fire_at` strictly after the current clock; a one-shot target whose `at`
-elapsed while disabled is marked `expired` instead of firing retroactively.
+target with the same reason, leaving siblings active. A target already soft-disabled with
+`removed_from_config` is durable history rather than a Project's current target, so subsequently
+disabling or removing that Project does not re-mark it `inactive` or clear its reason; it stays
+`disabled` with `removed_from_config` until the declaration is restored. Restoring a Routine or
+target — removing `disabled: true`, re-adding the entry, or restoring the target name — un-disables
+it on the next reload and recomputes `next_fire_at` strictly after the current clock; a one-shot
+target whose `at` elapsed while disabled is marked `expired` instead of firing retroactively.
 `catch_up: fire_once_if_missed` does not apply to a routine-level restore — that policy is for
 daemon outage, not deliberate operator disable.
 

@@ -1,19 +1,35 @@
-# Independently verify the refactor
+# Independently verify the refactor for issue #{{issue.number}}
 
-Act as a read-only verifier. Read the assigned issue, repository instructions, current files, Git
-history, and branch diff. Identify the red-team characterization-test commit and the later refactor
-commit from repository evidence.
+Act as a read-only verifier. You are running autonomously in the existing issue workspace at
+`{{workspace.path}}` on branch `{{branch.name}}`. Read the repository instructions, the current
+files, the Git history on this branch, and the branch diff against its base. Identify the red-team
+characterization-test commit and the later refactor commit from repository evidence.
 
-Verify all of the following:
+## Issue under work
 
-1. Every characterization test and fixture introduced by the red-team commit is byte-for-byte
+- Number: #{{issue.number}}
+- Title: {{issue.title}}
+- URL: {{issue.url}}
+
+### Issue body
+
+{{issue.body}}
+
+## What to verify
+
+1. A red-team characterization-test commit exists on `{{branch.name}}`, and a later, distinct
+   refactor commit exists after it. The orchestrator's commits-ahead signal compares the branch to
+   its base, not to the state at the start of each attempt, so it cannot detect a refactor state
+   that produced no commit of its own. Rejecting that case is your job.
+2. Every characterization test and fixture introduced by the red-team commit is byte-for-byte
    unchanged at `HEAD`; none was deleted, renamed, skipped, narrowed, or made unreachable through a
    test-runner, helper, or configuration change.
-2. The focused characterization suite passes against the refactored code.
-3. The repository's complete required quality checks pass.
-4. The production diff is confined to the requested refactor and preserves public interfaces,
+3. The focused characterization suite passes against the refactored code.
+4. The repository's complete required quality checks pass.
+5. The production diff is confined to the requested refactor and preserves public interfaces,
    outputs, side effects, and error behavior.
 
-Do not modify files or create commits. Approve only when every check succeeds. If behavior changed,
-a characterization test was weakened, evidence is ambiguous, or a required check fails, clearly
-describe the rejection and exit with a non-zero status so the workflow takes its blocked exit.
+Do not modify files or create commits. Approve only when every check succeeds. If no distinct
+refactor commit exists, behavior changed, a characterization test was weakened, evidence is
+ambiguous, or a required check fails, clearly describe the rejection and exit with a non-zero
+status (e.g. `exit 1`) so the workflow takes its blocked exit.

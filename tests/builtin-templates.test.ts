@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
 import { BUILTIN_WORKFLOW_TEMPLATES } from "../src/builtin-templates.js";
+import { validatePromptTemplateExpressions } from "../src/workflow/autonomous-prompt.js";
 
 const EXPECTED_BUILTINS = [
   "autofix-until-clean",
@@ -17,20 +18,6 @@ const EXPECTED_BUILTINS = [
 const TERMINAL_VALUES = new Set(["success", "blocked", "failure"]);
 
 describe("built-in workflow template registry", () => {
-  it("ships provider-neutral refactor-swarm prompts with an immutable characterization-test baseline", async () => {
-    const [redTeam, refactor, verify] = await Promise.all(
-      ["red-team.md", "refactor.md", "verify.md"].map((name) =>
-        readFile(path.resolve("prompts", name), "utf8")
-      )
-    );
-
-    expect(redTeam).toContain("characterization tests");
-    expect(redTeam).toContain("Commit only");
-    expect(refactor).toContain("Do not edit, delete, rename, skip, or weaken");
-    expect(verify).toContain("exit with a non-zero status");
-    expect(verify).toContain("Do not modify files or create commits");
-  });
-
   it("exposes the five built-in templates expected by the workflow contract", () => {
     expect(Object.keys(BUILTIN_WORKFLOW_TEMPLATES).sort()).toEqual([
       ...EXPECTED_BUILTINS
@@ -111,4 +98,65 @@ describe("built-in workflow template registry", () => {
       });
     });
   }
+});
+
+describe("shipped refactor-swarm prompts", () => {
+  const refactorSwarm = parse(
+    BUILTIN_WORKFLOW_TEMPLATES["refactor-swarm"] ?? ""
+  ) as { inputs: Record<string, { default?: unknown }> };
+
+  const DEFAULT_PROMPT_PATHS = {
+    red_team_prompt: "prompts/red-team.md",
+    refactor_prompt: "prompts/refactor.md",
+    verify_prompt: "prompts/verify.md"
+  } as const;
+
+  const readPrompt = (promptPath: string): Promise<string> =>
+    readFile(path.resolve(promptPath), "utf8");
+
+  it("points every prompt input default at a prompt file the repository ships", async () => {
+    for (const [input, promptPath] of Object.entries(DEFAULT_PROMPT_PATHS)) {
+      expect(refactorSwarm.inputs[input]?.default, input).toBe(promptPath);
+      await expect(readPrompt(promptPath)).resolves.toContain("#");
+    }
+  });
+
+  it("renders only supported prompt variables and names the issue in every state", async () => {
+    for (const promptPath of Object.values(DEFAULT_PROMPT_PATHS)) {
+      const template = await readPrompt(promptPath);
+      expect(
+        validatePromptTemplateExpressions(template, promptPath),
+        promptPath
+      ).toEqual([]);
+      // Without these the agent has no way to identify the issue, the
+      // refactor target named in its body, or the branch it must stay on.
+      expect(template, promptPath).toContain("{{issue.number}}");
+      expect(template, promptPath).toContain("{{issue.body}}");
+      expect(template, promptPath).toContain("{{workspace.path}}");
+      expect(template, promptPath).toContain("{{branch.name}}");
+    }
+  });
+
+  it("keeps the immutable characterization-test baseline instructions", async () => {
+    // Prose reflows on edit, so match against whitespace-collapsed text
+    // rather than pinning these phrases to a particular line break.
+    const readFlattened = async (promptPath: string): Promise<string> =>
+      (await readPrompt(promptPath)).replace(/\s+/g, " ");
+    const redTeam = await readFlattened(DEFAULT_PROMPT_PATHS.red_team_prompt);
+    const refactor = await readFlattened(DEFAULT_PROMPT_PATHS.refactor_prompt);
+    const verify = await readFlattened(DEFAULT_PROMPT_PATHS.verify_prompt);
+
+    expect(redTeam).toContain("characterization tests");
+    expect(redTeam).toContain("Commit only");
+    expect(redTeam).toContain("git status --porcelain");
+    expect(refactor).toContain("Do not edit, delete, rename, skip, or weaken");
+    expect(verify).toContain("distinct refactor commit");
+    expect(verify).toContain("Do not modify files or create commits");
+    // Every state must spell out the concrete blocked-exit signal, matching
+    // the convention the other shipped prompts already use.
+    for (const prompt of [redTeam, refactor, verify]) {
+      expect(prompt).toContain("`exit 1`");
+      expect(prompt).toContain("blocked exit");
+    }
+  });
 });

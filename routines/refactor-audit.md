@@ -22,7 +22,10 @@ vendored code, dependency trees, and build artifacts, calculate:
 1. `size`: physical lines in the current file;
 2. `recent churn`: additions plus deletions reported by `git log --since=90.days --numstat` for the
    file; and
-3. `inverse line coverage`: `1 - covered_lines / total_lines`, clamped to the range 0 through 1.
+3. `inverse line coverage`: `1 - covered_lines / total_lines`, clamped to the range 0 through 1. A
+   tracked production file that the coverage report ran over but never lists is untested, not
+   unmeasured: score it as `1`. Only treat coverage as missing when the report itself does not
+   cover that part of the tree.
 
 The risk score is **size × recent churn × inverse line coverage**. Record the measurement date,
 90-day window, coverage report or command, raw factors, and resulting score. Rank candidates by

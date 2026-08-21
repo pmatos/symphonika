@@ -64,10 +64,22 @@ Its transitions are:
 | `verifying` | `provider_success: true` | `success` | `blocked` |
 
 The first commit is an immutable characterization-test baseline. The second state is instructed not
-to edit, delete, rename, skip, or weaken those tests and must create a separate refactor commit. The
-verifier is read-only, so requiring `branch_ahead_of_base` from its attempt would make successful
-verification impossible. A verifier rejection uses the existing provider-failure signal and blocked
-exit; the template does not add a comment action or predicate.
+to edit, delete, rename, skip, or weaken those tests and must create a separate refactor commit.
+
+`branch_ahead_of_base` is *not* attempt-local: `inspectWorkspaceCommitsAhead` counts
+`refs/remotes/origin/<base>..HEAD` in the shared Workspace, so once `red_team` commits, the
+predicate stays true for every later state in the walk. Two consequences follow. The `refactoring`
+gate therefore proves only "this branch has commits", not "this attempt committed" — the distinct
+refactor commit is a prompt obligation that the verifier re-checks from Git history, not a
+predicate the engine can enforce. And declaring `branch_ahead_of_base` on the read-only `verifying`
+state would be worse than useless: it would pass unconditionally while implying a gate that does
+not exist, so the state gates on `provider_success` alone and says so. A verifier rejection uses
+the existing provider-failure signal and blocked exit; the template does not add a comment action
+or predicate.
+
+Closing the gap mechanically would need a new attempt-local signal (for example
+`commits_ahead_of_attempt_start`). That is a workflow-language change, deliberately out of scope
+here; the shipped design states the limitation instead of implying a guarantee.
 
 ### Blindness is prompt isolation, not a security boundary
 
@@ -84,8 +96,9 @@ explicit local template path. There is no automatic name shadowing.
 
 - Allowing the red-team state to advance without a commit would leave no immutable baseline for the
   verifier to distinguish from refactor changes.
-- Requiring a verifier commit would turn a read-only approval into a guaranteed blocked outcome,
-  because commits-ahead evidence is attempt-local.
+- Requiring a verifier commit would not block a read-only approval — `branch_ahead_of_base` is
+  already true from the two earlier commits — but it would advertise a gate the predicate cannot
+  express. Stating the read-only contract in the prompt is honest; a decorative predicate is not.
 - Adding risk values to Workflow Predicates or the dispatch layer would couple repository analysis
   to orchestration policy even though priority labels already provide the dispatch seam.
 - Filing every high-risk issue immediately would maximize throughput but could starve unrelated
@@ -95,8 +108,8 @@ explicit local template path. There is no automatic name shadowing.
 
 ## Consequences
 
-- Refactors cannot reach verification until characterization tests and production changes exist as
-  distinct commits.
+- Refactors cannot reach verification until a characterization-test commit exists; the second,
+  distinct refactor commit is enforced at the verifier rather than by the transition predicate.
 - Read-only approval works with the existing `provider_success` predicate and state-advance rules.
 - Risk-ranked targets compete through existing eligibility, priority, and concurrency behavior.
 - “Swarm” means several independently filed Issues admitted by normal Project capacity, not

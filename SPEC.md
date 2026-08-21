@@ -517,8 +517,11 @@ Raw FSM workflows may reference five built-in Workflow Templates through the `bu
 `single-agent-pr`, `plan-tdd-pr`, `refactor-swarm`, `autofix-until-clean`, and
 `merge-when-green`. Built-ins expand through the same validation, state-prefixing, exit-mapping,
 and evidence path as repository-local templates. `refactor-swarm` runs three serial agent states:
-`red_team` and `refactoring` each require provider success plus a commit created by that attempt,
-then `verifying` requires provider success alone because verification is read-only. Any fallback
+`red_team` and `refactoring` each require provider success plus `branch_ahead_of_base`, then
+`verifying` requires provider success alone because verification is read-only.
+`branch_ahead_of_base` compares the branch to its base, not to the state at the start of the
+attempt, so it stays true for the rest of the walk once `red_team` commits; a distinct refactor
+commit is required by prompt and checked by the verifier, not by the predicate. Any fallback
 uses the template's `blocked` exit. Repositories may explicitly replace a built-in reference with a
 local `.symphonika/workflow-templates/<name>.yml`; local files never auto-shadow the reserved
 namespace. See ADRs 0049 and 0085.

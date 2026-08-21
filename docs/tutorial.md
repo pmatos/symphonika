@@ -730,13 +730,10 @@ The five built-ins are:
 The built-ins use these default prompt paths:
 
 ```text
-WORKFLOW.md
-prompts/plan.md
-prompts/impl.md
-prompts/red-team.md
-prompts/refactor.md
-prompts/verify.md
-prompts/autofix.md
+single-agent-pr     WORKFLOW.md
+plan-tdd-pr         prompts/plan.md, prompts/impl.md
+refactor-swarm      prompts/red-team.md, prompts/refactor.md, prompts/verify.md
+autofix-until-clean prompts/autofix.md
 ```
 
 Override those paths under `with` or create the files before validation.

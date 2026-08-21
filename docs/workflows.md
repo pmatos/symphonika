@@ -310,6 +310,11 @@ The parser recognizes the following keys:
 | `branch_pushed` | `true`, `false` | no | no | reserved; not emitted |
 | `timeout` | scalar | no | no | reserved; not implemented |
 
+`branch_ahead_of_base` counts commits ahead of `origin/<base_branch>`, not ahead of the commit the
+attempt started from. It is a property of the branch, not of the attempt: in a multi-state walk it
+stays `true` for every later state once any earlier state has committed. A state cannot use it to
+prove that its own agent committed something.
+
 Because missing and `false` are different, `pr_merged: false` does not match an ordinary open PR:
 the signal is omitted until the PR is merged. Likewise, `mergeable: false` means GitHub explicitly
 reported a conflict; it does not match `UNKNOWN`.
@@ -502,12 +507,15 @@ Their exact expanded behavior is:
   The implementer takes `success` only with provider success and commits ahead of base. Either
   state's fallback takes `blocked`.
 - **`refactor-swarm`:** the red-team agent must succeed and commit characterization tests before
-  the refactorer runs. The refactorer must succeed and create a separate commit before the verifier
-  runs. The verifier takes `success` on `provider_success: true` alone because it is instructed not
-  to modify the Workspace; rejection takes `blocked`. All three states share the issue Workspace,
-  but each receives only its own rendered prompt and the fixed structured prompt variables—never a
-  prior provider transcript or reasoning trail. The verifier can and should inspect files, commits,
-  diffs, and tests. This is prompt isolation, not sandboxing.
+  the refactorer runs. The refactorer takes its transition on `provider_success: true` and
+  `branch_ahead_of_base: true`, but that predicate compares the branch to its base rather than to
+  the attempt's starting commit, so the red-team commit alone keeps it true — the required distinct
+  refactor commit is enforced by `prompts/refactor.md` and re-checked by the verifier, not by the
+  predicate. The verifier takes `success` on `provider_success: true` alone because it is
+  instructed not to modify the Workspace; rejection takes `blocked`. All three states share the
+  issue Workspace, but each receives only its own rendered prompt and the fixed structured prompt
+  variables—never a prior provider transcript or reasoning trail. The verifier can and should
+  inspect files, commits, diffs, and tests. This is prompt isolation, not sandboxing.
 - **`autofix-until-clean`:** its wait state takes `success` when checks succeed and unresolved
   threads equal zero, takes `blocked` when checks fail, and launches the autofix agent when checks
   succeed but the zero-thread transition did not match. Other PR states stay parked. A successful

@@ -387,6 +387,26 @@ describe("fetchPullRequestFollowupState", () => {
     expect(state).toBeNull();
   });
 
+  it("rejects a response that omits the schema-required headRefOid", async () => {
+    const executor: GraphqlExecutor = () =>
+      Promise.resolve({
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              nodes: [],
+              pageInfo: { endCursor: null, hasNextPage: false }
+            }
+          }
+        }
+      });
+
+    await expect(
+      fetchPullRequestFollowupState(executor, followupInput)
+    ).rejects.toThrow(
+      "GitHub GraphQL pull request response is missing non-empty headRefOid"
+    );
+  });
+
   it("stops paginating when hasNextPage is false even if endCursor is present", async () => {
     let callCount = 0;
     const executor: GraphqlExecutor = () => {

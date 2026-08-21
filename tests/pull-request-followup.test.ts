@@ -1194,11 +1194,12 @@ describe("pull request follow-up", () => {
     }
   });
 
-  it("auto-merges using the discovered head SHA when GraphQL follow-up omits headRefOid", async () => {
-    // GraphQL normalizes an omitted headRefOid to an empty string. Sending
-    // that empty string as the merge API's `sha` pin (instead of falling
-    // back to a known-good head SHA, or omitting the pin) makes GitHub
-    // reject a legitimate merge. Regression for #499.
+  it("auto-merges using the discovered head SHA when a custom follow-up adapter lacks one", async () => {
+    // The default GraphQL adapter requires a non-empty headRefOid, but a
+    // custom GitHubIssuesApi can still return an empty headSha. Sending that
+    // empty string as the merge API's `sha` pin (instead of falling back to
+    // a known-good head SHA) makes GitHub reject a legitimate merge.
+    // Regression for #499.
     const root = await makeTempRoot();
     await writeProject(root);
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
@@ -1260,14 +1261,14 @@ describe("pull request follow-up", () => {
     }
   });
 
-  it("skips auto-merge without pinning a SHA when both GraphQL and the tracked row lack a head SHA", async () => {
+  it("skips auto-merge without a pin when both a custom adapter and the tracked row lack a head SHA", async () => {
     // A tracked row can already have last_seen_head_sha = "" on disk from
-    // before this fix landed (the pre-fix code unconditionally persisted
-    // whatever GraphQL returned, empty string included). If GraphQL omits
-    // headRefOid again on a later tick, falling back to that also-empty
-    // lastSeenHeadSha must not merge unpinned -- an unpinned merge could
-    // land a commit pushed after this tick's checks/review state was
-    // fetched. Regression for the P1 follow-up on #530.
+    // before this fix landed (the pre-fix code unconditionally persisted an
+    // empty adapter result). If a custom adapter reports no head SHA again
+    // on a later tick, falling back to that also-empty lastSeenHeadSha must
+    // not merge unpinned -- an unpinned merge could land a commit pushed
+    // after this tick's checks/review state was fetched. Regression for the
+    // P1 follow-up on #530.
     const root = await makeTempRoot();
     await writeProject(root);
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
@@ -1330,7 +1331,7 @@ describe("pull request follow-up", () => {
     }
   });
 
-  it("dispatches review follow-up with the discovered head SHA when GraphQL follow-up omits headRefOid", async () => {
+  it("dispatches review follow-up with the discovered head SHA when a custom follow-up adapter lacks one", async () => {
     // Regression for the P1 follow-up on #530: the resolved fallback head
     // SHA was threaded into recordPullRequestReviewDispatch (the DB write)
     // but not into reviewContextFromState, so the dispatched agent's

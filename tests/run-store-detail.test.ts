@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { IssueSnapshot } from "../src/issue-polling.js";
 import { openRunStore } from "../src/run-store.js";
@@ -945,6 +945,41 @@ describe("RunStore detail queries", () => {
       expect(latest.get("beta")?.id).toBe("beta-only");
       expect(latest.has("gamma")).toBe(false);
     } finally {
+      store.close();
+    }
+  });
+
+  it("listLatestRunsByProject anchors lastTransitionAt to the newest state transition, not updated_at", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      vi.useFakeTimers();
+      vi.setSystemTime("2026-05-22T10:00:00.000Z");
+      store.createRun({
+        id: "alpha-terminal",
+        issue: sampleIssue({ number: 1 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      store.updateRunState("alpha-terminal", "succeeded");
+
+      // Post-terminal bookkeeping bumps runs.updated_at without recording a
+      // state transition, so only updatedAt may move.
+      vi.setSystemTime("2026-05-22T11:00:00.000Z");
+      store.recordPullRequestDiscoveryAttempt("alpha-terminal");
+
+      const latest = store.listLatestRunsByProject({
+        projectNames: ["alpha"],
+        states: ["succeeded", "failed", "cancelled"]
+      });
+
+      expect(latest.get("alpha")?.lastTransitionAt).toBe(
+        "2026-05-22T10:00:00.000Z"
+      );
+      expect(latest.get("alpha")?.updatedAt).toBe("2026-05-22T11:00:00.000Z");
+    } finally {
+      vi.useRealTimers();
       store.close();
     }
   });

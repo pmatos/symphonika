@@ -454,15 +454,23 @@ export function registerPages(options: RegisterPagesOptions): void {
       getWatchdogConfig,
       nowMs
     );
+    // Lazily resolved and memoised: /fragments/active-band shares this
+    // assembly but never reads lastRunByProject, and the query behind it
+    // scans every Run and its state transitions on a fragment refetched on
+    // every SSE event.
+    let lastRunByProject: ReadonlyMap<string, ProjectLastRunStatus> | undefined;
     return {
       activeFirings,
       activeRuns,
-      lastRunByProject: options.runStore.listLatestRunsByProject({
-        projectNames: (snapshot?.projectStates ?? []).map(
-          (project) => project.projectName
-        ),
-        states: PROJECT_LAST_RUN_STATES
-      }),
+      get lastRunByProject(): ReadonlyMap<string, ProjectLastRunStatus> {
+        lastRunByProject ??= options.runStore.listLatestRunsByProject({
+          projectNames: (snapshot?.projectStates ?? []).map(
+            (project) => project.projectName
+          ),
+          states: PROJECT_LAST_RUN_STATES
+        });
+        return lastRunByProject;
+      },
       nowMs,
       snapshot,
       watchdogByRun
@@ -3355,7 +3363,7 @@ function renderDispatchProjectsTable(
       const lastRun =
         row.lastRun === undefined
           ? '<span class="muted">never</span>'
-          : `${statePill(row.lastRun.state)} <code>${escapeHtml(formatAge(row.lastRun.terminalAt, nowMs))}</code>`;
+          : `${statePill(row.lastRun.state)} <code>${escapeHtml(formatAge(row.lastRun.lastTransitionAt, nowMs))}</code>`;
       return `<tr><td><a href="/projects/${encodeURIComponent(row.name)}">${escapeHtml(row.name)}</a></td><td>${renderValidityPill(row)}</td><td>${row.eligible}</td><td>${row.inFlight}</td><td class="c-detail">${lastRun}</td></tr>`;
     })
     .join("");

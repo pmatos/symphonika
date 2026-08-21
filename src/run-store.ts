@@ -118,7 +118,7 @@ export type RunStatus = {
 };
 
 export type ProjectLastRunStatus = RunStatus & {
-  terminalAt: string;
+  lastTransitionAt: string;
 };
 
 export type AttemptStatus = {
@@ -547,7 +547,7 @@ type RunRow = {
 };
 
 type ProjectLastRunRow = RunRow & {
-  terminal_at: string | null;
+  last_transition_at: string;
 };
 
 type AttemptRow = {
@@ -3749,8 +3749,9 @@ export class RunStore {
   // One query for "each project's most recent run in one of `states`",
   // keyed by project name — the dashboard's Projects section wants this per
   // row, and a per-project listRuns(limit:1) call would be an N+1 query
-  // against the number of configured Projects. terminalAt comes from the
-  // latest state transition so post-terminal bookkeeping cannot reset its age.
+  // against the number of configured Projects. lastTransitionAt comes from the
+  // newest state transition, not `updated_at`, so post-terminal bookkeeping
+  // (PR-discovery retries, notification delivery) cannot reset a Run's age.
   listLatestRunsByProject(input: {
     projectNames: string[];
     states: RunState[];
@@ -3783,7 +3784,7 @@ export class RunStore {
           "select transition.created_at from run_state_transitions transition",
           "where transition.run_id = ranked_runs.id",
           "order by transition.sequence desc limit 1",
-          "), updated_at) as terminal_at from (",
+          "), updated_at) as last_transition_at from (",
           "select *, row_number() over (",
           "partition by project_name order by created_at desc, id desc",
           ") as rn from runs",
@@ -3796,7 +3797,7 @@ export class RunStore {
     for (const row of rows) {
       result.set(row.project_name, {
         ...mapRunRow(row),
-        terminalAt: row.terminal_at ?? row.updated_at
+        lastTransitionAt: row.last_transition_at
       });
     }
     return result;
@@ -5090,6 +5091,16 @@ export class RunStore {
     this.database.exec(`
       create index if not exists routine_firing_workspace_retention_idx
       on routine_firings(workspace_pruned_at, state, updated_at);
+    `);
+
+    // listLatestRunsByProject resolves each row's newest transition through a
+    // correlated subquery, and run_state_transitions is append-only with no
+    // retention sweep. Without this index that subquery is a full scan plus a
+    // temp b-tree sort of the whole table, once per Project, on a dashboard
+    // fragment refetched on every run-transition event.
+    this.database.exec(`
+      create index if not exists run_state_transitions_run_seq_idx
+      on run_state_transitions(run_id, sequence);
     `);
 
     // Runs after the ensureColumn additions above so databases created before

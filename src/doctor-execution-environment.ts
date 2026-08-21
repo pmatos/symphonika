@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { constants } from "node:fs";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { parse as parseToml } from "smol-toml";
@@ -206,11 +206,17 @@ async function inspectInstalledUnitPath(
     warnings.push(
       `${servicePath} is installed but has no Environment=PATH= directive`
     );
+    return {
+      binaries: [],
+      environmentPath: null,
+      servicePath,
+      status: "path_missing"
+    };
   }
   const ghPath = await resolveExecutable(
     "gh",
     homeDir,
-    environmentPath ?? "",
+    environmentPath,
     pathExt
   );
   if (ghPath === undefined) {
@@ -221,9 +227,9 @@ async function inspectInstalledUnitPath(
     binaries: [
       { executable: "gh", resolvedPath: ghPath === undefined ? null : ghPath }
     ],
-    environmentPath: environmentPath ?? null,
+    environmentPath,
     servicePath,
-    status: environmentPath === undefined ? "path_missing" : "checked"
+    status: "checked"
   };
 }
 
@@ -234,7 +240,7 @@ async function withInstalledProviderBinaryChecks(
   pathExt: string | undefined,
   warnings: string[]
 ): Promise<DoctorInstalledUnitReport> {
-  if (installedUnit.status === "not_installed") {
+  if (installedUnit.status !== "checked") {
     return installedUnit;
   }
   const providerReports: DoctorInstalledUnitReport["binaries"] = [];
@@ -543,7 +549,9 @@ async function resolveExecutable(
       const resolved = `${candidate}${extension}`;
       try {
         await access(resolved, constants.X_OK);
-        return resolved;
+        if ((await stat(resolved)).isFile()) {
+          return resolved;
+        }
       } catch {
         // Continue searching the same way child-process PATH resolution does.
       }

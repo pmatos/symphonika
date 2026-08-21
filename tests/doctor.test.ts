@@ -287,6 +287,41 @@ describe("doctor", () => {
     );
   });
 
+  it("does not accept a same-named executable directory on PATH", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, { codexCommand: "codex app-server" });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    const codexPath = path.join(root, "test-bin", "codex");
+    await rm(codexPath);
+    await mkdir(codexPath);
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      env: {
+        GITHUB_TOKEN: "test-secret-token",
+        PATH: path.join(root, "test-bin")
+      },
+      githubApi: successfulGitHubApi(),
+      homeDir: root,
+      offline: true
+    });
+
+    expect(report.environment.providerBinaries).toContainEqual({
+      executable: "codex",
+      provider: "codex",
+      resolvedPath: null,
+      status: "unresolved"
+    });
+    expect(report.errors).toContain(
+      "provider codex executable codex is not resolvable on PATH"
+    );
+  });
+
   it("checks each distinct provider selected across Projects once", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");
@@ -1120,6 +1155,66 @@ describe("doctor", () => {
         `${path.join(unitDir, "symphonika.service")} PATH does not resolve provider codex executable codex`
       );
       expect(report.ok).toBe(true);
+    });
+
+    it("does not treat the home directory as PATH when the unit has no PATH directive", async () => {
+      const root = await makeTempRoot();
+      const configPath = path.join(root, "symphonika.yml");
+      const unitDir = path.join(root, ".config", "systemd", "user");
+      await writeValidConfig(configPath, { codexCommand: "codex app-server" });
+      await writeFile(
+        path.join(root, "WORKFLOW.md"),
+        "Work on {{issue.title}} for {{project.name}}.\n"
+      );
+      for (const executable of ["codex", "gh"]) {
+        const executablePath = path.join(root, executable);
+        await writeFile(executablePath, "#!/bin/sh\nexit 0\n");
+        await chmod(executablePath, 0o755);
+      }
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        [
+          "[Service]",
+          "Type=notify",
+          "WatchdogSec=90",
+          "NotifyAccess=all",
+          "TimeoutStartSec=300",
+          "Slice=symphonika-daemon.slice",
+          ""
+        ].join("\n")
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-daemon.slice"),
+        renderSliceUnit()
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-providers.slice"),
+        renderProvidersSliceUnit()
+      );
+
+      const report = await runDoctor({
+        agentProviders: fakeAgentProviders(),
+        configPath,
+        env: {
+          GITHUB_TOKEN: "test-secret-token",
+          PATH: process.env.PATH
+        },
+        githubApi: successfulGitHubApi(),
+        homeDir: root,
+        offline: true
+      });
+
+      const servicePath = path.join(unitDir, "symphonika.service");
+      expect(report.environment.installedUnit).toEqual({
+        binaries: [],
+        environmentPath: null,
+        servicePath,
+        status: "path_missing"
+      });
+      expect(report.warnings).toEqual([
+        `${servicePath} is installed but has no Environment=PATH= directive`
+      ]);
     });
 
     it("reports no warnings when no systemd unit has been installed", async () => {

@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createHttpApp } from "../src/http/app.js";
 import type { IssueSnapshot } from "../src/issue-polling.js";
@@ -2235,6 +2235,7 @@ describe("HTTP app — dashboard IA shell (#302)", () => {
           lastPollFinishedAt: null,
           lastPollOk: null,
           lastPollStartedAt: null,
+          lastSuccessfulPollAt: null,
           projectName: "alpha",
           schedulerCurrentWeight: 0,
           updatedAt: "2026-05-22T10:00:00.000Z",
@@ -2362,6 +2363,55 @@ describe("HTTP app — project detail page (#303)", () => {
         '<span class="k">next poll</span><span class="v">in 1m</span>'
       );
     } finally {
+      test.cleanup();
+    }
+  });
+
+  it("keeps pre-restart snapshot freshness after a poll fails", async () => {
+    const test = await setup();
+    vi.useFakeTimers();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+
+      vi.setSystemTime(new Date("2026-08-21T10:00:00.000Z"));
+      test.runStore.recordProjectPollOutcome({
+        candidateIssues: 1,
+        fetchedIssues: 1,
+        filteredIssues: 0,
+        ok: true,
+        projectName: "alpha"
+      });
+
+      const startedAtMs = Date.parse("2026-08-21T10:01:00.000Z");
+      const failedPollAtMs = Date.parse("2026-08-21T10:02:00.000Z");
+      vi.setSystemTime(failedPollAtMs);
+      test.runStore.recordProjectPollOutcome({
+        candidateIssues: 0,
+        error: "tracker unavailable",
+        fetchedIssues: 0,
+        filteredIssues: 0,
+        ok: false,
+        projectName: "alpha"
+      });
+
+      const app = createHttpApp({
+        now: () => failedPollAtMs,
+        runStore: test.runStore,
+        startedAtMs,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/projects/alpha")).text();
+
+      expect(body).toContain(
+        '<span class="k">poll</span><span class="v">2m ago <span class="muted">(pre-restart)</span></span>'
+      );
+      expect(body).toContain("tracker unavailable");
+      expect(body).toContain("failing");
+    } finally {
+      vi.useRealTimers();
       test.cleanup();
     }
   });

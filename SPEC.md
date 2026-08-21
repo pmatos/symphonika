@@ -1791,7 +1791,7 @@ Bootstrap CLI commands:
 
 - `symphonika init [--yes] [--force]`
 - `symphonika add-routine <name> --project <project> (--schedule <expr> | --at <iso8601>) --kind <git|report> [--provider <codex|claude|omp>] [--tz <iana>] [--config <path>]`
-- `symphonika doctor [--config <path>]`
+- `symphonika doctor [--config <path>] [--json] [--offline] [--live-check <codex|claude|omp>]`
 - `symphonika test-email [--config <path>]`
 - `symphonika init-project [--config <path>] [--yes] [--force]`
 - `symphonika daemon [--config <path>] [--port <port>]`
@@ -1820,6 +1820,15 @@ config path and points the operator to `symphonika init`.
 - Routine Hosts: provider command + adapter + workspace resolvable (no GitHub access, no label
   checks); `validForHosting` rather than `validForDispatch`
 - provider commands for Codex, Claude, and OMP when selected by a Project or Routine
+- the Doctor Execution Environment: selected Project provider executables under the invoking PATH,
+  the required Codex profile keys when Codex is selected — checked under the profile the configured
+  command selects, in `$CODEX_HOME` when set — and independent `gh` executable/authentication
+  status, with fatal auth-probe failures distinct from logged-out credentials; Workspace-relative
+  executable paths are rejected because no future issue or Routine Workspace exists yet for
+  `doctor` to resolve them against
+- installed `symphonika.service` PATH liveness for selected Project provider executables and `gh`;
+  the effective assignment includes adjacent `.service.d/*.conf` drop-ins, and failures here are
+  warnings because the unit's frozen PATH may be intentional
 - Dispatch Projects: workflow contract path and parse
 - every Routine declaration in the top-level `routines:` block, including unknown target Projects,
   a target Project name declared more than once, globally duplicate Routine names, and `kind: git`
@@ -1834,6 +1843,11 @@ env file to load for a manual run: the explicit Service Config's sibling `env` f
 warns when an installed service unit predates the `EnvironmentFile=` directive. Unit-regeneration
 guidance must remind operators to repeat any original `--config <path>` option and to restart the
 running service after reinstalling the unit.
+
+`doctor --json` renders the same typed `DoctorReport` and check set as the human-readable command as
+one JSON value on stdout. `--offline` skips only the network-backed `gh auth status` call; it still
+resolves `gh`, checks provider binaries and the Codex profile, reads installed-unit PATH, and runs
+the existing config/workflow validations. See ADR 0085.
 
 `init` writes only the user Service Config and never inspects or mutates a repository or GitHub.
 
@@ -1957,9 +1971,9 @@ Hosts group, since a Routine Host is never polled and never dispatches (ADR-0062
 
 Each Project name links to its own drill-in page, `GET /projects/:name`. For a Dispatch Project
 this is a capacity strip — validity, in-flight vs. per-Project cap, global cap, poll age (marked
-`(pre-restart)` when the last successful poll predates the current process), and next poll — over
-one issue-keyed table: a union of the persisted issue poll snapshot (candidate and filtered issues,
-ADR-0073) and this Project's Runs, keyed by issue number. Every row's state pill collapses to
+`(pre-restart)` when `project_states.last_successful_poll_at` predates the current process), and
+next poll — over one issue-keyed table: a union of the persisted issue poll snapshot (candidate and
+filtered issues, ADR-0073) and this Project's Runs, keyed by issue number. Every row's state pill collapses to
 `eligible`, the Run's own state (`queued`/`preparing_workspace` render as a claimed-but-not-yet-
 running Run, `waiting`/`input_required` as parked, `blocked`, or a terminal RunState), or
 `filtered`; the detail column carries the specific reason — cap pressure for a capped eligible

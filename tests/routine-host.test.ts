@@ -24,12 +24,17 @@ import type {
 } from "../src/provider.js";
 import type { RunControllerProjectConfig } from "../src/lifecycle/run-controller.js";
 import type { TargetedRoutineDeclaration } from "../src/routines/types.js";
+import {
+  doctorTestEnv,
+  prepareDoctorTestEnvironment
+} from "./helpers/doctor-environment.js";
 
 const tempRoots: string[] = [];
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-rh-test-"));
   tempRoots.push(root);
+  await prepareDoctorTestEnvironment(root);
   return root;
 }
 
@@ -1039,8 +1044,11 @@ describe("Routine Host doctor (ADR 0062)", () => {
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
       configPath: path.join(root, "symphonika.yml"),
-      env: process.env,
-      githubApi: githubApiWithLabels([]) // no labels at all
+      cwd: root,
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
+      githubApi: githubApiWithLabels([]), // no labels at all
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(true);
@@ -1084,8 +1092,11 @@ describe("Routine Host doctor (ADR 0062)", () => {
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
       configPath: path.join(root, "symphonika.yml"),
-      env: process.env,
-      githubApi: githubApiWithLabels([])
+      cwd: root,
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
+      githubApi: githubApiWithLabels([]),
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);
@@ -1123,8 +1134,11 @@ describe("Routine Host doctor (ADR 0062)", () => {
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
       configPath: path.join(root, "symphonika.yml"),
-      env: process.env,
-      githubApi: githubApiWithLabels([])
+      cwd: root,
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
+      githubApi: githubApiWithLabels([]),
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);
@@ -1185,8 +1199,11 @@ describe("Routine Host doctor (ADR 0062)", () => {
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
       configPath: path.join(root, "symphonika.yml"),
-      env: process.env,
-      githubApi: githubApiWithLabels([])
+      cwd: root,
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
+      githubApi: githubApiWithLabels([]),
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);
@@ -1235,8 +1252,11 @@ describe("Routine Host doctor (ADR 0062)", () => {
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
       configPath: path.join(root, "symphonika.yml"),
-      env: process.env,
-      githubApi: githubApiWithLabels([])
+      cwd: root,
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
+      githubApi: githubApiWithLabels([]),
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);
@@ -1289,8 +1309,11 @@ describe("Routine Host doctor (ADR 0062)", () => {
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
       configPath: path.join(root, "symphonika.yml"),
-      env: process.env,
-      githubApi: githubApiWithLabels([])
+      cwd: root,
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
+      githubApi: githubApiWithLabels([]),
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);
@@ -1355,7 +1378,8 @@ describe("Routine Host doctor (ADR 0062)", () => {
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
       configPath: path.join(root, "symphonika.yml"),
-      env: process.env,
+      cwd: root,
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
       // The dispatch repo has all required labels; the hosts have no tracker,
       // so no repo access / label checks run for them.
       githubApi: {
@@ -1364,7 +1388,9 @@ describe("Routine Host doctor (ADR 0062)", () => {
           .fn()
           .mockResolvedValue(["agent-ready", ...REQUIRED_OPERATIONAL_LABELS]),
         validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
-      }
+      },
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(true);
@@ -1414,8 +1440,11 @@ describe("Routine Host doctor (ADR 0062)", () => {
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
       configPath: path.join(root, "symphonika.yml"),
-      env: process.env,
-      githubApi: githubApiWithLabels([])
+      cwd: root,
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
+      githubApi: githubApiWithLabels([]),
+      homeDir: root,
+      offline: true
     });
 
     // The declaration error is reported...

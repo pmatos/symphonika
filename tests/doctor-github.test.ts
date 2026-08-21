@@ -13,6 +13,10 @@ import {
 } from "../src/doctor.js";
 import type { GitHubIssuesApi } from "../src/issue-polling.js";
 import type { AgentProviderRegistry } from "../src/provider.js";
+import {
+  doctorTestEnv,
+  prepareDoctorTestEnvironment
+} from "./helpers/doctor-environment.js";
 
 const tempRoots: string[] = [];
 const execFile = promisify(execFileCallback);
@@ -20,6 +24,7 @@ const execFile = promisify(execFileCallback);
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-github-test-"));
   tempRoots.push(root);
+  await prepareDoctorTestEnvironment(root);
   return root;
 }
 
@@ -74,8 +79,10 @@ describe("GitHub Project validation", () => {
       agentProviders: fakeAgentProviders(),
       configPath,
       cwd: configRoot,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubApi
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
+      githubApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);
@@ -107,8 +114,10 @@ describe("GitHub Project validation", () => {
       agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubApi
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
+      githubApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(true);
@@ -140,8 +149,10 @@ describe("GitHub Project validation", () => {
       agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubApi
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
+      githubApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);
@@ -169,8 +180,10 @@ describe("GitHub Project validation", () => {
       agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubApi
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
+      githubApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);
@@ -212,8 +225,10 @@ describe("GitHub Project validation", () => {
       agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubApi
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
+      githubApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);
@@ -275,9 +290,11 @@ describe("GitHub Project validation", () => {
       agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
       githubApi,
-      githubIssuesApi
+      githubIssuesApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(true);
@@ -308,8 +325,10 @@ describe("GitHub Project validation", () => {
       agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubApi
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
+      githubApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);

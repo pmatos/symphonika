@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { buildCli } from "../src/cli.js";
 import {
@@ -16,20 +16,28 @@ import {
   renderServiceUnit,
   renderSliceUnit
 } from "../src/service.js";
+import {
+  doctorEnvironmentFixture,
+  writeStubExecutables
+} from "./helpers/doctor-environment.js";
 
 const tempRoots: string[] = [];
 // Built by the real generator rather than hand-written, so a new structural
 // directive in the unit template can never silently leave these fixtures
 // behind while the drift checks they exercise still claim to pass.
-const currentServiceUnit = renderServiceUnit({
-  environmentFilePath: "/home/op/.config/symphonika/env",
-  execPath: "/usr/bin/node",
-  path: "/usr/bin:/bin",
-  scriptPath: "/opt/symphonika/dist/cli.js"
-});
+const currentServiceUnit = (unitPath = "/usr/bin:/bin") =>
+  renderServiceUnit({
+    environmentFilePath: "/home/op/.config/symphonika/env",
+    execPath: "/usr/bin/node",
+    path: unitPath,
+    scriptPath: "/opt/symphonika/dist/cli.js"
+  });
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
+const originalCodexHome = process.env.CODEX_HOME;
 const originalGithubToken = process.env.GITHUB_TOKEN;
 const originalExitCode = process.exitCode;
+const originalPath = process.env.PATH;
+const TEST_DOCTOR_ENVIRONMENT = doctorEnvironmentFixture();
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-doctor-test-"));
@@ -37,7 +45,16 @@ async function makeTempRoot(): Promise<string> {
   return root;
 }
 
+beforeEach(() => {
+  delete process.env.CODEX_HOME;
+});
+
 afterEach(async () => {
+  if (originalCodexHome === undefined) {
+    delete process.env.CODEX_HOME;
+  } else {
+    process.env.CODEX_HOME = originalCodexHome;
+  }
   if (originalGithubToken === undefined) {
     delete process.env.GITHUB_TOKEN;
   } else {
@@ -46,6 +63,11 @@ afterEach(async () => {
   delete process.env.SYMPHONIKA_MISSING_TOKEN;
   delete process.env.SYMPHONIKA_TEST_TOKEN;
   process.exitCode = originalExitCode;
+  if (originalPath === undefined) {
+    delete process.env.PATH;
+  } else {
+    process.env.PATH = originalPath;
+  }
 
   await Promise.all(
     tempRoots
@@ -90,7 +112,7 @@ describe("doctor", () => {
     const output = await runDoctorCommand(configPath);
 
     expect(process.exitCode).toBe(1);
-    expect(output.stdout).toBe("");
+    expect(output.stdout).toContain("execution environment:");
     expect(output.stderr).toContain("doctor failed");
     expect(output.stderr).toContain("projects");
   });
@@ -197,7 +219,7 @@ describe("doctor", () => {
     const output = await runDoctorCommand(configPath);
 
     expect(process.exitCode).toBe(1);
-    expect(output.stdout).toBe("");
+    expect(output.stdout).toContain("execution environment:");
     expect(output.stderr).toContain("doctor failed");
     expect(output.stderr).toContain(`routine at ${routinePath}`);
     expect(output.stderr).toContain("schedule.cron is invalid");
@@ -244,6 +266,471 @@ describe("doctor", () => {
     });
 
     expect(report.liveCheck).toBeUndefined();
+  });
+
+  it("reports an unresolved binary from the rendered command for each selected provider", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const missingCodex = path.join(root, "missing-codex");
+    const binDir = path.join(root, "bin");
+    await writeValidConfig(configPath, {
+      codexCommand: `${missingCodex} {{#model}}--model {{model}}{{/model}} app-server`
+    });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    await mkdir(binDir);
+    const ghPath = path.join(binDir, "gh");
+    await writeStubExecutables(binDir, ["gh"]);
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      env: { GITHUB_TOKEN: "test-secret-token", PATH: binDir },
+      githubApi: successfulGitHubApi(),
+      homeDir: root,
+      offline: true
+    });
+
+    expect(report.environment.providerBinaries).toEqual([
+      {
+        executable: missingCodex,
+        provider: "codex",
+        resolvedPath: null,
+        status: "unresolved"
+      }
+    ]);
+    expect(report.environment.gh).toEqual({
+      executablePath: ghPath,
+      status: "skipped_offline"
+    });
+    expect(report.errors).toContain(
+      `provider codex executable ${missingCodex} is not resolvable on PATH`
+    );
+  });
+
+  it("rejects provider executables relative to a future Workspace", async () => {
+    const root = await makeTempRoot();
+    const doctorCwd = path.join(root, "doctor-cwd");
+    const configPath = path.join(root, "symphonika.yml");
+    const binDir = path.join(root, "bin");
+    const executable = "./tools/agent-wrapper";
+    await writeValidConfig(configPath, {
+      codexCommand: `${executable} app-server`
+    });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    await writeStubExecutables(path.join(doctorCwd, "tools"), [
+      "agent-wrapper"
+    ]);
+    await writeStubExecutables(binDir, ["gh"]);
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      cwd: doctorCwd,
+      env: { GITHUB_TOKEN: "test-secret-token", PATH: binDir },
+      githubApi: successfulGitHubApi(),
+      homeDir: root,
+      offline: true
+    });
+
+    expect(report.environment.providerBinaries).toEqual([
+      {
+        executable,
+        provider: "codex",
+        resolvedPath: null,
+        status: "unresolved"
+      }
+    ]);
+    expect(report.errors).toContain(
+      `provider codex executable ${executable} is relative to the future Workspace; use an absolute path or a command resolvable on PATH`
+    );
+  });
+
+  it("does not accept a same-named executable directory on PATH", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, { codexCommand: "codex app-server" });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    const codexPath = path.join(root, "test-bin", "codex");
+    await rm(codexPath);
+    await mkdir(codexPath);
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      env: {
+        GITHUB_TOKEN: "test-secret-token",
+        PATH: path.join(root, "test-bin")
+      },
+      githubApi: successfulGitHubApi(),
+      homeDir: root,
+      offline: true
+    });
+
+    expect(report.environment.providerBinaries).toContainEqual({
+      executable: "codex",
+      provider: "codex",
+      resolvedPath: null,
+      status: "unresolved"
+    });
+    expect(report.errors).toContain(
+      "provider codex executable codex is not resolvable on PATH"
+    );
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "distinguishes an unset PATH from an explicitly empty PATH",
+    async () => {
+      const root = await makeTempRoot();
+      const doctorCwd = path.join(root, "doctor-cwd");
+      const configPath = path.join(root, "symphonika.yml");
+      await writeValidConfig(configPath, { codexCommand: "sh app-server" });
+      await writeFile(
+        path.join(root, "WORKFLOW.md"),
+        "Work on {{issue.title}} for {{project.name}}.\n"
+      );
+      await writeStubExecutables(doctorCwd, ["sh"]);
+
+      const withoutPath = await runDoctor({
+        agentProviders: fakeAgentProviders(),
+        configPath,
+        cwd: doctorCwd,
+        env: { GITHUB_TOKEN: "test-secret-token" },
+        githubApi: successfulGitHubApi(),
+        homeDir: root,
+        offline: true
+      });
+      const withEmptyPath = await runDoctor({
+        agentProviders: fakeAgentProviders(),
+        configPath,
+        cwd: doctorCwd,
+        env: { GITHUB_TOKEN: "test-secret-token", PATH: "" },
+        githubApi: successfulGitHubApi(),
+        homeDir: root,
+        offline: true
+      });
+
+      expect(["/usr/bin/sh", "/bin/sh"]).toContain(
+        withoutPath.environment.providerBinaries[0]?.resolvedPath
+      );
+      expect(withEmptyPath.environment.providerBinaries[0]).toMatchObject({
+        executable: "sh",
+        provider: "codex",
+        resolvedPath: path.join(doctorCwd, "sh"),
+        status: "resolved"
+      });
+    }
+  );
+
+  it("checks each distinct provider selected across Projects once", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, {
+      additionalProjectLines: [
+        "  - name: claude-host",
+        "    mode: routine_host",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/claude-host",
+        "      git:",
+        "        remote: git@github.com:pmatos/claude-host.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: claude",
+        "  - name: second-codex-host",
+        "    mode: routine_host",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/second-codex-host",
+        "      git:",
+        "        remote: git@github.com:pmatos/second-codex-host.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex"
+      ],
+      claudeCommand:
+        "claude --print --input-format stream-json --output-format stream-json",
+      codexCommand: "codex app-server"
+    });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    await writeStubExecutables(path.join(root, "test-bin"), ["claude"]);
+    const provider = (name: "claude" | "codex") => ({
+      cancel: () => Promise.resolve(),
+      name,
+      runAttempt: async function* () {
+        await Promise.resolve();
+        yield* [];
+      },
+      validate: () => Promise.resolve()
+    });
+
+    const report = await runDoctor({
+      agentProviders: {
+        claude: provider("claude"),
+        codex: provider("codex")
+      },
+      configPath,
+      env: { GITHUB_TOKEN: "test-secret-token", PATH: process.env.PATH },
+      githubApi: successfulGitHubApi(),
+      homeDir: root,
+      offline: true
+    });
+
+    expect(
+      report.environment.providerBinaries.map((binary) => binary.provider)
+    ).toEqual(["codex", "claude"]);
+    expect(report.environment.providerBinaries).toHaveLength(2);
+  });
+
+  it("reports each missing or mismatched Codex profile key", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const binDir = path.join(root, "bin");
+    await writeValidConfig(configPath, { codexCommand: "codex app-server" });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    await mkdir(path.join(root, ".codex"), { recursive: true });
+    await writeFile(
+      path.join(root, ".codex", "config.toml"),
+      '[profiles.symphonika]\nsandbox_mode = "workspace-write"\n'
+    );
+    await writeStubExecutables(binDir, ["codex", "gh"]);
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      env: { GITHUB_TOKEN: "test-secret-token", PATH: binDir },
+      githubApi: successfulGitHubApi(),
+      homeDir: root,
+      offline: true
+    });
+
+    expect(report.environment.codexProfile).toMatchObject({
+      checks: [
+        {
+          actual: "workspace-write",
+          expected: "danger-full-access",
+          key: "sandbox_mode",
+          status: "mismatch"
+        },
+        {
+          actual: null,
+          expected: "never",
+          key: "approval_policy",
+          status: "missing"
+        }
+      ],
+      path: path.join(root, ".codex", "config.toml"),
+      status: "invalid"
+    });
+    expect(report.errors).toContain(
+      'Codex profile profiles.symphonika.sandbox_mode is "workspace-write"; expected "danger-full-access"'
+    );
+    expect(report.errors).toContain(
+      'Codex profile profiles.symphonika.approval_policy is missing; expected "never"'
+    );
+  });
+
+  it("checks the Codex profile the configured command actually selects", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const binDir = path.join(root, "bin");
+    await writeValidConfig(configPath, {
+      codexCommand: "codex --profile acme app-server"
+    });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    await mkdir(path.join(root, ".codex"), { recursive: true });
+    await writeFile(
+      path.join(root, ".codex", "config.toml"),
+      [
+        "[profiles.acme]",
+        'sandbox_mode = "danger-full-access"',
+        'approval_policy = "never"',
+        "",
+        "[profiles.symphonika]",
+        'sandbox_mode = "workspace-write"',
+        ""
+      ].join("\n")
+    );
+    await writeStubExecutables(binDir, ["codex", "gh"]);
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      env: { GITHUB_TOKEN: "test-secret-token", PATH: binDir },
+      githubApi: successfulGitHubApi(),
+      homeDir: root,
+      offline: true
+    });
+
+    expect(report.environment.codexProfile.status).toBe("valid");
+    expect(report.errors).toEqual([]);
+  });
+
+  it("reads the Codex config from an absolute CODEX_HOME", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const binDir = path.join(root, "bin");
+    const codexHome = path.join(root, "codex-home");
+    await writeValidConfig(configPath, { codexCommand: "codex app-server" });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(
+      path.join(codexHome, "config.toml"),
+      '[profiles.symphonika]\nsandbox_mode = "danger-full-access"\napproval_policy = "never"\n'
+    );
+    await writeStubExecutables(binDir, ["codex", "gh"]);
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      env: {
+        CODEX_HOME: codexHome,
+        GITHUB_TOKEN: "test-secret-token",
+        PATH: binDir
+      },
+      githubApi: successfulGitHubApi(),
+      homeDir: root,
+      offline: true
+    });
+
+    expect(report.environment.codexProfile).toMatchObject({
+      path: path.join(codexHome, "config.toml"),
+      status: "valid"
+    });
+    expect(report.errors).toEqual([]);
+  });
+
+  it("distinguishes an installed but logged-out gh CLI", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const binDir = path.join(root, "bin");
+    await writeValidConfig(configPath, { codexCommand: "codex app-server" });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    await mkdir(binDir);
+    await writeStubExecutables(binDir, ["codex"]);
+    const ghPath = path.join(binDir, "gh");
+    await writeStubExecutables(
+      binDir,
+      ["gh"],
+      '#!/bin/sh\n[ "$1" = auth ] && [ "$2" = status ] && exit 1\nexit 2\n'
+    );
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      env: { GITHUB_TOKEN: "test-secret-token", PATH: binDir },
+      githubApi: successfulGitHubApi(),
+      homeDir: root
+    });
+
+    expect(report.environment.gh).toEqual({
+      executablePath: ghPath,
+      status: "unauthenticated"
+    });
+    expect(report.errors).toContainEqual(
+      expect.stringContaining(
+        "gh is installed but not authenticated; run `gh auth login`"
+      )
+    );
+  });
+
+  it("reports a fatal gh auth probe failure separately from logged-out credentials", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const binDir = path.join(root, "bin");
+    await writeValidConfig(configPath, { codexCommand: "codex app-server" });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    await writeStubExecutables(binDir, ["codex"]);
+    const ghPath = path.join(binDir, "gh");
+    await writeStubExecutables(
+      binDir,
+      ["gh"],
+      '#!/bin/sh\necho "gh backend unavailable" >&2\nexit 2\n'
+    );
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      env: { GITHUB_TOKEN: "test-secret-token", PATH: binDir },
+      githubApi: successfulGitHubApi(),
+      homeDir: root
+    });
+
+    expect(report.environment.gh).toEqual({
+      executablePath: ghPath,
+      reason: "gh backend unavailable",
+      status: "probe_failed"
+    });
+    expect(report.errors).toContain(
+      "gh authentication probe failed: gh backend unavailable"
+    );
+    expect(report.errors).not.toContainEqual(
+      expect.stringContaining("run `gh auth login`")
+    );
+  });
+
+  it("checks only the active GitHub.com gh account", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const binDir = path.join(root, "bin");
+    await writeValidConfig(configPath, { codexCommand: "codex app-server" });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    await writeStubExecutables(binDir, ["codex"]);
+    await writeStubExecutables(
+      binDir,
+      ["gh"],
+      [
+        "#!/bin/sh",
+        '[ "$1" = auth ] || exit 2',
+        '[ "$2" = status ] || exit 2',
+        '[ "$3" = --active ] || exit 2',
+        '[ "$4" = --hostname ] || exit 2',
+        '[ "$5" = github.com ] || exit 2',
+        "exit 0",
+        ""
+      ].join("\n")
+    );
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      env: { GITHUB_TOKEN: "test-secret-token", PATH: binDir },
+      githubApi: successfulGitHubApi(),
+      homeDir: root
+    });
+
+    expect(report.environment.gh).toEqual({
+      executablePath: path.join(binDir, "gh"),
+      status: "authenticated"
+    });
+    expect(report.errors).toEqual([]);
   });
 
   it("runs the live provider check when requested and reports success", async () => {
@@ -847,6 +1334,165 @@ describe("doctor", () => {
   });
 
   describe("installed systemd unit drift", () => {
+    it("uses the PATH from the installed unit's drop-ins", async () => {
+      const root = await makeTempRoot();
+      const configPath = path.join(root, "symphonika.yml");
+      const shellBin = path.join(root, "shell-bin");
+      const baseUnitBin = path.join(root, "base-unit-bin");
+      const dropInBin = path.join(root, "drop-in-bin");
+      const unitDir = path.join(root, ".config", "systemd", "user");
+      const servicePath = path.join(unitDir, "symphonika.service");
+      const dropInDir = `${servicePath}.d`;
+      await writeValidConfig(configPath, { codexCommand: "codex app-server" });
+      await writeFile(
+        path.join(root, "WORKFLOW.md"),
+        "Work on {{issue.title}} for {{project.name}}.\n"
+      );
+      await writeStubExecutables(shellBin, ["codex", "gh"]);
+      await writeStubExecutables(baseUnitBin, ["codex", "gh"]);
+      await writeStubExecutables(dropInBin, ["codex", "gh"]);
+      await mkdir(dropInDir, { recursive: true });
+      await writeFile(servicePath, currentServiceUnit(baseUnitBin));
+      await writeFile(
+        path.join(dropInDir, "20-path.conf"),
+        `[Service]\nEnvironment="PATH=${dropInBin}"\n`
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-daemon.slice"),
+        renderSliceUnit()
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-providers.slice"),
+        renderProvidersSliceUnit()
+      );
+
+      const report = await runDoctor({
+        agentProviders: fakeAgentProviders(),
+        configPath,
+        env: { GITHUB_TOKEN: "test-secret-token", PATH: shellBin },
+        githubApi: successfulGitHubApi(),
+        homeDir: root,
+        offline: true
+      });
+
+      expect(report.environment.installedUnit).toMatchObject({
+        binaries: [
+          {
+            executable: "codex",
+            provider: "codex",
+            resolvedPath: path.join(dropInBin, "codex")
+          },
+          { executable: "gh", resolvedPath: path.join(dropInBin, "gh") }
+        ],
+        environmentPath: dropInBin,
+        servicePath,
+        status: "checked"
+      });
+      expect(report.warnings).toEqual([]);
+    });
+
+    it("warns for a provider missing from the installed unit's frozen PATH", async () => {
+      const root = await makeTempRoot();
+      const configPath = path.join(root, "symphonika.yml");
+      const shellBin = path.join(root, "shell-bin");
+      const unitBin = path.join(root, "unit-bin");
+      const unitDir = path.join(root, ".config", "systemd", "user");
+      await writeValidConfig(configPath, { codexCommand: "codex app-server" });
+      await writeFile(
+        path.join(root, "WORKFLOW.md"),
+        "Work on {{issue.title}} for {{project.name}}.\n"
+      );
+      await mkdir(shellBin);
+      await mkdir(unitBin);
+      await writeStubExecutables(shellBin, ["codex", "gh"]);
+      const unitGhPath = path.join(unitBin, "gh");
+      await writeStubExecutables(unitBin, ["gh"]);
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        currentServiceUnit(unitBin)
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-daemon.slice"),
+        renderSliceUnit()
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-providers.slice"),
+        renderProvidersSliceUnit()
+      );
+
+      const report = await runDoctor({
+        agentProviders: fakeAgentProviders(),
+        configPath,
+        env: { GITHUB_TOKEN: "test-secret-token", PATH: shellBin },
+        githubApi: successfulGitHubApi(),
+        homeDir: root,
+        offline: true
+      });
+
+      expect(report.environment.installedUnit).toEqual({
+        binaries: [
+          { executable: "codex", provider: "codex", resolvedPath: null },
+          { executable: "gh", resolvedPath: unitGhPath }
+        ],
+        environmentPath: unitBin,
+        servicePath: path.join(unitDir, "symphonika.service"),
+        status: "checked"
+      });
+      expect(report.warnings).toContain(
+        `${path.join(unitDir, "symphonika.service")} PATH does not resolve provider codex executable codex`
+      );
+      expect(report.ok).toBe(true);
+    });
+
+    it("does not treat the home directory as PATH when the unit has no PATH directive", async () => {
+      const root = await makeTempRoot();
+      const configPath = path.join(root, "symphonika.yml");
+      const unitDir = path.join(root, ".config", "systemd", "user");
+      await writeValidConfig(configPath, { codexCommand: "codex app-server" });
+      await writeFile(
+        path.join(root, "WORKFLOW.md"),
+        "Work on {{issue.title}} for {{project.name}}.\n"
+      );
+      await writeStubExecutables(root, ["codex", "gh"]);
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        currentServiceUnit().replace(/^Environment="PATH=.*"\n/m, "")
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-daemon.slice"),
+        renderSliceUnit()
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-providers.slice"),
+        renderProvidersSliceUnit()
+      );
+
+      const report = await runDoctor({
+        agentProviders: fakeAgentProviders(),
+        configPath,
+        env: {
+          GITHUB_TOKEN: "test-secret-token",
+          PATH: process.env.PATH
+        },
+        githubApi: successfulGitHubApi(),
+        homeDir: root,
+        offline: true
+      });
+
+      const servicePath = path.join(unitDir, "symphonika.service");
+      expect(report.environment.installedUnit).toEqual({
+        binaries: [],
+        environmentPath: null,
+        servicePath,
+        status: "path_missing"
+      });
+      expect(report.warnings).toEqual([
+        `${servicePath} is installed but has no Environment=PATH= directive`
+      ]);
+    });
+
     it("reports no warnings when no systemd unit has been installed", async () => {
       const root = await makeTempRoot();
       const homeDir = await makeTempRoot();
@@ -1187,10 +1833,12 @@ describe("doctor", () => {
       const root = await makeTempRoot();
       const homeDir = await makeTempRoot();
       const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      const unitBin = path.join(homeDir, "bin");
       await mkdir(unitDir, { recursive: true });
+      await writeStubExecutables(unitBin, ["gh"]);
       await writeFile(
         path.join(unitDir, "symphonika.service"),
-        currentServiceUnit,
+        currentServiceUnit(unitBin),
         "utf8"
       );
       await writeFile(
@@ -1222,10 +1870,12 @@ describe("doctor", () => {
       const root = await makeTempRoot();
       const homeDir = await makeTempRoot();
       const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      const unitBin = path.join(homeDir, "bin");
       await mkdir(unitDir, { recursive: true });
+      await writeStubExecutables(unitBin, ["gh"]);
       await writeFile(
         path.join(unitDir, "symphonika.service"),
-        currentServiceUnit,
+        currentServiceUnit(unitBin),
         "utf8"
       );
       await writeFile(
@@ -1255,6 +1905,7 @@ describe("doctor", () => {
         runDoctor: () =>
           Promise.resolve({
             configPath: "/tmp/symphonika.yml",
+            environment: TEST_DOCTOR_ENVIRONMENT,
             errors: [],
             ok: true,
             projects: [],
@@ -1285,6 +1936,7 @@ describe("doctor", () => {
         runDoctor: () =>
           Promise.resolve({
             configPath: "/tmp/symphonika.yml",
+            environment: TEST_DOCTOR_ENVIRONMENT,
             errors: ["projects is required"],
             ok: false,
             projects: [],
@@ -1303,6 +1955,7 @@ describe("doctor", () => {
       await program.parseAsync(["node", "symphonika", "doctor"]);
 
       expect(output.stderr).toContain("doctor failed");
+      expect(output.stdout).toContain("- gh: authenticated (/usr/bin/gh)");
       expect(output.stdout).toContain(
         "symphonika.service predates the cgroup split"
       );
@@ -1320,6 +1973,11 @@ async function runDoctorCommand(
   // installed on the machine running the suite, making these tests
   // non-hermetic.
   const homeDir = await makeTempRoot();
+  await mkdir(path.join(homeDir, ".codex"), { recursive: true });
+  await writeFile(
+    path.join(homeDir, ".codex", "config.toml"),
+    '[profiles.symphonika]\nsandbox_mode = "danger-full-access"\napproval_policy = "never"\n'
+  );
   const output = { stderr: "", stdout: "" };
   const program = buildCli({
     registerSignalHandlers: false,
@@ -1377,6 +2035,7 @@ function successfulGitHubApi(): GitHubApi {
 async function writeValidConfig(
   configPath: string,
   overrides: {
+    additionalProjectLines?: string[];
     agentProvider?: string;
     claudeCommand?: string;
     codexCommand?: string;
@@ -1392,6 +2051,17 @@ async function writeValidConfig(
 ): Promise<void> {
   const configDir = path.dirname(configPath);
   await mkdir(configDir, { recursive: true });
+  await mkdir(path.join(configDir, ".codex"), { recursive: true });
+  await writeFile(
+    path.join(configDir, ".codex", "config.toml"),
+    '[profiles.symphonika]\nsandbox_mode = "danger-full-access"\napproval_policy = "never"\n'
+  );
+  const binDir = path.join(configDir, "test-bin");
+  await mkdir(binDir, { recursive: true });
+  await writeStubExecutables(binDir, ["claude", "codex", "gh", "omp"]);
+  process.env.PATH = [binDir, originalPath ?? ""]
+    .filter(Boolean)
+    .join(path.delimiter);
   await writeFile(
     configPath,
     [
@@ -1438,6 +2108,7 @@ async function writeValidConfig(
       "    agent:",
       `      provider: ${overrides.agentProvider ?? "codex"}`,
       `    workflow: ${overrides.workflowPath ?? "./WORKFLOW.md"}`,
+      ...(overrides.additionalProjectLines ?? []),
       ...(overrides.routinePaths === undefined
         ? []
         : [

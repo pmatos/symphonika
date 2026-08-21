@@ -314,6 +314,13 @@ _Avoid_: dependency scheduler, merge-conflict resolver
 A normalized adapter that lets the orchestrator run a specific coding-agent implementation; v1 supports Codex, Claude, and Oh My Pi.
 _Avoid_: agent when referring to the adapter boundary
 
+**Doctor Execution Environment**:
+The report-only view of local capabilities `doctor` checks before any dispatch: selected Project
+provider executables, the Codex headless profile contract, independent `gh` authentication, and the
+provider/`gh` liveness of an installed unit's frozen PATH. It is an on-demand observation, not a
+persisted capability manifest or an auto-remediation mechanism. See ADR 0085.
+_Avoid_: Dispatch Eligibility, provider validation when referring only to executable/auth/PATH state
+
 **Full-Permission Agent Execution**:
 The execution posture where coding agents run without provider approval prompts or provider sandbox restrictions.
 _Avoid_: safe mode, yolo mode in formal docs
@@ -362,6 +369,8 @@ _Avoid_: chat session
 - Each **Workspace** uses one **Issue Branch**
 - A **Coding Agent** executes within a **Workspace** for one **Issue**
 - An **Agent Provider** launches and observes one kind of **Coding Agent**
+- The **Doctor Execution Environment** reports whether selected **Agent Providers** and `gh` can run
+  under both the invoking process environment and an installed daemon unit's frozen PATH
 - A **Provider Event Log** belongs to one coding-agent run
 - A **Normalized Event Log** is derived from a **Provider Event Log**
 - A **Run Store** records durable orchestration state across process restarts

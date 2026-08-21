@@ -431,6 +431,42 @@ describe("routine operator surfaces", () => {
     }
   });
 
+  it("excludes Routine Targets removed from config from dashboard groups", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/daily-report.md"
+    };
+    try {
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      store.syncRoutines([{ ...declaration, projectName: "alpha" }], {
+        projects: ["alpha", "beta"]
+      });
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain('<td><a href="/routines/daily-report">1</a></td>');
+      expect(body).not.toContain("1/2 active");
+    } finally {
+      store.close();
+    }
+  });
+
   it("renders a disabled routine's disable reason on the local dashboard page", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

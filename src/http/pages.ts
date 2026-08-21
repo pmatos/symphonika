@@ -5429,18 +5429,15 @@ function renderPullRequestDetailPage(input: {
 }
 
 // A Routine name is globally unique across the *current* declared config
-// (ADR 0069), but a removed declaration's target rows are soft-disabled,
-// never deleted (src/routines/dispatcher.ts documents this: "Routine names
-// are unique only per (project_name, name) — a routine soft-disabled with
-// disabled_reason 'removed_from_config' is never deleted, so an unrelated,
-// later-declared routine elsewhere can legitimately reuse its name"). A
-// stale disabled row still passes listRoutines()'s default
-// `state != 'inactive'` filter, so grouping by name alone could fold a dead
-// declaration's row into a live, unrelated routine's target count. Source
-// path is stable per declaration and shared by every target one `routines:`
-// entry materializes, so grouping on (name, sourcePath) keeps that
-// cross-declaration merge from happening while still collapsing an
-// N-target Routine into one row — the failure mode #302 exists to prevent.
+// (ADR 0069), but removed target rows are soft-disabled, never deleted, and
+// still pass listRoutines()'s default `state != 'inactive'` filter. Dashboard
+// groups exclude those historical rows by default so they cannot inflate the
+// current target count. Routine detail/editor callers opt in to removed rows
+// because they use sourcePath to disambiguate durable historical declarations.
+// Source path is stable per declaration and shared by every target one
+// `routines:` entry materializes, so grouping on (name, sourcePath) keeps
+// distinct declarations apart while still collapsing an N-target Routine
+// into one row.
 // Full per-target detail
 // (skip counters, firing history, latest outcome) moves to /routines/:name
 // (#304); this row only needs enough to answer "is it scheduled, and when
@@ -5454,9 +5451,18 @@ type RoutineGroup = {
   targets: RoutineStatus[];
 };
 
-function groupRoutinesByName(routines: RoutineStatus[]): RoutineGroup[] {
+function groupRoutinesByName(
+  routines: RoutineStatus[],
+  includeRemovedTargets = false
+): RoutineGroup[] {
   const byKey = new Map<string, RoutineGroup>();
   for (const routine of routines) {
+    if (
+      !includeRemovedTargets &&
+      routine.disabledReason === "removed_from_config"
+    ) {
+      continue;
+    }
     const key = `${routine.name} ${routine.sourcePath}`;
     let group = byKey.get(key);
     if (group === undefined) {
@@ -5586,7 +5592,8 @@ function resolveNamedRoutineGroup(
   | { groups: RoutineGroup[]; kind: "ambiguous" }
   | { group: RoutineGroup; kind: "ok" } {
   const groups = groupRoutinesByName(
-    runStore.listRoutines({ includeInactive })
+    runStore.listRoutines({ includeInactive }),
+    true
   ).filter((group) => group.name === name);
 
   if (groups.length === 0) {
@@ -5629,7 +5636,10 @@ function includeInactiveRoutineTargets(
     return selectedGroup;
   }
   return (
-    groupRoutinesByName(runStore.listRoutines({ includeInactive: true })).find(
+    groupRoutinesByName(
+      runStore.listRoutines({ includeInactive: true }),
+      true
+    ).find(
       (candidate) =>
         candidate.name === selectedGroup.name &&
         candidate.targets[0]?.sourcePath === sourcePath

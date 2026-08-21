@@ -297,7 +297,7 @@ describe("routine operator surfaces", () => {
     }
   });
 
-  it("POST /api/runs/:id/cancel cancels a routine firing via the store-only fallback", async () => {
+  it("POST /api/runs/:id/cancel persists a canonical outcome for a store-cancelled routine firing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
@@ -337,6 +337,28 @@ describe("routine operator surfaces", () => {
         cancelReason: "operator",
         state: "cancelled"
       });
+
+      const firingsResponse = await app.request(
+        "/api/routines/daily-report/firings?project=alpha"
+      );
+      const firingsBody = (await firingsResponse.json()) as {
+        firings: Array<{ outcome: unknown }>;
+      };
+      expect(firingsResponse.status).toBe(200);
+      expect(firingsBody.firings).toEqual([
+        expect.objectContaining({
+          id: "fire-live",
+          outcome: {
+            action: "none",
+            source: "symphonika",
+            status: "error",
+            summary: "cancelled",
+            title: "",
+            url: null,
+            verified: false
+          }
+        })
+      ]);
 
       const alreadyTerminal = await app.request("/api/runs/fire-live/cancel", {
         method: "POST"

@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { loadRoutineDeclaration } from "../src/routines/declaration-loader.js";
 
+const repoRoot = path.resolve(import.meta.dirname, "..");
+
 const tempRoots: string[] = [];
 
 async function makeTempRoot(): Promise<string> {
@@ -24,7 +26,7 @@ afterEach(async () => {
 describe("RoutineDeclarationLoader", () => {
   it("loads the shipped risk-ranked refactor auditor as a bounded provider-neutral report Routine", async () => {
     const result = await loadRoutineDeclaration(
-      path.resolve("routines/refactor-audit.md")
+      path.join(repoRoot, "routines/refactor-audit.md")
     );
 
     expect(result.errors).toEqual([]);

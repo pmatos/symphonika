@@ -20,6 +20,17 @@ async function makeTempRoot(): Promise<string> {
   return root;
 }
 
+function stateById(
+  workflow: ExpandedWorkflow,
+  id: string
+): ExpandedWorkflow["states"][number] {
+  const state = workflow.states.find((candidate) => candidate.id === id);
+  if (state === undefined) {
+    throw new Error(`expected state ${id}`);
+  }
+  return state;
+}
+
 afterEach(async () => {
   await Promise.all(
     tempRoots
@@ -1411,18 +1422,9 @@ describe("built-in workflow templates", () => {
     expect(result.workflow.initial).toBe("refactor.red_team");
     expect(result.workflow.templateFiles).toEqual(["builtin:refactor-swarm"]);
 
-    const stateById = (id: string) => {
-      const state = result.workflow.states.find(
-        (candidate) => candidate.id === id
-      );
-      if (state === undefined) {
-        throw new Error(`expected state ${id}`);
-      }
-      return state;
-    };
-    const redTeam = stateById("refactor.red_team");
-    const refactoring = stateById("refactor.refactoring");
-    const verifying = stateById("refactor.verifying");
+    const redTeam = stateById(result.workflow, "refactor.red_team");
+    const refactoring = stateById(result.workflow, "refactor.refactoring");
+    const verifying = stateById(result.workflow, "refactor.verifying");
 
     expect(redTeam.action).toEqual({
       kind: "agent",
@@ -1440,13 +1442,8 @@ describe("built-in workflow templates", () => {
       provider: "omp"
     });
 
-    expect(
-      decideNextStep({
-        actionExecuted: true,
-        signals: { branch_ahead_of_base: false, provider_success: true },
-        state: redTeam
-      })
-    ).toMatchObject({ kind: "advance", to: "needs_human" });
+    // Blocked routing is covered once for every built-in by the sibling
+    // "routes failed agent outcomes" test; assert the happy chain here.
     expect(
       decideNextStep({
         actionExecuted: true,
@@ -1468,13 +1465,6 @@ describe("built-in workflow templates", () => {
         state: verifying
       })
     ).toMatchObject({ kind: "advance", to: "shipped" });
-    expect(
-      decideNextStep({
-        actionExecuted: true,
-        signals: { branch_ahead_of_base: true, provider_success: false },
-        state: verifying
-      })
-    ).toMatchObject({ kind: "advance", to: "needs_human" });
   });
 
   it("routes failed agent outcomes through every built-in's blocked exit", async () => {
@@ -1519,18 +1509,15 @@ describe("built-in workflow templates", () => {
     const result = await loadExpandedWorkflow(workflowPath);
     expect(result.errors).toEqual([]);
 
-    const stateById = (id: string) => {
-      const state = result.workflow.states.find((s) => s.id === id);
-      if (state === undefined) {
-        throw new Error(`expected state ${id}`);
-      }
-      return state;
-    };
     const decide = (
       id: string,
       signals: Record<string, string | number | boolean>
     ) =>
-      decideNextStep({ actionExecuted: true, signals, state: stateById(id) });
+      decideNextStep({
+        actionExecuted: true,
+        signals,
+        state: stateById(result.workflow, id)
+      });
 
     // signalsFromTerminal emits these three shapes; assert each agent state
     // routes them through the template's mapped blocked exit (needs_human)

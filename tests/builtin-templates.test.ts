@@ -17,6 +17,16 @@ const EXPECTED_BUILTINS = [
 
 const TERMINAL_VALUES = new Set(["success", "blocked", "failure"]);
 
+const repoRoot = path.resolve(import.meta.dirname, "..");
+
+function builtinTemplateYaml(name: string): string {
+  const yamlText = BUILTIN_WORKFLOW_TEMPLATES[name];
+  if (yamlText === undefined) {
+    throw new Error(`BUILTIN_WORKFLOW_TEMPLATES missing ${name}`);
+  }
+  return yamlText;
+}
+
 describe("built-in workflow template registry", () => {
   it("exposes the five built-in templates expected by the workflow contract", () => {
     expect(Object.keys(BUILTIN_WORKFLOW_TEMPLATES).sort()).toEqual([
@@ -26,10 +36,7 @@ describe("built-in workflow template registry", () => {
 
   for (const name of EXPECTED_BUILTINS) {
     describe(`${name}`, () => {
-      const yamlText = BUILTIN_WORKFLOW_TEMPLATES[name];
-      if (yamlText === undefined) {
-        throw new Error(`BUILTIN_WORKFLOW_TEMPLATES missing ${name}`);
-      }
+      const yamlText = builtinTemplateYaml(name);
       const parsed = parse(yamlText) as Record<string, unknown>;
 
       it("has an entry that points at a declared state", () => {
@@ -101,9 +108,9 @@ describe("built-in workflow template registry", () => {
 });
 
 describe("shipped refactor-swarm prompts", () => {
-  const refactorSwarm = parse(
-    BUILTIN_WORKFLOW_TEMPLATES["refactor-swarm"] ?? ""
-  ) as { inputs: Record<string, { default?: unknown }> };
+  const refactorSwarm = parse(builtinTemplateYaml("refactor-swarm")) as {
+    inputs: Record<string, { default?: unknown }>;
+  };
 
   const DEFAULT_PROMPT_PATHS = {
     red_team_prompt: "prompts/red-team.md",
@@ -112,12 +119,12 @@ describe("shipped refactor-swarm prompts", () => {
   } as const;
 
   const readPrompt = (promptPath: string): Promise<string> =>
-    readFile(path.resolve(promptPath), "utf8");
+    readFile(path.join(repoRoot, promptPath), "utf8");
 
   it("points every prompt input default at a prompt file the repository ships", async () => {
     for (const [input, promptPath] of Object.entries(DEFAULT_PROMPT_PATHS)) {
       expect(refactorSwarm.inputs[input]?.default, input).toBe(promptPath);
-      await expect(readPrompt(promptPath)).resolves.toContain("#");
+      await expect(readPrompt(promptPath)).resolves.toMatch(/^# /);
     }
   });
 

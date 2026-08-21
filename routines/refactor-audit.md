@@ -20,8 +20,8 @@ For each tracked, hand-maintained production source file, excluding tests, gener
 vendored code, dependency trees, and build artifacts, calculate:
 
 1. `size`: physical lines in the current file;
-2. `recent churn`: additions plus deletions reported by `git log --since=90.days --numstat` for the
-   file; and
+2. `recent churn`: additions plus deletions for the file, attributed from one
+   `git log --since=90.days --numstat` pass over the repository rather than a pass per file; and
 3. `inverse line coverage`: `1 - covered_lines / total_lines`, clamped to the range 0 through 1. A
    tracked production file that the coverage report ran over but never lists is untested, not
    unmeasured: score it as `1`. Only treat coverage as missing when the report itself does not

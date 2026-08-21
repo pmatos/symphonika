@@ -133,6 +133,13 @@ projects:
   #     states: ["open"]
   #     labels_all: ["refactor-ready"]
   #     labels_none: ["blocked", "needs-human", "sym:stale"]
+  #   priority:
+  #     labels:
+  #       "priority:critical": 0
+  #       "priority:high": 1
+  #       "priority:medium": 2
+  #       "priority:low": 3
+  #     default: 99
   #   workspace:
   #     root: ./.symphonika/workspaces/symphonika-refactors
   #     git:

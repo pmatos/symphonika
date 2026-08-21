@@ -6148,7 +6148,7 @@ function renderRoutineDeclarationCard(
   reloadErrors: string[]
 ): string {
   const errorBanner =
-    !declaration.invalid || reloadErrors.length === 0
+    reloadErrors.length === 0
       ? ""
       : `<div class="alert" role="alert"><strong>Reload error</strong><ul>${reloadErrors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div>`;
   const promptSection =

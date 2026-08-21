@@ -2968,6 +2968,59 @@ describe("HTTP app — routine detail page (#304)", () => {
     }
   });
 
+  it("shows a reload error while keeping the last-known-good Routine declaration active", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncRoutines([
+        {
+          kind: "report",
+          name: "audit",
+          prompt: "Last-known-good prompt.",
+          provider: null,
+          projectName: "alpha",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit.md"
+        }
+      ]);
+
+      const app = createHttpApp({
+        getStatusSnapshot: () => ({
+          configPath: "/tmp/symphonika.yml",
+          doctorErrors: [],
+          issuePolling: {
+            candidateIssues: [],
+            errors: [],
+            filteredIssues: [],
+            projects: []
+          },
+          projectModes: new Map([["alpha", "dispatch"]]),
+          projectStates: [],
+          projects: [],
+          reload: {
+            errors: ["Routine audit: schedule is invalid"],
+            lastAttemptedAt: "2026-05-22T09:00:00.000Z",
+            lastLoadedAt: "2026-05-22T08:00:00.000Z",
+            ok: false,
+            usingLastKnownGood: false
+          },
+          runs: { active: [], failed: [], recent: [], stale: [] },
+          stateRoot: test.stateRoot
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/routines/audit")).text();
+
+      expect(body).toContain(
+        '<div class="alert" role="alert"><strong>Reload error</strong><ul><li>Routine audit: schedule is invalid</li></ul></div>'
+      );
+      expect(body).toContain("Last-known-good prompt.");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("shows sibling firings from one clock event as one event, not N unrelated rows", async () => {
     const test = await setup();
     try {

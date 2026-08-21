@@ -719,23 +719,34 @@ workflow:
       terminal: blocked
 ```
 
-The four built-ins are:
+The five built-ins are:
 
 - `builtin:single-agent-pr`
 - `builtin:plan-tdd-pr`
+- `builtin:refactor-swarm`
 - `builtin:autofix-until-clean`
 - `builtin:merge-when-green`
 
-The example uses the built-ins' default prompt paths:
+The built-ins use these default prompt paths:
 
 ```text
 WORKFLOW.md
 prompts/plan.md
 prompts/impl.md
+prompts/red-team.md
+prompts/refactor.md
+prompts/verify.md
 prompts/autofix.md
 ```
 
 Override those paths under `with` or create the files before validation.
+
+`builtin:refactor-swarm` is an issue Workflow, not a risk scanner. The repository also ships
+`routines/refactor-audit.md` as a bounded weekly scanner that files at most three ranked issues.
+Register that Routine only after declaring a Dispatch Project whose raw-FSM Workflow uses the
+built-in and whose Required Eligibility Label is `refactor-ready`; a separate label keeps those
+issues out of a different Workflow used for ordinary repository work. Adjust the Routine's labels
+and batching policy when copying it to another repository.
 
 For repository-specific reusable fragments, create a YAML template under
 `.symphonika/workflow-templates/` and reference it by relative path. Templates support typed scalar

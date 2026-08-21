@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
@@ -7,13 +10,28 @@ const EXPECTED_BUILTINS = [
   "autofix-until-clean",
   "merge-when-green",
   "plan-tdd-pr",
+  "refactor-swarm",
   "single-agent-pr"
 ] as const;
 
 const TERMINAL_VALUES = new Set(["success", "blocked", "failure"]);
 
 describe("built-in workflow template registry", () => {
-  it("exposes the four built-in templates expected by SPEC §Built-In Templates", () => {
+  it("ships provider-neutral refactor-swarm prompts with an immutable characterization-test baseline", async () => {
+    const [redTeam, refactor, verify] = await Promise.all(
+      ["red-team.md", "refactor.md", "verify.md"].map((name) =>
+        readFile(path.resolve("prompts", name), "utf8")
+      )
+    );
+
+    expect(redTeam).toContain("characterization tests");
+    expect(redTeam).toContain("Commit only");
+    expect(refactor).toContain("Do not edit, delete, rename, skip, or weaken");
+    expect(verify).toContain("exit with a non-zero status");
+    expect(verify).toContain("Do not modify files or create commits");
+  });
+
+  it("exposes the five built-in templates expected by the workflow contract", () => {
     expect(Object.keys(BUILTIN_WORKFLOW_TEMPLATES).sort()).toEqual([
       ...EXPECTED_BUILTINS
     ]);

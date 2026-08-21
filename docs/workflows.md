@@ -489,6 +489,7 @@ Built-ins use the same expansion machinery and are referenced with `builtin:<nam
 | --- | --- | --- | --- |
 | `builtin:single-agent-pr` | One agent must succeed with commits ahead of base | `provider: codex`, `prompt: WORKFLOW.md` | `success`, `blocked` |
 | `builtin:plan-tdd-pr` | Planning agent, then implementation agent | `planner: codex`, `implementer: codex`, `plan_prompt: prompts/plan.md`, `impl_prompt: prompts/impl.md` | `success`, `blocked` |
+| `builtin:refactor-swarm` | Characterize current behavior, refactor, then independently verify | `red_teamer: codex`, `refactorer: codex`, `verifier: codex`, `red_team_prompt: prompts/red-team.md`, `refactor_prompt: prompts/refactor.md`, `verify_prompt: prompts/verify.md` | `success`, `blocked` |
 | `builtin:autofix-until-clean` | Wait for checks/reviews, then run an autofix agent and loop | `provider: codex`, `fix_prompt: prompts/autofix.md` | `success`, `blocked` |
 | `builtin:merge-when-green` | Enter a policy-controlled merge state | `method: squash` | `success`, `blocked` |
 
@@ -500,6 +501,13 @@ Their exact expanded behavior is:
 - **`plan-tdd-pr`:** a successful planner advances to the implementer without requiring a commit.
   The implementer takes `success` only with provider success and commits ahead of base. Either
   state's fallback takes `blocked`.
+- **`refactor-swarm`:** the red-team agent must succeed and commit characterization tests before
+  the refactorer runs. The refactorer must succeed and create a separate commit before the verifier
+  runs. The verifier takes `success` on `provider_success: true` alone because it is instructed not
+  to modify the Workspace; rejection takes `blocked`. All three states share the issue Workspace,
+  but each receives only its own rendered prompt and the fixed structured prompt variables—never a
+  prior provider transcript or reasoning trail. The verifier can and should inspect files, commits,
+  diffs, and tests. This is prompt isolation, not sandboxing.
 - **`autofix-until-clean`:** its wait state takes `success` when checks succeed and unresolved
   threads equal zero, takes `blocked` when checks fail, and launches the autofix agent when checks
   succeed but the zero-thread transition did not match. Other PR states stay parked. A successful
@@ -660,7 +668,7 @@ Common validation failures:
 - Supported agent-result and PR predicates from the table above
 - Per-state Codex/Claude/OMP routing
 - Local templates and all six scalar input types
-- The four built-in templates
+- The five built-in templates
 - Poll-driven wait and policy-controlled merge loops
 
 ### Parsed but not operational

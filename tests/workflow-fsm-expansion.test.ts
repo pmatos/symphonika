@@ -1374,6 +1374,109 @@ describe("built-in workflow templates", () => {
     });
   });
 
+  it("expands builtin:refactor-swarm into a characterization-gated refactor with read-only verification", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: refactor_with_proof",
+        "  initial: refactor",
+        "  use:",
+        "    refactor:",
+        "      template: builtin:refactor-swarm",
+        "      with:",
+        "        red_teamer: codex",
+        "        refactorer: claude",
+        "        verifier: omp",
+        "        red_team_prompt: prompts/characterize.md",
+        "        refactor_prompt: prompts/restructure.md",
+        "        verify_prompt: prompts/audit.md",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "  states:",
+        "    shipped:",
+        "      terminal: success",
+        "    needs_human:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.workflow.initial).toBe("refactor.red_team");
+    expect(result.workflow.templateFiles).toEqual(["builtin:refactor-swarm"]);
+
+    const stateById = (id: string) => {
+      const state = result.workflow.states.find(
+        (candidate) => candidate.id === id
+      );
+      if (state === undefined) {
+        throw new Error(`expected state ${id}`);
+      }
+      return state;
+    };
+    const redTeam = stateById("refactor.red_team");
+    const refactoring = stateById("refactor.refactoring");
+    const verifying = stateById("refactor.verifying");
+
+    expect(redTeam.action).toEqual({
+      kind: "agent",
+      prompt: "prompts/characterize.md",
+      provider: "codex"
+    });
+    expect(refactoring.action).toEqual({
+      kind: "agent",
+      prompt: "prompts/restructure.md",
+      provider: "claude"
+    });
+    expect(verifying.action).toEqual({
+      kind: "agent",
+      prompt: "prompts/audit.md",
+      provider: "omp"
+    });
+
+    expect(
+      decideNextStep({
+        actionExecuted: true,
+        signals: { branch_ahead_of_base: false, provider_success: true },
+        state: redTeam
+      })
+    ).toMatchObject({ kind: "advance", to: "needs_human" });
+    expect(
+      decideNextStep({
+        actionExecuted: true,
+        signals: { branch_ahead_of_base: true, provider_success: true },
+        state: redTeam
+      })
+    ).toMatchObject({ kind: "advance", to: "refactor.refactoring" });
+    expect(
+      decideNextStep({
+        actionExecuted: true,
+        signals: { branch_ahead_of_base: true, provider_success: true },
+        state: refactoring
+      })
+    ).toMatchObject({ kind: "advance", to: "refactor.verifying" });
+    expect(
+      decideNextStep({
+        actionExecuted: true,
+        signals: { branch_ahead_of_base: false, provider_success: true },
+        state: verifying
+      })
+    ).toMatchObject({ kind: "advance", to: "shipped" });
+    expect(
+      decideNextStep({
+        actionExecuted: true,
+        signals: { branch_ahead_of_base: true, provider_success: false },
+        state: verifying
+      })
+    ).toMatchObject({ kind: "advance", to: "needs_human" });
+  });
+
   it("routes failed agent outcomes through every built-in's blocked exit", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");
@@ -1391,6 +1494,11 @@ describe("built-in workflow templates", () => {
         "        blocked: needs_human",
         "    build:",
         "      template: builtin:plan-tdd-pr",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "    refactor:",
+        "      template: builtin:refactor-swarm",
         "      exits:",
         "        success: shipped",
         "        blocked: needs_human",
@@ -1463,6 +1571,32 @@ describe("built-in workflow templates", () => {
     expect(decide("build.implementing", noChangeSignals)).toMatchObject({
       kind: "advance",
       to: "needs_human"
+    });
+
+    expect(decide("refactor.red_team", failureSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    expect(decide("refactor.red_team", noChangeSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    expect(decide("refactor.refactoring", failureSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    expect(decide("refactor.refactoring", noChangeSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    expect(decide("refactor.verifying", failureSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+    // Verification is deliberately read-only, so provider success is enough.
+    expect(decide("refactor.verifying", noChangeSignals)).toMatchObject({
+      kind: "advance",
+      to: "shipped"
     });
 
     expect(decide("review.autofix", failureSignals)).toMatchObject({

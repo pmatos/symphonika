@@ -127,5 +127,7 @@ projects:
 # above (see ADR 0067) — not appended by Symphonika itself. Claude Routine
 # Firings also receive the one-shot anti-backgrounding guards.
 # routines:
+#   # First declare this dedicated Dispatch Project with labels_all:
+#   # [refactor-ready] and a raw-FSM Workflow using builtin:refactor-swarm.
 #   - path: ./routines/refactor-audit.md
-#     projects: [symphonika]
+#     projects: [symphonika-refactors]

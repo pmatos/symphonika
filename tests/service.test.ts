@@ -560,7 +560,7 @@ describe("runServiceInstall", () => {
     expect(report.files[0]?.content).not.toContain('EnvironmentFile="');
   });
 
-  it("loads the optional env file from XDG_CONFIG_HOME without fixing daemon config discovery", async () => {
+  it("loads the optional env file from an absolute XDG config home without baking a daemon config path", async () => {
     const report = await runServiceInstall({
       ...baseOptions,
       env: {

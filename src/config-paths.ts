@@ -93,9 +93,12 @@ function userConfigHome(
   const env = options.env ?? process.env;
   const homeDir = options.homeDir ?? homedir();
   const configured = env.XDG_CONFIG_HOME?.trim();
-  return configured === undefined || configured.length === 0
-    ? path.join(homeDir, ".config")
-    : path.resolve(configured);
+  // XDG base directories must be absolute. Ignoring a relative value also
+  // keeps daemon Service Config discovery aligned with systemd's user-unit
+  // and EnvironmentFile paths, which use the same home-directory fallback.
+  return configured !== undefined && path.isAbsolute(configured)
+    ? path.resolve(configured)
+    : path.join(homeDir, ".config");
 }
 
 function userStateHome(

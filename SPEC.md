@@ -303,8 +303,9 @@ daemon-health policy and rendering remain outside the transport.
 The service config file is named `symphonika.yml`. By default the CLI uses
 `./symphonika.yml` when the current directory provides one; otherwise it uses the initialized
 user config at `$XDG_CONFIG_HOME/symphonika/symphonika.yml`, falling back to
-`~/.config/symphonika/symphonika.yml` when `XDG_CONFIG_HOME` is unset. Operators can always select
-another file with `--config`.
+`~/.config/symphonika/symphonika.yml` when `XDG_CONFIG_HOME` is unset or relative. XDG base
+directories must be absolute; a relative value is ignored rather than resolved against the current
+working directory. Operators can always select another file with `--config`.
 
 It is reloadable and owned by the orchestrator. It lists Projects and service-level runtime
 settings.

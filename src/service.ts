@@ -374,11 +374,7 @@ export function unitEnvironmentFilePath(
   env: NodeJS.ProcessEnv
 ): string {
   return serviceEnvironmentFilePath(
-    configPath ??
-      defaultUserConfigPath({
-        env: { XDG_CONFIG_HOME: systemdConfigHome(env) },
-        homeDir
-      })
+    configPath ?? defaultUserConfigPath({ env, homeDir })
   );
 }
 

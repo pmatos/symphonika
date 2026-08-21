@@ -299,8 +299,8 @@ export function createOmpProvider(
         await processScope.stopProviderScope(input.run);
       }
     },
-    validate: async (command) => {
-      const rendered = renderProviderCommandTemplate(command, {}).rendered;
+    validate: async (command, values = {}) => {
+      const rendered = renderProviderCommandTemplate(command, values).rendered;
       const parsed = parseProviderCommand(rendered, PROVIDER_LABEL);
       validateOmpProtocolFlags(parsed.args);
       await validateOmpRpcCommand(parsed);

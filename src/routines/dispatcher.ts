@@ -22,7 +22,6 @@ import type {
   NormalizedProviderEvent,
   ProviderEvent
 } from "../provider.js";
-import { renderProviderCommandTemplate } from "../provider-command-template.js";
 import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig
@@ -1057,12 +1056,10 @@ async function runRoutineFiring(input: {
       rawLogPath,
       workspacePath: prepared.workspacePath
     });
-    // One object feeds both the pre-flight render below and the adapter's own
-    // render inside runAttempt (via ProviderRunInput.routine), so validate()
-    // probes the same rendered template the adapter will derive. It is not the
-    // final argv — the adapter still layers applyRoutineArguments and the
-    // process scope on top — but these two renders must not drift apart into
-    // two separately maintained literals.
+    // One object feeds the adapter's single command-template render in both
+    // validate() and runAttempt(), so the two paths cannot drift. The result
+    // is not the final argv — the adapter still layers routine arguments and
+    // the process scope on top.
     const routineOverrides = {
       ...(input.routine.effort === undefined
         ? {}
@@ -1074,11 +1071,9 @@ async function runRoutineFiring(input: {
         ? {}
         : { permissionMode: input.routine.permissionMode })
     };
-    const renderedProviderCommand = renderProviderCommandTemplate(
-      input.providerCommand,
-      routineOverrides
-    ).rendered;
-    await deadline.race(input.provider.validate(renderedProviderCommand));
+    await deadline.race(
+      input.provider.validate(input.providerCommand, routineOverrides)
+    );
     input.runStore.updateRoutineFiringState(input.firingId, "running");
     input.activeRuns.attachProvider(input.firingId, {
       cancel: () => input.provider.cancel(input.firingId),

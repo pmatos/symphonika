@@ -27,12 +27,12 @@ actually work" moved to an opt-in functional probe, `doctor --live-check <provid
 the real command with a trivial prompt and waits for a reply — see SPEC.md §11.3. Everything else in
 this ADR is unchanged.
 
-**Third amendment note:** a Routine Firing now renders the provider command with its resolved
-`model`, `effort`, and `permission_mode` before passing it to the adapter's `validate()` pre-flight
-probe. The earlier contract passed the raw template, whose adapter-level empty-value render removed
-every routine-only section; an unsupported routine-specific flag or value could therefore bypass
-validation and reach `runAttempt`. The provider interface remains unchanged, and issue-driven or
-provider-level validation still renders with empty values.
+**Third amendment note:** a Routine Firing now passes the authored provider command and its resolved
+`model`, `effort`, and `permission_mode` to the adapter's `validate()` pre-flight probe. The earlier
+contract passed the template without values, whose adapter-level empty-value render removed every
+routine-only section; an unsupported routine-specific flag or value could therefore bypass
+validation and reach `runAttempt`. `validate()` now accepts optional template values and renders the
+command exactly once; issue-driven or provider-level validation still defaults to empty values.
 
 ## Context
 
@@ -56,12 +56,12 @@ omitted effective value does not change the corresponding provider command behav
 plain tags (`{{model}}`, `{{effort}}`, `{{permission_mode}}`) substitute the resolved value, and
 `{{#tag}}...{{/tag}}` conditional sections keep (and substitute) their contents only when the field
 resolves to a value — the section form is what lets an operator omit a whole `--model X` segment
-when `X` is absent, without a dangling incomplete flag. Each provider adapter renders
-`input.provider.command` through this template using `input.routine` (or `{}` for issue-driven Runs
-and the adapter's own `validate()` implementation) before parsing it into argv. A Routine Firing
-first renders the command with the same resolved values and passes that rendered string to
-`validate()`, making the adapter's subsequent empty-value render a no-op and ensuring its pre-flight
-probe sees the command that `runAttempt` will spawn. The operator's own authored command carries all
+when `X` is absent, without a dangling incomplete flag. Each provider adapter renders the authored
+command exactly once before parsing it into argv: `runAttempt` uses `input.routine` (or `{}` for
+issue-driven Runs), while `validate()` uses its optional template values (or `{}` for provider-level
+validation). A Routine Firing passes the authored command and the same resolved values to both
+entrypoints, ensuring its pre-flight probe sees the same command-template result that `runAttempt`
+derives without re-parsing substituted bytes. The operator's own authored command carries all
 provider-specific flag knowledge; Symphonika's TypeScript never hardcodes Codex's `-c` keys or OMP's
 flag names.
 

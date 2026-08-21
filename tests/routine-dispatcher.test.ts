@@ -53,12 +53,9 @@ afterEach(async () => {
 const ROUTINE_OVERRIDE_COMMAND_TEMPLATE =
   "claude fake{{#model}} --model {{model}}{{/model}}{{#effort}} --effort {{effort}}{{/effort}}{{#permission_mode}} --permission-mode {{permission_mode}}{{/permission_mode}}";
 
-const RESOLVED_ROUTINE_OVERRIDE_COMMAND =
-  "claude fake --model claude-opus-4-8 --effort xhigh --permission-mode bypass";
-
 const ROUTINE_EXECUTION_OVERRIDES = {
   effort: "xhigh",
-  model: "claude-opus-4-8",
+  model: "{{effort}}",
   permissionMode: "bypass"
 } as const;
 
@@ -551,7 +548,7 @@ describe("RoutineFiringDispatcher", () => {
       runStore.close();
     }
   });
-  it("passes effective execution overrides only on the routine provider input", async () => {
+  it("passes effective execution overrides without re-rendering resolved values", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
@@ -613,14 +610,15 @@ describe("RoutineFiringDispatcher", () => {
           }
         ).routine
       ).toEqual(ROUTINE_EXECUTION_OVERRIDES);
-      // The adapter renders the template itself from the routine field above,
-      // so runAttempt must keep receiving the unrendered command; only the
-      // pre-flight validate() probe is handed the resolved string.
+      // Both provider entrypoints receive the same raw template and values so
+      // each adapter renders once. In particular, the model's literal
+      // {{effort}} bytes must not be parsed as a second template.
       expect(providerInputs[0]!.provider.command).toBe(
         ROUTINE_OVERRIDE_COMMAND_TEMPLATE
       );
       expect(provider.validate).toHaveBeenCalledWith(
-        RESOLVED_ROUTINE_OVERRIDE_COMMAND
+        ROUTINE_OVERRIDE_COMMAND_TEMPLATE,
+        ROUTINE_EXECUTION_OVERRIDES
       );
     } finally {
       runStore.close();
@@ -634,13 +632,17 @@ describe("RoutineFiringDispatcher", () => {
     const provider = {
       ...quietProvider(),
       name: "claude",
-      // Rejecting only the resolved string is what makes this a regression
-      // test: before the pre-flight render, validate() saw the raw template
-      // and resolved, so an unconditional rejection would pass on main too.
-      validate: vi.fn((command: string) =>
-        command === RESOLVED_ROUTINE_OVERRIDE_COMMAND
-          ? Promise.reject(new Error("unsupported routine command"))
-          : Promise.resolve()
+      // Rejecting only the raw template paired with the resolved overrides is
+      // what makes this a regression test: an unconditional rejection would
+      // pass even if the dispatcher dropped the values.
+      validate: vi.fn(
+        (command: string, values?: ProviderRunInput["routine"]) =>
+          command === ROUTINE_OVERRIDE_COMMAND_TEMPLATE &&
+          values?.effort === ROUTINE_EXECUTION_OVERRIDES.effort &&
+          values.model === ROUTINE_EXECUTION_OVERRIDES.model &&
+          values.permissionMode === ROUTINE_EXECUTION_OVERRIDES.permissionMode
+            ? Promise.reject(new Error("unsupported routine command"))
+            : Promise.resolve()
       )
     } satisfies AgentProvider;
     const project = dueRoutineProjectFixture(root, "claude");
@@ -3849,7 +3851,7 @@ describe("RoutineFiringDispatcher", () => {
       expect(prepareInput?.firingId).toBe("fire-1");
       expect(prepareInput?.project.name).toBe("alpha");
       expect(prepareInput?.routineName).toBe("daily-report");
-      expect(provider.validate).toHaveBeenCalledWith("codex fake");
+      expect(provider.validate).toHaveBeenCalledWith("codex fake", {});
       expect(providerInputs).toHaveLength(1);
       const providerInput = providerInputs[0];
       expect(providerInput?.prompt).toContain(

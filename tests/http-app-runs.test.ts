@@ -719,6 +719,74 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("asks for confirmation before cancelling an active Run and reflects the cancellation", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "web-cancel",
+        issue: sampleIssue({ number: 15 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("web-cancel", "running");
+      test.runStore.createRun({
+        id: "web-cancel-done",
+        issue: sampleIssue({ number: 16 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("web-cancel-done", "succeeded");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const activePage = await app.request("/runs/web-cancel");
+      const activeBody = await activePage.text();
+      expect(activePage.status).toBe(200);
+      expect(activeBody).toContain('action="/api/runs/web-cancel/cancel"');
+      expect(activeBody).toContain(
+        `onsubmit="return window.confirm('Cancel this run? Any active provider process will be stopped. This action cannot be undone.')"`
+      );
+
+      const terminalBody = await (
+        await app.request("/runs/web-cancel-done")
+      ).text();
+      expect(terminalBody).not.toContain(
+        'action="/api/runs/web-cancel-done/cancel"'
+      );
+
+      const cancelResponse = await app.request("/api/runs/web-cancel/cancel", {
+        body: "",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        method: "POST",
+        redirect: "manual"
+      });
+      expect(cancelResponse.status).toBe(303);
+      expect(cancelResponse.headers.get("location")).toBe("/runs/web-cancel");
+
+      const cancelledBody = await (
+        await app.request("/runs/web-cancel")
+      ).text();
+      expect(cancelledBody).toContain(">cancelled</span>");
+      expect(cancelledBody).toContain(
+        "<strong>Cancel requested</strong> (reason: operator)"
+      );
+      expect(cancelledBody).toContain(
+        "<dt>Terminal reason</dt><dd><code>operator</code></dd>"
+      );
+      expect(cancelledBody).not.toContain(
+        'action="/api/runs/web-cancel/cancel"'
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("renders the dashboard and run detail page with HTML escaping", async () => {
     const test = await setup();
     try {

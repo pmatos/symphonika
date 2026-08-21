@@ -309,11 +309,11 @@ another file with `--config`.
 It is reloadable and owned by the orchestrator. It lists Projects and service-level runtime
 settings.
 
-v1 implements reload by defensively re-reading the selected `symphonika.yml` on each daemon tick
-and manual poll-now trigger. A valid reload replaces the effective snapshot used for future polling,
-dispatch, retry, continuation, provider-command selection, and PR follow-up policy. An invalid
-reload is surfaced in structured logs and operator status while the daemon keeps using the last
-known good effective snapshot.
+v1 implements reload by defensively re-reading the selected `symphonika.yml` on each daemon tick,
+manual poll-now trigger, and manual Routine Firing request. A valid reload replaces the effective
+snapshot used for future polling, dispatch, retry, continuation, provider-command selection, PR
+follow-up policy, and manual Routine Firing admission. An invalid reload is surfaced in structured
+logs and operator status while the daemon keeps using the last known good effective snapshot.
 
 `symphonika init` initializes Symphonika's user Service Config independently of any repository. It
 prompts for service-level state, polling, pull-request merge policy, and Codex/Claude/OMP commands,
@@ -571,7 +571,8 @@ pointing at a hand-authored Markdown routine file and a required, non-empty
 `projects: [<name>, ...]` list. Every target names a declared Dispatch Project or Routine Host.
 Targets are explicit: duplicates and wildcard values such as `all` are invalid, so adding a Project
 never expands a Routine's blast radius implicitly. Paths are resolved relative to the service
-config directory and are re-read on every daemon tick with the rest of the runtime snapshot.
+config directory and are re-read on every daemon tick and manual Routine Firing request with the
+rest of the runtime snapshot.
 
 Routine names are globally unique across the complete `routines:` block, including declarations
 with different target lists. The per-Project `routines:` key is not supported; routines point at
@@ -1071,6 +1072,15 @@ normal Routine Firing workspace, provider, evidence, cancellation, overlap, and 
 It does not update the Routine's `next_fire_at`, `last_fired_at`, `last_attempted_at`, or state, so a
 future one-shot or recurring clock event still fires normally. A manual overlap or cap refusal
 creates neither a firing row nor Routine Skip evidence because it did not attempt a clock event.
+
+Before resolving the target, every manual request performs the normal defensive Service Config
+reload and synchronizes Routine Target rows from the resulting effective snapshot through the same
+classification path as scheduled dispatch. The request therefore sees a declaration added,
+removed, disabled, or edited since the prior daemon tick and executes its current prompt/provider
+settings when accepted. Whole-config reload failure still uses the last-known-good effective
+snapshot, while per-Routine invalid-declaration fallback keeps §5.4's existing behavior. This
+fire-time synchronization is an admission barrier only; it neither evaluates scheduled clock events
+nor changes the schedule-clock fields listed above.
 
 Manual firing accepts active Routines. It refuses `inactive`, `invalid`, and `expired` Routines with
 their specific state. It also refuses `disabled` by default; `--force` overrides only a

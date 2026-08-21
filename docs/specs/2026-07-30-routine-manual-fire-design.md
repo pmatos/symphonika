@@ -43,11 +43,28 @@ daemon ownership.
 
 ## Claim and lifecycle
 
-The daemon resolves a Routine name against persisted rows, including inactive
-rows so it can return a precise refusal. `--project` narrows resolution.
-Ambiguous names return every candidate Project and do not claim a firing.
+The daemon first performs its normal defensive Service Config reload, then
+synchronizes Routine Targets from the resulting effective snapshot through the
+same path scheduled dispatch uses. It resolves a Routine name against those
+current persisted rows, including inactive rows so it can return a precise
+refusal. `--project` narrows resolution. Ambiguous names return every candidate
+Project and do not claim a firing.
 
-An accepted claim performs these steps without an asynchronous gap:
+This fire-time boundary deliberately covers both drift windows: a declaration
+edited on disk before the next tick has reloaded it, and a runtime snapshot
+reloaded before scheduled dispatch has synchronized the Run Store. A valid
+reload refreshes prompt, provider, policy, and lifecycle fields; removal or
+rejection records its exact non-active state. Whole-config failures keep the
+last-known-good effective snapshot, and invalid individual declarations keep
+their existing per-Routine last-known-good/invalid-stub semantics. Calling only
+`syncRoutines` against the prior in-memory snapshot was rejected because it
+would close only the second, narrower window. Direct declaration validation
+was rejected because it would duplicate the tracker-less, template-rejected,
+invalid, removal, and expiry classification already centralized in Routine
+Target synchronization.
+
+After reload and synchronization, an accepted claim performs these steps
+without an asynchronous gap:
 
 1. Refuse shutdown, overlap, missing provider configuration, or a full global
    or Project concurrency cap.
@@ -117,5 +134,6 @@ Behavior is covered at the agreed public seams:
 - HTTP tests prove request parsing, status codes, and ambiguity candidates.
 - CLI tests prove daemon routing, Project selection, force propagation,
   immediate output, terminal waiting, and non-zero failure exit.
-- Daemon integration tests prove a not-due Routine fires through the live
-  endpoint and remains scheduled afterward.
+- Daemon integration tests prove a target removed from Service Config before
+  the next tick is refused through the live endpoint, and that a not-due
+  Routine fires through the same endpoint while remaining scheduled afterward.

@@ -24,15 +24,34 @@ Issues #189 and #296 explicitly reopen the deferred manual Routine trigger.
 for the CLI; this decision does not add a mutating control to the
 server-rendered dashboard.
 
-The daemon resolves the Routine and performs an await-free claim:
+The daemon resolves the Routine and claims it in two phases:
 
-1. refuse ambiguity, an unavailable Project/provider, disallowed Routine
+1. defensively reload Service Config and synchronize Routine Targets from the
+   resulting effective snapshot;
+2. refuse ambiguity, an unavailable Project/provider, disallowed Routine
    state, overlap, shutdown, or a concurrency cap;
-2. insert a normal `routine_firings` row with `trigger_source = manual`;
-3. reserve the same active-run slot used by issue Runs and scheduled Routine
+3. insert a normal `routine_firings` row with `trigger_source = manual`;
+4. reserve the same active-run slot used by issue Runs and scheduled Routine
    Firings; and
-4. start the existing workspace, evidence, provider, cancellation, and
+5. start the existing workspace, evidence, provider, cancellation, and
    terminal-classification lifecycle as daemon-owned asynchronous work.
+
+The reload and synchronization are awaited before steps 2–5, which then run
+without an asynchronous gap. This makes the manual-fire boundary observe a Routine
+declaration added, removed, disabled, or edited after the prior daemon tick.
+Synchronization reuses scheduled dispatch's complete classification path,
+including invalid-name protection and the precise tracker-less-host and
+provider-template rejection states; it does not hand-roll a second live-
+declaration validator. Resolution still uses the persisted Routine Target row,
+but only after that row reflects the freshly loaded effective snapshot, so the
+execution lifecycle receives the current prompt and provider settings.
+
+A whole-config reload failure retains the last-known-good effective snapshot
+under ADR 0008. An invalid individual Routine retains ADR 0060's per-Routine
+last-known-good declaration or invalid stub. Manual firing is intentionally a
+reload boundary despite the extra filesystem work: it is an operator-driven,
+low-frequency admission action, and synchronizing only the previous in-memory
+snapshot would leave edits made before the next tick unresolved.
 
 Scheduled claims record `trigger_source = scheduled`. Existing database rows
 default to `scheduled` during migration.
@@ -65,6 +84,8 @@ fan-out.
 ## Consequences
 
 - Prompt authors can iterate without changing a Routine schedule.
+- Manual firing observes the latest valid on-disk declaration without waiting
+  for a daemon tick, while defensive last-known-good behavior remains intact.
 - A manual run can be refused as cap-reached or overlap, exactly like any
   competing provider execution, without consuming a clock event.
 - Routine Firing consumers distinguish only the recorded trigger source; the

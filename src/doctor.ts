@@ -18,7 +18,8 @@ import {
 } from "./config-schemas.js";
 import {
   missingUserConfigHint,
-  resolveServiceConfigPath
+  resolveServiceConfigPath,
+  serviceEnvironmentFilePath
 } from "./config-paths.js";
 import {
   defaultWorkflowContract,
@@ -465,8 +466,11 @@ export async function runDoctor(
     email?.smtpUsername !== undefined &&
     (env[email.smtpPasswordEnv]?.trim().length ?? 0) === 0
   ) {
+    const environmentFile = shellQuote(
+      serviceEnvironmentFilePath(resolvedConfig.configPath)
+    );
     errors.push(
-      `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . /path/to/symphonika.env; set +a)`
+      `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . ${environmentFile}; set +a)`
     );
   }
 
@@ -543,6 +547,10 @@ export async function runDoctor(
   return report(configPath, errors, projects, warnings, liveCheck);
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 async function runLiveCheck(
   providerName: AgentProviderName | undefined,
   timeoutMs: number | undefined,
@@ -583,8 +591,9 @@ async function runLiveCheck(
 }
 
 // Detects an installed unit that predates a systemd-unit-shape change (the
-// daemon/provider cgroup split, docs/adr/0064; or the watchdog heartbeat,
-// docs/adr/0065) so operators learn to re-run `service install --force`
+// daemon/provider cgroup split, docs/adr/0064; the watchdog heartbeat,
+// docs/adr/0065; or EnvironmentFile secret injection, docs/adr/0055) so
+// operators learn to re-run `service install --force`
 // instead of silently running on stale units indefinitely. Skips entirely
 // when no unit is installed at all (`service install` was never run) —
 // that's not a doctor concern. `ExecStart`/`Environment=PATH` are baked in
@@ -627,6 +636,11 @@ async function checkInstalledUnitDrift(
   ) {
     warnings.push(
       `${servicePath} predates the systemd watchdog heartbeat (docs/adr/0065) — ${reinstallHint}`
+    );
+  }
+  if (!/^[ \t]*EnvironmentFile[ \t]*=/m.test(serviceContent)) {
+    warnings.push(
+      `${servicePath} predates environment-backed secrets support (docs/adr/0014, docs/adr/0055) — ${reinstallHint}`
     );
   }
 

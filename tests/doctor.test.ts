@@ -11,9 +11,22 @@ import {
 } from "../src/doctor.js";
 import type { AgentProviderRegistry } from "../src/provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "../src/providers/index.js";
-import { renderProvidersSliceUnit, renderSliceUnit } from "../src/service.js";
+import {
+  renderProvidersSliceUnit,
+  renderServiceUnit,
+  renderSliceUnit
+} from "../src/service.js";
 
 const tempRoots: string[] = [];
+// Built by the real generator rather than hand-written, so a new structural
+// directive in the unit template can never silently leave these fixtures
+// behind while the drift checks they exercise still claim to pass.
+const currentServiceUnit = renderServiceUnit({
+  environmentFilePath: "/home/op/.config/symphonika/env",
+  execPath: "/usr/bin/node",
+  path: "/usr/bin:/bin",
+  scriptPath: "/opt/symphonika/dist/cli.js"
+});
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
 const originalGithubToken = process.env.GITHUB_TOKEN;
 const originalExitCode = process.exitCode;
@@ -925,6 +938,32 @@ describe("doctor", () => {
       ).toBe(true);
     });
 
+    it("warns when the installed unit predates environment-file secret injection", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nSlice=symphonika-daemon.slice\n",
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      expect(
+        report.warnings.some(
+          (warning) =>
+            warning.includes("environment-backed secrets") &&
+            warning.includes("service install")
+        )
+      ).toBe(true);
+    });
+
     // Regression: the generated unit explains Type=notify in comments. If an
     // operator changes the active directive to Type=simple, matching a bare
     // substring must not mistake the explanatory comment for the directive.
@@ -1151,7 +1190,7 @@ describe("doctor", () => {
       await mkdir(unitDir, { recursive: true });
       await writeFile(
         path.join(unitDir, "symphonika.service"),
-        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nSlice=symphonika-daemon.slice\n",
+        currentServiceUnit,
         "utf8"
       );
       await writeFile(
@@ -1186,7 +1225,7 @@ describe("doctor", () => {
       await mkdir(unitDir, { recursive: true });
       await writeFile(
         path.join(unitDir, "symphonika.service"),
-        "[Service]\nType=notify\nWatchdogSec=90\nNotifyAccess=all\nTimeoutStartSec=300\nSlice=symphonika-daemon.slice\n",
+        currentServiceUnit,
         "utf8"
       );
       await writeFile(

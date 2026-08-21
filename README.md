@@ -95,7 +95,8 @@ The generated unit uses the daemon's normal config discovery by default. To run 
 
 The unit also references an optional `env` file beside the selected Service Config. For the default
 user config this is `$XDG_CONFIG_HOME/symphonika/env`, or `~/.config/symphonika/env` when
-`XDG_CONFIG_HOME` is unset. An explicit `--config /path/to/symphonika.yml` uses `/path/to/env`.
+`XDG_CONFIG_HOME` is unset or relative (systemd ignores a relative `XDG_CONFIG_HOME`). An explicit
+`--config /path/to/symphonika.yml` uses `/path/to/env`.
 Create the default file with restrictive permissions, then edit it without putting the password on
 the command line:
 

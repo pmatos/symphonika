@@ -41,7 +41,7 @@ import { probeProviderCommand } from "./provider-probe.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import type { RoutineExecutionOverrides } from "./routines/types.js";
-import { systemdConfigHome, userUnitDir } from "./service.js";
+import { defaultUnitEnvironmentFilePath, userUnitDir } from "./service.js";
 import { resolveStateRoot } from "./state.js";
 import type { ExpandedWorkflow } from "./workflow/types.js";
 import {
@@ -464,15 +464,14 @@ export async function runDoctor(
     email?.smtpUsername !== undefined &&
     (env[email.smtpPasswordEnv]?.trim().length ?? 0) === 0
   ) {
-    const environmentFilePath = serviceEnvironmentFilePath(
+    // Name the file `service install` actually points the unit at, not the
+    // one beside whichever config discovery happened to select here: without
+    // an explicit `--config` the installer always uses the user config
+    // directory, even when discovery lands on a project-local config.
+    const environmentFilePath =
       options.configPath === undefined
-        ? path.join(
-            systemdConfigHome(env) ?? path.join(homeDir, ".config"),
-            "symphonika",
-            "symphonika.yml"
-          )
-        : configPath
-    );
+        ? defaultUnitEnvironmentFilePath(homeDir, env)
+        : serviceEnvironmentFilePath(configPath);
     const environmentFile = shellQuote(environmentFilePath);
     errors.push(
       `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . ${environmentFile}; set +a)`

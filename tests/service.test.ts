@@ -588,12 +588,32 @@ describe("runServiceInstall", () => {
         PATH: "/opt/node/bin:/usr/bin",
         XDG_CONFIG_HOME: "relative-config"
       },
+      homeDir: "/home/dev",
       print: true
     });
 
     expect(report.files[0]?.content).toContain(
-      "EnvironmentFile=-%h/.config/symphonika/env"
+      "EnvironmentFile=-/home/dev/.config/symphonika/env"
     );
+    expect(report.files[0]?.content).not.toContain("relative-config");
+  });
+
+  // The home directory is resolved at install time rather than deferred to
+  // systemd's `%h`: systemd glob-expands EnvironmentFile= after expanding
+  // specifiers, so a `[` arriving via `%h` would escape this escaping and the
+  // leading `-` would swallow the resulting non-match, silently dropping the
+  // operator's secrets.
+  it("escapes glob metacharacters coming from the home directory", async () => {
+    const report = await runServiceInstall({
+      ...baseOptions,
+      homeDir: "/home/dev [work]",
+      print: true
+    });
+
+    expect(report.files[0]?.content).toContain(
+      "EnvironmentFile=-/home/dev \\[work\\]/.config/symphonika/env"
+    );
+    expect(report.files[0]?.content).not.toContain("%h/.config");
   });
 
   it("skips daemon-reload when reload is false but still writes units", async () => {

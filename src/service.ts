@@ -223,16 +223,10 @@ export async function runServiceInstall(
   const homeDir = options.homeDir ?? homedir();
   const unitDir = userUnitDir(homeDir, env);
   const daemonPath = buildDaemonPath(execPath, env);
-  // Only consult defaultUserConfigPath under an absolute XDG_CONFIG_HOME: it
-  // resolves a relative one against the install-time cwd, which must not get
-  // baked into the unit.
-  const defaultConfigPath =
-    systemdConfigHome(env) === undefined
-      ? "%h/.config/symphonika/symphonika.yml"
-      : defaultUserConfigPath({ env, homeDir });
-  const environmentFilePath = serviceEnvironmentFilePath(
-    options.configPath ?? defaultConfigPath
-  );
+  const environmentFilePath =
+    options.configPath === undefined
+      ? defaultUnitEnvironmentFilePath(homeDir, env)
+      : serviceEnvironmentFilePath(options.configPath);
 
   const files: ServiceUnitFile[] = [
     {
@@ -354,13 +348,39 @@ export async function runServiceInstall(
 
 // systemd only honors an absolute XDG_CONFIG_HOME, so a relative value is
 // ignored rather than resolved. Returns undefined when the caller should fall
-// back to its own notion of `~/.config`. Shared so that where the unit files
-// are written and where the unit points for its env file cannot drift apart.
-export function systemdConfigHome(env: NodeJS.ProcessEnv): string | undefined {
+// back to its own notion of `~/.config`. Stated once so that where the unit
+// files are written and where the unit points for its env file cannot drift
+// apart.
+function systemdConfigHome(env: NodeJS.ProcessEnv): string | undefined {
   const configured = env.XDG_CONFIG_HOME?.trim() ?? "";
   return configured.length > 0 && path.isAbsolute(configured)
     ? configured
     : undefined;
+}
+
+// The env file the generated unit points at when no explicit `--config` was
+// given: the `env` beside the default user Service Config. Shared with doctor
+// so its "load the daemon's env file" hint names the same file the unit does.
+// The path is resolved here rather than deferred to systemd's `%h` specifier
+// because systemd glob-expands EnvironmentFile= *after* expanding specifiers,
+// so a home directory containing `[`, `*`, `?` or `\` would slip past
+// systemdEnvironmentFile's escaping and silently drop the operator's secrets.
+// Baking homeDir also mirrors userUnitDir, which already commits to it when
+// deciding where the unit itself is written.
+export function defaultUnitEnvironmentFilePath(
+  homeDir: string,
+  env: NodeJS.ProcessEnv
+): string {
+  return serviceEnvironmentFilePath(
+    defaultUserConfigPath({
+      // An empty (but defined) env drops a relative XDG_CONFIG_HOME, which
+      // defaultUserConfigPath would otherwise resolve against the
+      // install-time cwd and bake into the unit. Passing no `env` at all
+      // would fall back to process.env instead.
+      env: systemdConfigHome(env) === undefined ? {} : env,
+      homeDir
+    })
+  );
 }
 
 // systemd --user reads units from $XDG_CONFIG_HOME/systemd/user, falling back
@@ -395,18 +415,14 @@ function systemdEnvAssignment(name: string, value: string): string {
 
 // EnvironmentFile accepts one path per directive and a leading `-` makes a
 // missing file non-fatal. Unlike ExecStart, quotes would be filename bytes;
-// leave spaces intact and escape `%` so it is not interpreted as a specifier
-// (except for the leading `%h` in the conventional home-directory fallback).
+// leave spaces intact and escape `%` so it is not interpreted as a specifier.
 // systemd also glob-expands this path ("an absolute filename or wildcard
 // expression", man systemd.exec), and the `-` prefix silences a non-matching
 // pattern — so an unescaped `[`, `*` or `?` in the config directory would drop
 // the operator's secrets with no error at all. Backslash-escape the glob
 // metacharacters; a path without any renders byte-identical to the plain path.
 function systemdEnvironmentFile(value: string): string {
-  const escaped = value
-    .replace(/[\\?*[\]{}]/g, "\\$&")
-    .replace(/%/g, "%%")
-    .replace(/^%%h(?=\/)/, "%h");
+  const escaped = value.replace(/[\\?*[\]{}]/g, "\\$&").replace(/%/g, "%%");
   return `-${escaped}`;
 }
 

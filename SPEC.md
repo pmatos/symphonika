@@ -1860,11 +1860,14 @@ unit on the daemon's normal project-local/user-config discovery path.
 
 The generated service always references an optional environment file named `env`, resolved at
 install time. With `--config`, the path is `<directory-containing-config>/env`; without it, the
-path is the user config directory's `env` — `$XDG_CONFIG_HOME/symphonika/env`, falling back to
-`~/.config/symphonika/env` — even when the daemon's own discovery later selects a project-local
-Service Config. The systemd directive uses the leading `-` form, so an absent file does not prevent
-installations without authenticated email from starting, and glob metacharacters in the path are
-escaped so a directory name containing `[`, `*`, or `?` still resolves. The file remains
+path is the user config directory's `env` — `$XDG_CONFIG_HOME/symphonika/env` when
+`XDG_CONFIG_HOME` is absolute, falling back to `~/.config/symphonika/env` otherwise, because systemd
+ignores a relative `XDG_CONFIG_HOME` and it must not be resolved against the install-time working
+directory — even when the daemon's own discovery later selects a project-local Service Config. The
+systemd directive uses the leading `-` form, so an absent file does not prevent installations
+without authenticated email from starting. Every component of the path is resolved at install time
+rather than deferred to a systemd specifier such as `%h`, so glob metacharacters are escaped and a
+home or config directory containing `[`, `*`, or `?` still resolves. The file remains
 operator-owned and may define the default `SYMPHONIKA_SMTP_PASSWORD` or any variable selected by
 `email.smtp_password_env`; `service install` neither creates it nor copies secret values into the
 unit. Assignments in it override the unit's `Environment=` settings, so it must carry secrets only.

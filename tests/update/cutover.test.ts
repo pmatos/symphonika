@@ -286,7 +286,7 @@ describe("checkUnitRegenerationNeeded", () => {
     expect(result.needed).toBe(true);
   });
 
-  it("tells operators to repeat an explicit config when regenerating a legacy unit", async () => {
+  it("pins the `--config` reminder in the regeneration hint", async () => {
     const homeDir = await makeTempRoot();
     await writeInstalledUnit(
       homeDir,

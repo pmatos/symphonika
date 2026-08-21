@@ -1,5 +1,10 @@
 # Routine lifecycle control: cancellation, disable, removal, invalid reload
 
+**Amendment note (issue #424):** ADR-0021's Project cascade applies to current Routine Targets. A
+target already disabled with `removed_from_config` remains durable declaration history across a
+later Project disable or removal, retaining its disabled state and reason instead of becoming
+`inactive`.
+
 Routines slice 6 gives operators the same lifecycle control over Routine Firings and Routines that
 they already have over issue Runs and Projects: cancel a misbehaving firing, disable or remove a
 Routine without disrupting in-flight work, and see an invalid routine declaration without losing
@@ -20,6 +25,11 @@ matter, or its path removed from a still-enabled Project's `routines:` list. Unl
 ("is this Project running at all" vs. "why did this specific Routine stop"), and merging them would
 either break ADR-0021's default-hidden Project cascade or force reason-based filtering into every
 existing `inactive` call site.
+
+The states remain distinct under the amendment above: current targets of disabled or absent
+Projects still become hidden-by-default `inactive` rows. Only a target already removed from its
+declaration retains `disabled (removed_from_config)`, preserving the evidence that distinguishes
+historical removal from a genuinely current inactive target.
 
 Removing a Routine's path from a still-enabled Project's `routines:` list previously hard-deleted
 its `routines` row (`RunStore.syncRoutines`). This slice reverses that: the row is soft-disabled

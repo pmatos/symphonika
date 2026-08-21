@@ -53,13 +53,7 @@ import {
 } from "./workflow/fsm-expansion.js";
 
 export { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
-export type {
-  DoctorCodexProfileReport,
-  DoctorExecutionEnvironmentReport,
-  DoctorGhAuthReport,
-  DoctorInstalledUnitReport,
-  DoctorProviderBinaryReport
-} from "./doctor-execution-environment.js";
+export type { DoctorExecutionEnvironmentReport } from "./doctor-execution-environment.js";
 
 export type DoctorOptions = {
   agentProviders?: AgentProviderRegistry;

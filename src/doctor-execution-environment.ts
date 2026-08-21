@@ -15,14 +15,14 @@ import { userUnitDir } from "./service.js";
 
 const execFile = promisify(execFileCallback);
 
-export type DoctorProviderBinaryReport = {
+type DoctorProviderBinaryReport = {
   executable: string | null;
   provider: AgentProviderName;
   resolvedPath: string | null;
   status: "invalid_command" | "resolved" | "unresolved";
 };
 
-export type DoctorCodexProfileReport = {
+type DoctorCodexProfileReport = {
   checks: Array<{
     actual: string | null;
     expected: string;
@@ -34,13 +34,13 @@ export type DoctorCodexProfileReport = {
   status: "invalid" | "not_required" | "valid";
 };
 
-export type DoctorGhAuthReport = {
+type DoctorGhAuthReport = {
   executablePath: string | null;
   status:
     "authenticated" | "not_installed" | "skipped_offline" | "unauthenticated";
 };
 
-export type DoctorInstalledUnitReport = {
+type DoctorInstalledUnitReport = {
   binaries: Array<{
     executable: string;
     provider?: AgentProviderName;

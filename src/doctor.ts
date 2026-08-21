@@ -18,12 +18,15 @@ import { z } from "zod";
 import type { WorkflowFormat } from "./config-schemas.js";
 import {
   pathStringSchema,
+  projectDispatchSchema,
   projectWorkspaceSchema,
+  rejectDispatchOnlyKeysOnRoutineHost,
   workflowReferenceSchema
 } from "./config-schemas.js";
 import {
   missingUserConfigHint,
-  resolveServiceConfigPath
+  resolveServiceConfigPath,
+  serviceEnvironmentFilePath
 } from "./config-paths.js";
 import {
   inspectConfiguredDoctorEnvironment,
@@ -334,6 +337,7 @@ const dispatchProjectSchema = z
     mode: z.literal("dispatch").default("dispatch"),
     disabled: z.boolean().optional(),
     weight: z.number().int().positive().optional(),
+    dispatch: projectDispatchSchema.optional(),
     tracker: trackerSchema,
     issue_filters: issueFiltersSchema,
     priority: prioritySchema,
@@ -343,29 +347,6 @@ const dispatchProjectSchema = z
   })
   .passthrough()
   .superRefine(rejectPerProjectRoutines);
-
-// A Routine Host has no use for dispatch-only fields — ADR 0062 says they are
-// "unused and rejected", so a stale or copy-pasted dispatch block must be a
-// declaration-time error rather than silently ignored.
-const DISPATCH_ONLY_KEYS = ["issue_filters", "priority", "workflow"] as const;
-
-function rejectDispatchOnlyKeysOnRoutineHost(
-  rawProject: unknown,
-  ctx: z.RefinementCtx
-): void {
-  if (rawProject === null || typeof rawProject !== "object") {
-    return;
-  }
-  for (const key of DISPATCH_ONLY_KEYS) {
-    if (key in rawProject) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `\`${key}\` is a dispatch-only field and is unused and rejected on a Routine Host (mode: routine_host); see ADR 0062`,
-        path: [key]
-      });
-    }
-  }
-}
 
 const routineHostProjectSchema = z
   .object({
@@ -531,8 +512,11 @@ export async function runDoctor(
     email?.smtpUsername !== undefined &&
     (env[email.smtpPasswordEnv]?.trim().length ?? 0) === 0
   ) {
+    const environmentFile = shellQuote(
+      serviceEnvironmentFilePath(resolvedConfig.configPath)
+    );
     errors.push(
-      `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . /path/to/symphonika.env; set +a)`
+      `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . ${environmentFile}; set +a)`
     );
   }
 
@@ -616,6 +600,10 @@ export async function runDoctor(
   });
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 async function runLiveCheck(
   providerName: AgentProviderName | undefined,
   timeoutMs: number | undefined,
@@ -656,8 +644,9 @@ async function runLiveCheck(
 }
 
 // Detects an installed unit that predates a systemd-unit-shape change (the
-// daemon/provider cgroup split, docs/adr/0064; or the watchdog heartbeat,
-// docs/adr/0065) so operators learn to re-run `service install --force`
+// daemon/provider cgroup split, docs/adr/0064; the watchdog heartbeat,
+// docs/adr/0065; or EnvironmentFile secret injection, docs/adr/0055) so
+// operators learn to re-run `service install --force`
 // instead of silently running on stale units indefinitely. Skips entirely
 // when no unit is installed at all (`service install` was never run) —
 // that's not a doctor concern. `ExecStart`/`Environment=PATH` are baked in
@@ -698,6 +687,11 @@ async function checkInstalledUnitDrift(
   ) {
     warnings.push(
       `${servicePath} predates the systemd watchdog heartbeat (docs/adr/0065) — ${reinstallHint}`
+    );
+  }
+  if (!/^[ \t]*EnvironmentFile[ \t]*=/m.test(serviceContent)) {
+    warnings.push(
+      `${servicePath} predates environment-backed secrets support (docs/adr/0014, docs/adr/0055) — ${reinstallHint}`
     );
   }
 
@@ -931,14 +925,16 @@ async function validateServiceRoutines(
             : { timeoutMinutes: routine.timeoutMinutes })
         };
         try {
-          const { rendered, unreferencedFields } =
-            renderProviderCommandTemplate(providerConfig.command, resolved);
+          const { unreferencedFields } = renderProviderCommandTemplate(
+            providerConfig.command,
+            resolved
+          );
           for (const field of unreferencedFields) {
             errors.push(
               `routine "${routine.name}" declares ${field}, but providers.${routine.provider}.command never references it`
             );
           }
-          await providerAdapter.validate(rendered);
+          await providerAdapter.validate(providerConfig.command, resolved);
         } catch (error) {
           errors.push(
             `routine "${routine.name}" providers.${routine.provider}.command is invalid: ${errorMessage(error)}`
@@ -1040,9 +1036,7 @@ async function validateWorkflowProviderReferences(
       continue;
     }
     try {
-      await adapter.validate(
-        renderProviderCommandTemplate(provider.command, {}).rendered
-      );
+      await adapter.validate(provider.command);
     } catch (error) {
       errors.push(
         `projects.${project.name} providers.${providerName}.command is invalid: ${errorMessage(error)}`
@@ -2253,9 +2247,7 @@ async function validateProject(
     providerOk = false;
   } else if (provider !== undefined) {
     try {
-      await providerAdapter.validate(
-        renderProviderCommandTemplate(provider.command, {}).rendered
-      );
+      await providerAdapter.validate(provider.command);
     } catch (error) {
       errors.push(
         `projects.${project.name}.providers.${project.agent.provider}.command is invalid: ${errorMessage(error)}`

@@ -321,8 +321,8 @@ export function createCodexProvider(
         await processScope.stopProviderScope(input.run);
       }
     },
-    validate: async (command) => {
-      const rendered = renderProviderCommandTemplate(command, {}).rendered;
+    validate: async (command, values = {}) => {
+      const rendered = renderProviderCommandTemplate(command, values).rendered;
       const parsed = parseProviderCommand(rendered, PROVIDER_LABEL);
       if (!parsed.args.includes("app-server")) {
         throw new Error(

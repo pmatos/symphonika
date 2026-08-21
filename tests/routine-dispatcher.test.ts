@@ -50,6 +50,15 @@ afterEach(async () => {
   );
 });
 
+const ROUTINE_OVERRIDE_COMMAND_TEMPLATE =
+  "claude fake{{#model}} --model {{model}}{{/model}}{{#effort}} --effort {{effort}}{{/effort}}{{#permission_mode}} --permission-mode {{permission_mode}}{{/permission_mode}}";
+
+const ROUTINE_EXECUTION_OVERRIDES = {
+  effort: "xhigh",
+  model: "{{effort}}",
+  permissionMode: "bypass"
+} as const;
+
 describe("RoutineFiringDispatcher", () => {
   it("manually fires a not-due Routine through the normal provider lifecycle", async () => {
     const root = await makeTempRoot();
@@ -539,7 +548,7 @@ describe("RoutineFiringDispatcher", () => {
       runStore.close();
     }
   });
-  it("passes effective execution overrides only on the routine provider input", async () => {
+  it("passes effective execution overrides without re-rendering resolved values", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
@@ -563,9 +572,7 @@ describe("RoutineFiringDispatcher", () => {
     project.routines = [
       {
         ...project.routines![0]!,
-        effort: "xhigh",
-        model: "claude-opus-4-8",
-        permissionMode: "bypass",
+        ...ROUTINE_EXECUTION_OVERRIDES,
         timeoutMinutes: 60
       }
     ];
@@ -588,7 +595,7 @@ describe("RoutineFiringDispatcher", () => {
           }),
         projects: new Map([["alpha", project]]),
         providersConfig: {
-          claude: { command: "claude fake" },
+          claude: { command: ROUTINE_OVERRIDE_COMMAND_TEMPLATE },
           codex: { command: "codex fake" }
         },
         runStore,
@@ -602,11 +609,82 @@ describe("RoutineFiringDispatcher", () => {
             routine?: Record<string, unknown>;
           }
         ).routine
-      ).toEqual({
-        effort: "xhigh",
-        model: "claude-opus-4-8",
-        permissionMode: "bypass"
+      ).toEqual(ROUTINE_EXECUTION_OVERRIDES);
+      // Both provider entrypoints receive the same raw template and values so
+      // each adapter renders once. In particular, the model's literal
+      // {{effort}} bytes must not be parsed as a second template.
+      expect(providerInputs[0]!.provider.command).toBe(
+        ROUTINE_OVERRIDE_COMMAND_TEMPLATE
+      );
+      expect(provider.validate).toHaveBeenCalledWith(
+        ROUTINE_OVERRIDE_COMMAND_TEMPLATE,
+        ROUTINE_EXECUTION_OVERRIDES
+      );
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("rejects a routine command whose resolved overrides fail provider validation", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      ...quietProvider(),
+      name: "claude",
+      // Rejecting only the raw template paired with the resolved overrides is
+      // what makes this a regression test: an unconditional rejection would
+      // pass even if the dispatcher dropped the values.
+      validate: vi.fn(
+        (command: string, values?: ProviderRunInput["routine"]) =>
+          command === ROUTINE_OVERRIDE_COMMAND_TEMPLATE &&
+          values?.effort === ROUTINE_EXECUTION_OVERRIDES.effort &&
+          values.model === ROUTINE_EXECUTION_OVERRIDES.model &&
+          values.permissionMode === ROUTINE_EXECUTION_OVERRIDES.permissionMode
+            ? Promise.reject(new Error("unsupported routine command"))
+            : Promise.resolve()
+      )
+    } satisfies AgentProvider;
+    const project = dueRoutineProjectFixture(root, "claude");
+    project.routines = [
+      {
+        ...project.routines![0]!,
+        ...ROUTINE_EXECUTION_OVERRIDES
+      }
+    ];
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { claude: provider },
+        configDir: root,
+        createFiringId: () => "fire-invalid-overrides",
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", project]]),
+        providersConfig: {
+          claude: { command: ROUTINE_OVERRIDE_COMMAND_TEMPLATE },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
       });
+
+      expect(runStore.getRoutineFiring("fire-invalid-overrides")).toMatchObject(
+        {
+          state: "failed",
+          terminalReason: "unsupported routine command"
+        }
+      );
+      expect(provider.runAttempt).not.toHaveBeenCalled();
     } finally {
       runStore.close();
     }
@@ -1389,6 +1467,73 @@ describe("RoutineFiringDispatcher", () => {
       expect(fanoutMessages[0]?.text).toContain(
         "- beta: held (provider_not_registered: omp)"
       );
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("persists a dispatched firing's execution-time kind across a later declaration edit", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/dependency-update/01JABCDEFG";
+    await createGitWorkspaceAtBase({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "git" as const,
+      name: "dependency-update",
+      projectName: "alpha",
+      prompt: "Update dependencies.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: path.join(root, "dependency-update.md")
+    };
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: quietProvider() },
+        configDir: root,
+        createFiringId: () => "fire-kind-snapshot",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch: vi.fn().mockResolvedValue([])
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          ["alpha", { ...runStoreProjectFixture(), routines: [declaration] }]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.getRoutineFiring("fire-kind-snapshot")).toEqual(
+        expect.objectContaining({
+          branchRef: `refs/heads/${branchName}`,
+          kind: "git"
+        })
+      );
+
+      runStore.syncRoutines([
+        { ...declaration, kind: "report", provider: "codex" }
+      ]);
+
+      expect(runStore.getRoutineFiring("fire-kind-snapshot")?.kind).toBe("git");
     } finally {
       runStore.close();
     }
@@ -3773,7 +3918,7 @@ describe("RoutineFiringDispatcher", () => {
       expect(prepareInput?.firingId).toBe("fire-1");
       expect(prepareInput?.project.name).toBe("alpha");
       expect(prepareInput?.routineName).toBe("daily-report");
-      expect(provider.validate).toHaveBeenCalledWith("codex fake");
+      expect(provider.validate).toHaveBeenCalledWith("codex fake", {});
       expect(providerInputs).toHaveLength(1);
       const providerInput = providerInputs[0];
       expect(providerInput?.prompt).toContain(

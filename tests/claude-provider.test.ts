@@ -712,6 +712,21 @@ describe("Claude stream-json provider", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("renders routine override values exactly once during validation", async () => {
+    const root = await makeTempRoot();
+    const fakeClaudePath = path.join(root, "fake-claude-argv.mjs");
+    const resolvedModel = "{{effort}}";
+    await writeFakeClaudeArgvValidator(fakeClaudePath, resolvedModel);
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
+
+    await expect(
+      provider.validate(
+        `${process.execPath} ${fakeClaudePath} --settings {{model}} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
+        { model: resolvedModel }
+      )
+    ).resolves.toBeUndefined();
+  });
+
   it("preserves backslashes inside quoted command executables", async () => {
     const root = await makeTempRoot();
     const fakeClaudeDir = path.join(root, "fake\\claude dir");

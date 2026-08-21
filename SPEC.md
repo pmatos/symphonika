@@ -256,14 +256,14 @@ one-shot is consumed as an ungrouped `catch_up_window` skip instead of reopening
 summary, while a recurring target begins with its next future clock event.
 
 A Routine Firing is one durable execution of a Routine Target. It records the Routine, its target
-Project, fan-out id, provider, nominal scheduled clock time, workspace path, branch name and ref,
-prompt evidence, provider logs, terminal reason, lifecycle state, its canonical Routine Outcome,
-whether its prepared `kind: git` workspace held commits ahead of the configured base branch at
-completion, and any pull requests discovered from a `kind: git` firing branch. The commits-ahead
-signal is independent of the canonical action: a verified GitHub issue or pull-request action may
-legitimately be the Routine Outcome while the workspace still has local commits to protect. The
-Routine Outcome records `status`, `action`, `url`, `title`, `summary`, `verified`, and `source`
-without replacing lifecycle state or terminal reason; see ADR 0068. Its trigger source is
+Project, fan-out id, execution-time kind, provider, nominal scheduled clock time, workspace path,
+branch name and ref, prompt evidence, provider logs, terminal reason, lifecycle state, its canonical
+Routine Outcome, whether its prepared `kind: git` workspace held commits ahead of the configured
+base branch at completion, and any pull requests discovered from a `kind: git` firing branch. The
+commits-ahead signal is independent of the canonical action: a verified GitHub issue or pull-request
+action may legitimately be the Routine Outcome while the workspace still has local commits to
+protect. The Routine Outcome records `status`, `action`, `url`, `title`, `summary`, `verified`, and
+`source` without replacing lifecycle state or terminal reason; see ADR 0068. Its trigger source is
 `scheduled` or `manual`; a scheduled firing carries the fan-out id of the Routine Fan-out it belongs
 to, while a manual firing targets one Routine Target directly and has no fan-out id. A one-shot
 `schedule.at` target becomes `expired` after its firing is claimed and must not fire again on daemon
@@ -416,6 +416,8 @@ projects:
         base_branch: main
     agent:
       provider: codex
+    dispatch:
+      overlap_guard: false
     workflow: ./WORKFLOW.md
   - name: new-composer-host
     mode: routine_host
@@ -512,6 +514,21 @@ in `symphonika.yml`, not in `WORKFLOW.md`.
 Raw FSM agent states may declare `action.provider` to route that state to a specific configured
 Agent Provider. If an agent state omits `action.provider`, Symphonika uses the Project's
 `agent.provider` from `symphonika.yml`.
+
+Raw FSM workflows may reference five built-in Workflow Templates through the `builtin:` namespace:
+`single-agent-pr`, `plan-tdd-pr`, `refactor-swarm`, `autofix-until-clean`, and
+`merge-when-green`. Built-ins expand through the same validation, state-prefixing, exit-mapping,
+and evidence path as repository-local templates. `refactor-swarm` runs three serial agent states:
+`red_team` and `refactoring` each require provider success, `branch_ahead_of_base`, and
+`branch_advanced_since_attempt_start`, then `verifying` requires provider success alone because
+verification is read-only. `branch_ahead_of_base` remains the cumulative branch-vs-base signal.
+For each agent Attempt, Symphonika also snapshots `HEAD` immediately before provider execution;
+`branch_advanced_since_attempt_start` is true only when completion `HEAD` is a different descendant
+of that snapshot. The second transition therefore requires a distinct refactor commit rather than
+reusing the red-team commit. Any fallback uses the template's `blocked` exit. Repositories may
+explicitly replace a built-in reference with a local
+`.symphonika/workflow-templates/<name>.yml`; local files never auto-shadow the reserved namespace.
+See ADRs 0049 and 0085.
 
 The daemon must not dispatch a Dispatch Project when its workflow contract is missing or invalid. A
 Routine Host is never dispatched, so this gate does not apply to it.
@@ -898,6 +915,27 @@ Dispatch uses weighted round-robin across Projects. Within each Project, issues 
 2. oldest creation time
 3. issue number
 
+A Dispatch Project may opt into `dispatch.overlap_guard: true` (default `false`). After the global
+and per-Project concurrency caps and per-Issue reservation checks, the picker compares a
+candidate's known open-pull-request files with periodically refreshed committed and live Workspace
+changes from in-flight issue Runs in the same Project. An exact repository-relative path overlap
+skips that candidate for the tick. If every candidate for the Project overlaps, the Project does
+not enter weighted round-robin and its scheduler cursor does not advance. Other Projects remain
+dispatchable, and unregistering the terminal Run makes the skipped candidate reconsiderable on the
+next tick. Rename footprints include both the previous and current repository paths.
+
+Fresh dispatch rechecks overlap inside the serialized claim boundary. When a candidate with a known
+pull-request footprint is admitted, that footprint seeds its in-flight slot before the claim mutex
+is released; this makes overlap admission atomic even before the new Run's Workspace is prepared.
+
+The overlap guard creates no timer: in-flight footprints refresh at most once every 30 seconds as
+part of existing dispatch ticks. Missing candidate PRs, unavailable adapter methods, absent
+Workspaces, and Git/GitHub read failures do not block dispatch. The guard therefore reduces known
+collisions but cannot predict a genuinely fresh Issue's footprint; operators requiring strict
+serialization use `max_in_flight: 1`. An expired footprint that fails to refresh becomes empty for
+that interval rather than retaining stale collision evidence; the failed refresh is still
+timestamped to rate-limit retries. See ADR 0085.
+
 Invalid Projects are disabled. Valid Projects may continue running.
 
 ### 8.4 Project Disable and Removal
@@ -1008,10 +1046,11 @@ release that protection; age alone must never delete the only copy.
 When a pre-signal database first gains commits-ahead evidence, the column addition and backfill are
 atomic. Every historical firing not known to be a `kind: report` firing is conservatively protected;
 subsequent startups do not repeat the backfill and therefore cannot overwrite a newly inspected
-zero. Startup reconciliation similarly protects a prepared `kind: git` workspace when a daemon
-crash prevents the ordinary terminal inspection from running. Because a Routine declaration can
-change kind while its firing is active and the firing row does not retain execution-time kind,
-reconciliation treats every leaked firing with a recorded workspace path as unknown and protected.
+zero. Startup reconciliation uses the firing's persisted execution-time kind rather than the
+mutable Routine declaration. It protects a leaked `kind: git` firing with a recorded workspace path
+when a daemon crash prevents ordinary terminal inspection, while a leaked `kind: report` firing
+records verified zero commits-ahead and remains eligible for its normal age window. A historical
+firing whose kind is unknown remains conservatively protected.
 
 After a Routine Firing reaches a terminal state, Symphonika evaluates its Routine notification
 policy. Delivery occurs after `kind: git` PR discovery, uses both plain text and an escaped HTML
@@ -1137,12 +1176,16 @@ terminal update time has crossed the configured outcome window and whose persist
 signal is false. Canonical Routine Outcome does not substitute for this predicate. Reclamation runs
 `git worktree remove --force` followed by `git worktree prune` against the Project cache, so both
 the checkout and its registration are removed; for a `kind: git` firing, reclamation also deletes
-its deterministic local branch (`git branch -D`) from the Project cache, since that branch has no
-other purpose once the worktree is gone. A failed removal remains unmarked and is retried on
-a later tick. The Run Store preserves `workspace_path` and writes `workspace_pruned_at`; no
-state-root provider log, normalized event, or prompt artifact is removed. The manual
-`symphonika prune-workspaces [--dry-run]` command evaluates the same policy even when automatic
-retention is disabled. See ADR 0067.
+its deterministic local branch ref from the Project cache, since that branch has no other purpose
+once the worktree is gone. Branch ownership follows the firing's persisted execution-time kind
+rather than the mutable Routine declaration. Local branch deletion preserves Git's refusal to
+delete a branch checked out by another registered worktree; this matters when colliding firing ids
+share a truncated branch name. A branch already deleted by a concurrent retention pass counts as
+success, while a branch now held by another firing is preserved. A failed removal remains unmarked
+and is retried on a later tick. The Run Store preserves `workspace_path` and writes
+`workspace_pruned_at`; no state-root provider log, normalized event, or prompt artifact is removed.
+The manual `symphonika prune-workspaces [--dry-run]` command evaluates the same policy even when
+automatic retention is disabled. See ADR 0067.
 
 ## 9. GitHub Tracker Behavior
 
@@ -1297,7 +1340,14 @@ Provider adapters expose a normalized interface conceptually equivalent to:
 ```ts
 type AgentProvider = {
   name: "codex" | "claude" | "omp";
-  validate(command: string): Promise<void>;
+  validate(
+    command: string,
+    values?: {
+      effort?: string;
+      model?: string;
+      permissionMode?: string;
+    },
+  ): Promise<void>;
   runAttempt(input: ProviderRunInput): AsyncIterable<ProviderEvent>;
   cancel(runId: string): Promise<void>;
 };
@@ -1385,16 +1435,20 @@ the section form is what lets an operator omit a whole `--model X` segment when 
 leaving a dangling incomplete flag, and likewise lets an operator template
 `{{#permission_mode}}--permission-mode {{permission_mode}}{{/permission_mode}}` so a routine that
 doesn't declare `permission_mode` doesn't emit a dangling flag either. Each provider adapter renders
-`input.provider.command` through this template — using the firing's resolved values for
-`runAttempt`, and empty values (so every section collapses) for `validate()` and for issue-driven
-Runs — before parsing the rendered string into argv. Symphonika's TypeScript never hardcodes a
-provider's flag vocabulary; the operator's own authored command carries that knowledge, exactly as it
-already does today for Codex's `-c sandbox_mode=...`. An unrecognized or malformed template tag
-throws rather than being passed through as literal text. `permission_mode` is exempt from the
-unreferenced-field declaration-load check (§5.4): unlike `model`/`effort`, a routine may declare
-`permission_mode` purely as documentation of intent without its resolved provider command
-referencing the tag, since no provider currently requires it to appear in the command for full
-permission to take effect (the default commands above already carry a fixed policy flag literally).
+the authored command exactly once before parsing it into argv: `runAttempt` uses
+`input.provider.command` with the firing's resolved values, while `validate()` uses its optional
+values argument and defaults to empty values (so every section collapses) for issue-driven or
+provider-level validation. A Routine Firing passes the authored command and the same resolved values
+to both adapter entrypoints, so routine-only flags and values are covered by the pre-flight probe
+without re-parsing substituted bytes as another template. Symphonika's TypeScript never hardcodes a
+provider's flag vocabulary; the operator's own authored command carries that knowledge, exactly as
+it already does today for Codex's `-c sandbox_mode=...`. An unrecognized or malformed template tag
+throws rather than being passed through as literal text.
+`permission_mode` is exempt from the unreferenced-field declaration-load check (§5.4): unlike
+`model`/`effort`, a routine may declare `permission_mode` purely as documentation of intent without
+its resolved provider command referencing the tag, since no provider currently requires it to appear
+in the command for full permission to take effect (the default commands above already carry a fixed
+policy flag literally).
 Claude Routine Firings additionally ensure one `--disallowedTools` option whose variadic values
 merge any operator-authored restrictions with `ScheduleWakeup`, `Monitor`, and `CronCreate`
 (outside the template, applied by the adapter directly), and set
@@ -1809,6 +1863,19 @@ path; otherwise it uses a `./`-prefixed path relative to the Service Config.
 `service install --config <path>` resolves the selected Service Config to an absolute path and
 bakes it into the generated unit as `daemon --config <absolute-path>`. Omitting `--config` keeps the
 unit on the daemon's normal project-local/user-config discovery path.
+
+The generated service always references an optional environment file named `env`, resolved at
+install time. With `--config`, the path is `<directory-containing-config>/env`; without it, the
+path is the user config directory's `env` — `$XDG_CONFIG_HOME/symphonika/env`, falling back to
+`~/.config/symphonika/env` — even when the daemon's own discovery later selects a project-local
+Service Config. The systemd directive uses the leading `-` form, so an absent file does not prevent
+installations without authenticated email from starting, and glob metacharacters in the path are
+escaped so a directory name containing `[`, `*`, or `?` still resolves. The file remains
+operator-owned and may define the default `SYMPHONIKA_SMTP_PASSWORD` or any variable selected by
+`email.smtp_password_env`; `service install` neither creates it nor copies secret values into the
+unit. Assignments in it override the unit's `Environment=` settings, so it must carry secrets only.
+Re-running `service install --force` preserves the reference, while creating or changing the file
+takes effect after the service is restarted.
 
 `status --dashboard` renders a compact terminal status dashboard from the run store and daemon
 `/api/status` endpoint. `status --watch` refreshes that read-only dashboard in place; it must not

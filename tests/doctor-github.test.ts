@@ -39,8 +39,10 @@ afterEach(async () => {
 describe("GitHub Project validation", () => {
   it("explains how to load a daemon env file when the SMTP password is absent from a manual doctor run", async () => {
     const root = await makeTempRoot();
-    await writeValidProject(root);
-    const configPath = path.join(root, "symphonika.yml");
+    const configRoot = path.join(root, "config with spaces");
+    await mkdir(configRoot);
+    await writeValidProject(configRoot);
+    const configPath = path.join(configRoot, "symphonika.yml");
     const config = await readFile(configPath, "utf8");
     await writeFile(
       configPath,
@@ -76,7 +78,7 @@ describe("GitHub Project validation", () => {
     const report = await runDoctor({
       agentProviders: fakeAgentProviders(),
       configPath,
-      cwd: root,
+      cwd: configRoot,
       env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
       githubApi,
       homeDir: root,
@@ -85,7 +87,7 @@ describe("GitHub Project validation", () => {
 
     expect(report.ok).toBe(false);
     expect(report.errors).toContain(
-      "email.smtp_password_env references $SMTP_TEST_PASSWORD, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . /path/to/symphonika.env; set +a)"
+      `email.smtp_password_env references $SMTP_TEST_PASSWORD, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . '${path.join(configRoot, "env")}'; set +a)`
     );
   });
 

@@ -535,8 +535,15 @@ function reportRateLimit(
   return true;
 }
 
-function repositoryForProject(
-  project: RunControllerProjectConfig | undefined,
+// Structurally typed rather than tied to RunControllerProjectConfig so the
+// dispatch overlap guard can share it without importing the wide config type.
+export function repositoryForProject(
+  project:
+    | {
+        disabled?: boolean | undefined;
+        tracker?: { owner: string; repo: string; token: string } | undefined;
+      }
+    | undefined,
   env: NodeJS.ProcessEnv
 ): GitHubIssueRepositoryInput | undefined {
   if (

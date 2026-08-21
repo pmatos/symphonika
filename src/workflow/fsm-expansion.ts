@@ -88,6 +88,7 @@ const mergeMethods = new Set<string>(["merge", "rebase", "squash"]);
 
 const completionPredicateKeys = new Set([
   "artifact_exists",
+  "branch_advanced_since_attempt_start",
   "branch_ahead_of_base",
   "branch_pushed",
   "checks",

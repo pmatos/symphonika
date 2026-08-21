@@ -32,6 +32,9 @@ jobs:
 
       - name: Run Claude Code Review
         id: claude-review
+        # This reviewer is advisory. Provider outages and quota exhaustion must
+        # not turn an otherwise healthy pull request red.
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -66,3 +69,14 @@ jobs:
             🤖 Generated with [Claude Code](https://claude.ai/code)
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
+
+      - name: Report unavailable review
+        if: ${{ steps.claude-review.outcome == 'failure' }}
+        shell: bash
+        run: |
+          echo "::warning::Claude Code Review was unavailable; this advisory failure does not indicate a pull request code failure."
+          {
+            echo "### Claude Code Review unavailable"
+            echo
+            echo "The advisory review could not be completed. This does not indicate a pull request code or CI failure; inspect the failed review step for the external service error."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -282,9 +282,10 @@ workspace that was never created because preparation failed is treated as alread
 repository cache is also absent or unusable.
 
 A Routine Firing with an effective `timeout_minutes` has an absolute wall-clock deadline beginning
-when execution of the claimed firing starts. Exceeding it terminates the provider process tree and
-records `state = failed` with `terminal_reason = "firing_timeout"`. This declared deadline is
-independent of Watchdog progress-liveness: useful progress does not extend it.
+when execution of the claimed firing starts. Exceeding it aborts in-flight workspace preparation or
+terminates the provider process tree, waits for that work to settle, and records `state = failed`
+with `terminal_reason = "firing_timeout"`. This declared deadline is independent of Watchdog
+progress-liveness: useful progress does not extend it.
 
 A clock event skipped for catch-up policy, overlap, or a concurrency cap is not a Routine Firing:
 no `routine_firings` row is created. The Routine instead records `last_attempted_at`,
@@ -953,10 +954,29 @@ on workspace preparation, provider validation, provider streaming, and terminal 
 classification, and completes the firing as `failed` with `terminal_reason = "firing_timeout"`
 rather than classifying the cancellation-produced exit event as `process_exit_*` or `cancelled`.
 Once a provider process exists, expiry invokes the provider's cancellation path, which stops the
-full process group (ADR 0064 / #341) and preserves workspace and logs. Expiry during workspace
-preparation does not cancel the in-flight `git` subprocesses: the dispatcher stops waiting on
-`prepareRoutineWorkspace`, but the abandoned clone/fetch keeps running and can delay a later
-firing that shares the same per-project repository cache (tracked in #353).
+full process group (ADR 0064 / #341) and preserves workspace and logs. During workspace preparation,
+the same deadline aborts every in-flight `git` command and awaits preparation cleanup before the
+firing becomes terminal or releases its in-flight slot. On POSIX, each cancellable Git command is
+the leader of its own process group; abort sends `SIGTERM` to the whole group and escalates surviving
+helpers, transports, or hooks to `SIGKILL` after a bounded grace period. Non-POSIX hosts retain
+direct-child abort behavior. Git stdout and stderr retention remains capped at 1 MiB per stream;
+exceeding that limit stops the POSIX process group before returning the max-buffer failure. After
+escalation, Linux process groups containing only zombies count as stopped because none of their
+members can execute; delayed PID 1 reaping does not replace the original abort outcome with a
+cleanup failure. A caller queued on the shared per-cache fetch serializer checks the signal after
+reaching the head of the queue and does not begin new Git work after its deadline.
+
+First-time bare-cache creation clones into a unique sibling staging directory and atomically renames
+the completed repository to the shared cache path. Failed or aborted clones remove only their owned
+staging directory, so a partial clone cannot poison later Routine Firings or issue Runs. Before
+publication, the staging directory receives the mode a direct clone would derive from the process
+umask, preserving group-sharing and restrictive deployments. An interrupted fetch preserves the
+previously validated shared cache and its linked worktrees. If cancellation reaches a
+firing-specific branch or `git worktree add`, cleanup removes only the branch/worktree proved absent
+before this preparation began; a pre-existing reused Routine Workspace is never removed. Cleanup
+verifies that both the worktree directory and bare-cache registration are gone. An incomplete
+cleanup is surfaced as a typed preparation error and logged even though the deadline still owns the
+terminal `firing_timeout` classification.
 
 For `kind: report`, provider exit code 0 succeeds without requiring commits. For `kind: git`, exit
 code 0 applies the same commits-ahead-of-base inspection as §12.1: zero commits fails with

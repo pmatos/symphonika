@@ -205,7 +205,8 @@ _Avoid_: evidence retention, issue Workspace cleanup
 
 **Routine Firing Deadline**:
 An optional declared absolute wall-clock bound for one Routine Firing. It expires regardless of
-continued provider progress and fails the firing with terminal reason `firing_timeout`.
+continued progress, cancels active workspace preparation or provider work, and fails the firing with
+terminal reason `firing_timeout` after that work settles.
 _Avoid_: Watchdog timeout, no-progress grace
 
 **Routine Skip**:

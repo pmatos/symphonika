@@ -1619,6 +1619,81 @@ describe("RuntimeConfigReloader concurrency caps", () => {
   });
 });
 
+describe("RuntimeConfigReloader dispatch overlap guard", () => {
+  it("loads a Dispatch Project overlap-guard opt-in", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      projectLines: ["    dispatch:", "      overlap_guard: true"]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.getStatus().ok).toBe(true);
+    expect(reloader.projectsByName().get("symphonika")?.dispatch).toEqual({
+      overlap_guard: true
+    });
+  });
+
+  it("rejects a non-boolean project dispatch.overlap_guard", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      projectLines: ["    dispatch:", '      overlap_guard: "sometimes"']
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    const status = reloader.getStatus();
+    expect(status.ok).toBe(false);
+    expect(status.errors.join("\n")).toMatch(/dispatch\.overlap_guard/);
+  });
+
+  it("rejects dispatch configuration on a Routine Host", async () => {
+    const root = await makeTempRoot();
+    await writeFile(
+      path.join(root, "symphonika.yml"),
+      [
+        "providers:",
+        "  codex:",
+        '    command: "codex"',
+        "  claude:",
+        '    command: "claude"',
+        "projects:",
+        "  - name: reports",
+        "    mode: routine_host",
+        "    dispatch:",
+        "      overlap_guard: true",
+        "    workspace:",
+        "      root: ./workspaces/reports",
+        "      git:",
+        "        remote: git@github.com:pmatos/reports.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        ""
+      ].join("\n")
+    );
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    const status = reloader.getStatus();
+    expect(status.ok).toBe(false);
+    expect(status.errors.join("\n")).toMatch(
+      /`dispatch` is a dispatch-only field/
+    );
+  });
+});
+
 describe("RuntimeConfigReloader routine workspace retention", () => {
   it("defaults automatic cleanup to short success and longer forensic windows", async () => {
     const root = await makeTempRoot();

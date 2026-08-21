@@ -304,6 +304,12 @@ A Dispatch Project's scheduler state for polling cadence, last poll outcome, and
 Routine Hosts are never polled and have no cursor.
 _Avoid_: issue cursor
 
+**Dispatch Overlap Guard**:
+An optional Dispatch-Project admission gate that delays a candidate when its known pull-request file
+footprint intersects the periodically refreshed Workspace footprint of an in-flight Run in the same
+Project. Unknown footprints remain dispatchable; strict serialization uses `max_in_flight: 1`.
+_Avoid_: dependency scheduler, merge-conflict resolver
+
 **Agent Provider**:
 A normalized adapter that lets the orchestrator run a specific coding-agent implementation; v1 supports Codex, Claude, and Oh My Pi.
 _Avoid_: agent when referring to the adapter boundary
@@ -387,6 +393,8 @@ _Avoid_: chat session
 - A **State Advance** is not capped by the continuation cap; the FSM bounds the walk via terminal states
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete
 - A **Project Cursor** belongs to exactly one **Dispatch Project**
+- A **Dispatch Overlap Guard** supplements concurrency caps and **Issue Reservation** without
+  advancing a skipped **Dispatch Project**'s scheduler cursor
 - **Full-Permission Agent Execution** is the default and assumed provider posture
 - **Provider PID Isolation** bounds what an **Agent Provider** can see and signal without changing
   **Full-Permission Agent Execution**

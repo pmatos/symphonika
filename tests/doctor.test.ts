@@ -98,6 +98,22 @@ describe("doctor", () => {
     expect(output.stderr).toContain("projects.0");
   });
 
+  it("reports a non-boolean project dispatch.overlap_guard", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, {
+      projectLines: ["    dispatch:", '      overlap_guard: "sometimes"']
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work on this Issue.\n");
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const output = await runDoctorCommand(configPath);
+
+    expect(process.exitCode).toBe(1);
+    expect(output.stderr).toContain("projects.0");
+    expect(output.stderr).toContain("Invalid input");
+  });
+
   it("reports unknown workspace hook lifecycle keys", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");
@@ -1326,6 +1342,7 @@ async function writeValidConfig(
     claudeCommand?: string;
     codexCommand?: string;
     ompCommand?: string;
+    projectLines?: string[];
     routineDefaultLines?: string[];
     routinePaths?: string[];
     token?: string;
@@ -1356,6 +1373,7 @@ async function writeValidConfig(
       "  - name: symphonika",
       "    disabled: false",
       "    weight: 1",
+      ...(overrides.projectLines ?? []),
       "    tracker:",
       `      kind: ${overrides.trackerKind ?? "github"}`,
       "      owner: pmatos",

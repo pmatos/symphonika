@@ -416,6 +416,8 @@ projects:
         base_branch: main
     agent:
       provider: codex
+    dispatch:
+      overlap_guard: false
     workflow: ./WORKFLOW.md
   - name: new-composer-host
     mode: routine_host
@@ -912,6 +914,27 @@ Dispatch uses weighted round-robin across Projects. Within each Project, issues 
 1. configured priority label mapping
 2. oldest creation time
 3. issue number
+
+A Dispatch Project may opt into `dispatch.overlap_guard: true` (default `false`). After the global
+and per-Project concurrency caps and per-Issue reservation checks, the picker compares a
+candidate's known open-pull-request files with periodically refreshed committed and live Workspace
+changes from in-flight issue Runs in the same Project. An exact repository-relative path overlap
+skips that candidate for the tick. If every candidate for the Project overlaps, the Project does
+not enter weighted round-robin and its scheduler cursor does not advance. Other Projects remain
+dispatchable, and unregistering the terminal Run makes the skipped candidate reconsiderable on the
+next tick. Rename footprints include both the previous and current repository paths.
+
+Fresh dispatch rechecks overlap inside the serialized claim boundary. When a candidate with a known
+pull-request footprint is admitted, that footprint seeds its in-flight slot before the claim mutex
+is released; this makes overlap admission atomic even before the new Run's Workspace is prepared.
+
+The overlap guard creates no timer: in-flight footprints refresh at most once every 30 seconds as
+part of existing dispatch ticks. Missing candidate PRs, unavailable adapter methods, absent
+Workspaces, and Git/GitHub read failures do not block dispatch. The guard therefore reduces known
+collisions but cannot predict a genuinely fresh Issue's footprint; operators requiring strict
+serialization use `max_in_flight: 1`. An expired footprint that fails to refresh becomes empty for
+that interval rather than retaining stale collision evidence; the failed refresh is still
+timestamped to rate-limit retries. See ADR 0085.
 
 Invalid Projects are disabled. Valid Projects may continue running.
 

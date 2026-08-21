@@ -3717,6 +3717,27 @@ export class RunStore {
     return rows.map((row) => mapRunRow(row));
   }
 
+  findRunWorkspacePaths(runIds: readonly string[]): Map<string, string> {
+    const ids = Array.from(new Set(runIds));
+    if (ids.length === 0) {
+      return new Map();
+    }
+    const placeholders = ids.map((_, index) => `@id${index}`);
+    const params = Object.fromEntries(
+      ids.map((id, index) => [`id${index}`, id])
+    );
+    const rows = this.database
+      .prepare(
+        [
+          "select id, workspace_path from runs",
+          `where id in (${placeholders.join(", ")})`,
+          "and workspace_path is not null and workspace_path <> ''"
+        ].join(" ")
+      )
+      .all(params) as Array<{ id: string; workspace_path: string }>;
+    return new Map(rows.map((row) => [row.id, row.workspace_path]));
+  }
+
   // One query for "each project's most recent run in one of `states`",
   // keyed by project name — the dashboard's Projects section wants this per
   // row, and a per-project listRuns(limit:1) call would be an N+1 query

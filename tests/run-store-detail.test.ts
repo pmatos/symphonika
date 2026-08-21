@@ -610,6 +610,51 @@ describe("RunStore detail queries", () => {
     }
   });
 
+  it("finds Workspace paths only for requested Run IDs", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      for (const id of ["active-a", "active-b", "historical"]) {
+        store.createRun({
+          id,
+          issue: sampleIssue(),
+          projectName: "alpha",
+          providerCommand: "x",
+          providerName: "codex"
+        });
+      }
+      store.updateRunEvidence("active-a", {
+        branchName: "sym/alpha/42-active-a",
+        branchRef: "refs/heads/sym/alpha/42-active-a",
+        issueSnapshotPath: "/tmp/issue.json",
+        metadataPath: "/tmp/metadata.json",
+        normalizedLogPath: "/tmp/normalized.jsonl",
+        promptPath: "/tmp/prompt.md",
+        rawLogPath: "/tmp/raw.jsonl",
+        workflowGraphPath: "/tmp/workflow.json",
+        workspacePath: "/tmp/active-a"
+      });
+      store.updateRunEvidence("historical", {
+        branchName: "sym/alpha/42-historical",
+        branchRef: "refs/heads/sym/alpha/42-historical",
+        issueSnapshotPath: "/tmp/issue.json",
+        metadataPath: "/tmp/metadata.json",
+        normalizedLogPath: "/tmp/normalized.jsonl",
+        promptPath: "/tmp/prompt.md",
+        rawLogPath: "/tmp/raw.jsonl",
+        workflowGraphPath: "/tmp/workflow.json",
+        workspacePath: "/tmp/historical"
+      });
+
+      expect(
+        store.findRunWorkspacePaths(["active-a", "active-b", "missing"])
+      ).toEqual(new Map([["active-a", "/tmp/active-a"]]));
+      expect(store.findRunWorkspacePaths([])).toEqual(new Map());
+    } finally {
+      store.close();
+    }
+  });
+
   it("listProviderEvents respects limit and afterSequence", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

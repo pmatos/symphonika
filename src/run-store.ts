@@ -117,6 +117,10 @@ export type RunStatus = {
   workspacePath: string;
 };
 
+export type ProjectLastRunStatus = RunStatus & {
+  terminalAt: string;
+};
+
 export type AttemptStatus = {
   artifacts: RunArtifactDescriptor[];
   attemptNumber: number;
@@ -540,6 +544,10 @@ type RunRow = {
   terminal_state_id: string | null;
   updated_at: string;
   workspace_path: string | null;
+};
+
+type ProjectLastRunRow = RunRow & {
+  terminal_at: string | null;
 };
 
 type AttemptRow = {
@@ -3741,12 +3749,13 @@ export class RunStore {
   // One query for "each project's most recent run in one of `states`",
   // keyed by project name — the dashboard's Projects section wants this per
   // row, and a per-project listRuns(limit:1) call would be an N+1 query
-  // against the number of configured Projects.
+  // against the number of configured Projects. terminalAt comes from the
+  // latest state transition so post-terminal bookkeeping cannot reset its age.
   listLatestRunsByProject(input: {
     projectNames: string[];
     states: RunState[];
-  }): Map<string, RunStatus> {
-    const result = new Map<string, RunStatus>();
+  }): Map<string, ProjectLastRunStatus> {
+    const result = new Map<string, ProjectLastRunStatus>();
     if (input.projectNames.length === 0 || input.states.length === 0) {
       return result;
     }
@@ -3769,18 +3778,26 @@ export class RunStore {
           "current_state_id, terminal_state_id, state_transition_reason,",
           "is_continuation, continuation_parent_run_id, retry_count,",
           "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
-          "created_at, updated_at from (",
+          "created_at, updated_at,",
+          "coalesce((",
+          "select transition.created_at from run_state_transitions transition",
+          "where transition.run_id = ranked_runs.id",
+          "order by transition.sequence desc limit 1",
+          "), updated_at) as terminal_at from (",
           "select *, row_number() over (",
           "partition by project_name order by created_at desc, id desc",
           ") as rn from runs",
           `where project_name in (${projectPlaceholders.join(", ")})`,
           `and state in (${statePlaceholders.join(", ")})`,
-          ") where rn = 1"
+          ") as ranked_runs where rn = 1"
         ].join(" ")
       )
-      .all(params) as RunRow[];
+      .all(params) as ProjectLastRunRow[];
     for (const row of rows) {
-      result.set(row.project_name, mapRunRow(row));
+      result.set(row.project_name, {
+        ...mapRunRow(row),
+        terminalAt: row.terminal_at ?? row.updated_at
+      });
     }
     return result;
   }

@@ -77,6 +77,7 @@ import {
 } from "./classify-failure.js";
 import { decideNextStep, findWorkflowState } from "./state-machine-dispatch.js";
 import { buildCapReachedReason } from "./terminal-reason.js";
+import { DispatchFileOverlapGuard } from "./file-overlap-guard.js";
 
 export type WorkflowSnapshot = {
   body: string;
@@ -105,6 +106,7 @@ export type RunControllerProjectConfig = {
   // Per-project concurrency cap. Omitted defaults to 1 at consume-time.
   // See ADR 0053.
   max_in_flight?: number | undefined;
+  dispatch?: { overlap_guard: boolean } | undefined;
   // Required for Dispatch Projects; optional for Routine Hosts (required when
   // the host targets kind: git firings — enforced at reload). The issue
   // dispatch path reads tracker only for projects that produced polling
@@ -367,6 +369,7 @@ export class RunController {
   private readonly createRunId: () => string;
   private readonly dispatchMutex: AsyncMutex;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly fileOverlapGuard: DispatchFileOverlapGuard;
   private readonly githubIssuesApi: GitHubIssuesApi;
   private readonly globalConcurrencyLoader: () => Promise<{
     maxInFlight: number | undefined;
@@ -392,6 +395,14 @@ export class RunController {
     this.createRunId = options.createRunId ?? randomUUID;
     this.dispatchMutex = options.dispatchMutex ?? createAsyncMutex();
     this.env = options.env ?? process.env;
+    this.fileOverlapGuard = new DispatchFileOverlapGuard({
+      activeRuns: options.activeRuns,
+      configDir: options.configDir,
+      env: this.env,
+      githubIssuesApi: options.githubIssuesApi,
+      ...(options.logger === undefined ? {} : { logger: options.logger }),
+      runStore: options.runStore
+    });
     this.githubIssuesApi = options.githubIssuesApi;
     this.globalConcurrencyLoader =
       options.globalConcurrencyLoader ??
@@ -2189,13 +2200,25 @@ export class RunController {
       if (this.activeRuns.countInFlightByProject(projectName) >= projectMax) {
         continue;
       }
-      const candidate = bucket
-        .slice()
-        .sort(compareCandidateIssues)
-        .find(
-          (entry) =>
-            !this.activeRuns.isIssueReserved(entry.project, entry.issue.number)
-        );
+      let candidate: { issue: IssueSnapshot; project: string } | undefined;
+      for (const entry of bucket.slice().sort(compareCandidateIssues)) {
+        if (
+          this.activeRuns.isIssueReserved(entry.project, entry.issue.number)
+        ) {
+          continue;
+        }
+        if (
+          project.dispatch?.overlap_guard === true &&
+          (await this.fileOverlapGuard.hasKnownOverlap({
+            issue: entry.issue,
+            project
+          }))
+        ) {
+          continue;
+        }
+        candidate = entry;
+        break;
+      }
       if (candidate === undefined) {
         continue;
       }

@@ -62,6 +62,12 @@ export const projectWorkspaceSchema = z
   })
   .passthrough();
 
+export const projectDispatchSchema = z
+  .object({
+    overlap_guard: z.boolean().default(false)
+  })
+  .strict();
+
 const workflowFormatSchema = z.enum(["markdown", "raw_fsm", "auto"]);
 export type WorkflowFormat = z.infer<typeof workflowFormatSchema>;
 

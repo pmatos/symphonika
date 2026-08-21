@@ -14,6 +14,8 @@ export type InFlightRunEntry = {
   // CLOSED_ISSUE. See ADR 0046.
   respectsIssueLabels: boolean;
   runId: string;
+  touchedFiles: readonly string[];
+  touchedFilesRefreshedAt?: number;
 };
 
 export type ReserveSlotInput = {
@@ -86,7 +88,8 @@ export class InFlightRunRegistry {
       issueNumber: input.issueNumber,
       projectName: input.projectName,
       respectsIssueLabels: input.respectsIssueLabels ?? true,
-      runId: input.runId
+      runId: input.runId,
+      touchedFiles: []
     };
     this.entries.set(input.runId, entry);
     this.issueLocks.add(key);
@@ -155,6 +158,19 @@ export class InFlightRunRegistry {
 
   list(): InFlightRunEntry[] {
     return Array.from(this.entries.values());
+  }
+
+  updateTouchedFiles(
+    runId: string,
+    input: { files: readonly string[]; refreshedAt: number }
+  ): InFlightRunEntry | undefined {
+    const entry = this.entries.get(runId);
+    if (entry === undefined) {
+      return undefined;
+    }
+    entry.touchedFiles = [...input.files];
+    entry.touchedFilesRefreshedAt = input.refreshedAt;
+    return entry;
   }
 
   isIssueInFlight(projectName: string, issueNumber: number): boolean {

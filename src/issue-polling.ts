@@ -3,6 +3,7 @@ import { Octokit } from "@octokit/rest";
 import { parse } from "yaml";
 import { z } from "zod";
 
+import { projectDispatchSchema } from "./config-schemas.js";
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 
 export type GitHubIssueRepositoryInput = {
@@ -49,6 +50,10 @@ export type RawGitHubPullRequest = {
   number?: number;
   state?: string;
   title?: string;
+};
+
+export type RawGitHubPullRequestFile = {
+  filename?: string;
 };
 
 type RawGitHubPullRequestReviewComment = {
@@ -122,6 +127,9 @@ export type GitHubIssuesApi = {
   listPullRequestsForBranch?: (
     input: GitHubBranchPullRequestsInput
   ) => Promise<RawGitHubPullRequest[]>;
+  listPullRequestFiles?: (
+    input: GitHubPullRequestInput
+  ) => Promise<RawGitHubPullRequestFile[]>;
   getPullRequestFollowupState?: (
     input: GitHubPullRequestInput
   ) => Promise<RawGitHubPullRequestFollowupState | null>;
@@ -222,6 +230,7 @@ const pollingProjectSchema = z
     // Per-project concurrency cap; consumed by the runtime picker only.
     // Kept in this duplicate schema to preserve parsing parity. See ADR 0053.
     max_in_flight: z.number().int().positive().optional(),
+    dispatch: projectDispatchSchema.optional(),
     tracker: z
       .object({
         kind: z.literal("github"),
@@ -379,6 +388,18 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
       state: "all"
     });
     return response.data;
+  }
+
+  async listPullRequestFiles(
+    input: GitHubPullRequestInput
+  ): Promise<RawGitHubPullRequestFile[]> {
+    const octokit = this.octokit(input.token);
+    return octokit.paginate(octokit.rest.pulls.listFiles, {
+      owner: input.owner,
+      per_page: 100,
+      pull_number: input.pullNumber,
+      repo: input.repo
+    });
   }
 
   async getPullRequestFollowupState(
@@ -904,6 +925,16 @@ export async function tryListPullRequestsForBranch(
     return undefined;
   }
   return api.listPullRequestsForBranch(input);
+}
+
+export async function tryListPullRequestFiles(
+  api: GitHubIssuesApi,
+  input: GitHubPullRequestInput
+): Promise<RawGitHubPullRequestFile[] | undefined> {
+  if (api.listPullRequestFiles === undefined) {
+    return undefined;
+  }
+  return api.listPullRequestFiles(input);
 }
 
 export async function tryGetPullRequestFollowupState(

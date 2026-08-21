@@ -9,6 +9,7 @@ import { z } from "zod";
 import type { WorkflowFormat } from "./config-schemas.js";
 import {
   pathStringSchema,
+  projectDispatchSchema,
   projectWorkspaceSchema,
   workflowReferenceSchema
 } from "./config-schemas.js";
@@ -229,6 +230,7 @@ const pollingProjectSchema = z
     // Per-project concurrency cap. Omitted defaults to 1 at consume-time.
     // Zero / negative values are rejected. See ADR 0053.
     max_in_flight: z.number().int().positive().optional(),
+    dispatch: projectDispatchSchema.optional(),
     tracker: trackerSchema,
     issue_filters: issueFiltersSchema,
     priority: prioritySchema,
@@ -240,7 +242,12 @@ const pollingProjectSchema = z
 // A Routine Host has no use for dispatch-only fields — ADR 0062 says they are
 // "unused and rejected", so a stale or copy-pasted dispatch block must be a
 // declaration-time error rather than silently ignored.
-const DISPATCH_ONLY_KEYS = ["issue_filters", "priority", "workflow"] as const;
+const DISPATCH_ONLY_KEYS = [
+  "dispatch",
+  "issue_filters",
+  "priority",
+  "workflow"
+] as const;
 
 function rejectDispatchOnlyKeysOnRoutineHost(
   rawProject: unknown,

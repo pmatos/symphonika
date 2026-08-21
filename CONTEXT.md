@@ -180,9 +180,9 @@ One durable execution attempt for a Routine Target, with its own workspace, prov
 evidence, persisted execution-time kind, lifecycle state, terminal reason, optional canonical
 Routine Outcome, and an independent record of whether its prepared `kind: git` workspace held
 commits ahead of base at completion. A scheduled firing is correlated to its Routine Fan-out; its
-trigger source is scheduled or manual,
-and a manual firing targets one Routine Target directly, using the same execution lifecycle without
-consuming the Routine's next clock event or creating a Routine Fan-out.
+trigger source is scheduled or manual, and a manual firing targets one Routine Target directly,
+using the same execution lifecycle without consuming the Routine's next clock event or creating a
+Routine Fan-out.
 _Avoid_: run when specifically referring to non-issue scheduled execution
 
 **Routine Outcome Claim**:

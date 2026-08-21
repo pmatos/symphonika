@@ -7,6 +7,7 @@ import type { RoutineFiringStatus, RunStore } from "../run-store.js";
 
 const execFileAsync = promisify(execFile);
 const DAY_MS = 24 * 60 * 60 * 1000;
+const LOCAL_BRANCH_REF_PREFIX = "refs/heads/";
 // Well under the ~100,000,000-day ECMAScript Date range on either side of
 // `now`, so `cutoff` never produces an invalid Date/RangeError regardless of
 // `now`'s value, while still comfortably exceeding any real retention need.
@@ -137,10 +138,10 @@ async function deleteRoutineFiringBranch(
   if (firing.kind !== "git") {
     return;
   }
-  if (
-    !firing.branchRef.startsWith("refs/heads/") ||
-    firing.branchRef === "refs/heads/"
-  ) {
+  const branchName = firing.branchRef.startsWith(LOCAL_BRANCH_REF_PREFIX)
+    ? firing.branchRef.slice(LOCAL_BRANCH_REF_PREFIX.length)
+    : "";
+  if (branchName.length === 0) {
     return;
   }
   // update-ref deletes the ref atomically and exits successfully when another

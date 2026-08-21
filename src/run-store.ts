@@ -4838,7 +4838,10 @@ export class RunStore {
         id text primary key,
         project_name text not null,
         routine_name text not null,
-        kind text not null,
+        -- Nullable so a database created here matches one migrated from a
+        -- release without this column, where historical rows stay unknown.
+        -- createRoutineFiring rejects a firing whose kind cannot be resolved.
+        kind text,
         state text not null,
         provider_name text not null,
         provider_command text not null,

@@ -367,9 +367,7 @@ describe("routine firing workspace retention", () => {
       path.join(wrapperDirectory, "git"),
       [
         "#!/bin/sh",
-        'if [ "$3" = "branch" ] && [ "$4" = "-D" ]; then',
-        '  "$REAL_GIT_PATH" -C "$2" update-ref -d "refs/heads/$5"',
-        'elif [ "$3" = "update-ref" ] && [ "$4" = "-d" ]; then',
+        'if [ "$3" = "update-ref" ] && [ "$4" = "-d" ]; then',
         '  "$REAL_GIT_PATH" -C "$2" update-ref -d "$5"',
         "fi",
         'exec "$REAL_GIT_PATH" "$@"',

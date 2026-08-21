@@ -1947,9 +1947,9 @@ Hosts group, since a Routine Host is never polled and never dispatches (ADR-0062
 
 Each Project name links to its own drill-in page, `GET /projects/:name`. For a Dispatch Project
 this is a capacity strip — validity, in-flight vs. per-Project cap, global cap, poll age (marked
-`(pre-restart)` when the last successful poll predates the current process), and next poll — over
-one issue-keyed table: a union of the persisted issue poll snapshot (candidate and filtered issues,
-ADR-0073) and this Project's Runs, keyed by issue number. Every row's state pill collapses to
+`(pre-restart)` when `project_states.last_successful_poll_at` predates the current process), and
+next poll — over one issue-keyed table: a union of the persisted issue poll snapshot (candidate and
+filtered issues, ADR-0073) and this Project's Runs, keyed by issue number. Every row's state pill collapses to
 `eligible`, the Run's own state (`queued`/`preparing_workspace` render as a claimed-but-not-yet-
 running Run, `waiting`/`input_required` as parked, `blocked`, or a terminal RunState), or
 `filtered`; the detail column carries the specific reason — cap pressure for a capped eligible

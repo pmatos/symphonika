@@ -174,6 +174,7 @@ export type ProjectState = {
   lastPollFinishedAt: string | null;
   lastPollOk: boolean | null;
   lastPollStartedAt: string | null;
+  lastSuccessfulPollAt: string | null;
   projectName: string;
   schedulerCurrentWeight: number;
   updatedAt: string;
@@ -672,6 +673,7 @@ type ProjectStateRow = {
   last_poll_finished_at: string | null;
   last_poll_ok: number | null;
   last_poll_started_at: string | null;
+  last_successful_poll_at: string | null;
   project_name: string;
   scheduler_current_weight: number;
   updated_at: string;
@@ -1570,12 +1572,12 @@ export class RunStore {
         [
           "insert into project_states (",
           "project_name, active, weight, validation_state, validation_message,",
-          "last_poll_started_at, last_poll_finished_at, last_poll_ok, last_poll_error,",
+          "last_poll_started_at, last_poll_finished_at, last_successful_poll_at, last_poll_ok, last_poll_error,",
           "last_fetched_issues, last_candidate_issues, last_filtered_issues,",
           "created_at, updated_at",
           ") values (",
           "@project_name, 1, 1, @validation_state, @validation_message,",
-          "@last_poll_started_at, @last_poll_finished_at, @last_poll_ok, @last_poll_error,",
+          "@last_poll_started_at, @last_poll_finished_at, @last_successful_poll_at, @last_poll_ok, @last_poll_error,",
           "@last_fetched_issues, @last_candidate_issues, @last_filtered_issues,",
           "@created_at, @updated_at",
           ")",
@@ -1584,6 +1586,7 @@ export class RunStore {
           "validation_message = excluded.validation_message,",
           "last_poll_started_at = excluded.last_poll_started_at,",
           "last_poll_finished_at = excluded.last_poll_finished_at,",
+          "last_successful_poll_at = case when excluded.last_poll_ok = 1 then excluded.last_successful_poll_at else project_states.last_successful_poll_at end,",
           "last_poll_ok = excluded.last_poll_ok,",
           "last_poll_error = excluded.last_poll_error,",
           "last_fetched_issues = excluded.last_fetched_issues,",
@@ -1601,6 +1604,7 @@ export class RunStore {
         last_poll_finished_at: now,
         last_poll_ok: input.ok ? 1 : 0,
         last_poll_started_at: now,
+        last_successful_poll_at: input.ok ? now : null,
         project_name: input.projectName,
         updated_at: now,
         validation_message: message,
@@ -1658,7 +1662,7 @@ export class RunStore {
       .prepare(
         [
           "select project_name, active, weight, validation_state, validation_message,",
-          "last_poll_started_at, last_poll_finished_at, last_poll_ok, last_poll_error,",
+          "last_poll_started_at, last_poll_finished_at, last_successful_poll_at, last_poll_ok, last_poll_error,",
           "last_fetched_issues, last_candidate_issues, last_filtered_issues,",
           "scheduler_current_weight, last_dispatched_at, last_dispatched_issue_number,",
           "created_at, updated_at",
@@ -4708,6 +4712,7 @@ export class RunStore {
         validation_message text,
         last_poll_started_at text,
         last_poll_finished_at text,
+        last_successful_poll_at text,
         last_poll_ok integer,
         last_poll_error text,
         last_fetched_issues integer not null default 0,
@@ -4958,6 +4963,7 @@ export class RunStore {
         "review_followup_cap_reached",
         "integer not null default 0"
       ],
+      ["project_states", "last_successful_poll_at", "text"],
       ["attempts", "failure_classification", "text"],
       ["attempts", "metadata_path", "text"],
       ["attempts", "workflow_graph_path", "text"],
@@ -5022,6 +5028,7 @@ export class RunStore {
     const apply = this.database.transaction(() => {
       let addedCommitsAhead = false;
       let addedFiringKind = false;
+      let addedLastSuccessfulPollAt = false;
       for (const [table, column, decl] of additions) {
         const added = this.ensureColumn(table, column, decl);
         if (
@@ -5034,6 +5041,24 @@ export class RunStore {
         if (added && table === "routine_firings" && column === "kind") {
           addedFiringKind = true;
         }
+        if (
+          added &&
+          table === "project_states" &&
+          column === "last_successful_poll_at"
+        ) {
+          addedLastSuccessfulPollAt = true;
+        }
+      }
+
+      if (addedLastSuccessfulPollAt) {
+        // A legacy latest-success row has enough evidence to recover this
+        // timestamp exactly. A latest-failure row does not reveal when its
+        // preceding success happened, so leave that case unknown.
+        this.database.exec(`
+          update project_states
+          set last_successful_poll_at = last_poll_finished_at
+          where last_poll_ok = 1;
+        `);
       }
 
       if (addedFiringKind) {
@@ -5558,6 +5583,7 @@ function mapProjectStateRow(row: ProjectStateRow): ProjectState {
         ? null
         : row.last_poll_ok === 1,
     lastPollStartedAt: row.last_poll_started_at ?? null,
+    lastSuccessfulPollAt: row.last_successful_poll_at ?? null,
     projectName: row.project_name,
     schedulerCurrentWeight: row.scheduler_current_weight,
     updatedAt: row.updated_at,

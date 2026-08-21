@@ -1968,6 +1968,78 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("protects an orphaned workspace whose historical firing kind is unknown", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        branchName: "main",
+        branchRef: "refs/remotes/origin/main",
+        id: "legacy-unknown-fire",
+        kind: "report",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report",
+        workspacePath: "/tmp/legacy-unknown-workspace"
+      });
+      store.updateRoutineFiringState("legacy-unknown-fire", "running");
+      expect(store.getRoutineFiring("legacy-unknown-fire")).toMatchObject({
+        commitsAhead: false,
+        kind: "report"
+      });
+    } finally {
+      store.close();
+    }
+
+    const legacyDatabase = new Database(databasePath(stateRoot));
+    try {
+      legacyDatabase.exec("alter table routine_firings drop column kind");
+    } finally {
+      legacyDatabase.close();
+    }
+
+    const migrated = openRunStore({ stateRoot });
+    try {
+      expect(migrated.getRoutineFiring("legacy-unknown-fire")?.kind).toBeNull();
+
+      migrated.markRoutineFiringsFailed([
+        {
+          firingId: "legacy-unknown-fire",
+          previousState: "running",
+          reason: "leaked_routine_firing"
+        }
+      ]);
+
+      expect(migrated.getRoutineFiring("legacy-unknown-fire")).toMatchObject({
+        commitsAhead: true,
+        kind: null,
+        state: "failed"
+      });
+      const future = "9999-12-31T23:59:59.999Z";
+      expect(
+        migrated.listRoutineWorkspacePruneCandidates({
+          cancelledBefore: future,
+          failedBefore: future,
+          succeededBefore: future
+        })
+      ).toEqual([]);
+    } finally {
+      migrated.close();
+    }
+  });
+
   it("records workspace reclamation only for an eligible terminal firing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

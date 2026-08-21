@@ -4504,8 +4504,8 @@ export class RunStore {
         "state = 'failed',",
         "terminal_reason = ?,",
         "commits_ahead = case",
-        "when kind = 'git' and workspace_path is not null and workspace_path <> '' then 1",
         "when kind = 'report' then 0",
+        "when workspace_path is not null and workspace_path <> '' then 1",
         "else commits_ahead end,",
         "updated_at = ?",
         "where id = ?"

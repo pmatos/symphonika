@@ -38,7 +38,10 @@ Alternatives rejected:
 
 For each in-flight issue Run, Symphonika reads the Run Store's recorded Workspace path and unions:
 
-- committed paths changed from `refs/remotes/origin/<base>..HEAD`;
+- committed paths changed from `refs/remotes/origin/<base>...HEAD` (three-dot, merge-base relative:
+  the shared repository cache re-fetches the base branch on every Workspace preparation, so a
+  two-dot range would fold everything that landed on base since the Run branched into that Run's
+  own footprint);
 - staged, unstaged, renamed, copied, and untracked paths reported by Git status.
 
 The resulting repository-relative paths are stored on the in-flight registry entry with a refresh

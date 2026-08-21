@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -14,7 +16,13 @@ import type { AgentProvider, ProviderEvent } from "../src/provider.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
 import { createGitWorkspaceAtBase } from "./helpers/git-workspace.js";
 
+const execFileAsync = promisify(execFile);
 const tempRoots: string[] = [];
+
+async function git(args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", args);
+  return stdout.trim();
+}
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-overlap-test-"));
@@ -103,6 +111,84 @@ describe("dispatch file-overlap guard", () => {
     }
   });
 
+  it("counts a committed branch change as in-flight footprint", async () => {
+    const harness = await createHarness({
+      setupWorkspace: async (workspacePath) => {
+        await writeFile(path.join(workspacePath, "shared.ts"), "in flight\n");
+        await git(["-C", workspacePath, "add", "shared.ts"]);
+        await git(["-C", workspacePath, "commit", "-m", "In-flight work"]);
+      }
+    });
+    try {
+      const result = await harness.controller.dispatchOneFresh(
+        pollStatus(issue({ number: 2, title: "Candidate" }))
+      );
+
+      expect(result.dispatched).toBe(false);
+      expect(harness.addLabelsToIssue).not.toHaveBeenCalled();
+    } finally {
+      harness.runStore.close();
+    }
+  });
+
+  it("ignores base-branch commits the in-flight Run never made", async () => {
+    const harness = await createHarness({
+      setupWorkspace: async (workspacePath) => {
+        await writeFile(path.join(workspacePath, "isolated.ts"), "in flight\n");
+        await git(["-C", workspacePath, "add", "isolated.ts"]);
+        await git(["-C", workspacePath, "commit", "-m", "In-flight work"]);
+        // The shared repository cache re-fetches the base branch while a Run
+        // is live, so origin/main can carry a commit touching the candidate's
+        // files that this Run never made. A two-dot range would read that as
+        // this Run's own footprint and block the candidate forever.
+        const baseSha = await git([
+          "-C",
+          workspacePath,
+          "rev-parse",
+          "refs/remotes/origin/main"
+        ]);
+        await git([
+          "-C",
+          workspacePath,
+          "checkout",
+          "-q",
+          "-b",
+          "base",
+          baseSha
+        ]);
+        await writeFile(path.join(workspacePath, "shared.ts"), "landed\n");
+        await git(["-C", workspacePath, "add", "shared.ts"]);
+        await git(["-C", workspacePath, "commit", "-m", "Base advance"]);
+        await git([
+          "-C",
+          workspacePath,
+          "update-ref",
+          "refs/remotes/origin/main",
+          await git(["-C", workspacePath, "rev-parse", "HEAD"])
+        ]);
+        await git([
+          "-C",
+          workspacePath,
+          "checkout",
+          "-q",
+          "sym/alpha/1-active"
+        ]);
+      }
+    });
+    try {
+      const result = await harness.controller.dispatchOneFresh(
+        pollStatus(issue({ number: 2, title: "Candidate" }))
+      );
+
+      expect(result).toEqual({
+        dispatched: true,
+        runId: "candidate-run-1"
+      });
+    } finally {
+      harness.runStore.close();
+    }
+  });
+
   it("fails open when a linked pull request footprint cannot be loaded", async () => {
     const harness = await createHarness();
     try {
@@ -120,7 +206,9 @@ describe("dispatch file-overlap guard", () => {
   });
 });
 
-async function createHarness(): Promise<{
+async function createHarness(
+  options: { setupWorkspace?: (workspacePath: string) => Promise<void> } = {}
+): Promise<{
   activeRuns: ActiveRunRegistry;
   addLabelsToIssue: ReturnType<typeof vi.fn>;
   controller: RunController;
@@ -139,7 +227,11 @@ async function createHarness(): Promise<{
     branchName: "sym/alpha/1-active",
     workspacePath
   });
-  await writeFile(path.join(workspacePath, "shared.ts"), "in flight\n");
+  if (options.setupWorkspace === undefined) {
+    await writeFile(path.join(workspacePath, "shared.ts"), "in flight\n");
+  } else {
+    await options.setupWorkspace(workspacePath);
+  }
   await writeFile(path.join(root, "WORKFLOW.md"), "Work on this Issue.\n");
 
   const runStore = openRunStore({ stateRoot });

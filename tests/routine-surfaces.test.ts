@@ -467,7 +467,7 @@ describe("routine operator surfaces", () => {
     }
   });
 
-  it("omits a Routine whose every target was removed from config", async () => {
+  it("keeps a Routine whose every target was removed from config visible", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     const declaration = {
@@ -494,8 +494,12 @@ describe("routine operator surfaces", () => {
       const body = await response.text();
 
       expect(response.status).toBe(200);
-      expect(body).toContain("No Routines configured");
-      expect(body).not.toContain('<a href="/routines/daily-report">');
+      expect(body).toContain(
+        '<a href="/routines/daily-report">daily-report</a>'
+      );
+      expect(body).toContain('<td><a href="/routines/daily-report">2</a></td>');
+      expect(body).toContain("removed_from_config");
+      expect(body).not.toContain("No Routines configured");
     } finally {
       store.close();
     }

@@ -520,14 +520,17 @@ export function registerPages(options: RegisterPagesOptions): void {
         : options.monotonicNow() - bannerReferenceAt;
     const pollingIntervalMs =
       options.getPollingIntervalMs?.() ?? DEFAULT_POLLING_INTERVAL_MS;
-    // removed_from_config rows are durable, never deleted, so they must not
-    // inflate a live Routine's target count here; /routines/:name still needs
-    // them, and so takes the unfiltered list.
+    // removed_from_config rows are durable, never deleted. Exclude them from
+    // the target count when their declaration still has current targets, but
+    // keep an entirely removed declaration visible with its disabled reason.
     const routineGroups = groupRoutinesByName(
-      options.runStore
-        .listRoutines({ includeInactive })
-        .filter(isCurrentRoutineTarget)
-    );
+      options.runStore.listRoutines({ includeInactive })
+    ).map((group) => {
+      const currentTargets = currentRoutineTargets(group);
+      return currentTargets.length === 0
+        ? group
+        : { ...group, targets: currentTargets };
+    });
     const html = layout(
       "Symphonika",
       [

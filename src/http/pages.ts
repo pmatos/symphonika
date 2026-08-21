@@ -2041,13 +2041,18 @@ export function registerPages(options: RegisterPagesOptions): void {
     const firings = options.runStore
       .listRoutineFirings({ routineName: name })
       .filter((firing) => groupProjectNames.has(firing.projectName));
-    // invalidRoutines carries no error text of its own (see reload.ts) —
-    // the reload error lives only in the flat, process-lifetime
-    // reload.errors list, so this is a best-effort match on the routine's
-    // own name rather than a guaranteed per-routine correlation.
+    // invalidRoutines carries no error text of its own (see reload.ts) — the
+    // reload error lives only in the flat reload.errors list, so this is a
+    // best-effort match. The source path is the discriminating key: a broken
+    // declaration is reported as `routine at <sourcePath> ...`, never by name.
+    const declarationSourcePath = declaration.sourcePath;
     const reloadErrors = (
       options.getStatusSnapshot?.()?.reload.errors ?? []
-    ).filter((error) => error.includes(name));
+    ).filter(
+      (error) =>
+        error.includes(name) ||
+        (declarationSourcePath !== "-" && error.includes(declarationSourcePath))
+    );
 
     const lifecycleCsrfToken = csrfTokenFor(
       options.csrfSecret,

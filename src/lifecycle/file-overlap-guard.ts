@@ -44,6 +44,12 @@ type CandidateFootprintCacheEntry = {
   refreshedAt: number;
 };
 
+type CandidateOverlapInspection = {
+  candidateFiles: readonly string[];
+  hasKnownOverlap: boolean;
+  refreshedAt: number;
+};
+
 export class DispatchFileOverlapGuard {
   private readonly activeRuns: ActiveRunRegistry;
   private readonly candidateCache = new Map<
@@ -98,10 +104,42 @@ export class DispatchFileOverlapGuard {
     }
   }
 
-  private async evaluateOverlap(input: {
+  // Claim-time admission calls this while holding dispatchMutex. Returning the
+  // candidate footprint lets the caller seed the newly reserved Run before
+  // releasing that mutex, so another already-picked candidate can compare
+  // against it atomically rather than waiting for Workspace preparation.
+  async inspectCandidate(input: {
     issue: IssueSnapshot;
     project: GuardProject;
-  }): Promise<boolean> {
+  }): Promise<CandidateOverlapInspection> {
+    const refreshedAt = this.now();
+    try {
+      const candidateFiles = await this.candidateFiles(input);
+      return {
+        candidateFiles,
+        hasKnownOverlap: await this.evaluateOverlap(input, candidateFiles),
+        refreshedAt
+      };
+    } catch (error) {
+      this.logger?.warn(
+        {
+          candidateIssueNumber: input.issue.number,
+          err: error,
+          project: input.project.name
+        },
+        "symphonika dispatch overlap claim inspection failed"
+      );
+      return { candidateFiles: [], hasKnownOverlap: false, refreshedAt };
+    }
+  }
+
+  private async evaluateOverlap(
+    input: {
+      issue: IssueSnapshot;
+      project: GuardProject;
+    },
+    candidateFootprint?: readonly string[]
+  ): Promise<boolean> {
     const projectName = input.project.name;
     // Cheapest possible gate first: with nothing in flight for the Project
     // there is nothing to collide with, so neither the Run Store nor GitHub
@@ -109,7 +147,8 @@ export class DispatchFileOverlapGuard {
     if (this.activeRuns.countInFlightByProject(projectName) === 0) {
       return false;
     }
-    const candidateFiles = await this.candidateFiles(input);
+    const candidateFiles =
+      candidateFootprint ?? (await this.candidateFiles(input));
     if (candidateFiles.length === 0) {
       return false;
     }
@@ -120,8 +159,9 @@ export class DispatchFileOverlapGuard {
     // getRun also loads every attempt and stats every artifact on disk, and
     // all this needs is the Workspace path. Routine Firings share the
     // registry but own no `runs` row, so they drop out here and a routine
-    // Workspace is never read as issue-Run footprint; a reserved-but-not-
-    // yet-prepared Run has no Workspace path and contributes nothing either.
+    // Workspace is never read as issue-Run footprint. A reserved issue Run
+    // without a Workspace path contributes only when claim-time admission
+    // seeded its known candidate footprint.
     const workspacePaths = new Map(
       this.runStore
         .listRuns({ project: projectName })
@@ -133,20 +173,24 @@ export class DispatchFileOverlapGuard {
     const activeIssueRuns = this.activeRuns.list().flatMap((active) => {
       const workspacePath = workspacePaths.get(active.runId);
       return active.projectName !== projectName ||
-        workspacePath === undefined ||
-        workspacePath.length === 0
+        ((workspacePath === undefined || workspacePath.length === 0) &&
+          active.touchedFiles === undefined)
         ? []
         : [{ active, workspacePath }];
     });
 
     await Promise.all(
-      activeIssueRuns.map(({ active, workspacePath }) =>
-        this.refreshTouchedFiles({
-          active,
-          baseBranch: input.project.workspace.git.base_branch,
-          now,
-          workspacePath
-        })
+      activeIssueRuns.flatMap(({ active, workspacePath }) =>
+        workspacePath === undefined || workspacePath.length === 0
+          ? []
+          : [
+              this.refreshTouchedFiles({
+                active,
+                baseBranch: input.project.workspace.git.base_branch,
+                now,
+                workspacePath
+              })
+            ]
       )
     );
 
@@ -183,10 +227,10 @@ export class DispatchFileOverlapGuard {
     ) {
       return;
     }
-    // On failure keep the last good snapshot but still stamp the attempt, so a
-    // permanently broken Workspace does not respawn two `git` processes for
-    // every candidate on every tick.
-    let files = input.active.touchedFiles?.files ?? [];
+    // On failure replace stale evidence with an empty footprint but still
+    // stamp the attempt, so dispatch fails open without respawning two `git`
+    // processes for every candidate on every tick.
+    let files: readonly string[] = [];
     try {
       files = await readTouchedFiles({
         baseBranch: input.baseBranch,
@@ -229,7 +273,6 @@ export class DispatchFileOverlapGuard {
     }
     try {
       const files = await this.loadCandidateFiles({
-        carried: cached?.files ?? [],
         issue: input.issue,
         project: input.project,
         repository
@@ -245,15 +288,15 @@ export class DispatchFileOverlapGuard {
         },
         "symphonika dispatch overlap candidate inspection failed"
       );
-      return cached?.files ?? [];
+      this.candidateCache.set(key, { files: [], refreshedAt: now });
+      return [];
     }
   }
 
-  // Returns the candidate PR's file footprint, or `carried`/`[]` when there is
-  // nothing to read — every outcome is cached by the caller so a fail-open
-  // answer does not re-issue the branch lookup to GitHub on the next tick.
+  // Returns the candidate PR's file footprint, or [] when there is nothing to
+  // read. Every outcome is cached by the caller so a fail-open answer does not
+  // re-issue the branch lookup to GitHub on the next tick.
   private async loadCandidateFiles(input: {
-    carried: readonly string[];
     issue: IssueSnapshot;
     project: GuardProject;
     repository: { owner: string; repo: string; token: string };
@@ -285,14 +328,17 @@ export class DispatchFileOverlapGuard {
       ...input.repository,
       pullNumber
     });
-    // The adapter has no listFiles at all: fail open on the last good answer.
+    // The adapter has no listFiles at all: fail open without stale evidence.
     if (files === undefined) {
-      return input.carried;
+      return [];
     }
     return Array.from(
       new Set(
         files
-          .map((file) => normalizeRepositoryPath(file.filename))
+          .flatMap((file) => [
+            normalizeRepositoryPath(file.filename),
+            normalizeRepositoryPath(file.previous_filename)
+          ])
           .filter((file): file is string => file !== undefined)
       )
     );
@@ -314,7 +360,7 @@ async function readTouchedFiles(input: {
   const [committed, status] = await Promise.all([
     gitOutput(input.workspacePath, [
       "diff",
-      "--name-only",
+      "--name-status",
       "-z",
       // Three-dot (merge-base) on purpose: the shared repository cache
       // re-fetches refs/remotes/origin/<base> on every Workspace
@@ -332,10 +378,7 @@ async function readTouchedFiles(input: {
     ])
   ]);
   return Array.from(
-    new Set([
-      ...parseNullSeparatedPaths(committed),
-      ...parseStatusPaths(status)
-    ])
+    new Set([...parseDiffStatusPaths(committed), ...parseStatusPaths(status)])
   );
 }
 
@@ -358,11 +401,24 @@ async function gitOutput(
   return stdout;
 }
 
-function parseNullSeparatedPaths(output: string): string[] {
-  return output
-    .split("\0")
-    .map((file) => normalizeRepositoryPath(file))
-    .filter((file): file is string => file !== undefined);
+function parseDiffStatusPaths(output: string): string[] {
+  const fields = output.split("\0");
+  const files: string[] = [];
+  for (let index = 0; index < fields.length; index += 1) {
+    const status = fields[index];
+    if (status === undefined || status.length === 0) {
+      continue;
+    }
+    const pathCount = /^[RC]/.test(status) ? 2 : 1;
+    for (let pathIndex = 0; pathIndex < pathCount; pathIndex += 1) {
+      const file = normalizeRepositoryPath(fields[index + 1]);
+      if (file !== undefined) {
+        files.push(file);
+      }
+      index += 1;
+    }
+  }
+  return files;
 }
 
 function parseStatusPaths(output: string): string[] {

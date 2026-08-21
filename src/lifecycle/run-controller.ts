@@ -344,18 +344,22 @@ type WaitParkPayload = {
 };
 
 // Thrown by claimAndPersistRun's in-mutex re-check when a concurrent
-// dispatch already filled the last available slot, or when the same
-// (project, issue) was reserved by a concurrent tick that beat us into
-// claimAndPersistRun. Callers handle these as "skip this fire": fresh
-// dispatch silently no-ops (next tick will pick again); scheduled paths
-// (continuation / state advance / retry / review followup) reschedule the
-// callback. See ADR 0053.
+// dispatch already filled the last available slot, when the same (project,
+// issue) was reserved, or when a newly reserved Run created known file
+// overlap before this claim reached claimAndPersistRun. Callers handle these
+// as "skip this fire": fresh dispatch silently no-ops (next tick will pick
+// again); scheduled paths (continuation / state advance / retry / review
+// followup) reschedule the callback. See ADR 0053 / ADR 0085.
 class CapBreachedError extends Error {
   readonly name = "CapBreachedError";
 }
 
 class IssueReservedError extends Error {
   readonly name = "IssueReservedError";
+}
+
+class FileOverlapDetectedError extends Error {
+  readonly name = "FileOverlapDetectedError";
 }
 
 class FreshClaimDeferredError extends Error {
@@ -558,7 +562,8 @@ export class RunController {
         providerName,
         repository,
         runId,
-        schedulerWeights: target.schedulerWeights
+        schedulerWeights: target.schedulerWeights,
+        verifyFileOverlap: target.project.dispatch?.overlap_guard === true
       });
     } catch (error) {
       if (error instanceof RegistryShutdownError) {
@@ -570,14 +575,15 @@ export class RunController {
       }
       if (
         error instanceof CapBreachedError ||
+        error instanceof FileOverlapDetectedError ||
         error instanceof IssueReservedError ||
         error instanceof FreshClaimDeferredError
       ) {
-        // A concurrent dispatch may have taken the slot between the
-        // lock-free picker and claimAndPersistRun's in-mutex re-check, or a
-        // caller-owned admission guard may have closed in that same window.
-        // A later tick can reconsider the candidate once the gate clears.
-        // See ADR 0053 / ADR 0083.
+        // A concurrent dispatch may have taken the slot or introduced known
+        // overlap between the lock-free picker and claimAndPersistRun's
+        // in-mutex re-check, or a caller-owned admission guard may have closed
+        // in that same window. A later tick can reconsider the candidate once
+        // the gate clears. See ADR 0053 / ADR 0083 / ADR 0085.
         this.logger?.debug(
           { reason: error.message, runId },
           "symphonika fresh dispatch skipped at claim boundary"
@@ -2292,6 +2298,7 @@ export class RunController {
       projectName: string;
       weight: number;
     }>;
+    verifyFileOverlap?: boolean;
   }): Promise<void> {
     // Narrowed critical section: claim label + scheduler cursor + createRun
     // + reserveSlot all happen while the mutex is held. Provider event
@@ -2342,6 +2349,7 @@ export class RunController {
       projectName: string;
       weight: number;
     }>;
+    verifyFileOverlap?: boolean;
   }): Promise<void> {
     // Shutdown gate, fast path: throwing before any side effect needs no
     // rollback. The gate can still land during the addLabelsToIssue await
@@ -2386,6 +2394,19 @@ export class RunController {
     ) {
       throw new IssueReservedError(
         `issue ${input.project.name}#${input.issue.number} is already reserved`
+      );
+    }
+
+    const overlapInspection =
+      input.verifyFileOverlap === true
+        ? await this.fileOverlapGuard.inspectCandidate({
+            issue: input.issue,
+            project: input.project
+          })
+        : undefined;
+    if (overlapInspection?.hasKnownOverlap === true) {
+      throw new FileOverlapDetectedError(
+        `issue ${input.project.name}#${input.issue.number} has known file overlap`
       );
     }
 
@@ -2460,6 +2481,15 @@ export class RunController {
           : { respectsIssueLabels: input.respectsIssueLabels }),
         runId: input.runId
       });
+      if (
+        overlapInspection !== undefined &&
+        overlapInspection.candidateFiles.length > 0
+      ) {
+        this.activeRuns.updateTouchedFiles(input.runId, {
+          files: overlapInspection.candidateFiles,
+          refreshedAt: overlapInspection.refreshedAt
+        });
+      }
     } catch (error) {
       if (error instanceof RegistryShutdownError && runCreated) {
         // The shutdown snapshot in stop() predates this row, so record the

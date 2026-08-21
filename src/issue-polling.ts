@@ -54,6 +54,7 @@ export type RawGitHubPullRequest = {
 
 export type RawGitHubPullRequestFile = {
   filename?: string;
+  previous_filename?: string;
 };
 
 type RawGitHubPullRequestReviewComment = {

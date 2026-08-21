@@ -907,13 +907,19 @@ changes from in-flight issue Runs in the same Project. An exact repository-relat
 skips that candidate for the tick. If every candidate for the Project overlaps, the Project does
 not enter weighted round-robin and its scheduler cursor does not advance. Other Projects remain
 dispatchable, and unregistering the terminal Run makes the skipped candidate reconsiderable on the
-next tick.
+next tick. Rename footprints include both the previous and current repository paths.
+
+Fresh dispatch rechecks overlap inside the serialized claim boundary. When a candidate with a known
+pull-request footprint is admitted, that footprint seeds its in-flight slot before the claim mutex
+is released; this makes overlap admission atomic even before the new Run's Workspace is prepared.
 
 The overlap guard creates no timer: in-flight footprints refresh at most once every 30 seconds as
 part of existing dispatch ticks. Missing candidate PRs, unavailable adapter methods, absent
 Workspaces, and Git/GitHub read failures do not block dispatch. The guard therefore reduces known
 collisions but cannot predict a genuinely fresh Issue's footprint; operators requiring strict
-serialization use `max_in_flight: 1`. See ADR 0085.
+serialization use `max_in_flight: 1`. An expired footprint that fails to refresh becomes empty for
+that interval rather than retaining stale collision evidence; the failed refresh is still
+timestamped to rate-limit retries. See ADR 0085.
 
 Invalid Projects are disabled. Valid Projects may continue running.
 

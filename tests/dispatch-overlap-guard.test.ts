@@ -9,6 +9,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { IssuePollStatus, IssueSnapshot } from "../src/issue-polling.js";
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
 import {
+  createAsyncMutex,
+  type AsyncMutex
+} from "../src/lifecycle/async-mutex.js";
+import {
   RunController,
   type RunControllerProjectConfig
 } from "../src/lifecycle/run-controller.js";
@@ -32,6 +36,7 @@ async function makeTempRoot(): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const store of openStores.splice(0)) {
     store.close();
   }
@@ -119,6 +124,125 @@ describe("dispatch file-overlap guard", () => {
     expect(harness.addLabelsToIssue).not.toHaveBeenCalled();
   });
 
+  it("counts both paths of a committed in-flight rename", async () => {
+    const harness = await createHarness({
+      pullRequestFiles: () => Promise.resolve([{ filename: "README.md" }]),
+      setupWorkspace: async (workspacePath) => {
+        await git([
+          "-C",
+          workspacePath,
+          "mv",
+          "README.md",
+          "renamed-readme.md"
+        ]);
+        await git(["-C", workspacePath, "commit", "-m", "Rename readme"]);
+      }
+    });
+    const result = await harness.controller.dispatchOneFresh(
+      pollStatus(issue({ number: 2, title: "Edits renamed source" }))
+    );
+
+    expect(result.dispatched).toBe(false);
+    expect(harness.addLabelsToIssue).not.toHaveBeenCalled();
+  });
+
+  it("counts both paths of a candidate pull request rename", async () => {
+    const harness = await createHarness({
+      pullRequestFiles: () =>
+        Promise.resolve([
+          { filename: "new-name.ts", previous_filename: "old-name.ts" }
+        ]),
+      setupWorkspace: (workspacePath) =>
+        writeFile(path.join(workspacePath, "old-name.ts"), "in flight\n")
+    });
+    const result = await harness.controller.dispatchOneFresh(
+      pollStatus(issue({ number: 2, title: "Candidate rename" }))
+    );
+
+    expect(result.dispatched).toBe(false);
+    expect(harness.addLabelsToIssue).not.toHaveBeenCalled();
+  });
+
+  it("serializes overlap admission with the in-flight slot reservation", async () => {
+    let markFirstAttemptStarted: (() => void) | undefined;
+    let releaseFirstAttempt: (() => void) | undefined;
+    const firstAttemptStarted = new Promise<void>((resolve) => {
+      markFirstAttemptStarted = resolve;
+    });
+    const firstAttemptRelease = new Promise<void>((resolve) => {
+      releaseFirstAttempt = resolve;
+    });
+    const claimMutex = createAsyncMutex();
+    await claimMutex.acquire();
+    let claimAttempts = 0;
+    let markFirstClaimWaiting: (() => void) | undefined;
+    let markBothClaimsWaiting: (() => void) | undefined;
+    const firstClaimWaiting = new Promise<void>((resolve) => {
+      markFirstClaimWaiting = resolve;
+    });
+    const bothClaimsWaiting = new Promise<void>((resolve) => {
+      markBothClaimsWaiting = resolve;
+    });
+    const observedClaimMutex: AsyncMutex = {
+      acquire: async () => {
+        claimAttempts += 1;
+        if (claimAttempts === 1) {
+          markFirstClaimWaiting?.();
+        }
+        if (claimAttempts === 2) {
+          markBothClaimsWaiting?.();
+        }
+        await claimMutex.acquire();
+      },
+      get held() {
+        return claimMutex.held;
+      },
+      release: () => claimMutex.release(),
+      tryAcquire: () => claimMutex.tryAcquire()
+    };
+    let attemptCount = 0;
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        attemptCount += 1;
+        if (attemptCount === 1) {
+          markFirstAttemptStarted?.();
+          await firstAttemptRelease;
+        }
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { code: 1, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const harness = await createHarness({
+      agentProvider: provider,
+      dispatchMutex: observedClaimMutex,
+      includeActiveRun: false,
+      pullRequestFiles: () => Promise.resolve([{ filename: "shared.ts" }])
+    });
+
+    const firstDispatch = harness.controller.dispatchOneFresh(
+      pollStatus(issue({ number: 2, title: "First candidate" }))
+    );
+    await firstClaimWaiting;
+    const secondDispatch = harness.controller.dispatchOneFresh(
+      pollStatus(issue({ number: 3, title: "Second candidate" }))
+    );
+    await bothClaimsWaiting;
+    claimMutex.release();
+    await firstAttemptStarted;
+    const secondResult = await secondDispatch;
+
+    releaseFirstAttempt?.();
+    await firstDispatch;
+
+    expect(secondResult.dispatched).toBe(false);
+    expect(harness.runStore.getRun("candidate-run-2")).toBeUndefined();
+  });
+
   it("ignores base-branch commits the in-flight Run never made", async () => {
     const harness = await createHarness({
       setupWorkspace: async (workspacePath) => {
@@ -184,15 +308,75 @@ describe("dispatch file-overlap guard", () => {
       runId: "candidate-run-1"
     });
   });
+
+  it("fails open when an expired candidate footprint cannot be refreshed", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const harness = await createHarness();
+    const firstResult = await harness.controller.dispatchOneFresh(
+      pollStatus(issue({ number: 2, title: "Initially conflicting" }))
+    );
+    expect(firstResult.dispatched).toBe(false);
+
+    now.mockReturnValue(31_001);
+    harness.listPullRequestFiles.mockRejectedValue(
+      new Error("GitHub files unavailable")
+    );
+    const retryResult = await harness.controller.dispatchOneFresh(
+      pollStatus(issue({ number: 2, title: "No longer conflicting" }))
+    );
+
+    expect(retryResult).toEqual({
+      dispatched: true,
+      runId: "candidate-run-1"
+    });
+  });
+
+  it("clears a stale in-flight footprint when its refresh fails", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const harness = await createHarness();
+    const firstResult = await harness.controller.dispatchOneFresh(
+      pollStatus(issue({ number: 2, title: "Initially conflicting" }))
+    );
+    expect(firstResult.dispatched).toBe(false);
+
+    await rm(path.join(harness.workspacePath, "shared.ts"));
+    await rm(path.join(harness.workspacePath, ".git"), {
+      force: true,
+      recursive: true
+    });
+    now.mockReturnValue(31_001);
+    const retryResult = await harness.controller.dispatchOneFresh(
+      pollStatus(issue({ number: 2, title: "No longer conflicting" }))
+    );
+
+    expect(retryResult).toEqual({
+      dispatched: true,
+      runId: "candidate-run-1"
+    });
+    expect(harness.activeRuns.get("active-run")?.touchedFiles).toEqual({
+      files: [],
+      refreshedAt: 31_001
+    });
+  });
 });
 
 async function createHarness(
-  options: { setupWorkspace?: (workspacePath: string) => Promise<void> } = {}
+  options: {
+    agentProvider?: AgentProvider;
+    dispatchMutex?: AsyncMutex;
+    includeActiveRun?: boolean;
+    pullRequestFiles?: () => Promise<
+      Array<{ filename?: string; previous_filename?: string }>
+    >;
+    setupWorkspace?: (workspacePath: string) => Promise<void>;
+  } = {}
 ): Promise<{
   activeRuns: ActiveRunRegistry;
   addLabelsToIssue: ReturnType<typeof vi.fn>;
   controller: RunController;
+  listPullRequestFiles: ReturnType<typeof vi.fn>;
   runStore: RunStore;
+  workspacePath: string;
 }> {
   const root = await makeTempRoot();
   const stateRoot = path.join(root, "state");
@@ -207,10 +391,12 @@ async function createHarness(
     branchName: "sym/alpha/1-active",
     workspacePath
   });
-  if (options.setupWorkspace === undefined) {
-    await writeFile(path.join(workspacePath, "shared.ts"), "in flight\n");
-  } else {
-    await options.setupWorkspace(workspacePath);
+  if (options.includeActiveRun !== false) {
+    if (options.setupWorkspace === undefined) {
+      await writeFile(path.join(workspacePath, "shared.ts"), "in flight\n");
+    } else {
+      await options.setupWorkspace(workspacePath);
+    }
   }
   await writeFile(path.join(root, "WORKFLOW.md"), "Work on this Issue.\n");
 
@@ -218,29 +404,31 @@ async function createHarness(
   openStores.push(runStore);
   const activeRuns = new ActiveRunRegistry();
   runStore.syncProjectStates([{ name: "alpha", weight: 1 }]);
-  runStore.createRun({
-    id: "active-run",
-    issue: issue({ number: 1, title: "Active" }),
-    projectName: "alpha",
-    providerCommand: "codex",
-    providerName: "codex"
-  });
-  runStore.updateRunEvidence("active-run", {
-    branchName: "sym/alpha/1-active",
-    branchRef: "refs/heads/sym/alpha/1-active",
-    issueSnapshotPath: path.join(stateRoot, "issue.json"),
-    metadataPath: path.join(stateRoot, "metadata.json"),
-    normalizedLogPath: path.join(stateRoot, "normalized.jsonl"),
-    promptPath: path.join(stateRoot, "prompt.md"),
-    rawLogPath: path.join(stateRoot, "raw.jsonl"),
-    workflowGraphPath: path.join(stateRoot, "workflow.json"),
-    workspacePath
-  });
-  activeRuns.reserveSlot({
-    issueNumber: 1,
-    projectName: "alpha",
-    runId: "active-run"
-  });
+  if (options.includeActiveRun !== false) {
+    runStore.createRun({
+      id: "active-run",
+      issue: issue({ number: 1, title: "Active" }),
+      projectName: "alpha",
+      providerCommand: "codex",
+      providerName: "codex"
+    });
+    runStore.updateRunEvidence("active-run", {
+      branchName: "sym/alpha/1-active",
+      branchRef: "refs/heads/sym/alpha/1-active",
+      issueSnapshotPath: path.join(stateRoot, "issue.json"),
+      metadataPath: path.join(stateRoot, "metadata.json"),
+      normalizedLogPath: path.join(stateRoot, "normalized.jsonl"),
+      promptPath: path.join(stateRoot, "prompt.md"),
+      rawLogPath: path.join(stateRoot, "raw.jsonl"),
+      workflowGraphPath: path.join(stateRoot, "workflow.json"),
+      workspacePath
+    });
+    activeRuns.reserveSlot({
+      issueNumber: 1,
+      projectName: "alpha",
+      runId: "active-run"
+    });
+  }
 
   const project: RunControllerProjectConfig = {
     agent: { provider: "codex" },
@@ -271,26 +459,33 @@ async function createHarness(
     }
   };
   const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+  const listPullRequestFiles = vi
+    .fn()
+    .mockImplementation(({ pullNumber }: { pullNumber: number }) => {
+      if (options.pullRequestFiles !== undefined) {
+        return options.pullRequestFiles();
+      }
+      if (pullNumber === 44) {
+        return Promise.reject(new Error("GitHub files unavailable"));
+      }
+      return Promise.resolve([
+        { filename: pullNumber === 22 ? "shared.ts" : "independent.ts" }
+      ]);
+    });
   let runCounter = 0;
   const controller = new RunController({
     activeRuns,
-    agentProviders: { codex: failingProvider() },
+    agentProviders: { codex: options.agentProvider ?? failingProvider() },
     configDir: root,
     createRunId: () => `candidate-run-${++runCounter}`,
+    ...(options.dispatchMutex === undefined
+      ? {}
+      : { dispatchMutex: options.dispatchMutex }),
     env: { GITHUB_TOKEN: "secret" },
     githubIssuesApi: {
       addLabelsToIssue,
       listOpenIssues: vi.fn().mockResolvedValue([]),
-      listPullRequestFiles: vi
-        .fn()
-        .mockImplementation(({ pullNumber }: { pullNumber: number }) => {
-          if (pullNumber === 44) {
-            return Promise.reject(new Error("GitHub files unavailable"));
-          }
-          return Promise.resolve([
-            { filename: pullNumber === 22 ? "shared.ts" : "independent.ts" }
-          ]);
-        }),
+      listPullRequestFiles,
       listPullRequestsForBranch: vi
         .fn()
         .mockImplementation(({ branch }: { branch: string }) =>
@@ -339,7 +534,14 @@ async function createHarness(
     stateRoot
   });
 
-  return { activeRuns, addLabelsToIssue, controller, runStore };
+  return {
+    activeRuns,
+    addLabelsToIssue,
+    controller,
+    listPullRequestFiles,
+    runStore,
+    workspacePath
+  };
 }
 
 function issue(overrides: Partial<IssueSnapshot> = {}): IssueSnapshot {

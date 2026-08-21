@@ -20,7 +20,14 @@ per-Project cap, and Issue Reservation. The candidate footprint is the changed-f
 existing open pull request linked through a Symphonika tracked association or the candidate's
 deterministic Issue Branch. The in-flight footprint is the union of committed and live Workspace
 changes for issue Runs in the same Project. Exact repository-relative path intersection is a known
-collision and skips that candidate for the current tick.
+collision and skips that candidate for the current tick. Changed-file normalization retains both
+the previous and current repository paths for renames from GitHub and Git.
+
+Because fresh dispatch is re-entrant, the guard rechecks overlap inside `dispatchMutex` immediately
+before claim persistence. An admitted candidate's known pull-request footprint seeds its newly
+reserved in-flight slot before the mutex is released. A queued claim can therefore compare against
+that Run even before Workspace preparation records a path, making known-footprint admission atomic
+with slot reservation.
 
 In-flight footprints live on `InFlightRunRegistry` entries and are refreshed at most every 30
 seconds during normal dispatch ticks. The guard creates no timer or polling loop. Unregistering a
@@ -29,7 +36,9 @@ next tick.
 
 The guard fails open when either footprint is unavailable or a Git/GitHub read fails. Fresh Issues
 usually have no pull-request footprint and therefore remain dispatchable. Strict Project-wide
-serialization remains available through `max_in_flight: 1`.
+serialization remains available through `max_in_flight: 1`. A failed refresh replaces expired
+candidate or in-flight evidence with an empty footprint for that interval while timestamping the
+attempt, preventing stale evidence from blocking dispatch without retrying on every candidate.
 
 A skipped Project does not participate in weighted round-robin for that tick, so its scheduler
 cursor does not advance. Other Projects and later non-colliding candidates in the same Project
@@ -43,4 +52,3 @@ remain eligible.
 - GitHub file discovery and local Git inspection remain provider-neutral.
 - Candidate and in-flight evidence stay ephemeral; no Run Store migration is required.
 - Detecting or cancelling superseded in-flight work remains a separate architecture decision.
-

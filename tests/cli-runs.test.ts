@@ -115,6 +115,42 @@ describe("CLI run commands", () => {
     expect(output.stdout).toContain("r-failed");
   });
 
+  it("status skips the network-backed gh probe only when rendering the dashboard", async () => {
+    const stateRoot = await makeTempRoot();
+    const seenOffline: (boolean | undefined)[] = [];
+    const doctorReport = {
+      configPath: "/tmp/symphonika.yml",
+      environment: TEST_DOCTOR_ENVIRONMENT,
+      errors: [],
+      ok: true,
+      projects: [],
+      warnings: []
+    } satisfies DoctorReport;
+    const runStatus = async (extraArgs: string[]): Promise<void> => {
+      const { program } = captureProgram(stateRoot, {
+        runDoctor: (options) => {
+          seenOffline.push(options.offline);
+          return Promise.resolve(doctorReport);
+        }
+      });
+      await program.parseAsync([
+        "node",
+        "symphonika",
+        "status",
+        "--config",
+        path.join(stateRoot, "symphonika.yml"),
+        ...extraArgs
+      ]);
+    };
+
+    await runStatus([]);
+    await runStatus(["--dashboard"]);
+
+    // Plain status prints report.errors, so it must keep the gh check. The
+    // dashboard renders report.projects only and would discard the result.
+    expect(seenOffline).toEqual([undefined, true]);
+  });
+
   it("status shows the terminal-reason suffix for blocked runs in the plain-text recent-runs listing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

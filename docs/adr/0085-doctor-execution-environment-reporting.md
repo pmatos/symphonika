@@ -65,5 +65,8 @@ profile, rewrite the systemd unit, or persist a capability manifest.
   executable, or `gh` authentication is unavailable.
 - Scripted and CI callers can consume stable structured evidence and can suppress only the
   network-backed `gh auth status` probe.
+- `status --dashboard` and `status --watch` suppress that probe too. They render only
+  `report.projects`, so on a watch refresh the probe would cost a subprocess per interval for a
+  result nothing displays. Plain `status` prints `report.errors` and keeps the check.
 - Operators with a stale installed PATH get specific warnings while retaining the existing
   structural drift diagnostics from ADRs 0064 and 0065.

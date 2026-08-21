@@ -223,10 +223,11 @@ export async function runServiceInstall(
   const homeDir = options.homeDir ?? homedir();
   const unitDir = userUnitDir(homeDir, env);
   const daemonPath = buildDaemonPath(execPath, env);
-  const environmentFilePath =
-    options.configPath === undefined
-      ? defaultUnitEnvironmentFilePath(homeDir, env)
-      : serviceEnvironmentFilePath(options.configPath);
+  const environmentFilePath = unitEnvironmentFilePath(
+    options.configPath,
+    homeDir,
+    env
+  );
 
   const files: ServiceUnitFile[] = [
     {
@@ -358,28 +359,26 @@ function systemdConfigHome(env: NodeJS.ProcessEnv): string | undefined {
     : undefined;
 }
 
-// The env file the generated unit points at when no explicit `--config` was
-// given: the `env` beside the default user Service Config. Shared with doctor
-// so its "load the daemon's env file" hint names the same file the unit does.
-// The path is resolved here rather than deferred to systemd's `%h` specifier
-// because systemd glob-expands EnvironmentFile= *after* expanding specifiers,
-// so a home directory containing `[`, `*`, `?` or `\` would slip past
-// systemdEnvironmentFile's escaping and silently drop the operator's secrets.
-// Baking homeDir also mirrors userUnitDir, which already commits to it when
-// deciding where the unit itself is written.
-export function defaultUnitEnvironmentFilePath(
+// The env file the generated unit points at: beside an explicit `--config`,
+// otherwise beside the default user Service Config — never the project-local
+// branch of resolveServiceConfigPath, which the installer deliberately does
+// not follow. Shared with doctor so its "load the daemon's env file" hint
+// names the same file the unit does. The path is resolved here rather than
+// deferred to systemd's `%h` specifier because systemd glob-expands
+// EnvironmentFile= *after* expanding specifiers, so a home directory
+// containing `[`, `*`, `?` or `\` would slip past systemdEnvironmentFile's
+// escaping and silently drop the operator's secrets.
+export function unitEnvironmentFilePath(
+  configPath: string | undefined,
   homeDir: string,
   env: NodeJS.ProcessEnv
 ): string {
   return serviceEnvironmentFilePath(
-    defaultUserConfigPath({
-      // An empty (but defined) env drops a relative XDG_CONFIG_HOME, which
-      // defaultUserConfigPath would otherwise resolve against the
-      // install-time cwd and bake into the unit. Passing no `env` at all
-      // would fall back to process.env instead.
-      env: systemdConfigHome(env) === undefined ? {} : env,
-      homeDir
-    })
+    configPath ??
+      defaultUserConfigPath({
+        env: { XDG_CONFIG_HOME: systemdConfigHome(env) },
+        homeDir
+      })
   );
 }
 
@@ -422,8 +421,7 @@ function systemdEnvAssignment(name: string, value: string): string {
 // the operator's secrets with no error at all. Backslash-escape the glob
 // metacharacters; a path without any renders byte-identical to the plain path.
 function systemdEnvironmentFile(value: string): string {
-  const escaped = value.replace(/[\\?*[\]{}]/g, "\\$&").replace(/%/g, "%%");
-  return `-${escaped}`;
+  return `-${value.replace(/[\\?*[\]{}]/g, "\\$&").replace(/%/g, "%%")}`;
 }
 
 export function defaultScriptPath(): string {

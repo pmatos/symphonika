@@ -51,11 +51,9 @@ export function defaultUserConfigPath(
 }
 
 // Environment-backed secrets live in a file named `env` beside the selected
-// Service Config. Takes the config path rather than resolving one itself, so
-// an explicit `--config` is a plain sibling lookup. The no-`--config` case is
-// owned by service.ts's defaultUnitEnvironmentFilePath instead — both the
-// installer and doctor route through it, so they always name the same file,
-// and neither follows the project-local branch of resolveServiceConfigPath.
+// Service Config. Takes the config path rather than resolving one itself:
+// which config the installed unit and doctor agree on is decided once, in
+// service.ts's unitEnvironmentFilePath.
 export function serviceEnvironmentFilePath(configPath: string): string {
   return path.join(path.dirname(configPath), SERVICE_ENVIRONMENT_FILE);
 }

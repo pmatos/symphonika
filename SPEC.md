@@ -1136,10 +1136,13 @@ in-flight firings continue under the snapshot they started with — the daemon n
 a side effect of the Routine becoming disabled. Removing the declaration from the top-level
 `routines:` block likewise soft-disables every target with `disabled_reason =
 "removed_from_config"`. Removing one Project from its `projects:` list soft-disables only that
-target with the same reason, leaving siblings active. Restoring a Routine or target — removing
-`disabled: true`, re-adding the entry, or restoring the target name — un-disables it on the next
-reload and recomputes `next_fire_at` strictly after the current clock; a one-shot target whose `at`
-elapsed while disabled is marked `expired` instead of firing retroactively.
+target with the same reason, leaving siblings active. A target already soft-disabled with
+`removed_from_config` is durable history rather than a Project's current target, so subsequently
+disabling or removing that Project does not re-mark it `inactive` or clear its reason; it stays
+`disabled` with `removed_from_config` until the declaration is restored. Restoring a Routine or
+target — removing `disabled: true`, re-adding the entry, or restoring the target name — un-disables
+it on the next reload and recomputes `next_fire_at` strictly after the current clock; a one-shot
+target whose `at` elapsed while disabled is marked `expired` instead of firing retroactively.
 `catch_up: fire_once_if_missed` does not apply to a routine-level restore — that policy is for
 daemon outage, not deliberate operator disable.
 
@@ -1170,6 +1173,11 @@ last known good value. A Routine with no prior valid declaration — a newly add
 the start — is `state = invalid` and does not fire until a valid reload succeeds. A declaration with
 no parseable `name` field cannot be represented as a `routines` row at all (the table's primary key
 is `(project_name, name)`) and is reported only through the reload-error and `doctor` surfaces.
+A target removed from configuration and later restored with an invalid declaration has no live
+last-known-good snapshot: its stale durable row returns to `invalid` when its Project is enabled,
+or remains `inactive` while the Project-level disable cascade takes precedence. A later valid repair
+follows the normal restoration clock rules: recurring schedules recompute from the repair time, and
+an elapsed one-shot becomes `expired` instead of firing retroactively.
 
 On every daemon tick, enabled Routine Workspace Retention selects only terminal firings whose
 terminal update time has crossed the configured outcome window and whose persisted commits-ahead
@@ -1954,9 +1962,15 @@ labelled by kind. Active means `queued`, `preparing_workspace`, or `running` —
 (parked for external state, such as PR review) or one in `input_required` has no provider process
 running and is not active right now, though both still appear on `/runs`. Below the band, Routines
 are grouped by their globally unique name into one row per Routine with a target-Project count
-linking to its own page (`/routines/:name`, detailed below); Projects split into Dispatch
-Projects (eligible/in-flight counts, last terminal-run outcome) and a visually subordinate Routine
-Hosts group, since a Routine Host is never polled and never dispatches (ADR-0062). The flat
+linking to its own page (`/routines/:name`, detailed below). A target soft-disabled with
+`disabled_reason = "removed_from_config"` is excluded from the target count when another target
+from that declaration remains current. When every durable target is removed, the Routine remains
+visible as disabled with `removed_from_config`; `/routines/:name` lists every target in either case.
+When current and removed target snapshots differ, the dashboard row's kind and schedule come from a
+current visible target rather than stale removed history.
+Projects split into Dispatch Projects
+(eligible/in-flight counts, last terminal-run outcome) and a visually subordinate Routine Hosts
+group, since a Routine Host is never polled and never dispatches (ADR-0062). The flat
 "recent runs" list this superseded now lives only at `/runs`. See #302.
 
 Each Project name links to its own drill-in page, `GET /projects/:name`. For a Dispatch Project

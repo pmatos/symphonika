@@ -2002,10 +2002,12 @@ export class RunStore {
         // Un-disabling (front matter disabled: true removed, or the routine's
         // path restored after removal) always recomputes from the current
         // tick's now — never resurrects a next_fire_at computed before the
-        // routine was disabled. For cron this is always strictly future; for
-        // an elapsed one-shot the state branch below routes to 'expired',
-        // where next_fire_at is never read.
-        "when (routines.state = 'disabled' or routines.state = 'inactive') and @disabled = 0 then excluded.next_fire_at",
+        // routine was disabled. A reclaimed invalid row with a nonempty
+        // historical prompt is the same deliberate-restore path; an empty-
+        // prompt identity stub has no prior schedule to resurrect. For cron
+        // this is always strictly future; for an elapsed one-shot the state
+        // branch below routes to 'expired', where next_fire_at is never read.
+        "when (routines.state = 'disabled' or routines.state = 'inactive' or (routines.state = 'invalid' and routines.prompt_body != '')) and @disabled = 0 then excluded.next_fire_at",
         "when routines.next_fire_at is null and routines.state != 'expired' then excluded.next_fire_at",
         "else routines.next_fire_at end,",
         "prompt_body = excluded.prompt_body,",
@@ -2021,11 +2023,12 @@ export class RunStore {
         "state = case",
         "when @disabled = 1 then 'disabled'",
         "when excluded.schedule_cron is not null then 'active'",
-        // Restoring a one-shot whose `at` already elapsed while disabled or
-        // inactive must not fire it retroactively, even when its schedule was
-        // edited while stopped. This precedes schedule-change reactivation so
-        // only a future one-shot edit can reactivate a stopped Routine.
-        "when (routines.state = 'disabled' or routines.state = 'inactive') and @disabled = 0 and excluded.schedule_cron is null and routines.last_fired_at is null and excluded.schedule_at <= @now_iso then 'expired'",
+        // Restoring a one-shot whose `at` already elapsed while disabled,
+        // inactive, or reclaimed-invalid must not fire it retroactively, even
+        // when its schedule was edited while stopped. This precedes schedule-
+        // change reactivation so only a future one-shot edit can reactivate a
+        // stopped Routine.
+        "when (routines.state = 'disabled' or routines.state = 'inactive' or (routines.state = 'invalid' and routines.prompt_body != '')) and @disabled = 0 and excluded.schedule_cron is null and routines.last_fired_at is null and excluded.schedule_at <= @now_iso then 'expired'",
         "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then 'active'",
         "when routines.state = 'expired' or routines.last_fired_at is not null then 'expired'",
         "else 'active' end,",
@@ -2526,6 +2529,7 @@ export class RunStore {
   markRoutinesInactiveForProject(
     projectName: string,
     options: {
+      currentRoutineNames?: string[];
       now?: Date;
       trackerlessGitRoutines?: TargetedRoutineDeclaration[];
       templateRejectedRoutines?: TargetedRoutineDeclaration[];
@@ -2533,6 +2537,11 @@ export class RunStore {
   ): void {
     const now = timestamp();
     const scheduleNow = options.now ?? new Date();
+    const currentRoutineNames = [...new Set(options.currentRoutineNames ?? [])];
+    const preserveRemovedTargets =
+      currentRoutineNames.length === 0
+        ? "and not (state = 'disabled' and disabled_reason = 'removed_from_config')"
+        : `and not (state = 'disabled' and disabled_reason = 'removed_from_config' and name not in (${currentRoutineNames.map(() => "?").join(", ")}))`;
     const insertInactive = this.database.prepare(
       [
         "insert into routines (",
@@ -2611,25 +2620,31 @@ export class RunStore {
         .prepare(
           // disabled_reason only means anything on state = 'disabled' — clear
           // it here so an inactive row never surfaces a stale routine-level
-          // reason left over from before the Project-cascade (ADR-0060).
-          "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name = ? and (state != 'inactive' or disabled_reason is not null)"
+          // reason left over from before the Project-cascade (ADR-0060). The
+          // one exception is a target already removed from its declaration:
+          // that row is history, not a target this Project still has (ADR
+          // 0069 cascades "a targeted Project"'s own rows), and laundering it
+          // to a reasonless inactive row makes it indistinguishable from a
+          // current target whose Project went away — which then hides its
+          // still-removed siblings in enabled Projects from the dashboard. A
+          // name restored while this Project remains disabled is current
+          // again, so it must pass through the cascade to inactive/null.
+          `update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name = ? and (state != 'inactive' or disabled_reason is not null) ${preserveRemovedTargets}`
         )
-        .run(now, projectName);
+        .run(now, projectName, ...currentRoutineNames);
     });
     apply();
   }
 
-  // Persists identity-only evidence for a routine declaration that has never
-  // had a valid snapshot (a brand-new file with a parseable name but invalid
-  // front matter elsewhere). kind/schedule_at/prompt_body are unreadable
-  // sentinels — evaluateRoutineSchedule (src/routines/schedule.ts) never
-  // fires a non-'active' row, so these values are never read as real config.
-  // A validly-configured routine always has a non-empty prompt_body, so
-  // prompt_body = '' reliably identifies a row that has never been anything
-  // but this stub. On conflict, reclaim such a row back to 'invalid' (it may
-  // have gone dormant as 'disabled'/'inactive' via a Project-cascade or
-  // removal-from-config while still broken) but never touch a row that has
-  // ever held a real declaration.
+  // Persists identity evidence for a current routine declaration that has no
+  // live valid snapshot (a file with a parseable name but invalid front
+  // matter elsewhere). kind/schedule_at/prompt_body are unreadable sentinels
+  // for a first-seen declaration — evaluateRoutineSchedule
+  // (src/routines/schedule.ts) never fires a non-'active' row, so these values
+  // are never read as real config. On conflict, reclaim either an identity-
+  // only stub or stale declaration history already classified as inactive or
+  // removed_from_config. Active, expired, and operator-disabled rows may
+  // still represent live last-known-good configuration and remain untouched.
   upsertInvalidRoutineStub(input: {
     name: string;
     projectName: string;
@@ -2649,7 +2664,9 @@ export class RunStore {
           "state = 'invalid',",
           "disabled_reason = null,",
           "updated_at = excluded.updated_at",
-          "where routines.prompt_body = ''"
+          "where routines.prompt_body = ''",
+          "or routines.state = 'inactive'",
+          "or (routines.state = 'disabled' and routines.disabled_reason = 'removed_from_config')"
         ].join(" ")
       )
       .run({
@@ -2666,11 +2683,15 @@ export class RunStore {
     const names = [...new Set(projectNames)];
     // disabled_reason only means anything on state = 'disabled' — clear it
     // here so an inactive row never surfaces a stale routine-level reason
-    // left over from before the Project-cascade (ADR-0060).
+    // left over from before the Project-cascade (ADR-0060). A target already
+    // removed from its declaration is the exception, for the same reason as
+    // in markRoutinesInactiveForProject: it is durable history rather than a
+    // row this Project still targets, and clearing its reason would strip the
+    // only evidence that separates it from a current target.
     if (names.length === 0) {
       this.database
         .prepare(
-          "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where state != 'inactive'"
+          "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where state != 'inactive' and not (state = 'disabled' and disabled_reason = 'removed_from_config')"
         )
         .run(now);
       return;
@@ -2678,7 +2699,7 @@ export class RunStore {
     const placeholders = names.map(() => "?").join(", ");
     this.database
       .prepare(
-        `update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name not in (${placeholders}) and state != 'inactive'`
+        `update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name not in (${placeholders}) and state != 'inactive' and not (state = 'disabled' and disabled_reason = 'removed_from_config')`
       )
       .run(now, ...names);
   }

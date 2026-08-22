@@ -387,10 +387,13 @@ export async function dispatchDueRoutines(
       const templateRejectedRoutines = project.templateRejectedRoutines ?? [];
       input.runStore.markRoutinesInactiveForProject(project.name, {
         currentRoutineNames: [
-          ...(project.routines ?? []),
-          ...trackerlessGitRoutines,
-          ...templateRejectedRoutines
-        ].map((routine) => routine.name),
+          ...(project.invalidRoutineNames ?? []),
+          ...[
+            ...(project.routines ?? []),
+            ...trackerlessGitRoutines,
+            ...templateRejectedRoutines
+          ].map((routine) => routine.name)
+        ],
         now,
         trackerlessGitRoutines,
         templateRejectedRoutines

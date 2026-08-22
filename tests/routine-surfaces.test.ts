@@ -467,6 +467,52 @@ describe("routine operator surfaces", () => {
     }
   });
 
+  it("renders dashboard declaration metadata from current targets instead of removed history", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/daily-report.md"
+    };
+    try {
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      store.syncRoutines(
+        [
+          {
+            ...declaration,
+            kind: "git",
+            projectName: "beta",
+            schedule: { at: "2026-05-23T10:00:00.000Z" }
+          }
+        ],
+        { projects: ["alpha", "beta"] }
+      );
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain("<td>git</td>");
+      expect(body).toContain("2026-05-23T10:00:00.000Z");
+      expect(body).not.toContain("2026-05-22T10:00:00.000Z");
+      expect(body).toContain('<td><a href="/routines/daily-report">1</a></td>');
+    } finally {
+      store.close();
+    }
+  });
+
   it("keeps a Routine whose every target was removed from config visible", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

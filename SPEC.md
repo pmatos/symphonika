@@ -1952,6 +1952,8 @@ linking to its own page (`/routines/:name`, detailed below). A target soft-disab
 `disabled_reason = "removed_from_config"` is excluded from the target count when another target
 from that declaration remains current. When every durable target is removed, the Routine remains
 visible as disabled with `removed_from_config`; `/routines/:name` lists every target in either case.
+When current and removed target snapshots differ, the dashboard row's kind and schedule come from a
+current visible target rather than stale removed history.
 Projects split into Dispatch Projects
 (eligible/in-flight counts, last terminal-run outcome) and a visually subordinate Routine Hosts
 group, since a Routine Host is never polled and never dispatches (ADR-0062). The flat

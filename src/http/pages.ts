@@ -536,7 +536,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         : currentTargets.filter((target) => target.state !== "inactive");
       return visibleTargets.length === 0
         ? []
-        : [{ ...group, targets: visibleTargets }];
+        : groupRoutinesByName(visibleTargets);
     });
     const html = layout(
       "Symphonika",

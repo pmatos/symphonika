@@ -1173,6 +1173,9 @@ last known good value. A Routine with no prior valid declaration — a newly add
 the start — is `state = invalid` and does not fire until a valid reload succeeds. A declaration with
 no parseable `name` field cannot be represented as a `routines` row at all (the table's primary key
 is `(project_name, name)`) and is reported only through the reload-error and `doctor` surfaces.
+A target removed from configuration and later restored with an invalid declaration has no live
+last-known-good snapshot: its stale durable row returns to `invalid` when its Project is enabled,
+or remains `inactive` while the Project-level disable cascade takes precedence.
 
 On every daemon tick, enabled Routine Workspace Retention selects only terminal firings whose
 terminal update time has crossed the configured outcome window and whose persisted commits-ahead

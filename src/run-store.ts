@@ -2629,17 +2629,15 @@ export class RunStore {
     apply();
   }
 
-  // Persists identity-only evidence for a routine declaration that has never
-  // had a valid snapshot (a brand-new file with a parseable name but invalid
-  // front matter elsewhere). kind/schedule_at/prompt_body are unreadable
-  // sentinels — evaluateRoutineSchedule (src/routines/schedule.ts) never
-  // fires a non-'active' row, so these values are never read as real config.
-  // A validly-configured routine always has a non-empty prompt_body, so
-  // prompt_body = '' reliably identifies a row that has never been anything
-  // but this stub. On conflict, reclaim such a row back to 'invalid' (it may
-  // have gone dormant as 'disabled'/'inactive' via a Project-cascade or
-  // removal-from-config while still broken) but never touch a row that has
-  // ever held a real declaration.
+  // Persists identity evidence for a current routine declaration that has no
+  // live valid snapshot (a file with a parseable name but invalid front
+  // matter elsewhere). kind/schedule_at/prompt_body are unreadable sentinels
+  // for a first-seen declaration — evaluateRoutineSchedule
+  // (src/routines/schedule.ts) never fires a non-'active' row, so these values
+  // are never read as real config. On conflict, reclaim either an identity-
+  // only stub or stale declaration history already classified as inactive or
+  // removed_from_config. Active, expired, and operator-disabled rows may
+  // still represent live last-known-good configuration and remain untouched.
   upsertInvalidRoutineStub(input: {
     name: string;
     projectName: string;
@@ -2659,7 +2657,9 @@ export class RunStore {
           "state = 'invalid',",
           "disabled_reason = null,",
           "updated_at = excluded.updated_at",
-          "where routines.prompt_body = ''"
+          "where routines.prompt_body = ''",
+          "or routines.state = 'inactive'",
+          "or (routines.state = 'disabled' and routines.disabled_reason = 'removed_from_config')"
         ].join(" ")
       )
       .run({

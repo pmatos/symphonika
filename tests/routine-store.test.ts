@@ -3166,4 +3166,62 @@ describe("RunStore routines", () => {
       store.close();
     }
   });
+
+  it("reclassifies a restored invalid routine with stale declaration history when its Project is re-enabled", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.syncRoutines([], { projects: ["alpha"] });
+      expect(
+        store.getRoutine({ name: "daily-report", projectName: "alpha" })
+      ).toMatchObject({
+        disabledReason: "removed_from_config",
+        state: "disabled"
+      });
+
+      // The declaration is restored with a recoverable name but remains
+      // invalid while its Project is disabled. The disabled-Project cascade
+      // recognizes it as current again, leaving a reasonless inactive row.
+      store.markRoutinesInactiveForProject("alpha", {
+        currentRoutineNames: ["daily-report"]
+      });
+      expect(store.listRoutines({ includeInactive: true })).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          name: "daily-report",
+          state: "inactive"
+        })
+      );
+
+      // Re-enabling the Project while the declaration is still invalid must
+      // expose the invalid target again rather than leave it hidden as
+      // inactive merely because the row contains stale valid history.
+      store.upsertInvalidRoutineStub({
+        name: "daily-report",
+        projectName: "alpha",
+        sourcePath: "/tmp/daily-report.md"
+      });
+
+      expect(store.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          name: "daily-report",
+          state: "invalid"
+        })
+      );
+    } finally {
+      store.close();
+    }
+  });
 });

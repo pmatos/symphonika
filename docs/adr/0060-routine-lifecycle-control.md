@@ -47,6 +47,14 @@ a routine with no parseable name has no identity to persist a row against. Those
 surfaced only through the reload-error/doctor channel, keyed by file path, never as a `routines`
 row (`RunStore.upsertInvalidRoutineStub`).
 
+A previously valid target that was removed from configuration does not retain a live
+last-known-good declaration indefinitely. If the target is later restored with a recoverable name
+but an otherwise invalid declaration, its removed or Project-cascaded durable row is stale history:
+it becomes `invalid` when the target Project is enabled, or remains `inactive` while that Project is
+disabled. `upsertInvalidRoutineStub` therefore reclaims rows already classified as `inactive` or
+`disabled (removed_from_config)`, while leaving active, expired, and operator-disabled rows intact
+because they may still represent live last-known-good configuration.
+
 `invalid` rows use sentinel values (`kind: 'report'`, empty `schedule_at`, empty `prompt_body`) for
 columns the broken declaration never supplied. This is safe because `evaluateRoutineSchedule`
 (`src/routines/schedule.ts`) never fires a non-`'active'` row, so the sentinels are never read as

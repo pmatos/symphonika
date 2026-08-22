@@ -1998,10 +1998,12 @@ export class RunStore {
         // Un-disabling (front matter disabled: true removed, or the routine's
         // path restored after removal) always recomputes from the current
         // tick's now — never resurrects a next_fire_at computed before the
-        // routine was disabled. For cron this is always strictly future; for
-        // an elapsed one-shot the state branch below routes to 'expired',
-        // where next_fire_at is never read.
-        "when (routines.state = 'disabled' or routines.state = 'inactive') and @disabled = 0 then excluded.next_fire_at",
+        // routine was disabled. A reclaimed invalid row with a nonempty
+        // historical prompt is the same deliberate-restore path; an empty-
+        // prompt identity stub has no prior schedule to resurrect. For cron
+        // this is always strictly future; for an elapsed one-shot the state
+        // branch below routes to 'expired', where next_fire_at is never read.
+        "when (routines.state = 'disabled' or routines.state = 'inactive' or (routines.state = 'invalid' and routines.prompt_body != '')) and @disabled = 0 then excluded.next_fire_at",
         "when routines.next_fire_at is null and routines.state != 'expired' then excluded.next_fire_at",
         "else routines.next_fire_at end,",
         "prompt_body = excluded.prompt_body,",
@@ -2017,11 +2019,12 @@ export class RunStore {
         "state = case",
         "when @disabled = 1 then 'disabled'",
         "when excluded.schedule_cron is not null then 'active'",
-        // Restoring a one-shot whose `at` already elapsed while disabled or
-        // inactive must not fire it retroactively, even when its schedule was
-        // edited while stopped. This precedes schedule-change reactivation so
-        // only a future one-shot edit can reactivate a stopped Routine.
-        "when (routines.state = 'disabled' or routines.state = 'inactive') and @disabled = 0 and excluded.schedule_cron is null and routines.last_fired_at is null and excluded.schedule_at <= @now_iso then 'expired'",
+        // Restoring a one-shot whose `at` already elapsed while disabled,
+        // inactive, or reclaimed-invalid must not fire it retroactively, even
+        // when its schedule was edited while stopped. This precedes schedule-
+        // change reactivation so only a future one-shot edit can reactivate a
+        // stopped Routine.
+        "when (routines.state = 'disabled' or routines.state = 'inactive' or (routines.state = 'invalid' and routines.prompt_body != '')) and @disabled = 0 and excluded.schedule_cron is null and routines.last_fired_at is null and excluded.schedule_at <= @now_iso then 'expired'",
         "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then 'active'",
         "when routines.state = 'expired' or routines.last_fired_at is not null then 'expired'",
         "else 'active' end,",

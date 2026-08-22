@@ -55,6 +55,11 @@ disabled. `upsertInvalidRoutineStub` therefore reclaims rows already classified 
 `disabled (removed_from_config)`, while leaving active, expired, and operator-disabled rows intact
 because they may still represent live last-known-good configuration.
 
+When that reclaimed declaration later becomes valid, its nonempty historical prompt identifies the
+row as a deliberate restore rather than a never-valid identity stub. The normal restore clock rules
+therefore apply: recompute a recurring `next_fire_at` from the repair time, and expire an elapsed
+one-shot instead of firing it retroactively.
+
 `invalid` rows use sentinel values (`kind: 'report'`, empty `schedule_at`, empty `prompt_body`) for
 columns the broken declaration never supplied. This is safe because `evaluateRoutineSchedule`
 (`src/routines/schedule.ts`) never fires a non-`'active'` row, so the sentinels are never read as

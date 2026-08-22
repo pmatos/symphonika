@@ -3220,6 +3220,73 @@ describe("RunStore routines", () => {
           state: "invalid"
         })
       );
+
+      // Fixing the declaration after its one-shot time elapsed completes the
+      // deliberate restore. It must expire rather than launch retroactively
+      // from schedule evidence retained in the stale durable row.
+      store.syncRoutines(
+        [
+          {
+            kind: "report",
+            name: "daily-report",
+            prompt: "Report.",
+            provider: "codex",
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: "/tmp/daily-report.md",
+            projectName: "alpha"
+          }
+        ],
+        { now: new Date("2026-05-23T10:00:00.000Z") }
+      );
+
+      expect(
+        store.getRoutine({ name: "daily-report", projectName: "alpha" })
+      ).toMatchObject({ state: "expired" });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("recomputes a restored invalid recurring routine from its valid-repair time", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: "codex" as const,
+      schedule: { cron: "0 9 * * *", tz: "UTC" },
+      sourcePath: "/tmp/daily-report.md",
+      projectName: "alpha"
+    };
+    try {
+      store.syncRoutines([declaration], {
+        now: new Date("2026-05-20T08:30:00.000Z")
+      });
+      expect(
+        store.getRoutine({ name: "daily-report", projectName: "alpha" })
+      ).toMatchObject({ nextFireAt: "2026-05-20T09:00:00.000Z" });
+
+      store.syncRoutines([], { projects: ["alpha"] });
+      store.markRoutinesInactiveForProject("alpha", {
+        currentRoutineNames: ["daily-report"]
+      });
+      store.upsertInvalidRoutineStub({
+        name: "daily-report",
+        projectName: "alpha",
+        sourcePath: "/tmp/daily-report.md"
+      });
+
+      store.syncRoutines([declaration], {
+        now: new Date("2026-05-23T10:00:00.000Z")
+      });
+
+      expect(
+        store.getRoutine({ name: "daily-report", projectName: "alpha" })
+      ).toMatchObject({
+        nextFireAt: "2026-05-24T09:00:00.000Z",
+        state: "active"
+      });
     } finally {
       store.close();
     }

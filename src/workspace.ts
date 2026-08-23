@@ -1,5 +1,15 @@
-import { execFile } from "node:child_process";
-import { mkdir, realpath, stat } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  stat
+} from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -9,6 +19,9 @@ import {
 } from "./workspace-paths.js";
 
 const execFileAsync = promisify(execFile);
+const GIT_ABORT_GRACE_MS = 1_000;
+const GIT_GROUP_POLL_MS = 10;
+const GIT_MAX_BUFFER_BYTES = 1024 * 1024;
 
 export type WorkspaceProject = {
   name: string;
@@ -52,6 +65,13 @@ export class WorkspacePreparationError extends Error {
     }
     this.name = "WorkspacePreparationError";
     this.code = code;
+  }
+}
+
+export class WorkspacePreparationCleanupError extends Error {
+  constructor(message: string, cause: unknown) {
+    super(message, { cause });
+    this.name = "WorkspacePreparationCleanupError";
   }
 }
 
@@ -207,25 +227,30 @@ const fetchLocks = new Map<string, Promise<unknown>>();
 
 export async function ensureRepositoryCache(
   project: WorkspaceProject,
-  cachePath: string
+  cachePath: string,
+  signal?: AbortSignal
 ): Promise<void> {
   const prior = fetchLocks.get(cachePath) ?? Promise.resolve();
   const next = prior
     .catch(() => undefined)
     .then(async () => {
+      signal?.throwIfAborted();
       if (!(await exists(cachePath))) {
-        await mkdir(path.dirname(cachePath), { recursive: true });
-        await git(["clone", "--bare", project.workspace.git.remote, cachePath]);
+        await createRepositoryCache(project, cachePath, signal);
       } else {
-        await ensureRepositoryCacheRemote(project, cachePath);
+        await ensureRepositoryCacheRemote(project, cachePath, signal);
       }
-      await git([
-        "-C",
-        cachePath,
-        "fetch",
-        "origin",
-        `${project.workspace.git.base_branch}:refs/remotes/origin/${project.workspace.git.base_branch}`
-      ]);
+      signal?.throwIfAborted();
+      await git(
+        [
+          "-C",
+          cachePath,
+          "fetch",
+          "origin",
+          `${project.workspace.git.base_branch}:refs/remotes/origin/${project.workspace.git.base_branch}`
+        ],
+        signal
+      );
     });
   fetchLocks.set(cachePath, next);
   try {
@@ -238,20 +263,79 @@ export async function ensureRepositoryCache(
   }
 }
 
+async function createRepositoryCache(
+  project: WorkspaceProject,
+  cachePath: string,
+  signal: AbortSignal | undefined
+): Promise<void> {
+  const cacheParent = path.dirname(cachePath);
+  await mkdir(cacheParent, { recursive: true });
+  signal?.throwIfAborted();
+  // The shared cache path is published only after clone completion. An
+  // interrupted first clone can therefore remove its owned staging path
+  // without deleting a cache that may already own live worktrees.
+  const stagingPath = await mkdtemp(
+    path.join(cacheParent, `.${path.basename(cachePath)}.clone-`)
+  );
+  let operationError: unknown;
+  let operationFailed = false;
+  try {
+    // mkdtemp always creates its directory 0700, unlike a direct `git clone
+    // --bare` into a not-yet-existing path, which follows the process umask.
+    // Restore that parity before publishing, including group-sharing umasks.
+    await chmod(stagingPath, 0o777 & ~process.umask());
+    await git(
+      ["clone", "--bare", project.workspace.git.remote, stagingPath],
+      signal
+    );
+    signal?.throwIfAborted();
+    try {
+      await rename(stagingPath, cachePath);
+    } catch (error) {
+      if (!(await exists(cachePath))) {
+        throw error;
+      }
+      await ensureRepositoryCacheRemote(project, cachePath, signal);
+    }
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
+  }
+  // A no-op after a successful rename: the staging path is already gone
+  // and `force` swallows the resulting ENOENT.
+  try {
+    await rm(stagingPath, { force: true, recursive: true });
+  } catch (cleanupError) {
+    throw new WorkspacePreparationCleanupError(
+      `failed to clean repository cache staging directory ${stagingPath}`,
+      operationFailed
+        ? new AggregateError([operationError, cleanupError])
+        : cleanupError
+    );
+  }
+  if (operationFailed) {
+    throw operationError;
+  }
+}
+
 async function ensureRepositoryCacheRemote(
   project: WorkspaceProject,
-  cachePath: string
+  cachePath: string,
+  signal?: AbortSignal
 ): Promise<void> {
   let originUrl: string;
   try {
-    originUrl = await git([
-      "-C",
-      cachePath,
-      "config",
-      "--get",
-      "remote.origin.url"
-    ]);
+    originUrl = await git(
+      ["-C", cachePath, "config", "--get", "remote.origin.url"],
+      signal
+    );
   } catch (error) {
+    if (
+      isAbortError(error) ||
+      error instanceof WorkspacePreparationCleanupError
+    ) {
+      throw error;
+    }
     throw new WorkspacePreparationError(
       "cache_conflict",
       `repository cache ${cachePath} is not a reusable Git repository with origin ${project.workspace.git.remote}`,
@@ -306,9 +390,274 @@ async function exists(filePath: string): Promise<boolean> {
   }
 }
 
-async function git(args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args);
+export async function git(
+  args: string[],
+  signal?: AbortSignal
+): Promise<string> {
+  if (signal !== undefined && process.platform !== "win32") {
+    return await gitInProcessGroup(args, signal);
+  }
+  const { stdout } =
+    signal === undefined
+      ? await execFileAsync("git", args)
+      : await execFileAsync("git", args, { signal });
   return stdout.trim();
+}
+
+async function gitInProcessGroup(
+  args: string[],
+  signal: AbortSignal
+): Promise<string> {
+  const child = spawn("git", args, {
+    detached: true,
+    signal,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const stdout = new BoundedGitOutput();
+  const stderr = new BoundedGitOutput();
+  let settled = false;
+  let groupShutdown: Promise<void> | undefined;
+  let rejectGroupShutdownFailure: ((reason?: unknown) => void) | undefined;
+  const groupShutdownFailure = new Promise<never>((_resolve, reject) => {
+    rejectGroupShutdownFailure = reject;
+  });
+  let outputError: Error | undefined;
+  const stopGroup = (): void => {
+    if (!settled && groupShutdown === undefined) {
+      groupShutdown = terminateGitProcessGroup(child.pid);
+      void groupShutdown.catch((error: unknown) => {
+        rejectGroupShutdownFailure?.(error);
+      });
+    }
+  };
+  const captureOutput = (
+    stream: "stdout" | "stderr",
+    output: BoundedGitOutput,
+    chunk: Buffer
+  ): void => {
+    if (outputError !== undefined || !output.append(chunk)) {
+      return;
+    }
+    outputError = Object.assign(
+      new RangeError(`${stream} maxBuffer length exceeded`),
+      {
+        cmd: `git ${args.join(" ")}`,
+        code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+      }
+    );
+    stopGroup();
+  };
+  child.stdout.on("data", (chunk: Buffer) => {
+    captureOutput("stdout", stdout, chunk);
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    captureOutput("stderr", stderr, chunk);
+  });
+  signal.addEventListener("abort", stopGroup, { once: true });
+  if (signal.aborted) {
+    stopGroup();
+  }
+
+  let processError: unknown;
+  try {
+    await Promise.race([
+      new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code, exitSignal) => {
+          settled = true;
+          if (code === 0) {
+            resolve();
+            return;
+          }
+          reject(
+            Object.assign(
+              new Error(
+                `Command failed: git ${args.join(" ")}\n${stderr.toString()}`
+              ),
+              { code, killed: child.killed, signal: exitSignal }
+            )
+          );
+        });
+      }),
+      groupShutdownFailure
+    ]);
+  } catch (error) {
+    processError = error;
+  } finally {
+    settled = true;
+    signal.removeEventListener("abort", stopGroup);
+  }
+
+  try {
+    await groupShutdown;
+  } catch (cleanupError) {
+    throw new WorkspacePreparationCleanupError(
+      "failed to stop aborted Git process group",
+      cleanupError
+    );
+  }
+  if (outputError !== undefined) {
+    throw outputError;
+  }
+  if (processError !== undefined) {
+    if (processError instanceof Error) {
+      throw processError;
+    }
+    throw new Error("Git process failed with a non-error value", {
+      cause: processError
+    });
+  }
+  return stdout.toString().trim();
+}
+
+class BoundedGitOutput {
+  readonly #chunks: Buffer[] = [];
+  #length = 0;
+
+  append(chunk: Buffer): boolean {
+    const remaining = GIT_MAX_BUFFER_BYTES - this.#length;
+    if (chunk.length <= remaining) {
+      this.#chunks.push(chunk);
+      this.#length += chunk.length;
+      return false;
+    }
+    if (remaining > 0) {
+      this.#chunks.push(chunk.subarray(0, remaining));
+      this.#length = GIT_MAX_BUFFER_BYTES;
+    }
+    return true;
+  }
+
+  toString(): string {
+    return Buffer.concat(this.#chunks, this.#length).toString("utf8");
+  }
+}
+
+async function terminateGitProcessGroup(
+  pid: number | undefined
+): Promise<void> {
+  if (pid === undefined || !Number.isSafeInteger(pid) || pid <= 0) {
+    return;
+  }
+  if (!signalProcessGroup(pid, "SIGTERM")) {
+    return;
+  }
+  if (await waitForProcessGroupExit(pid, GIT_ABORT_GRACE_MS)) {
+    return;
+  }
+  signalProcessGroup(pid, "SIGKILL");
+  if (!(await waitForProcessGroupExit(pid, GIT_ABORT_GRACE_MS, true))) {
+    throw new Error(`Git process group ${pid} survived SIGKILL`);
+  }
+}
+
+function signalProcessGroup(pid: number, signal: NodeJS.Signals): boolean {
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ESRCH") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function waitForProcessGroupExit(
+  pid: number,
+  timeoutMs: number,
+  acceptZombieOnly = false
+): Promise<boolean> {
+  const expiresAt = Date.now() + timeoutMs;
+  while (await processGroupCanExecute(pid, acceptZombieOnly)) {
+    if (Date.now() >= expiresAt) {
+      return false;
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, GIT_GROUP_POLL_MS);
+    });
+  }
+  return true;
+}
+
+async function processGroupCanExecute(
+  pid: number,
+  acceptZombieOnly: boolean
+): Promise<boolean> {
+  if (!processGroupExists(pid)) {
+    return false;
+  }
+  if (!acceptZombieOnly || process.platform !== "linux") {
+    return true;
+  }
+  return await linuxProcessGroupHasNonZombieMember(pid);
+}
+
+async function linuxProcessGroupHasNonZombieMember(
+  processGroupId: number
+): Promise<boolean> {
+  let entries: string[];
+  try {
+    entries = await readdir("/proc");
+  } catch {
+    // A host without a readable procfs cannot distinguish zombies from
+    // executable members, so retain the conservative process-group probe.
+    return true;
+  }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) {
+      continue;
+    }
+    let statContents: string;
+    try {
+      statContents = await readFile(`/proc/${entry}/stat`, "utf8");
+    } catch {
+      // Processes can disappear between readdir and readFile.
+      continue;
+    }
+    const processStat = parseLinuxProcessStat(statContents);
+    if (
+      processStat?.processGroupId === processGroupId &&
+      processStat.state !== "Z" &&
+      processStat.state !== "X"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseLinuxProcessStat(
+  statContents: string
+): { processGroupId: number; state: string } | undefined {
+  // /proc/<pid>/stat wraps comm in parentheses; comm itself may contain a
+  // closing parenthesis, so field parsing must begin after the final one.
+  const commandEnd = statContents.lastIndexOf(")");
+  if (commandEnd < 0) {
+    return undefined;
+  }
+  const fields = statContents
+    .slice(commandEnd + 1)
+    .trim()
+    .split(/\s+/);
+  const processGroupId = Number.parseInt(fields[2] ?? "", 10);
+  const state = fields[0];
+  if (state === undefined || !Number.isSafeInteger(processGroupId)) {
+    return undefined;
+  }
+  return { processGroupId, state };
+}
+
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ESRCH") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function gitSucceeds(args: string[]): Promise<boolean> {
@@ -322,4 +671,12 @@ async function gitSucceeds(args: string[]): Promise<boolean> {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+// Distinguishes an execFile rejection actually caused by `signal` firing from
+// an unrelated failure that happens to land after the signal was aborted for
+// some other reason (e.g. a real Git error racing the deadline). Node's
+// execFile rejects with this shape specifically for signal-driven aborts.
+export function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }

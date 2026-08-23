@@ -31,6 +31,7 @@ import { deliverRoutineFanoutNotification } from "../notifications/routine-fanou
 import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
 import type { NotificationSink } from "../notifications/types.js";
 import type { RoutineFanoutHoldReason, RunStore } from "../run-store.js";
+import { WorkspacePreparationCleanupError } from "../workspace.js";
 import {
   evaluateRoutineSchedule,
   nextRecurringFireAt,
@@ -1013,6 +1014,7 @@ async function runRoutineFiring(input: {
   const events: NormalizedProviderEvent[] = [];
   const deadline = routineFiringDeadline(input.routine.timeoutMinutes);
   let prepared: PreparedRoutineWorkspace | undefined;
+  let preparationAttempt: Promise<PreparedRoutineWorkspace> | undefined;
   let providerAttempt: Promise<void> | undefined;
   let rawLogPath: string | undefined;
   let normalizedIndexPath: string | undefined;
@@ -1031,15 +1033,15 @@ async function runRoutineFiring(input: {
       input.firingId,
       "preparing_workspace"
     );
-    prepared = await deadline.race(
-      input.prepareRoutineWorkspace({
-        configDir: input.configDir,
-        firingId: input.firingId,
-        kind: input.routine.kind,
-        project: input.project,
-        routineName: input.routine.name
-      })
-    );
+    preparationAttempt = input.prepareRoutineWorkspace({
+      configDir: input.configDir,
+      firingId: input.firingId,
+      kind: input.routine.kind,
+      project: input.project,
+      routineName: input.routine.name,
+      ...(deadline.signal === undefined ? {} : { signal: deadline.signal })
+    });
+    prepared = await deadline.race(preparationAttempt);
     input.runStore.updateRoutineFiringWorkspace({
       branchName: prepared.branchName,
       branchRef: prepared.branchRef,
@@ -1298,6 +1300,27 @@ async function runRoutineFiring(input: {
     const timedOut = error instanceof RoutineFiringTimeoutError;
     if (timedOut) {
       await input.provider.cancel(input.firingId).catch(() => undefined);
+      // A deadline can win its race before AbortSignal-driven Git cleanup
+      // settles. Keep the firing's slot until preparation has actually
+      // stopped so later callers never serialize behind abandoned work.
+      const preparationError = await preparationAttempt?.then(
+        () => undefined,
+        (preparationError: unknown) => preparationError
+      );
+      if (
+        preparationError instanceof WorkspacePreparationCleanupError ||
+        (preparationError instanceof Error &&
+          (preparationError.name === "WorkspacePreparationCleanupError" ||
+            preparationError.name === "RoutineWorkspaceCleanupError"))
+      ) {
+        input.logger?.warn(
+          {
+            err: errorMessage(preparationError),
+            firing: input.firingId
+          },
+          "symphonika timed-out routine workspace cleanup failed"
+        );
+      }
       await providerAttempt?.catch(() => undefined);
     }
     const cancelEntry = input.activeRuns.get(input.firingId);
@@ -1766,18 +1789,23 @@ function routinePullRequestObservations(
 function routineFiringDeadline(timeoutMinutes: number | undefined): {
   clear: () => void;
   race: <T>(operation: Promise<T>) => Promise<T>;
+  signal: AbortSignal | undefined;
 } {
   if (timeoutMinutes === undefined) {
     return {
       clear: () => undefined,
-      race: (operation) => operation
+      race: (operation) => operation,
+      signal: undefined
     };
   }
 
+  const controller = new AbortController();
   let timer: NodeJS.Timeout | undefined;
   const expired = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
-      reject(new RoutineFiringTimeoutError());
+      const error = new RoutineFiringTimeoutError();
+      reject(error);
+      controller.abort(error);
     }, timeoutMinutes * 60_000);
   });
   return {
@@ -1787,7 +1815,8 @@ function routineFiringDeadline(timeoutMinutes: number | undefined): {
         timer = undefined;
       }
     },
-    race: (operation) => Promise.race([operation, expired])
+    race: (operation) => Promise.race([operation, expired]),
+    signal: controller.signal
   };
 }
 

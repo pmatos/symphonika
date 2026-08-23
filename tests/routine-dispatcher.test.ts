@@ -827,6 +827,85 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("aborts and settles workspace preparation before completing a timed-out firing", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const provider = quietProvider();
+    const logger = pino({ enabled: false });
+    const logWarn = vi.spyOn(logger, "warn");
+    const project = dueRoutineProjectFixture(root, "codex");
+    project.routines = [
+      {
+        ...project.routines![0]!,
+        timeoutMinutes: 0.001
+      }
+    ];
+    let preparationSettled = false;
+    const prepareRoutineWorkspace = vi.fn(
+      (input: PrepareRoutineWorkspaceInput): Promise<never> =>
+        new Promise((_resolve, reject) => {
+          const signal = input.signal;
+          signal?.addEventListener(
+            "abort",
+            () => {
+              setTimeout(() => {
+                preparationSettled = true;
+                reject(
+                  Object.assign(
+                    new Error(
+                      "failed to clean repository cache staging directory"
+                    ),
+                    { name: "WorkspacePreparationCleanupError" }
+                  )
+                );
+              }, 10);
+            },
+            { once: true }
+          );
+        })
+    );
+
+    try {
+      await dispatchDueRoutines({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-workspace-timeout",
+        globalConcurrency: { maxInFlight: undefined },
+        logger,
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([["alpha", project]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(prepareRoutineWorkspace).toHaveBeenCalledOnce();
+      expect(preparationSettled).toBe(true);
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(logWarn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          err: "failed to clean repository cache staging directory",
+          firing: "fire-workspace-timeout"
+        }),
+        "symphonika timed-out routine workspace cleanup failed"
+      );
+      expect(runStore.getRoutineFiring("fire-workspace-timeout")).toMatchObject(
+        {
+          state: "failed",
+          terminalReason: "firing_timeout"
+        }
+      );
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("terminates a firing at its wall-clock deadline when the pre-run GitHub snapshot read hangs", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

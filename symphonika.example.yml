@@ -119,6 +119,36 @@ projects:
       provider: codex
     workflow: ./WORKFLOW.md
 
+  # Dedicated Dispatch Project for the refactor-audit Routine below. Its own
+  # eligibility label keeps risk-ranked refactor issues out of the Workflow
+  # above, and its raw-FSM Workflow composes builtin:refactor-swarm. Uncomment
+  # this together with the `routines:` block at the bottom of this file.
+  # - name: symphonika-refactors
+  #   tracker:
+  #     kind: github
+  #     owner: pmatos
+  #     repo: symphonika
+  #     token: "$GITHUB_TOKEN"
+  #   issue_filters:
+  #     states: ["open"]
+  #     labels_all: ["refactor-ready"]
+  #     labels_none: ["blocked", "needs-human", "sym:stale"]
+  #   priority:
+  #     labels:
+  #       "priority:critical": 0
+  #       "priority:high": 1
+  #       "priority:medium": 2
+  #       "priority:low": 3
+  #     default: 99
+  #   workspace:
+  #     root: ./.symphonika/workspaces/symphonika-refactors
+  #     git:
+  #       remote: git@github.com:pmatos/symphonika.git
+  #       base_branch: main
+  #   agent:
+  #     provider: codex
+  #   workflow: ./refactor-workflow.yml
+
 # Routines live at service level and target an explicit, non-empty Project list.
 # The old singular `project:` field and nested Project `routines:` lists are invalid.
 # Per-Routine overrides use the same model, effort, permission_mode, and
@@ -127,5 +157,7 @@ projects:
 # above (see ADR 0067) — not appended by Symphonika itself. Claude Routine
 # Firings also receive the one-shot anti-backgrounding guards.
 # routines:
+#   # Targets the commented-out `symphonika-refactors` Project above; a
+#   # routines entry naming an undeclared Project fails the reload.
 #   - path: ./routines/refactor-audit.md
-#     projects: [symphonika]
+#     projects: [symphonika-refactors]

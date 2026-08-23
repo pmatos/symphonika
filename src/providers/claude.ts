@@ -178,8 +178,8 @@ export function createClaudeProvider(
         await processScope.stopProviderScope(input.run);
       }
     },
-    validate: async (command) => {
-      const rendered = renderProviderCommandTemplate(command, {}).rendered;
+    validate: async (command, values = {}) => {
+      const rendered = renderProviderCommandTemplate(command, values).rendered;
       const parsed = parseProviderCommand(rendered, PROVIDER_LABEL);
       validateClaudeProtocolFlags(parsed.args);
       await validateClaudeStreamJsonCommand(parsed);

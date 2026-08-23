@@ -297,7 +297,7 @@ describe("routine operator surfaces", () => {
     }
   });
 
-  it("POST /api/runs/:id/cancel cancels a routine firing via the store-only fallback", async () => {
+  it("POST /api/runs/:id/cancel persists a canonical outcome for a store-cancelled routine firing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
@@ -337,6 +337,28 @@ describe("routine operator surfaces", () => {
         cancelReason: "operator",
         state: "cancelled"
       });
+
+      const firingsResponse = await app.request(
+        "/api/routines/daily-report/firings?project=alpha"
+      );
+      const firingsBody = (await firingsResponse.json()) as {
+        firings: Array<{ outcome: unknown }>;
+      };
+      expect(firingsResponse.status).toBe(200);
+      expect(firingsBody.firings).toEqual([
+        expect.objectContaining({
+          id: "fire-live",
+          outcome: {
+            action: "none",
+            source: "symphonika",
+            status: "error",
+            summary: "cancelled",
+            title: "",
+            url: null,
+            verified: false
+          }
+        })
+      ]);
 
       const alreadyTerminal = await app.request("/api/runs/fire-live/cancel", {
         method: "POST"
@@ -404,6 +426,249 @@ describe("routine operator surfaces", () => {
       expect(body).toContain("Routines");
       expect(body).toContain("daily-report");
       expect(body).toContain('<a href="/routines/daily-report">');
+    } finally {
+      store.close();
+    }
+  });
+
+  it("excludes Routine Targets removed from config from dashboard groups", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/daily-report.md"
+    };
+    try {
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      store.syncRoutines([{ ...declaration, projectName: "alpha" }], {
+        projects: ["alpha", "beta"]
+      });
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain('<td><a href="/routines/daily-report">1</a></td>');
+      expect(body).not.toContain("1/2 active");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("renders dashboard declaration metadata from current targets instead of removed history", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/daily-report.md"
+    };
+    try {
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      store.syncRoutines(
+        [
+          {
+            ...declaration,
+            kind: "git",
+            projectName: "beta",
+            schedule: { at: "2026-05-23T10:00:00.000Z" }
+          }
+        ],
+        { projects: ["alpha", "beta"] }
+      );
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain("<td>git</td>");
+      expect(body).toContain("2026-05-23T10:00:00.000Z");
+      expect(body).not.toContain("2026-05-22T10:00:00.000Z");
+      expect(body).toContain('<td><a href="/routines/daily-report">1</a></td>');
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a Routine whose every target was removed from config visible", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/daily-report.md"
+    };
+    try {
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      store.syncRoutines([], { projects: ["alpha", "beta"] });
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain(
+        '<a href="/routines/daily-report">daily-report</a>'
+      );
+      expect(body).toContain('<td><a href="/routines/daily-report">2</a></td>');
+      expect(body).toContain("removed_from_config");
+      expect(body).not.toContain("No Routines configured");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("hides removed targets when every current target is inactive", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/daily-report.md"
+    };
+    try {
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      store.syncRoutines([{ ...declaration, projectName: "alpha" }], {
+        projects: ["alpha", "beta"]
+      });
+      store.markRoutinesInactiveForProject("alpha");
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const defaultBody = await (await app.request("/")).text();
+      const inactiveBody = await (
+        await app.request("/?include_inactive=true")
+      ).text();
+
+      expect(defaultBody).not.toContain(
+        '<a href="/routines/daily-report">daily-report</a>'
+      );
+      expect(inactiveBody).toContain(
+        '<a href="/routines/daily-report?include_inactive=true">daily-report</a>'
+      );
+      expect(inactiveBody).toContain(
+        '<td><a href="/routines/daily-report?include_inactive=true">1</a></td>'
+      );
+      expect(inactiveBody).toContain("inactive");
+      expect(inactiveBody).not.toContain("removed_from_config");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a fully removed Routine visible after one target Project is disabled", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/daily-report.md"
+    };
+    try {
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      store.syncRoutines([], { projects: ["alpha", "beta"] });
+      store.markRoutinesInactiveForProject("alpha");
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain(
+        '<a href="/routines/daily-report">daily-report</a>'
+      );
+      expect(body).toContain('<td><a href="/routines/daily-report">2</a></td>');
+      expect(body).toContain("removed_from_config");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a fully removed Routine visible after one target Project leaves the config", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/daily-report.md"
+    };
+    try {
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      store.syncRoutines([], { projects: ["alpha", "beta"] });
+      store.pruneRoutinesForUnknownProjects(["beta"]);
+      const app = createHttpApp({
+        runStore: store,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain(
+        '<a href="/routines/daily-report">daily-report</a>'
+      );
+      expect(body).toContain('<td><a href="/routines/daily-report">2</a></td>');
+      expect(body).toContain("removed_from_config");
     } finally {
       store.close();
     }

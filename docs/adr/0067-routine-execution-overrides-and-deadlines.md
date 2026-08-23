@@ -27,6 +27,24 @@ actually work" moved to an opt-in functional probe, `doctor --live-check <provid
 the real command with a trivial prompt and waits for a reply — see SPEC.md §11.3. Everything else in
 this ADR is unchanged.
 
+**Third amendment note:** a Routine Firing now passes the authored provider command and its resolved
+`model`, `effort`, and `permission_mode` to the adapter's `validate()` pre-flight probe. The earlier
+contract passed the template without values, whose adapter-level empty-value render removed every
+routine-only section; an unsupported routine-specific flag or value could therefore bypass
+validation and reach `runAttempt`. `validate()` now accepts optional template values and renders the
+command exactly once; issue-driven or provider-level validation still defaults to empty values.
+
+**Fourth amendment note:** Routine Firing Deadline expiry now cooperatively cancels workspace
+preparation as well as provider execution. The deadline's `AbortSignal` reaches the shared cache
+clone/fetch and firing-specific branch/worktree Git commands, and the dispatcher awaits preparation
+settlement before recording the timeout. First-cache clones publish atomically from an owned staging
+directory so abort cleanup cannot leave a partial bare repository at the shared cache path. On
+POSIX, cancellable Git commands run as separate process groups with bounded `SIGTERM` to `SIGKILL`
+escalation, so transports, hooks, and helpers cannot continue executing after preparation settles;
+Linux groups with only zombie members count as stopped even when PID 1 delays reaping them. Staging
+modes follow the process umask, and incomplete owned-path cleanup is surfaced without replacing the
+deadline's terminal classification. This resolves the temporary limitation tracked in #353.
+
 ## Context
 
 The live ptt routines require different model, effort, permission, and 60-minute execution
@@ -49,11 +67,14 @@ omitted effective value does not change the corresponding provider command behav
 plain tags (`{{model}}`, `{{effort}}`, `{{permission_mode}}`) substitute the resolved value, and
 `{{#tag}}...{{/tag}}` conditional sections keep (and substitute) their contents only when the field
 resolves to a value — the section form is what lets an operator omit a whole `--model X` segment
-when `X` is absent, without a dangling incomplete flag. Each provider adapter renders
-`input.provider.command` through this template using `input.routine` (or `{}` for issue-driven Runs
-and for `validate()`, which never resolves per-routine values) before parsing it into argv — the
-operator's own authored command carries all provider-specific flag knowledge; Symphonika's
-TypeScript never hardcodes Codex's `-c` keys or OMP's flag names.
+when `X` is absent, without a dangling incomplete flag. Each provider adapter renders the authored
+command exactly once before parsing it into argv: `runAttempt` uses `input.routine` (or `{}` for
+issue-driven Runs), while `validate()` uses its optional template values (or `{}` for provider-level
+validation). A Routine Firing passes the authored command and the same resolved values to both
+entrypoints, ensuring its pre-flight probe sees the same command-template result that `runAttempt`
+derives without re-parsing substituted bytes. The operator's own authored command carries all
+provider-specific flag knowledge; Symphonika's TypeScript never hardcodes Codex's `-c` keys or OMP's
+flag names.
 
 An unrecognized or malformed template tag throws rather than passing through as literal text — the
 string is about to be spawned as a real child-process argv. Section validity is checked structurally
@@ -100,14 +121,23 @@ the provider adapter's existing cancellation method and persists `failed / firin
 regardless of the cancellation-generated process-exit event. Terminal outcome classification is
 also inside the deadline; post-terminal pull-request discovery is not. The process-group
 implementation from #341 and ADR 0064 makes that cancellation a whole-tree termination once a
-provider process exists. Expiry during workspace preparation only stops the dispatcher from
-waiting on that stage — the underlying `git` subprocesses are not cancelled and can keep running
-in the background (tracked in #353).
+provider process exists. During workspace preparation, expiry aborts the stage's Git subprocesses
+and awaits preparation settlement before the firing becomes terminal or releases its concurrency
+slot. POSIX Git commands use their own process groups and bounded escalation so abort covers Git's
+transports, hooks, and helpers; non-POSIX hosts retain direct-child abort behavior. Cache creation
+clones to an invocation-owned sibling staging directory, applies the direct-clone mode derived from
+the process umask, and atomically publishes a complete bare repository; abort removes the staging
+directory, while an interrupted fetch preserves the already-validated shared cache. Cleanup likewise
+removes only a newly-owned firing branch/worktree, never a reused one, verifies no owned directory or
+worktree registration remains, and surfaces any incomplete cleanup in logs while preserving
+`firing_timeout` as the terminal reason.
 
 ## Consequences
 
 - Operator commands remain reusable for issue Runs and are unchanged when Routine overrides are
   omitted (rendering with `{}` is a no-op for a command with no template tags).
+- Routine-specific flags and values are rejected during pre-flight validation instead of first
+  failing after `runAttempt` starts.
 - Provider-specific argv vocabulary lives entirely in the operator's own `providers.<name>.command`,
   not in Symphonika's TypeScript — real Codex/OMP tuning works without either adapter hardcoding a
   flag name.
@@ -121,7 +151,6 @@ in the background (tracked in #353).
   mode; it is unenforced, not unsupported. A Routine still runs headless (`-p`, no
   `--permission-prompt-tool`), so a mode that relies on a human answering a prompt cannot make
   progress on gated actions in practice — the operator's own responsibility, not a Symphonika check.
-- A firing that times out during workspace preparation leaves its `git` clone/fetch running
-  unattended; because `ensureRepositoryCache` serializes callers per project repository cache, that
-  abandoned work can delay the next firing's or Run's workspace preparation for the same project
-  (#353).
+- A firing that times out during workspace preparation retains its concurrency slot until the
+  aborted Git command and owned-path cleanup settle. Later callers of the same repository cache can
+  then proceed without awaiting abandoned work or repairing a partial clone.

@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { loadRoutineDeclaration } from "../src/routines/declaration-loader.js";
 
+const repoRoot = path.resolve(import.meta.dirname, "..");
+
 const tempRoots: string[] = [];
 
 async function makeTempRoot(): Promise<string> {
@@ -22,6 +24,27 @@ afterEach(async () => {
 });
 
 describe("RoutineDeclarationLoader", () => {
+  it("loads the shipped risk-ranked refactor auditor as a bounded provider-neutral report Routine", async () => {
+    const result = await loadRoutineDeclaration(
+      path.join(repoRoot, "routines/refactor-audit.md")
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.routine).toMatchObject({
+      kind: "report",
+      name: "refactor-audit",
+      provider: null,
+      schedule: { cron: "0 0 * * 0", tz: "Etc/UTC" }
+    });
+    expect(result.routine?.prompt).toContain(
+      "size × recent churn × inverse line coverage"
+    );
+    expect(result.routine?.prompt).toContain("at most 3 new issues");
+    expect(result.routine?.prompt).toContain("gh issue create");
+    expect(result.routine?.prompt).toContain("duplicate");
+    expect(result.routine?.prompt).toContain("refactor-ready");
+  });
+
   it("parses notify false as a Routine-level notification opt-out", async () => {
     const root = await makeTempRoot();
     const routinePath = path.join(root, "self-notifying.md");

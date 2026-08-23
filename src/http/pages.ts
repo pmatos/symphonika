@@ -520,6 +520,24 @@ export function registerPages(options: RegisterPagesOptions): void {
         : options.monotonicNow() - bannerReferenceAt;
     const pollingIntervalMs =
       options.getPollingIntervalMs?.() ?? DEFAULT_POLLING_INTERVAL_MS;
+    // Classify declarations from every durable target before applying the
+    // inactive-target visibility policy. Otherwise an inactive current target
+    // can disappear first and make its removed sibling look like an entirely
+    // removed declaration.
+    const routineGroups = groupRoutinesByName(
+      options.runStore.listRoutines({ includeInactive: true })
+    ).flatMap((group) => {
+      const currentTargets = currentRoutineTargets(group);
+      if (currentTargets.length === 0) {
+        return [group];
+      }
+      const visibleTargets = includeInactive
+        ? currentTargets
+        : currentTargets.filter((target) => target.state !== "inactive");
+      return visibleTargets.length === 0
+        ? []
+        : groupRoutinesByName(visibleTargets);
+    });
     const html = layout(
       "Symphonika",
       [
@@ -528,14 +546,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         renderHeader(options.version, snapshot),
         DASHBOARD_STREAM_BANNER,
         `<div id="active-now-band">${renderActiveNowBand(activeRuns, activeFirings, watchdogByRun, nowMs)}</div>`,
-        renderRoutinesSection(
-          groupRoutinesByName(
-            options.runStore.listRoutines({
-              includeInactive
-            })
-          ),
-          includeInactive
-        ),
+        renderRoutinesSection(routineGroups, includeInactive),
         `<div id="projects-section">${renderProjectsSection(snapshot, options.issuePollStatus, activeRuns, activeFirings, lastRunByProject, nowMs)}</div>`,
         renderStaleIssuesCard(options.issuePollStatus?.filteredIssues ?? []),
         `<script>${DASHBOARD_LIVE_CLIENT_JS}</script>`
@@ -1504,6 +1515,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       .sort((a, b) => b - a)
       .map((issueNumber) =>
         buildProjectIssueRow({
+          globalCapacity: concurrency?.global,
           inFlight,
           issueNumber,
           maxInFlight: projectCapacity?.maxInFlight,
@@ -3102,6 +3114,47 @@ td code { color: var(--ink-2); }
   .fields dt { margin-top: var(--sp-2); }
 }`;
 
+const LOCAL_TIME_CLIENT_JS = `(function () {
+  var selector = "time[data-local-time]";
+  function localizeTimestamp(element) {
+    var value = element.getAttribute("datetime");
+    if (!value) { return; }
+    var date = new Date(value);
+    if (Number.isNaN(date.getTime())) { return; }
+    element.textContent = date.toLocaleString();
+  }
+  function localizeWithin(root) {
+    if (root.nodeType === 1 && root.matches(selector)) {
+      localizeTimestamp(root);
+    }
+    if (!root.querySelectorAll) { return; }
+    var timestamps = root.querySelectorAll(selector);
+    for (var i = 0; i < timestamps.length; i++) {
+      localizeTimestamp(timestamps[i]);
+    }
+  }
+  localizeWithin(document);
+  new MutationObserver(function (records) {
+    for (var i = 0; i < records.length; i++) {
+      var nodes = records[i].addedNodes;
+      for (var j = 0; j < nodes.length; j++) {
+        localizeWithin(nodes[j]);
+      }
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+})();`;
+
+function renderTimestamp(
+  value: string | null | undefined,
+  fallback = "-"
+): string {
+  if (!value) {
+    return escapeHtml(fallback);
+  }
+  const escaped = escapeHtml(value);
+  return `<time datetime="${escaped}" data-local-time>${escaped}</time>`;
+}
+
 function layout(title: string, body: string): string {
   return `<!doctype html>
 <html lang="en">
@@ -3120,6 +3173,7 @@ function layout(title: string, body: string): string {
 <main>
 ${body}
 </main>
+<script data-local-time-client>${LOCAL_TIME_CLIENT_JS}</script>
 </body>
 </html>`;
 }
@@ -3490,7 +3544,7 @@ function renderProjectCapacityStrip(
       )
     );
   }
-  const lastPollAt = projectState.lastPollFinishedAt;
+  const lastPollAt = projectState.lastSuccessfulPollAt;
   const pollAge = lastPollAt === null ? "never" : formatAge(lastPollAt, nowMs);
   const preRestart =
     lastPollAt !== null &&
@@ -3566,6 +3620,7 @@ type ProjectIssueRow = {
 };
 
 function buildProjectIssueRow(input: {
+  globalCapacity: { inFlight: number; maxInFlight: number | null } | undefined;
   inFlight: number;
   issueNumber: number;
   maxInFlight: number | undefined;
@@ -3662,12 +3717,17 @@ function buildProjectIssueRow(input: {
       title: snapshot.title
     };
   }
-  const atCap =
-    input.maxInFlight !== undefined && input.inFlight >= input.maxInFlight;
+  const globalCapacity = input.globalCapacity;
+  const capDetail =
+    globalCapacity !== undefined &&
+    globalCapacity.maxInFlight !== null &&
+    globalCapacity.inFlight >= globalCapacity.maxInFlight
+      ? `queued behind global cap (${globalCapacity.inFlight}/${globalCapacity.maxInFlight})`
+      : input.maxInFlight !== undefined && input.inFlight >= input.maxInFlight
+        ? `queued behind cap (${input.inFlight}/${input.maxInFlight})`
+        : undefined;
   return {
-    detail: atCap
-      ? `queued behind cap (${input.inFlight}/${input.maxInFlight})`
-      : "within cap, next by priority",
+    detail: capDetail ?? "within cap, next by priority",
     hasSnapshot,
     issueNumber: input.issueNumber,
     pillHtml: labelPill("eligible", "neutral"),
@@ -5387,19 +5447,13 @@ function renderPullRequestDetailPage(input: {
 }
 
 // A Routine name is globally unique across the *current* declared config
-// (ADR 0069), but a removed declaration's target rows are soft-disabled,
-// never deleted (src/routines/dispatcher.ts documents this: "Routine names
-// are unique only per (project_name, name) — a routine soft-disabled with
-// disabled_reason 'removed_from_config' is never deleted, so an unrelated,
-// later-declared routine elsewhere can legitimately reuse its name"). A
-// stale disabled row still passes listRoutines()'s default
-// `state != 'inactive'` filter, so grouping by name alone could fold a dead
-// declaration's row into a live, unrelated routine's target count. Source
+// (ADR 0069), but removed target rows are soft-disabled, never deleted, and
+// still pass listRoutines()'s default `state != 'inactive'` filter. Source
 // path is stable per declaration and shared by every target one `routines:`
-// entry materializes, so grouping on (name, sourcePath) keeps that
-// cross-declaration merge from happening while still collapsing an
-// N-target Routine into one row — the failure mode #302 exists to prevent.
-// Full per-target detail
+// entry materializes, so grouping on (name, sourcePath) keeps distinct
+// declarations apart while still collapsing an N-target Routine into one
+// row. Grouping itself keeps every row it is handed; excluding removed
+// targets is each caller's own decision. Full per-target detail
 // (skip counters, firing history, latest outcome) moves to /routines/:name
 // (#304); this row only needs enough to answer "is it scheduled, and when
 // does it next run."
@@ -5436,15 +5490,17 @@ function groupRoutinesByName(routines: RoutineStatus[]): RoutineGroup[] {
 // Widened past RoutineGroup so #304's declaration card can format a
 // specific resolved target's schedule (see resolveRoutineDeclaration)
 // without a duplicate copy of this two-line rule.
-function formatRoutineSchedule(schedule: {
+function renderRoutineSchedule(schedule: {
   scheduleAt: string | null;
   scheduleCron: string | null;
   scheduleTz: string | null;
 }): string {
   if (schedule.scheduleCron !== null) {
-    return `${schedule.scheduleCron} (${schedule.scheduleTz ?? "UTC"})`;
+    return escapeHtml(
+      `${schedule.scheduleCron} (${schedule.scheduleTz ?? "UTC"})`
+    );
   }
-  return schedule.scheduleAt ?? "-";
+  return renderTimestamp(schedule.scheduleAt);
 }
 
 // A group with no active target shows its shared lifecycle state (plus
@@ -5461,7 +5517,7 @@ function renderRoutineGroupStatus(group: RoutineGroup): string {
       active.length === group.targets.length
         ? ""
         : ` <span class="muted">(${active.length}/${group.targets.length} active)</span>`;
-    return `<code>${escapeHtml(nextFireAt ?? "-")}</code>${partial}`;
+    return `<code>${renderTimestamp(nextFireAt)}</code>${partial}`;
   }
   const [representative] = group.targets;
   if (representative === undefined) {
@@ -5486,7 +5542,7 @@ function renderRoutinesSection(
       const href = `/routines/${encodeURIComponent(group.name)}${routineQuerySuffix(undefined, includeInactive)}`;
       const routineLink = `<a href="${href}">${escapeHtml(group.name)}</a>`;
       const targetsLink = `<a href="${href}">${group.targets.length}</a>`;
-      return `<tr><td>${routineLink}</td><td>${escapeHtml(group.kind)}</td><td class="c-detail"><code>${escapeHtml(formatRoutineSchedule(group))}</code></td><td>${targetsLink}</td><td>${renderRoutineGroupStatus(group)}</td></tr>`;
+      return `<tr><td>${routineLink}</td><td>${escapeHtml(group.kind)}</td><td class="c-detail"><code>${renderRoutineSchedule(group)}</code></td><td>${targetsLink}</td><td>${renderRoutineGroupStatus(group)}</td></tr>`;
     })
     .join("");
   return tableSection(
@@ -5832,7 +5888,7 @@ function renderRoutineEditBlastRadius(targets: RoutineStatus[]): string {
   const items = targets
     .map(
       (target) =>
-        `<li>${escapeHtml(target.projectName)} — next fire: <code>${target.nextFireAt === null ? "—" : escapeHtml(target.nextFireAt)}</code></li>`
+        `<li>${escapeHtml(target.projectName)} — next fire: <code>${renderTimestamp(target.nextFireAt, "—")}</code></li>`
     )
     .join("");
   return `<div class="empty"><strong>This save affects</strong>Every target below picks up the edited schedule and prompt on the next dispatch tick.<ul>${items}</ul></div>`;
@@ -6114,11 +6170,15 @@ function renderRoutineDeclarationCard(
   return `${errorBanner}<section><dl class="fields">
   <dt>Kind</dt><dd>${escapeHtml(declaration.kind)}</dd>
   <dt>Provider</dt><dd>${declaration.provider === null ? '<span class="muted">inherited</span>' : escapeHtml(declaration.provider)}</dd>
-  <dt>Schedule</dt><dd><code>${escapeHtml(formatRoutineSchedule(declaration))}</code></dd>
+  <dt>Schedule</dt><dd><code>${renderRoutineSchedule(declaration)}</code></dd>
   <dt>Allow overlap</dt><dd>${declaration.allowOverlap ? "yes" : "no"}</dd>
   <dt>Catch up</dt><dd>${escapeHtml(declaration.catchUp)}</dd>
   <dt>Source</dt><dd><code>${escapeHtml(declaration.sourcePath)}</code></dd>
 </dl></section><section>${sectionHead("Prompt")}${promptSection}</section>`;
+}
+
+function isCurrentRoutineTarget(target: RoutineStatus): boolean {
+  return target.disabledReason !== "removed_from_config";
 }
 
 // A target removed from its declaration can remain as a durable
@@ -6127,9 +6187,7 @@ function renderRoutineDeclarationCard(
 // resolveRoutineDeclaration, which picks a target to carry the
 // declaration's *content* and so orders by validity instead.
 function currentRoutineTargets(group: RoutineGroup): RoutineStatus[] {
-  return group.targets.filter(
-    (target) => target.disabledReason !== "removed_from_config"
-  );
+  return group.targets.filter(isCurrentRoutineTarget);
 }
 
 // #307 AC: "Disable/enable a Routine from its page affects every target; a
@@ -6277,9 +6335,9 @@ function renderRoutineTargetsTable(group: RoutineGroup): string {
       const skip =
         target.lastSkipReason === null
           ? '<span class="muted">none</span>'
-          : `${escapeHtml(target.lastSkipReason)} <code>${escapeHtml(target.lastSkipAt ?? "-")}</code>`;
+          : `${escapeHtml(target.lastSkipReason)} <code>${renderTimestamp(target.lastSkipAt)}</code>`;
       const counts = `overlap ${target.skipCounts24h.overlap} · cap ${target.skipCounts24h.concurrency_cap} · catch-up ${target.skipCounts24h.catch_up_window}`;
-      return `<tr><td>${escapeHtml(target.projectName)}</td><td>${routineStatePill(target.state)}${reason}</td><td><code>${escapeHtml(target.nextFireAt ?? "-")}</code></td><td><code>${escapeHtml(target.lastFiredAt ?? "-")}</code></td><td class="c-detail">${skip}</td><td class="c-detail">${counts}</td></tr>`;
+      return `<tr><td>${escapeHtml(target.projectName)}</td><td>${routineStatePill(target.state)}${reason}</td><td><code>${renderTimestamp(target.nextFireAt)}</code></td><td><code>${renderTimestamp(target.lastFiredAt)}</code></td><td class="c-detail">${skip}</td><td class="c-detail">${counts}</td></tr>`;
     })
     .join("");
   return tableSection(
@@ -6328,7 +6386,7 @@ function renderRoutineFiringHistory(firings: RoutineFiringStatus[]): string {
         .sort((a, b) => a.projectName.localeCompare(b.projectName))
         .map(
           (firing) =>
-            `<tr><td class="c-detail">${escapeHtml(eventLabel)}</td><td><a href="/firings/${encodeURIComponent(firing.id)}"><code>${escapeHtml(firing.id)}</code></a></td><td>${escapeHtml(firing.projectName)}</td><td>${statePill(firing.state)}</td><td class="c-detail">${escapeHtml(firing.terminalReason ?? "")}</td><td><code>${escapeHtml(firing.createdAt)}</code></td></tr>`
+            `<tr><td class="c-detail">${escapeHtml(eventLabel)}</td><td><a href="/firings/${encodeURIComponent(firing.id)}"><code>${escapeHtml(firing.id)}</code></a></td><td>${escapeHtml(firing.projectName)}</td><td>${statePill(firing.state)}</td><td class="c-detail">${escapeHtml(firing.terminalReason ?? "")}</td><td><code>${renderTimestamp(firing.createdAt)}</code></td></tr>`
         );
     })
     .join("");
@@ -6368,9 +6426,9 @@ function renderFiringSummary(
   <dt>State</dt><dd>${statePill(detail.state)}</dd>
   <dt>Provider</dt><dd>${escapeHtml(detail.provider)}</dd>
   <dt>Trigger</dt><dd>${escapeHtml(detail.triggerSource)}</dd>
-  <dt>Scheduled</dt><dd><code>${escapeHtml(detail.scheduledAt ?? "-")}</code></dd>
-  <dt>Started</dt><dd><code>${escapeHtml(startedAt ?? "-")}</code></dd>
-  <dt>Ended</dt><dd><code>${escapeHtml(endedAt ?? "-")}</code></dd>
+  <dt>Scheduled</dt><dd><code>${renderTimestamp(detail.scheduledAt)}</code></dd>
+  <dt>Started</dt><dd><code>${renderTimestamp(startedAt)}</code></dd>
+  <dt>Ended</dt><dd><code>${renderTimestamp(endedAt)}</code></dd>
   <dt>Workspace</dt><dd><code>${escapeHtml(detail.workspacePath)}</code></dd>
   <dt>Branch</dt><dd><code>${escapeHtml(detail.branchName)}</code></dd>
   ${terminalRow}
@@ -6480,7 +6538,7 @@ function runRowHtml(
   nowMs: number
 ): string {
   const currentState = formatCurrentStateCell(workflowStateId(run));
-  return `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td class="c-title">#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td>${statePill(run.state)}${renderWatchdogIdleBadge(watchdogByRun.get(run.id), nowMs)}</td><td>${currentState}</td><td>${escapeHtml(run.provider)}</td><td><code>${escapeHtml(run.createdAt)}</code></td><td><code>${escapeHtml(run.updatedAt)}</code></td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`;
+  return `<tr><td><a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a></td><td>${escapeHtml(run.project)}</td><td class="c-title">#${run.issueNumber} ${escapeHtml(run.issueTitle)}</td><td>${statePill(run.state)}${renderWatchdogIdleBadge(watchdogByRun.get(run.id), nowMs)}</td><td>${currentState}</td><td>${escapeHtml(run.provider)}</td><td><code>${renderTimestamp(run.createdAt)}</code></td><td><code>${renderTimestamp(run.updatedAt)}</code></td><td><code>${escapeHtml(run.branchName)}</code></td></tr>`;
 }
 
 function renderRunsTable(
@@ -6506,7 +6564,7 @@ const ROUTINE_FIRINGS_TABLE_HEAD =
   "<tr><th>Routine</th><th>Project</th><th>State</th><th>Started</th></tr>";
 
 function firingRowHtml(firing: RoutineFiringStatus): string {
-  return `<tr><td><a href="/routines/${encodeURIComponent(firing.routineName)}">${escapeHtml(firing.routineName)}</a></td><td>${escapeHtml(firing.projectName)}</td><td>${statePill(firing.state)}</td><td><code>${escapeHtml(firing.createdAt)}</code></td></tr>`;
+  return `<tr><td><a href="/routines/${encodeURIComponent(firing.routineName)}">${escapeHtml(firing.routineName)}</a></td><td>${escapeHtml(firing.projectName)}</td><td>${statePill(firing.state)}</td><td><code>${renderTimestamp(firing.createdAt)}</code></td></tr>`;
 }
 
 // The active-now band (#302): every in-flight Run and Routine Firing,
@@ -6617,8 +6675,8 @@ function renderRunSummary(
   <dt>State</dt><dd>${statePill(detail.state)}</dd>
   <dt>Current state</dt><dd>${formatCurrentStateCell(workflowStateId(detail))}</dd>
   <dt>Provider</dt><dd>${escapeHtml(detail.provider)}</dd>
-  <dt>Started</dt><dd><code>${escapeHtml(detail.createdAt)}</code></dd>
-  <dt>Updated</dt><dd><code>${escapeHtml(detail.updatedAt)}</code></dd>
+  <dt>Started</dt><dd><code>${renderTimestamp(detail.createdAt)}</code></dd>
+  <dt>Updated</dt><dd><code>${renderTimestamp(detail.updatedAt)}</code></dd>
   <dt>Branch</dt><dd><code>${escapeHtml(detail.branchName)}</code></dd>
   <dt>Workspace</dt><dd><code>${escapeHtml(detail.workspacePath)}</code></dd>
   <dt>Retries</dt><dd>${detail.retryCount}${detail.isContinuation ? " (continuation)" : ""}</dd>
@@ -6641,7 +6699,7 @@ function renderWatchdogSection(
   }
   const idleRow =
     watchdog.idleSince !== undefined
-      ? `<dt>idle_since</dt><dd><code>${escapeHtml(watchdog.idleSince)}</code></dd>`
+      ? `<dt>idle_since</dt><dd><code>${renderTimestamp(watchdog.idleSince)}</code></dd>`
       : "";
   const graceRow =
     watchdog.graceRemainingMs !== undefined
@@ -6664,7 +6722,7 @@ function renderCancelForm(
   if (TERMINAL_STATES.has(detail.state)) {
     return "";
   }
-  return `<section><form method="post" action="/api/runs/${encodeURIComponent(detail.id)}/cancel"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}"><button class="btn" type="submit">Cancel run</button></form></section>`;
+  return `<section><form method="post" action="/api/runs/${encodeURIComponent(detail.id)}/cancel" onsubmit="return window.confirm('Cancel this run? Any active provider process will be stopped. This action cannot be undone.')"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}"><button class="btn" type="submit">Cancel run</button></form></section>`;
 }
 
 // #307's routine-lifecycle controls: cancellation already generalized
@@ -6699,7 +6757,7 @@ function renderAttemptsTable(
   const rows = attempts
     .map(
       (attempt) =>
-        `<tr><td>${attempt.attemptNumber}</td><td><code>${escapeHtml(attempt.id)}</code></td><td>${statePill(attempt.state)}</td><td>${escapeHtml(attempt.providerName)}</td><td><code>${escapeHtml(attempt.createdAt)}</code></td><td><code>${escapeHtml(attempt.updatedAt)}</code></td><td><code>${escapeHtml(attempt.branchName)}</code></td></tr>`
+        `<tr><td>${attempt.attemptNumber}</td><td><code>${escapeHtml(attempt.id)}</code></td><td>${statePill(attempt.state)}</td><td>${escapeHtml(attempt.providerName)}</td><td><code>${renderTimestamp(attempt.createdAt)}</code></td><td><code>${renderTimestamp(attempt.updatedAt)}</code></td><td><code>${escapeHtml(attempt.branchName)}</code></td></tr>`
     )
     .join("");
   return tableSection(
@@ -6723,7 +6781,7 @@ function renderTransitionsTable(
   const rows = transitions
     .map(
       (transition) =>
-        `<tr><td>${transition.sequence}</td><td>${statePill(transition.state)}</td><td><code>${escapeHtml(transition.createdAt)}</code></td></tr>`
+        `<tr><td>${transition.sequence}</td><td>${statePill(transition.state)}</td><td><code>${renderTimestamp(transition.createdAt)}</code></td></tr>`
     )
     .join("");
   return tableSection(
@@ -6763,9 +6821,9 @@ function renderEventsTable(
           row.firstSequence === row.lastSequence
             ? formatEventSequence(row.firstSequence)
             : `${formatEventSequence(row.firstSequence)}–${formatEventSequence(row.lastSequence)}`;
-        return `<tr><td>${seq}</td><td>message</td><td class="c-detail"><div class="msg">${escapeHtml(row.text)}</div></td><td><code>${escapeHtml(row.createdAt || "-")}</code></td></tr>`;
+        return `<tr><td>${seq}</td><td>message</td><td class="c-detail"><div class="msg">${escapeHtml(row.text)}</div></td><td><code>${renderTimestamp(row.createdAt)}</code></td></tr>`;
       }
-      return `<tr><td>${formatEventSequence(row.sequence)}</td><td>${escapeHtml(row.type)}</td><td class="c-detail"><code>${escapeHtml(row.detail)}</code></td><td><code>${escapeHtml(row.createdAt || "-")}</code></td></tr>`;
+      return `<tr><td>${formatEventSequence(row.sequence)}</td><td>${escapeHtml(row.type)}</td><td class="c-detail"><code>${escapeHtml(row.detail)}</code></td><td><code>${renderTimestamp(row.createdAt)}</code></td></tr>`;
     })
     .join("");
   const scope = truncated

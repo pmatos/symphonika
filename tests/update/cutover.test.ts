@@ -223,7 +223,7 @@ describe("checkUnitRegenerationNeeded", () => {
     const homeDir = await makeTempRoot();
     await writeInstalledUnit(
       homeDir,
-      "[Service]\nSlice=symphonika-daemon.slice\nType=notify\nNotifyAccess=all\nWatchdogSec=90\nTimeoutStartSec=300\n"
+      "[Service]\nSlice=symphonika-daemon.slice\nType=notify\nNotifyAccess=all\nWatchdogSec=90\nTimeoutStartSec=300\nEnvironmentFile=-/custom/config/env\n"
     );
 
     const result = await checkUnitRegenerationNeeded({
@@ -233,7 +233,7 @@ describe("checkUnitRegenerationNeeded", () => {
       runStagedServiceInstallPrint: () =>
         Promise.resolve(
           "# /home/x/.config/systemd/user/symphonika.service\n" +
-            "[Service]\nSlice=symphonika-daemon.slice\nType=notify\nNotifyAccess=all\nWatchdogSec=90\nTimeoutStartSec=300\n\n" +
+            "[Service]\nSlice=symphonika-daemon.slice\nType=notify\nNotifyAccess=all\nWatchdogSec=90\nTimeoutStartSec=300\nEnvironmentFile=-/home/x/.config/symphonika/env\n\n" +
             "# /home/x/.config/systemd/user/symphonika-daemon.slice\n[Slice]\n"
         )
     });
@@ -263,6 +263,27 @@ describe("checkUnitRegenerationNeeded", () => {
     expect((result as { reason: string }).reason).toContain(
       "service install --force"
     );
+  });
+
+  it("reports needed when the staged unit adds environment-file secret injection", async () => {
+    const homeDir = await makeTempRoot();
+    await writeInstalledUnit(
+      homeDir,
+      "[Service]\nSlice=symphonika-daemon.slice\nType=notify\nNotifyAccess=all\nWatchdogSec=90\nTimeoutStartSec=300\n"
+    );
+
+    const result = await checkUnitRegenerationNeeded({
+      stagingPath: "/irrelevant",
+      homeDir,
+      env: {},
+      runStagedServiceInstallPrint: () =>
+        Promise.resolve(
+          "# /home/x/.config/systemd/user/symphonika.service\n" +
+            "[Service]\nSlice=symphonika-daemon.slice\nType=notify\nNotifyAccess=all\nWatchdogSec=90\nTimeoutStartSec=300\nEnvironmentFile=-/home/x/.config/symphonika/env\n\n"
+        )
+    });
+
+    expect(result.needed).toBe(true);
   });
 
   it("fails safe (not needed) when the staged print spawn fails", async () => {

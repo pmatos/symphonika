@@ -1,4 +1,5 @@
 import type { IssueSnapshot } from "./issue-polling.js";
+import type { ProviderCommandTemplateValues } from "./provider-command-template.js";
 
 export type AgentProviderName = "codex" | "claude" | "omp";
 
@@ -41,11 +42,7 @@ export type ProviderRunInput = {
   // Present only for one-shot Routine Firings. Provider adapters use this
   // boundary to add routine-only argv/environment guards without changing
   // the operator-authored base command used by issue Runs.
-  routine?: {
-    effort?: string;
-    model?: string;
-    permissionMode?: string;
-  };
+  routine?: ProviderCommandTemplateValues;
   workspacePath: string;
 };
 
@@ -53,7 +50,10 @@ export type AgentProvider = {
   cancel: (runId: string) => Promise<void>;
   name: AgentProviderName;
   runAttempt: (input: ProviderRunInput) => AsyncIterable<ProviderEvent>;
-  validate: (command: string) => Promise<void>;
+  validate: (
+    command: string,
+    values?: ProviderCommandTemplateValues
+  ) => Promise<void>;
 };
 
 export type AgentProviderRegistry = Partial<

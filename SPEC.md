@@ -727,7 +727,10 @@ message. Watchdog terminations from one reconciliation pass are grouped.
 
 All notification delivery gets two total attempts within one 30-second orchestration deadline.
 Sink construction, rendering, delivery, and delivery-evidence failures are best-effort and cannot
-change a Run or Routine Firing state or fail a daemon tick. See ADR 0071.
+change a Run or Routine Firing state or fail a daemon tick. Terminal Routine Firing and ready
+Routine Fan-out delivery run as daemon-tracked background work after routine dispatch has persisted
+terminal state; routine dispatch does not await SMTP. Graceful shutdown drains that tracked work
+before closing the Run Store. See ADRs 0071 and 0085.
 
 ## 6. Credentials
 
@@ -1080,9 +1083,11 @@ an `(unverified)` marker whenever `verified` is false, including for an error ou
 omitted whenever `verified` is true because outcome status and verification are independent. The
 final claim JSON is excluded from report-output content.
 Delivery gets two total attempts within one 30-second orchestration deadline and runs after the
-firing releases its concurrency slot. Delivery failure or timeout never changes the firing state:
-`notification_state = failed` and the final sanitized `notification_error` remain durable. Policy
-or `notify: false` suppression records `notification_state = skipped`; success records `sent`.
+firing releases its concurrency slot. It is enqueued as daemon-tracked background work, so neither
+Routine dispatch nor a manual firing's completion promise waits for SMTP. Delivery failure or
+timeout never changes the firing state: `notification_state = failed` and the final sanitized
+`notification_error` remain durable. Policy or `notify: false` suppression records
+`notification_state = skipped`; success records `sent`.
 
 On daemon startup, a recurring Routine with `catch_up: fire_once_if_missed` preserves a due
 `next_fire_at` and fires at most once even when the outage spans several clock events. The claim
@@ -1167,7 +1172,9 @@ state-root logs remain. Cancelling an unknown id or a Routine Firing already in 
 Graceful daemon shutdown cancels every in-flight Routine Firing through the same provider
 cancellation path before waiting for dispatch work to drain, recording
 `cancel_reason = "daemon_shutdown"`. This is distinct from disabling or removing a Routine while
-the daemon remains active, which does not cancel its in-flight firing.
+the daemon remains active, which does not cancel its in-flight firing. After all dispatch producers
+have unwound, shutdown drains tracked Routine Firing and Routine Fan-out notification work before
+closing the Run Store, so a background evidence write cannot race SQLite closure. See ADR 0085.
 
 A Routine with `disabled: true` in its own front matter transitions every Routine Target to
 `state = disabled`, `disabled_reason = "operator"` on the next reload; future scheduling stops but

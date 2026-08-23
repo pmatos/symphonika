@@ -321,8 +321,8 @@ export function createCodexProvider(
         await processScope.stopProviderScope(input.run);
       }
     },
-    validate: async (command) => {
-      const rendered = renderProviderCommandTemplate(command, {}).rendered;
+    validate: async (command, values = {}) => {
+      const rendered = renderProviderCommandTemplate(command, values).rendered;
       const parsed = parseProviderCommand(rendered, PROVIDER_LABEL);
       if (!parsed.args.includes("app-server")) {
         throw new Error(
@@ -1124,7 +1124,9 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function extractProfileName(args: string[]): string | undefined {
+// Exported so doctor's execution-environment report checks the profile the
+// operator's command actually selects instead of assuming the default name.
+export function extractProfileName(args: string[]): string | undefined {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === undefined) {

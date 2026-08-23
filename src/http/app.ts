@@ -27,6 +27,7 @@ import {
   statRoutineEvidenceFile,
   type RoutineEvidencePaths
 } from "../routines/evidence.js";
+import { reconcileRoutineOutcome } from "../routines/outcome.js";
 import type { RoutineFiringState, RoutineState } from "../routines/types.js";
 import type { PullRequestState } from "../pull-request-state.js";
 import type { ReloadOutcome } from "./save-pipeline.js";
@@ -1017,6 +1018,15 @@ function cancelRunInStore(
     runStore.completeRoutineFiring({
       cancelReason: "operator",
       id,
+      outcome: reconcileRoutineOutcome({
+        claim: null,
+        commitsAhead: firing.commitsAhead,
+        githubObservationAvailable: false,
+        observedAction: null,
+        provider: firing.provider,
+        terminalReason: "cancelled",
+        terminalState: "cancelled"
+      }),
       state: "cancelled"
     });
     return { kind: "cancelled" };

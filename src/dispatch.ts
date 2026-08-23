@@ -3,6 +3,7 @@ import { parse } from "yaml";
 import { z } from "zod";
 
 import {
+  projectDispatchSchema,
   projectWorkspaceSchema,
   workflowReferenceSchema
 } from "./config-schemas.js";
@@ -65,6 +66,7 @@ const dispatchProjectSchema = z
     // Accept but ignore in the one-shot CLI; preserves parsing parity with
     // the runtime daemon path. See ADR 0053.
     max_in_flight: z.number().int().positive().optional(),
+    dispatch: projectDispatchSchema.optional(),
     tracker: z
       .object({
         kind: z.literal("github"),

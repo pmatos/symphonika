@@ -17,6 +17,10 @@
   daemon check for, stage, smoke-check, and cut over a newer release on its own, draining in-flight
   work before a `systemctl --user restart`-driven cutover. See ADR 0079 and `symphonika service
   rollback`.
+- `service install` now generates an optional `EnvironmentFile=` pointing at an `env` file beside the
+  selected Service Config, so operator-owned secrets such as `SYMPHONIKA_SMTP_PASSWORD` survive every
+  `service install --force`. `doctor` and the self-update regeneration check flag installed units
+  that predate the directive. See ADR 0055.
 
 ### Fixed
 

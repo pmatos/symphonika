@@ -8,7 +8,10 @@ import type { DoctorReport } from "../src/doctor.js";
 import type { IssueSnapshot } from "../src/issue-polling.js";
 import { openRunStore } from "../src/run-store.js";
 
+import { doctorEnvironmentFixture } from "./helpers/doctor-environment.js";
+
 const tempRoots: string[] = [];
+const TEST_DOCTOR_ENVIRONMENT = doctorEnvironmentFixture();
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-cli-runs-test-"));
@@ -110,6 +113,42 @@ describe("CLI run commands", () => {
     expect(output.stdout).toContain("failed: 1");
     expect(output.stdout).toContain("r-running");
     expect(output.stdout).toContain("r-failed");
+  });
+
+  it("status skips the network-backed gh probe only when rendering the dashboard", async () => {
+    const stateRoot = await makeTempRoot();
+    const seenOffline: (boolean | undefined)[] = [];
+    const doctorReport = {
+      configPath: "/tmp/symphonika.yml",
+      environment: TEST_DOCTOR_ENVIRONMENT,
+      errors: [],
+      ok: true,
+      projects: [],
+      warnings: []
+    } satisfies DoctorReport;
+    const runStatus = async (extraArgs: string[]): Promise<void> => {
+      const { program } = captureProgram(stateRoot, {
+        runDoctor: (options) => {
+          seenOffline.push(options.offline);
+          return Promise.resolve(doctorReport);
+        }
+      });
+      await program.parseAsync([
+        "node",
+        "symphonika",
+        "status",
+        "--config",
+        path.join(stateRoot, "symphonika.yml"),
+        ...extraArgs
+      ]);
+    };
+
+    await runStatus([]);
+    await runStatus(["--dashboard"]);
+
+    // Plain status prints report.errors, so it must keep the gh check. The
+    // dashboard renders report.projects only and would discard the result.
+    expect(seenOffline).toEqual([undefined, true]);
   });
 
   it("status shows the terminal-reason suffix for blocked runs in the plain-text recent-runs listing", async () => {
@@ -325,6 +364,7 @@ describe("CLI run commands", () => {
       runDoctor: () =>
         Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -452,6 +492,7 @@ describe("CLI run commands", () => {
       runDoctor: () =>
         Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -561,6 +602,7 @@ describe("CLI run commands", () => {
       runDoctor: () =>
         Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -627,6 +669,7 @@ describe("CLI run commands", () => {
         doctorCalls += 1;
         return Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -697,6 +740,7 @@ describe("CLI run commands", () => {
         doctorCalls += 1;
         return Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -770,6 +814,7 @@ describe("CLI run commands", () => {
       runDoctor: () =>
         Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -800,6 +845,7 @@ describe("CLI run commands", () => {
       runDoctor: () =>
         Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],
@@ -837,6 +883,7 @@ describe("CLI run commands", () => {
       runDoctor: () =>
         Promise.resolve({
           configPath: "/tmp/symphonika.yml",
+          environment: TEST_DOCTOR_ENVIRONMENT,
           errors: [],
           ok: true,
           warnings: [],

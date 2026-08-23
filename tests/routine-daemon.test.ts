@@ -43,6 +43,46 @@ afterEach(async () => {
 });
 
 describe("daemon routine firing", () => {
+  it("refuses a manual firing removed from Service Config before the next tick", async () => {
+    const root = await makeTempRoot();
+    const fireAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    await writeRoutineProject(root, fireAt, 30_000);
+    const provider = quietProvider();
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareRoutineWorkspace: vi.fn()
+    });
+
+    try {
+      await waitForRoutine(daemon.url, "active");
+      await writeProjectConfig(root, "alpha", [], false, 30_000);
+
+      const response = await fetch(
+        `${daemon.url}/api/routines/daily-report/fire?project=alpha`,
+        { method: "POST" }
+      );
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: "routine daily-report is disabled (removed_from_config)",
+        kind: "refused",
+        reason: "disabled"
+      });
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("fires a not-due Routine through the daemon without consuming its scheduled event", async () => {
     const root = await makeTempRoot();
     // Needs enough headroom past daemon startup (DB open, orphan sweeps, HTTP
@@ -1113,7 +1153,8 @@ function quietProvider(): AgentProvider {
 
 async function writeRoutineProject(
   root: string,
-  fireAt: string
+  fireAt: string,
+  pollingIntervalMs = 25
 ): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
@@ -1130,7 +1171,13 @@ async function writeRoutineProject(
       ""
     ].join("\n")
   );
-  await writeProjectConfig(root, "alpha", ["./daily-report.md"]);
+  await writeProjectConfig(
+    root,
+    "alpha",
+    ["./daily-report.md"],
+    false,
+    pollingIntervalMs
+  );
 }
 
 async function writeRecurringRoutineProject(
@@ -1167,7 +1214,8 @@ async function writeProjectConfig(
   root: string,
   projectName: string,
   routines: string[],
-  disabled = false
+  disabled = false,
+  pollingIntervalMs = 25
 ): Promise<void> {
   await writeFile(
     path.join(root, "symphonika.yml"),
@@ -1175,7 +1223,7 @@ async function writeProjectConfig(
       "state:",
       "  root: ./.symphonika",
       "polling:",
-      "  interval_ms: 25",
+      `  interval_ms: ${pollingIntervalMs}`,
       "providers:",
       "  codex:",
       '    command: "codex fake"',

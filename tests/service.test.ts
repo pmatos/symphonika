@@ -30,6 +30,13 @@ const repoRoot = path.resolve(
 const NODE = "/home/dev/.nvm/versions/node/v22.23.1/bin/node";
 const CLI = "/home/dev/symphonika/dist/cli.js";
 const DAEMON_PATH = "/home/dev/.nvm/versions/node/v22.23.1/bin:/usr/bin:/bin";
+const ENV_FILE = "/home/dev/.config/symphonika/env";
+const baseUnitInput = {
+  environmentFilePath: ENV_FILE,
+  execPath: NODE,
+  path: DAEMON_PATH,
+  scriptPath: CLI
+};
 
 const tempRoots: string[] = [];
 
@@ -53,27 +60,20 @@ afterEach(async () => {
 
 describe("renderServiceUnit", () => {
   it("binds ExecStart and PATH to the running node runtime and cli.js", () => {
-    const unit = renderServiceUnit({
-      execPath: NODE,
-      path: DAEMON_PATH,
-      scriptPath: CLI
-    });
+    const unit = renderServiceUnit(baseUnitInput);
 
     expect(unit).toContain(`exec "$1" "$2" daemon`);
     expect(unit).toContain(`"${NODE}"`);
     expect(unit).toContain(`"${CLI}"`);
     expect(unit).toContain(`Environment="PATH=${DAEMON_PATH}"`);
+    expect(unit).toContain(`EnvironmentFile=-${ENV_FILE}`);
     expect(unit).toContain("t=$(gh auth token)");
     expect(unit).toContain("Slice=symphonika-daemon.slice");
     expect(unit).toContain("WantedBy=default.target");
   });
 
   it("uses Type=notify with a watchdog timeout so a hung-but-alive daemon is restarted", () => {
-    const unit = renderServiceUnit({
-      execPath: NODE,
-      path: DAEMON_PATH,
-      scriptPath: CLI
-    });
+    const unit = renderServiceUnit(baseUnitInput);
 
     expect(unit).toContain("Type=notify");
     expect(unit).toContain("WatchdogSec=90");
@@ -91,11 +91,7 @@ describe("renderServiceUnit", () => {
   // child-process notifier with `result: protocol`; NotifyAccess=all
   // accepts it.
   it("sets NotifyAccess=all so a child-process notifier is accepted", () => {
-    const unit = renderServiceUnit({
-      execPath: NODE,
-      path: DAEMON_PATH,
-      scriptPath: CLI
-    });
+    const unit = renderServiceUnit(baseUnitInput);
 
     expect(unit).toContain("NotifyAccess=all");
   });
@@ -111,29 +107,21 @@ describe("renderServiceUnit", () => {
   // so a generous startup allowance costs nothing in the runtime hang
   // detection this feature provides.
   it("sets a generous TimeoutStartSec so slow initial polling isn't mistaken for a hung startup", () => {
-    const unit = renderServiceUnit({
-      execPath: NODE,
-      path: DAEMON_PATH,
-      scriptPath: CLI
-    });
+    const unit = renderServiceUnit(baseUnitInput);
 
     expect(unit).toContain("TimeoutStartSec=300");
   });
 
   it("never hardcodes the ~/.npm-global bin path", () => {
-    const unit = renderServiceUnit({
-      execPath: NODE,
-      path: DAEMON_PATH,
-      scriptPath: CLI
-    });
+    const unit = renderServiceUnit(baseUnitInput);
 
     expect(unit).not.toContain(".npm-global");
   });
 
   it("quotes ExecStart paths so spaces in the runtime or checkout survive", () => {
     const unit = renderServiceUnit({
+      ...baseUnitInput,
       execPath: "/home/John Doe/.nvm/node",
-      path: DAEMON_PATH,
       scriptPath: "/opt/my app/dist/cli.js"
     });
 
@@ -144,9 +132,8 @@ describe("renderServiceUnit", () => {
 
   it("quotes the Environment=PATH assignment so a spaced PATH entry survives", () => {
     const unit = renderServiceUnit({
-      execPath: NODE,
-      path: "/home/John Doe/.nvm/bin:/usr/bin",
-      scriptPath: CLI
+      ...baseUnitInput,
+      path: "/home/John Doe/.nvm/bin:/usr/bin"
     });
 
     expect(unit).toContain(
@@ -496,6 +483,47 @@ describe("runServiceInstall", () => {
       `exec "$1" "$2" daemon --config "$3"`
     );
     expect(report.files[0]?.content).toContain(`"${configPath}"`);
+    expect(report.files[0]?.content).toContain(
+      "EnvironmentFile=-/opt/Symphonika Config/env"
+    );
+  });
+
+  it("references an optional env file beside the default user config without creating it", async () => {
+    const home = await makeTempHome();
+    const xdg = path.join(home, "custom-config");
+
+    const report = await runServiceInstall({
+      ...baseOptions,
+      env: { PATH: "/opt/node/bin:/usr/bin", XDG_CONFIG_HOME: xdg },
+      homeDir: home,
+      reload: false
+    });
+
+    const environmentFilePath = path.join(xdg, "symphonika", "env");
+    expect(report.ok).toBe(true);
+    const installedUnit = await readFile(
+      path.join(xdg, "systemd", "user", "symphonika.service"),
+      "utf8"
+    );
+    expect(installedUnit).toContain(`EnvironmentFile=-${environmentFilePath}`);
+    // The env file stays operator-owned: a real install must never create it
+    // (and so never hand it a default-umask, world-readable mode).
+    await expect(access(environmentFilePath)).rejects.toThrow();
+  });
+
+  // systemd glob-expands EnvironmentFile= and the leading `-` swallows a
+  // non-matching pattern, so an unescaped `[` would silently drop the
+  // operator's secrets instead of failing the unit.
+  it("escapes glob metacharacters in the env file path", async () => {
+    const report = await runServiceInstall({
+      ...baseOptions,
+      configPath: "/opt/config [old]/daemon.yml",
+      print: true
+    });
+
+    expect(report.files[0]?.content).toContain(
+      "EnvironmentFile=-/opt/config \\[old\\]/env"
+    );
   });
 
   it("skips daemon-reload when reload is false but still writes units", async () => {
@@ -678,6 +706,9 @@ describe("CLI service install", () => {
     expect(output.stdout).toContain(`exec "$1" "$2" daemon --config "$3"`);
     expect(output.stdout).toContain(
       `"${path.resolve("configs", "daemon.yml")}"`
+    );
+    expect(output.stdout).toContain(
+      `EnvironmentFile=-${path.resolve("configs", "env")}`
     );
   });
 

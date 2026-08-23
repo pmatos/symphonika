@@ -520,6 +520,24 @@ export function registerPages(options: RegisterPagesOptions): void {
         : options.monotonicNow() - bannerReferenceAt;
     const pollingIntervalMs =
       options.getPollingIntervalMs?.() ?? DEFAULT_POLLING_INTERVAL_MS;
+    // Classify declarations from every durable target before applying the
+    // inactive-target visibility policy. Otherwise an inactive current target
+    // can disappear first and make its removed sibling look like an entirely
+    // removed declaration.
+    const routineGroups = groupRoutinesByName(
+      options.runStore.listRoutines({ includeInactive: true })
+    ).flatMap((group) => {
+      const currentTargets = currentRoutineTargets(group);
+      if (currentTargets.length === 0) {
+        return [group];
+      }
+      const visibleTargets = includeInactive
+        ? currentTargets
+        : currentTargets.filter((target) => target.state !== "inactive");
+      return visibleTargets.length === 0
+        ? []
+        : groupRoutinesByName(visibleTargets);
+    });
     const html = layout(
       "Symphonika",
       [
@@ -528,14 +546,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         renderHeader(options.version, snapshot),
         DASHBOARD_STREAM_BANNER,
         `<div id="active-now-band">${renderActiveNowBand(activeRuns, activeFirings, watchdogByRun, nowMs)}</div>`,
-        renderRoutinesSection(
-          groupRoutinesByName(
-            options.runStore.listRoutines({
-              includeInactive
-            })
-          ),
-          includeInactive
-        ),
+        renderRoutinesSection(routineGroups, includeInactive),
         `<div id="projects-section">${renderProjectsSection(snapshot, options.issuePollStatus, activeRuns, activeFirings, lastRunByProject, nowMs)}</div>`,
         renderStaleIssuesCard(options.issuePollStatus?.filteredIssues ?? []),
         `<script>${DASHBOARD_LIVE_CLIENT_JS}</script>`
@@ -1504,6 +1515,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       .sort((a, b) => b - a)
       .map((issueNumber) =>
         buildProjectIssueRow({
+          globalCapacity: concurrency?.global,
           inFlight,
           issueNumber,
           maxInFlight: projectCapacity?.maxInFlight,
@@ -3532,7 +3544,7 @@ function renderProjectCapacityStrip(
       )
     );
   }
-  const lastPollAt = projectState.lastPollFinishedAt;
+  const lastPollAt = projectState.lastSuccessfulPollAt;
   const pollAge = lastPollAt === null ? "never" : formatAge(lastPollAt, nowMs);
   const preRestart =
     lastPollAt !== null &&
@@ -3608,6 +3620,7 @@ type ProjectIssueRow = {
 };
 
 function buildProjectIssueRow(input: {
+  globalCapacity: { inFlight: number; maxInFlight: number | null } | undefined;
   inFlight: number;
   issueNumber: number;
   maxInFlight: number | undefined;
@@ -3704,12 +3717,17 @@ function buildProjectIssueRow(input: {
       title: snapshot.title
     };
   }
-  const atCap =
-    input.maxInFlight !== undefined && input.inFlight >= input.maxInFlight;
+  const globalCapacity = input.globalCapacity;
+  const capDetail =
+    globalCapacity !== undefined &&
+    globalCapacity.maxInFlight !== null &&
+    globalCapacity.inFlight >= globalCapacity.maxInFlight
+      ? `queued behind global cap (${globalCapacity.inFlight}/${globalCapacity.maxInFlight})`
+      : input.maxInFlight !== undefined && input.inFlight >= input.maxInFlight
+        ? `queued behind cap (${input.inFlight}/${input.maxInFlight})`
+        : undefined;
   return {
-    detail: atCap
-      ? `queued behind cap (${input.inFlight}/${input.maxInFlight})`
-      : "within cap, next by priority",
+    detail: capDetail ?? "within cap, next by priority",
     hasSnapshot,
     issueNumber: input.issueNumber,
     pillHtml: labelPill("eligible", "neutral"),
@@ -5429,19 +5447,13 @@ function renderPullRequestDetailPage(input: {
 }
 
 // A Routine name is globally unique across the *current* declared config
-// (ADR 0069), but a removed declaration's target rows are soft-disabled,
-// never deleted (src/routines/dispatcher.ts documents this: "Routine names
-// are unique only per (project_name, name) — a routine soft-disabled with
-// disabled_reason 'removed_from_config' is never deleted, so an unrelated,
-// later-declared routine elsewhere can legitimately reuse its name"). A
-// stale disabled row still passes listRoutines()'s default
-// `state != 'inactive'` filter, so grouping by name alone could fold a dead
-// declaration's row into a live, unrelated routine's target count. Source
+// (ADR 0069), but removed target rows are soft-disabled, never deleted, and
+// still pass listRoutines()'s default `state != 'inactive'` filter. Source
 // path is stable per declaration and shared by every target one `routines:`
-// entry materializes, so grouping on (name, sourcePath) keeps that
-// cross-declaration merge from happening while still collapsing an
-// N-target Routine into one row — the failure mode #302 exists to prevent.
-// Full per-target detail
+// entry materializes, so grouping on (name, sourcePath) keeps distinct
+// declarations apart while still collapsing an N-target Routine into one
+// row. Grouping itself keeps every row it is handed; excluding removed
+// targets is each caller's own decision. Full per-target detail
 // (skip counters, firing history, latest outcome) moves to /routines/:name
 // (#304); this row only needs enough to answer "is it scheduled, and when
 // does it next run."
@@ -6165,15 +6177,17 @@ function renderRoutineDeclarationCard(
 </dl></section><section>${sectionHead("Prompt")}${promptSection}</section>`;
 }
 
+function isCurrentRoutineTarget(target: RoutineStatus): boolean {
+  return target.disabledReason !== "removed_from_config";
+}
+
 // A target removed from its declaration can remain as a durable
 // removed_from_config row beside current siblings (ADR 0069), so it must
 // not represent the declaration's lifecycle state -- unlike
 // resolveRoutineDeclaration, which picks a target to carry the
 // declaration's *content* and so orders by validity instead.
 function currentRoutineTargets(group: RoutineGroup): RoutineStatus[] {
-  return group.targets.filter(
-    (target) => target.disabledReason !== "removed_from_config"
-  );
+  return group.targets.filter(isCurrentRoutineTarget);
 }
 
 // #307 AC: "Disable/enable a Routine from its page affects every target; a
@@ -6708,7 +6722,7 @@ function renderCancelForm(
   if (TERMINAL_STATES.has(detail.state)) {
     return "";
   }
-  return `<section><form method="post" action="/api/runs/${encodeURIComponent(detail.id)}/cancel"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}"><button class="btn" type="submit">Cancel run</button></form></section>`;
+  return `<section><form method="post" action="/api/runs/${encodeURIComponent(detail.id)}/cancel" onsubmit="return window.confirm('Cancel this run? Any active provider process will be stopped. This action cannot be undone.')"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}"><button class="btn" type="submit">Cancel run</button></form></section>`;
 }
 
 // #307's routine-lifecycle controls: cancellation already generalized

@@ -719,23 +719,31 @@ workflow:
       terminal: blocked
 ```
 
-The four built-ins are:
+The five built-ins are:
 
 - `builtin:single-agent-pr`
 - `builtin:plan-tdd-pr`
+- `builtin:refactor-swarm`
 - `builtin:autofix-until-clean`
 - `builtin:merge-when-green`
 
-The example uses the built-ins' default prompt paths:
+The built-ins use these default prompt paths:
 
 ```text
-WORKFLOW.md
-prompts/plan.md
-prompts/impl.md
-prompts/autofix.md
+single-agent-pr     WORKFLOW.md
+plan-tdd-pr         prompts/plan.md, prompts/impl.md
+refactor-swarm      prompts/red-team.md, prompts/refactor.md, prompts/verify.md
+autofix-until-clean prompts/autofix.md
 ```
 
 Override those paths under `with` or create the files before validation.
+
+`builtin:refactor-swarm` is an issue Workflow, not a risk scanner. The repository also ships
+`routines/refactor-audit.md` as a bounded weekly scanner that files at most three ranked issues.
+Register that Routine only after declaring a Dispatch Project whose raw-FSM Workflow uses the
+built-in and whose Required Eligibility Label is `refactor-ready`; a separate label keeps those
+issues out of a different Workflow used for ordinary repository work. Adjust the Routine's labels
+and batching policy when copying it to another repository.
 
 For repository-specific reusable fragments, create a YAML template under
 `.symphonika/workflow-templates/` and reference it by relative path. Templates support typed scalar
@@ -1080,8 +1088,10 @@ symphonika prune-workspaces --dry-run
 symphonika prune-workspaces
 ```
 
-Reclamation removes only the registered Git worktree. The firing row keeps the historical workspace
-path and records it as pruned. Provider logs, normalized events, and prompt evidence under
+Reclamation removes the registered Git worktree. For a `kind: git` firing it also force-deletes the
+firing's deterministic local branch from the shared repository cache; a `kind: report` firing owns
+no branch, so report cleanup does not delete one. The firing row keeps the historical workspace path
+and records it as pruned. Provider logs, normalized events, and prompt evidence under
 `<state.root>/logs/routines/<firing-id>/` are untouched; their retention is a separate concern.
 Set `enabled: false` to disable automatic reclamation while keeping the manual command available.
 

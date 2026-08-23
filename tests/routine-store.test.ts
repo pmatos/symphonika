@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { databasePath, openRunStore } from "../src/run-store.js";
+import {
+  databasePath,
+  openRunStore,
+  RoutineFanoutInvariantError
+} from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -247,6 +251,126 @@ describe("RunStore routines", () => {
           scheduledAt: "2026-05-22T10:00:00.000Z"
         })
       ).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects a skip paired with a fan-out that excludes the Routine Target", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "refactor-audit",
+          prompt: "Audit.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/refactor-audit.md",
+          projectName: "beta"
+        }
+      ]);
+      store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+
+      expect(() =>
+        store.skipRoutineFiring({
+          attemptedAt: "2026-05-22T10:00:01.000Z",
+          fanoutId: "fanout-1",
+          name: "refactor-audit",
+          projectName: "beta",
+          reason: "concurrency_cap"
+        })
+      ).toThrow(new RoutineFanoutInvariantError("fanout-1", "beta"));
+      // The clock-column update inside the same transaction must roll back
+      // too, not just the fan-out update: this is what makes the failure an
+      // atomic no-op rather than a partially-applied skip attempt.
+      expect(
+        store.getRoutine({ name: "refactor-audit", projectName: "beta" })
+      ).toMatchObject({
+        lastAttemptedAt: null,
+        lastSkipAt: null,
+        lastSkipReason: null,
+        nextFireAt: "2026-05-22T10:00:00.000Z",
+        state: "active"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects a skip when the paired fan-out leg already left pending/held", async () => {
+    const stateRoot = await makeTempRoot();
+    let store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "refactor-audit",
+          prompt: "Audit.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/refactor-audit.md",
+          projectName: "beta"
+        }
+      ]);
+      store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["beta"],
+        routineName: "refactor-audit",
+        scheduledAt: "2026-05-22T10:00:00.000Z"
+      });
+    } finally {
+      store.close();
+    }
+
+    // Simulate a fan-out leg that already settled away from pending/held
+    // (e.g. an earlier skip or claim, or an operator/migration edit) while
+    // the Routine Target itself is still active and due at the same
+    // scheduled_at. This is the production-shaped trigger for the
+    // invariant: the leg row exists (hasRoutineFanoutTarget is true) but is
+    // no longer claimable, as opposed to the fan-out never having included
+    // this Project at all.
+    const rawDatabase = new Database(databasePath(stateRoot));
+    try {
+      rawDatabase
+        .prepare(
+          "update routine_fanout_targets set disposition = 'skipped' where fanout_id = ? and project_name = ?"
+        )
+        .run("fanout-1", "beta");
+    } finally {
+      rawDatabase.close();
+    }
+
+    store = openRunStore({ stateRoot });
+    try {
+      expect(
+        store.hasRoutineFanoutTarget({ id: "fanout-1", projectName: "beta" })
+      ).toBe(true);
+
+      expect(() =>
+        store.skipRoutineFiring({
+          attemptedAt: "2026-05-22T10:00:01.000Z",
+          fanoutId: "fanout-1",
+          name: "refactor-audit",
+          projectName: "beta",
+          reason: "concurrency_cap"
+        })
+      ).toThrow(new RoutineFanoutInvariantError("fanout-1", "beta"));
+      expect(
+        store.getRoutine({ name: "refactor-audit", projectName: "beta" })
+      ).toMatchObject({
+        lastAttemptedAt: null,
+        lastSkipAt: null,
+        lastSkipReason: null,
+        nextFireAt: "2026-05-22T10:00:00.000Z",
+        state: "active"
+      });
     } finally {
       store.close();
     }
@@ -1580,6 +1704,74 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("preserves removed_from_config across a Project disable and a Project prune", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: "/tmp/daily-report.md"
+    };
+    try {
+      store.syncRoutines([
+        { ...declaration, projectName: "alpha" },
+        { ...declaration, projectName: "beta" }
+      ]);
+      store.syncRoutines([], { projects: ["alpha", "beta"] });
+
+      store.markRoutinesInactiveForProject("alpha");
+      store.pruneRoutinesForUnknownProjects(["alpha"]);
+
+      const targets = store
+        .listRoutines({ includeInactive: true })
+        .filter((routine) => routine.name === "daily-report");
+      expect(targets).toHaveLength(2);
+      for (const target of targets) {
+        expect(target).toMatchObject({
+          disabledReason: "removed_from_config",
+          state: "disabled"
+        });
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reactivates a preserved removed target when its Project and declaration return", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: null,
+      schedule: { cron: "0 9 * * *", tz: "UTC" },
+      sourcePath: "/tmp/daily-report.md"
+    };
+    try {
+      store.syncRoutines([{ ...declaration, projectName: "alpha" }]);
+      store.syncRoutines([], { projects: ["alpha"] });
+      store.markRoutinesInactiveForProject("alpha");
+
+      store.syncRoutines([{ ...declaration, projectName: "alpha" }], {
+        projects: ["alpha"]
+      });
+
+      expect(store.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          name: "daily-report",
+          state: "active"
+        })
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("clears a stale disabled_reason when pruneRoutinesForUnknownProjects cascades a Project removal", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -1898,6 +2090,145 @@ describe("RunStore routines", () => {
       });
     } finally {
       reopened.close();
+    }
+  });
+
+  it("persists firing kind and migrates only trustworthy legacy git branch evidence", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md"
+        },
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        branchName: "sym/alpha/routine/dependency-update/fire-git",
+        branchRef: "refs/heads/sym/alpha/routine/dependency-update/fire-git",
+        id: "fire-git",
+        kind: "git",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.createRoutineFiring({
+        branchName: "main",
+        branchRef: "refs/remotes/origin/main",
+        id: "fire-report",
+        kind: "report",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+
+      expect(store.getRoutineFiring("fire-git")?.kind).toBe("git");
+      expect(store.getRoutineFiring("fire-report")?.kind).toBe("report");
+    } finally {
+      store.close();
+    }
+
+    const legacyDatabase = new Database(databasePath(stateRoot));
+    try {
+      legacyDatabase.exec("alter table routine_firings drop column kind");
+    } finally {
+      legacyDatabase.close();
+    }
+
+    const migrated = openRunStore({ stateRoot });
+    try {
+      expect(migrated.getRoutineFiring("fire-git")?.kind).toBe("git");
+      expect(migrated.getRoutineFiring("fire-report")?.kind).toBeNull();
+    } finally {
+      migrated.close();
+    }
+  });
+
+  it("protects an orphaned workspace whose historical firing kind is unknown", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          projectName: "alpha",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        branchName: "main",
+        branchRef: "refs/remotes/origin/main",
+        id: "legacy-unknown-fire",
+        kind: "report",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report",
+        workspacePath: "/tmp/legacy-unknown-workspace"
+      });
+      store.updateRoutineFiringState("legacy-unknown-fire", "running");
+      expect(store.getRoutineFiring("legacy-unknown-fire")).toMatchObject({
+        commitsAhead: false,
+        kind: "report"
+      });
+    } finally {
+      store.close();
+    }
+
+    const legacyDatabase = new Database(databasePath(stateRoot));
+    try {
+      legacyDatabase.exec("alter table routine_firings drop column kind");
+    } finally {
+      legacyDatabase.close();
+    }
+
+    const migrated = openRunStore({ stateRoot });
+    try {
+      expect(migrated.getRoutineFiring("legacy-unknown-fire")?.kind).toBeNull();
+
+      migrated.markRoutineFiringsFailed([
+        {
+          firingId: "legacy-unknown-fire",
+          previousState: "running",
+          reason: "leaked_routine_firing"
+        }
+      ]);
+
+      expect(migrated.getRoutineFiring("legacy-unknown-fire")).toMatchObject({
+        commitsAhead: true,
+        kind: null,
+        state: "failed"
+      });
+      const future = "9999-12-31T23:59:59.999Z";
+      expect(
+        migrated.listRoutineWorkspacePruneCandidates({
+          cancelledBefore: future,
+          failedBefore: future,
+          succeededBefore: future
+        })
+      ).toEqual([]);
+    } finally {
+      migrated.close();
     }
   });
 
@@ -2350,6 +2681,67 @@ describe("RunStore routines", () => {
           succeededBefore: future
         })
       ).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("allows age-based retention for an orphaned report workspace", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "leaked-report-fire",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.updateRoutineFiringWorkspace({
+        id: "leaked-report-fire",
+        workspacePath: "/tmp/leaked-report-workspace"
+      });
+      store.updateRoutineFiringState("leaked-report-fire", "running");
+
+      store.markRoutineFiringsFailed([
+        {
+          firingId: "leaked-report-fire",
+          previousState: "running",
+          reason: "leaked_routine_firing"
+        }
+      ]);
+
+      expect(store.getRoutineFiring("leaked-report-fire")).toMatchObject({
+        commitsAhead: false,
+        kind: "report",
+        state: "failed",
+        terminalReason: "leaked_routine_firing"
+      });
+      const future = "9999-12-31T23:59:59.999Z";
+      expect(
+        store.listRoutineWorkspacePruneCandidates({
+          cancelledBefore: future,
+          failedBefore: future,
+          succeededBefore: future
+        })
+      ).toEqual([
+        expect.objectContaining({
+          id: "leaked-report-fire",
+          kind: "report",
+          workspacePath: "/tmp/leaked-report-workspace"
+        })
+      ]);
     } finally {
       store.close();
     }
@@ -2894,6 +3286,131 @@ describe("RunStore routines", () => {
           disabledReason: null
         })
       );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reclassifies a restored invalid routine with stale declaration history when its Project is re-enabled", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.syncRoutines([], { projects: ["alpha"] });
+      expect(
+        store.getRoutine({ name: "daily-report", projectName: "alpha" })
+      ).toMatchObject({
+        disabledReason: "removed_from_config",
+        state: "disabled"
+      });
+
+      // The declaration is restored with a recoverable name but remains
+      // invalid while its Project is disabled. The disabled-Project cascade
+      // recognizes it as current again, leaving a reasonless inactive row.
+      store.markRoutinesInactiveForProject("alpha", {
+        currentRoutineNames: ["daily-report"]
+      });
+      expect(store.listRoutines({ includeInactive: true })).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          name: "daily-report",
+          state: "inactive"
+        })
+      );
+
+      // Re-enabling the Project while the declaration is still invalid must
+      // expose the invalid target again rather than leave it hidden as
+      // inactive merely because the row contains stale valid history.
+      store.upsertInvalidRoutineStub({
+        name: "daily-report",
+        projectName: "alpha",
+        sourcePath: "/tmp/daily-report.md"
+      });
+
+      expect(store.listRoutines()).toContainEqual(
+        expect.objectContaining({
+          disabledReason: null,
+          name: "daily-report",
+          state: "invalid"
+        })
+      );
+
+      // Fixing the declaration after its one-shot time elapsed completes the
+      // deliberate restore. It must expire rather than launch retroactively
+      // from schedule evidence retained in the stale durable row.
+      store.syncRoutines(
+        [
+          {
+            kind: "report",
+            name: "daily-report",
+            prompt: "Report.",
+            provider: "codex",
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: "/tmp/daily-report.md",
+            projectName: "alpha"
+          }
+        ],
+        { now: new Date("2026-05-23T10:00:00.000Z") }
+      );
+
+      expect(
+        store.getRoutine({ name: "daily-report", projectName: "alpha" })
+      ).toMatchObject({ state: "expired" });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("recomputes a restored invalid recurring routine from its valid-repair time", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const declaration = {
+      kind: "report" as const,
+      name: "daily-report",
+      prompt: "Report.",
+      provider: "codex" as const,
+      schedule: { cron: "0 9 * * *", tz: "UTC" },
+      sourcePath: "/tmp/daily-report.md",
+      projectName: "alpha"
+    };
+    try {
+      store.syncRoutines([declaration], {
+        now: new Date("2026-05-20T08:30:00.000Z")
+      });
+      expect(
+        store.getRoutine({ name: "daily-report", projectName: "alpha" })
+      ).toMatchObject({ nextFireAt: "2026-05-20T09:00:00.000Z" });
+
+      store.syncRoutines([], { projects: ["alpha"] });
+      store.markRoutinesInactiveForProject("alpha", {
+        currentRoutineNames: ["daily-report"]
+      });
+      store.upsertInvalidRoutineStub({
+        name: "daily-report",
+        projectName: "alpha",
+        sourcePath: "/tmp/daily-report.md"
+      });
+
+      store.syncRoutines([declaration], {
+        now: new Date("2026-05-23T10:00:00.000Z")
+      });
+
+      expect(
+        store.getRoutine({ name: "daily-report", projectName: "alpha" })
+      ).toMatchObject({
+        nextFireAt: "2026-05-24T09:00:00.000Z",
+        state: "active"
+      });
     } finally {
       store.close();
     }

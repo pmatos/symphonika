@@ -6063,7 +6063,7 @@ describe("RoutineFiringDispatcher", () => {
     });
 
     try {
-      const result = await dispatchDueRoutines({
+      const result = await dispatchDueRoutinesAndDrain({
         activeRuns: new ActiveRunRegistry(),
         agentProviders: { codex: provider },
         configDir: root,
@@ -6165,7 +6165,7 @@ describe("RoutineFiringDispatcher", () => {
     });
 
     try {
-      const result = await dispatchDueRoutines({
+      const result = await dispatchDueRoutinesAndDrain({
         ...recurringDispatchInput({
           activeRuns: new ActiveRunRegistry(),
           provider,

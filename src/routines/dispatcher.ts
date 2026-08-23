@@ -99,6 +99,14 @@ export type DispatchDueRoutinesResult = {
   skipped: Array<{ reason: string; routineName: string; projectName: string }>;
 };
 
+export type SynchronizeRoutineTargetsInput = Pick<
+  DispatchDueRoutinesInput,
+  "projects" | "runStore"
+> & {
+  now?: Date;
+  recomputeSchedulesFromNow?: boolean;
+};
+
 export type FireRoutineNowInput = Omit<
   DispatchDueRoutinesInput,
   "now" | "recomputeSchedulesFromNow"
@@ -366,6 +374,76 @@ class RoutineFiringTimeoutError extends Error {
   }
 }
 
+export function synchronizeRoutineTargets(
+  input: SynchronizeRoutineTargetsInput
+): void {
+  const now = input.now ?? new Date();
+  const projects = [...input.projects.values()];
+  const allRoutines: TargetedRoutineDeclaration[] = [];
+  const protectedNamesByProject: Record<string, string[]> = {};
+  const trackerlessGitRoutinesByProject: Record<
+    string,
+    TargetedRoutineDeclaration[]
+  > = {};
+  const templateRejectedRoutinesByProject: Record<
+    string,
+    TargetedRoutineDeclaration[]
+  > = {};
+  const syncedProjects: string[] = [];
+
+  for (const project of projects) {
+    if (project.disabled === true) {
+      const trackerlessGitRoutines = project.trackerlessGitRoutines ?? [];
+      const templateRejectedRoutines = project.templateRejectedRoutines ?? [];
+      input.runStore.markRoutinesInactiveForProject(project.name, {
+        currentRoutineNames: [
+          ...(project.invalidRoutineNames ?? []),
+          ...[
+            ...(project.routines ?? []),
+            ...trackerlessGitRoutines,
+            ...templateRejectedRoutines
+          ].map((routine) => routine.name)
+        ],
+        now,
+        trackerlessGitRoutines,
+        templateRejectedRoutines
+      });
+      continue;
+    }
+    syncedProjects.push(project.name);
+    for (const routine of project.routines ?? []) {
+      allRoutines.push(routine);
+    }
+    if ((project.invalidRoutineNames ?? []).length > 0) {
+      protectedNamesByProject[project.name] = project.invalidRoutineNames ?? [];
+    }
+    if ((project.trackerlessGitRoutines ?? []).length > 0) {
+      trackerlessGitRoutinesByProject[project.name] =
+        project.trackerlessGitRoutines ?? [];
+    }
+    if ((project.templateRejectedRoutines ?? []).length > 0) {
+      templateRejectedRoutinesByProject[project.name] =
+        project.templateRejectedRoutines ?? [];
+    }
+  }
+
+  // Service-level routines synchronize in one pass across all targets.
+  // Include enabled Projects with zero declarations so removal detection
+  // soft-disables a target whose last declaration was just removed.
+  input.runStore.syncRoutines(allRoutines, {
+    now,
+    projects: syncedProjects,
+    protectedNamesByProject,
+    trackerlessGitRoutinesByProject,
+    templateRejectedRoutinesByProject,
+    recomputeRecurring: input.recomputeSchedulesFromNow === true
+  });
+  input.runStore.pruneRoutinesForUnknownProjects(
+    projects.map((project) => project.name)
+  );
+  input.runStore.settleUnavailableRoutineFanoutTargets();
+}
+
 export async function dispatchDueRoutines(
   input: DispatchDueRoutinesInput
 ): Promise<DispatchDueRoutinesResult> {
@@ -392,21 +470,6 @@ export async function dispatchDueRoutines(
 
   for (const project of projects) {
     if (project.disabled === true) {
-      const trackerlessGitRoutines = project.trackerlessGitRoutines ?? [];
-      const templateRejectedRoutines = project.templateRejectedRoutines ?? [];
-      input.runStore.markRoutinesInactiveForProject(project.name, {
-        currentRoutineNames: [
-          ...(project.invalidRoutineNames ?? []),
-          ...[
-            ...(project.routines ?? []),
-            ...trackerlessGitRoutines,
-            ...templateRejectedRoutines
-          ].map((routine) => routine.name)
-        ],
-        now,
-        trackerlessGitRoutines,
-        templateRejectedRoutines
-      });
       continue;
     }
     if (input.recomputeSchedulesFromNow === true) {
@@ -498,56 +561,12 @@ export async function dispatchDueRoutines(
       }
     }
   }
-  // Service-level routines: one sync call with all targeted routines across
-  // projects, each carrying its own projectName. protectedNamesByProject
-  // holds invalid-routine names per project (ADR 0060/0063), while the
-  // tracker-less set identifies valid files rejected by host compatibility
-  // for a precise soft-disable (ADR 0066).
-  const allRoutines: TargetedRoutineDeclaration[] = [];
-  const protectedNamesByProject: Record<string, string[]> = {};
-  const trackerlessGitRoutinesByProject: Record<
-    string,
-    TargetedRoutineDeclaration[]
-  > = {};
-  const templateRejectedRoutinesByProject: Record<
-    string,
-    TargetedRoutineDeclaration[]
-  > = {};
-  const syncedProjects: string[] = [];
-  for (const project of projects) {
-    if (project.disabled === true) {
-      continue;
-    }
-    syncedProjects.push(project.name);
-    for (const routine of project.routines ?? []) {
-      allRoutines.push(routine);
-    }
-    if ((project.invalidRoutineNames ?? []).length > 0) {
-      protectedNamesByProject[project.name] = project.invalidRoutineNames ?? [];
-    }
-    if ((project.trackerlessGitRoutines ?? []).length > 0) {
-      trackerlessGitRoutinesByProject[project.name] =
-        project.trackerlessGitRoutines ?? [];
-    }
-    if ((project.templateRejectedRoutines ?? []).length > 0) {
-      templateRejectedRoutinesByProject[project.name] =
-        project.templateRejectedRoutines ?? [];
-    }
-  }
-  input.runStore.syncRoutines(allRoutines, {
+  synchronizeRoutineTargets({
     now,
-    // Include projects with zero routines so removal-detection runs for a
-    // project whose last routine was just removed (ADR 0063).
-    projects: syncedProjects,
-    protectedNamesByProject,
-    trackerlessGitRoutinesByProject,
-    templateRejectedRoutinesByProject,
-    recomputeRecurring: input.recomputeSchedulesFromNow === true
+    projects: input.projects,
+    recomputeSchedulesFromNow: input.recomputeSchedulesFromNow === true,
+    runStore: input.runStore
   });
-  input.runStore.pruneRoutinesForUnknownProjects(
-    projects.map((project) => project.name)
-  );
-  input.runStore.settleUnavailableRoutineFanoutTargets();
 
   for (const project of projects) {
     if (project.disabled === true) {

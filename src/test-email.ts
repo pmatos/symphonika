@@ -109,7 +109,11 @@ export async function runTestEmail(
     sink: createSink(config, env)
   });
   if (outcome.state === "failed") {
-    return failed(configPath, outcome.error, config.to);
+    return failed(
+      configPath,
+      redactSmtpPassword(outcome.error, config, env),
+      config.to
+    );
   }
   return {
     configPath,
@@ -133,4 +137,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function redactSmtpPassword(
+  message: string,
+  config: EmailNotificationConfig,
+  env: NodeJS.ProcessEnv
+): string {
+  const secret =
+    config.smtpUsername === undefined ? undefined : env[config.smtpPasswordEnv];
+  if (secret === undefined || secret.length === 0) {
+    return message;
+  }
+  return message.replaceAll(secret, "[REDACTED]");
 }

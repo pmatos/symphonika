@@ -47,6 +47,7 @@ import {
 import type {
   ListRunsFilter,
   ProjectIssueSnapshotRow,
+  ProjectLastRunStatus,
   ProjectPullRequestSnapshotRow,
   ProjectSnapshotRepository,
   ProjectState,
@@ -434,7 +435,7 @@ export function registerPages(options: RegisterPagesOptions): void {
   function assembleDashboardData(): {
     activeFirings: RoutineFiringStatus[];
     activeRuns: RunStatus[];
-    lastRunByProject: ReadonlyMap<string, RunStatus>;
+    lastRunByProject: ReadonlyMap<string, ProjectLastRunStatus>;
     nowMs: number;
     snapshot: StatusSnapshot | undefined;
     watchdogByRun: Map<string, WatchdogIdleStatus>;
@@ -453,15 +454,24 @@ export function registerPages(options: RegisterPagesOptions): void {
       getWatchdogConfig,
       nowMs
     );
+    // Lazily resolved and memoised: /fragments/active-band shares this
+    // assembly but never reads lastRunByProject, and the query behind it
+    // scans every Run and its state transitions on a fragment refetched on
+    // every SSE event.
+    let memoizedLastRunByProject:
+      ReadonlyMap<string, ProjectLastRunStatus> | undefined;
     return {
       activeFirings,
       activeRuns,
-      lastRunByProject: options.runStore.listLatestRunsByProject({
-        projectNames: (snapshot?.projectStates ?? []).map(
-          (project) => project.projectName
-        ),
-        states: PROJECT_LAST_RUN_STATES
-      }),
+      get lastRunByProject() {
+        memoizedLastRunByProject ??= options.runStore.listLatestRunsByProject({
+          projectNames: (snapshot?.projectStates ?? []).map(
+            (project) => project.projectName
+          ),
+          states: PROJECT_LAST_RUN_STATES
+        });
+        return memoizedLastRunByProject;
+      },
       nowMs,
       snapshot,
       watchdogByRun
@@ -3284,7 +3294,7 @@ function tableSection(
 type ProjectRow = {
   eligible: number;
   inFlight: number;
-  lastRun: RunStatus | undefined;
+  lastRun: ProjectLastRunStatus | undefined;
   mode: "dispatch" | "routine_host";
   name: string;
   validationMessage: string | null;
@@ -3303,7 +3313,7 @@ function buildProjectRows(
   issuePollStatus: IssuePollStatus | undefined,
   activeRuns: RunStatus[],
   activeFirings: RoutineFiringStatus[],
-  lastRunByProject: ReadonlyMap<string, RunStatus>
+  lastRunByProject: ReadonlyMap<string, ProjectLastRunStatus>
 ): ProjectRow[] {
   // A Routine Firing consumes the same per-project in-flight capacity as an
   // issue Run (ADR 0053/0069), and a Routine Host — which never has Runs —
@@ -3366,7 +3376,7 @@ function renderDispatchProjectsTable(
       const lastRun =
         row.lastRun === undefined
           ? '<span class="muted">never</span>'
-          : `${statePill(row.lastRun.state)} <code>${escapeHtml(formatAge(row.lastRun.updatedAt, nowMs))}</code>`;
+          : `${statePill(row.lastRun.state)} <code>${escapeHtml(formatAge(row.lastRun.lastTransitionAt, nowMs))}</code>`;
       return `<tr><td><a href="/projects/${encodeURIComponent(row.name)}">${escapeHtml(row.name)}</a></td><td>${renderValidityPill(row)}</td><td>${row.eligible}</td><td>${row.inFlight}</td><td class="c-detail">${lastRun}</td></tr>`;
     })
     .join("");
@@ -3401,7 +3411,7 @@ function renderProjectsSection(
   issuePollStatus: IssuePollStatus | undefined,
   activeRuns: RunStatus[],
   activeFirings: RoutineFiringStatus[],
-  lastRunByProject: ReadonlyMap<string, RunStatus>,
+  lastRunByProject: ReadonlyMap<string, ProjectLastRunStatus>,
   nowMs: number
 ): string {
   const projectStates = snapshot?.projectStates ?? [];

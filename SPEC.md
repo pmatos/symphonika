@@ -2036,7 +2036,9 @@ visible as disabled with `removed_from_config`; `/routines/:name` lists every ta
 When current and removed target snapshots differ, the dashboard row's kind and schedule come from a
 current visible target rather than stale removed history.
 Projects split into Dispatch Projects
-(eligible/in-flight counts, last terminal-run outcome) and a visually subordinate Routine Hosts
+(eligible/in-flight counts, last terminal-run outcome and the age of that terminal transition —
+not `runs.updated_at`, for the same reason given in the Progress Signal note below) and a visually
+subordinate Routine Hosts
 group, since a Routine Host is never polled and never dispatches (ADR-0062). The flat
 "recent runs" list this superseded now lives only at `/runs`. See #302.
 

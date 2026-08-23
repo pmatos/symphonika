@@ -2,10 +2,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
-import { afterEach, describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { IssueSnapshot } from "../src/issue-polling.js";
-import { openRunStore } from "../src/run-store.js";
+import { databasePath, openRunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -945,6 +946,130 @@ describe("RunStore detail queries", () => {
       expect(latest.get("beta")?.id).toBe("beta-only");
       expect(latest.has("gamma")).toBe(false);
     } finally {
+      store.close();
+    }
+  });
+
+  it("listLatestRunsByProject anchors lastTransitionAt to the newest state transition, not updated_at", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      vi.useFakeTimers();
+      vi.setSystemTime("2026-05-22T10:00:00.000Z");
+      store.createRun({
+        id: "alpha-terminal",
+        issue: sampleIssue({ number: 1 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      store.updateRunState("alpha-terminal", "succeeded");
+
+      // Post-terminal bookkeeping bumps runs.updated_at without recording a
+      // state transition, so only updatedAt may move.
+      vi.setSystemTime("2026-05-22T11:00:00.000Z");
+      store.recordPullRequestDiscoveryAttempt("alpha-terminal");
+
+      const latest = store.listLatestRunsByProject({
+        projectNames: ["alpha"],
+        states: ["succeeded", "failed", "cancelled"]
+      });
+
+      expect(latest.get("alpha")?.lastTransitionAt).toBe(
+        "2026-05-22T10:00:00.000Z"
+      );
+      expect(latest.get("alpha")?.updatedAt).toBe("2026-05-22T11:00:00.000Z");
+    } finally {
+      vi.useRealTimers();
+      store.close();
+    }
+  });
+
+  it("listLatestRunsByProject falls back to the run update when the latest transition does not match its state", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    let restartedStore: ReturnType<typeof openRunStore> | undefined;
+    try {
+      vi.useFakeTimers();
+      vi.setSystemTime("2026-05-22T09:00:00.000Z");
+      store.createRun({
+        id: "interrupted-terminal-transition",
+        issue: sampleIssue({ number: 1 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      store.close();
+
+      // Simulate a process exit after the runs row commits its terminal state
+      // but before the separate transition insert. The restarted store must
+      // not mistake the preceding queued transition for terminal completion.
+      const interruptedDatabase = new Database(databasePath(stateRoot));
+      interruptedDatabase
+        .prepare(
+          "update runs set state = 'succeeded', updated_at = ? where id = ?"
+        )
+        .run("2026-05-22T10:00:00.000Z", "interrupted-terminal-transition");
+      interruptedDatabase.close();
+
+      restartedStore = openRunStore({ stateRoot });
+      const latest = restartedStore.listLatestRunsByProject({
+        projectNames: ["alpha"],
+        states: ["succeeded", "failed", "cancelled"]
+      });
+
+      expect(latest.get("alpha")?.lastTransitionAt).toBe(
+        "2026-05-22T10:00:00.000Z"
+      );
+    } finally {
+      vi.useRealTimers();
+      restartedStore?.close();
+    }
+  });
+
+  it("updateRunState does not expose a terminal run when its transition write fails", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      vi.useFakeTimers();
+      vi.setSystemTime("2026-05-22T09:00:00.000Z");
+      store.createRun({
+        id: "interrupted-state-update",
+        issue: sampleIssue({ number: 1 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+
+      const faultDatabase = new Database(databasePath(stateRoot));
+      faultDatabase.exec(`
+        create trigger fail_terminal_transition
+        before insert on run_state_transitions
+        when new.state = 'succeeded'
+        begin
+          select raise(abort, 'simulated terminal transition failure');
+        end;
+      `);
+      faultDatabase.close();
+
+      expect(() =>
+        store.updateRunState("interrupted-state-update", "succeeded")
+      ).toThrow("simulated terminal transition failure");
+
+      vi.setSystemTime("2026-05-22T11:00:00.000Z");
+      store.recordPullRequestDiscoveryAttempt("interrupted-state-update");
+
+      expect(store.getRun("interrupted-state-update")?.state).toBe("queued");
+      expect(
+        store
+          .listLatestRunsByProject({
+            projectNames: ["alpha"],
+            states: ["succeeded", "failed", "cancelled"]
+          })
+          .has("alpha")
+      ).toBe(false);
+    } finally {
+      vi.useRealTimers();
       store.close();
     }
   });

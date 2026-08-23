@@ -837,6 +837,15 @@ class RoutineAlreadyClaimedError extends Error {
   }
 }
 
+export class RoutineFanoutInvariantError extends Error {
+  constructor(fanoutId: string, projectName: string) {
+    super(
+      `routine fan-out "${fanoutId}" has no claimable target for Project "${projectName}"`
+    );
+    this.name = "RoutineFanoutInvariantError";
+  }
+}
+
 // See docs/adr/0074-live-notification-path.md: these are invalidation
 // signals (identity + new state), not a replay log. A listener that
 // misses events during a disconnect is expected to reconcile once on
@@ -2930,7 +2939,14 @@ export class RunStore {
           )
           .run(input.reason, timestamp(), input.fanoutId, input.projectName);
         if (target.changes === 0) {
-          throw new RoutineAlreadyClaimedError();
+          // The Routine Target clock update above already won inside this
+          // transaction. Ordinary competing claims therefore return false
+          // before reaching this branch; a supplied fan-out without a
+          // claimable Project leg violates the caller's pairing invariant.
+          throw new RoutineFanoutInvariantError(
+            input.fanoutId,
+            input.projectName
+          );
         }
       }
       this.database

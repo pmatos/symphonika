@@ -138,9 +138,11 @@ export function renderServiceUnit(input: ServiceUnitInput): string {
     "# quoted so a PATH entry containing a space is not split off and dropped.",
     `Environment=${systemdEnvAssignment("PATH", input.path)}`,
     "",
-    "# Load environment-backed secrets from beside the selected Service",
-    "# Config. The leading `-` keeps the file optional for installations",
-    "# that do not configure authenticated email. Keep it to secrets only:",
+    "# Load environment-backed secrets from the conventional `env` file",
+    "# beside the selected Service Config (including email.smtp_password_env;",
+    "# see docs/adr/0067-smtp-notification-sink). The leading `-` keeps the",
+    "# file optional when authenticated email is not configured. Keep it to",
+    "# secrets only:",
     "# per `man systemd.exec`, assignments here override Environment= above,",
     "# so a PATH= line in that file would replace the PATH baked in at",
     "# install time and break provider/gh resolution.",
@@ -221,8 +223,10 @@ export async function runServiceInstall(
   const homeDir = options.homeDir ?? homedir();
   const unitDir = userUnitDir(homeDir, env);
   const daemonPath = buildDaemonPath(execPath, env);
-  const environmentFilePath = serviceEnvironmentFilePath(
-    options.configPath ?? defaultUserConfigPath({ env, homeDir })
+  const environmentFilePath = unitEnvironmentFilePath(
+    options.configPath,
+    homeDir,
+    env
   );
 
   const files: ServiceUnitFile[] = [
@@ -343,16 +347,41 @@ export async function runServiceInstall(
   }
 }
 
+// systemd only honors an absolute XDG_CONFIG_HOME, so a relative value is
+// ignored rather than resolved. Returns undefined when the caller should fall
+// back to its own notion of `~/.config`. Stated once so that where the unit
+// files are written and where the unit points for its env file cannot drift
+// apart.
+function systemdConfigHome(env: NodeJS.ProcessEnv): string | undefined {
+  const configured = env.XDG_CONFIG_HOME?.trim() ?? "";
+  return configured.length > 0 && path.isAbsolute(configured)
+    ? configured
+    : undefined;
+}
+
+// The env file the generated unit points at: beside an explicit `--config`,
+// otherwise beside the default user Service Config — never the project-local
+// branch of resolveServiceConfigPath, which the installer deliberately does
+// not follow. Shared with doctor so its "load the daemon's env file" hint
+// names the same file the unit does. The path is resolved here rather than
+// deferred to systemd's `%h` specifier because systemd glob-expands
+// EnvironmentFile= *after* expanding specifiers, so a home directory
+// containing `[`, `*`, `?` or `\` would slip past systemdEnvironmentFile's
+// escaping and silently drop the operator's secrets.
+export function unitEnvironmentFilePath(
+  configPath: string | undefined,
+  homeDir: string,
+  env: NodeJS.ProcessEnv
+): string {
+  return serviceEnvironmentFilePath(
+    configPath ?? defaultUserConfigPath({ env, homeDir })
+  );
+}
+
 // systemd --user reads units from $XDG_CONFIG_HOME/systemd/user, falling back
-// to ~/.config/systemd/user when XDG_CONFIG_HOME is unset. systemd only honors
-// an absolute XDG_CONFIG_HOME, so a relative value is ignored here too.
+// to ~/.config/systemd/user when XDG_CONFIG_HOME is unset.
 export function userUnitDir(homeDir: string, env: NodeJS.ProcessEnv): string {
-  const xdg =
-    typeof env.XDG_CONFIG_HOME === "string" ? env.XDG_CONFIG_HOME.trim() : "";
-  const configHome =
-    xdg.length > 0 && path.isAbsolute(xdg)
-      ? xdg
-      : path.join(homeDir, ".config");
+  const configHome = systemdConfigHome(env) ?? path.join(homeDir, ".config");
   return path.join(configHome, "systemd", "user");
 }
 

@@ -286,6 +286,30 @@ describe("checkUnitRegenerationNeeded", () => {
     expect(result.needed).toBe(true);
   });
 
+  it("pins the `--config` reminder in the regeneration hint", async () => {
+    const homeDir = await makeTempRoot();
+    await writeInstalledUnit(
+      homeDir,
+      "[Service]\nSlice=symphonika-daemon.slice\nType=notify\nNotifyAccess=all\nWatchdogSec=90\nTimeoutStartSec=300\nExecStart=/bin/symphonika daemon --config /srv/symphonika/symphonika.yml\n"
+    );
+
+    const result = await checkUnitRegenerationNeeded({
+      stagingPath: "/irrelevant",
+      homeDir,
+      env: {},
+      runStagedServiceInstallPrint: () =>
+        Promise.resolve(
+          "# /home/x/.config/systemd/user/symphonika.service\n" +
+            "[Service]\nSlice=symphonika-daemon.slice\nType=notify\nNotifyAccess=all\nWatchdogSec=90\nTimeoutStartSec=300\nEnvironmentFile=-%h/.config/symphonika/env\n\n"
+        )
+    });
+
+    expect(result.needed).toBe(true);
+    expect(result.needed && result.reason).toContain(
+      "repeat the original `--config <path>`"
+    );
+  });
+
   it("fails safe (not needed) when the staged print spawn fails", async () => {
     const homeDir = await makeTempRoot();
     await writeInstalledUnit(homeDir, "[Service]\n");

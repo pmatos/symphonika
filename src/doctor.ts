@@ -25,8 +25,7 @@ import {
 } from "./config-schemas.js";
 import {
   missingUserConfigHint,
-  resolveServiceConfigPath,
-  serviceEnvironmentFilePath
+  resolveServiceConfigPath
 } from "./config-paths.js";
 import {
   inspectConfiguredDoctorEnvironment,
@@ -53,7 +52,7 @@ import { probeProviderCommand } from "./provider-probe.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import type { RoutineExecutionOverrides } from "./routines/types.js";
-import { userUnitDir } from "./service.js";
+import { unitEnvironmentFilePath, userUnitDir } from "./service.js";
 import { resolveStateRoot } from "./state.js";
 import type { ExpandedWorkflow } from "./workflow/types.js";
 import {
@@ -513,7 +512,14 @@ export async function runDoctor(
     (env[email.smtpPasswordEnv]?.trim().length ?? 0) === 0
   ) {
     const environmentFile = shellQuote(
-      serviceEnvironmentFilePath(resolvedConfig.configPath)
+      unitEnvironmentFilePath(
+        // Name the file `service install` points the unit at: without an
+        // explicit `--config` the installer always uses the user config
+        // directory, even when discovery here landed on a project-local one.
+        resolvedConfig.source === "explicit" ? configPath : undefined,
+        homeDir,
+        env
+      )
     );
     errors.push(
       `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . ${environmentFile}; set +a)`
@@ -671,7 +677,8 @@ async function checkInstalledUnitDrift(
   // (and lacks whatever protection this drift check is warning about) until
   // an operator separately restarts it.
   const reinstallHint =
-    "re-run `symphonika service install --force` to refresh it; a running " +
+    "re-run `symphonika service install --force` (repeat the original " +
+    "`--config <path>` option if one was used) to refresh it; a running " +
     "daemon only picks up the change after `systemctl --user restart " +
     "symphonika.service`";
   if (!serviceContent.includes("Slice=symphonika-daemon.slice")) {

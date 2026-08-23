@@ -1605,7 +1605,8 @@ describe("doctor", () => {
         report.warnings.some(
           (warning) =>
             warning.includes("environment-backed secrets") &&
-            warning.includes("service install")
+            warning.includes("service install") &&
+            warning.includes("repeat the original `--config <path>`")
         )
       ).toBe(true);
     });

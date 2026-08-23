@@ -4,6 +4,7 @@ import { parse } from "yaml";
 import { z } from "zod";
 
 import { projectDispatchSchema } from "./config-schemas.js";
+import { normalizeLabels, priorityForLabels } from "./issue-priority.js";
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 
 export type GitHubIssueRepositoryInput = {
@@ -1350,43 +1351,12 @@ function normalizeIssueSnapshot(
     labels,
     number: rawIssue.number ?? 0,
     ...(parentIssueNumber === undefined ? {} : { parentIssueNumber }),
-    priority: priorityForLabels(labels, project),
+    priority: priorityForLabels(labels, project.priority),
     state: rawIssue.state ?? "open",
     title: rawIssue.title ?? "",
     updated_at: rawIssue.updated_at ?? "",
     url: rawIssue.html_url ?? rawIssue.url ?? ""
   };
-}
-
-export function normalizeLabels(labels: unknown[]): string[] {
-  const normalized: string[] = [];
-
-  for (const label of labels) {
-    if (typeof label === "string") {
-      normalized.push(label);
-      continue;
-    }
-
-    if (isRecord(label) && typeof label.name === "string") {
-      normalized.push(label.name);
-    }
-  }
-
-  return normalized;
-}
-
-function priorityForLabels(
-  labels: string[],
-  project: PollingProjectConfig
-): number {
-  const priorities = labels.flatMap((label) => {
-    const priority = project.priority.labels[label];
-    return priority === undefined ? [] : [priority];
-  });
-
-  return priorities.length === 0
-    ? project.priority.default
-    : Math.min(...priorities);
 }
 
 function issueFilterReasons(
@@ -1600,10 +1570,6 @@ function formatZodIssueWithPrefix(issue: z.ZodIssue, prefix: string[]): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isOctokitNotFound(error: unknown): boolean {

@@ -89,7 +89,11 @@ import {
   type RunState,
   type SyncProjectStateInput
 } from "./run-store.js";
-import { dispatchDueRoutines, fireRoutineNow } from "./routines/dispatcher.js";
+import {
+  dispatchDueRoutines,
+  fireRoutineNow,
+  synchronizeRoutineTargets
+} from "./routines/dispatcher.js";
 import type { RoutineFiringState } from "./routines/types.js";
 import type {
   PreparedRoutineWorkspace,
@@ -1252,11 +1256,30 @@ export async function startDaemon(
     // behind (dispatchMutex.held, above).
     claimMutex: dispatchMutex,
     dispatchRuntime,
-    fireRoutine: (request): FireRoutineResult => {
+    fireRoutine: async (request): Promise<FireRoutineResult> => {
       // fireRoutineNow is a second admission path outside launchWork's
       // drain check above -- a manual `symphonika fire-now` during a
       // self-update drain must be refused too, or drain could wait forever
       // on work the drain gate never saw coming (ADR 0079).
+      if (updateCoordinator.isDrainRequested()) {
+        return {
+          error: "self-update is draining in-flight work before cutover",
+          kind: "refused",
+          reason: "self_update_draining"
+        };
+      }
+      // Manual firing is an explicit admission boundary, so resolve it from
+      // a freshly reloaded effective snapshot rather than waiting for the
+      // next daemon tick. Synchronize that snapshot through the same path as
+      // scheduled dispatch before reading the persisted Routine Target; this
+      // preserves precise disabled/invalid/rejection states while ensuring
+      // an accepted firing uses the current prompt and provider declaration.
+      await reloadConfigAndRecordOutcome();
+      const projects = runtimeConfig.projectsByName();
+      synchronizeRoutineTargets({ projects, runStore });
+      // The reload awaits the reloader mutex and filesystem reads. A
+      // self-update drain can begin during that gap, so repeat the admission
+      // check immediately before the synchronous claim section.
       if (updateCoordinator.isDrainRequested()) {
         return {
           error: "self-update is draining in-flight work before cutover",
@@ -1287,7 +1310,7 @@ export async function startDaemon(
         ...(options.prepareRoutineWorkspace === undefined
           ? {}
           : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),
-        projects: runtimeConfig.projectsByName(),
+        projects,
         providersConfig: runtimeConfig.providersConfig(),
         request,
         runStore,

@@ -1,5 +1,10 @@
 # Routine lifecycle control: cancellation, disable, removal, invalid reload
 
+**Amendment note (issue #424):** ADR-0021's Project cascade applies to current Routine Targets. A
+target already disabled with `removed_from_config` remains durable declaration history across a
+later Project disable or removal, retaining its disabled state and reason instead of becoming
+`inactive`.
+
 Routines slice 6 gives operators the same lifecycle control over Routine Firings and Routines that
 they already have over issue Runs and Projects: cancel a misbehaving firing, disable or remove a
 Routine without disrupting in-flight work, and see an invalid routine declaration without losing
@@ -21,6 +26,11 @@ matter, or its path removed from a still-enabled Project's `routines:` list. Unl
 either break ADR-0021's default-hidden Project cascade or force reason-based filtering into every
 existing `inactive` call site.
 
+The states remain distinct under the amendment above: current targets of disabled or absent
+Projects still become hidden-by-default `inactive` rows. Only a target already removed from its
+declaration retains `disabled (removed_from_config)`, preserving the evidence that distinguishes
+historical removal from a genuinely current inactive target.
+
 Removing a Routine's path from a still-enabled Project's `routines:` list previously hard-deleted
 its `routines` row (`RunStore.syncRoutines`). This slice reverses that: the row is soft-disabled
 with `disabled_reason = 'removed_from_config'` and stays visible, mirroring the Project-level
@@ -36,6 +46,19 @@ field itself parsed successfully; the `routines` table's primary key is `(projec
 a routine with no parseable name has no identity to persist a row against. Those failures are
 surfaced only through the reload-error/doctor channel, keyed by file path, never as a `routines`
 row (`RunStore.upsertInvalidRoutineStub`).
+
+A previously valid target that was removed from configuration does not retain a live
+last-known-good declaration indefinitely. If the target is later restored with a recoverable name
+but an otherwise invalid declaration, its removed or Project-cascaded durable row is stale history:
+it becomes `invalid` when the target Project is enabled, or remains `inactive` while that Project is
+disabled. `upsertInvalidRoutineStub` therefore reclaims rows already classified as `inactive` or
+`disabled (removed_from_config)`, while leaving active, expired, and operator-disabled rows intact
+because they may still represent live last-known-good configuration.
+
+When that reclaimed declaration later becomes valid, its nonempty historical prompt identifies the
+row as a deliberate restore rather than a never-valid identity stub. The normal restore clock rules
+therefore apply: recompute a recurring `next_fire_at` from the repair time, and expire an elapsed
+one-shot instead of firing it retroactively.
 
 `invalid` rows use sentinel values (`kind: 'report'`, empty `schedule_at`, empty `prompt_body`) for
 columns the broken declaration never supplied. This is safe because `evaluateRoutineSchedule`

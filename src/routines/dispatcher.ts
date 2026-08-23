@@ -32,6 +32,7 @@ import { deliverRoutineFanoutNotification } from "../notifications/routine-fanou
 import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
 import type { NotificationSink } from "../notifications/types.js";
 import type { RoutineFanoutHoldReason, RunStore } from "../run-store.js";
+import { WorkspacePreparationCleanupError } from "../workspace.js";
 import {
   evaluateRoutineSchedule,
   nextRecurringFireAt,
@@ -100,6 +101,14 @@ type RoutineNotificationDelivery = {
 export type DispatchDueRoutinesResult = {
   fired: string[];
   skipped: Array<{ reason: string; routineName: string; projectName: string }>;
+};
+
+export type SynchronizeRoutineTargetsInput = Pick<
+  DispatchDueRoutinesInput,
+  "projects" | "runStore"
+> & {
+  now?: Date;
+  recomputeSchedulesFromNow?: boolean;
 };
 
 export type FireRoutineNowInput = Omit<
@@ -282,6 +291,7 @@ export function fireRoutineNow(
     branchRef: workspacePlan.branchRef,
     firingId,
     forceOperatorDisabled,
+    kind: detail.kind,
     projectName: routine.projectName,
     providerCommand,
     providerName,
@@ -363,80 +373,11 @@ class RoutineFiringTimeoutError extends Error {
   }
 }
 
-export async function dispatchDueRoutines(
-  input: DispatchDueRoutinesInput
-): Promise<DispatchDueRoutinesResult> {
-  const fired: string[] = [];
-  const skipped: DispatchDueRoutinesResult["skipped"] = [];
+export function synchronizeRoutineTargets(
+  input: SynchronizeRoutineTargetsInput
+): void {
   const now = input.now ?? new Date();
-  const prepareRoutineWorkspace =
-    input.prepareRoutineWorkspace ?? defaultPrepareRoutineWorkspace;
-  const createFiringId = input.createFiringId ?? (() => createUlid());
-  const createFanoutId = input.createFanoutId ?? (() => createUlid());
   const projects = [...input.projects.values()];
-  const fanoutIds = new Map<string, string>();
-  const firingTasks: Promise<void>[] = [];
-  const redactSecrets = (): string[] =>
-    resolveRedactSecrets(input.notification, input.env ?? process.env);
-
-  for (const project of projects) {
-    if (project.disabled === true) {
-      input.runStore.markRoutinesInactiveForProject(project.name, {
-        now,
-        trackerlessGitRoutines: project.trackerlessGitRoutines ?? [],
-        templateRejectedRoutines: project.templateRejectedRoutines ?? []
-      });
-      continue;
-    }
-    if (input.recomputeSchedulesFromNow === true) {
-      const declarations = new Map(
-        (project.routines ?? []).map((routine) => [routine.name, routine])
-      );
-      for (const persisted of input.runStore.listRoutines({
-        project: project.name
-      })) {
-        const declaration = declarations.get(persisted.name);
-        if (
-          declaration === undefined ||
-          !("cron" in declaration.schedule) ||
-          (declaration.catchUp ?? "skip") !== "skip" ||
-          persisted.state !== "active" ||
-          persisted.nextFireAt === null ||
-          new Date(persisted.nextFireAt).getTime() > now.getTime() ||
-          persisted.scheduleCron !== declaration.schedule.cron ||
-          persisted.scheduleTz !== declaration.schedule.tz
-        ) {
-          continue;
-        }
-        const nextFireAt = nextRecurringFireAt(declaration.schedule, now);
-        if (
-          input.runStore.skipRoutineFiring({
-            attemptedAt: now.toISOString(),
-            name: persisted.name,
-            nextFireAt,
-            projectName: project.name,
-            reason: "catch_up_window"
-          })
-        ) {
-          logRoutineSkip(input.logger, {
-            reason: "catch_up_window",
-            routine: persisted.name,
-            scheduledAt: persisted.nextFireAt
-          });
-          skipped.push({
-            projectName: project.name,
-            reason: "catch_up_window",
-            routineName: persisted.name
-          });
-        }
-      }
-    }
-  }
-  // Service-level routines: one sync call with all targeted routines across
-  // projects, each carrying its own projectName. protectedNamesByProject
-  // holds invalid-routine names per project (ADR 0060/0063), while the
-  // tracker-less set identifies valid files rejected by host compatibility
-  // for a precise soft-disable (ADR 0066).
   const allRoutines: TargetedRoutineDeclaration[] = [];
   const protectedNamesByProject: Record<string, string[]> = {};
   const trackerlessGitRoutinesByProject: Record<
@@ -448,8 +389,24 @@ export async function dispatchDueRoutines(
     TargetedRoutineDeclaration[]
   > = {};
   const syncedProjects: string[] = [];
+
   for (const project of projects) {
     if (project.disabled === true) {
+      const trackerlessGitRoutines = project.trackerlessGitRoutines ?? [];
+      const templateRejectedRoutines = project.templateRejectedRoutines ?? [];
+      input.runStore.markRoutinesInactiveForProject(project.name, {
+        currentRoutineNames: [
+          ...(project.invalidRoutineNames ?? []),
+          ...[
+            ...(project.routines ?? []),
+            ...trackerlessGitRoutines,
+            ...templateRejectedRoutines
+          ].map((routine) => routine.name)
+        ],
+        now,
+        trackerlessGitRoutines,
+        templateRejectedRoutines
+      });
       continue;
     }
     syncedProjects.push(project.name);
@@ -468,10 +425,12 @@ export async function dispatchDueRoutines(
         project.templateRejectedRoutines ?? [];
     }
   }
+
+  // Service-level routines synchronize in one pass across all targets.
+  // Include enabled Projects with zero declarations so removal detection
+  // soft-disables a target whose last declaration was just removed.
   input.runStore.syncRoutines(allRoutines, {
     now,
-    // Include projects with zero routines so removal-detection runs for a
-    // project whose last routine was just removed (ADR 0063).
     projects: syncedProjects,
     protectedNamesByProject,
     trackerlessGitRoutinesByProject,
@@ -482,6 +441,131 @@ export async function dispatchDueRoutines(
     projects.map((project) => project.name)
   );
   input.runStore.settleUnavailableRoutineFanoutTargets();
+}
+
+export async function dispatchDueRoutines(
+  input: DispatchDueRoutinesInput
+): Promise<DispatchDueRoutinesResult> {
+  const fired: string[] = [];
+  const skipped: DispatchDueRoutinesResult["skipped"] = [];
+  const now = input.now ?? new Date();
+  const prepareRoutineWorkspace =
+    input.prepareRoutineWorkspace ?? defaultPrepareRoutineWorkspace;
+  const createFiringId = input.createFiringId ?? (() => createUlid());
+  const createFanoutId = input.createFanoutId ?? (() => createUlid());
+  const projects = [...input.projects.values()];
+  const fanoutIds = new Map<string, string>();
+  const recomputedCatchUpGroups = new Map<
+    string,
+    {
+      routineName: string;
+      scheduledAt: string;
+      targets: Array<{ nextFireAt: string; projectName: string }>;
+    }
+  >();
+  const firingTasks: Promise<void>[] = [];
+  const redactSecrets = (): string[] =>
+    resolveRedactSecrets(input.notification, input.env ?? process.env);
+
+  for (const project of projects) {
+    if (project.disabled === true) {
+      continue;
+    }
+    if (input.recomputeSchedulesFromNow === true) {
+      const declarations = new Map(
+        (project.routines ?? []).map((routine) => [routine.name, routine])
+      );
+      for (const persisted of input.runStore.listRoutines({
+        project: project.name
+      })) {
+        const declaration = declarations.get(persisted.name);
+        if (
+          declaration === undefined ||
+          declaration.disabled === true ||
+          !("cron" in declaration.schedule) ||
+          (declaration.catchUp ?? "skip") !== "skip" ||
+          persisted.state !== "active" ||
+          persisted.nextFireAt === null ||
+          new Date(persisted.nextFireAt).getTime() > now.getTime() ||
+          persisted.scheduleCron !== declaration.schedule.cron ||
+          persisted.scheduleTz !== declaration.schedule.tz
+        ) {
+          continue;
+        }
+        const scheduledAt = persisted.nextFireAt;
+        const fanoutKey = routineFanoutKey(persisted.name, scheduledAt);
+        const group = recomputedCatchUpGroups.get(fanoutKey) ?? {
+          routineName: persisted.name,
+          scheduledAt,
+          targets: []
+        };
+        group.targets.push({
+          nextFireAt: nextRecurringFireAt(declaration.schedule, now),
+          projectName: project.name
+        });
+        recomputedCatchUpGroups.set(fanoutKey, group);
+      }
+    }
+  }
+
+  // Capture every Project sharing the missed clock event before the first
+  // skip advances its target's schedule and destroys that grouping key.
+  for (const [fanoutKey, group] of recomputedCatchUpGroups) {
+    const projectNames = group.targets.map((target) => target.projectName);
+    const ensured = input.runStore.ensureRoutineFanout({
+      id: createFanoutId(),
+      projectNames,
+      routineName: group.routineName,
+      scheduledAt: group.scheduledAt
+    });
+    const fanoutId = ensured.id;
+    fanoutIds.set(fanoutKey, fanoutId);
+    // A freshly created row's membership is exactly this group, all still
+    // pending, so no extra read is needed. An existing row may already be
+    // notified, or may cover a narrower membership snapshot from an earlier
+    // restart (ensureRoutineFanout never extends membership on an existing
+    // row — see its own comment in src/run-store.ts) — only then do we need
+    // to read it back to learn what's actually pending. A sent or
+    // policy-skipped fan-out is also an immutable one-shot snapshot (ADR
+    // 0084): only settle a target that belongs to a notification-pending
+    // group; otherwise record the schedule advance as an ungrouped
+    // catch_up_window skip without rewriting that snapshot.
+    const pendingTargetProjectNames = ensured.created
+      ? undefined
+      : input.runStore.getPendingRoutineFanoutTargetProjectNames(fanoutId);
+    for (const target of group.targets) {
+      const shouldSettleFanout =
+        pendingTargetProjectNames === undefined ||
+        pendingTargetProjectNames.has(target.projectName);
+      if (
+        input.runStore.skipRoutineFiring({
+          attemptedAt: now.toISOString(),
+          ...(shouldSettleFanout ? { fanoutId } : {}),
+          name: group.routineName,
+          nextFireAt: target.nextFireAt,
+          projectName: target.projectName,
+          reason: "catch_up_window"
+        })
+      ) {
+        logRoutineSkip(input.logger, {
+          reason: "catch_up_window",
+          routine: group.routineName,
+          scheduledAt: group.scheduledAt
+        });
+        skipped.push({
+          projectName: target.projectName,
+          reason: "catch_up_window",
+          routineName: group.routineName
+        });
+      }
+    }
+  }
+  synchronizeRoutineTargets({
+    now,
+    projects: input.projects,
+    recomputeSchedulesFromNow: input.recomputeSchedulesFromNow === true,
+    runStore: input.runStore
+  });
 
   for (const project of projects) {
     if (project.disabled === true) {
@@ -512,7 +596,7 @@ export async function dispatchDueRoutines(
         continue;
       }
       const scheduledAt = routine.nextFireAt ?? now.toISOString();
-      const fanoutKey = `${routine.name}\0${scheduledAt}`;
+      const fanoutKey = routineFanoutKey(routine.name, scheduledAt);
       let fanoutId = fanoutIds.get(fanoutKey);
       if (fanoutId === undefined) {
         const targetProjectNames = input.runStore
@@ -730,6 +814,7 @@ export async function dispatchDueRoutines(
         fanoutId,
         firedAt: now.toISOString(),
         firingId,
+        kind: routineDetail.kind,
         ...(reEvaluation.nextAt === undefined
           ? {}
           : { nextFireAt: reEvaluation.nextAt }),
@@ -997,6 +1082,7 @@ async function runRoutineFiring(input: {
   const events: NormalizedProviderEvent[] = [];
   const deadline = routineFiringDeadline(input.routine.timeoutMinutes);
   let prepared: PreparedRoutineWorkspace | undefined;
+  let preparationAttempt: Promise<PreparedRoutineWorkspace> | undefined;
   let providerAttempt: Promise<void> | undefined;
   let rawLogPath: string | undefined;
   let normalizedIndexPath: string | undefined;
@@ -1015,15 +1101,15 @@ async function runRoutineFiring(input: {
       input.firingId,
       "preparing_workspace"
     );
-    prepared = await deadline.race(
-      input.prepareRoutineWorkspace({
-        configDir: input.configDir,
-        firingId: input.firingId,
-        kind: input.routine.kind,
-        project: input.project,
-        routineName: input.routine.name
-      })
-    );
+    preparationAttempt = input.prepareRoutineWorkspace({
+      configDir: input.configDir,
+      firingId: input.firingId,
+      kind: input.routine.kind,
+      project: input.project,
+      routineName: input.routine.name,
+      ...(deadline.signal === undefined ? {} : { signal: deadline.signal })
+    });
+    prepared = await deadline.race(preparationAttempt);
     input.runStore.updateRoutineFiringWorkspace({
       branchName: prepared.branchName,
       branchRef: prepared.branchRef,
@@ -1052,7 +1138,24 @@ async function runRoutineFiring(input: {
       rawLogPath,
       workspacePath: prepared.workspacePath
     });
-    await deadline.race(input.provider.validate(input.providerCommand));
+    // One object feeds the adapter's single command-template render in both
+    // validate() and runAttempt(), so the two paths cannot drift. The result
+    // is not the final argv — the adapter still layers routine arguments and
+    // the process scope on top.
+    const routineOverrides = {
+      ...(input.routine.effort === undefined
+        ? {}
+        : { effort: input.routine.effort }),
+      ...(input.routine.model === undefined
+        ? {}
+        : { model: input.routine.model }),
+      ...(input.routine.permissionMode === undefined
+        ? {}
+        : { permissionMode: input.routine.permissionMode })
+    };
+    await deadline.race(
+      input.provider.validate(input.providerCommand, routineOverrides)
+    );
     input.runStore.updateRoutineFiringState(input.firingId, "running");
     input.activeRuns.attachProvider(input.firingId, {
       cancel: () => input.provider.cancel(input.firingId),
@@ -1114,17 +1217,7 @@ async function runRoutineFiring(input: {
           attempt: 1,
           id: input.firingId
         },
-        routine: {
-          ...(input.routine.effort === undefined
-            ? {}
-            : { effort: input.routine.effort }),
-          ...(input.routine.model === undefined
-            ? {}
-            : { model: input.routine.model }),
-          ...(input.routine.permissionMode === undefined
-            ? {}
-            : { permissionMode: input.routine.permissionMode })
-        },
+        routine: routineOverrides,
         workspacePath: prepared.workspacePath
       })) {
         const normalizedLogCursor = await appendRoutineEvent({
@@ -1275,6 +1368,27 @@ async function runRoutineFiring(input: {
     const timedOut = error instanceof RoutineFiringTimeoutError;
     if (timedOut) {
       await input.provider.cancel(input.firingId).catch(() => undefined);
+      // A deadline can win its race before AbortSignal-driven Git cleanup
+      // settles. Keep the firing's slot until preparation has actually
+      // stopped so later callers never serialize behind abandoned work.
+      const preparationError = await preparationAttempt?.then(
+        () => undefined,
+        (preparationError: unknown) => preparationError
+      );
+      if (
+        preparationError instanceof WorkspacePreparationCleanupError ||
+        (preparationError instanceof Error &&
+          (preparationError.name === "WorkspacePreparationCleanupError" ||
+            preparationError.name === "RoutineWorkspaceCleanupError"))
+      ) {
+        input.logger?.warn(
+          {
+            err: errorMessage(preparationError),
+            firing: input.firingId
+          },
+          "symphonika timed-out routine workspace cleanup failed"
+        );
+      }
       await providerAttempt?.catch(() => undefined);
     }
     const cancelEntry = input.activeRuns.get(input.firingId);
@@ -1769,18 +1883,23 @@ function routinePullRequestObservations(
 function routineFiringDeadline(timeoutMinutes: number | undefined): {
   clear: () => void;
   race: <T>(operation: Promise<T>) => Promise<T>;
+  signal: AbortSignal | undefined;
 } {
   if (timeoutMinutes === undefined) {
     return {
       clear: () => undefined,
-      race: (operation) => operation
+      race: (operation) => operation,
+      signal: undefined
     };
   }
 
+  const controller = new AbortController();
   let timer: NodeJS.Timeout | undefined;
   const expired = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
-      reject(new RoutineFiringTimeoutError());
+      const error = new RoutineFiringTimeoutError();
+      reject(error);
+      controller.abort(error);
     }, timeoutMinutes * 60_000);
   });
   return {
@@ -1790,7 +1909,8 @@ function routineFiringDeadline(timeoutMinutes: number | undefined): {
         timer = undefined;
       }
     },
-    race: (operation) => Promise.race([operation, expired])
+    race: (operation) => Promise.race([operation, expired]),
+    signal: controller.signal
   };
 }
 
@@ -2167,6 +2287,14 @@ function routineSchedule(routine: RoutineStatus): RoutineSchedule {
     );
   }
   return { at: routine.scheduleAt };
+}
+
+// Shared by both places dispatchDueRoutines groups Routine Targets by clock
+// event: the restart catch-up recompute pass and the normal due-event loop.
+// A NUL separator can't appear in either a routine name or an ISO timestamp,
+// so this stays collision-free without escaping.
+function routineFanoutKey(routineName: string, scheduledAt: string): string {
+  return `${routineName}\0${scheduledAt}`;
 }
 
 function recordDueRoutineSkip(

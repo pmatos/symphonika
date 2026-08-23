@@ -177,11 +177,12 @@ _Avoid_: Routine Firing when referring to the whole clock event
 
 **Routine Firing**:
 One durable execution attempt for a Routine Target, with its own workspace, provider logs, prompt
-evidence, lifecycle state, terminal reason, optional canonical Routine Outcome, and an independent
-record of whether its prepared `kind: git` workspace held commits ahead of base at completion. A
-scheduled firing is correlated to its Routine Fan-out; its trigger source is scheduled or manual,
-and a manual firing targets one Routine Target directly, using the same execution lifecycle without
-consuming the Routine's next clock event or creating a Routine Fan-out.
+evidence, persisted execution-time kind, lifecycle state, terminal reason, optional canonical
+Routine Outcome, and an independent record of whether its prepared `kind: git` workspace held
+commits ahead of base at completion. A scheduled firing is correlated to its Routine Fan-out; its
+trigger source is scheduled or manual, and a manual firing targets one Routine Target directly,
+using the same execution lifecycle without consuming the Routine's next clock event or creating a
+Routine Fan-out.
 _Avoid_: run when specifically referring to non-issue scheduled execution
 
 **Routine Outcome Claim**:
@@ -205,7 +206,8 @@ _Avoid_: evidence retention, issue Workspace cleanup
 
 **Routine Firing Deadline**:
 An optional declared absolute wall-clock bound for one Routine Firing. It expires regardless of
-continued provider progress and fails the firing with terminal reason `firing_timeout`.
+continued progress, cancels active workspace preparation or provider work, and fails the firing with
+terminal reason `firing_timeout` after that work settles.
 _Avoid_: Watchdog timeout, no-progress grace
 
 **Routine Skip**:
@@ -305,9 +307,22 @@ A Dispatch Project's scheduler state for polling cadence, last poll outcome, and
 Routine Hosts are never polled and have no cursor.
 _Avoid_: issue cursor
 
+**Dispatch Overlap Guard**:
+An optional Dispatch-Project admission gate that delays a candidate when its known pull-request file
+footprint intersects the periodically refreshed Workspace footprint of an in-flight Run in the same
+Project. Unknown footprints remain dispatchable; strict serialization uses `max_in_flight: 1`.
+_Avoid_: dependency scheduler, merge-conflict resolver
+
 **Agent Provider**:
 A normalized adapter that lets the orchestrator run a specific coding-agent implementation; v1 supports Codex, Claude, and Oh My Pi.
 _Avoid_: agent when referring to the adapter boundary
+
+**Doctor Execution Environment**:
+The report-only view of local capabilities `doctor` checks before any dispatch: selected Project
+provider executables, the Codex headless profile contract, independent `gh` authentication, and the
+provider/`gh` liveness of an installed unit's frozen PATH. It is an on-demand observation, not a
+persisted capability manifest or an auto-remediation mechanism. See ADR 0085.
+_Avoid_: Dispatch Eligibility, provider validation when referring only to executable/auth/PATH state
 
 **Full-Permission Agent Execution**:
 The execution posture where coding agents run without provider approval prompts or provider sandbox restrictions.
@@ -357,6 +372,8 @@ _Avoid_: chat session
 - Each **Workspace** uses one **Issue Branch**
 - A **Coding Agent** executes within a **Workspace** for one **Issue**
 - An **Agent Provider** launches and observes one kind of **Coding Agent**
+- The **Doctor Execution Environment** reports whether selected **Agent Providers** and `gh` can run
+  under both the invoking process environment and an installed daemon unit's frozen PATH
 - A **Provider Event Log** belongs to one coding-agent run
 - A **Normalized Event Log** is derived from a **Provider Event Log**
 - A **Run Store** records durable orchestration state across process restarts
@@ -390,6 +407,8 @@ _Avoid_: chat session
 - A **State Advance** is not capped by the continuation cap; the FSM bounds the walk via terminal states
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete
 - A **Project Cursor** belongs to exactly one **Dispatch Project**
+- A **Dispatch Overlap Guard** supplements concurrency caps and **Issue Reservation** without
+  advancing a skipped **Dispatch Project**'s scheduler cursor
 - **Full-Permission Agent Execution** is the default and assumed provider posture
 - **Provider PID Isolation** bounds what an **Agent Provider** can see and signal without changing
   **Full-Permission Agent Execution**

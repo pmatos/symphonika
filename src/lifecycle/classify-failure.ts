@@ -13,11 +13,14 @@ export type ClassifyFailureInput = {
   events: NormalizedProviderEvent[];
   successWorkspace?: {
     baseBranch: string;
+    headInspectionFailed?: boolean;
+    headShaAtStart?: string;
     workspacePath: string;
   };
 };
 
 export type ClassifiedTerminal = {
+  branchAdvancedSinceAttemptStart?: boolean;
   classification?: FailureClassification;
   kind: "success" | "failed" | "cancelled" | "input_required";
   reason: string;
@@ -25,6 +28,10 @@ export type ClassifiedTerminal = {
 
 export type WorkspaceCommitInspectionInput = {
   baseBranch: string;
+  workspacePath: string;
+};
+
+export type WorkspaceHeadInspectionInput = {
   workspacePath: string;
 };
 
@@ -112,6 +119,9 @@ async function verifyWorkspaceSuccess(
   }
 
   try {
+    if (workspace.headInspectionFailed === true) {
+      return workspaceInspectionFailed();
+    }
     if (!(await inspectWorkspaceCommitsAhead(workspace))) {
       return {
         classification: "deterministic",
@@ -119,7 +129,15 @@ async function verifyWorkspaceSuccess(
         reason: "no_workspace_changes"
       };
     }
+    const branchAdvancedSinceAttemptStart =
+      workspace.headShaAtStart === undefined
+        ? true
+        : await inspectWorkspaceAdvancedSinceHead({
+            headShaAtStart: workspace.headShaAtStart,
+            workspacePath: workspace.workspacePath
+          });
     return {
+      branchAdvancedSinceAttemptStart,
       kind: "success",
       reason: ""
     };
@@ -144,6 +162,53 @@ export async function inspectWorkspaceCommitsAhead(
     throw new Error(`invalid git rev-list count: ${trimmed}`);
   }
   return Number(trimmed) > 0;
+}
+
+export async function inspectWorkspaceHead(
+  workspace: WorkspaceHeadInspectionInput
+): Promise<string> {
+  const { stdout } = await execFileAsync("git", [
+    "-C",
+    workspace.workspacePath,
+    "rev-parse",
+    "--verify",
+    "HEAD^{commit}"
+  ]);
+  const trimmed = stdout.trim();
+  if (!/^[0-9a-f]{40,64}$/i.test(trimmed)) {
+    throw new Error(`invalid git HEAD: ${trimmed}`);
+  }
+  return trimmed;
+}
+
+async function inspectWorkspaceAdvancedSinceHead(workspace: {
+  headShaAtStart: string;
+  workspacePath: string;
+}): Promise<boolean> {
+  try {
+    await execFileAsync("git", [
+      "-C",
+      workspace.workspacePath,
+      "merge-base",
+      "--is-ancestor",
+      workspace.headShaAtStart,
+      "HEAD"
+    ]);
+  } catch (error) {
+    if (gitExitCode(error) === 1) {
+      return false;
+    }
+    throw error;
+  }
+  return (await inspectWorkspaceHead(workspace)) !== workspace.headShaAtStart;
+}
+
+function gitExitCode(error: unknown): number | undefined {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    return typeof code === "number" ? code : undefined;
+  }
+  return undefined;
 }
 
 function workspaceInspectionFailed(): ClassifiedTerminal {

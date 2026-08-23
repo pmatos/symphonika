@@ -397,10 +397,11 @@ async function buildSnapshot(
       url: state.url
     };
     cache.set(cacheKey, { ...enriched, enrichedAtMs: nowMs });
-    // GraphQL normalizes an omitted headRefOid to an empty string because PR
-    // Follow-up requires a string-valued head SHA. Resolve that sentinel from
-    // this poll's REST result, but do not cache it: a later poll may observe a
-    // newly pushed commit while reusing the other GraphQL enrichment fields.
+    // The default GraphQL adapter rejects a response without its schema-
+    // required headRefOid. A custom GitHubIssuesApi can still use an empty
+    // headSha sentinel; resolve it from this poll's REST result, but do not
+    // cache it: a later poll may observe a newly pushed commit while reusing
+    // the other GraphQL enrichment fields.
     return {
       snapshot: { ...base, ...enriched, headSha, stateAvailable: true }
     };

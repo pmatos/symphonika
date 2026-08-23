@@ -48,3 +48,19 @@ status checks when required, and satisfies the configured review policy, Symphon
 the configured method. The default policy is squash merge, require successful status checks, and do
 not require explicit approval unless GitHub reports `REVIEW_REQUIRED`; branch protection still has
 the final say because the merge goes through GitHub's normal pull-request merge API.
+
+Head identity is part of that same successful GraphQL observation, not a separately refreshed
+fact. GitHub's schema declares [`PullRequest.headRefOid` as
+`GitObjectID!`](https://docs.github.com/en/graphql/reference/pulls#pullrequest), including after the
+head ref is deleted. `fetchPullRequestFollowupState` therefore rejects a missing or empty value as a
+malformed observation. Octokit throws GraphQL responses containing errors, including partial
+responses, so repeated server-side failures follow the existing observation-failure path: preserve
+the tracked row's prior evidence and attempt neither review dispatch nor merge.
+
+The alternative of refreshing only the SHA through REST was rejected. It would add a per-tick API
+call and, more importantly, could pair a newer commit identity with mergeability, checks, and review
+state evaluated for an older commit. Automatic merge instead pins `expectedHeadSha` to the SHA from
+the same successful GraphQL response. The downstream last-known SHA fallback remains only as
+defense for custom `GitHubIssuesApi` implementations that return an empty `headSha`; it cannot
+authorize an unpinned merge, and GitHub rejects a stale pin safely if such an implementation also
+reports readiness for a newer commit.

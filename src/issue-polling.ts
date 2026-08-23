@@ -479,6 +479,9 @@ type GraphqlPullRequest = {
       } | null;
     } | null> | null;
   } | null;
+  // GitHub declares this as GitObjectID!, but the executor result enters as
+  // unknown and is validated at runtime before it becomes a successful PR
+  // Follow-up observation.
   headRefOid?: string | null;
   isDraft?: boolean | null;
   mergeable?: string | null;
@@ -631,6 +634,19 @@ export async function fetchPullRequestFollowupState(
   if (pullRequest === null || pullRequest === undefined) {
     return null;
   }
+  // GitHub's schema guarantees headRefOid even after the head ref is deleted.
+  // Octokit also throws responses that contain GraphQL errors, including
+  // partial responses, so reaching this branch means a custom executor
+  // returned malformed data. Do not turn it into a successful observation:
+  // mergeability/check/review state must stay bound to a known commit.
+  if (
+    typeof pullRequest.headRefOid !== "string" ||
+    pullRequest.headRefOid.length === 0
+  ) {
+    throw new Error(
+      "GitHub GraphQL pull request response is missing non-empty headRefOid"
+    );
+  }
 
   const allThreads = collectReviewThreads(pullRequest.reviewThreads);
   let pageInfo = pullRequest.reviewThreads?.pageInfo;
@@ -656,7 +672,7 @@ export async function fetchPullRequestFollowupState(
 
   return {
     draft: pullRequest.isDraft ?? false,
-    headSha: pullRequest.headRefOid ?? "",
+    headSha: pullRequest.headRefOid,
     mergeable: normalizeMergeable(pullRequest.mergeable),
     merged: pullRequest.merged ?? false,
     number: pullRequest.number ?? input.pullNumber,

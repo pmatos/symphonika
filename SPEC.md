@@ -1740,6 +1740,15 @@ tracked. For each tracked open PR:
 5. If the PR is open, non-draft, mergeable, has no unresolved review feedback, satisfies the review
    policy, and has passing status checks when required, merge it using the configured merge method.
 
+A successful PR Follow-up observation requires a non-empty `headRefOid` from the same GraphQL
+response that supplies mergeability, checks, and review state. GitHub declares this field as
+non-null even after the head ref is deleted. A missing or empty value is therefore a malformed
+observation and is handled like any other observation failure: preserve the tracked row's prior
+evidence and perform no review dispatch or merge. Automatic merge pins `expectedHeadSha` to the
+head SHA from that successful observation. Symphonika does not refresh only the SHA through REST,
+because pairing a newer REST head with GraphQL readiness evaluated for another commit would break
+the commit-identity guarantee while adding another polling call.
+
 Review follow-up Runs ignore `labels_all` and `labels_none` from the moment their in-flight slot is
 reserved, including workspace preparation and provider validation. Issue closure and operator
 cancellation still cancel them. Fresh dispatches and ordinary label-controlled Continuations keep

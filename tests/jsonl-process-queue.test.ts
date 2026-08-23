@@ -192,11 +192,13 @@ describe("createJsonlProcessQueue", () => {
     expect(await queue.next()).toEqual({ kind: "message", raw: { kept: 1 } });
   });
 
-  it("emits a malformed item for a line that is not valid JSON", async () => {
+  it("emits a malformed item for a line that is not valid JSON, trimming trailing whitespace", async () => {
     const { child, stdout } = fakeChild();
     const queue = createJsonlProcessQueue(child);
 
-    stdout.emit("data", "not json\n");
+    // Trailing spaces and a CR before the newline must be stripped from the
+    // echoed line so operators see the payload, not framing artefacts.
+    stdout.emit("data", "not json  \r\n");
 
     const item = await queue.next();
     expect(item.kind).toBe("malformed");
@@ -205,6 +207,31 @@ describe("createJsonlProcessQueue", () => {
     }
     expect(item.line).toBe("not json");
     expect(item.message.length).toBeGreaterThan(0);
+  });
+
+  it("trims the trailing unterminated line and does not re-flush the buffer on a second end", async () => {
+    const { child, stdout } = fakeChild();
+    const queue = createJsonlProcessQueue(child);
+
+    stdout.emit("data", "not json  \r");
+    stdout.emit("end");
+
+    const flushed = await queue.next();
+    expect(flushed.kind).toBe("malformed");
+    if (flushed.kind !== "malformed") {
+      throw new Error("expected malformed item");
+    }
+    expect(flushed.line).toBe("not json");
+
+    // A second end must not re-emit the already-flushed (now cleared) buffer;
+    // the next item is the exit, not a duplicate malformed line.
+    stdout.emit("end");
+    child.emit("close", 0, null);
+    expect(await queue.next()).toEqual({
+      exitCode: 0,
+      kind: "exit",
+      signal: null
+    });
   });
 
   it("emits an error item when the child errors", async () => {

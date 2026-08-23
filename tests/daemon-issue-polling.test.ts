@@ -504,6 +504,80 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("keeps a backed-off Project active when an unparseable config edit falls back to the last-known-good snapshot", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      listOpenIssues: vi
+        .fn()
+        .mockRejectedValue(new Error("API rate limit exceeded"))
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const initialResponse = await fetch(`${daemon.url}/api/status`);
+      const initialBody = (await initialResponse.json()) as {
+        projectStates: Array<{
+          active: boolean;
+          projectName: string;
+          validationMessage: string | null;
+          validationState: string;
+          weight: number;
+        }>;
+      };
+      const initialState = initialBody.projectStates.find(
+        (project) => project.projectName === "symphonika"
+      );
+      expect(initialState).toMatchObject({
+        active: true,
+        projectName: "symphonika",
+        validationState: "invalid",
+        weight: 1
+      });
+      expect(initialState?.validationMessage).toContain("rate limit");
+
+      await writeFile(path.join(root, "symphonika.yml"), "projects: [\n");
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
+
+      const fallbackResponse = await fetch(`${daemon.url}/api/status`);
+      const fallbackBody = (await fallbackResponse.json()) as {
+        projectStates: Array<{
+          active: boolean;
+          projectName: string;
+          validationMessage: string | null;
+          validationState: string;
+          weight: number;
+        }>;
+        reload: { usingLastKnownGood: boolean };
+      };
+      expect(fallbackBody.reload.usingLastKnownGood).toBe(true);
+      expect(
+        fallbackBody.projectStates.find(
+          (project) => project.projectName === "symphonika"
+        )
+      ).toMatchObject({
+        active: true,
+        projectName: "symphonika",
+        validationMessage: initialState?.validationMessage,
+        validationState: "invalid",
+        weight: 1
+      });
+      expect(githubIssuesApi.listOpenIssues).toHaveBeenCalledTimes(1);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("preserves a same-token project's prior status when an earlier project rate-limits", async () => {
     const root = await makeTempRoot();
     await writeTwoProjectsWithDifferentTokens(root, { pollingIntervalMs: 10 });

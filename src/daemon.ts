@@ -85,6 +85,7 @@ import { resolveWatchdogConfig, RuntimeConfigReloader } from "./reload.js";
 import {
   INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS,
   openRunStore,
+  type ProjectState,
   type ProjectSnapshotRepository,
   type RunState,
   type SyncProjectStateInput
@@ -735,7 +736,8 @@ export async function startDaemon(
         state.configPath,
         nextStatus,
         skippedIssueProjectKeys,
-        selectedIssueProjectKeysByName
+        selectedIssueProjectKeysByName,
+        snapshot.projects
       );
 
       // #309: a cheap per-repo PR list, persisted alongside the issue
@@ -1802,9 +1804,11 @@ function persistProjectPollState(
   configPath: string,
   status: import("./issue-polling.js").IssuePollStatus,
   skippedProjectKeys: ReadonlySet<string>,
-  selectedProjectKeysByName: ReadonlyMap<string, string>
+  selectedProjectKeysByName: ReadonlyMap<string, string>,
+  effectiveProjects: readonly RunControllerProjectConfig[]
 ): Promise<Map<string, "dispatch" | "routine_host">> {
   return readProjectStateInputs(configPath, status, {
+    effectiveProjects,
     priorProjectStates: runStore.getProjectStatesByName(),
     skippedProjectKeys
   }).then(({ inputs, modes }) => {
@@ -1997,13 +2001,8 @@ type ProjectStateInputs = {
 };
 
 type ReadProjectStateInputsOptions = {
-  priorProjectStates: ReadonlyMap<
-    string,
-    {
-      validationMessage: string | null;
-      validationState: "inactive" | "invalid" | "valid";
-    }
-  >;
+  effectiveProjects: readonly RunControllerProjectConfig[];
+  priorProjectStates: ReadonlyMap<string, ProjectState>;
   skippedProjectKeys: ReadonlySet<string>;
 };
 
@@ -2022,16 +2021,10 @@ async function readProjectStateInputs(
   try {
     raw = parse(await readFile(configPath, "utf8")) ?? {};
   } catch {
-    return {
-      inputs: status.projects.map(projectStateInputFromReport),
-      modes: new Map()
-    };
+    return fallbackProjectStateInputs(reports, options);
   }
   if (!isRecord(raw) || !Array.isArray(raw["projects"])) {
-    return {
-      inputs: status.projects.map(projectStateInputFromReport),
-      modes: new Map()
-    };
+    return fallbackProjectStateInputs(reports, options);
   }
   const inputs: SyncProjectStateInput[] = [];
   const modes = new Map<string, "dispatch" | "routine_host">();
@@ -2073,6 +2066,57 @@ async function readProjectStateInputs(
     });
   });
   return { inputs, modes };
+}
+
+function fallbackProjectStateInputs(
+  reports: ReadonlyMap<
+    string,
+    import("./issue-polling.js").ProjectIssuePollReport
+  >,
+  options: ReadProjectStateInputsOptions
+): ProjectStateInputs {
+  const inputsByName = new Map<string, SyncProjectStateInput>();
+  const modes = new Map<string, "dispatch" | "routine_host">();
+
+  // A broken edit is not evidence that a Project in the last-known-good
+  // runtime snapshot was removed. Unlike status.projects, this set still
+  // contains Projects whose GitHub token caused this tick to back off.
+  for (const project of options.effectiveProjects) {
+    modes.set(project.name, project.mode);
+    const report =
+      project.tracker === undefined
+        ? undefined
+        : reports.get(projectPollIdentityKey(project.name, project.tracker));
+    const prior = options.priorProjectStates.get(project.name);
+    inputsByName.set(
+      project.name,
+      report !== undefined
+        ? projectStateInputFromReport(report)
+        : prior !== undefined
+          ? projectStateInputFromPrior(prior)
+          : {
+              name: project.name,
+              validationMessage: null,
+              validationState: "valid",
+              weight: project.weight
+            }
+    );
+  }
+
+  return { inputs: Array.from(inputsByName.values()), modes };
+}
+
+function projectStateInputFromPrior(
+  project: ProjectState
+): SyncProjectStateInput {
+  return {
+    name: project.projectName,
+    validationMessage:
+      project.validationState === "invalid" ? project.validationMessage : null,
+    validationState:
+      project.validationState === "invalid" ? "invalid" : "valid",
+    weight: project.weight
+  };
 }
 
 function rawProjectPollIdentityKey(

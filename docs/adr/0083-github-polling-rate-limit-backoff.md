@@ -110,6 +110,15 @@ visible, but a schema-valid Project with no report is not automatically proof of
 by backoff. Config-validation errors continue to take precedence, and disabled/removed declarations
 are not classified as backoff skips.
 
+If the raw config cannot be read or parsed after reload has fallen back to the last-known-good
+runtime snapshot, that broken edit is not authoritative evidence that any Project was removed.
+`readProjectStateInputs` therefore rebuilds its full-set sync input from the effective runtime
+Project descriptors in those fallback branches. A fresh poll report still updates the matching
+Project, while a Project omitted by backoff reuses its existing `project_states` weight and
+validation evidence. Project modes likewise come from the effective snapshot, so a fallback cannot
+temporarily reclassify or hide a Routine Host. Once the file is parseable again, the normal raw-config
+pass resumes ownership of additions, removals, modes, weights, and validation errors.
+
 ### Backoff is keyed by resolved GitHub token, not global
 
 `daemon.ts` holds `githubBackoffUntilByToken: Map<string, number>`, keyed by the token

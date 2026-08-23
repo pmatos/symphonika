@@ -1,7 +1,8 @@
 # Built-in workflow templates ship as inline YAML in TypeScript
 
-Symphonika ships four built-in workflow templates (`builtin:single-agent-pr`,
-`builtin:plan-tdd-pr`, `builtin:autofix-until-clean`, `builtin:merge-when-green`) as conveniences
+Symphonika ships five built-in workflow templates (`builtin:single-agent-pr`,
+`builtin:plan-tdd-pr`, `builtin:refactor-swarm`, `builtin:autofix-until-clean`,
+`builtin:merge-when-green`) as conveniences
 over the repo-local template machinery introduced in ADR 0045 and SPEC §"Built-In Templates".
 Built-ins are not a separate runtime path: they expand through the same `loadWorkflowTemplate`
 loader, `expandWorkflowTemplateUse` interpolation, state-prefixing, and exit-mapping rules as
@@ -16,7 +17,7 @@ separate copy step in the build pipeline. The inline-string approach has zero bu
 impact, keeps the contents directly verifiable by `tsc`, and mirrors the pattern that
 `tests/workflow.test.ts` already uses when constructing workflow YAML inline via
 `[...].join("\n")`. The cost is editor ergonomics (no YAML syntax highlighting inside TS string
-literals), which is small relative to the four templates this set contains.
+literals), which is small relative to the five templates this set contains.
 
 Second, **built-ins resolve by prefix on the existing `template:` field**: a workflow declares
 `template: builtin:<name>` exactly the same way it declares `template: ./local.yml`.
@@ -64,3 +65,6 @@ alternative — interpolating an empty string and relying on `coerceMergeMethod(
 The reserved prefix `builtin:` joins `sym:` (label namespace, ADR 0024) as a Symphonika-owned
 namespace. There is no collision today but new template names should avoid both prefixes for
 forward compatibility.
+
+ADR 0085 adds `builtin:refactor-swarm` without changing these resolution decisions. Its three
+serial agent states use the same inline-YAML registry and explicit local-override mechanism.

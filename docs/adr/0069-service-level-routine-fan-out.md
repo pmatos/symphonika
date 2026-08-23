@@ -2,6 +2,10 @@
 
 Status: Accepted
 
+**Amendment note (issue #424):** the Project cascade applies only to current Routine Targets. A
+target already disabled with `removed_from_config` is durable declaration history and retains that
+state and reason across a later Project disable or removal.
+
 Superseded in part by ADR 0084, which makes provider-blocked targets `held`, summary-terminal, and
 still claimable instead of leaving them `pending` as a readiness gate.
 
@@ -60,12 +64,13 @@ Routine reconciliation consumes the complete service-level set of `(Project, Rou
 - `disabled: true` or removing the declaration soft-disables every materialized target row;
 - removing one Project from `projects:` soft-disables only that row with
   `disabled_reason = "removed_from_config"`;
-- disabling or removing a targeted Project marks only that row `inactive` under ADR 0021; and
+- disabling or removing a targeted Project marks its current target row `inactive` under ADR 0021,
+  while a row already removed from the declaration retains `removed_from_config`; and
 - sibling target rows remain independently active and continue firing.
 
 In-flight firings continue under ADR 0060. `pruneRoutinesForUnknownProjects` remains a
 Project-membership cleanup operation and `markRoutinesInactiveForProject` remains a per-Project
-cascade.
+cascade; both preserve targets already recorded as removed declaration history.
 
 ### Durable Routine Fan-out
 

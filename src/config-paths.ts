@@ -19,6 +19,7 @@ export type ResolveServiceConfigPathOptions = {
 };
 
 const DEFAULT_SERVICE_CONFIG_FILE = "symphonika.yml";
+const SERVICE_ENVIRONMENT_FILE = "env";
 const XDG_CONFIG_SUBDIR = "symphonika";
 const XDG_STATE_SUBDIR = "symphonika";
 
@@ -47,6 +48,16 @@ export function defaultUserConfigPath(
     XDG_CONFIG_SUBDIR,
     DEFAULT_SERVICE_CONFIG_FILE
   );
+}
+
+// Environment-backed secrets live in a file named `env` beside the selected
+// Service Config. Takes the config path rather than resolving one itself: the
+// installer deliberately bakes in the explicit-or-default user config (never
+// the project-local branch of resolveServiceConfigPath), while doctor reports
+// against whichever config discovery actually selected, so the two callers can
+// legitimately land in different directories.
+export function serviceEnvironmentFilePath(configPath: string): string {
+  return path.join(path.dirname(configPath), SERVICE_ENVIRONMENT_FILE);
 }
 
 export function defaultUserStateRoot(

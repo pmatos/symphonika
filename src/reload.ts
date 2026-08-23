@@ -9,7 +9,9 @@ import { z } from "zod";
 import type { WorkflowFormat } from "./config-schemas.js";
 import {
   pathStringSchema,
+  projectDispatchSchema,
   projectWorkspaceSchema,
+  rejectDispatchOnlyKeysOnRoutineHost,
   workflowReferenceSchema
 } from "./config-schemas.js";
 import type {
@@ -229,6 +231,7 @@ const pollingProjectSchema = z
     // Per-project concurrency cap. Omitted defaults to 1 at consume-time.
     // Zero / negative values are rejected. See ADR 0053.
     max_in_flight: z.number().int().positive().optional(),
+    dispatch: projectDispatchSchema.optional(),
     tracker: trackerSchema,
     issue_filters: issueFiltersSchema,
     priority: prioritySchema,
@@ -236,29 +239,6 @@ const pollingProjectSchema = z
   })
   .passthrough()
   .superRefine(rejectPerProjectRoutines);
-
-// A Routine Host has no use for dispatch-only fields — ADR 0062 says they are
-// "unused and rejected", so a stale or copy-pasted dispatch block must be a
-// declaration-time error rather than silently ignored.
-const DISPATCH_ONLY_KEYS = ["issue_filters", "priority", "workflow"] as const;
-
-function rejectDispatchOnlyKeysOnRoutineHost(
-  rawProject: unknown,
-  ctx: z.RefinementCtx
-): void {
-  if (rawProject === null || typeof rawProject !== "object") {
-    return;
-  }
-  for (const key of DISPATCH_ONLY_KEYS) {
-    if (key in rawProject) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `\`${key}\` is a dispatch-only field and is unused and rejected on a Routine Host (mode: routine_host); see ADR 0062`,
-        path: [key]
-      });
-    }
-  }
-}
 
 // A Routine Host: never polled for issues, exists only to host Routine Firings.
 // Requires name + workspace + agent + mode. `tracker` is optional here; the

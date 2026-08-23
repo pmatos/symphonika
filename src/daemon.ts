@@ -70,6 +70,7 @@ import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { createSmtpNotificationSink } from "./notifications/smtp.js";
 import { DaemonHealthNotifier } from "./notifications/daemon-health.js";
+import { NotificationDeliveryTracker } from "./notifications/delivery-tracker.js";
 import { IssueRunNotificationCoordinator } from "./notifications/issue-run.js";
 import type { NotificationSink } from "./notifications/types.js";
 import {
@@ -88,7 +89,11 @@ import {
   type RunState,
   type SyncProjectStateInput
 } from "./run-store.js";
-import { dispatchDueRoutines, fireRoutineNow } from "./routines/dispatcher.js";
+import {
+  dispatchDueRoutines,
+  fireRoutineNow,
+  synchronizeRoutineTargets
+} from "./routines/dispatcher.js";
 import type { RoutineFiringState } from "./routines/types.js";
 import type {
   PreparedRoutineWorkspace,
@@ -362,6 +367,7 @@ export async function startDaemon(
     logger,
     resolveConfig: () => runtimeConfig.emailConfig()
   });
+  const routineNotificationDeliveries = new NotificationDeliveryTracker(logger);
   const activeRuns = new ActiveRunRegistry();
   // Drain gate read by launchWork and the fireRoutine HTTP handler (ADR
   // 0079): blocks NEW dispatch admission only, never cancels in-flight
@@ -1031,6 +1037,7 @@ export async function startDaemon(
             createSink: (config) =>
               options.notificationSink ??
               createSmtpNotificationSink(config, { env }),
+            deliveries: routineNotificationDeliveries,
             // Resolved at delivery time so a reload mid-firing is honored
             // for that firing's own notification (ADR 0067).
             resolveConfig: () => runtimeConfig.emailConfig()
@@ -1249,11 +1256,30 @@ export async function startDaemon(
     // behind (dispatchMutex.held, above).
     claimMutex: dispatchMutex,
     dispatchRuntime,
-    fireRoutine: (request): FireRoutineResult => {
+    fireRoutine: async (request): Promise<FireRoutineResult> => {
       // fireRoutineNow is a second admission path outside launchWork's
       // drain check above -- a manual `symphonika fire-now` during a
       // self-update drain must be refused too, or drain could wait forever
       // on work the drain gate never saw coming (ADR 0079).
+      if (updateCoordinator.isDrainRequested()) {
+        return {
+          error: "self-update is draining in-flight work before cutover",
+          kind: "refused",
+          reason: "self_update_draining"
+        };
+      }
+      // Manual firing is an explicit admission boundary, so resolve it from
+      // a freshly reloaded effective snapshot rather than waiting for the
+      // next daemon tick. Synchronize that snapshot through the same path as
+      // scheduled dispatch before reading the persisted Routine Target; this
+      // preserves precise disabled/invalid/rejection states while ensuring
+      // an accepted firing uses the current prompt and provider declaration.
+      await reloadConfigAndRecordOutcome();
+      const projects = runtimeConfig.projectsByName();
+      synchronizeRoutineTargets({ projects, runStore });
+      // The reload awaits the reloader mutex and filesystem reads. A
+      // self-update drain can begin during that gap, so repeat the admission
+      // check immediately before the synchronous claim section.
       if (updateCoordinator.isDrainRequested()) {
         return {
           error: "self-update is draining in-flight work before cutover",
@@ -1276,6 +1302,7 @@ export async function startDaemon(
           createSink: (config) =>
             options.notificationSink ??
             createSmtpNotificationSink(config, { env }),
+          deliveries: routineNotificationDeliveries,
           // Resolved at delivery time so a reload mid-firing is honored
           // for that firing's own notification (ADR 0067).
           resolveConfig: () => runtimeConfig.emailConfig()
@@ -1283,7 +1310,7 @@ export async function startDaemon(
         ...(options.prepareRoutineWorkspace === undefined
           ? {}
           : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),
-        projects: runtimeConfig.projectsByName(),
+        projects,
         providersConfig: runtimeConfig.providersConfig(),
         request,
         runStore,
@@ -1755,7 +1782,10 @@ export async function startDaemon(
       await activeRuns.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
       await scheduledWork;
       await Promise.allSettled(Array.from(inflightDispatches));
-      await daemonHealthNotifications.settled();
+      await Promise.all([
+        routineNotificationDeliveries.settled(),
+        daemonHealthNotifications.settled()
+      ]);
       try {
         shutdownController.abort();
         await stopServer(server, logger);

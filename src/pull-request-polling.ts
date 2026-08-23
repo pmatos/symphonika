@@ -1,7 +1,7 @@
+import { normalizeLabels } from "./issue-priority.js";
 import {
   envReferenceName,
   isRateLimitError,
-  normalizeLabels,
   resolveEnvBackedValue,
   tryGetPullRequestFollowupState,
   tryListPullRequests,

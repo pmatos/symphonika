@@ -51,11 +51,9 @@ export function defaultUserConfigPath(
 }
 
 // Environment-backed secrets live in a file named `env` beside the selected
-// Service Config. Takes the config path rather than resolving one itself: the
-// installer deliberately bakes in the explicit-or-default user config (never
-// the project-local branch of resolveServiceConfigPath), while doctor reports
-// against whichever config discovery actually selected, so the two callers can
-// legitimately land in different directories.
+// Service Config. Takes the config path rather than resolving one itself:
+// which config the installed unit and doctor agree on is decided once, in
+// service.ts's unitEnvironmentFilePath.
 export function serviceEnvironmentFilePath(configPath: string): string {
   return path.join(path.dirname(configPath), SERVICE_ENVIRONMENT_FILE);
 }
@@ -95,9 +93,12 @@ function userConfigHome(
   const env = options.env ?? process.env;
   const homeDir = options.homeDir ?? homedir();
   const configured = env.XDG_CONFIG_HOME?.trim();
-  return configured === undefined || configured.length === 0
-    ? path.join(homeDir, ".config")
-    : path.resolve(configured);
+  // XDG base directories must be absolute. Ignoring a relative value also
+  // keeps daemon Service Config discovery aligned with systemd's user-unit
+  // and EnvironmentFile paths, which use the same home-directory fallback.
+  return configured !== undefined && path.isAbsolute(configured)
+    ? path.resolve(configured)
+    : path.join(homeDir, ".config");
 }
 
 function userStateHome(

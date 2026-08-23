@@ -73,9 +73,35 @@ describe("test-email", () => {
     });
   });
 
+  it("redacts the SMTP password from the reported delivery failure", async () => {
+    const root = await makeTempRoot();
+    const configPath = await writeEmailConfig(root, "always", {
+      authenticated: true
+    });
+    const secret = "smtp-password-that-must-not-reach-the-cli";
+    const deliver = vi
+      .fn()
+      .mockRejectedValue(new Error(`authentication failed for ${secret}`));
+
+    const report = await runTestEmail({
+      configPath,
+      createSink: () => ({ deliver }),
+      env: { SYMPHONIKA_SMTP_PASSWORD: secret }
+    });
+
+    expect(report).toEqual({
+      configPath,
+      error: "authentication failed for [REDACTED]",
+      ok: false,
+      to: "operator@example.com"
+    });
+  });
+
   it("forces delivery when Routine Firing notifications are muted", async () => {
     const root = await makeTempRoot();
-    const configPath = await writeEmailConfig(root, "always", false);
+    const configPath = await writeEmailConfig(root, "always", {
+      routineFirings: false
+    });
     const deliver = vi.fn().mockResolvedValue(undefined);
 
     const report = await runTestEmail({
@@ -92,8 +118,9 @@ describe("test-email", () => {
 async function writeEmailConfig(
   root: string,
   on: "always" | "changes" | "failures",
-  routineFirings = true
+  options: { authenticated?: boolean; routineFirings?: boolean } = {}
 ): Promise<string> {
+  const { authenticated = false, routineFirings = true } = options;
   const configPath = path.join(root, "symphonika.yml");
   await writeFile(
     configPath,
@@ -107,6 +134,7 @@ async function writeEmailConfig(
       "    issue_runs: true",
       "    daemon_health: true",
       '  smtp_host: "smtp.example.com"',
+      ...(authenticated ? ['  smtp_username: "server-token"'] : []),
       ""
     ].join("\n")
   );

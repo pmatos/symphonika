@@ -8,6 +8,7 @@ import type {
   IssueSnapshot,
   RawGitHubIssueDependencyRef
 } from "./issue-polling.js";
+import { normalizeProjectWeight } from "./issue-priority.js";
 import { isPathInside } from "./path-safety.js";
 import type { AgentProviderName, NormalizedProviderEvent } from "./provider.js";
 import type {
@@ -178,6 +179,7 @@ export type ProjectState = {
   lastPollFinishedAt: string | null;
   lastPollOk: boolean | null;
   lastPollStartedAt: string | null;
+  lastSuccessfulPollAt: string | null;
   projectName: string;
   schedulerCurrentWeight: number;
   updatedAt: string;
@@ -680,6 +682,7 @@ type ProjectStateRow = {
   last_poll_finished_at: string | null;
   last_poll_ok: number | null;
   last_poll_started_at: string | null;
+  last_successful_poll_at: string | null;
   project_name: string;
   scheduler_current_weight: number;
   updated_at: string;
@@ -840,6 +843,15 @@ class RoutineAlreadyClaimedError extends Error {
   constructor() {
     super("routine already claimed");
     this.name = "RoutineAlreadyClaimedError";
+  }
+}
+
+export class RoutineFanoutInvariantError extends Error {
+  constructor(fanoutId: string, projectName: string) {
+    super(
+      `routine fan-out "${fanoutId}" has no claimable target for Project "${projectName}"`
+    );
+    this.name = "RoutineFanoutInvariantError";
   }
 }
 
@@ -1578,12 +1590,12 @@ export class RunStore {
         [
           "insert into project_states (",
           "project_name, active, weight, validation_state, validation_message,",
-          "last_poll_started_at, last_poll_finished_at, last_poll_ok, last_poll_error,",
+          "last_poll_started_at, last_poll_finished_at, last_successful_poll_at, last_poll_ok, last_poll_error,",
           "last_fetched_issues, last_candidate_issues, last_filtered_issues,",
           "created_at, updated_at",
           ") values (",
           "@project_name, 1, 1, @validation_state, @validation_message,",
-          "@last_poll_started_at, @last_poll_finished_at, @last_poll_ok, @last_poll_error,",
+          "@last_poll_started_at, @last_poll_finished_at, @last_successful_poll_at, @last_poll_ok, @last_poll_error,",
           "@last_fetched_issues, @last_candidate_issues, @last_filtered_issues,",
           "@created_at, @updated_at",
           ")",
@@ -1592,6 +1604,7 @@ export class RunStore {
           "validation_message = excluded.validation_message,",
           "last_poll_started_at = excluded.last_poll_started_at,",
           "last_poll_finished_at = excluded.last_poll_finished_at,",
+          "last_successful_poll_at = case when excluded.last_poll_ok = 1 then excluded.last_successful_poll_at else project_states.last_successful_poll_at end,",
           "last_poll_ok = excluded.last_poll_ok,",
           "last_poll_error = excluded.last_poll_error,",
           "last_fetched_issues = excluded.last_fetched_issues,",
@@ -1609,6 +1622,7 @@ export class RunStore {
         last_poll_finished_at: now,
         last_poll_ok: input.ok ? 1 : 0,
         last_poll_started_at: now,
+        last_successful_poll_at: input.ok ? now : null,
         project_name: input.projectName,
         updated_at: now,
         validation_message: message,
@@ -1666,7 +1680,7 @@ export class RunStore {
       .prepare(
         [
           "select project_name, active, weight, validation_state, validation_message,",
-          "last_poll_started_at, last_poll_finished_at, last_poll_ok, last_poll_error,",
+          "last_poll_started_at, last_poll_finished_at, last_successful_poll_at, last_poll_ok, last_poll_error,",
           "last_fetched_issues, last_candidate_issues, last_filtered_issues,",
           "scheduler_current_weight, last_dispatched_at, last_dispatched_issue_number,",
           "created_at, updated_at",
@@ -2006,10 +2020,12 @@ export class RunStore {
         // Un-disabling (front matter disabled: true removed, or the routine's
         // path restored after removal) always recomputes from the current
         // tick's now — never resurrects a next_fire_at computed before the
-        // routine was disabled. For cron this is always strictly future; for
-        // an elapsed one-shot the state branch below routes to 'expired',
-        // where next_fire_at is never read.
-        "when (routines.state = 'disabled' or routines.state = 'inactive') and @disabled = 0 then excluded.next_fire_at",
+        // routine was disabled. A reclaimed invalid row with a nonempty
+        // historical prompt is the same deliberate-restore path; an empty-
+        // prompt identity stub has no prior schedule to resurrect. For cron
+        // this is always strictly future; for an elapsed one-shot the state
+        // branch below routes to 'expired', where next_fire_at is never read.
+        "when (routines.state = 'disabled' or routines.state = 'inactive' or (routines.state = 'invalid' and routines.prompt_body != '')) and @disabled = 0 then excluded.next_fire_at",
         "when routines.next_fire_at is null and routines.state != 'expired' then excluded.next_fire_at",
         "else routines.next_fire_at end,",
         "prompt_body = excluded.prompt_body,",
@@ -2025,11 +2041,12 @@ export class RunStore {
         "state = case",
         "when @disabled = 1 then 'disabled'",
         "when excluded.schedule_cron is not null then 'active'",
-        // Restoring a one-shot whose `at` already elapsed while disabled or
-        // inactive must not fire it retroactively, even when its schedule was
-        // edited while stopped. This precedes schedule-change reactivation so
-        // only a future one-shot edit can reactivate a stopped Routine.
-        "when (routines.state = 'disabled' or routines.state = 'inactive') and @disabled = 0 and excluded.schedule_cron is null and routines.last_fired_at is null and excluded.schedule_at <= @now_iso then 'expired'",
+        // Restoring a one-shot whose `at` already elapsed while disabled,
+        // inactive, or reclaimed-invalid must not fire it retroactively, even
+        // when its schedule was edited while stopped. This precedes schedule-
+        // change reactivation so only a future one-shot edit can reactivate a
+        // stopped Routine.
+        "when (routines.state = 'disabled' or routines.state = 'inactive' or (routines.state = 'invalid' and routines.prompt_body != '')) and @disabled = 0 and excluded.schedule_cron is null and routines.last_fired_at is null and excluded.schedule_at <= @now_iso then 'expired'",
         "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then 'active'",
         "when routines.state = 'expired' or routines.last_fired_at is not null then 'expired'",
         "else 'active' end,",
@@ -2305,6 +2322,25 @@ export class RunStore {
     );
   }
 
+  // A cheaper alternative to getRoutineFanout() for callers that only need
+  // to know which targets are still reconcilable — it skips the per-target
+  // getRoutineFiring() lookups that getRoutineFanout() needs to build firing
+  // details and pull-request counts.
+  getPendingRoutineFanoutTargetProjectNames(id: string): Set<string> {
+    const fanout = this.database
+      .prepare("select notification_state from routine_fanouts where id = ?")
+      .get(id) as { notification_state: string } | undefined;
+    if (fanout?.notification_state !== "pending") {
+      return new Set();
+    }
+    const targets = this.database
+      .prepare(
+        "select project_name from routine_fanout_targets where fanout_id = ?"
+      )
+      .all(id) as Array<{ project_name: string }>;
+    return new Set(targets.map((target) => target.project_name));
+  }
+
   getRoutineFanout(id: string): RoutineFanoutStatus | undefined {
     const row = this.database
       .prepare(
@@ -2507,12 +2543,19 @@ export class RunStore {
   }
 
   settleUnavailableRoutineFanoutTargets(): number {
+    // Terminal or in-flight notifications already represent immutable
+    // one-shot snapshots; only a still-pending group may be reconciled.
     const result = this.database
       .prepare(
         [
           "update routine_fanout_targets",
           "set disposition = 'skipped', hold_reason = null, skip_reason = 'target_unavailable', updated_at = ?",
           "where disposition in ('pending', 'held')",
+          "and exists (",
+          "select 1 from routine_fanouts writable_fanout",
+          "where writable_fanout.id = routine_fanout_targets.fanout_id",
+          "and writable_fanout.notification_state = 'pending'",
+          ")",
           "and not exists (",
           "select 1 from routine_fanouts f",
           "join routines r on r.name = f.routine_name",
@@ -2530,6 +2573,7 @@ export class RunStore {
   markRoutinesInactiveForProject(
     projectName: string,
     options: {
+      currentRoutineNames?: string[];
       now?: Date;
       trackerlessGitRoutines?: TargetedRoutineDeclaration[];
       templateRejectedRoutines?: TargetedRoutineDeclaration[];
@@ -2537,6 +2581,11 @@ export class RunStore {
   ): void {
     const now = timestamp();
     const scheduleNow = options.now ?? new Date();
+    const currentRoutineNames = [...new Set(options.currentRoutineNames ?? [])];
+    const preserveRemovedTargets =
+      currentRoutineNames.length === 0
+        ? "and not (state = 'disabled' and disabled_reason = 'removed_from_config')"
+        : `and not (state = 'disabled' and disabled_reason = 'removed_from_config' and name not in (${currentRoutineNames.map(() => "?").join(", ")}))`;
     const insertInactive = this.database.prepare(
       [
         "insert into routines (",
@@ -2615,25 +2664,31 @@ export class RunStore {
         .prepare(
           // disabled_reason only means anything on state = 'disabled' — clear
           // it here so an inactive row never surfaces a stale routine-level
-          // reason left over from before the Project-cascade (ADR-0060).
-          "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name = ? and (state != 'inactive' or disabled_reason is not null)"
+          // reason left over from before the Project-cascade (ADR-0060). The
+          // one exception is a target already removed from its declaration:
+          // that row is history, not a target this Project still has (ADR
+          // 0069 cascades "a targeted Project"'s own rows), and laundering it
+          // to a reasonless inactive row makes it indistinguishable from a
+          // current target whose Project went away — which then hides its
+          // still-removed siblings in enabled Projects from the dashboard. A
+          // name restored while this Project remains disabled is current
+          // again, so it must pass through the cascade to inactive/null.
+          `update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name = ? and (state != 'inactive' or disabled_reason is not null) ${preserveRemovedTargets}`
         )
-        .run(now, projectName);
+        .run(now, projectName, ...currentRoutineNames);
     });
     apply();
   }
 
-  // Persists identity-only evidence for a routine declaration that has never
-  // had a valid snapshot (a brand-new file with a parseable name but invalid
-  // front matter elsewhere). kind/schedule_at/prompt_body are unreadable
-  // sentinels — evaluateRoutineSchedule (src/routines/schedule.ts) never
-  // fires a non-'active' row, so these values are never read as real config.
-  // A validly-configured routine always has a non-empty prompt_body, so
-  // prompt_body = '' reliably identifies a row that has never been anything
-  // but this stub. On conflict, reclaim such a row back to 'invalid' (it may
-  // have gone dormant as 'disabled'/'inactive' via a Project-cascade or
-  // removal-from-config while still broken) but never touch a row that has
-  // ever held a real declaration.
+  // Persists identity evidence for a current routine declaration that has no
+  // live valid snapshot (a file with a parseable name but invalid front
+  // matter elsewhere). kind/schedule_at/prompt_body are unreadable sentinels
+  // for a first-seen declaration — evaluateRoutineSchedule
+  // (src/routines/schedule.ts) never fires a non-'active' row, so these values
+  // are never read as real config. On conflict, reclaim either an identity-
+  // only stub or stale declaration history already classified as inactive or
+  // removed_from_config. Active, expired, and operator-disabled rows may
+  // still represent live last-known-good configuration and remain untouched.
   upsertInvalidRoutineStub(input: {
     name: string;
     projectName: string;
@@ -2653,7 +2708,9 @@ export class RunStore {
           "state = 'invalid',",
           "disabled_reason = null,",
           "updated_at = excluded.updated_at",
-          "where routines.prompt_body = ''"
+          "where routines.prompt_body = ''",
+          "or routines.state = 'inactive'",
+          "or (routines.state = 'disabled' and routines.disabled_reason = 'removed_from_config')"
         ].join(" ")
       )
       .run({
@@ -2670,11 +2727,15 @@ export class RunStore {
     const names = [...new Set(projectNames)];
     // disabled_reason only means anything on state = 'disabled' — clear it
     // here so an inactive row never surfaces a stale routine-level reason
-    // left over from before the Project-cascade (ADR-0060).
+    // left over from before the Project-cascade (ADR-0060). A target already
+    // removed from its declaration is the exception, for the same reason as
+    // in markRoutinesInactiveForProject: it is durable history rather than a
+    // row this Project still targets, and clearing its reason would strip the
+    // only evidence that separates it from a current target.
     if (names.length === 0) {
       this.database
         .prepare(
-          "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where state != 'inactive'"
+          "update routines set state = 'inactive', disabled_reason = null, updated_at = ? where state != 'inactive' and not (state = 'disabled' and disabled_reason = 'removed_from_config')"
         )
         .run(now);
       return;
@@ -2682,7 +2743,7 @@ export class RunStore {
     const placeholders = names.map(() => "?").join(", ");
     this.database
       .prepare(
-        `update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name not in (${placeholders}) and state != 'inactive'`
+        `update routines set state = 'inactive', disabled_reason = null, updated_at = ? where project_name not in (${placeholders}) and state != 'inactive' and not (state = 'disabled' and disabled_reason = 'removed_from_config')`
       )
       .run(now, ...names);
   }
@@ -2822,6 +2883,22 @@ export class RunStore {
     return mapRoutineOutcomeRow(row);
   }
 
+  // A fanoutId whose target row already left pending/held (e.g. a racing
+  // claim or skip from another writer) is a benign miss, not a crash —
+  // shared by skipRoutineFiring, claimRoutineFiring, and
+  // claimManualRoutineFiring, which all report it the same way a 0-row
+  // update would.
+  private runIfClaimable<T>(fn: () => T): T | undefined {
+    try {
+      return fn();
+    } catch (error) {
+      if (error instanceof RoutineAlreadyClaimedError) {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
   skipRoutineFiring(input: {
     attemptedAt: string;
     fanoutId?: string;
@@ -2871,7 +2948,14 @@ export class RunStore {
           )
           .run(input.reason, timestamp(), input.fanoutId, input.projectName);
         if (target.changes === 0) {
-          throw new RoutineAlreadyClaimedError();
+          // The Routine Target clock update above already won inside this
+          // transaction. Ordinary competing claims therefore return false
+          // before reaching this branch; a supplied fan-out without a
+          // claimable Project leg violates the caller's pairing invariant.
+          throw new RoutineFanoutInvariantError(
+            input.fanoutId,
+            input.projectName
+          );
         }
       }
       this.database
@@ -2891,7 +2975,7 @@ export class RunStore {
         });
       return true;
     });
-    return apply();
+    return this.runIfClaimable(apply) ?? false;
   }
 
   markRoutineExpired(input: {
@@ -3039,16 +3123,12 @@ export class RunStore {
       }
       return event;
     });
-    try {
-      const event = claim();
-      this.publishChange(event);
-      return true;
-    } catch (error) {
-      if (error instanceof RoutineAlreadyClaimedError) {
-        return false;
-      }
-      throw error;
+    const event = this.runIfClaimable(claim);
+    if (event === undefined) {
+      return false;
     }
+    this.publishChange(event);
+    return true;
   }
 
   claimManualRoutineFiring(input: {
@@ -3101,16 +3181,12 @@ export class RunStore {
           : { workspacePath: input.workspacePath })
       });
     });
-    try {
-      const event = claim();
-      this.publishChange(event);
-      return true;
-    } catch (error) {
-      if (error instanceof RoutineAlreadyClaimedError) {
-        return false;
-      }
-      throw error;
+    const event = this.runIfClaimable(claim);
+    if (event === undefined) {
+      return false;
     }
+    this.publishChange(event);
+    return true;
   }
 
   updateRoutineFiringState(id: string, state: RoutineFiringState): void {
@@ -4732,6 +4808,7 @@ export class RunStore {
         validation_message text,
         last_poll_started_at text,
         last_poll_finished_at text,
+        last_successful_poll_at text,
         last_poll_ok integer,
         last_poll_error text,
         last_fetched_issues integer not null default 0,
@@ -4982,6 +5059,7 @@ export class RunStore {
         "review_followup_cap_reached",
         "integer not null default 0"
       ],
+      ["project_states", "last_successful_poll_at", "text"],
       ["attempts", "failure_classification", "text"],
       ["attempts", "metadata_path", "text"],
       ["attempts", "workflow_graph_path", "text"],
@@ -5046,6 +5124,7 @@ export class RunStore {
     const apply = this.database.transaction(() => {
       let addedCommitsAhead = false;
       let addedFiringKind = false;
+      let addedLastSuccessfulPollAt = false;
       for (const [table, column, decl] of additions) {
         const added = this.ensureColumn(table, column, decl);
         if (
@@ -5058,6 +5137,24 @@ export class RunStore {
         if (added && table === "routine_firings" && column === "kind") {
           addedFiringKind = true;
         }
+        if (
+          added &&
+          table === "project_states" &&
+          column === "last_successful_poll_at"
+        ) {
+          addedLastSuccessfulPollAt = true;
+        }
+      }
+
+      if (addedLastSuccessfulPollAt) {
+        // A legacy latest-success row has enough evidence to recover this
+        // timestamp exactly. A latest-failure row does not reveal when its
+        // preceding success happened, so leave that case unknown.
+        this.database.exec(`
+          update project_states
+          set last_successful_poll_at = last_poll_finished_at
+          where last_poll_ok = 1;
+        `);
       }
 
       if (addedFiringKind) {
@@ -5592,6 +5689,7 @@ function mapProjectStateRow(row: ProjectStateRow): ProjectState {
         ? null
         : row.last_poll_ok === 1,
     lastPollStartedAt: row.last_poll_started_at ?? null,
+    lastSuccessfulPollAt: row.last_successful_poll_at ?? null,
     projectName: row.project_name,
     schedulerCurrentWeight: row.scheduler_current_weight,
     updatedAt: row.updated_at,
@@ -5722,13 +5820,6 @@ function mapRoutinePullRequestRow(
     projectName: row.project_name,
     routineName: row.routine_name
   };
-}
-
-function normalizeProjectWeight(weight: number | undefined): number {
-  if (weight === undefined || !Number.isInteger(weight) || weight <= 0) {
-    return 1;
-  }
-  return weight;
 }
 
 function mapTrackedPullRequestRow(

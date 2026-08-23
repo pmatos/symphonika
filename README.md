@@ -35,6 +35,12 @@ use `init --force` only to replace the global config, and `init-project --force`
 Project with the same name. Export the GitHub credential referenced by the generated Project before
 running `init-project` or `doctor`.
 
+`doctor` also reports execution-environment drift: selected provider executables, the required
+Codex `profiles.symphonika` keys, independent `gh` authentication, and provider/`gh` resolution
+under an installed systemd unit's frozen PATH. Use `doctor --json` for the same typed report as JSON.
+Use `doctor --offline` in CI or other network-constrained scripts to skip only `gh auth status`;
+local executable, profile, unit-PATH, config, and workflow checks still run.
+
 Run the local quality gate:
 
 ```sh
@@ -95,12 +101,17 @@ The generated unit uses the daemon's normal config discovery by default. To run 
 
 The unit also references an optional `env` file beside the selected Service Config. For the default
 user config this is `$XDG_CONFIG_HOME/symphonika/env`, or `~/.config/symphonika/env` when
-`XDG_CONFIG_HOME` is unset. An explicit `--config /path/to/symphonika.yml` uses `/path/to/env`.
+`XDG_CONFIG_HOME` is unset or relative (systemd ignores a relative `XDG_CONFIG_HOME`). An explicit
+`--config /path/to/symphonika.yml` uses `/path/to/env`.
 Create the default file with restrictive permissions, then edit it without putting the password on
 the command line:
 
 ```sh
-secrets_dir="${XDG_CONFIG_HOME:-$HOME/.config}/symphonika"
+case "${XDG_CONFIG_HOME:-}" in
+  /*) config_home="$XDG_CONFIG_HOME" ;;
+  *) config_home="$HOME/.config" ;;
+esac
+secrets_dir="$config_home/symphonika"
 secrets_file="$secrets_dir/env"
 mkdir -p "$secrets_dir"
 chmod 700 "$secrets_dir"

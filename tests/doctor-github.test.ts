@@ -13,6 +13,11 @@ import {
 } from "../src/doctor.js";
 import type { GitHubIssuesApi } from "../src/issue-polling.js";
 import type { AgentProviderRegistry } from "../src/provider.js";
+import { runServiceInstall } from "../src/service.js";
+import {
+  doctorTestEnv,
+  prepareDoctorTestEnvironment
+} from "./helpers/doctor-environment.js";
 
 const tempRoots: string[] = [];
 const execFile = promisify(execFileCallback);
@@ -20,6 +25,7 @@ const execFile = promisify(execFileCallback);
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-github-test-"));
   tempRoots.push(root);
+  await prepareDoctorTestEnvironment(root);
   return root;
 }
 
@@ -74,13 +80,99 @@ describe("GitHub Project validation", () => {
       agentProviders: fakeAgentProviders(),
       configPath,
       cwd: configRoot,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubApi
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
+      githubApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);
     expect(report.errors).toContain(
       `email.smtp_password_env references $SMTP_TEST_PASSWORD, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . '${path.join(configRoot, "env")}'; set +a)`
+    );
+  });
+
+  // Two things at once: doctor must name the file `service install` bakes
+  // into the unit -- not the `env` beside whichever config discovery selected,
+  // since without `--config` the installer always points at the user config
+  // directory even when a project-local Service Config is what doctor read --
+  // and the two must not drift apart as the XDG rule changes.
+  it("names the same env file the installed unit loads, even when a project-local config was discovered", async () => {
+    const root = await makeTempRoot();
+    const projectDir = path.join(root, "project");
+    const configHome = path.join(root, "xdg config");
+    await writeValidProject(projectDir);
+    await mkdir(configHome, { recursive: true });
+    const configPath = path.join(projectDir, "symphonika.yml");
+    const config = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      config.replace(
+        "providers:\n",
+        [
+          "email:",
+          '  from: "symphonika@example.com"',
+          '  to: "operator@example.com"',
+          '  smtp_host: "smtp.example.com"',
+          '  smtp_username: "server-token"',
+          '  smtp_password_env: "SMTP_TEST_PASSWORD"',
+          "providers:",
+          ""
+        ].join("\n")
+      )
+    );
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi
+        .fn()
+        .mockResolvedValue([
+          "agent-ready",
+          "sym:claimed",
+          "sym:running",
+          "sym:failed",
+          "sym:blocked",
+          "sym:stale"
+        ]),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const expectAgreement = async (
+      env: NodeJS.ProcessEnv,
+      expectedEnvFile: string
+    ): Promise<void> => {
+      const report = await runDoctor({
+        agentProviders: fakeAgentProviders(),
+        cwd: projectDir,
+        env,
+        githubApi,
+        homeDir: root
+      });
+
+      expect(report.ok).toBe(false);
+      expect(report.errors).toContain(
+        `email.smtp_password_env references $SMTP_TEST_PASSWORD, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . '${expectedEnvFile}'; set +a)`
+      );
+      expect(report.errors.join("\n")).not.toContain(
+        path.join(projectDir, "env")
+      );
+
+      const install = await runServiceInstall({
+        env: { ...env, PATH: "/usr/bin" },
+        homeDir: root,
+        print: true
+      });
+      expect(install.files[0]?.content).toContain(
+        `EnvironmentFile=-${expectedEnvFile}`
+      );
+    };
+
+    await expectAgreement(
+      { GITHUB_TOKEN: "secret-token", XDG_CONFIG_HOME: configHome },
+      path.join(configHome, "symphonika", "env")
+    );
+    await expectAgreement(
+      { GITHUB_TOKEN: "secret-token" },
+      path.join(root, ".config", "symphonika", "env")
     );
   });
 
@@ -107,8 +199,10 @@ describe("GitHub Project validation", () => {
       agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubApi
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
+      githubApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(true);
@@ -140,8 +234,10 @@ describe("GitHub Project validation", () => {
       agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubApi
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
+      githubApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);
@@ -169,8 +265,10 @@ describe("GitHub Project validation", () => {
       agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubApi
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
+      githubApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);
@@ -212,8 +310,10 @@ describe("GitHub Project validation", () => {
       agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubApi
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
+      githubApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);
@@ -275,9 +375,11 @@ describe("GitHub Project validation", () => {
       agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
       githubApi,
-      githubIssuesApi
+      githubIssuesApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(true);
@@ -308,8 +410,10 @@ describe("GitHub Project validation", () => {
       agentProviders: fakeAgentProviders(),
       configPath: "symphonika.yml",
       cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubApi
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "secret-token" }),
+      githubApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);

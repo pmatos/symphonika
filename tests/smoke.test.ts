@@ -20,12 +20,17 @@ import {
   createGitWorkspaceAhead,
   createGitWorkspaceAtBase
 } from "./helpers/git-workspace.js";
+import {
+  doctorTestEnv,
+  prepareDoctorTestEnvironment
+} from "./helpers/doctor-environment.js";
 
 const tempRoots: string[] = [];
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-smoke-test-"));
   tempRoots.push(root);
+  await prepareDoctorTestEnvironment(root);
   return root;
 }
 
@@ -51,9 +56,11 @@ describe("runSmoke", () => {
       agentProviders: { codex: fakeCodexProvider() },
       configPath: path.join(root, "symphonika.yml"),
       cwd: root,
-      env: { GITHUB_TOKEN: "test-token" },
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
       githubApi,
-      githubIssuesApi
+      githubIssuesApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(true);
@@ -94,9 +101,11 @@ describe("runSmoke", () => {
       agentProviders: { codex: fakeCodexProvider() },
       configPath,
       cwd: root,
-      env: { GITHUB_TOKEN: "test-token" },
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
       githubApi,
-      githubIssuesApi
+      githubIssuesApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(true);
@@ -132,9 +141,11 @@ describe("runSmoke", () => {
       agentProviders: { codex },
       configPath: path.join(root, "symphonika.yml"),
       cwd: root,
-      env: { GITHUB_TOKEN: "test-token" },
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
       githubApi,
-      githubIssuesApi
+      githubIssuesApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(true);
@@ -170,9 +181,11 @@ describe("runSmoke", () => {
       agentProviders: { codex },
       configPath: path.join(root, "symphonika.yml"),
       cwd: root,
-      env: { GITHUB_TOKEN: "test-token" },
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
       githubApi,
-      githubIssuesApi
+      githubIssuesApi,
+      homeDir: root,
+      offline: true
     });
 
     expect(report.ok).toBe(false);
@@ -266,9 +279,11 @@ describe("runSmoke", () => {
       agentProviders: { codex },
       configPath: path.join(root, "symphonika.yml"),
       cwd: root,
-      env: { GITHUB_TOKEN: "test-token" },
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
       githubApi,
       githubIssuesApi,
+      homeDir: root,
+      offline: true,
       prepareIssueWorkspace
     });
 
@@ -400,9 +415,11 @@ describe("runSmoke", () => {
       agentProviders: { codex },
       configPath,
       cwd: root,
-      env: { GITHUB_TOKEN: "test-token" },
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
       githubApi,
       githubIssuesApi,
+      homeDir: root,
+      offline: true,
       prepareIssueWorkspace
     });
 
@@ -486,9 +503,11 @@ describe("runSmoke", () => {
       agentProviders: { codex },
       configPath: path.join(root, "symphonika.yml"),
       cwd: root,
-      env: { GITHUB_TOKEN: "test-token" },
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
       githubApi,
       githubIssuesApi,
+      homeDir: root,
+      offline: true,
       prepareIssueWorkspace
     });
 
@@ -582,9 +601,11 @@ describe("runSmoke", () => {
       agentProviders: { codex },
       configPath: path.join(root, "symphonika.yml"),
       cwd: root,
-      env: { GITHUB_TOKEN: "test-token" },
+      env: doctorTestEnv(root, { GITHUB_TOKEN: "test-token" }),
       githubApi,
       githubIssuesApi,
+      homeDir: root,
+      offline: true,
       prepareIssueWorkspace
     });
 

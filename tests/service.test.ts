@@ -526,6 +526,96 @@ describe("runServiceInstall", () => {
     );
   });
 
+  it("loads an optional env file beside an explicit service config", async () => {
+    const report = await runServiceInstall({
+      ...baseOptions,
+      configPath: "/opt/symphonika/config/symphonika.yml",
+      print: true
+    });
+
+    expect(report.files[0]?.content).toContain(
+      "EnvironmentFile=-/opt/symphonika/config/env"
+    );
+    expect(report.files[0]?.content).toContain("smtp_password_env");
+    expect(report.files[0]?.content).toContain(
+      "docs/adr/0067-smtp-notification-sink"
+    );
+  });
+
+  // Regression: EnvironmentFile= consumes the whole remainder of the line as
+  // one path and never unquotes it, so wrapping a spaced path in double
+  // quotes makes systemd reject it ("EnvironmentFile= path is not absolute,
+  // ignoring") and silently drop the env file. Verified against
+  // `systemd-analyze verify --user`.
+  it("emits the optional env file unquoted so a spaced config directory survives", async () => {
+    const report = await runServiceInstall({
+      ...baseOptions,
+      configPath: "/opt/Symphonika Config/symphonika.yml",
+      print: true
+    });
+
+    expect(report.files[0]?.content).toContain(
+      "EnvironmentFile=-/opt/Symphonika Config/env"
+    );
+    expect(report.files[0]?.content).not.toContain('EnvironmentFile="');
+  });
+
+  it("loads the optional env file from an absolute XDG config home without baking a daemon config path", async () => {
+    const report = await runServiceInstall({
+      ...baseOptions,
+      env: {
+        PATH: "/opt/node/bin:/usr/bin",
+        XDG_CONFIG_HOME: "/srv/operator-config"
+      },
+      print: true
+    });
+
+    expect(report.files[0]?.content).toContain(
+      "EnvironmentFile=-/srv/operator-config/symphonika/env"
+    );
+    expect(report.files[0]?.content).toContain(`exec "$1" "$2" daemon'`);
+    expect(report.files[0]?.content).not.toContain("daemon --config");
+  });
+
+  // systemd only honors an absolute XDG_CONFIG_HOME (see userUnitDir), so a
+  // relative one must not be resolved against the install-time cwd and baked
+  // into the unit -- the unit files themselves would land in ~/.config
+  // meanwhile.
+  it("ignores a relative XDG_CONFIG_HOME when locating the optional env file", async () => {
+    const report = await runServiceInstall({
+      ...baseOptions,
+      env: {
+        PATH: "/opt/node/bin:/usr/bin",
+        XDG_CONFIG_HOME: "relative-config"
+      },
+      homeDir: "/home/dev",
+      print: true
+    });
+
+    expect(report.files[0]?.content).toContain(
+      "EnvironmentFile=-/home/dev/.config/symphonika/env"
+    );
+    expect(report.files[0]?.content).not.toContain("relative-config");
+  });
+
+  // The home directory is resolved at install time rather than deferred to
+  // systemd's `%h`: systemd glob-expands EnvironmentFile= after expanding
+  // specifiers, so a `[` arriving via `%h` would escape this escaping and the
+  // leading `-` would swallow the resulting non-match, silently dropping the
+  // operator's secrets.
+  it("escapes glob metacharacters coming from the home directory", async () => {
+    const report = await runServiceInstall({
+      ...baseOptions,
+      homeDir: "/home/dev [work]",
+      print: true
+    });
+
+    expect(report.files[0]?.content).toContain(
+      "EnvironmentFile=-/home/dev \\[work\\]/.config/symphonika/env"
+    );
+    expect(report.files[0]?.content).not.toContain("%h/.config");
+  });
+
   it("skips daemon-reload when reload is false but still writes units", async () => {
     const home = await makeTempHome();
     let reloadCalls = 0;

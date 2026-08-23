@@ -1,5 +1,12 @@
 import { constants } from "node:fs";
-import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  writeFile
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { stdin, stdout } from "node:process";
@@ -18,9 +25,13 @@ import {
 } from "./config-schemas.js";
 import {
   missingUserConfigHint,
-  resolveServiceConfigPath,
-  serviceEnvironmentFilePath
+  resolveServiceConfigPath
 } from "./config-paths.js";
+import {
+  inspectConfiguredDoctorEnvironment,
+  inspectDoctorHostEnvironment,
+  type DoctorExecutionEnvironmentReport
+} from "./doctor-execution-environment.js";
 import {
   defaultWorkflowContract,
   inspectCurrentGitHubProject,
@@ -41,7 +52,7 @@ import { probeProviderCommand } from "./provider-probe.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import type { RoutineExecutionOverrides } from "./routines/types.js";
-import { userUnitDir } from "./service.js";
+import { unitEnvironmentFilePath, userUnitDir } from "./service.js";
 import { resolveStateRoot } from "./state.js";
 import type { ExpandedWorkflow } from "./workflow/types.js";
 import {
@@ -51,6 +62,7 @@ import {
 } from "./workflow/fsm-expansion.js";
 
 export { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
+export type { DoctorExecutionEnvironmentReport } from "./doctor-execution-environment.js";
 
 export type DoctorOptions = {
   agentProviders?: AgentProviderRegistry;
@@ -66,6 +78,9 @@ export type DoctorOptions = {
   // that can take tens of seconds. See probeProviderCommand.
   liveCheckProvider?: AgentProviderName;
   liveCheckTimeoutMs?: number;
+  // Skip network-backed checks while retaining local executable, profile,
+  // and installed-unit checks. Intended for CI and scripted JSON snapshots.
+  offline?: boolean;
 };
 
 type DoctorLiveCheckReport = {
@@ -98,6 +113,7 @@ export type DoctorProjectReport = {
 
 export type DoctorReport = {
   configPath: string;
+  environment: DoctorExecutionEnvironmentReport;
   errors: string[];
   liveCheck?: DoctorLiveCheckReport;
   ok: boolean;
@@ -441,25 +457,54 @@ export async function runDoctor(
   const githubApi = options.githubApi ?? DEFAULT_GITHUB_API;
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
+  const homeDir = options.homeDir ?? homedir();
   const errors: string[] = [];
   const projects: DoctorProjectReport[] = [];
-  const warnings = await checkInstalledUnitDrift(
-    options.homeDir ?? homedir(),
-    env
-  );
+  // Both the structural drift check and the frozen-PATH check read the same
+  // effective installed unit, including operator-authored drop-ins; read it
+  // once here rather than twice concurrently.
+  const unitDir = userUnitDir(homeDir, env);
+  const servicePath = path.join(unitDir, "symphonika.service");
+  const serviceContent = await readEffectiveUnitContent(servicePath);
+  const [warnings, hostEnvironment] = await Promise.all([
+    checkInstalledUnitDrift(unitDir, servicePath, serviceContent),
+    inspectDoctorHostEnvironment({
+      cwd,
+      env,
+      homeDir,
+      offline: options.offline === true,
+      serviceContent,
+      servicePath
+    })
+  ]);
+  let environment = hostEnvironment.environment;
+  errors.push(...hostEnvironment.errors);
+  warnings.push(...hostEnvironment.warnings);
   const rawConfig = await readConfig(configPath, errors);
 
   if (rawConfig === undefined) {
     if (resolvedConfig.source === "user" && !resolvedConfig.configExists) {
       errors.push(missingUserConfigHint(configPath));
     }
-    return report(configPath, errors, projects, warnings);
+    return report({ configPath, environment, errors, projects, warnings });
   }
 
   const parsedConfig = parseServiceConfig(rawConfig, errors);
   if (parsedConfig === undefined) {
-    return report(configPath, errors, projects, warnings);
+    return report({ configPath, environment, errors, projects, warnings });
   }
+
+  const configuredEnvironment = await inspectConfiguredDoctorEnvironment({
+    cwd,
+    env,
+    environment,
+    homeDir,
+    projects: parsedConfig.projects,
+    providers: parsedConfig.providers
+  });
+  environment = configuredEnvironment.environment;
+  errors.push(...configuredEnvironment.errors);
+  warnings.push(...configuredEnvironment.warnings);
 
   const email = parsedConfig.email;
   if (
@@ -467,7 +512,14 @@ export async function runDoctor(
     (env[email.smtpPasswordEnv]?.trim().length ?? 0) === 0
   ) {
     const environmentFile = shellQuote(
-      serviceEnvironmentFilePath(resolvedConfig.configPath)
+      unitEnvironmentFilePath(
+        // Name the file `service install` points the unit at: without an
+        // explicit `--config` the installer always uses the user config
+        // directory, even when discovery here landed on a project-local one.
+        resolvedConfig.source === "explicit" ? configPath : undefined,
+        homeDir,
+        env
+      )
     );
     errors.push(
       `email.smtp_password_env references $${email.smtpPasswordEnv}, but it is not set; for a manual run, load the daemon's env file first (for example: set -a; . ${environmentFile}; set +a)`
@@ -544,7 +596,14 @@ export async function runDoctor(
     errors
   );
 
-  return report(configPath, errors, projects, warnings, liveCheck);
+  return report({
+    configPath,
+    environment,
+    errors,
+    ...(liveCheck === undefined ? {} : { liveCheck }),
+    projects,
+    warnings
+  });
 }
 
 function shellQuote(value: string): string {
@@ -603,12 +662,10 @@ async function runLiveCheck(
 // also checked structurally because their resource-limit values are
 // operator-customizable (README.md).
 async function checkInstalledUnitDrift(
-  homeDir: string,
-  env: NodeJS.ProcessEnv
+  unitDir: string,
+  servicePath: string,
+  serviceContent: string | undefined
 ): Promise<string[]> {
-  const unitDir = userUnitDir(homeDir, env);
-  const servicePath = path.join(unitDir, "symphonika.service");
-  const serviceContent = await readFileIfExists(servicePath);
   if (serviceContent === undefined) {
     return [];
   }
@@ -620,7 +677,8 @@ async function checkInstalledUnitDrift(
   // (and lacks whatever protection this drift check is warning about) until
   // an operator separately restarts it.
   const reinstallHint =
-    "re-run `symphonika service install --force` to refresh it; a running " +
+    "re-run `symphonika service install --force` (repeat the original " +
+    "`--config <path>` option if one was used) to refresh it; a running " +
     "daemon only picks up the change after `systemctl --user restart " +
     "symphonika.service`";
   if (!serviceContent.includes("Slice=symphonika-daemon.slice")) {
@@ -711,6 +769,34 @@ function sliceDirectiveNames(content: string): Set<string> | undefined {
   }
 
   return sawSliceSection ? directives : undefined;
+}
+
+async function readEffectiveUnitContent(
+  servicePath: string
+): Promise<string | undefined> {
+  const baseContent = await readFileIfExists(servicePath);
+  if (baseContent === undefined) {
+    return undefined;
+  }
+
+  const dropInDir = `${servicePath}.d`;
+  let dropInNames: string[];
+  try {
+    dropInNames = (await readdir(dropInDir))
+      .filter((name) => name.endsWith(".conf"))
+      .sort();
+  } catch {
+    return baseContent;
+  }
+
+  const fragments = [baseContent];
+  for (const dropInName of dropInNames) {
+    const content = await readFileIfExists(path.join(dropInDir, dropInName));
+    if (content !== undefined) {
+      fragments.push(content);
+    }
+  }
+  return fragments.join("\n");
 }
 
 async function readFileIfExists(filePath: string): Promise<string | undefined> {
@@ -2313,20 +2399,22 @@ function envReferenceName(input: string): string | undefined {
   return match?.[1];
 }
 
-function report(
-  configPath: string,
-  errors: string[],
-  projects: DoctorProjectReport[],
-  warnings: string[] = [],
-  liveCheck?: DoctorLiveCheckReport
-): DoctorReport {
+function report(input: {
+  configPath: string;
+  environment: DoctorExecutionEnvironmentReport;
+  errors: string[];
+  liveCheck?: DoctorLiveCheckReport;
+  projects: DoctorProjectReport[];
+  warnings: string[];
+}): DoctorReport {
   return {
-    configPath,
-    errors,
-    ...(liveCheck === undefined ? {} : { liveCheck }),
-    ok: errors.length === 0,
-    projects,
-    warnings
+    configPath: input.configPath,
+    environment: input.environment,
+    errors: input.errors,
+    ...(input.liveCheck === undefined ? {} : { liveCheck: input.liveCheck }),
+    ok: input.errors.length === 0,
+    projects: input.projects,
+    warnings: input.warnings
   };
 }
 

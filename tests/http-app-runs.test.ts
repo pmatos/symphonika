@@ -723,6 +723,74 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("asks for confirmation before cancelling an active Run and reflects the cancellation", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "web-cancel",
+        issue: sampleIssue({ number: 15 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("web-cancel", "running");
+      test.runStore.createRun({
+        id: "web-cancel-done",
+        issue: sampleIssue({ number: 16 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("web-cancel-done", "succeeded");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const activePage = await app.request("/runs/web-cancel");
+      const activeBody = await activePage.text();
+      expect(activePage.status).toBe(200);
+      expect(activeBody).toContain('action="/api/runs/web-cancel/cancel"');
+      expect(activeBody).toContain(
+        `onsubmit="return window.confirm('Cancel this run? Any active provider process will be stopped. This action cannot be undone.')"`
+      );
+
+      const terminalBody = await (
+        await app.request("/runs/web-cancel-done")
+      ).text();
+      expect(terminalBody).not.toContain(
+        'action="/api/runs/web-cancel-done/cancel"'
+      );
+
+      const cancelResponse = await app.request("/api/runs/web-cancel/cancel", {
+        body: "",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        method: "POST",
+        redirect: "manual"
+      });
+      expect(cancelResponse.status).toBe(303);
+      expect(cancelResponse.headers.get("location")).toBe("/runs/web-cancel");
+
+      const cancelledBody = await (
+        await app.request("/runs/web-cancel")
+      ).text();
+      expect(cancelledBody).toContain(">cancelled</span>");
+      expect(cancelledBody).toContain(
+        "<strong>Cancel requested</strong> (reason: operator)"
+      );
+      expect(cancelledBody).toContain(
+        "<dt>Terminal reason</dt><dd><code>operator</code></dd>"
+      );
+      expect(cancelledBody).not.toContain(
+        'action="/api/runs/web-cancel/cancel"'
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("renders the dashboard and run detail page with HTML escaping", async () => {
     const test = await setup();
     try {
@@ -2239,6 +2307,7 @@ describe("HTTP app — dashboard IA shell (#302)", () => {
           lastPollFinishedAt: null,
           lastPollOk: null,
           lastPollStartedAt: null,
+          lastSuccessfulPollAt: null,
           projectName: "alpha",
           schedulerCurrentWeight: 0,
           updatedAt: "2026-05-22T10:00:00.000Z",
@@ -2410,6 +2479,55 @@ describe("HTTP app — project detail page (#303)", () => {
         '<span class="k">next poll</span><span class="v">in 1m</span>'
       );
     } finally {
+      test.cleanup();
+    }
+  });
+
+  it("keeps pre-restart snapshot freshness after a poll fails", async () => {
+    const test = await setup();
+    vi.useFakeTimers();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+
+      vi.setSystemTime(new Date("2026-08-21T10:00:00.000Z"));
+      test.runStore.recordProjectPollOutcome({
+        candidateIssues: 1,
+        fetchedIssues: 1,
+        filteredIssues: 0,
+        ok: true,
+        projectName: "alpha"
+      });
+
+      const startedAtMs = Date.parse("2026-08-21T10:01:00.000Z");
+      const failedPollAtMs = Date.parse("2026-08-21T10:02:00.000Z");
+      vi.setSystemTime(failedPollAtMs);
+      test.runStore.recordProjectPollOutcome({
+        candidateIssues: 0,
+        error: "tracker unavailable",
+        fetchedIssues: 0,
+        filteredIssues: 0,
+        ok: false,
+        projectName: "alpha"
+      });
+
+      const app = createHttpApp({
+        now: () => failedPollAtMs,
+        runStore: test.runStore,
+        startedAtMs,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/projects/alpha")).text();
+
+      expect(body).toContain(
+        '<span class="k">poll</span><span class="v">2m ago <span class="muted">(pre-restart)</span></span>'
+      );
+      expect(body).toContain("tracker unavailable");
+      expect(body).toContain("failing");
+    } finally {
+      vi.useRealTimers();
       test.cleanup();
     }
   });
@@ -2695,6 +2813,45 @@ describe("HTTP app — project detail page (#303)", () => {
       const body = await (await app.request("/projects/alpha")).text();
 
       expect(body).toContain("queued behind cap (2/2)");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows an eligible issue as capped when the global concurrency cap is full", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedByTruncated: false,
+            blockedBy: [],
+            issueNumber: 301,
+            kind: "candidate",
+            labels: [],
+            priority: 1,
+            reasons: [],
+            title: "Blocked behind global cap"
+          }
+        ]
+      });
+      const app = createHttpApp({
+        getConcurrency: () => ({
+          global: { inFlight: 2, maxInFlight: 2 },
+          perProject: [{ inFlight: 0, maxInFlight: 2, projectName: "alpha" }]
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/projects/alpha")).text();
+
+      expect(body).toContain("queued behind global cap (2/2)");
     } finally {
       test.cleanup();
     }

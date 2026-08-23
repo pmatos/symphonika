@@ -2063,13 +2063,15 @@ export function registerPages(options: RegisterPagesOptions): void {
     const firings = options.runStore
       .listRoutineFirings({ routineName: name })
       .filter((firing) => groupProjectNames.has(firing.projectName));
-    // invalidRoutines carries no error text of its own (see reload.ts) —
-    // the reload error lives only in the flat, process-lifetime
-    // reload.errors list, so this is a best-effort match on the routine's
-    // own name rather than a guaranteed per-routine correlation.
-    const reloadErrors = (
-      options.getStatusSnapshot?.()?.reload.errors ?? []
-    ).filter((error) => error.includes(name));
+    const declarationSourcePath = declaration.sourcePath;
+    const reloadErrors =
+      declarationSourcePath === "-"
+        ? []
+        : (options.getStatusSnapshot?.()?.reload.routineErrors ?? [])
+            .filter((error) =>
+              error.sourcePaths.includes(declarationSourcePath)
+            )
+            .map((error) => error.message);
 
     const lifecycleCsrfToken = csrfTokenFor(
       options.csrfSecret,
@@ -6170,7 +6172,7 @@ function renderRoutineDeclarationCard(
   reloadErrors: string[]
 ): string {
   const errorBanner =
-    !declaration.invalid || reloadErrors.length === 0
+    reloadErrors.length === 0
       ? ""
       : `<div class="alert" role="alert"><strong>Reload error</strong><ul>${reloadErrors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div>`;
   const promptSection =

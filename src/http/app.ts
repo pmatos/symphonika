@@ -790,6 +790,7 @@ function emptyReloadStatus(): RuntimeReloadStatus {
     lastAttemptedAt: null,
     lastLoadedAt: null,
     ok: true,
+    routineErrors: [],
     usingLastKnownGood: false
   };
 }

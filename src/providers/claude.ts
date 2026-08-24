@@ -16,7 +16,11 @@ import type {
 import { renderProviderCommandTemplate } from "../provider-command-template.js";
 import { parseProviderCommand, type ProviderLabel } from "./command-parse.js";
 import {
-  providerProcessExitResult,
+  createJsonlProcessQueue,
+  mapProcessQueueControlEvent,
+  type ProcessQueueItem
+} from "./jsonl-process-queue.js";
+import {
   shutdownProviderProcess,
   spawnProviderProcess
 } from "./provider-process.js";
@@ -29,30 +33,6 @@ type ActiveClaudeRun = {
   cancelled: boolean;
   child?: ChildProcessWithoutNullStreams;
   sessionId?: string;
-};
-
-type ProcessQueueItem =
-  | {
-      kind: "exit";
-      exitCode: number | null;
-      signal: NodeJS.Signals | null;
-    }
-  | {
-      error: Error;
-      kind: "error";
-    }
-  | {
-      kind: "malformed";
-      line: string;
-      message: string;
-    }
-  | {
-      kind: "message";
-      raw: unknown;
-    };
-
-type ProcessQueue = {
-  next: () => Promise<ProcessQueueItem>;
 };
 
 export type ClaudeProviderOptions = {
@@ -144,7 +124,7 @@ export function createClaudeProvider(
       );
       activeRun.child = child;
       child.stderr.resume();
-      const queue = createProcessQueue(child);
+      const queue = createJsonlProcessQueue(child);
 
       try {
         writeClaudeInput(child, input.prompt);
@@ -191,55 +171,11 @@ function providerEventsFromQueueItem(
   item: ProcessQueueItem,
   activeRun: ActiveClaudeRun
 ): ProviderEvent[] {
-  switch (item.kind) {
-    case "error":
-      return [
-        {
-          normalized: {
-            message: item.error.message,
-            type: "turn_failed"
-          },
-          raw: {
-            kind: "process_error",
-            message: item.error.message
-          }
-        }
-      ];
-    case "exit":
-      return [
-        {
-          normalized: {
-            cancelled: activeRun.cancelled,
-            exitCode: item.exitCode,
-            signal: item.signal,
-            type: "process_exit"
-          },
-          raw: {
-            cancelled: activeRun.cancelled,
-            exitCode: item.exitCode,
-            kind: "process_exit",
-            signal: item.signal
-          }
-        }
-      ];
-    case "malformed":
-      return [
-        {
-          normalized: {
-            line: item.line,
-            message: item.message,
-            type: "malformed_event"
-          },
-          raw: {
-            kind: "malformed_json",
-            line: item.line,
-            message: item.message
-          }
-        }
-      ];
-    case "message":
-      return mapClaudeStreamJsonMessage(item.raw, activeRun);
+  if (item.kind === "message") {
+    return mapClaudeStreamJsonMessage(item.raw, activeRun);
   }
+
+  return [mapProcessQueueControlEvent(item, activeRun.cancelled)];
 }
 
 function mapClaudeStreamJsonMessage(
@@ -550,89 +486,6 @@ function isTerminalFailure(type: string | undefined): boolean {
     type === "malformed_event" ||
     type === "turn_failed"
   );
-}
-
-function createProcessQueue(
-  child: ChildProcessWithoutNullStreams
-): ProcessQueue {
-  const pending: ProcessQueueItem[] = [];
-  let waiting: ((item: ProcessQueueItem) => void) | undefined;
-  let stdoutBuffer = "";
-
-  const push = (item: ProcessQueueItem): void => {
-    if (waiting !== undefined) {
-      const resolve = waiting;
-      waiting = undefined;
-      resolve(item);
-      return;
-    }
-
-    pending.push(item);
-  };
-
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
-    stdoutBuffer += chunk;
-    let newlineIndex = stdoutBuffer.indexOf("\n");
-    while (newlineIndex >= 0) {
-      const line = stdoutBuffer.slice(0, newlineIndex).trimEnd();
-      stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
-      pushLine(line, push);
-      newlineIndex = stdoutBuffer.indexOf("\n");
-    }
-  });
-  child.stdout.on("end", () => {
-    if (stdoutBuffer.length > 0) {
-      pushLine(stdoutBuffer.trimEnd(), push);
-      stdoutBuffer = "";
-    }
-  });
-  child.once("error", (error) => {
-    push({
-      error,
-      kind: "error"
-    });
-  });
-  child.once("close", (exitCode, signal) => {
-    const result = providerProcessExitResult(child, exitCode, signal);
-    push({
-      exitCode: result.exitCode,
-      kind: "exit",
-      signal: result.signal
-    });
-  });
-
-  return {
-    next: () => {
-      const item = pending.shift();
-      if (item !== undefined) {
-        return Promise.resolve(item);
-      }
-
-      return new Promise<ProcessQueueItem>((resolve) => {
-        waiting = resolve;
-      });
-    }
-  };
-}
-
-function pushLine(line: string, push: (item: ProcessQueueItem) => void): void {
-  if (line.trim().length === 0) {
-    return;
-  }
-
-  try {
-    push({
-      kind: "message",
-      raw: JSON.parse(line) as unknown
-    });
-  } catch (error) {
-    push({
-      kind: "malformed",
-      line,
-      message: error instanceof Error ? error.message : String(error)
-    });
-  }
 }
 
 function writeClaudeInput(

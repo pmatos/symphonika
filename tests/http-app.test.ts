@@ -253,6 +253,7 @@ describe("HTTP app", () => {
         runId: "idle-run",
         sampledAt: "2026-05-22T11:59:00.000Z",
         turnIdSetSize: 0,
+        workspaceDigest: "",
         workspaceMtimeMax: 0
       });
 
@@ -320,6 +321,7 @@ describe("HTTP app", () => {
         runId: "disabled-run",
         sampledAt: "2026-05-22T11:59:00.000Z",
         turnIdSetSize: 0,
+        workspaceDigest: "",
         workspaceMtimeMax: 0
       });
 
@@ -333,7 +335,11 @@ describe("HTTP app", () => {
             runId: "disabled-run"
           }
         ],
-        getWatchdogConfig: () => ({ enabled: false, graceMinutes: 30 }),
+        getWatchdogConfig: () => ({
+          enabled: false,
+          graceMinutes: 30,
+          outputTokenBudget: 0
+        }),
         runStore,
         stateRoot,
         version: "0.1.0"

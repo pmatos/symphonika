@@ -79,6 +79,59 @@ describe("daemon watchdog", () => {
     }
   });
 
+  it("stales a busy provider that burns its output-token budget without converging", async () => {
+    const root = await makeTempRoot();
+    // A long grace window, so only the convergence budget can end this Run.
+    await writeProject(root, { graceMinutes: 600, outputTokenBudget: 1_000 });
+    const prepared = preparedWorkspaceFixture(root);
+    await mkdir(prepared.workspacePath, { recursive: true });
+    const provider = busyProvider();
+    // Distinct ids per dispatch, so a re-dispatch after the stale verdict would
+    // show up as a second Run rather than colliding on a fixed id.
+    let dispatched = 0;
+    const createRunId = (): string => {
+      dispatched += 1;
+      return dispatched === 1
+        ? "run-watchdog-budget"
+        : `run-watchdog-budget-${dispatched}`;
+    };
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: githubIssuesApiFixture(),
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: prepareWorkspace(prepared)
+    });
+
+    try {
+      const run = await waitForRunState(daemon.url, "stale");
+      expect(run).toMatchObject({
+        id: "run-watchdog-budget",
+        state: "stale",
+        terminalReason: "no_convergence"
+      });
+      expect(provider.cancel).toHaveBeenCalledWith("run-watchdog-budget");
+
+      // The provider's own exit must not rewrite the verdict as "cancelled".
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(await getRun(daemon.url, "run-watchdog-budget")).toMatchObject({
+        state: "stale",
+        terminalReason: "no_convergence"
+      });
+      // And the Issue must stay claimed: re-dispatching would start a fresh
+      // Run with a fresh budget and reproduce the incident at higher cost.
+      expect(dispatched).toBe(1);
+      expect(await listRuns(daemon.url)).toHaveLength(1);
+    } finally {
+      provider.stopAll();
+      await daemon.stop();
+    }
+  });
+
   it("keeps a provider alive when an undeclared vendor directory is its only progress signal", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
@@ -320,6 +373,60 @@ function idleUsageProvider(): ControllableProvider {
   });
 }
 
+// Streams real assistant output and a climbing cumulative output-token total:
+// every ADR 0054 liveness signal stays satisfied, so only the ADR 0086 budget
+// can stop it. This is the shape of the vow#1055 crash loop.
+function busyProvider(): ControllableProvider {
+  return controllableProvider(async function* (
+    input: ProviderRunInput,
+    stopped: Promise<void>
+  ): AsyncGenerator<ProviderEvent> {
+    let outputTokens = 0;
+    const pending: ProviderEvent[] = [];
+    const interval = setInterval(() => {
+      outputTokens += 400;
+      pending.push(
+        {
+          normalized: { message: "still working", type: "message" },
+          raw: { kind: "message", runId: input.run.id }
+        },
+        {
+          normalized: {
+            tokenUsage: { total: { outputTokens } },
+            type: "usage_updated"
+          },
+          raw: { kind: "usage", runId: input.run.id }
+        }
+      );
+    }, 10);
+    let finished = false;
+    void stopped.then(() => {
+      finished = true;
+    });
+    try {
+      while (!finished) {
+        const next = pending.shift();
+        if (next === undefined) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          continue;
+        }
+        yield next;
+      }
+      yield {
+        normalized: {
+          cancelled: true,
+          exitCode: null,
+          signal: "SIGTERM",
+          type: "process_exit"
+        },
+        raw: { cancelled: true, kind: "exit", runId: input.run.id }
+      };
+    } finally {
+      clearInterval(interval);
+    }
+  });
+}
+
 function workspaceMtimeProvider(
   relativePath: string | string[] = "heartbeat.txt"
 ): ControllableProvider {
@@ -336,7 +443,11 @@ function workspaceMtimeProvider(
       tick += 1;
       const next = new Date(Date.now() + tick * 1_000);
       for (const entry of touched) {
-        void utimes(entry, next, next);
+        // ADR 0086: the workspace signal keys on the tree's shape, so a live
+        // provider has to actually grow the file rather than only restamp it.
+        void writeFile(entry, `heartbeat\n`.repeat(tick + 1)).then(() =>
+          utimes(entry, next, next)
+        );
       }
     }, 15);
     try {
@@ -422,23 +533,45 @@ function neverStartingProvider(): ControllableProvider & {
   return Object.assign(base, { runAttemptCalls: () => calls });
 }
 
+// Label writes are reflected back into listOpenIssues, because Operational
+// Labels are what actually gate re-dispatch: `sym:claimed` makes the Issue
+// ineligible (issue-polling's REQUIRED_OPERATIONAL_LABELS check), and the
+// Watchdog cancel path deliberately does not release it. A static fixture
+// would let a terminated Run be re-dispatched forever and prove nothing.
 function githubIssuesApiFixture() {
+  const labels = new Set(["agent-ready"]);
   return {
-    addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
-    listOpenIssues: vi.fn().mockResolvedValue([
-      {
-        body: "watchdog issue",
-        created_at: "2026-05-22T09:00:00.000Z",
-        html_url: "https://github.com/pmatos/symphonika/issues/198",
-        id: 198,
-        labels: ["agent-ready"],
-        number: 198,
-        state: "open",
-        title: "Watchdog issue",
-        updated_at: "2026-05-22T09:00:00.000Z"
+    addLabelsToIssue: vi.fn(
+      (input: { labels: readonly string[] }): Promise<void> => {
+        for (const label of input.labels) {
+          labels.add(label);
+        }
+        return Promise.resolve();
       }
-    ]),
-    removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    ),
+    listOpenIssues: vi.fn(() =>
+      Promise.resolve([
+        {
+          body: "watchdog issue",
+          created_at: "2026-05-22T09:00:00.000Z",
+          html_url: "https://github.com/pmatos/symphonika/issues/198",
+          id: 198,
+          labels: [...labels],
+          number: 198,
+          state: "open",
+          title: "Watchdog issue",
+          updated_at: "2026-05-22T09:00:00.000Z"
+        }
+      ])
+    ),
+    removeLabelsFromIssue: vi.fn(
+      (input: { labels: readonly string[] }): Promise<void> => {
+        for (const label of input.labels) {
+          labels.delete(label);
+        }
+        return Promise.resolve();
+      }
+    )
   };
 }
 
@@ -483,6 +616,7 @@ async function writeProject(
     daemonHealthEmail?: boolean;
     evidenceIgnore?: string[];
     graceMinutes?: number;
+    outputTokenBudget?: number;
   } = {}
 ): Promise<void> {
   await writeFile(
@@ -495,6 +629,7 @@ async function writeProject(
       "watchdog:",
       "  enabled: true",
       `  grace_minutes: ${options.graceMinutes ?? 0.001}`,
+      `  output_token_budget: ${options.outputTokenBudget ?? 0}`,
       "  sample_interval_seconds: 0.02",
       ...(options.daemonHealthEmail === true
         ? [
@@ -654,6 +789,12 @@ async function waitForSettledRun(
   }
 
   throw new Error(`run ${id} did not settle before timeout`);
+}
+
+async function listRuns(url: string): Promise<StatusRun[]> {
+  const response = await fetch(`${url}/api/status`);
+  const body = (await response.json()) as { runs?: StatusRun[] };
+  return body.runs ?? [];
 }
 
 async function getRun(url: string, id: string): Promise<StatusRun | undefined> {

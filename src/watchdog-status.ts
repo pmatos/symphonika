@@ -9,6 +9,8 @@ export type WatchdogStatus =
       graceRemainingMs?: number;
       idleSince?: string;
       lastToolCallAt?: string | null;
+      // Zero when no convergence budget is configured (ADR 0086).
+      outputTokenBudget: number;
       outputTokensTotal?: number;
       sampledAt?: string;
       turnIdSetSize?: number;
@@ -24,7 +26,10 @@ export type WatchdogIdleStatus =
     };
 
 export function buildWatchdogStatus(input: {
-  config: Pick<WatchdogConfig, "enabled" | "graceMinutes">;
+  config: Pick<
+    WatchdogConfig,
+    "enabled" | "graceMinutes" | "outputTokenBudget"
+  >;
   nowMs: number;
   runId: string;
   runStore: RunStore;
@@ -34,14 +39,16 @@ export function buildWatchdogStatus(input: {
   }
 
   const graceMs = input.config.graceMinutes * 60_000;
+  const outputTokenBudget = input.config.outputTokenBudget;
   const sample = input.runStore.getWatchdogSample(input.runId);
   if (sample === undefined) {
-    return { enabled: true, graceMs };
+    return { enabled: true, graceMs, outputTokenBudget };
   }
 
   return {
     enabled: true,
     graceMs,
+    outputTokenBudget,
     ...(sample.idleSince === null
       ? {}
       : {
@@ -58,7 +65,10 @@ export function buildWatchdogStatus(input: {
 }
 
 export function buildWatchdogIdleStatus(input: {
-  config: Pick<WatchdogConfig, "enabled" | "graceMinutes">;
+  config: Pick<
+    WatchdogConfig,
+    "enabled" | "graceMinutes" | "outputTokenBudget"
+  >;
   nowMs: number;
   runId: string;
   runStore: RunStore;

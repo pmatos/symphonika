@@ -449,9 +449,11 @@ never polled for issues and exists only to host Routine Firings. A Routine Host 
 host is a declaration-time validation error. See ADR 0062. `symphonika init-project --mode
 routine-host` scaffolds a host without issue-filter, priority, or label-creation prompts.
 
-A Project may override only `watchdog.grace_minutes` with a positive integer. It inherits
-`watchdog.enabled`, `watchdog.sample_interval_seconds`, and `watchdog.mtime_ignore` from daemon
-scope, so a Project can lengthen its grace window but cannot opt into a daemon-disabled Watchdog.
+A Project may override `watchdog.grace_minutes` (a positive integer) and
+`watchdog.output_token_budget` (a non-negative integer); each is optional and merges independently
+over daemon scope. It inherits `watchdog.enabled`, `watchdog.sample_interval_seconds`, and
+`watchdog.mtime_ignore` from daemon scope, so a Project can lengthen its grace window or raise its
+convergence budget but cannot opt into a daemon-disabled Watchdog.
 Project overrides are part of the defensive Service Config reload snapshot: any invalid value or
 unknown key rejects the candidate snapshot for all Projects and leaves the last known-good snapshot
 live.
@@ -790,7 +792,7 @@ SQLite stores durable orchestration state:
 - workspace paths
 - per-Run Workflow Contract `evidence.ignore` snapshots
 - normalized event metadata
-- Watchdog samples for no-progress detection
+- Watchdog samples for no-progress and convergence-budget detection
 - raw log file paths
 - routines
 - routine firings
@@ -907,7 +909,8 @@ pending. Validation and status commands must not dispatch work.
 
 The daemon also runs the Watchdog during reconciliation according to
 `watchdog.sample_interval_seconds`. The default Watchdog policy is enabled with a 30 minute
-no-progress grace window and 60 second sampling interval.
+no-progress grace window, a 150000 output-token convergence budget, and 60 second sampling
+interval.
 
 ### 8.3 Multi-Project Dispatch
 
@@ -1333,6 +1336,9 @@ On Watchdog no-progress termination:
 - remove `sym:running` best-effort when the provider stream unwinds
 - preserve workspace and logs
 
+On Watchdog convergence-budget termination, the same steps apply with
+`terminal_reason = "no_convergence"`.
+
 On stale startup state:
 
 - if GitHub has `sym:claimed` or `sym:running` but there is no live local run, mark `sym:stale`
@@ -1681,8 +1687,8 @@ Watchdog does not overwrite a more specific in-flight cancellation with `no_prog
 For each sampled Run, Symphonika records one durable latest `watchdog_samples` row keyed by
 `run_id` and an append-only `watchdog_sample_history` row keyed by `(run_id, sampled_at)`. Both
 contain `sampled_at`, `last_tool_call_at`, `last_message_at`, `workspace_mtime_max`,
-`turn_id_set_size`, `output_tokens_total`, `normalized_log_offset`, `normalized_log_path`, and
-`idle_since`. The latest row keeps reconciliation reads bounded; the history supports operator
+`workspace_digest`, `turn_id_set_size`, `output_tokens_total`, `normalized_log_offset`,
+`normalized_log_path`, and `idle_since`. The latest row keeps reconciliation reads bounded; the history supports operator
 rolling-window calculations. In particular, `show-run` computes output-token growth over the final
 sample's five-minute window by walking persisted cumulative totals (and treating a normalized-log
 path change as a counter reset), never by re-scanning the Normalized Event Log. `idle_since`
@@ -1700,8 +1706,10 @@ baseline and idle grace window fresh when sampling resumes.
 Sampling reads the Normalized Event Log only forward of the stored byte offset and walks the
 Workspace tree once. A transient retry writes a new per-attempt log path; its first sample reads
 that file from the start with zeroed byte-offset and output-token baselines. The reconciler also
-treats any observed `normalized_log_path` change as a defensive baseline reset. The hard-coded v1
-exclude set is `.git/`, `target/`, and `node_modules/`,
+treats any observed `normalized_log_path` change as a defensive baseline reset. The hard-coded
+exclude set is `.cache`, `.git`, `.gradle`, `.mypy_cache`, `.next`, `.nyc_output`,
+`.pytest_cache`, `.ruff_cache`, `.stack-work`, `.tox`, `.turbo`, `.venv`, `__pycache__`,
+`_build`, `build`, `coverage`, `dist`, `node_modules`, `out`, `target`, and `venv`,
 skipped at the directory-entry level and not descended. The current per-Project Workflow Contract's
 `evidence.ignore` list adds workspace-relative directory trees that are also skipped before descent;
 when an active Run's Project has been removed from the Service Config, the Watchdog uses the list
@@ -1712,11 +1720,18 @@ Run alive.
 
 A sampled Run is making progress when any one signal advances since the previous sample:
 
-- `last_tool_call_at` increases
-- `workspace_mtime_max` advances by at least one second
+- `last_tool_call_at` increases (both Claude and Codex emit normalized `tool_call` events; the
+  Codex provider maps its `commandExecution`, `fileChange`, and `webSearch` items)
+- `workspace_digest` changes — a hash over the sorted `relative-path:size` pairs of every
+  non-excluded file. A bare `workspace_mtime_max` advance is **not** progress: a build that
+  reproduces byte-identical output restamps mtimes without carrying new information (ADR 0086).
+  An empty stored digest is a pre-upgrade row and is never read as a change.
 - `turn_id_set_size` increases (only the Codex provider tags events with a `turnId`; Claude and OMP
   emit session-level identity without a stable turn id, so this signal advances for Codex Runs)
-- `output_tokens_total` increases
+- `output_tokens_total` increases. Output tokens are read shape-aware: a nested
+  `tokenUsage.total.outputTokens` (Codex) is a cumulative running total taken as an absolute
+  value, while a top-level `outputTokens`/`output_tokens`/`output` (Claude, OMP) is one completed
+  assistant message's output and is added.
 - `last_message_at` increases (a new streamed assistant `message` event arrived — both providers
   normalize their streamed deltas to a `message` event)
 
@@ -1725,6 +1740,17 @@ another signal advances. When no progress is observed, the Watchdog persists `id
 observation. Once `now - idle_since >= watchdog.grace_minutes`, it transitions the Run to
 `stale` with `terminal_reason = "no_progress"` and requests provider cancellation. `no_progress`
 is a deterministic terminal verdict for that attempt, not a transient retry reason.
+
+Independently of that liveness clock, the Watchdog enforces a **convergence budget**: when a
+sampled Run's cumulative `output_tokens_total` reaches `watchdog.output_token_budget` (default
+150000; `0` disables it), the Run transitions to `stale` with
+`terminal_reason = "no_convergence"` and its provider is cancelled the same way. The budget is
+attempt-scoped like the rest of the Progress Signal — a transient retry starts a fresh baseline —
+and a `no_convergence` verdict is never retried. This catches the
+opposite failure mode from `no_progress` — a Run doing plenty of observable work without ever
+finishing, which satisfies the liveness rule on every tick. The budget is checked before the idle
+clock, honours the same per-Project override scope as `grace_minutes`, and like `no_progress` is
+deterministic rather than a transient retry reason. See ADR 0086.
 
 ### 12.5 PR Follow-up
 

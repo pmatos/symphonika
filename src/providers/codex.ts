@@ -437,6 +437,32 @@ function mapCodexJsonRpcMessage(
     };
   }
 
+  if (method === "item/started") {
+    const item = objectField(params, "item");
+    const itemType = stringField(item, "type");
+    const toolCallInput =
+      itemType === undefined ? undefined : codexToolCallInput(itemType, item);
+    if (toolCallInput === undefined) {
+      return { raw };
+    }
+    // Codex reports tool activity as typed items rather than a dedicated tool
+    // event, so the started item is the analogue of Claude's `tool_use` block:
+    // it marks the moment the model issued the call. Without this mapping the
+    // Watchdog's `last_tool_call_at` progress signal is permanently null for
+    // Codex runs (ADR 0054 signal 1).
+    return {
+      normalized: {
+        input: toolCallInput,
+        threadId: stringField(params, "threadId"),
+        toolCallId: stringField(item, "id"),
+        toolName: itemType,
+        turnId: stringField(params, "turnId"),
+        type: "tool_call"
+      },
+      raw
+    };
+  }
+
   if (method === "item/completed") {
     const item = objectField(params, "item");
     const phase = stringField(item, "phase");
@@ -1020,6 +1046,42 @@ function missingProfileMessage(profile: string, stderr: string): string {
     `  codex_hooks      = false`,
     `  image_generation = false`
   ].join("\n");
+}
+
+// Project a Codex tool item down to the fields worth persisting in the
+// Normalized Event Log. `fileChange` items carry full diffs and command items
+// carry aggregated output, neither of which belongs in the normalized log
+// alongside the raw log that already holds them verbatim.
+function codexToolCallInput(
+  itemType: string,
+  item: JsonObject | undefined
+): JsonObject | undefined {
+  if (item === undefined) {
+    return undefined;
+  }
+  if (itemType === "commandExecution") {
+    return {
+      command: stringField(item, "command"),
+      cwd: stringField(item, "cwd")
+    };
+  }
+  if (itemType === "fileChange") {
+    const changes = item.changes;
+    return {
+      paths: Array.isArray(changes)
+        ? changes
+            .map((change) => stringField(change, "path"))
+            .filter(
+              (changePath): changePath is string => changePath !== undefined
+            )
+        : []
+    };
+  }
+  if (itemType === "webSearch") {
+    return { query: stringField(item, "query") };
+  }
+
+  return undefined;
 }
 
 function responseId(value: unknown): string | number | undefined {

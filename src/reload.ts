@@ -105,11 +105,16 @@ export type WatchdogConfig = {
   enabled: boolean;
   graceMinutes: number;
   mtimeIgnore: string[];
+  // Cumulative output tokens a single Run may spend before the Watchdog stops
+  // it as non-converging (ADR 0086). Zero disables the convergence guard and
+  // leaves only the ADR 0054 liveness rule.
+  outputTokenBudget: number;
   sampleIntervalSeconds: number;
 };
 
 type ProjectWatchdogConfig = {
-  graceMinutes: number;
+  graceMinutes?: number;
+  outputTokenBudget?: number;
 };
 
 type RuntimeProjectConfig = RunControllerProjectConfig & {
@@ -128,6 +133,7 @@ export const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
   enabled: true,
   graceMinutes: 30,
   mtimeIgnore: [],
+  outputTokenBudget: 150_000,
   sampleIntervalSeconds: 60
 };
 
@@ -160,13 +166,19 @@ const watchdogConfigSchema = z
       .default(DEFAULT_WATCHDOG_CONFIG.sampleIntervalSeconds),
     // Extra workspace-relative globs whose files are dropped from the mtime
     // walk so build-output churn cannot keep a wedged Run alive (ADR 0054).
-    mtime_ignore: z.array(z.string().trim().min(1)).default([])
+    mtime_ignore: z.array(z.string().trim().min(1)).default([]),
+    output_token_budget: z
+      .number()
+      .int()
+      .nonnegative()
+      .default(DEFAULT_WATCHDOG_CONFIG.outputTokenBudget)
   })
   .passthrough();
 
 const projectWatchdogConfigSchema = z
   .object({
-    grace_minutes: z.number().int().positive()
+    grace_minutes: z.number().int().positive().optional(),
+    output_token_budget: z.number().int().nonnegative().optional()
   })
   .strict();
 
@@ -1083,13 +1095,7 @@ async function loadDispatchProject(input: {
     input.dispatchProjects.push({
       ...pollingProject.data,
       routines: [],
-      ...(detail.data.watchdog === undefined
-        ? {}
-        : {
-            watchdog: {
-              graceMinutes: detail.data.watchdog.grace_minutes
-            }
-          }),
+      ...projectWatchdogOverride(detail.data.watchdog),
       workflow:
         previousWorkflow !== undefined && "expandedWorkflow" in previousWorkflow
           ? previousWorkflow
@@ -1114,13 +1120,7 @@ async function loadDispatchProject(input: {
   }
   input.dispatchProjects.push({
     ...pollingProject.data,
-    ...(detail.data.watchdog === undefined
-      ? {}
-      : {
-          watchdog: {
-            graceMinutes: detail.data.watchdog.grace_minutes
-          }
-        }),
+    ...projectWatchdogOverride(detail.data.watchdog),
     workflow,
     workspace: detail.data.workspace
   });
@@ -1189,13 +1189,7 @@ function loadRoutineHostProject(input: {
     mode: "routine_host",
     name: host.data.name,
     routines: [],
-    ...(detail.data.watchdog === undefined
-      ? {}
-      : {
-          watchdog: {
-            graceMinutes: detail.data.watchdog.grace_minutes
-          }
-        }),
+    ...projectWatchdogOverride(detail.data.watchdog),
     workspace: detail.data.workspace
   });
   return "ok";
@@ -1208,9 +1202,29 @@ function normalizeWatchdogConfig(
     enabled: raw?.enabled ?? DEFAULT_WATCHDOG_CONFIG.enabled,
     graceMinutes: raw?.grace_minutes ?? DEFAULT_WATCHDOG_CONFIG.graceMinutes,
     mtimeIgnore: raw?.mtime_ignore ?? DEFAULT_WATCHDOG_CONFIG.mtimeIgnore,
+    outputTokenBudget:
+      raw?.output_token_budget ?? DEFAULT_WATCHDOG_CONFIG.outputTokenBudget,
     sampleIntervalSeconds:
       raw?.sample_interval_seconds ??
       DEFAULT_WATCHDOG_CONFIG.sampleIntervalSeconds
+  };
+}
+
+function projectWatchdogOverride(
+  raw: z.infer<typeof projectWatchdogConfigSchema> | undefined
+): { watchdog: ProjectWatchdogConfig } | Record<string, never> {
+  if (raw === undefined) {
+    return {};
+  }
+  return {
+    watchdog: {
+      ...(raw.grace_minutes === undefined
+        ? {}
+        : { graceMinutes: raw.grace_minutes }),
+      ...(raw.output_token_budget === undefined
+        ? {}
+        : { outputTokenBudget: raw.output_token_budget })
+    }
   };
 }
 
@@ -1226,7 +1240,12 @@ export function resolveWatchdogConfig(
   }
   return {
     ...serviceConfig.watchdog,
-    graceMinutes: projectOverride.graceMinutes
+    ...(projectOverride.graceMinutes === undefined
+      ? {}
+      : { graceMinutes: projectOverride.graceMinutes }),
+    ...(projectOverride.outputTokenBudget === undefined
+      ? {}
+      : { outputTokenBudget: projectOverride.outputTokenBudget })
   };
 }
 

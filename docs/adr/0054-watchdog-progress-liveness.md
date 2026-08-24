@@ -28,8 +28,10 @@ A Progress Signal is the tuple:
 
 - `last_tool_call_at` — timestamp of the most recent `NormalizedProviderEventType = "tool_call"`
   event.
-- `workspace_mtime_max` — maximum file mtime under the Run's `workspacePath`, with `.git/`,
-  `target/`, and `node_modules/` excluded at the directory level. The daemon-owned watchdog config's
+- `workspace_mtime_max` — maximum file mtime under the Run's `workspacePath`, with build-output
+  directories excluded at the directory level. (ADR 0086 replaced bare mtime advance with a
+  workspace digest as the progress test and widened the built-in exclusion set; the mtime is still
+  sampled and surfaced.) The daemon-owned watchdog config's
   `mtime_ignore` set excludes matching individual files. The follow-up evidence-ignore slice also
   retains a repository-owned `evidence.ignore` directory list from Markdown Workflow Contract front
   matter; those workspace-relative trees are pruned before descent while the built-in set always
@@ -42,9 +44,12 @@ A Progress Signal is the tuple:
   added since the previous Watchdog sample, over the events read forward from that sample's stored
   offset (a one-`sample_interval_seconds` window, 60 s by default). Output tokens are read from the
   normalized `usage_updated.tokenUsage` object, whose shape is provider-specific —
-  `tokenUsage.output_tokens` for Claude and `tokenUsage.outputTokens` for Codex — so the Watchdog
-  uses a provider-neutral accessor over those keys rather than a fixed `tokenUsage.total.outputTokens`
-  path, which exists for neither provider. The two providers report `tokenUsage` differently, so the
+  `tokenUsage.output_tokens` for Claude and `tokenUsage.total.outputTokens` for Codex — so the
+  Watchdog uses a shape-aware accessor over those keys. (This paragraph originally claimed the
+  nested `tokenUsage.total.outputTokens` path "exists for neither provider" and read only
+  top-level keys; the preserved Codex provider log in issue #548 shows the nested path is exactly
+  what Codex emits, so signal 4 read zero for every Codex Run until ADR 0086 corrected the
+  accessor.) The two providers report `tokenUsage` differently, so the
   Watchdog computes growth per provider. Codex's `thread/tokenUsage/updated` carries a cumulative
   running total, so growth is the delta between the latest cumulative total and the one stored in
   the previous `WatchdogSample` (an unchanged total reads as zero growth). Claude forwards the raw
@@ -65,7 +70,8 @@ A Run is making progress on tick *t* iff **any** of the following advanced since
 Watchdog sample:
 
 1. `last_tool_call_at` increased, or
-2. `workspace_mtime_max` advanced by at least one second, or
+2. the workspace changed — bare `workspace_mtime_max` advance under this ADR, superseded by the
+   ADR 0086 workspace digest, or
 3. `turn_id_set_size` increased, or
 4. `output_token_growth_since_last_sample` is non-zero, or
 5. `last_message_at` increased (a new streamed assistant message arrived).
